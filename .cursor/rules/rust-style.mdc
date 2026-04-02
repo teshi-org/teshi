@@ -1,0 +1,16 @@
+---
+description: Rust coding style & idioms (project-scoped)
+globs: **/*.rs
+alwaysApply: false
+---
+
+# Rust coding style & idioms
+
+- Prefer `Result<T, E>` plus the `?` operator for error propagation.
+- Avoid `unwrap()`/`expect()` in non-test code; return/handle errors instead.
+- Keep functions small; extract helpers and split into modules when it improves clarity.
+- Prefer iterator adapters (`map`, `filter`, `fold`, `collect`) over manual loops when readable.
+- Borrow wisely: take `&self`/`&T` when possible; clone only when it’s necessary and justified.
+- Naming: `snake_case` for values/functions/vars, `UpperCamelCase` for types, `SCREAMING_SNAKE_CASE` for consts.
+- Run `cargo fmt --all` before finishing changes.
+
