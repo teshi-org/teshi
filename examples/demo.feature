@@ -1,7 +1,7 @@
 @auth   @smoke
 Feature: User login
   Background:
-    Given the a
+    Given 看起来效果真的不错哦
 
   Scenario: Successful login
     Given ok

@@ -6,6 +6,13 @@ use anyhow::{Context, Result};
 use crate::editor_buffer::EditorBuffer;
 use crate::keymap::Action;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MainTab {
+    Editor,
+    Feature,
+    Help,
+}
+
 pub struct App {
     pub buffer: EditorBuffer,
     pub file_path: Option<PathBuf>,
@@ -14,6 +21,7 @@ pub struct App {
     pub desired_col: usize,
     pub scroll_row: usize,
     pub should_quit: bool,
+    pub active_tab: MainTab,
     pub dirty: bool,
     pub status: String,
     pub step_input_active: bool,
@@ -23,8 +31,14 @@ pub struct App {
 }
 
 impl App {
+    /// Builds the editor state from process arguments: optional file path to open.
+    ///
+    /// Skips leading arguments that start with `-` (for example `cargo test --quiet` passes `--quiet`).
     pub fn from_args() -> Result<Self> {
-        let path = std::env::args().nth(1).map(PathBuf::from);
+        let path = std::env::args()
+            .skip(1)
+            .find(|arg| !arg.starts_with('-'))
+            .map(PathBuf::from);
         if let Some(path) = path {
             let content = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
@@ -36,6 +50,7 @@ impl App {
                 desired_col: 0,
                 scroll_row: 0,
                 should_quit: false,
+                active_tab: MainTab::Editor,
                 dirty: false,
                 status: "Opened file".to_string(),
                 step_input_active: false,
@@ -52,6 +67,7 @@ impl App {
                 desired_col: 0,
                 scroll_row: 0,
                 should_quit: false,
+                active_tab: MainTab::Editor,
                 dirty: false,
                 status: "New buffer".to_string(),
                 step_input_active: false,
@@ -116,7 +132,12 @@ impl App {
             }
             Action::Save => self.save()?,
             Action::Quit => self.quit(),
+            Action::SelectTab(tab) => self.select_tab(tab),
             Action::ActivateStepInput => {
+                if self.active_tab != MainTab::Editor {
+                    self.status = "Switch to Editor tab before editing".to_string();
+                    return Ok(());
+                }
                 let line = self.buffer.line(self.cursor_row);
                 if let Some(min_col) = step_edit_start_col(&line) {
                     self.step_input_active = true;
@@ -131,7 +152,7 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::ClearInputState => {
-                self.step_input_active = false;
+                self.clear_step_input_state();
                 self.status = "Input state cleared".to_string();
                 self.quit_pending_confirm = false;
             }
@@ -171,6 +192,42 @@ impl App {
         if self.cursor_row < self.scroll_row {
             self.scroll_row = self.cursor_row;
         }
+    }
+
+    fn select_tab(&mut self, tab: MainTab) {
+        if self.active_tab == tab {
+            return;
+        }
+        if self.step_input_active {
+            self.clear_step_input_state();
+        }
+        self.quit_pending_confirm = false;
+        self.active_tab = tab;
+        self.status = match tab {
+            MainTab::Editor => "Switched to Editor tab",
+            MainTab::Feature => "Switched to Feature tab",
+            MainTab::Help => "Switched to Help tab",
+        }
+        .to_string();
+    }
+
+    fn clear_step_input_state(&mut self) {
+        self.step_input_active = false;
+    }
+
+    pub fn feature_outline_lines(&self) -> Vec<String> {
+        let mut rows = Vec::new();
+        for row in 0..self.buffer.line_count() {
+            let line = self.buffer.line(row);
+            let trimmed = line.trim_start();
+            if ["Feature:", "Scenario:", "Scenario Outline:", "Examples:"]
+                .iter()
+                .any(|prefix| trimmed.starts_with(prefix))
+            {
+                rows.push(trimmed.to_string());
+            }
+        }
+        rows
     }
 
     fn move_up(&mut self) {
@@ -274,7 +331,7 @@ pub(crate) fn step_edit_start_col(line: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, step_edit_start_col};
+    use super::{App, MainTab, step_edit_start_col};
     use crate::keymap::Action;
 
     #[test]
@@ -305,5 +362,35 @@ mod tests {
         assert!(!app.should_quit);
         app.handle_action(Action::Quit).expect("quit should work");
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_switching_tab_clears_step_input() {
+        let mut app = App::from_args().expect("app init should work");
+        app.buffer = crate::editor_buffer::EditorBuffer::from_string("Given hello".to_string());
+        app.handle_action(Action::ActivateStepInput)
+            .expect("activate should work");
+        assert!(app.step_input_active);
+        app.handle_action(Action::SelectTab(MainTab::Help))
+            .expect("tab switch should work");
+        assert!(!app.step_input_active);
+        assert_eq!(app.active_tab, MainTab::Help);
+    }
+
+    #[test]
+    fn test_feature_outline_lines_extracts_expected_rows() {
+        let mut app = App::from_args().expect("app init should work");
+        app.buffer = crate::editor_buffer::EditorBuffer::from_string(
+            "Feature: Login\n  Scenario: ok\nGiven noop\n  Examples:\n".to_string(),
+        );
+        let outline = app.feature_outline_lines();
+        assert_eq!(
+            outline,
+            vec![
+                "Feature: Login".to_string(),
+                "Scenario: ok".to_string(),
+                "Examples:".to_string()
+            ]
+        );
     }
 }
