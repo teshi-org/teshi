@@ -8,6 +8,7 @@ use std::io;
 use std::time::Duration;
 
 use anyhow::Result;
+use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, Event};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -24,13 +25,14 @@ struct TerminalGuard;
 impl TerminalGuard {
     fn setup() -> Result<Self> {
         enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen)?;
+        execute!(io::stdout(), EnterAlternateScreen, Hide)?;
         Ok(Self)
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        let _ = execute!(io::stdout(), Show);
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
     }

@@ -3,10 +3,54 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
-use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, MainTab};
 use crate::highlight::{KeywordSet, highlight_line};
+
+const NAV_CELL_BG: Color = Color::LightBlue;
+const NAV_CELL_FG: Color = Color::Black;
+
+/// Applies `patch` on UTF-8 character indices `[range.start, range.end)` within each span.
+fn apply_patch_to_char_range(
+    line: Line<'static>,
+    range: std::ops::Range<usize>,
+    patch: Style,
+) -> Line<'static> {
+    if range.start >= range.end {
+        return line;
+    }
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut idx = 0usize;
+    let spans = line.spans;
+    for span in spans {
+        let text = span.content.to_string();
+        let n = text.chars().count();
+        let start_i = idx;
+        let end_i = idx + n;
+        let lo = range.start.max(start_i);
+        let hi = range.end.min(end_i);
+        if hi <= lo {
+            out.push(span);
+        } else {
+            let lo_rel = lo - start_i;
+            let hi_rel = hi - start_i;
+            let chars: Vec<char> = text.chars().collect();
+            if lo_rel > 0 {
+                let before: String = chars[..lo_rel].iter().collect();
+                out.push(Span::styled(before, span.style));
+            }
+            let mid: String = chars[lo_rel..hi_rel].iter().collect();
+            let mid_style = span.style.patch(patch);
+            out.push(Span::styled(mid, mid_style));
+            if hi_rel < chars.len() {
+                let after: String = chars[hi_rel..].iter().collect();
+                out.push(Span::styled(after, span.style));
+            }
+        }
+        idx = end_i;
+    }
+    Line::from(out)
+}
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let chunks = Layout::default()
@@ -46,21 +90,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         chunks[1],
     );
 
-    let editor_area = render_main_panel(frame, app, chunks[2]);
+    render_main_panel(frame, app, chunks[2]);
 
     let key_hints = footer_hints(app.active_tab);
     frame.render_widget(Paragraph::new(key_hints), chunks[3]);
-
-    if app.active_tab == MainTab::Editor {
-        let cursor_line = app.buffer.line(app.cursor_row);
-        let mut visual_col = 0usize;
-        for ch in cursor_line.chars().take(app.cursor_col) {
-            visual_col += UnicodeWidthStr::width(ch.encode_utf8(&mut [0; 4]));
-        }
-        let x = editor_area.x + visual_col as u16;
-        let y = editor_area.y + (app.cursor_row.saturating_sub(app.scroll_row)) as u16;
-        frame.set_cursor_position((x, y));
-    }
 }
 
 fn render_main_panel(
@@ -90,8 +123,8 @@ fn render_main_panel(
             frame.render_widget(block, area);
             let help = vec![
                 Line::raw("Tabs: Editor [1], Feature [2], Help [3]"),
-                Line::raw("Editor: Arrow keys move cursor"),
-                Line::raw("Editor: Space activates step text input"),
+                Line::raw("Editor: Arrow keys move the navigation highlight"),
+                Line::raw("Editor: Space cycles step keyword on prefix, or step-input at body end"),
                 Line::raw("Editor: Enter commits step input, Esc clears input state"),
                 Line::raw("Global: s save, q quit (dirty needs confirmation)"),
             ];
@@ -132,8 +165,25 @@ fn render_editor_panel(
             continue;
         }
         let line = app.buffer.line(row);
-        let (styled, next_doc) = highlight_line(&line, in_doc, &KeywordSet::default());
+        let (mut styled, next_doc) = highlight_line(&line, in_doc, &KeywordSet::default());
         in_doc = next_doc;
+        if row == app.cursor_row {
+            let line_len = line.chars().count();
+            let nav_cell_style = Style::default().bg(NAV_CELL_BG).fg(NAV_CELL_FG);
+            if line_len == 0 {
+                styled = Line::from(vec![Span::styled(" ", nav_cell_style)]);
+            } else if app.cursor_col < line_len {
+                styled = apply_patch_to_char_range(
+                    styled,
+                    app.cursor_col..app.cursor_col.saturating_add(1),
+                    nav_cell_style,
+                );
+            } else {
+                let mut spans = styled.spans;
+                spans.push(Span::styled(" ", nav_cell_style));
+                styled = Line::from(spans);
+            }
+        }
         lines.push(styled);
     }
     frame.render_widget(Paragraph::new(Text::from(lines)), editor_area);
