@@ -3,11 +3,13 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
+use tui_tree_widget::Tree;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, BddFocusSlot, MainTab, STEP_KEYWORDS_CYCLE};
+use crate::app::{App, BddFocusSlot, MainTab, STEP_KEYWORDS_CYCLE, ViewStage};
 use crate::bdd_nav::{is_feature_narrative_row, keyword_char_range, nav_body_char_range_in_buffer};
 use crate::highlight::{KeywordSet, highlight_line};
+use crate::mindmap;
 
 const NAV_CELL_BG: Color = Color::LightBlue;
 const NAV_CELL_FG: Color = Color::Black;
@@ -68,17 +70,14 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         .split(frame.area());
 
     let top_tabs = Tabs::new(vec![
-        Line::from(" Editor [1] "),
-        Line::from(" Feature [2] "),
-        Line::from(" Help [3] "),
+        Line::from(" MindMap [1] "),
+        Line::from(" Help [2] "),
     ])
     .select(match app.active_tab {
-        MainTab::Editor => 0,
-        MainTab::Feature => 1,
-        MainTab::Help => 2,
+        MainTab::MindMap => 0,
+        MainTab::Help => 1,
     })
     .style(Style::default().fg(Color::DarkGray))
-    // Avoid Underlined: many IDE terminals emulate it with leading/trailing `_`, which looks like stray punctuation.
     .highlight_style(
         Style::default()
             .fg(Color::White)
@@ -96,75 +95,123 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     render_main_panel(frame, app, chunks[2]);
 
-    let key_hints = footer_hints(app.active_tab);
+    let key_hints = footer_hints(app);
     frame.render_widget(Paragraph::new(key_hints), chunks[3]);
 }
 
-fn render_main_panel(
-    frame: &mut Frame<'_>,
-    app: &mut App,
-    area: ratatui::layout::Rect,
-) -> ratatui::layout::Rect {
+fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     match app.active_tab {
-        MainTab::Editor => render_editor_panel(frame, app, area),
-        MainTab::Feature => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title("Feature Outline");
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
-            let lines = app
-                .feature_outline_lines()
-                .into_iter()
-                .map(Line::raw)
-                .collect::<Vec<_>>();
-            frame.render_widget(Paragraph::new(Text::from(lines)), inner);
-            inner
-        }
+        MainTab::MindMap => render_mindmap_panel(frame, app, area),
         MainTab::Help => {
             let block = Block::default().borders(Borders::ALL).title("Help");
             let inner = block.inner(area);
             frame.render_widget(block, area);
             let help = vec![
-                Line::raw("Tabs: Editor [1], Feature [2], Help [3]"),
-                Line::raw(
-                    "Editor: ↑↓ body on step or title jumps steps and Scenario/Feature/Outline/Examples lines in order",
-                ),
-                Line::raw(
-                    "Editor: Space on body edits steps, titles, or Feature description lines",
-                ),
-                Line::raw(
-                    "Editor: ↑↓ in list, Enter confirm, Esc cancel; Enter commits step input",
-                ),
+                Line::raw("Tabs: MindMap [1], Help [2]"),
+                Line::raw(""),
+                Line::raw("── MindMap (Stage 1: Tree only) ──"),
+                Line::raw("↑↓ navigate tree   ←→ collapse/expand   Enter open preview"),
+                Line::raw("Home/End first/last node"),
+                Line::raw(""),
+                Line::raw("── MindMap (Stage 2: Tree + Preview) ──"),
+                Line::raw("↑↓ navigate tree   ←→ collapse/expand"),
+                Line::raw("→ on leaf: enter editor   Esc: close preview"),
+                Line::raw(""),
+                Line::raw("── MindMap (Stage 3: Editor) ──"),
+                Line::raw("↑↓ BDD nav   ←→ keyword/body focus   Space edit"),
+                Line::raw("← on keyword: back to tree   Esc: clear input / back"),
+                Line::raw(""),
                 Line::raw("Global: s save, q quit (dirty needs confirmation)"),
             ];
             frame.render_widget(Paragraph::new(Text::from(help)), inner);
-            inner
         }
     }
 }
 
-fn render_editor_panel(
-    frame: &mut Frame<'_>,
-    app: &mut App,
-    area: ratatui::layout::Rect,
-) -> ratatui::layout::Rect {
-    let editor_block = Block::default().borders(Borders::ALL).title("BDD Editor");
+/// Renders the three-stage MindMap layout.
+fn render_mindmap_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    match app.view_stage {
+        ViewStage::TreeOnly => {
+            render_tree_panel(frame, app, area);
+        }
+        ViewStage::TreeAndEditor => {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+                .split(area);
+            render_tree_panel(frame, app, cols[0]);
+            render_editor_panel(frame, app, cols[1], true);
+        }
+        ViewStage::EditorAndPanel => {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+                .split(area);
+            render_editor_panel(frame, app, cols[0], false);
+            render_reserved_panel(frame, cols[1]);
+        }
+    }
+}
+
+/// Renders the collapsible tree using `tui-tree-widget`.
+fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let items = mindmap::build_tree_items(&app.project, &app.step_index);
+
+    let highlight_style = Style::default()
+        .bg(NAV_CELL_BG)
+        .fg(NAV_CELL_FG)
+        .add_modifier(Modifier::BOLD);
+
+    let block = Block::default().borders(Borders::ALL).title("MindMap");
+
+    let tree = Tree::new(&items)
+        .expect("tree construction should succeed")
+        .block(block)
+        .highlight_style(highlight_style);
+
+    frame.render_stateful_widget(tree, area, &mut app.tree_state);
+}
+
+/// Renders the editor panel showing the active feature file.
+///
+/// When `preview` is true (stage 2), the panel is read-only with no cursor. Otherwise (stage 3),
+/// it shows the full interactive editor with cursor highlighting.
+fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview: bool) {
+    let title = app
+        .file_path
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Editor".to_string());
+    let title = if preview {
+        format!("{title} (preview)")
+    } else {
+        title
+    };
+    let editor_block = Block::default().borders(Borders::ALL).title(title);
     let editor_area = editor_block.inner(area);
     frame.render_widget(editor_block, area);
 
     let visible_lines = editor_area.height as usize;
-    if app.cursor_row < app.scroll_row {
-        app.scroll_row = app.cursor_row;
-    } else if app.cursor_row >= app.scroll_row.saturating_add(visible_lines) {
-        app.scroll_row = app
-            .cursor_row
-            .saturating_sub(visible_lines.saturating_sub(1));
+    if !preview {
+        if app.cursor_row < app.scroll_row {
+            app.scroll_row = app.cursor_row;
+        } else if app.cursor_row >= app.scroll_row.saturating_add(visible_lines) {
+            app.scroll_row = app
+                .cursor_row
+                .saturating_sub(visible_lines.saturating_sub(1));
+        }
+    } else {
+        // In preview mode, center the cursor row
+        app.scroll_row = app.cursor_row.saturating_sub(visible_lines / 2);
     }
 
     let mut lines = Vec::with_capacity(visible_lines);
     let mut in_doc = false;
     for row in 0..app.scroll_row {
+        if row >= app.buffer.line_count() {
+            break;
+        }
         let line = app.buffer.line(row);
         let (_, next_doc) = highlight_line(&line, in_doc, &KeywordSet::default());
         in_doc = next_doc;
@@ -177,10 +224,11 @@ fn render_editor_panel(
         let line = app.buffer.line(row);
         let (mut styled, next_doc) = highlight_line(&line, in_doc, &KeywordSet::default());
         in_doc = next_doc;
-        if row == app.cursor_row {
+
+        if row == app.cursor_row && !preview {
             let nav_cell_style = Style::default().bg(NAV_CELL_BG).fg(NAV_CELL_FG);
             let line_len = line.chars().count();
-            if app.active_tab == MainTab::Editor
+            if app.view_stage == ViewStage::EditorAndPanel
                 && !app.step_input_active
                 && app.step_keyword_picker.is_none()
             {
@@ -215,18 +263,23 @@ fn render_editor_panel(
                     styled = Line::from(spans);
                 }
             }
+        } else if row == app.cursor_row && preview {
+            // Highlight the entire line in preview mode
+            let highlight = Style::default().bg(Color::DarkGray);
+            let line_len = line.chars().count();
+            if line_len > 0 {
+                styled = apply_patch_to_char_range(styled, 0..line_len, highlight);
+            }
         }
         lines.push(styled);
     }
     frame.render_widget(Paragraph::new(Text::from(lines)), editor_area);
-    render_step_keyword_picker(frame, app, editor_area);
-    editor_area
+    if !preview {
+        render_step_keyword_picker(frame, app, editor_area);
+    }
 }
 
 /// Draws the step-keyword overlay when [`App::step_keyword_picker`] is active.
-///
-/// Uses [`Clear`] plus a [`Paragraph`] so underlying editor cells are not merged with list text
-/// (narrow [`List`] + stale buffer cells produced strings like "Givend" / "Whenhen").
 fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rect) {
     let Some(picker) = app.step_keyword_picker else {
         return;
@@ -297,7 +350,31 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rec
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
-/// One footer “button” like gitui: light blue background and black foreground.
+/// Renders the reserved panel placeholder (stage 3, right side).
+fn render_reserved_panel(frame: &mut Frame<'_>, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Reserved")
+        .style(Style::default().fg(Color::DarkGray));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let content = vec![
+        Line::raw(""),
+        Line::styled(
+            "  Coming Soon",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::raw(""),
+        Line::raw("  Planned:"),
+        Line::raw("  · Step impl code"),
+        Line::raw("  · BDD executor"),
+        Line::raw("  · Test results"),
+    ];
+    frame.render_widget(Paragraph::new(Text::from(content)), inner);
+}
+
 fn footer_pill(label: &'static str) -> Span<'static> {
     Span::styled(
         label,
@@ -305,12 +382,36 @@ fn footer_pill(label: &'static str) -> Span<'static> {
     )
 }
 
-fn footer_hints(active_tab: MainTab) -> Line<'static> {
-    match active_tab {
-        MainTab::Editor => Line::from(vec![
+fn footer_hints(app: &App) -> Line<'static> {
+    match (app.active_tab, app.view_stage) {
+        (MainTab::MindMap, ViewStage::TreeOnly) => Line::from(vec![
+            footer_pill(" Navigate [↑↓] "),
+            Span::raw(" "),
+            footer_pill(" Expand [→] "),
+            Span::raw(" "),
+            footer_pill(" Collapse [←] "),
+            Span::raw(" "),
+            footer_pill(" Open [Enter] "),
+            Span::raw(" "),
+            footer_pill(" Quit [q] "),
+        ]),
+        (MainTab::MindMap, ViewStage::TreeAndEditor) => Line::from(vec![
+            footer_pill(" Navigate [↑↓] "),
+            Span::raw(" "),
+            footer_pill(" Edit [→ leaf] "),
+            Span::raw(" "),
+            footer_pill(" Back [Esc] "),
+            Span::raw(" "),
+            footer_pill(" Save [s] "),
+            Span::raw(" "),
+            footer_pill(" Quit [q] "),
+        ]),
+        (MainTab::MindMap, ViewStage::EditorAndPanel) => Line::from(vec![
             footer_pill(" BDD [←→↑↓] "),
             Span::raw(" "),
             footer_pill(" Step [Space] "),
+            Span::raw(" "),
+            footer_pill(" Back [← kw] "),
             Span::raw(" "),
             footer_pill(" Save [s] "),
             Span::raw(" "),
@@ -318,7 +419,7 @@ fn footer_hints(active_tab: MainTab) -> Line<'static> {
             Span::raw(" "),
             footer_pill(" Clear [Esc] "),
         ]),
-        MainTab::Feature | MainTab::Help => Line::from(vec![
+        (MainTab::Help, _) => Line::from(vec![
             footer_pill(" Save [s] "),
             Span::raw(" "),
             footer_pill(" Quit [q] "),

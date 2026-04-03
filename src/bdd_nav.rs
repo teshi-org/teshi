@@ -3,24 +3,10 @@
 use std::ops::Range;
 
 use crate::editor_buffer::EditorBuffer;
+use crate::gherkin_keywords::{HEADER_PREFIXES, HEADER_TITLE_EDIT_PREFIXES};
 
-/// Gherkin step keywords in **picker cycle** order.
-pub const STEP_KEYWORDS_CYCLE: &[&str] = &["Given", "When", "Then", "And", "But"];
-
-/// Header prefixes for navigation nodes; longer prefixes must appear before shorter ones that share a prefix.
-const HEADER_PREFIXES: &[&str] = &[
-    "Scenario Outline:",
-    "Feature:",
-    "Background:",
-    "Scenario:",
-    "Examples:",
-];
-
-/// Headers whose text after the colon can be focused and edited (`Feature`, `Scenario`, etc.).
-///
-/// `Background:` is intentionally omitted: only the keyword is navigable on that line.
-const HEADER_TITLE_EDIT_PREFIXES: &[&str] =
-    &["Scenario Outline:", "Feature:", "Scenario:", "Examples:"];
+/// Gherkin step keywords in **picker cycle** order (re-exported from shared module).
+pub use crate::gherkin_keywords::STEP_KEYWORDS as STEP_KEYWORDS_CYCLE;
 
 /// Collects row indices (ascending) for BDD navigation: `Feature:` prose lines, headers, and steps.
 pub fn bdd_node_rows(buffer: &EditorBuffer) -> Vec<usize> {
