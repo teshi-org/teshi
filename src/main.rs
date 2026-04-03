@@ -17,7 +17,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use app::App;
-use keymap::Action;
+use keymap::{Action, KeyContext};
 
 struct TerminalGuard;
 
@@ -47,7 +47,13 @@ fn main() -> Result<()> {
 
         if event::poll(Duration::from_millis(50))?
             && let Event::Key(key_event) = event::read()?
-            && let Some(action) = Action::from_key_event(key_event, app.step_input_active)
+            && let Some(action) = Action::from_key_event(
+                key_event,
+                KeyContext {
+                    step_input_active: app.step_input_active,
+                    active_tab: app.active_tab,
+                },
+            )
         {
             app.handle_action(action)?;
         }
