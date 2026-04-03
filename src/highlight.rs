@@ -21,6 +21,7 @@ impl Default for KeywordSet {
     }
 }
 
+/// Applies Gherkin-oriented foreground highlighting for one buffer line.
 pub fn highlight_line(
     line: &str,
     in_doc_string: bool,

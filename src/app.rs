@@ -139,13 +139,27 @@ impl App {
                     return Ok(());
                 }
                 let line = self.buffer.line(self.cursor_row);
-                if let Some(min_col) = step_edit_start_col(&line) {
-                    self.step_input_active = true;
-                    self.step_input_row = self.cursor_row;
-                    self.step_input_min_col = min_col;
-                    self.cursor_col = self.cursor_col.max(min_col);
-                    self.desired_col = self.cursor_col;
-                    self.status = "Step input active".to_string();
+                if let Some(body_start) = step_edit_start_col(&line) {
+                    if self.cursor_col < body_start {
+                        if let Some(new_line) = cycle_step_keyword_line(&line) {
+                            self.buffer.replace_line(self.cursor_row, &new_line);
+                            let refreshed = self.buffer.line(self.cursor_row);
+                            if let Some(nb) = step_edit_start_col(&refreshed) {
+                                self.cursor_col = self.cursor_col.min(nb.saturating_sub(1));
+                                self.desired_col = self.cursor_col;
+                            }
+                            self.dirty = true;
+                            self.status = "Step keyword cycled".to_string();
+                        }
+                    } else {
+                        self.step_input_active = true;
+                        self.step_input_row = self.cursor_row;
+                        self.step_input_min_col = body_start;
+                        let end = self.buffer.line_len_chars(self.cursor_row);
+                        self.cursor_col = end;
+                        self.desired_col = end;
+                        self.status = "Step input active".to_string();
+                    }
                 } else {
                     self.status = "Current line is not a BDD step".to_string();
                 }
@@ -284,7 +298,7 @@ impl App {
         } else {
             0
         };
-        self.desired_col = 0;
+        self.desired_col = self.cursor_col;
         self.quit_pending_confirm = false;
     }
 
@@ -314,11 +328,15 @@ impl App {
     }
 }
 
+/// Gherkin step keywords in **cycle** order (Space on the keyword prefix advances along this ring).
+pub(crate) const STEP_KEYWORDS_CYCLE: &[&str] = &["Given", "When", "Then", "And", "But"];
+
+/// Returns the first UTF-8 character column where editable step text starts, or `None` if the line is not a step.
 pub(crate) fn step_edit_start_col(line: &str) -> Option<usize> {
     let trimmed = line.trim_start();
     let leading = line.len().saturating_sub(trimmed.len());
-    for kw in ["Given", "When", "Then", "And", "But"] {
-        if let Some(rest) = trimmed.strip_prefix(kw) {
+    for kw in STEP_KEYWORDS_CYCLE {
+        if let Some(rest) = trimmed.strip_prefix(*kw) {
             let mut col = leading + kw.chars().count();
             if rest.starts_with(' ') {
                 col += 1;
@@ -329,9 +347,25 @@ pub(crate) fn step_edit_start_col(line: &str) -> Option<usize> {
     None
 }
 
+/// Builds the same line with the leading step keyword replaced by the next one in [`STEP_KEYWORDS_CYCLE`].
+pub(crate) fn cycle_step_keyword_line(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let leading = line.len().saturating_sub(trimmed.len());
+    let leading_s = line.get(..leading).unwrap_or("");
+    for (i, kw) in STEP_KEYWORDS_CYCLE.iter().enumerate() {
+        if let Some(rest) = trimmed.strip_prefix(*kw) {
+            let next = STEP_KEYWORDS_CYCLE[(i + 1) % STEP_KEYWORDS_CYCLE.len()];
+            let new_trimmed = format!("{next}{rest}");
+            return Some(format!("{leading_s}{new_trimmed}"));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{App, MainTab, step_edit_start_col};
+    use super::{App, MainTab, cycle_step_keyword_line, step_edit_start_col};
+    use crate::editor_buffer::EditorBuffer;
     use crate::keymap::Action;
 
     #[test]
@@ -344,14 +378,49 @@ mod tests {
     #[test]
     fn test_activate_step_input_and_block_prefix_backspace() {
         let mut app = App::from_args().expect("app init should work");
-        app.buffer = crate::editor_buffer::EditorBuffer::from_string("Given hello".to_string());
+        app.buffer = EditorBuffer::from_string("Given hello".to_string());
+        app.cursor_col = 6;
         app.handle_action(Action::ActivateStepInput)
             .expect("activate should work");
         assert!(app.step_input_active);
-        assert_eq!(app.cursor_col, 6);
+        assert_eq!(app.cursor_col, 11);
         app.handle_action(Action::Backspace)
             .expect("backspace should work");
-        assert_eq!(app.buffer.as_string(), "Given hello");
+        assert_eq!(app.buffer.as_string(), "Given hell");
+    }
+
+    #[test]
+    fn test_space_on_prefix_cycles_step_keyword() {
+        let mut app = App::from_args().expect("app init should work");
+        app.buffer = EditorBuffer::from_string("Given hello\n".to_string());
+        app.cursor_col = 0;
+        app.handle_action(Action::ActivateStepInput)
+            .expect("cycle should work");
+        assert_eq!(app.buffer.line(0), "When hello");
+        assert!(!app.step_input_active);
+    }
+
+    #[test]
+    fn test_space_in_body_activates_at_line_end() {
+        let mut app = App::from_args().expect("app init should work");
+        app.buffer = EditorBuffer::from_string("Given hello".to_string());
+        app.cursor_col = 6;
+        app.handle_action(Action::ActivateStepInput)
+            .expect("activate should work");
+        assert!(app.step_input_active);
+        assert_eq!(app.cursor_col, 11);
+    }
+
+    #[test]
+    fn test_cycle_step_keyword_line_order() {
+        assert_eq!(
+            cycle_step_keyword_line("  Given x").as_deref(),
+            Some("  When x")
+        );
+        assert_eq!(
+            cycle_step_keyword_line("But last").as_deref(),
+            Some("Given last")
+        );
     }
 
     #[test]
@@ -367,7 +436,8 @@ mod tests {
     #[test]
     fn test_switching_tab_clears_step_input() {
         let mut app = App::from_args().expect("app init should work");
-        app.buffer = crate::editor_buffer::EditorBuffer::from_string("Given hello".to_string());
+        app.buffer = EditorBuffer::from_string("Given hello".to_string());
+        app.cursor_col = 6;
         app.handle_action(Action::ActivateStepInput)
             .expect("activate should work");
         assert!(app.step_input_active);

@@ -39,6 +39,27 @@ impl EditorBuffer {
         col.min(self.line_len_chars(row))
     }
 
+    /// Replaces the full logical line at `row` with `new_content` (no embedded newline).
+    ///
+    /// Preserves trailing newline when another line follows so the rope line structure stays valid.
+    pub fn replace_line(&mut self, row: usize, new_content: &str) {
+        let safe_row = row.min(self.line_count().saturating_sub(1));
+        let has_next = safe_row + 1 < self.rope.len_lines();
+        let start = self.rope.line_to_char(safe_row);
+        let end = if has_next {
+            self.rope.line_to_char(safe_row + 1)
+        } else {
+            self.rope.len_chars()
+        };
+        self.rope.remove(start..end);
+        let insert = if has_next {
+            format!("{new_content}\n")
+        } else {
+            new_content.to_string()
+        };
+        self.rope.insert(start, &insert);
+    }
+
     pub fn insert_char(&mut self, row: usize, col: usize, ch: char) {
         let idx = self.line_col_to_char_idx(row, col);
         self.rope.insert_char(idx, ch);
@@ -101,5 +122,14 @@ mod tests {
         assert!(changed);
         assert_eq!((row, col), (0, 1));
         assert_eq!(buffer.as_string(), "ab");
+    }
+
+    #[test]
+    fn test_replace_line_preserves_neighbors() {
+        let mut buffer = EditorBuffer::from_string("a\nb\nc".to_string());
+        buffer.replace_line(1, "B");
+        assert_eq!(buffer.line(0), "a");
+        assert_eq!(buffer.line(1), "B");
+        assert_eq!(buffer.line(2), "c");
     }
 }
