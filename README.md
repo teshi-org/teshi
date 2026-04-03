@@ -18,10 +18,24 @@ A minimal Rust TUI editor for pure Gherkin (`.feature`) files.
 ## Run
 
 ```bash
-cargo run -- examples/demo.feature
+# Open a single feature file
+cargo run -- tests/features/editor.feature
+
+# Open an entire directory (planned: multi-file mind map view)
+cargo run -- tests/features/
 ```
 
 If no file path is passed, the editor starts with an empty buffer.
+
+## Self-bootstrapping
+
+teshi's own feature matrix is described in BDD feature files under `tests/features/`:
+
+- `editor.feature` — BDD navigation, step editing, keyword picker, syntax highlighting
+- `mindmap.feature` — mind map tree view, three-stage layout, step reuse detection
+- `project.feature` — single/multi-file loading, Gherkin parsing, edit-to-tree sync
+
+The project aims to eventually run these BDD specifications against itself.
 
 ## Keybindings
 

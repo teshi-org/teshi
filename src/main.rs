@@ -1,8 +1,12 @@
 mod app;
 mod bdd_nav;
 mod editor_buffer;
+mod gherkin;
+mod gherkin_keywords;
 mod highlight;
 mod keymap;
+mod mindmap;
+mod step_index;
 mod ui;
 
 use std::io;
@@ -56,6 +60,7 @@ fn main() -> Result<()> {
                     step_keyword_picker_active: app.step_keyword_picker.is_some(),
                     step_input_active: app.step_input_active,
                     active_tab: app.active_tab,
+                    view_stage: app.view_stage,
                 },
             )
         {
