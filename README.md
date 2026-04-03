@@ -26,10 +26,10 @@ If no file path is passed, the editor starts with an empty buffer.
 ## Keybindings
 
 - `1` / `2` / `3`: switch top tabs (`Editor` / `Feature` / `Help`) when step input is inactive
-- `↑` / `↓` (Editor, not in overlays): jump to the previous/next BDD node (headers + steps)
+- `↑` / `↓` (Editor, not in overlays): with **keyword** focus, previous/next BDD node (headers + steps); with **body** focus on a step line, previous/next **step** line only
 - `←` / `→` (Editor, not in overlays): toggle focus between the step keyword and the step body (step lines only)
-- `Home` / `End` (Editor, not in overlays): jump to the first/last BDD node
-- `PageUp` / `PageDown` (Editor, not in overlays): jump about 10 nodes backward/forward
+- `Home` / `End` (Editor, not in overlays): first/last BDD node (keyword focus) or first/last step line (body focus on a step)
+- `PageUp` / `PageDown` (Editor, not in overlays): about 10 BDD nodes or step lines, matching the same rule as `↑` / `↓`
 - `Space` (Editor): on **keyword** focus, open the step-keyword dropdown; on **body** focus, start step text input (`Given` / `When` / …)
 - `Enter`: commit current step text input
 - `Esc`: clear current input state

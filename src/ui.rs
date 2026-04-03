@@ -127,7 +127,9 @@ fn render_main_panel(
             frame.render_widget(block, area);
             let help = vec![
                 Line::raw("Tabs: Editor [1], Feature [2], Help [3]"),
-                Line::raw("Editor: ↑↓ jump between BDD nodes; ←/→ switch keyword vs step body"),
+                Line::raw(
+                    "Editor: ↑↓ jump BDD nodes (keyword focus) or step lines only (body focus)",
+                ),
                 Line::raw(
                     "Editor: Space on keyword opens step list; Space on body edits step text",
                 ),
