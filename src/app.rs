@@ -3,14 +3,28 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
+use crate::bdd_nav::{
+    bdd_node_rows, body_char_range, current_step_keyword_index, next_node_row, prev_node_row,
+    replace_step_keyword_line, step_edit_start_col,
+};
 use crate::editor_buffer::EditorBuffer;
 use crate::keymap::Action;
+
+/// Step keywords in cycle order (re-exported for UI pickers).
+pub use crate::bdd_nav::STEP_KEYWORDS_CYCLE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainTab {
     Editor,
     Feature,
     Help,
+}
+
+/// Navigation focus within the current BDD node line (keyword token vs step body).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BddFocusSlot {
+    Keyword,
+    Body,
 }
 
 /// UI state for the step-keyword list shown after Space on the keyword prefix.
@@ -29,6 +43,8 @@ pub struct App {
     pub cursor_col: usize,
     pub desired_col: usize,
     pub scroll_row: usize,
+    /// Which segment of the current line is active for highlighting and `Space` (keyword vs step body).
+    pub focus_slot: BddFocusSlot,
     pub should_quit: bool,
     pub active_tab: MainTab,
     pub dirty: bool,
@@ -53,13 +69,14 @@ impl App {
         if let Some(path) = path {
             let content = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
-            Ok(Self {
+            let mut app = Self {
                 buffer: EditorBuffer::from_string(content),
                 file_path: Some(path),
                 cursor_row: 0,
                 cursor_col: 0,
                 desired_col: 0,
                 scroll_row: 0,
+                focus_slot: BddFocusSlot::Keyword,
                 should_quit: false,
                 active_tab: MainTab::Editor,
                 dirty: false,
@@ -69,15 +86,18 @@ impl App {
                 step_input_min_col: 0,
                 step_keyword_picker: None,
                 quit_pending_confirm: false,
-            })
+            };
+            app.sync_cursor_to_first_node();
+            Ok(app)
         } else {
-            Ok(Self {
+            let mut app = Self {
                 buffer: EditorBuffer::from_string(String::new()),
                 file_path: None,
                 cursor_row: 0,
                 cursor_col: 0,
                 desired_col: 0,
                 scroll_row: 0,
+                focus_slot: BddFocusSlot::Keyword,
                 should_quit: false,
                 active_tab: MainTab::Editor,
                 dirty: false,
@@ -87,8 +107,23 @@ impl App {
                 step_input_min_col: 0,
                 step_keyword_picker: None,
                 quit_pending_confirm: false,
-            })
+            };
+            app.sync_cursor_to_first_node();
+            Ok(app)
         }
+    }
+
+    /// Positions the navigation row on the first BDD node, or keeps row `0` when there are none.
+    ///
+    /// Resets column to `0` and [`BddFocusSlot::Keyword`]. Used after load/replace so navigation starts on structure.
+    fn sync_cursor_to_first_node(&mut self) {
+        let rows = bdd_node_rows(&self.buffer);
+        if let Some(&r) = rows.first() {
+            self.cursor_row = r;
+            self.cursor_col = 0;
+            self.desired_col = 0;
+        }
+        self.focus_slot = BddFocusSlot::Keyword;
     }
 
     pub fn handle_action(&mut self, action: Action) -> Result<()> {
@@ -115,6 +150,7 @@ impl App {
             Action::Enter => {
                 if self.step_input_active {
                     self.step_input_active = false;
+                    self.focus_slot = BddFocusSlot::Body;
                     self.status = "Step input committed".to_string();
                 }
             }
@@ -152,8 +188,13 @@ impl App {
                     return Ok(());
                 }
                 let line = self.buffer.line(self.cursor_row);
-                if let Some(body_start) = step_edit_start_col(&line) {
-                    if self.cursor_col < body_start {
+                let Some(body_start) = step_edit_start_col(&line) else {
+                    self.status = "Current line is not a BDD step".to_string();
+                    self.quit_pending_confirm = false;
+                    return Ok(());
+                };
+                match self.focus_slot {
+                    BddFocusSlot::Keyword => {
                         self.clear_step_input_state();
                         if let Some(idx) = current_step_keyword_index(&line) {
                             self.step_keyword_picker = Some(StepKeywordPicker {
@@ -162,7 +203,8 @@ impl App {
                             });
                             self.status = "Select step keyword (↑↓ Enter, Esc cancel)".to_string();
                         }
-                    } else {
+                    }
+                    BddFocusSlot::Body => {
                         self.clear_step_keyword_picker();
                         self.step_input_active = true;
                         self.step_input_row = self.cursor_row;
@@ -172,8 +214,6 @@ impl App {
                         self.desired_col = end;
                         self.status = "Step input active".to_string();
                     }
-                } else {
-                    self.status = "Current line is not a BDD step".to_string();
                 }
                 self.quit_pending_confirm = false;
             }
@@ -273,17 +313,33 @@ impl App {
         let new_kw = STEP_KEYWORDS_CYCLE[picker.selected];
         if let Some(new_line) = replace_step_keyword_line(&line, new_kw) {
             self.buffer.replace_line(picker.buffer_row, &new_line);
-            let refreshed = self.buffer.line(picker.buffer_row);
-            if let Some(nb) = step_edit_start_col(&refreshed) {
-                self.cursor_row = picker.buffer_row;
-                self.cursor_col = self.cursor_col.min(nb.saturating_sub(1));
-                self.desired_col = self.cursor_col;
-            }
+            self.cursor_row = picker.buffer_row;
+            self.cursor_col = 0;
+            self.desired_col = 0;
+            self.focus_slot = BddFocusSlot::Keyword;
             self.dirty = true;
             self.status = "Step keyword updated".to_string();
         }
         self.step_keyword_picker = None;
         self.quit_pending_confirm = false;
+    }
+
+    fn is_editor_nav_mode(&self) -> bool {
+        self.active_tab == MainTab::Editor
+            && !self.step_input_active
+            && self.step_keyword_picker.is_none()
+    }
+
+    /// Cycles keyword/body focus on step lines; no-op on header-only lines.
+    fn toggle_focus_slot_horizontal(&mut self) {
+        let line = self.buffer.line(self.cursor_row);
+        if body_char_range(&line).is_none() {
+            return;
+        }
+        self.focus_slot = match self.focus_slot {
+            BddFocusSlot::Keyword => BddFocusSlot::Body,
+            BddFocusSlot::Body => BddFocusSlot::Keyword,
+        };
     }
 
     pub fn feature_outline_lines(&self) -> Vec<String> {
@@ -305,84 +361,138 @@ impl App {
         if self.step_input_active || self.step_keyword_picker.is_some() {
             return;
         }
-        self.cursor_row = self.cursor_row.saturating_sub(1);
-        self.cursor_col = self.buffer.clamp_col(self.cursor_row, self.desired_col);
-        self.quit_pending_confirm = false;
+        if self.is_editor_nav_mode() {
+            let rows = bdd_node_rows(&self.buffer);
+            if let Some(r) = prev_node_row(&rows, self.cursor_row) {
+                self.cursor_row = r;
+                self.focus_slot = BddFocusSlot::Keyword;
+                self.cursor_col = 0;
+                self.desired_col = 0;
+            }
+            self.quit_pending_confirm = false;
+        }
     }
 
     fn move_down(&mut self) {
         if self.step_input_active || self.step_keyword_picker.is_some() {
             return;
         }
-        self.cursor_row = (self.cursor_row + 1).min(self.buffer.line_count().saturating_sub(1));
-        self.cursor_col = self.buffer.clamp_col(self.cursor_row, self.desired_col);
-        self.quit_pending_confirm = false;
+        if self.is_editor_nav_mode() {
+            let rows = bdd_node_rows(&self.buffer);
+            if let Some(r) = next_node_row(&rows, self.cursor_row) {
+                self.cursor_row = r;
+                self.focus_slot = BddFocusSlot::Keyword;
+                self.cursor_col = 0;
+                self.desired_col = 0;
+            }
+            self.quit_pending_confirm = false;
+        }
     }
 
     fn move_left(&mut self) {
         if self.step_keyword_picker.is_some() {
             return;
         }
-        if self.cursor_col > 0 {
-            self.cursor_col -= 1;
-        } else if self.cursor_row > 0 {
-            self.cursor_row -= 1;
-            self.cursor_col = self.buffer.line_len_chars(self.cursor_row);
-        }
         if self.step_input_active {
+            if self.cursor_col > self.step_input_min_col {
+                self.cursor_col -= 1;
+            }
             self.cursor_row = self.step_input_row;
-            self.cursor_col = self.cursor_col.max(self.step_input_min_col);
+            self.desired_col = self.cursor_col;
+            self.quit_pending_confirm = false;
+            return;
         }
-        self.desired_col = self.cursor_col;
-        self.quit_pending_confirm = false;
+        if self.is_editor_nav_mode() {
+            self.toggle_focus_slot_horizontal();
+            self.quit_pending_confirm = false;
+        }
     }
 
     fn move_right(&mut self) {
         if self.step_keyword_picker.is_some() {
             return;
         }
-        let line_len = self.buffer.line_len_chars(self.cursor_row);
-        if self.cursor_col < line_len {
-            self.cursor_col += 1;
-        } else if self.cursor_row + 1 < self.buffer.line_count() {
-            if self.step_input_active {
-                return;
+        if self.step_input_active {
+            let line_len = self.buffer.line_len_chars(self.cursor_row);
+            if self.cursor_col < line_len {
+                self.cursor_col += 1;
             }
-            self.cursor_row += 1;
-            self.cursor_col = 0;
+            self.cursor_row = self.step_input_row;
+            self.desired_col = self.cursor_col;
+            self.quit_pending_confirm = false;
+            return;
         }
-        self.desired_col = self.cursor_col;
-        self.quit_pending_confirm = false;
+        if self.is_editor_nav_mode() {
+            self.toggle_focus_slot_horizontal();
+            self.quit_pending_confirm = false;
+        }
     }
 
     fn move_home(&mut self) {
         if self.step_keyword_picker.is_some() {
             return;
         }
-        self.cursor_col = if self.step_input_active {
-            self.step_input_min_col
-        } else {
-            0
-        };
-        self.desired_col = self.cursor_col;
-        self.quit_pending_confirm = false;
+        if self.step_input_active {
+            self.cursor_col = self.step_input_min_col;
+            self.desired_col = self.cursor_col;
+            self.quit_pending_confirm = false;
+            return;
+        }
+        if self.is_editor_nav_mode() {
+            let rows = bdd_node_rows(&self.buffer);
+            if let Some(&r) = rows.first() {
+                self.cursor_row = r;
+                self.focus_slot = BddFocusSlot::Keyword;
+                self.cursor_col = 0;
+                self.desired_col = 0;
+            }
+            self.quit_pending_confirm = false;
+        }
     }
 
     fn move_end(&mut self) {
         if self.step_keyword_picker.is_some() {
             return;
         }
-        self.cursor_col = self.buffer.line_len_chars(self.cursor_row);
-        self.desired_col = self.cursor_col;
-        self.quit_pending_confirm = false;
+        if self.step_input_active {
+            self.cursor_col = self.buffer.line_len_chars(self.cursor_row);
+            self.desired_col = self.cursor_col;
+            self.quit_pending_confirm = false;
+            return;
+        }
+        if self.is_editor_nav_mode() {
+            let rows = bdd_node_rows(&self.buffer);
+            if let Some(&r) = rows.last() {
+                self.cursor_row = r;
+                self.focus_slot = BddFocusSlot::Keyword;
+                self.cursor_col = 0;
+                self.desired_col = 0;
+            }
+            self.quit_pending_confirm = false;
+        }
     }
 
     fn page_up(&mut self) {
         if self.step_input_active || self.step_keyword_picker.is_some() {
             return;
         }
-        self.cursor_row = self.cursor_row.saturating_sub(10);
-        self.cursor_col = self.buffer.clamp_col(self.cursor_row, self.desired_col);
+        if !self.is_editor_nav_mode() {
+            return;
+        }
+        let rows = bdd_node_rows(&self.buffer);
+        let mut r = self.cursor_row;
+        for _ in 0..10 {
+            match prev_node_row(&rows, r) {
+                Some(pr) => r = pr,
+                None => break,
+            }
+        }
+        if r != self.cursor_row {
+            self.cursor_row = r;
+            self.focus_slot = BddFocusSlot::Keyword;
+            self.cursor_col = 0;
+            self.desired_col = 0;
+        }
         self.quit_pending_confirm = false;
     }
 
@@ -390,66 +500,32 @@ impl App {
         if self.step_input_active || self.step_keyword_picker.is_some() {
             return;
         }
-        let last_row = self.buffer.line_count().saturating_sub(1);
-        self.cursor_row = (self.cursor_row + 10).min(last_row);
-        self.cursor_col = self.buffer.clamp_col(self.cursor_row, self.desired_col);
+        if !self.is_editor_nav_mode() {
+            return;
+        }
+        let rows = bdd_node_rows(&self.buffer);
+        let mut r = self.cursor_row;
+        for _ in 0..10 {
+            match next_node_row(&rows, r) {
+                Some(nr) => r = nr,
+                None => break,
+            }
+        }
+        if r != self.cursor_row {
+            self.cursor_row = r;
+            self.focus_slot = BddFocusSlot::Keyword;
+            self.cursor_col = 0;
+            self.desired_col = 0;
+        }
         self.quit_pending_confirm = false;
     }
-}
-
-/// Gherkin step keywords in **cycle** order (used by the keyword picker and cycle helpers).
-pub(crate) const STEP_KEYWORDS_CYCLE: &[&str] = &["Given", "When", "Then", "And", "But"];
-
-/// Returns the first UTF-8 character column where editable step text starts, or `None` if the line is not a step.
-pub(crate) fn step_edit_start_col(line: &str) -> Option<usize> {
-    let trimmed = line.trim_start();
-    let leading = line.len().saturating_sub(trimmed.len());
-    for kw in STEP_KEYWORDS_CYCLE {
-        if let Some(rest) = trimmed.strip_prefix(*kw) {
-            let mut col = leading + kw.chars().count();
-            if rest.starts_with(' ') {
-                col += 1;
-            }
-            return Some(col);
-        }
-    }
-    None
-}
-
-/// Returns the index into [`STEP_KEYWORDS_CYCLE`] for the leading step keyword, if any.
-pub(crate) fn current_step_keyword_index(line: &str) -> Option<usize> {
-    let trimmed = line.trim_start();
-    for (i, kw) in STEP_KEYWORDS_CYCLE.iter().enumerate() {
-        if trimmed.strip_prefix(*kw).is_some() {
-            return Some(i);
-        }
-    }
-    None
-}
-
-/// Replaces the leading step keyword with `new_keyword`, preserving indentation and the rest of the line.
-///
-/// Returns `None` if `new_keyword` is not a known step keyword or the line does not start with one.
-pub(crate) fn replace_step_keyword_line(line: &str, new_keyword: &str) -> Option<String> {
-    if !STEP_KEYWORDS_CYCLE.contains(&new_keyword) {
-        return None;
-    }
-    let trimmed = line.trim_start();
-    let leading = line.len().saturating_sub(trimmed.len());
-    let leading_s = line.get(..leading).unwrap_or("");
-    for kw in STEP_KEYWORDS_CYCLE {
-        if let Some(rest) = trimmed.strip_prefix(*kw) {
-            let new_trimmed = format!("{new_keyword}{rest}");
-            return Some(format!("{leading_s}{new_trimmed}"));
-        }
-    }
-    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        App, MainTab, current_step_keyword_index, replace_step_keyword_line, step_edit_start_col,
+        App, BddFocusSlot, MainTab, current_step_keyword_index, replace_step_keyword_line,
+        step_edit_start_col,
     };
     use crate::editor_buffer::EditorBuffer;
     use crate::keymap::Action;
@@ -465,7 +541,8 @@ mod tests {
     fn test_activate_step_input_and_block_prefix_backspace() {
         let mut app = App::from_args().expect("app init should work");
         app.buffer = EditorBuffer::from_string("Given hello".to_string());
-        app.cursor_col = 6;
+        app.sync_cursor_to_first_node();
+        app.focus_slot = BddFocusSlot::Body;
         app.handle_action(Action::ActivateStepInput)
             .expect("activate should work");
         assert!(app.step_input_active);
@@ -479,7 +556,8 @@ mod tests {
     fn test_space_on_prefix_opens_step_keyword_picker() {
         let mut app = App::from_args().expect("app init should work");
         app.buffer = EditorBuffer::from_string("Given hello\n".to_string());
-        app.cursor_col = 0;
+        app.sync_cursor_to_first_node();
+        app.focus_slot = BddFocusSlot::Keyword;
         app.handle_action(Action::ActivateStepInput)
             .expect("open picker should work");
         assert_eq!(app.buffer.line(0), "Given hello");
@@ -493,7 +571,8 @@ mod tests {
     fn test_step_keyword_picker_confirm_updates_line() {
         let mut app = App::from_args().expect("app init should work");
         app.buffer = EditorBuffer::from_string("Given hello".to_string());
-        app.cursor_col = 0;
+        app.sync_cursor_to_first_node();
+        app.focus_slot = BddFocusSlot::Keyword;
         app.handle_action(Action::ActivateStepInput)
             .expect("open picker should work");
         app.handle_action(Action::StepKeywordPickerDown)
@@ -508,7 +587,8 @@ mod tests {
     fn test_step_keyword_picker_cancel_leaves_buffer() {
         let mut app = App::from_args().expect("app init should work");
         app.buffer = EditorBuffer::from_string("Given hello".to_string());
-        app.cursor_col = 0;
+        app.sync_cursor_to_first_node();
+        app.focus_slot = BddFocusSlot::Keyword;
         app.handle_action(Action::ActivateStepInput)
             .expect("open picker should work");
         app.handle_action(Action::StepKeywordPickerCancel)
@@ -521,7 +601,8 @@ mod tests {
     fn test_space_in_body_activates_at_line_end() {
         let mut app = App::from_args().expect("app init should work");
         app.buffer = EditorBuffer::from_string("Given hello".to_string());
-        app.cursor_col = 6;
+        app.sync_cursor_to_first_node();
+        app.focus_slot = BddFocusSlot::Body;
         app.handle_action(Action::ActivateStepInput)
             .expect("activate should work");
         assert!(app.step_input_active);
@@ -556,7 +637,8 @@ mod tests {
     fn test_switching_tab_clears_step_input() {
         let mut app = App::from_args().expect("app init should work");
         app.buffer = EditorBuffer::from_string("Given hello".to_string());
-        app.cursor_col = 6;
+        app.sync_cursor_to_first_node();
+        app.focus_slot = BddFocusSlot::Body;
         app.handle_action(Action::ActivateStepInput)
             .expect("activate should work");
         assert!(app.step_input_active);
@@ -570,7 +652,8 @@ mod tests {
     fn test_switching_tab_clears_step_keyword_picker() {
         let mut app = App::from_args().expect("app init should work");
         app.buffer = EditorBuffer::from_string("Given hello".to_string());
-        app.cursor_col = 0;
+        app.sync_cursor_to_first_node();
+        app.focus_slot = BddFocusSlot::Keyword;
         app.handle_action(Action::ActivateStepInput)
             .expect("open picker should work");
         assert!(app.step_keyword_picker.is_some());
@@ -595,5 +678,49 @@ mod tests {
                 "Examples:".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn test_nav_move_down_goes_to_next_node() {
+        let mut app = App::from_args().expect("app init should work");
+        app.buffer = EditorBuffer::from_string("Feature: A\n  Given x\n".to_string());
+        app.sync_cursor_to_first_node();
+        assert_eq!(app.cursor_row, 0);
+        assert_eq!(app.focus_slot, BddFocusSlot::Keyword);
+        app.handle_action(Action::MoveDown)
+            .expect("move should work");
+        assert_eq!(app.cursor_row, 1);
+        assert_eq!(app.focus_slot, BddFocusSlot::Keyword);
+    }
+
+    #[test]
+    fn test_nav_left_right_toggles_keyword_and_body() {
+        let mut app = App::from_args().expect("app init should work");
+        app.buffer = EditorBuffer::from_string("  When hello".to_string());
+        app.sync_cursor_to_first_node();
+        assert_eq!(app.focus_slot, BddFocusSlot::Keyword);
+        app.handle_action(Action::MoveRight)
+            .expect("toggle should work");
+        assert_eq!(app.focus_slot, BddFocusSlot::Body);
+        app.handle_action(Action::MoveLeft)
+            .expect("toggle should work");
+        assert_eq!(app.focus_slot, BddFocusSlot::Keyword);
+    }
+
+    #[test]
+    fn test_space_respects_focus_slot_keyword_vs_body() {
+        let mut app = App::from_args().expect("app init should work");
+        app.buffer = EditorBuffer::from_string("Given ok\n".to_string());
+        app.sync_cursor_to_first_node();
+        app.focus_slot = BddFocusSlot::Keyword;
+        app.handle_action(Action::ActivateStepInput)
+            .expect("picker open should work");
+        assert!(app.step_keyword_picker.is_some());
+        app.handle_action(Action::StepKeywordPickerCancel)
+            .expect("cancel should work");
+        app.focus_slot = BddFocusSlot::Body;
+        app.handle_action(Action::ActivateStepInput)
+            .expect("body edit should work");
+        assert!(app.step_input_active);
     }
 }

@@ -5,11 +5,14 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, MainTab, STEP_KEYWORDS_CYCLE};
+use crate::app::{App, BddFocusSlot, MainTab, STEP_KEYWORDS_CYCLE};
+use crate::bdd_nav::{body_char_range, keyword_char_range};
 use crate::highlight::{KeywordSet, highlight_line};
 
 const NAV_CELL_BG: Color = Color::LightBlue;
 const NAV_CELL_FG: Color = Color::Black;
+/// Pale background for the focused keyword or step body in navigation mode.
+const NODE_FOCUS_BG: Color = Color::Rgb(140, 190, 255);
 
 /// Applies `patch` on UTF-8 character indices `[range.start, range.end)` within each span.
 fn apply_patch_to_char_range(
@@ -124,9 +127,9 @@ fn render_main_panel(
             frame.render_widget(block, area);
             let help = vec![
                 Line::raw("Tabs: Editor [1], Feature [2], Help [3]"),
-                Line::raw("Editor: Arrow keys move the navigation highlight"),
+                Line::raw("Editor: ↑↓ jump between BDD nodes; ←/→ switch keyword vs step body"),
                 Line::raw(
-                    "Editor: Space opens step-keyword list on prefix, or step-input at body end",
+                    "Editor: Space on keyword opens step list; Space on body edits step text",
                 ),
                 Line::raw(
                     "Editor: ↑↓ in list, Enter confirm, Esc cancel; Enter commits step input",
@@ -173,20 +176,36 @@ fn render_editor_panel(
         let (mut styled, next_doc) = highlight_line(&line, in_doc, &KeywordSet::default());
         in_doc = next_doc;
         if row == app.cursor_row {
-            let line_len = line.chars().count();
             let nav_cell_style = Style::default().bg(NAV_CELL_BG).fg(NAV_CELL_FG);
-            if line_len == 0 {
-                styled = Line::from(vec![Span::styled(" ", nav_cell_style)]);
-            } else if app.cursor_col < line_len {
-                styled = apply_patch_to_char_range(
-                    styled,
-                    app.cursor_col..app.cursor_col.saturating_add(1),
-                    nav_cell_style,
-                );
-            } else {
-                let mut spans = styled.spans;
-                spans.push(Span::styled(" ", nav_cell_style));
-                styled = Line::from(spans);
+            let line_len = line.chars().count();
+            if app.active_tab == MainTab::Editor
+                && !app.step_input_active
+                && app.step_keyword_picker.is_none()
+            {
+                let focus_patch = Style::default().bg(NODE_FOCUS_BG);
+                let hl_range = match app.focus_slot {
+                    BddFocusSlot::Keyword => keyword_char_range(&line),
+                    BddFocusSlot::Body => body_char_range(&line),
+                };
+                if let Some(r) = hl_range
+                    && r.start < r.end
+                {
+                    styled = apply_patch_to_char_range(styled, r, focus_patch);
+                }
+            } else if app.step_input_active || app.step_keyword_picker.is_some() {
+                if line_len == 0 {
+                    styled = Line::from(vec![Span::styled(" ", nav_cell_style)]);
+                } else if app.cursor_col < line_len {
+                    styled = apply_patch_to_char_range(
+                        styled,
+                        app.cursor_col..app.cursor_col.saturating_add(1),
+                        nav_cell_style,
+                    );
+                } else {
+                    let mut spans = styled.spans;
+                    spans.push(Span::styled(" ", nav_cell_style));
+                    styled = Line::from(spans);
+                }
             }
         }
         lines.push(styled);
@@ -281,7 +300,7 @@ fn footer_pill(label: &'static str) -> Span<'static> {
 fn footer_hints(active_tab: MainTab) -> Line<'static> {
     match active_tab {
         MainTab::Editor => Line::from(vec![
-            footer_pill(" Move [←→↑↓] "),
+            footer_pill(" BDD [←→↑↓] "),
             Span::raw(" "),
             footer_pill(" Step [Space] "),
             Span::raw(" "),
