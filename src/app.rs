@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use crate::bdd_nav::{
-    bdd_node_rows, bdd_step_rows, body_char_range, current_step_keyword_index, next_node_row,
-    prev_node_row, replace_step_keyword_line, step_edit_start_col,
+    bdd_node_rows, bdd_step_and_header_title_rows, body_char_range, current_step_keyword_index,
+    header_title_edit_start_col, is_feature_narrative_row, keyword_char_range,
+    line_body_edit_min_col_in_buffer, next_node_row, prev_node_row, replace_step_keyword_line,
 };
 use crate::editor_buffer::EditorBuffer;
 use crate::keymap::Action;
@@ -20,7 +21,7 @@ pub enum MainTab {
     Help,
 }
 
-/// Navigation focus within the current BDD node line (keyword token vs step body).
+/// Navigation focus on the current line: Gherkin keyword/token vs editable trailing text (step body or header title).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BddFocusSlot {
     Keyword,
@@ -151,7 +152,7 @@ impl App {
                 if self.step_input_active {
                     self.step_input_active = false;
                     self.focus_slot = BddFocusSlot::Body;
-                    self.status = "Step input committed".to_string();
+                    self.status = "Edit committed".to_string();
                 }
             }
             Action::Backspace => {
@@ -188,11 +189,6 @@ impl App {
                     return Ok(());
                 }
                 let line = self.buffer.line(self.cursor_row);
-                let Some(body_start) = step_edit_start_col(&line) else {
-                    self.status = "Current line is not a BDD step".to_string();
-                    self.quit_pending_confirm = false;
-                    return Ok(());
-                };
                 match self.focus_slot {
                     BddFocusSlot::Keyword => {
                         self.clear_step_input_state();
@@ -202,17 +198,27 @@ impl App {
                                 selected: idx,
                             });
                             self.status = "Select step keyword (↑↓ Enter, Esc cancel)".to_string();
+                        } else {
+                            self.status =
+                                "Step keyword list is available on step lines only".to_string();
                         }
                     }
                     BddFocusSlot::Body => {
                         self.clear_step_keyword_picker();
+                        let Some(body_start) =
+                            line_body_edit_min_col_in_buffer(&self.buffer, self.cursor_row)
+                        else {
+                            self.status = "No editable text region on this line".to_string();
+                            self.quit_pending_confirm = false;
+                            return Ok(());
+                        };
                         self.step_input_active = true;
                         self.step_input_row = self.cursor_row;
                         self.step_input_min_col = body_start;
                         let end = self.buffer.line_len_chars(self.cursor_row);
                         self.cursor_col = end;
                         self.desired_col = end;
-                        self.status = "Step input active".to_string();
+                        self.status = "Editing active".to_string();
                     }
                 }
                 self.quit_pending_confirm = false;
@@ -333,37 +339,51 @@ impl App {
     /// Cycles keyword/body focus on step lines; no-op on header-only lines.
     fn toggle_focus_slot_horizontal(&mut self) {
         let line = self.buffer.line(self.cursor_row);
-        if body_char_range(&line).is_none() {
+        if line_body_edit_min_col_in_buffer(&self.buffer, self.cursor_row).is_none() {
             return;
         }
-        self.focus_slot = match self.focus_slot {
-            BddFocusSlot::Keyword => BddFocusSlot::Body,
-            BddFocusSlot::Body => BddFocusSlot::Keyword,
-        };
+        match self.focus_slot {
+            BddFocusSlot::Keyword => {
+                self.focus_slot = BddFocusSlot::Body;
+            }
+            BddFocusSlot::Body => {
+                if keyword_char_range(&line).is_some() {
+                    self.focus_slot = BddFocusSlot::Keyword;
+                }
+            }
+        }
     }
 
-    /// Rows used for vertical navigation and whether that list is step-only.
+    /// Rows used for vertical navigation and whether that list is the **body chain** (steps + editable titles).
     ///
-    /// Step-only mode applies when [`BddFocusSlot::Body`] is active on a line that has a step body.
+    /// Body-chain mode applies when [`BddFocusSlot::Body`] is on a step line or on an editable header
+    /// title line (`Feature:` / `Scenario:` / …), excluding free-text feature narrative lines.
     fn vertical_nav_rows(&self) -> (Vec<usize>, bool) {
         let line = self.buffer.line(self.cursor_row);
-        let step_only = self.focus_slot == BddFocusSlot::Body && body_char_range(&line).is_some();
-        let rows = if step_only {
-            bdd_step_rows(&self.buffer)
+        let body_chain_nav = self.focus_slot == BddFocusSlot::Body
+            && (body_char_range(&line).is_some() || header_title_edit_start_col(&line).is_some())
+            && !is_feature_narrative_row(&self.buffer, self.cursor_row);
+        let rows = if body_chain_nav {
+            bdd_step_and_header_title_rows(&self.buffer)
         } else {
             bdd_node_rows(&self.buffer)
         };
-        (rows, step_only)
+        (rows, body_chain_nav)
     }
 
-    /// After a vertical jump: reset column; keep body focus only when navigating the step list.
-    fn apply_vertical_nav_jump(&mut self, new_row: usize, step_only_list: bool) {
+    /// After a vertical jump: reset column; keep body focus on the body chain or on feature prose lines.
+    fn apply_vertical_nav_jump(&mut self, new_row: usize, body_chain_nav: bool) {
         self.cursor_row = new_row;
         self.cursor_col = 0;
         self.desired_col = 0;
-        if !step_only_list {
-            self.focus_slot = BddFocusSlot::Keyword;
+        if body_chain_nav {
+            return;
         }
+        self.focus_slot = if is_feature_narrative_row(&self.buffer, new_row) {
+            BddFocusSlot::Body
+        } else {
+            BddFocusSlot::Keyword
+        };
     }
 
     pub fn feature_outline_lines(&self) -> Vec<String> {
@@ -386,9 +406,9 @@ impl App {
             return;
         }
         if self.is_editor_nav_mode() {
-            let (rows, step_only) = self.vertical_nav_rows();
+            let (rows, body_chain_nav) = self.vertical_nav_rows();
             if let Some(r) = prev_node_row(&rows, self.cursor_row) {
-                self.apply_vertical_nav_jump(r, step_only);
+                self.apply_vertical_nav_jump(r, body_chain_nav);
             }
             self.quit_pending_confirm = false;
         }
@@ -399,9 +419,9 @@ impl App {
             return;
         }
         if self.is_editor_nav_mode() {
-            let (rows, step_only) = self.vertical_nav_rows();
+            let (rows, body_chain_nav) = self.vertical_nav_rows();
             if let Some(r) = next_node_row(&rows, self.cursor_row) {
-                self.apply_vertical_nav_jump(r, step_only);
+                self.apply_vertical_nav_jump(r, body_chain_nav);
             }
             self.quit_pending_confirm = false;
         }
@@ -457,9 +477,9 @@ impl App {
             return;
         }
         if self.is_editor_nav_mode() {
-            let (rows, step_only) = self.vertical_nav_rows();
+            let (rows, body_chain_nav) = self.vertical_nav_rows();
             if let Some(&r) = rows.first() {
-                self.apply_vertical_nav_jump(r, step_only);
+                self.apply_vertical_nav_jump(r, body_chain_nav);
             }
             self.quit_pending_confirm = false;
         }
@@ -476,9 +496,9 @@ impl App {
             return;
         }
         if self.is_editor_nav_mode() {
-            let (rows, step_only) = self.vertical_nav_rows();
+            let (rows, body_chain_nav) = self.vertical_nav_rows();
             if let Some(&r) = rows.last() {
-                self.apply_vertical_nav_jump(r, step_only);
+                self.apply_vertical_nav_jump(r, body_chain_nav);
             }
             self.quit_pending_confirm = false;
         }
@@ -491,7 +511,7 @@ impl App {
         if !self.is_editor_nav_mode() {
             return;
         }
-        let (rows, step_only) = self.vertical_nav_rows();
+        let (rows, body_chain_nav) = self.vertical_nav_rows();
         let mut r = self.cursor_row;
         for _ in 0..10 {
             match prev_node_row(&rows, r) {
@@ -500,7 +520,7 @@ impl App {
             }
         }
         if r != self.cursor_row {
-            self.apply_vertical_nav_jump(r, step_only);
+            self.apply_vertical_nav_jump(r, body_chain_nav);
         }
         self.quit_pending_confirm = false;
     }
@@ -512,7 +532,7 @@ impl App {
         if !self.is_editor_nav_mode() {
             return;
         }
-        let (rows, step_only) = self.vertical_nav_rows();
+        let (rows, body_chain_nav) = self.vertical_nav_rows();
         let mut r = self.cursor_row;
         for _ in 0..10 {
             match next_node_row(&rows, r) {
@@ -521,7 +541,7 @@ impl App {
             }
         }
         if r != self.cursor_row {
-            self.apply_vertical_nav_jump(r, step_only);
+            self.apply_vertical_nav_jump(r, body_chain_nav);
         }
         self.quit_pending_confirm = false;
     }
@@ -531,8 +551,8 @@ impl App {
 mod tests {
     use super::{
         App, BddFocusSlot, MainTab, current_step_keyword_index, replace_step_keyword_line,
-        step_edit_start_col,
     };
+    use crate::bdd_nav::step_edit_start_col;
     use crate::editor_buffer::EditorBuffer;
     use crate::keymap::Action;
 
@@ -613,6 +633,53 @@ mod tests {
             .expect("activate should work");
         assert!(app.step_input_active);
         assert_eq!(app.cursor_col, 11);
+    }
+
+    #[test]
+    fn test_space_on_feature_keyword_does_not_open_step_picker() {
+        let mut app = App::from_args().expect("app init should work");
+        app.buffer = EditorBuffer::from_string("Feature: X\n".to_string());
+        app.sync_cursor_to_first_node();
+        assert_eq!(app.focus_slot, BddFocusSlot::Keyword);
+        app.handle_action(Action::ActivateStepInput)
+            .expect("activate should work");
+        assert!(app.step_keyword_picker.is_none());
+        assert!(!app.step_input_active);
+    }
+
+    #[test]
+    fn test_feature_title_body_edit() {
+        let mut app = App::from_args().expect("app init should work");
+        app.buffer = EditorBuffer::from_string("Feature: My title\n".to_string());
+        app.sync_cursor_to_first_node();
+        app.handle_action(Action::MoveRight).expect("toggle body");
+        assert_eq!(app.focus_slot, BddFocusSlot::Body);
+        app.handle_action(Action::ActivateStepInput)
+            .expect("edit should work");
+        assert!(app.step_input_active);
+        app.handle_action(Action::Insert('!'))
+            .expect("insert should work");
+        assert_eq!(app.buffer.line(0), "Feature: My title!");
+    }
+
+    #[test]
+    fn test_feature_description_nav_and_edit() {
+        let mut app = App::from_args().expect("app init should work");
+        app.buffer =
+            EditorBuffer::from_string("Feature: T\n  Desc line\nBackground:\n".to_string());
+        app.sync_cursor_to_first_node();
+        app.handle_action(Action::MoveDown)
+            .expect("move to description should work");
+        assert_eq!(app.cursor_row, 1);
+        assert_eq!(app.focus_slot, BddFocusSlot::Body);
+        assert!(crate::bdd_nav::is_feature_narrative_row(&app.buffer, 1));
+        app.handle_action(Action::ActivateStepInput)
+            .expect("edit should work");
+        assert!(app.step_input_active);
+        assert_eq!(app.step_input_min_col, 0);
+        app.handle_action(Action::Insert('!'))
+            .expect("insert should work");
+        assert_eq!(app.buffer.line(1), "  Desc line!");
     }
 
     #[test]
@@ -700,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nav_body_move_down_skips_header_nodes() {
+    fn test_nav_body_move_down_chain_includes_scenario_title() {
         let mut app = App::from_args().expect("app init should work");
         app.buffer = EditorBuffer::from_string(
             "Feature: A\n  Scenario: S\n  Given a\n  Scenario: T\n  When b\n".to_string(),
@@ -715,8 +782,60 @@ mod tests {
             .expect("body focus should work");
         assert_eq!(app.focus_slot, BddFocusSlot::Body);
         app.handle_action(Action::MoveDown)
-            .expect("step-only move should work");
+            .expect("body-chain move should work");
+        assert_eq!(app.cursor_row, 3);
+        assert!(app.buffer.line(3).trim_start().starts_with("Scenario"));
+        assert_eq!(app.focus_slot, BddFocusSlot::Body);
+        app.handle_action(Action::MoveDown)
+            .expect("body-chain move should work");
         assert_eq!(app.cursor_row, 4);
+        assert_eq!(app.focus_slot, BddFocusSlot::Body);
+    }
+
+    #[test]
+    fn test_nav_body_on_feature_title_uses_body_chain() {
+        let mut app = App::from_args().expect("app init should work");
+        app.buffer =
+            EditorBuffer::from_string("Feature: A\n  Scenario: S\n  Given a\n".to_string());
+        app.sync_cursor_to_first_node();
+        assert_eq!(app.cursor_row, 0);
+        app.handle_action(Action::MoveRight)
+            .expect("body focus on feature title should work");
+        assert_eq!(app.focus_slot, BddFocusSlot::Body);
+        app.handle_action(Action::MoveDown)
+            .expect("move should work");
+        assert_eq!(app.cursor_row, 1);
+        assert!(app.buffer.line(1).trim_start().starts_with("Scenario"));
+        assert_eq!(app.focus_slot, BddFocusSlot::Body);
+        app.handle_action(Action::MoveDown)
+            .expect("move should work");
+        assert_eq!(app.cursor_row, 2);
+        assert!(app.buffer.line(2).trim_start().starts_with("Given"));
+        assert_eq!(app.focus_slot, BddFocusSlot::Body);
+    }
+
+    #[test]
+    fn test_nav_body_move_up_from_step_to_scenario_title() {
+        let mut app = App::from_args().expect("app init should work");
+        app.buffer = EditorBuffer::from_string("Feature: F\nScenario: S\n  When x\n".to_string());
+        app.sync_cursor_to_first_node();
+        app.handle_action(Action::MoveDown)
+            .expect("move should work");
+        app.handle_action(Action::MoveDown)
+            .expect("move should work");
+        assert!(
+            app.buffer
+                .line(app.cursor_row)
+                .trim_start()
+                .starts_with("When")
+        );
+        app.handle_action(Action::MoveRight)
+            .expect("body focus should work");
+        assert_eq!(app.focus_slot, BddFocusSlot::Body);
+        app.handle_action(Action::MoveUp)
+            .expect("body-chain move should work");
+        assert_eq!(app.cursor_row, 1);
+        assert!(app.buffer.line(1).trim_start().starts_with("Scenario"));
         assert_eq!(app.focus_slot, BddFocusSlot::Body);
     }
 

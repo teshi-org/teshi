@@ -26,16 +26,16 @@ If no file path is passed, the editor starts with an empty buffer.
 ## Keybindings
 
 - `1` / `2` / `3`: switch top tabs (`Editor` / `Feature` / `Help`) when step input is inactive
-- `↑` / `↓` (Editor, not in overlays): with **keyword** focus, previous/next BDD node (headers + steps); with **body** focus on a step line, previous/next **step** line only
-- `←` / `→` (Editor, not in overlays): toggle focus between the step keyword and the step body (step lines only)
-- `Home` / `End` (Editor, not in overlays): first/last BDD node (keyword focus) or first/last step line (body focus on a step)
-- `PageUp` / `PageDown` (Editor, not in overlays): about 10 BDD nodes or step lines, matching the same rule as `↑` / `↓`
-- `Space` (Editor): on **keyword** focus, open the step-keyword dropdown; on **body** focus, start step text input (`Given` / `When` / …)
-- `Enter`: commit current step text input
+- `↑` / `↓` (Editor, not in overlays): with **keyword** focus, previous/next navigable line (headers, `Feature:` description lines, steps); with **body** focus on a step or editable header title (not feature prose), previous/next line in document order among **steps** and editable titles (`Feature:` / `Scenario:` / `Scenario Outline:` / `Examples:`); **body** on a `Feature:` description line uses the same rule as keyword (all navigable lines)
+- `←` / `→` (Editor, not in overlays): toggle between the Gherkin keyword/token and the editable text after it (step bodies; `Feature:` / `Scenario:` / `Scenario Outline:` / `Examples:` titles; not `Background:`); free-text lines under `Feature:` use **body** only (whole line)
+- `Home` / `End` (Editor, not in overlays): first/last BDD node (keyword focus) or first/last entry in the body chain above (same body-focus rule as `↑` / `↓`)
+- `PageUp` / `PageDown` (Editor, not in overlays): about 10 BDD nodes or body-chain lines, matching the same rule as `↑` / `↓`
+- `Space` (Editor): on **keyword** focus, open the step-keyword dropdown on step lines (not on headers); on **body** focus, start editing the step body or header title after the colon
+- `Enter`: commit the active line edit
 - `Esc`: clear current input state
 - `s`: save current file
 - `q`: quit (press twice if buffer is dirty)
-- While step input is active: printable chars / `Backspace` / `Delete` edit only text after the step keyword
+- While line edit is active: printable chars / `Backspace` / `Delete` only change text after the step keyword or after the editable header prefix
 
 ## Tabs
 
