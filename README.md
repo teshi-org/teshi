@@ -5,7 +5,7 @@ A minimal Rust TUI editor for pure Gherkin (`.feature`) files.
 ## Features (MVP)
 
 - Open a file from CLI argument: `cargo run -- path/to/file.feature`
-- Arrow-key navigation + Space-triggered single-step text editing
+- BDD-aware navigation (↑/↓ between nodes, ←/→ keyword vs body) and Space-triggered step editing
 - Gitui-style layout with switchable top tabs and dynamic bottom hints
 - Syntax highlighting for:
   - Gherkin headers (`Feature`, `Scenario`, `Scenario Outline`, `Examples`, `Background`)
@@ -26,10 +26,11 @@ If no file path is passed, the editor starts with an empty buffer.
 ## Keybindings
 
 - `1` / `2` / `3`: switch top tabs (`Editor` / `Feature` / `Help`) when step input is inactive
-- `↑/↓/←/→`: move cursor
-- `Home` / `End`: move to line start/end
-- `PageUp` / `PageDown`: move by 10 lines
-- `Space`: activate single-step text input on current step line (`Given/When/Then/And/But`)
+- `↑` / `↓` (Editor, not in overlays): jump to the previous/next BDD node (headers + steps)
+- `←` / `→` (Editor, not in overlays): toggle focus between the step keyword and the step body (step lines only)
+- `Home` / `End` (Editor, not in overlays): jump to the first/last BDD node
+- `PageUp` / `PageDown` (Editor, not in overlays): jump about 10 nodes backward/forward
+- `Space` (Editor): on **keyword** focus, open the step-keyword dropdown; on **body** focus, start step text input (`Given` / `When` / …)
 - `Enter`: commit current step text input
 - `Esc`: clear current input state
 - `s`: save current file

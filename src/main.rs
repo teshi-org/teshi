@@ -1,4 +1,5 @@
 mod app;
+mod bdd_nav;
 mod editor_buffer;
 mod highlight;
 mod keymap;
