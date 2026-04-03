@@ -1,10 +1,11 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
+use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, MainTab};
+use crate::app::{App, MainTab, STEP_KEYWORDS_CYCLE};
 use crate::highlight::{KeywordSet, highlight_line};
 
 const NAV_CELL_BG: Color = Color::LightBlue;
@@ -124,8 +125,12 @@ fn render_main_panel(
             let help = vec![
                 Line::raw("Tabs: Editor [1], Feature [2], Help [3]"),
                 Line::raw("Editor: Arrow keys move the navigation highlight"),
-                Line::raw("Editor: Space cycles step keyword on prefix, or step-input at body end"),
-                Line::raw("Editor: Enter commits step input, Esc clears input state"),
+                Line::raw(
+                    "Editor: Space opens step-keyword list on prefix, or step-input at body end",
+                ),
+                Line::raw(
+                    "Editor: ↑↓ in list, Enter confirm, Esc cancel; Enter commits step input",
+                ),
                 Line::raw("Global: s save, q quit (dirty needs confirmation)"),
             ];
             frame.render_widget(Paragraph::new(Text::from(help)), inner);
@@ -187,7 +192,82 @@ fn render_editor_panel(
         lines.push(styled);
     }
     frame.render_widget(Paragraph::new(Text::from(lines)), editor_area);
+    render_step_keyword_picker(frame, app, editor_area);
     editor_area
+}
+
+/// Draws the step-keyword overlay when [`App::step_keyword_picker`] is active.
+///
+/// Uses [`Clear`] plus a [`Paragraph`] so underlying editor cells are not merged with list text
+/// (narrow [`List`] + stale buffer cells produced strings like "Givend" / "Whenhen").
+fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rect) {
+    let Some(picker) = app.step_keyword_picker else {
+        return;
+    };
+
+    const TITLE: &str = "Step keyword";
+    let max_kw_ch = STEP_KEYWORDS_CYCLE
+        .iter()
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(5);
+    let inner_w_ch = max_kw_ch.max(TITLE.chars().count()).saturating_add(2);
+    let list_w = (inner_w_ch as u16).saturating_add(2);
+    let n_items = STEP_KEYWORDS_CYCLE.len();
+    let list_h = (n_items as u16).saturating_add(2);
+
+    let visible_lines = editor_area.height as usize;
+    let row_in_view = picker.buffer_row.saturating_sub(app.scroll_row);
+    let y_below = if row_in_view < visible_lines {
+        editor_area.y + 1 + row_in_view as u16
+    } else {
+        editor_area
+            .y
+            .saturating_add(editor_area.height.saturating_sub(list_h))
+    };
+    let max_y = editor_area.y + editor_area.height;
+    let mut y = y_below;
+    if y.saturating_add(list_h) > max_y {
+        y = max_y.saturating_sub(list_h);
+    }
+    y = y.max(editor_area.y);
+
+    let h_avail = max_y.saturating_sub(y);
+    let h = list_h.min(h_avail).max(3);
+    let w = list_w.min(editor_area.width).max(3);
+    let area = Rect::new(editor_area.x, y, w, h);
+
+    frame.render_widget(Clear, area);
+
+    let block = Block::default().borders(Borders::ALL).title(TITLE);
+    let inner = block.inner(area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let row_width = inner.width as usize;
+    let max_rows = inner.height as usize;
+
+    let selected_style = Style::default().bg(NAV_CELL_BG).fg(NAV_CELL_FG);
+    let normal = Style::default();
+
+    let mut lines: Vec<Line> = Vec::with_capacity(max_rows.min(n_items));
+    for (i, kw) in STEP_KEYWORDS_CYCLE.iter().enumerate().take(max_rows) {
+        let style = if i == picker.selected {
+            selected_style
+        } else {
+            normal
+        };
+        let mut text = String::from(" ");
+        text.push_str(kw);
+        let used = UnicodeWidthStr::width(text.as_str());
+        let pad = row_width.saturating_sub(used);
+        text.push_str(&" ".repeat(pad));
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
 /// One footer “button” like gitui: light blue background and black foreground.

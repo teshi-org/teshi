@@ -2,12 +2,16 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::MainTab;
 
+/// Inputs for [`Action::from_key_event`] to resolve mode-specific bindings.
 #[derive(Debug, Clone, Copy)]
 pub struct KeyContext {
+    /// When true, arrow keys adjust the step-keyword list instead of moving the cursor.
+    pub step_keyword_picker_active: bool,
     pub step_input_active: bool,
     pub active_tab: MainTab,
 }
 
+/// High-level editor command derived from keyboard input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     MoveUp,
@@ -27,10 +31,28 @@ pub enum Action {
     SelectTab(MainTab),
     ActivateStepInput,
     ClearInputState,
+    /// Move selection up in the step-keyword overlay.
+    StepKeywordPickerUp,
+    /// Move selection down in the step-keyword overlay.
+    StepKeywordPickerDown,
+    /// Apply the selected keyword and close the overlay.
+    StepKeywordPickerConfirm,
+    /// Close the step-keyword overlay without applying.
+    StepKeywordPickerCancel,
 }
 
 impl Action {
     pub fn from_key_event(event: KeyEvent, context: KeyContext) -> Option<Self> {
+        if context.step_keyword_picker_active {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Esc, _) => Some(Self::StepKeywordPickerCancel),
+                (KeyCode::Up, _) => Some(Self::StepKeywordPickerUp),
+                (KeyCode::Down, _) => Some(Self::StepKeywordPickerDown),
+                (KeyCode::Enter, _) => Some(Self::StepKeywordPickerConfirm),
+                _ => None,
+            };
+        }
+
         if context.step_input_active {
             return match (event.code, event.modifiers) {
                 (KeyCode::Esc, _) => Some(Self::ClearInputState),
@@ -82,6 +104,7 @@ mod tests {
     #[test]
     fn test_tab_switch_shortcuts_in_non_input_state() {
         let context = KeyContext {
+            step_keyword_picker_active: false,
             step_input_active: false,
             active_tab: MainTab::Editor,
         };
@@ -95,6 +118,7 @@ mod tests {
     #[test]
     fn test_tab_switch_shortcuts_disabled_in_step_input_state() {
         let context = KeyContext {
+            step_keyword_picker_active: false,
             step_input_active: true,
             active_tab: MainTab::Editor,
         };
