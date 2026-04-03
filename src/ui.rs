@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, BddFocusSlot, MainTab, STEP_KEYWORDS_CYCLE};
-use crate::bdd_nav::{body_char_range, keyword_char_range};
+use crate::bdd_nav::{is_feature_narrative_row, keyword_char_range, nav_body_char_range_in_buffer};
 use crate::highlight::{KeywordSet, highlight_line};
 
 const NAV_CELL_BG: Color = Color::LightBlue;
@@ -128,10 +128,10 @@ fn render_main_panel(
             let help = vec![
                 Line::raw("Tabs: Editor [1], Feature [2], Help [3]"),
                 Line::raw(
-                    "Editor: ↑↓ jump BDD nodes (keyword focus) or step lines only (body focus)",
+                    "Editor: ↑↓ body on step or title jumps steps and Scenario/Feature/Outline/Examples lines in order",
                 ),
                 Line::raw(
-                    "Editor: Space on keyword opens step list; Space on body edits step text",
+                    "Editor: Space on body edits steps, titles, or Feature description lines",
                 ),
                 Line::raw(
                     "Editor: ↑↓ in list, Enter confirm, Esc cancel; Enter commits step input",
@@ -186,8 +186,14 @@ fn render_editor_panel(
             {
                 let focus_patch = Style::default().bg(NODE_FOCUS_BG);
                 let hl_range = match app.focus_slot {
-                    BddFocusSlot::Keyword => keyword_char_range(&line),
-                    BddFocusSlot::Body => body_char_range(&line),
+                    BddFocusSlot::Keyword => keyword_char_range(&line).or_else(|| {
+                        if is_feature_narrative_row(&app.buffer, row) {
+                            nav_body_char_range_in_buffer(&app.buffer, row, &line)
+                        } else {
+                            None
+                        }
+                    }),
+                    BddFocusSlot::Body => nav_body_char_range_in_buffer(&app.buffer, row, &line),
                 };
                 if let Some(r) = hl_range
                     && r.start < r.end
