@@ -13,6 +13,15 @@ pub enum MainTab {
     Help,
 }
 
+/// UI state for the step-keyword list shown after Space on the keyword prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StepKeywordPicker {
+    /// Buffer line index for the step being edited.
+    pub buffer_row: usize,
+    /// Index into [`STEP_KEYWORDS_CYCLE`] for the highlighted item.
+    pub selected: usize,
+}
+
 pub struct App {
     pub buffer: EditorBuffer,
     pub file_path: Option<PathBuf>,
@@ -27,6 +36,8 @@ pub struct App {
     pub step_input_active: bool,
     step_input_row: usize,
     step_input_min_col: usize,
+    /// When set, the step-keyword overlay is open (↑/↓ adjust selection, Enter/Esc finish).
+    pub step_keyword_picker: Option<StepKeywordPicker>,
     quit_pending_confirm: bool,
 }
 
@@ -56,6 +67,7 @@ impl App {
                 step_input_active: false,
                 step_input_row: 0,
                 step_input_min_col: 0,
+                step_keyword_picker: None,
                 quit_pending_confirm: false,
             })
         } else {
@@ -73,6 +85,7 @@ impl App {
                 step_input_active: false,
                 step_input_row: 0,
                 step_input_min_col: 0,
+                step_keyword_picker: None,
                 quit_pending_confirm: false,
             })
         }
@@ -141,17 +154,16 @@ impl App {
                 let line = self.buffer.line(self.cursor_row);
                 if let Some(body_start) = step_edit_start_col(&line) {
                     if self.cursor_col < body_start {
-                        if let Some(new_line) = cycle_step_keyword_line(&line) {
-                            self.buffer.replace_line(self.cursor_row, &new_line);
-                            let refreshed = self.buffer.line(self.cursor_row);
-                            if let Some(nb) = step_edit_start_col(&refreshed) {
-                                self.cursor_col = self.cursor_col.min(nb.saturating_sub(1));
-                                self.desired_col = self.cursor_col;
-                            }
-                            self.dirty = true;
-                            self.status = "Step keyword cycled".to_string();
+                        self.clear_step_input_state();
+                        if let Some(idx) = current_step_keyword_index(&line) {
+                            self.step_keyword_picker = Some(StepKeywordPicker {
+                                buffer_row: self.cursor_row,
+                                selected: idx,
+                            });
+                            self.status = "Select step keyword (↑↓ Enter, Esc cancel)".to_string();
                         }
                     } else {
+                        self.clear_step_keyword_picker();
                         self.step_input_active = true;
                         self.step_input_row = self.cursor_row;
                         self.step_input_min_col = body_start;
@@ -165,8 +177,17 @@ impl App {
                 }
                 self.quit_pending_confirm = false;
             }
+            Action::StepKeywordPickerUp => self.step_keyword_picker_move(-1),
+            Action::StepKeywordPickerDown => self.step_keyword_picker_move(1),
+            Action::StepKeywordPickerConfirm => self.confirm_step_keyword_picker(),
+            Action::StepKeywordPickerCancel => {
+                self.clear_step_keyword_picker();
+                self.status = "Step keyword selection canceled".to_string();
+                self.quit_pending_confirm = false;
+            }
             Action::ClearInputState => {
                 self.clear_step_input_state();
+                self.clear_step_keyword_picker();
                 self.status = "Input state cleared".to_string();
                 self.quit_pending_confirm = false;
             }
@@ -215,6 +236,7 @@ impl App {
         if self.step_input_active {
             self.clear_step_input_state();
         }
+        self.clear_step_keyword_picker();
         self.quit_pending_confirm = false;
         self.active_tab = tab;
         self.status = match tab {
@@ -227,6 +249,41 @@ impl App {
 
     fn clear_step_input_state(&mut self) {
         self.step_input_active = false;
+    }
+
+    fn clear_step_keyword_picker(&mut self) {
+        self.step_keyword_picker = None;
+    }
+
+    fn step_keyword_picker_move(&mut self, delta: isize) {
+        let Some(ref mut p) = self.step_keyword_picker else {
+            return;
+        };
+        let len = STEP_KEYWORDS_CYCLE.len();
+        let i = p.selected as isize + delta;
+        p.selected = i.clamp(0, len as isize - 1) as usize;
+        self.quit_pending_confirm = false;
+    }
+
+    fn confirm_step_keyword_picker(&mut self) {
+        let Some(picker) = self.step_keyword_picker else {
+            return;
+        };
+        let line = self.buffer.line(picker.buffer_row);
+        let new_kw = STEP_KEYWORDS_CYCLE[picker.selected];
+        if let Some(new_line) = replace_step_keyword_line(&line, new_kw) {
+            self.buffer.replace_line(picker.buffer_row, &new_line);
+            let refreshed = self.buffer.line(picker.buffer_row);
+            if let Some(nb) = step_edit_start_col(&refreshed) {
+                self.cursor_row = picker.buffer_row;
+                self.cursor_col = self.cursor_col.min(nb.saturating_sub(1));
+                self.desired_col = self.cursor_col;
+            }
+            self.dirty = true;
+            self.status = "Step keyword updated".to_string();
+        }
+        self.step_keyword_picker = None;
+        self.quit_pending_confirm = false;
     }
 
     pub fn feature_outline_lines(&self) -> Vec<String> {
@@ -245,7 +302,7 @@ impl App {
     }
 
     fn move_up(&mut self) {
-        if self.step_input_active {
+        if self.step_input_active || self.step_keyword_picker.is_some() {
             return;
         }
         self.cursor_row = self.cursor_row.saturating_sub(1);
@@ -254,7 +311,7 @@ impl App {
     }
 
     fn move_down(&mut self) {
-        if self.step_input_active {
+        if self.step_input_active || self.step_keyword_picker.is_some() {
             return;
         }
         self.cursor_row = (self.cursor_row + 1).min(self.buffer.line_count().saturating_sub(1));
@@ -263,6 +320,9 @@ impl App {
     }
 
     fn move_left(&mut self) {
+        if self.step_keyword_picker.is_some() {
+            return;
+        }
         if self.cursor_col > 0 {
             self.cursor_col -= 1;
         } else if self.cursor_row > 0 {
@@ -278,6 +338,9 @@ impl App {
     }
 
     fn move_right(&mut self) {
+        if self.step_keyword_picker.is_some() {
+            return;
+        }
         let line_len = self.buffer.line_len_chars(self.cursor_row);
         if self.cursor_col < line_len {
             self.cursor_col += 1;
@@ -293,6 +356,9 @@ impl App {
     }
 
     fn move_home(&mut self) {
+        if self.step_keyword_picker.is_some() {
+            return;
+        }
         self.cursor_col = if self.step_input_active {
             self.step_input_min_col
         } else {
@@ -303,13 +369,16 @@ impl App {
     }
 
     fn move_end(&mut self) {
+        if self.step_keyword_picker.is_some() {
+            return;
+        }
         self.cursor_col = self.buffer.line_len_chars(self.cursor_row);
         self.desired_col = self.cursor_col;
         self.quit_pending_confirm = false;
     }
 
     fn page_up(&mut self) {
-        if self.step_input_active {
+        if self.step_input_active || self.step_keyword_picker.is_some() {
             return;
         }
         self.cursor_row = self.cursor_row.saturating_sub(10);
@@ -318,7 +387,7 @@ impl App {
     }
 
     fn page_down(&mut self) {
-        if self.step_input_active {
+        if self.step_input_active || self.step_keyword_picker.is_some() {
             return;
         }
         let last_row = self.buffer.line_count().saturating_sub(1);
@@ -328,7 +397,7 @@ impl App {
     }
 }
 
-/// Gherkin step keywords in **cycle** order (Space on the keyword prefix advances along this ring).
+/// Gherkin step keywords in **cycle** order (used by the keyword picker and cycle helpers).
 pub(crate) const STEP_KEYWORDS_CYCLE: &[&str] = &["Given", "When", "Then", "And", "But"];
 
 /// Returns the first UTF-8 character column where editable step text starts, or `None` if the line is not a step.
@@ -347,15 +416,30 @@ pub(crate) fn step_edit_start_col(line: &str) -> Option<usize> {
     None
 }
 
-/// Builds the same line with the leading step keyword replaced by the next one in [`STEP_KEYWORDS_CYCLE`].
-pub(crate) fn cycle_step_keyword_line(line: &str) -> Option<String> {
+/// Returns the index into [`STEP_KEYWORDS_CYCLE`] for the leading step keyword, if any.
+pub(crate) fn current_step_keyword_index(line: &str) -> Option<usize> {
+    let trimmed = line.trim_start();
+    for (i, kw) in STEP_KEYWORDS_CYCLE.iter().enumerate() {
+        if trimmed.strip_prefix(*kw).is_some() {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Replaces the leading step keyword with `new_keyword`, preserving indentation and the rest of the line.
+///
+/// Returns `None` if `new_keyword` is not a known step keyword or the line does not start with one.
+pub(crate) fn replace_step_keyword_line(line: &str, new_keyword: &str) -> Option<String> {
+    if !STEP_KEYWORDS_CYCLE.contains(&new_keyword) {
+        return None;
+    }
     let trimmed = line.trim_start();
     let leading = line.len().saturating_sub(trimmed.len());
     let leading_s = line.get(..leading).unwrap_or("");
-    for (i, kw) in STEP_KEYWORDS_CYCLE.iter().enumerate() {
+    for kw in STEP_KEYWORDS_CYCLE {
         if let Some(rest) = trimmed.strip_prefix(*kw) {
-            let next = STEP_KEYWORDS_CYCLE[(i + 1) % STEP_KEYWORDS_CYCLE.len()];
-            let new_trimmed = format!("{next}{rest}");
+            let new_trimmed = format!("{new_keyword}{rest}");
             return Some(format!("{leading_s}{new_trimmed}"));
         }
     }
@@ -364,7 +448,9 @@ pub(crate) fn cycle_step_keyword_line(line: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, MainTab, cycle_step_keyword_line, step_edit_start_col};
+    use super::{
+        App, MainTab, current_step_keyword_index, replace_step_keyword_line, step_edit_start_col,
+    };
     use crate::editor_buffer::EditorBuffer;
     use crate::keymap::Action;
 
@@ -390,14 +476,45 @@ mod tests {
     }
 
     #[test]
-    fn test_space_on_prefix_cycles_step_keyword() {
+    fn test_space_on_prefix_opens_step_keyword_picker() {
         let mut app = App::from_args().expect("app init should work");
         app.buffer = EditorBuffer::from_string("Given hello\n".to_string());
         app.cursor_col = 0;
         app.handle_action(Action::ActivateStepInput)
-            .expect("cycle should work");
-        assert_eq!(app.buffer.line(0), "When hello");
+            .expect("open picker should work");
+        assert_eq!(app.buffer.line(0), "Given hello");
         assert!(!app.step_input_active);
+        let picker = app.step_keyword_picker.expect("picker should be open");
+        assert_eq!(picker.buffer_row, 0);
+        assert_eq!(picker.selected, 0);
+    }
+
+    #[test]
+    fn test_step_keyword_picker_confirm_updates_line() {
+        let mut app = App::from_args().expect("app init should work");
+        app.buffer = EditorBuffer::from_string("Given hello".to_string());
+        app.cursor_col = 0;
+        app.handle_action(Action::ActivateStepInput)
+            .expect("open picker should work");
+        app.handle_action(Action::StepKeywordPickerDown)
+            .expect("move selection should work");
+        app.handle_action(Action::StepKeywordPickerConfirm)
+            .expect("confirm should work");
+        assert_eq!(app.buffer.line(0), "When hello");
+        assert!(app.step_keyword_picker.is_none());
+    }
+
+    #[test]
+    fn test_step_keyword_picker_cancel_leaves_buffer() {
+        let mut app = App::from_args().expect("app init should work");
+        app.buffer = EditorBuffer::from_string("Given hello".to_string());
+        app.cursor_col = 0;
+        app.handle_action(Action::ActivateStepInput)
+            .expect("open picker should work");
+        app.handle_action(Action::StepKeywordPickerCancel)
+            .expect("cancel should work");
+        assert_eq!(app.buffer.line(0), "Given hello");
+        assert!(app.step_keyword_picker.is_none());
     }
 
     #[test]
@@ -412,15 +529,17 @@ mod tests {
     }
 
     #[test]
-    fn test_cycle_step_keyword_line_order() {
+    fn test_replace_step_keyword_line_order() {
         assert_eq!(
-            cycle_step_keyword_line("  Given x").as_deref(),
+            replace_step_keyword_line("  Given x", "When").as_deref(),
             Some("  When x")
         );
         assert_eq!(
-            cycle_step_keyword_line("But last").as_deref(),
+            replace_step_keyword_line("But last", "Given").as_deref(),
             Some("Given last")
         );
+        assert_eq!(current_step_keyword_index("  Given x"), Some(0));
+        assert_eq!(current_step_keyword_index("But last"), Some(4));
     }
 
     #[test]
@@ -444,6 +563,20 @@ mod tests {
         app.handle_action(Action::SelectTab(MainTab::Help))
             .expect("tab switch should work");
         assert!(!app.step_input_active);
+        assert_eq!(app.active_tab, MainTab::Help);
+    }
+
+    #[test]
+    fn test_switching_tab_clears_step_keyword_picker() {
+        let mut app = App::from_args().expect("app init should work");
+        app.buffer = EditorBuffer::from_string("Given hello".to_string());
+        app.cursor_col = 0;
+        app.handle_action(Action::ActivateStepInput)
+            .expect("open picker should work");
+        assert!(app.step_keyword_picker.is_some());
+        app.handle_action(Action::SelectTab(MainTab::Help))
+            .expect("tab switch should work");
+        assert!(app.step_keyword_picker.is_none());
         assert_eq!(app.active_tab, MainTab::Help);
     }
 

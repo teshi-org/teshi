@@ -52,6 +52,7 @@ fn main() -> Result<()> {
             && let Some(action) = Action::from_key_event(
                 key_event,
                 KeyContext {
+                    step_keyword_picker_active: app.step_keyword_picker.is_some(),
                     step_input_active: app.step_input_active,
                     active_tab: app.active_tab,
                 },
