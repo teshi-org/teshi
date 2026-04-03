@@ -28,6 +28,20 @@ pub fn bdd_node_rows(buffer: &EditorBuffer) -> Vec<usize> {
     out
 }
 
+/// Collects row indices (ascending) for Gherkin **step** lines only (`Given` / `When` / …).
+///
+/// Used when the UI focuses step body text so vertical navigation skips headers such as `Scenario:`.
+pub fn bdd_step_rows(buffer: &EditorBuffer) -> Vec<usize> {
+    let mut out = Vec::new();
+    for row in 0..buffer.line_count() {
+        let line = buffer.line(row);
+        if step_edit_start_col(&line).is_some() {
+            out.push(row);
+        }
+    }
+    out
+}
+
 /// Returns the smallest node row strictly greater than `current_row`, if any.
 pub fn next_node_row(rows: &[usize], current_row: usize) -> Option<usize> {
     rows.iter().find(|&&r| r > current_row).copied()
@@ -146,6 +160,15 @@ mod tests {
         );
         let rows = bdd_node_rows(&buf);
         assert_eq!(rows, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_bdd_step_rows_only_steps() {
+        let buf = EditorBuffer::from_string(
+            "Feature: A\n  Scenario: S\n  Given a\n  Scenario: T\n  When b\n".to_string(),
+        );
+        assert_eq!(bdd_node_rows(&buf), vec![0, 1, 2, 3, 4]);
+        assert_eq!(bdd_step_rows(&buf), vec![2, 4]);
     }
 
     #[test]

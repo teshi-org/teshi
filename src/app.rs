@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use crate::bdd_nav::{
-    bdd_node_rows, body_char_range, current_step_keyword_index, next_node_row, prev_node_row,
-    replace_step_keyword_line, step_edit_start_col,
+    bdd_node_rows, bdd_step_rows, body_char_range, current_step_keyword_index, next_node_row,
+    prev_node_row, replace_step_keyword_line, step_edit_start_col,
 };
 use crate::editor_buffer::EditorBuffer;
 use crate::keymap::Action;
@@ -342,6 +342,30 @@ impl App {
         };
     }
 
+    /// Rows used for vertical navigation and whether that list is step-only.
+    ///
+    /// Step-only mode applies when [`BddFocusSlot::Body`] is active on a line that has a step body.
+    fn vertical_nav_rows(&self) -> (Vec<usize>, bool) {
+        let line = self.buffer.line(self.cursor_row);
+        let step_only = self.focus_slot == BddFocusSlot::Body && body_char_range(&line).is_some();
+        let rows = if step_only {
+            bdd_step_rows(&self.buffer)
+        } else {
+            bdd_node_rows(&self.buffer)
+        };
+        (rows, step_only)
+    }
+
+    /// After a vertical jump: reset column; keep body focus only when navigating the step list.
+    fn apply_vertical_nav_jump(&mut self, new_row: usize, step_only_list: bool) {
+        self.cursor_row = new_row;
+        self.cursor_col = 0;
+        self.desired_col = 0;
+        if !step_only_list {
+            self.focus_slot = BddFocusSlot::Keyword;
+        }
+    }
+
     pub fn feature_outline_lines(&self) -> Vec<String> {
         let mut rows = Vec::new();
         for row in 0..self.buffer.line_count() {
@@ -362,12 +386,9 @@ impl App {
             return;
         }
         if self.is_editor_nav_mode() {
-            let rows = bdd_node_rows(&self.buffer);
+            let (rows, step_only) = self.vertical_nav_rows();
             if let Some(r) = prev_node_row(&rows, self.cursor_row) {
-                self.cursor_row = r;
-                self.focus_slot = BddFocusSlot::Keyword;
-                self.cursor_col = 0;
-                self.desired_col = 0;
+                self.apply_vertical_nav_jump(r, step_only);
             }
             self.quit_pending_confirm = false;
         }
@@ -378,12 +399,9 @@ impl App {
             return;
         }
         if self.is_editor_nav_mode() {
-            let rows = bdd_node_rows(&self.buffer);
+            let (rows, step_only) = self.vertical_nav_rows();
             if let Some(r) = next_node_row(&rows, self.cursor_row) {
-                self.cursor_row = r;
-                self.focus_slot = BddFocusSlot::Keyword;
-                self.cursor_col = 0;
-                self.desired_col = 0;
+                self.apply_vertical_nav_jump(r, step_only);
             }
             self.quit_pending_confirm = false;
         }
@@ -439,12 +457,9 @@ impl App {
             return;
         }
         if self.is_editor_nav_mode() {
-            let rows = bdd_node_rows(&self.buffer);
+            let (rows, step_only) = self.vertical_nav_rows();
             if let Some(&r) = rows.first() {
-                self.cursor_row = r;
-                self.focus_slot = BddFocusSlot::Keyword;
-                self.cursor_col = 0;
-                self.desired_col = 0;
+                self.apply_vertical_nav_jump(r, step_only);
             }
             self.quit_pending_confirm = false;
         }
@@ -461,12 +476,9 @@ impl App {
             return;
         }
         if self.is_editor_nav_mode() {
-            let rows = bdd_node_rows(&self.buffer);
+            let (rows, step_only) = self.vertical_nav_rows();
             if let Some(&r) = rows.last() {
-                self.cursor_row = r;
-                self.focus_slot = BddFocusSlot::Keyword;
-                self.cursor_col = 0;
-                self.desired_col = 0;
+                self.apply_vertical_nav_jump(r, step_only);
             }
             self.quit_pending_confirm = false;
         }
@@ -479,7 +491,7 @@ impl App {
         if !self.is_editor_nav_mode() {
             return;
         }
-        let rows = bdd_node_rows(&self.buffer);
+        let (rows, step_only) = self.vertical_nav_rows();
         let mut r = self.cursor_row;
         for _ in 0..10 {
             match prev_node_row(&rows, r) {
@@ -488,10 +500,7 @@ impl App {
             }
         }
         if r != self.cursor_row {
-            self.cursor_row = r;
-            self.focus_slot = BddFocusSlot::Keyword;
-            self.cursor_col = 0;
-            self.desired_col = 0;
+            self.apply_vertical_nav_jump(r, step_only);
         }
         self.quit_pending_confirm = false;
     }
@@ -503,7 +512,7 @@ impl App {
         if !self.is_editor_nav_mode() {
             return;
         }
-        let rows = bdd_node_rows(&self.buffer);
+        let (rows, step_only) = self.vertical_nav_rows();
         let mut r = self.cursor_row;
         for _ in 0..10 {
             match next_node_row(&rows, r) {
@@ -512,10 +521,7 @@ impl App {
             }
         }
         if r != self.cursor_row {
-            self.cursor_row = r;
-            self.focus_slot = BddFocusSlot::Keyword;
-            self.cursor_col = 0;
-            self.desired_col = 0;
+            self.apply_vertical_nav_jump(r, step_only);
         }
         self.quit_pending_confirm = false;
     }
@@ -691,6 +697,27 @@ mod tests {
             .expect("move should work");
         assert_eq!(app.cursor_row, 1);
         assert_eq!(app.focus_slot, BddFocusSlot::Keyword);
+    }
+
+    #[test]
+    fn test_nav_body_move_down_skips_header_nodes() {
+        let mut app = App::from_args().expect("app init should work");
+        app.buffer = EditorBuffer::from_string(
+            "Feature: A\n  Scenario: S\n  Given a\n  Scenario: T\n  When b\n".to_string(),
+        );
+        app.sync_cursor_to_first_node();
+        app.handle_action(Action::MoveDown)
+            .expect("move should work");
+        app.handle_action(Action::MoveDown)
+            .expect("move should work");
+        assert_eq!(app.cursor_row, 2);
+        app.handle_action(Action::MoveRight)
+            .expect("body focus should work");
+        assert_eq!(app.focus_slot, BddFocusSlot::Body);
+        app.handle_action(Action::MoveDown)
+            .expect("step-only move should work");
+        assert_eq!(app.cursor_row, 4);
+        assert_eq!(app.focus_slot, BddFocusSlot::Body);
     }
 
     #[test]
