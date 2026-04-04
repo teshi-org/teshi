@@ -10,50 +10,54 @@ Feature: Mind Map Tree View
     Given I have opened a directory containing feature files
     Then the MindMap tab shows a collapsible tree
     And the root node represents the project directory
-    And each feature file is a child node under the root
-    And each Feature, Scenario, and step is nested accordingly
+    And each scenario's step sequence appears as a path under the root
+    And shared step prefixes are merged into a single path
+    And no feature file nodes are shown in the tree
 
   Scenario: Step nodes display body text without keywords
     Given a scenario contains the step "Given I am on the login page"
     Then the tree displays the step node as "I am on the login page"
     And no Given, When, Then, And, or But keyword is shown
 
-  Scenario: Feature and Scenario titles retain their labels
-    Given a feature file contains "Feature: User login"
-    And it contains "Scenario: Successful login"
-    Then the tree shows "Feature: User login" with the full label
-    And the tree shows "Scenario: Successful login" with the full label
-
-  Scenario: Background node displays with nested steps
-    Given a feature file contains a Background block with steps
-    Then the tree shows a "Background" node under the Feature
-    And each Background step is a child node showing only its body text
-
   Scenario: Tags are not shown in the tree
     Given a feature file has tags "@auth @smoke" above the Feature line
     Then no tag node appears in the tree
-    And the Feature node label does not include the tags
+    And no tag text appears in the tree
 
   Scenario: Examples table is not shown in the tree
     Given a Scenario Outline has an Examples table
     Then no Examples node appears in the tree
     And no table row nodes appear in the tree
 
+  Scenario: Background steps are included as shared prefixes
+    Given a feature contains a Background with steps
+    And multiple scenarios follow that Background
+    Then the tree paths start with the Background steps
+    And the Background steps appear as a shared prefix across those scenarios
+
   # --- Step reuse detection ---
 
-  Scenario: Identical step bodies across files are recognized
+  Scenario: Identical step prefixes across files are merged
     Given Feature A contains "When I am on the login page"
     And Feature B contains "Given I am on the login page"
-    Then both tree nodes display "I am on the login page"
-    And both are marked as the same reused step
+    Then the tree displays a shared step node "I am on the login page"
+    And the path to that node is shared when prefixes match
 
-  Scenario: Shared step annotated with reuse count
+  Scenario: Shared step does not show reuse suffix
     Given the step body "I am on the login page" appears in 3 scenarios
-    Then each occurrence in the tree shows a reuse suffix like "[x3]"
+    Then the tree does not show any reuse suffix like "[x3]"
 
   Scenario: Unique steps have no reuse annotation
     Given a step body appears in only one scenario
     Then the tree node has no reuse suffix
+
+  Scenario: Shared path offers multiple preview locations
+    Given a shared step path exists in multiple scenarios
+    Then a location strip shows "Location 1/N" above the preview
+    When I press ]
+    Then the preview switches to another Feature and Scenario occurrence
+    When I press [
+    Then the preview switches to the previous occurrence
 
   # --- Tree navigation ---
 
@@ -144,7 +148,9 @@ Feature: Mind Map Tree View
   Scenario: Stage 3 - reserved panel shows placeholder
     Given the view is in Stage 3
     Then the reserved panel displays a placeholder message
-    And the placeholder indicates planned features including step implementation code and BDD executor
+    And the placeholder indicates planned features including step impl code
+    And the placeholder indicates planned features including BDD executor
+    And the placeholder indicates planned features including test results
 
   Scenario: Stage 3 to Stage 2 - return to tree
     Given the view is in Stage 3

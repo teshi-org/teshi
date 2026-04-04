@@ -34,7 +34,8 @@ pub struct BddFeature {
 #[derive(Debug, Clone)]
 pub struct BddBackground {
     pub steps: Vec<BddStep>,
-    /// 1-based line number of the `Background:` keyword.
+    /// 1-based line number of the `Background:` keyword (parsed for fidelity; not yet consumed by UI).
+    #[allow(dead_code)]
     pub line_number: usize,
 }
 
@@ -89,7 +90,6 @@ pub fn parse_feature(content: &str, file_path: PathBuf) -> BddFeature {
     let line_count = lines.len();
     let mut idx = 0;
 
-    let feature_tags;
     let mut feature_name = String::new();
     let mut feature_description = Vec::new();
     let mut background: Option<BddBackground> = None;
@@ -97,7 +97,7 @@ pub fn parse_feature(content: &str, file_path: PathBuf) -> BddFeature {
 
     // Collect tags before `Feature:`
     idx = skip_blank_and_comments(&lines, idx);
-    feature_tags = collect_tags(&lines, &mut idx);
+    let feature_tags = collect_tags(&lines, &mut idx);
 
     // Find `Feature:` line
     if idx < lines.len() {
@@ -271,11 +271,10 @@ fn is_structural_keyword(trimmed: &str) -> bool {
 
 fn is_step_line(trimmed: &str) -> bool {
     for kw in STEP_KEYWORDS {
-        if trimmed.starts_with(kw) {
-            let rest = &trimmed[kw.len()..];
-            if rest.is_empty() || rest.starts_with(' ') {
-                return true;
-            }
+        if let Some(rest) = trimmed.strip_prefix(kw)
+            && (rest.is_empty() || rest.starts_with(' '))
+        {
+            return true;
         }
     }
     false
@@ -303,16 +302,15 @@ fn parse_steps(lines: &[&str], idx: &mut usize) -> Vec<BddStep> {
 
 fn try_parse_step(trimmed: &str, line_number: usize) -> Option<BddStep> {
     for kw in STEP_KEYWORDS {
-        if trimmed.starts_with(kw) {
-            let rest = &trimmed[kw.len()..];
-            if rest.is_empty() || rest.starts_with(' ') {
-                let text = rest.strip_prefix(' ').unwrap_or(rest).to_string();
-                return Some(BddStep {
-                    keyword: kw.to_string(),
-                    text,
-                    line_number,
-                });
-            }
+        if let Some(rest) = trimmed.strip_prefix(kw)
+            && (rest.is_empty() || rest.starts_with(' '))
+        {
+            let text = rest.strip_prefix(' ').unwrap_or(rest).to_string();
+            return Some(BddStep {
+                keyword: kw.to_string(),
+                text,
+                line_number,
+            });
         }
     }
     None
@@ -415,7 +413,10 @@ fn parse_table_row(line: &str) -> Vec<String> {
         .unwrap_or(trimmed)
         .strip_suffix('|')
         .unwrap_or(trimmed);
-    inner.split('|').map(|cell| cell.trim().to_string()).collect()
+    inner
+        .split('|')
+        .map(|cell| cell.trim().to_string())
+        .collect()
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

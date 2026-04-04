@@ -18,7 +18,7 @@ Feature: Project File Management
 
   Scenario: Single file uses the same three-stage layout
     Given I run teshi with a single .feature file
-    Then the MindMap tree shows exactly one feature file node
+    Then the MindMap tree shows the project root and step paths for that file
     And all three-stage view transitions work normally
 
   # --- Multi-file mode ---
@@ -26,12 +26,12 @@ Feature: Project File Management
   Scenario: Open a directory of feature files
     Given I run teshi with a path to a directory
     Then all .feature files are recursively discovered
-    And the MindMap tree shows all discovered files as child nodes
+    And the MindMap tree shows step paths from all discovered files
 
-  Scenario: Feature files sorted alphabetically
+  Scenario: Feature files discovered in lexicographic order
     Given a directory contains "checkout.feature", "auth.feature", and "search.feature"
     When I open the directory in teshi
-    Then the tree shows the files in order: auth, checkout, search
+    Then the project feature list is ordered as: auth, checkout, search
 
   Scenario: Nested directories are scanned
     Given a directory contains subdirectories with .feature files
@@ -87,6 +87,7 @@ Feature: Project File Management
     Given a project with multiple feature files is loaded
     Then a StepIndex is constructed from all steps in all files
     And the index key is the normalized step body text
+    And background steps are included in the StepIndex
 
   Scenario: Step normalization ignores keywords
     Given Feature A has "Given I log in"
@@ -94,9 +95,10 @@ Feature: Project File Management
     And Feature C has "And I log in"
     Then the StepIndex has one entry for "I log in" with 3 usages
 
-  Scenario: Step normalization trims whitespace
-    Given a step has leading indentation "    Given I log in"
-    Then the normalized body is "I log in"
+  Scenario: Step normalization trims whitespace and lowercases
+    Given a step has leading indentation "    Given I Log In"
+    Then the normalized body is "i log in"
+    And the normalized body for "Given  I   log in" is "i log in"
 
   Scenario: Reuse count reflects actual usage
     Given the step body "I log in" appears in 5 distinct scenarios
@@ -117,12 +119,13 @@ Feature: Project File Management
     Then the file is written to disk
     And the tree structure is refreshed
 
-  Scenario: Step reuse annotations update after edit
+  Scenario: Step index and tree sync update after edit
     Given a step body "I log in" had reuse count 3
     And I change one occurrence to "I sign in"
     When the tree refreshes
-    Then "I log in" shows reuse count 2
-    And "I sign in" shows no reuse suffix
+    Then the tree path for that scenario uses "I sign in"
+    And the StepIndex entry for "I log in" has 2 usage locations
+    And the StepIndex entry for "I sign in" has 1 usage location
 
   Scenario: Adding a new step updates the tree
     Given I add a new step line in the Stage 3 editor

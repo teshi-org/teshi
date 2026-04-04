@@ -47,6 +47,10 @@ pub enum Action {
     TreeOpen,
     TreeHome,
     TreeEnd,
+    /// Cycle the stage-2 preview to the previous source location for a shared step path (left bracket).
+    TreeLocationPrev,
+    /// Cycle the stage-2 preview to the next source location for a shared step path (right bracket).
+    TreeLocationNext,
     /// Go back one stage in the three-stage model.
     StageBack,
 }
@@ -99,10 +103,10 @@ impl Action {
                 (KeyCode::Enter, _) => Some(Self::TreeOpen),
                 (KeyCode::Home, _) => Some(Self::TreeHome),
                 (KeyCode::End, _) => Some(Self::TreeEnd),
+                (KeyCode::Char('['), _) => Some(Self::TreeLocationPrev),
+                (KeyCode::Char(']'), _) => Some(Self::TreeLocationNext),
                 (KeyCode::Esc, _) => Some(Self::StageBack),
-                (KeyCode::Char('1'), KeyModifiers::NONE) => {
-                    Some(Self::SelectTab(MainTab::MindMap))
-                }
+                (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Help)),
                 (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),

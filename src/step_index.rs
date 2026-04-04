@@ -17,6 +17,10 @@ pub struct StepLocation {
 /// Maps normalized step body text → all locations that share it.
 #[derive(Debug, Clone)]
 pub struct StepIndex {
+    /// All usages keyed by normalized step body.
+    ///
+    /// Populated by [`StepIndex::build`]. Exposed for tooling; the binary currently uses only [`StepIndex::reuse_count`].
+    #[allow(dead_code)]
     pub usages: HashMap<String, Vec<StepLocation>>,
 }
 
@@ -51,6 +55,9 @@ impl StepIndex {
     }
 
     /// Returns the total usage count for a step body (>= 2 means reused).
+    ///
+    /// Exercised by unit tests; kept for future UI that surfaces reuse stats.
+    #[allow(dead_code)]
     pub fn reuse_count(&self, step_text: &str) -> usize {
         let key = normalize(step_text);
         self.usages.get(&key).map_or(0, |v| v.len())
@@ -68,7 +75,7 @@ fn normalize(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gherkin::{parse_feature, BddProject};
+    use crate::gherkin::{BddProject, parse_feature};
     use std::path::PathBuf;
 
     fn sample_project() -> BddProject {
