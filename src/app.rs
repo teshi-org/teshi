@@ -84,6 +84,11 @@ pub struct App {
     pub desired_col: usize,
     pub scroll_row: usize,
     pub focus_slot: BddFocusSlot,
+    // Stage-2 preview buffer (scenario-only slice)
+    pub preview_buffer: Option<EditorBuffer>,
+    pub preview_title: String,
+    pub preview_cursor_row: usize,
+    pub preview_scroll_row: usize,
 
     // ── Global UI ───────────────────────────────────────────────────
     pub should_quit: bool,
@@ -178,6 +183,10 @@ impl App {
             desired_col: 0,
             scroll_row: 0,
             focus_slot: BddFocusSlot::Keyword,
+            preview_buffer: None,
+            preview_title: String::new(),
+            preview_cursor_row: 0,
+            preview_scroll_row: 0,
             should_quit: false,
             active_tab: MainTab::MindMap,
             dirty: false,
@@ -231,6 +240,10 @@ impl App {
             desired_col: 0,
             scroll_row: 0,
             focus_slot: BddFocusSlot::Keyword,
+            preview_buffer: None,
+            preview_title: String::new(),
+            preview_cursor_row: 0,
+            preview_scroll_row: 0,
             should_quit: false,
             active_tab: MainTab::MindMap,
             dirty: false,
@@ -269,6 +282,10 @@ impl App {
             desired_col: 0,
             scroll_row: 0,
             focus_slot: BddFocusSlot::Keyword,
+            preview_buffer: None,
+            preview_title: String::new(),
+            preview_cursor_row: 0,
+            preview_scroll_row: 0,
             should_quit: false,
             active_tab: MainTab::MindMap,
             dirty: false,
@@ -327,8 +344,8 @@ impl App {
         self.focus_slot = BddFocusSlot::Keyword;
     }
 
-    /// Returns `(feature_idx, line_number)` for the currently selected tree node.
-    fn selected_tree_location(&mut self) -> Option<(usize, usize)> {
+    /// Returns the selected node's concrete source location.
+    fn selected_node_location(&mut self) -> Option<mindmap::NodeLocation> {
         let id = mindmap::selected_node_id(&self.tree_state)?;
         let locations = self.mindmap_index.locations_for(id)?;
         if locations.is_empty() {
@@ -341,7 +358,122 @@ impl App {
         if *entry >= locations.len() {
             *entry = 0;
         }
-        mindmap::parse_node_line_number(id, &self.mindmap_index, *entry)
+        locations.get(*entry).copied()
+    }
+
+    /// Returns `(feature_idx, line_number)` for the currently selected tree node.
+    fn selected_tree_location(&mut self) -> Option<(usize, usize)> {
+        let loc = self.selected_node_location()?;
+        Some((loc.feature_idx, loc.line_number))
+    }
+
+    /// Build the stage-2 preview buffer containing only the selected Scenario (or Background).
+    fn rebuild_preview(&mut self) {
+        let Some(loc) = self.selected_node_location() else {
+            self.set_empty_preview();
+            return;
+        };
+
+        if self.active_buffer_idx != Some(loc.feature_idx) {
+            self.switch_to_buffer(loc.feature_idx);
+        }
+
+        let Some(feature) = self.project.features.get(loc.feature_idx) else {
+            self.set_empty_preview();
+            return;
+        };
+
+        let buffer = &self.buffer;
+        let buffer_lines = buffer.line_count().max(1);
+
+        let (mut start_line, mut end_line, title) = match loc.context {
+            mindmap::LocationContext::Scenario(sci) => {
+                let Some(scenario) = feature.scenarios.get(sci) else {
+                    self.set_empty_preview();
+                    return;
+                };
+                let mut start = scenario.line_number.max(1);
+                // Include contiguous @tag lines immediately above the scenario.
+                let mut row = start.saturating_sub(1);
+                while row > 0 {
+                    let prev_row = row - 1;
+                    let line = buffer.line(prev_row);
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() && trimmed.starts_with('@') {
+                        start = prev_row + 1;
+                        row = prev_row;
+                    } else {
+                        break;
+                    }
+                }
+
+                let mut end = buffer_lines;
+                if let Some(next_sc) = feature.scenarios.get(sci + 1) {
+                    end = next_sc.line_number.saturating_sub(1).max(1);
+                }
+                if end < start {
+                    end = start;
+                }
+
+                let title = match scenario.kind {
+                    gherkin::ScenarioKind::Scenario => {
+                        format!("Scenario: {}", scenario.name)
+                    }
+                    gherkin::ScenarioKind::ScenarioOutline => {
+                        format!("Scenario Outline: {}", scenario.name)
+                    }
+                };
+                (start, end, title)
+            }
+            mindmap::LocationContext::Background => {
+                let Some(bg) = feature.background.as_ref() else {
+                    self.set_empty_preview();
+                    return;
+                };
+                let start = bg.line_number.max(1);
+                let mut end = buffer_lines;
+                if let Some(first_sc) = feature.scenarios.first() {
+                    end = first_sc.line_number.saturating_sub(1).max(1);
+                }
+                if end < start {
+                    end = start;
+                }
+                (start, end, "Background".to_string())
+            }
+        };
+
+        if start_line == 0 || end_line == 0 {
+            self.set_empty_preview();
+            return;
+        }
+
+        start_line = start_line.min(buffer_lines);
+        end_line = end_line.min(buffer_lines).max(start_line);
+
+        let mut out = String::new();
+        for row in (start_line - 1)..=end_line - 1 {
+            out.push_str(&buffer.line(row));
+            if row < end_line - 1 {
+                out.push('\n');
+            }
+        }
+
+        let rel_cursor = loc
+            .line_number
+            .saturating_sub(start_line)
+            .min(out.lines().count().saturating_sub(1));
+
+        self.preview_buffer = Some(EditorBuffer::from_string(out));
+        self.preview_title = title;
+        self.preview_cursor_row = rel_cursor;
+        self.preview_scroll_row = 0;
+    }
+
+    fn set_empty_preview(&mut self) {
+        self.preview_buffer = Some(EditorBuffer::from_string(String::new()));
+        self.preview_title = "Preview".to_string();
+        self.preview_cursor_row = 0;
+        self.preview_scroll_row = 0;
     }
 
     /// Transition from Stage 1 → Stage 2: open editor preview for the selected tree node.
@@ -353,6 +485,7 @@ impl App {
             self.editor_goto_line(line);
         }
         self.view_stage = ViewStage::TreeAndEditor;
+        self.rebuild_preview();
         self.status = "Preview opened".to_string();
     }
 
@@ -389,6 +522,7 @@ impl App {
                 self.view_stage = ViewStage::TreeAndEditor;
                 self.clear_step_input_state();
                 self.clear_step_keyword_picker();
+                self.rebuild_preview();
                 self.status = "Back to tree + preview".to_string();
             }
             ViewStage::TreeAndEditor => {
@@ -457,21 +591,17 @@ impl App {
             }
             self.editor_goto_line(line);
         }
+        self.rebuild_preview();
     }
 
     fn tree_toggle_or_expand(&mut self) {
-        let id = match mindmap::selected_node_id(&self.tree_state) {
-            Some(id) => id.to_string(),
-            None => return,
-        };
-        if mindmap::is_leaf_node(&id, &self.mindmap_index) {
-            // On leaf in stage 2, advance to stage 3
-            if self.view_stage == ViewStage::TreeAndEditor {
-                self.stage_enter_editor();
-            }
-        } else {
-            self.tree_state.key_right();
+        if self.view_stage == ViewStage::TreeAndEditor {
+            self.stage_enter_editor();
+            self.quit_pending_confirm = false;
+            return;
         }
+        // Stage 1: expand tree nodes
+        self.tree_state.key_right();
         self.quit_pending_confirm = false;
     }
 
@@ -507,12 +637,21 @@ impl App {
             }
             self.editor_goto_line(line);
         }
+        self.rebuild_preview();
         self.status = "Location switched".to_string();
         self.quit_pending_confirm = false;
     }
 
     fn tree_collapse(&mut self) {
         self.tree_state.key_left();
+        self.quit_pending_confirm = false;
+    }
+
+    fn tree_toggle(&mut self) {
+        self.tree_state.toggle_selected();
+        if self.view_stage == ViewStage::TreeAndEditor {
+            self.rebuild_preview();
+        }
         self.quit_pending_confirm = false;
     }
 
@@ -525,9 +664,10 @@ impl App {
             Action::TreeDown => self.tree_move_down(),
             Action::TreeExpand => self.tree_toggle_or_expand(),
             Action::TreeCollapse => self.tree_collapse(),
+            Action::TreeToggle => self.tree_toggle(),
             Action::TreeOpen => match self.view_stage {
                 ViewStage::TreeOnly => self.stage_open_editor_preview(),
-                ViewStage::TreeAndEditor => self.stage_enter_editor(),
+                ViewStage::TreeAndEditor => self.stage_back(),
                 _ => {}
             },
             Action::TreeHome => self.tree_home(),
@@ -1309,10 +1449,22 @@ mod tests {
             .expect("open should work");
         assert_eq!(app.view_stage, ViewStage::TreeAndEditor);
 
-        // StageBack → Stage 1
-        app.handle_action(Action::StageBack)
-            .expect("back should work");
+        // TreeOpen again → Stage 1
+        app.handle_action(Action::TreeOpen)
+            .expect("close should work");
         assert_eq!(app.view_stage, ViewStage::TreeOnly);
+    }
+
+    #[test]
+    fn test_tree_expand_in_stage2_enters_editor() {
+        let mut app = App::from_args().expect("app init should work");
+        app.handle_action(Action::TreeOpen)
+            .expect("open preview should work");
+        assert_eq!(app.view_stage, ViewStage::TreeAndEditor);
+
+        app.handle_action(Action::TreeExpand)
+            .expect("enter editor should work");
+        assert_eq!(app.view_stage, ViewStage::EditorAndPanel);
     }
 
     #[test]
@@ -1347,6 +1499,10 @@ mod tests {
             desired_col: 0,
             scroll_row: 0,
             focus_slot: BddFocusSlot::Keyword,
+            preview_buffer: None,
+            preview_title: String::new(),
+            preview_cursor_row: 0,
+            preview_scroll_row: 0,
             should_quit: false,
             active_tab: MainTab::MindMap,
             dirty: false,

@@ -263,7 +263,7 @@ fn build_items(
     tui_tree_widget::TreeItem::new(id, label, children).expect("tree item construction")
 }
 
-/// Creates a [`TreeState`] with default open nodes (root + all non-leaf nodes).
+/// Creates a [`TreeState`] with default open nodes: root and every non-leaf trie node.
 pub fn init_tree_state(index: &MindMapIndex) -> TreeState<String> {
     let mut state = TreeState::default();
 
@@ -292,11 +292,6 @@ pub fn selected_node_id(state: &TreeState<String>) -> Option<&str> {
 /// Returns the tree path for a node identifier.
 pub fn node_id_to_path(id: &str, index: &MindMapIndex) -> Option<Vec<String>> {
     index.path_for(id).cloned()
-}
-
-/// Returns `true` when the node has no children.
-pub fn is_leaf_node(id: &str, index: &MindMapIndex) -> bool {
-    index.is_leaf(id)
 }
 
 /// Resolves a node identifier + location index to `(feature_idx, line_number)`.
