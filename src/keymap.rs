@@ -44,6 +44,7 @@ pub enum Action {
     TreeDown,
     TreeExpand,
     TreeCollapse,
+    TreeToggle,
     TreeOpen,
     TreeHome,
     TreeEnd,
@@ -100,6 +101,7 @@ impl Action {
                 (KeyCode::Down, _) => Some(Self::TreeDown),
                 (KeyCode::Left, _) => Some(Self::TreeCollapse),
                 (KeyCode::Right, _) => Some(Self::TreeExpand),
+                (KeyCode::Char(' '), _) => Some(Self::TreeToggle),
                 (KeyCode::Enter, _) => Some(Self::TreeOpen),
                 (KeyCode::Home, _) => Some(Self::TreeHome),
                 (KeyCode::End, _) => Some(Self::TreeEnd),
@@ -187,6 +189,13 @@ mod tests {
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
             Some(Action::TreeUp)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::TreeToggle)
         );
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),

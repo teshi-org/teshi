@@ -165,12 +165,14 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Line::raw("Tabs: MindMap [1], Help [2]"),
                 Line::raw(""),
                 Line::raw("── MindMap (Stage 1: Tree only) ──"),
-                Line::raw("↑↓ navigate tree   ←→ collapse/expand   Enter open preview"),
+                Line::raw(
+                    "↑↓ navigate tree   Space toggle   ←→ collapse/expand   Enter open preview",
+                ),
                 Line::raw("Home/End first/last node"),
                 Line::raw(""),
                 Line::raw("── MindMap (Stage 2: Tree + Preview) ──"),
-                Line::raw("↑↓ navigate tree   ←→ collapse/expand"),
-                Line::raw("→ on leaf: enter editor   Esc: close preview"),
+                Line::raw("↑↓ navigate tree   Space toggle   ← collapse"),
+                Line::raw("→ enter editor   Enter/Esc close preview"),
                 Line::raw("[ / ] cycle preview location"),
                 Line::raw(""),
                 Line::raw("── MindMap (Stage 3: Editor) ──"),
@@ -266,16 +268,23 @@ fn render_location_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
 /// When `preview` is true (stage 2), the panel is read-only with no cursor. Otherwise (stage 3),
 /// it shows the full interactive editor with cursor highlighting.
 fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview: bool) {
-    let title = app
-        .file_path
-        .as_ref()
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "Editor".to_string());
-    let title = if preview {
-        format!("{title} (preview)")
+    let title_base = if preview {
+        if app.preview_title.is_empty() {
+            "Preview".to_string()
+        } else {
+            app.preview_title.clone()
+        }
     } else {
-        title
+        app.file_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Editor".to_string())
+    };
+    let title = if preview {
+        format!("{title_base} (preview)")
+    } else {
+        title_base
     };
     let editor_block = Block::default().borders(Borders::ALL).title(title);
     let editor_area = editor_block.inner(area);
@@ -283,32 +292,45 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
     frame.render_widget(Clear, editor_area);
 
     let visible_lines = editor_area.height as usize;
+    let buffer = if preview {
+        app.preview_buffer.as_ref().unwrap_or(&app.buffer)
+    } else {
+        &app.buffer
+    };
+    let cursor_row = if preview {
+        app.preview_cursor_row
+    } else {
+        app.cursor_row
+    };
+    let mut scroll_row = if preview {
+        app.preview_scroll_row
+    } else {
+        app.scroll_row
+    };
     if !preview {
-        if app.cursor_row < app.scroll_row {
-            app.scroll_row = app.cursor_row;
-        } else if app.cursor_row >= app.scroll_row.saturating_add(visible_lines) {
-            app.scroll_row = app
-                .cursor_row
-                .saturating_sub(visible_lines.saturating_sub(1));
+        if cursor_row < scroll_row {
+            scroll_row = cursor_row;
+        } else if cursor_row >= scroll_row.saturating_add(visible_lines) {
+            scroll_row = cursor_row.saturating_sub(visible_lines.saturating_sub(1));
         }
     } else {
         // In preview mode, center the cursor row
-        app.scroll_row = app.cursor_row.saturating_sub(visible_lines / 2);
+        scroll_row = cursor_row.saturating_sub(visible_lines / 2);
     }
 
     let mut lines = Vec::with_capacity(visible_lines);
     let preview_row_style = Style::default().bg(PREVIEW_CURSOR_BG).fg(PREVIEW_CURSOR_FG);
     let mut in_doc = false;
-    for row in 0..app.scroll_row {
-        if row >= app.buffer.line_count() {
+    for row in 0..scroll_row {
+        if row >= buffer.line_count() {
             break;
         }
-        let line = app.buffer.line(row);
+        let line = buffer.line(row);
         let (_, next_doc) = highlight_line(&line, in_doc, &KeywordSet::default());
         in_doc = next_doc;
     }
-    for row in app.scroll_row..app.scroll_row.saturating_add(visible_lines) {
-        if row >= app.buffer.line_count() {
+    for row in scroll_row..scroll_row.saturating_add(visible_lines) {
+        if row >= buffer.line_count() {
             let empty = pad_line_to_width(
                 Line::raw(String::new()),
                 editor_area.width,
@@ -317,11 +339,11 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             lines.push(empty);
             continue;
         }
-        let line = app.buffer.line(row);
+        let line = buffer.line(row);
         let (mut styled, next_doc) = highlight_line(&line, in_doc, &KeywordSet::default());
         in_doc = next_doc;
 
-        if row == app.cursor_row && !preview {
+        if row == cursor_row && !preview {
             let nav_cell_style = Style::default().bg(NAV_CELL_BG).fg(NAV_CELL_FG);
             let line_len = line.chars().count();
             if app.view_stage == ViewStage::EditorAndPanel
@@ -331,13 +353,13 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
                 let focus_patch = Style::default().bg(NODE_FOCUS_BG);
                 let hl_range = match app.focus_slot {
                     BddFocusSlot::Keyword => keyword_char_range(&line).or_else(|| {
-                        if is_feature_narrative_row(&app.buffer, row) {
-                            nav_body_char_range_in_buffer(&app.buffer, row, &line)
+                        if is_feature_narrative_row(buffer, row) {
+                            nav_body_char_range_in_buffer(buffer, row, &line)
                         } else {
                             None
                         }
                     }),
-                    BddFocusSlot::Body => nav_body_char_range_in_buffer(&app.buffer, row, &line),
+                    BddFocusSlot::Body => nav_body_char_range_in_buffer(buffer, row, &line),
                 };
                 if let Some(r) = hl_range
                     && r.start < r.end
@@ -359,7 +381,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
                     styled = Line::from(spans);
                 }
             }
-        } else if row == app.cursor_row && preview {
+        } else if row == cursor_row && preview {
             // Do not patch syntax-highlight spans: patching by char range can leave columns with
             // default colors between spans, which terminals show as a bright "hole" or bar.
             styled = if line.is_empty() {
@@ -368,7 +390,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
                 Line::from(Span::styled(line.to_string(), preview_row_style))
             };
         }
-        let pad_trail = if preview && row == app.cursor_row && row < app.buffer.line_count() {
+        let pad_trail = if preview && row == cursor_row && row < buffer.line_count() {
             preview_row_style
         } else {
             Style::default()
@@ -388,8 +410,8 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             if y >= editor_area.bottom() {
                 break;
             }
-            let buffer_row = app.scroll_row.saturating_add(i);
-            let row_fill = if buffer_row == app.cursor_row && buffer_row < app.buffer.line_count() {
+            let buffer_row = scroll_row.saturating_add(i);
+            let row_fill = if buffer_row == cursor_row && buffer_row < buffer.line_count() {
                 preview_row_style
             } else {
                 Style::default()
@@ -408,6 +430,11 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             break;
         }
         buf.set_line(editor_area.x, y, line, editor_area.width);
+    }
+    if preview {
+        app.preview_scroll_row = scroll_row;
+    } else {
+        app.scroll_row = scroll_row;
     }
     if !preview {
         render_step_keyword_picker(frame, app, editor_area);
@@ -522,6 +549,8 @@ fn footer_hints(app: &App) -> Line<'static> {
         (MainTab::MindMap, ViewStage::TreeOnly) => Line::from(vec![
             footer_pill(" Navigate [↑↓] "),
             Span::raw(" "),
+            footer_pill(" Toggle [Space] "),
+            Span::raw(" "),
             footer_pill(" Expand [→] "),
             Span::raw(" "),
             footer_pill(" Collapse [←] "),
@@ -533,9 +562,13 @@ fn footer_hints(app: &App) -> Line<'static> {
         (MainTab::MindMap, ViewStage::TreeAndEditor) => Line::from(vec![
             footer_pill(" Navigate [↑↓] "),
             Span::raw(" "),
-            footer_pill(" Edit [→ leaf] "),
+            footer_pill(" Toggle [Space] "),
+            Span::raw(" "),
+            footer_pill(" Edit [→] "),
             Span::raw(" "),
             footer_pill(" Location [[/]] "),
+            Span::raw(" "),
+            footer_pill(" Close [Enter] "),
             Span::raw(" "),
             footer_pill(" Back [Esc] "),
             Span::raw(" "),
