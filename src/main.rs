@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -54,7 +54,11 @@ fn main() -> Result<()> {
 
         if event::poll(Duration::from_millis(50))?
             && let Event::Key(key_event) = event::read()?
-            && let Some(action) = Action::from_key_event(
+        {
+            if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                continue;
+            }
+            if let Some(action) = Action::from_key_event(
                 key_event,
                 KeyContext {
                     step_keyword_picker_active: app.step_keyword_picker.is_some(),
@@ -62,9 +66,9 @@ fn main() -> Result<()> {
                     active_tab: app.active_tab,
                     view_stage: app.view_stage,
                 },
-            )
-        {
-            app.handle_action(action)?;
+            ) {
+                app.handle_action(action)?;
+            }
         }
     }
 

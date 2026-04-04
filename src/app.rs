@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -50,10 +51,23 @@ pub struct StepKeywordPicker {
     pub selected: usize,
 }
 
+/// Display info for the MindMap location selector when a step path maps to multiple sources.
+#[derive(Debug, Clone)]
+pub struct LocationInfo {
+    /// Zero-based index of the currently previewed location.
+    pub index: usize,
+    /// Total number of distinct locations for this node.
+    pub total: usize,
+    /// Human-readable feature and scenario (or background) label.
+    pub label: String,
+}
+
 pub struct App {
     // ── Multi-file project ──────────────────────────────────────────
     pub project: BddProject,
     pub step_index: StepIndex,
+    pub mindmap_index: mindmap::MindMapIndex,
+    pub mindmap_location_selection: HashMap<String, usize>,
     /// One `EditorBuffer` per feature file; order matches `project.features`.
     pub buffers: Vec<EditorBuffer>,
     /// Which buffer is shown in the editor panel (`None` when no file is loaded).
@@ -84,6 +98,32 @@ pub struct App {
 }
 
 impl App {
+    /// Returns location selector metadata in stage 2 when the selected node has multiple source locations.
+    ///
+    /// `None` when not in tree+preview stage, when selection is missing, or when only one location exists.
+    pub fn current_location_info(&self) -> Option<LocationInfo> {
+        if self.view_stage != ViewStage::TreeAndEditor {
+            return None;
+        }
+        let id = mindmap::selected_node_id(&self.tree_state)?;
+        let locations = self.mindmap_index.locations_for(id)?;
+        if locations.len() <= 1 {
+            return None;
+        }
+        let idx = self
+            .mindmap_location_selection
+            .get(id)
+            .copied()
+            .unwrap_or(0)
+            .min(locations.len().saturating_sub(1));
+        let label = mindmap::format_location_label(&self.project, &locations[idx]);
+        Some(LocationInfo {
+            index: idx,
+            total: locations.len(),
+            label,
+        })
+    }
+
     /// Builds the editor state from process arguments.
     ///
     /// Accepts a directory path (recursive `.feature` scan) or a single file path.
@@ -100,9 +140,10 @@ impl App {
         }
     }
 
-    fn from_directory(dir: &PathBuf) -> Result<Self> {
+    fn from_directory(dir: &Path) -> Result<Self> {
         let project = gherkin::parse_project(dir);
         let step_index = StepIndex::build(&project);
+        let mindmap_index = mindmap::build_index(&project);
         let buffers: Vec<EditorBuffer> = project
             .features
             .iter()
@@ -111,7 +152,7 @@ impl App {
                 EditorBuffer::from_string(content)
             })
             .collect();
-        let tree_state = mindmap::init_tree_state(&project);
+        let tree_state = mindmap::init_tree_state(&mindmap_index);
         let (buffer, file_path, active_idx) = if buffers.is_empty() {
             (EditorBuffer::from_string(String::new()), None, None)
         } else {
@@ -124,6 +165,8 @@ impl App {
         let mut app = Self {
             project,
             step_index,
+            mindmap_index,
+            mindmap_location_selection: HashMap::new(),
             buffers,
             active_buffer_idx: active_idx,
             view_stage: ViewStage::TreeOnly,
@@ -138,7 +181,12 @@ impl App {
             should_quit: false,
             active_tab: MainTab::MindMap,
             dirty: false,
-            status: format!("Opened directory with {} feature file(s)", active_idx.map_or(0, |_| 1).max(if active_idx.is_some() { 1 } else { 0 })),
+            status: format!(
+                "Opened directory with {} feature file(s)",
+                active_idx
+                    .map_or(0, |_| 1)
+                    .max(if active_idx.is_some() { 1 } else { 0 })
+            ),
             step_input_active: false,
             step_input_row: 0,
             step_input_min_col: 0,
@@ -164,11 +212,14 @@ impl App {
             features: vec![feature],
         };
         let step_index = StepIndex::build(&project);
+        let mindmap_index = mindmap::build_index(&project);
         let buffers = vec![EditorBuffer::from_string(content.clone())];
-        let tree_state = mindmap::init_tree_state(&project);
+        let tree_state = mindmap::init_tree_state(&mindmap_index);
         let mut app = Self {
             project,
             step_index,
+            mindmap_index,
+            mindmap_location_selection: HashMap::new(),
             buffers,
             active_buffer_idx: Some(0),
             view_stage: ViewStage::TreeOnly,
@@ -200,10 +251,13 @@ impl App {
             features: Vec::new(),
         };
         let step_index = StepIndex::build(&project);
-        let tree_state = mindmap::init_tree_state(&project);
+        let mindmap_index = mindmap::build_index(&project);
+        let tree_state = mindmap::init_tree_state(&mindmap_index);
         let mut app = Self {
             project,
             step_index,
+            mindmap_index,
+            mindmap_location_selection: HashMap::new(),
             buffers: Vec::new(),
             active_buffer_idx: None,
             view_stage: ViewStage::TreeOnly,
@@ -248,10 +302,10 @@ impl App {
             return;
         }
         // Persist current editor buffer back
-        if let Some(cur) = self.active_buffer_idx {
-            if cur < self.buffers.len() {
-                self.buffers[cur] = self.buffer.clone();
-            }
+        if let Some(cur) = self.active_buffer_idx
+            && cur < self.buffers.len()
+        {
+            self.buffers[cur] = self.buffer.clone();
         }
         self.active_buffer_idx = Some(idx);
         self.buffer = self.buffers[idx].clone();
@@ -274,9 +328,20 @@ impl App {
     }
 
     /// Returns `(feature_idx, line_number)` for the currently selected tree node.
-    fn selected_tree_location(&self) -> Option<(usize, usize)> {
+    fn selected_tree_location(&mut self) -> Option<(usize, usize)> {
         let id = mindmap::selected_node_id(&self.tree_state)?;
-        mindmap::parse_node_line_number(id, &self.project)
+        let locations = self.mindmap_index.locations_for(id)?;
+        if locations.is_empty() {
+            return None;
+        }
+        let entry = self
+            .mindmap_location_selection
+            .entry(id.to_string())
+            .or_insert(0);
+        if *entry >= locations.len() {
+            *entry = 0;
+        }
+        mindmap::parse_node_line_number(id, &self.mindmap_index, *entry)
     }
 
     /// Transition from Stage 1 → Stage 2: open editor preview for the selected tree node.
@@ -311,11 +376,14 @@ impl App {
                 // Sync tree selection to editor cursor
                 if let Some(fi) = self.active_buffer_idx {
                     let line_1based = self.cursor_row + 1;
-                    if let Some(node_id) =
-                        mindmap::find_closest_node_id(&self.project, fi, line_1based)
+                    if let Some(node_match) =
+                        mindmap::find_closest_node(&self.mindmap_index, fi, line_1based)
+                        && let Some(path) =
+                            mindmap::node_id_to_path(&node_match.node_id, &self.mindmap_index)
                     {
-                        let path = mindmap::node_id_to_path(&node_id);
                         self.tree_state.select(path);
+                        self.mindmap_location_selection
+                            .insert(node_match.node_id, node_match.location_index);
                     }
                 }
                 self.view_stage = ViewStage::TreeAndEditor;
@@ -347,6 +415,9 @@ impl App {
         let content = self.buffer.as_string();
         self.project.features[idx] = gherkin::parse_feature(&content, path);
         self.step_index = StepIndex::build(&self.project);
+        self.mindmap_index = mindmap::build_index(&self.project);
+        self.tree_state = mindmap::init_tree_state(&self.mindmap_index);
+        self.mindmap_location_selection.clear();
     }
 
     // ── Tree navigation ─────────────────────────────────────────────
@@ -393,7 +464,7 @@ impl App {
             Some(id) => id.to_string(),
             None => return,
         };
-        if mindmap::is_leaf_node(&id) {
+        if mindmap::is_leaf_node(&id, &self.mindmap_index) {
             // On leaf in stage 2, advance to stage 3
             if self.view_stage == ViewStage::TreeAndEditor {
                 self.stage_enter_editor();
@@ -401,6 +472,42 @@ impl App {
         } else {
             self.tree_state.key_right();
         }
+        self.quit_pending_confirm = false;
+    }
+
+    fn tree_cycle_location(&mut self, delta: isize) {
+        if self.view_stage != ViewStage::TreeAndEditor {
+            return;
+        }
+        let Some(id) = mindmap::selected_node_id(&self.tree_state) else {
+            return;
+        };
+        let Some(locations) = self.mindmap_index.locations_for(id) else {
+            return;
+        };
+        if locations.len() <= 1 {
+            return;
+        }
+        let entry = self
+            .mindmap_location_selection
+            .entry(id.to_string())
+            .or_insert(0);
+        let len = locations.len() as isize;
+        let mut next = *entry as isize + delta;
+        if next < 0 {
+            next = len - 1;
+        } else if next >= len {
+            next = 0;
+        }
+        *entry = next as usize;
+
+        if let Some((fi, line)) = mindmap::parse_node_line_number(id, &self.mindmap_index, *entry) {
+            if self.active_buffer_idx != Some(fi) {
+                self.switch_to_buffer(fi);
+            }
+            self.editor_goto_line(line);
+        }
+        self.status = "Location switched".to_string();
         self.quit_pending_confirm = false;
     }
 
@@ -418,15 +525,15 @@ impl App {
             Action::TreeDown => self.tree_move_down(),
             Action::TreeExpand => self.tree_toggle_or_expand(),
             Action::TreeCollapse => self.tree_collapse(),
-            Action::TreeOpen => {
-                match self.view_stage {
-                    ViewStage::TreeOnly => self.stage_open_editor_preview(),
-                    ViewStage::TreeAndEditor => self.stage_enter_editor(),
-                    _ => {}
-                }
-            }
+            Action::TreeOpen => match self.view_stage {
+                ViewStage::TreeOnly => self.stage_open_editor_preview(),
+                ViewStage::TreeAndEditor => self.stage_enter_editor(),
+                _ => {}
+            },
             Action::TreeHome => self.tree_home(),
             Action::TreeEnd => self.tree_end(),
+            Action::TreeLocationPrev => self.tree_cycle_location(-1),
+            Action::TreeLocationNext => self.tree_cycle_location(1),
             Action::StageBack => self.stage_back(),
 
             // Editor navigation (MindMap stage 3 & legacy)
@@ -641,9 +748,7 @@ impl App {
     }
 
     fn is_editor_nav_mode(&self) -> bool {
-        self.is_editor_active()
-            && !self.step_input_active
-            && self.step_keyword_picker.is_none()
+        self.is_editor_active() && !self.step_input_active && self.step_keyword_picker.is_none()
     }
 
     fn toggle_focus_slot_horizontal(&mut self) {
@@ -862,6 +967,8 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::{
         App, BddFocusSlot, MainTab, ViewStage, current_step_keyword_index,
         replace_step_keyword_line,
@@ -1198,7 +1305,8 @@ mod tests {
         assert_eq!(app.view_stage, ViewStage::TreeOnly);
 
         // TreeOpen → Stage 2
-        app.handle_action(Action::TreeOpen).expect("open should work");
+        app.handle_action(Action::TreeOpen)
+            .expect("open should work");
         assert_eq!(app.view_stage, ViewStage::TreeAndEditor);
 
         // StageBack → Stage 1
@@ -1220,11 +1328,14 @@ mod tests {
         };
         let step_index = crate::step_index::StepIndex::build(&project);
         let buffers = vec![EditorBuffer::from_string(content.to_string())];
-        let tree_state = crate::mindmap::init_tree_state(&project);
+        let mindmap_index = crate::mindmap::build_index(&project);
+        let tree_state = crate::mindmap::init_tree_state(&mindmap_index);
 
         let mut app = App {
             project,
             step_index,
+            mindmap_index,
+            mindmap_location_selection: HashMap::new(),
             buffers,
             active_buffer_idx: Some(0),
             view_stage: ViewStage::EditorAndPanel,
@@ -1257,7 +1368,10 @@ mod tests {
         assert_eq!(app.view_stage, ViewStage::TreeAndEditor);
 
         // Verify the project AST was re-parsed
-        assert_eq!(app.project.features[0].scenarios[0].steps[0].text, "modified step");
+        assert_eq!(
+            app.project.features[0].scenarios[0].steps[0].text,
+            "modified step"
+        );
         // Verify the buffer was persisted to the buffers vec
         assert!(app.buffers[0].line(2).contains("modified"));
     }

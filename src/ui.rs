@@ -4,17 +4,19 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use tui_tree_widget::Tree;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, BddFocusSlot, MainTab, STEP_KEYWORDS_CYCLE, ViewStage};
 use crate::bdd_nav::{is_feature_narrative_row, keyword_char_range, nav_body_char_range_in_buffer};
 use crate::highlight::{KeywordSet, highlight_line};
-use crate::mindmap;
 
 const NAV_CELL_BG: Color = Color::LightBlue;
 const NAV_CELL_FG: Color = Color::Black;
 /// Pale background for the focused keyword or step body in navigation mode.
 const NODE_FOCUS_BG: Color = Color::Rgb(140, 190, 255);
+/// Stage-2 preview: one solid style for the tree-selected line (avoids span-patch gaps that read as bright blocks).
+const PREVIEW_CURSOR_BG: Color = Color::DarkGray;
+const PREVIEW_CURSOR_FG: Color = Color::White;
 
 /// Applies `patch` on UTF-8 character indices `[range.start, range.end)` within each span.
 fn apply_patch_to_char_range(
@@ -58,6 +60,62 @@ fn apply_patch_to_char_range(
     Line::from(out)
 }
 
+/// Truncates styled spans so total display width does not exceed `max_cols` (Unicode columns).
+///
+/// When content is wider than the editor inner width, `pad_line_to_width` intentionally does not
+/// pad; `Buffer::set_line` then clips visually while the `Line` still reports a larger width. That
+/// mismatch breaks ratatui's terminal diff for trailing cells (observed as garbling on Windows).
+fn truncate_line_to_cols(line: Line<'static>, max_cols: u16) -> Line<'static> {
+    let max = max_cols as usize;
+    if line.width() <= max {
+        return line;
+    }
+    let line_style = line.style;
+    let alignment = line.alignment;
+    let mut budget = max;
+    let mut out_spans: Vec<Span<'static>> = Vec::new();
+    for span in line.spans {
+        if budget == 0 {
+            break;
+        }
+        let s = span.content.to_string();
+        let mut acc = String::new();
+        for ch in s.chars() {
+            let w = ch.width().unwrap_or(0);
+            if w == 0 {
+                acc.push(ch);
+                continue;
+            }
+            if w > budget {
+                break;
+            }
+            acc.push(ch);
+            budget -= w;
+        }
+        if !acc.is_empty() {
+            out_spans.push(Span::styled(acc, span.style));
+        }
+        if budget == 0 {
+            break;
+        }
+    }
+    let mut out = Line::from(out_spans);
+    out.style = line_style;
+    out.alignment = alignment;
+    out
+}
+
+/// Pads a line to `target_cols` display width using a trailing span (Unicode column widths).
+fn pad_line_to_width(mut line: Line<'static>, target_cols: u16, trail: Style) -> Line<'static> {
+    let t = target_cols as usize;
+    let w = line.width();
+    if w >= t {
+        return line;
+    }
+    line.push_span(Span::styled(" ".repeat(t - w), trail));
+    line
+}
+
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -69,21 +127,18 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         ])
         .split(frame.area());
 
-    let top_tabs = Tabs::new(vec![
-        Line::from(" MindMap [1] "),
-        Line::from(" Help [2] "),
-    ])
-    .select(match app.active_tab {
-        MainTab::MindMap => 0,
-        MainTab::Help => 1,
-    })
-    .style(Style::default().fg(Color::DarkGray))
-    .highlight_style(
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    )
-    .divider(" ");
+    let top_tabs = Tabs::new(vec![Line::from(" MindMap [1] "), Line::from(" Help [2] ")])
+        .select(match app.active_tab {
+            MainTab::MindMap => 0,
+            MainTab::Help => 1,
+        })
+        .style(Style::default().fg(Color::DarkGray))
+        .highlight_style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .divider(" ");
     frame.render_widget(top_tabs, chunks[0]);
 
     let divider_w = chunks[1].width as usize;
@@ -116,6 +171,7 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Line::raw("── MindMap (Stage 2: Tree + Preview) ──"),
                 Line::raw("↑↓ navigate tree   ←→ collapse/expand"),
                 Line::raw("→ on leaf: enter editor   Esc: close preview"),
+                Line::raw("[ / ] cycle preview location"),
                 Line::raw(""),
                 Line::raw("── MindMap (Stage 3: Editor) ──"),
                 Line::raw("↑↓ BDD nav   ←→ keyword/body focus   Space edit"),
@@ -140,7 +196,19 @@ fn render_mindmap_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
                 .split(area);
             render_tree_panel(frame, app, cols[0]);
-            render_editor_panel(frame, app, cols[1], true);
+            // Reset the whole preview column so the location strip and editor cannot leave ghosts
+            // from prior frames or widgets (ratatui diffs against the previous buffer only).
+            frame.render_widget(Clear, cols[1]);
+            if app.current_location_info().is_some() {
+                let rows = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(1), Constraint::Min(1)])
+                    .split(cols[1]);
+                render_location_panel(frame, app, rows[0]);
+                render_editor_panel(frame, app, rows[1], true);
+            } else {
+                render_editor_panel(frame, app, cols[1], true);
+            }
         }
         ViewStage::EditorAndPanel => {
             let cols = Layout::default()
@@ -155,7 +223,7 @@ fn render_mindmap_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
 /// Renders the collapsible tree using `tui-tree-widget`.
 fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let items = mindmap::build_tree_items(&app.project, &app.step_index);
+    let items = &app.mindmap_index.items;
 
     let highlight_style = Style::default()
         .bg(NAV_CELL_BG)
@@ -164,12 +232,33 @@ fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     let block = Block::default().borders(Borders::ALL).title("MindMap");
 
-    let tree = Tree::new(&items)
+    let tree = Tree::new(items)
         .expect("tree construction should succeed")
         .block(block)
         .highlight_style(highlight_style);
 
     frame.render_stateful_widget(tree, area, &mut app.tree_state);
+}
+
+fn render_location_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let Some(info) = app.current_location_info() else {
+        return;
+    };
+    let mut text = format!(
+        " Location {}/{}  {}",
+        info.index + 1,
+        info.total,
+        info.label
+    );
+    let width = area.width as usize;
+    let used = UnicodeWidthStr::width(text.as_str());
+    if used < width {
+        text.push_str(&" ".repeat(width - used));
+    }
+    let loc_style = Style::default().bg(Color::DarkGray).fg(Color::White);
+    frame
+        .buffer_mut()
+        .set_string(area.x, area.y, text, loc_style);
 }
 
 /// Renders the editor panel showing the active feature file.
@@ -191,6 +280,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
     let editor_block = Block::default().borders(Borders::ALL).title(title);
     let editor_area = editor_block.inner(area);
     frame.render_widget(editor_block, area);
+    frame.render_widget(Clear, editor_area);
 
     let visible_lines = editor_area.height as usize;
     if !preview {
@@ -207,6 +297,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
     }
 
     let mut lines = Vec::with_capacity(visible_lines);
+    let preview_row_style = Style::default().bg(PREVIEW_CURSOR_BG).fg(PREVIEW_CURSOR_FG);
     let mut in_doc = false;
     for row in 0..app.scroll_row {
         if row >= app.buffer.line_count() {
@@ -218,7 +309,12 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
     }
     for row in app.scroll_row..app.scroll_row.saturating_add(visible_lines) {
         if row >= app.buffer.line_count() {
-            lines.push(Line::raw(String::new()));
+            let empty = pad_line_to_width(
+                Line::raw(String::new()),
+                editor_area.width,
+                Style::default(),
+            );
+            lines.push(empty);
             continue;
         }
         let line = app.buffer.line(row);
@@ -264,16 +360,55 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
                 }
             }
         } else if row == app.cursor_row && preview {
-            // Highlight the entire line in preview mode
-            let highlight = Style::default().bg(Color::DarkGray);
-            let line_len = line.chars().count();
-            if line_len > 0 {
-                styled = apply_patch_to_char_range(styled, 0..line_len, highlight);
-            }
+            // Do not patch syntax-highlight spans: patching by char range can leave columns with
+            // default colors between spans, which terminals show as a bright "hole" or bar.
+            styled = if line.is_empty() {
+                Line::from(vec![Span::styled(" ", preview_row_style)])
+            } else {
+                Line::from(Span::styled(line.to_string(), preview_row_style))
+            };
         }
+        let pad_trail = if preview && row == app.cursor_row && row < app.buffer.line_count() {
+            preview_row_style
+        } else {
+            Style::default()
+        };
+        styled = truncate_line_to_cols(styled, editor_area.width);
+        styled = pad_line_to_width(styled, editor_area.width, pad_trail);
         lines.push(styled);
     }
-    frame.render_widget(Paragraph::new(Text::from(lines)), editor_area);
+
+    // Stage-2 feature preview (right pane): paint each inner row in two passes. `set_line` alone
+    // can leave columns past a truncated long line unchanged in edge cases; an explicit full-width
+    // space fill first forces every cell in this frame (helps terminal diff + Windows hosts).
+    let buf = frame.buffer_mut();
+    if preview {
+        for i in 0..visible_lines {
+            let y = editor_area.y.saturating_add(i as u16);
+            if y >= editor_area.bottom() {
+                break;
+            }
+            let buffer_row = app.scroll_row.saturating_add(i);
+            let row_fill = if buffer_row == app.cursor_row && buffer_row < app.buffer.line_count() {
+                preview_row_style
+            } else {
+                Style::default()
+            };
+            buf.set_string(
+                editor_area.x,
+                y,
+                " ".repeat(editor_area.width as usize),
+                row_fill,
+            );
+        }
+    }
+    for (i, line) in lines.iter().enumerate() {
+        let y = editor_area.y.saturating_add(i as u16);
+        if y >= editor_area.bottom() {
+            break;
+        }
+        buf.set_line(editor_area.x, y, line, editor_area.width);
+    }
     if !preview {
         render_step_keyword_picker(frame, app, editor_area);
     }
@@ -400,6 +535,8 @@ fn footer_hints(app: &App) -> Line<'static> {
             Span::raw(" "),
             footer_pill(" Edit [→ leaf] "),
             Span::raw(" "),
+            footer_pill(" Location [[/]] "),
+            Span::raw(" "),
             footer_pill(" Back [Esc] "),
             Span::raw(" "),
             footer_pill(" Save [s] "),
@@ -424,5 +561,18 @@ fn footer_hints(app: &App) -> Line<'static> {
             Span::raw(" "),
             footer_pill(" Quit [q] "),
         ]),
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::{Line, Span, truncate_line_to_cols};
+
+    #[test]
+    fn truncate_line_to_cols_limits_display_width() {
+        let line = Line::from(Span::raw("a".repeat(100)));
+        assert!(line.width() > 68);
+        let out = truncate_line_to_cols(line, 68);
+        assert!(out.width() <= 68);
     }
 }
