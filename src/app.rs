@@ -468,13 +468,13 @@ impl App {
         self.explore_focus = match self.explore_focus {
             ColumnFocus::Feature => ColumnFocus::Scenario,
             ColumnFocus::Scenario => ColumnFocus::Step,
-            ColumnFocus::Step => ColumnFocus::Feature,
+            ColumnFocus::Step => ColumnFocus::Step,
         };
     }
 
     fn explore_focus_prev(&mut self) {
         self.explore_focus = match self.explore_focus {
-            ColumnFocus::Feature => ColumnFocus::Step,
+            ColumnFocus::Feature => ColumnFocus::Feature,
             ColumnFocus::Scenario => ColumnFocus::Feature,
             ColumnFocus::Step => ColumnFocus::Scenario,
         };
@@ -1580,6 +1580,20 @@ mod tests {
             .expect("tab switch should work");
         assert!(app.step_keyword_picker.is_none());
         assert_eq!(app.active_tab, MainTab::Help);
+    }
+
+    #[test]
+    fn test_explore_focus_clamps_at_edges() {
+        let mut app = App::from_args().expect("app init should work");
+        app.active_tab = MainTab::Explore;
+
+        app.explore_focus = ColumnFocus::Feature;
+        app.explore_focus_prev();
+        assert_eq!(app.explore_focus, ColumnFocus::Feature);
+
+        app.explore_focus = ColumnFocus::Step;
+        app.explore_focus_next();
+        assert_eq!(app.explore_focus, ColumnFocus::Step);
     }
 
     #[test]

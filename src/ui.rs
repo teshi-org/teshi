@@ -196,7 +196,7 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Line::raw("← on keyword: back to tree   Esc: clear input / back"),
                 Line::raw(""),
                 Line::raw("── Explore (Three Columns) ──"),
-                Line::raw("Tab switch column   ↑↓ navigate   e edit   r run   a AI"),
+                Line::raw("Tab/Shift+Tab/←→ switch column   ↑↓ navigate   e edit   r run   a AI"),
                 Line::raw("Esc exit edit"),
                 Line::raw(""),
                 Line::raw("Global: s save, q quit (dirty needs confirmation)"),
@@ -883,7 +883,7 @@ fn footer_hints(app: &App) -> Line<'static> {
             footer_pill(" Clear [Esc] "),
         ]),
         (MainTab::Explore, _) => Line::from(vec![
-            footer_pill(" Focus [Tab] "),
+            footer_pill(" Focus [Tab/←→] "),
             Span::raw(" "),
             footer_pill(" Navigate [↑↓] "),
             Span::raw(" "),
