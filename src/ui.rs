@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use tui_tree_widget::Tree;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, BddFocusSlot, ColumnFocus, MainTab, STEP_KEYWORDS_CYCLE, ViewStage};
+use crate::app::{App, BddFocusSlot, ColumnFocus, MainTab, STEP_KEYWORDS_CYCLE};
 use crate::bdd_nav::{is_feature_narrative_row, keyword_char_range, nav_body_char_range_in_buffer};
 use crate::highlight::{KeywordSet, highlight_line};
 
@@ -134,13 +134,13 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         .split(frame.area());
 
     let top_tabs = Tabs::new(vec![
-        Line::from(" MindMap [1] "),
-        Line::from(" Explore [2] "),
+        Line::from(" Explore [1] "),
+        Line::from(" MindMap [2] "),
         Line::from(" Help [3] "),
     ])
     .select(match app.active_tab {
-        MainTab::MindMap => 0,
-        MainTab::Explore => 1,
+        MainTab::Explore => 0,
+        MainTab::MindMap => 1,
         MainTab::Help => 2,
     })
     .style(Style::default().fg(Color::DarkGray))
@@ -178,26 +178,15 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             let inner = block.inner(area);
             frame.render_widget(block, area);
             let help = vec![
-                Line::raw("Tabs: MindMap [1], Explore [2], Help [3]"),
+                Line::raw("Tabs: Explore [1], MindMap [2], Help [3]"),
                 Line::raw(""),
-                Line::raw("── MindMap (Stage 1: Tree only) ──"),
-                Line::raw(
-                    "↑↓ navigate tree   Space toggle   ←→ collapse/expand   Enter open preview",
-                ),
+                Line::raw("── MindMap (Tree only) ──"),
+                Line::raw("↑↓ navigate tree   Space toggle   ←→ collapse/expand"),
                 Line::raw("Home/End first/last node"),
                 Line::raw(""),
-                Line::raw("── MindMap (Stage 2: Tree + Preview) ──"),
-                Line::raw("↑↓ navigate tree   Space toggle   ← collapse"),
-                Line::raw("→ enter editor   Enter/Esc close preview"),
-                Line::raw("[ / ] cycle preview location"),
-                Line::raw(""),
-                Line::raw("── MindMap (Stage 3: Editor) ──"),
-                Line::raw("↑↓ BDD nav   ←→ keyword/body focus   Space edit"),
-                Line::raw("← on keyword: back to tree   Esc: clear input / back"),
-                Line::raw(""),
                 Line::raw("── Explore (Three Columns) ──"),
-                Line::raw("Tab/Shift+Tab/←→ switch column   ↑↓ navigate   e edit   r run   a AI"),
-                Line::raw("Esc exit edit"),
+                Line::raw("Tab/Shift+Tab/←→ switch column   ↑↓ navigate"),
+                Line::raw("→ on Step or e edit   Esc/← exit edit"),
                 Line::raw(""),
                 Line::raw("Global: s save, q quit (dirty needs confirmation)"),
             ];
@@ -206,45 +195,23 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
-/// Renders the three-stage MindMap layout.
+/// Renders the MindMap layout.
 fn render_mindmap_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    match app.view_stage {
-        ViewStage::TreeOnly => {
-            render_tree_panel(frame, app, area);
-        }
-        ViewStage::TreeAndEditor => {
-            let cols = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-                .split(area);
-            render_tree_panel(frame, app, cols[0]);
-            // Reset the whole preview column so the location strip and editor cannot leave ghosts
-            // from prior frames or widgets (ratatui diffs against the previous buffer only).
-            frame.render_widget(Clear, cols[1]);
-            if app.current_location_info().is_some() {
-                let rows = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(1), Constraint::Min(1)])
-                    .split(cols[1]);
-                render_location_panel(frame, app, rows[0]);
-                render_editor_panel(frame, app, rows[1], true);
-            } else {
-                render_editor_panel(frame, app, cols[1], true);
-            }
-        }
-        ViewStage::EditorAndPanel => {
-            let cols = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-                .split(area);
-            render_editor_panel(frame, app, cols[0], false);
-            render_reserved_panel(frame, cols[1]);
-        }
-    }
+    let _ = app.view_stage;
+    render_tree_panel(frame, app, area);
 }
 
 /// Renders the Explore tab: three-column feature/scenario/step browser.
 fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    if app.explore_edit_mode {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .split(area);
+        render_editor_panel(frame, app, cols[0], false);
+        render_reserved_panel(frame, cols[1]);
+        return;
+    }
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -485,27 +452,6 @@ fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .highlight_style(highlight_style);
 
     frame.render_stateful_widget(tree, area, &mut app.tree_state);
-}
-
-fn render_location_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let Some(info) = app.current_location_info() else {
-        return;
-    };
-    let mut text = format!(
-        " Location {}/{}  {}",
-        info.index + 1,
-        info.total,
-        info.label
-    );
-    let width = area.width as usize;
-    let used = UnicodeWidthStr::width(text.as_str());
-    if used < width {
-        text.push_str(&" ".repeat(width - used));
-    }
-    let loc_style = Style::default().bg(Color::DarkGray).fg(Color::White);
-    frame
-        .buffer_mut()
-        .set_string(area.x, area.y, text, loc_style);
 }
 
 /// Renders the editor panel showing the active feature file.
@@ -839,7 +785,7 @@ fn footer_pill(label: &'static str) -> Span<'static> {
 
 fn footer_hints(app: &App) -> Line<'static> {
     match (app.active_tab, app.view_stage) {
-        (MainTab::MindMap, ViewStage::TreeOnly) => Line::from(vec![
+        (MainTab::MindMap, _) => Line::from(vec![
             footer_pill(" Navigate [↑↓] "),
             Span::raw(" "),
             footer_pill(" Toggle [Space] "),
@@ -848,46 +794,14 @@ fn footer_hints(app: &App) -> Line<'static> {
             Span::raw(" "),
             footer_pill(" Collapse [←] "),
             Span::raw(" "),
-            footer_pill(" Open [Enter] "),
-            Span::raw(" "),
             footer_pill(" Quit [q] "),
-        ]),
-        (MainTab::MindMap, ViewStage::TreeAndEditor) => Line::from(vec![
-            footer_pill(" Navigate [↑↓] "),
-            Span::raw(" "),
-            footer_pill(" Toggle [Space] "),
-            Span::raw(" "),
-            footer_pill(" Edit [→] "),
-            Span::raw(" "),
-            footer_pill(" Location [[/]] "),
-            Span::raw(" "),
-            footer_pill(" Close [Enter] "),
-            Span::raw(" "),
-            footer_pill(" Back [Esc] "),
-            Span::raw(" "),
-            footer_pill(" Save [s] "),
-            Span::raw(" "),
-            footer_pill(" Quit [q] "),
-        ]),
-        (MainTab::MindMap, ViewStage::EditorAndPanel) => Line::from(vec![
-            footer_pill(" BDD [←→↑↓] "),
-            Span::raw(" "),
-            footer_pill(" Step [Space] "),
-            Span::raw(" "),
-            footer_pill(" Back [← kw] "),
-            Span::raw(" "),
-            footer_pill(" Save [s] "),
-            Span::raw(" "),
-            footer_pill(" Quit [q] "),
-            Span::raw(" "),
-            footer_pill(" Clear [Esc] "),
         ]),
         (MainTab::Explore, _) => Line::from(vec![
             footer_pill(" Focus [Tab/←→] "),
             Span::raw(" "),
             footer_pill(" Navigate [↑↓] "),
             Span::raw(" "),
-            footer_pill(" Edit [e] "),
+            footer_pill(" Edit [e/→] "),
             Span::raw(" "),
             footer_pill(" Run [r] "),
             Span::raw(" "),

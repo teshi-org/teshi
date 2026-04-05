@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::gherkin::{BddProject, ScenarioKind};
+use crate::gherkin::BddProject;
 
 pub use tui_tree_widget::TreeState;
 
@@ -327,28 +327,4 @@ pub fn find_closest_node(
     }
 
     best
-}
-
-/// Formats a location label for the preview location selector.
-pub fn format_location_label(project: &BddProject, location: &NodeLocation) -> String {
-    let feature = project
-        .features
-        .get(location.feature_idx)
-        .map(|f| f.name.clone())
-        .unwrap_or_else(|| "Unknown Feature".to_string());
-
-    let scenario_label = match location.context {
-        LocationContext::Background => "Background".to_string(),
-        LocationContext::Scenario(sci) => project
-            .features
-            .get(location.feature_idx)
-            .and_then(|f| f.scenarios.get(sci))
-            .map(|sc| match sc.kind {
-                ScenarioKind::Scenario => format!("Scenario: {}", sc.name),
-                ScenarioKind::ScenarioOutline => format!("Scenario Outline: {}", sc.name),
-            })
-            .unwrap_or_else(|| "Scenario".to_string()),
-    };
-
-    format!("{} > {}", feature, scenario_label)
 }
