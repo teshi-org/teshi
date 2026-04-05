@@ -21,6 +21,7 @@ pub use crate::bdd_nav::STEP_KEYWORDS_CYCLE;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainTab {
     MindMap,
+    Explore,
     Help,
 }
 
@@ -40,6 +41,14 @@ pub enum ViewStage {
 pub enum BddFocusSlot {
     Keyword,
     Body,
+}
+
+/// Focused column in the Explore tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnFocus {
+    Feature,
+    Scenario,
+    Step,
 }
 
 /// UI state for the step-keyword list shown after Space on the keyword prefix.
@@ -99,6 +108,12 @@ pub struct App {
     step_input_row: usize,
     step_input_min_col: usize,
     pub step_keyword_picker: Option<StepKeywordPicker>,
+    // ── Explore tab state ───────────────────────────────────────────
+    pub explore_focus: ColumnFocus,
+    pub explore_selected_feature: usize,
+    pub explore_selected_scenario: usize,
+    pub explore_selected_step: usize,
+    pub explore_edit_mode: bool,
     quit_pending_confirm: bool,
 }
 
@@ -200,11 +215,17 @@ impl App {
             step_input_row: 0,
             step_input_min_col: 0,
             step_keyword_picker: None,
+            explore_focus: ColumnFocus::Feature,
+            explore_selected_feature: 0,
+            explore_selected_scenario: 0,
+            explore_selected_step: 0,
+            explore_edit_mode: false,
             quit_pending_confirm: false,
         };
         let n = app.buffers.len();
         app.status = format!("Opened directory with {n} feature file(s)");
         app.sync_cursor_to_first_node();
+        app.normalize_explore_selection();
         Ok(app)
     }
 
@@ -252,9 +273,15 @@ impl App {
             step_input_row: 0,
             step_input_min_col: 0,
             step_keyword_picker: None,
+            explore_focus: ColumnFocus::Feature,
+            explore_selected_feature: 0,
+            explore_selected_scenario: 0,
+            explore_selected_step: 0,
+            explore_edit_mode: false,
             quit_pending_confirm: false,
         };
         app.sync_cursor_to_first_node();
+        app.normalize_explore_selection();
         Ok(app)
     }
 
@@ -294,9 +321,15 @@ impl App {
             step_input_row: 0,
             step_input_min_col: 0,
             step_keyword_picker: None,
+            explore_focus: ColumnFocus::Feature,
+            explore_selected_feature: 0,
+            explore_selected_scenario: 0,
+            explore_selected_step: 0,
+            explore_edit_mode: false,
             quit_pending_confirm: false,
         };
         app.sync_cursor_to_first_node();
+        app.normalize_explore_selection();
         app
     }
 
@@ -309,6 +342,171 @@ impl App {
             self.desired_col = 0;
         }
         self.focus_slot = BddFocusSlot::Keyword;
+    }
+
+    fn normalize_explore_selection(&mut self) {
+        let feature_len = self.project.features.len();
+        if feature_len == 0 {
+            self.explore_selected_feature = 0;
+            self.explore_selected_scenario = 0;
+            self.explore_selected_step = 0;
+            return;
+        }
+        if self.explore_selected_feature >= feature_len {
+            self.explore_selected_feature = feature_len - 1;
+        }
+        let scenarios = &self.project.features[self.explore_selected_feature].scenarios;
+        if scenarios.is_empty() {
+            self.explore_selected_scenario = 0;
+            self.explore_selected_step = 0;
+            return;
+        }
+        if self.explore_selected_scenario >= scenarios.len() {
+            self.explore_selected_scenario = scenarios.len() - 1;
+        }
+        let steps = &scenarios[self.explore_selected_scenario].steps;
+        if steps.is_empty() {
+            self.explore_selected_step = 0;
+            return;
+        }
+        if self.explore_selected_step >= steps.len() {
+            self.explore_selected_step = steps.len() - 1;
+        }
+    }
+
+    fn explore_set_feature(&mut self, idx: usize) {
+        self.explore_selected_feature = idx;
+        self.explore_selected_scenario = 0;
+        self.explore_selected_step = 0;
+        self.normalize_explore_selection();
+    }
+
+    fn explore_set_scenario(&mut self, idx: usize) {
+        self.explore_selected_scenario = idx;
+        self.explore_selected_step = 0;
+        self.normalize_explore_selection();
+    }
+
+    fn explore_move_selection(&mut self, delta: isize) {
+        let clamp_idx = |idx: isize, len: usize| -> usize {
+            if len == 0 {
+                return 0;
+            }
+            idx.clamp(0, len as isize - 1) as usize
+        };
+        match self.explore_focus {
+            ColumnFocus::Feature => {
+                let len = self.project.features.len();
+                let next = clamp_idx(self.explore_selected_feature as isize + delta, len);
+                if next != self.explore_selected_feature {
+                    self.explore_set_feature(next);
+                }
+            }
+            ColumnFocus::Scenario => {
+                let scenarios = self
+                    .project
+                    .features
+                    .get(self.explore_selected_feature)
+                    .map(|f| f.scenarios.len())
+                    .unwrap_or(0);
+                let next = clamp_idx(self.explore_selected_scenario as isize + delta, scenarios);
+                if next != self.explore_selected_scenario {
+                    self.explore_set_scenario(next);
+                }
+            }
+            ColumnFocus::Step => {
+                let steps = self
+                    .project
+                    .features
+                    .get(self.explore_selected_feature)
+                    .and_then(|f| f.scenarios.get(self.explore_selected_scenario))
+                    .map(|s| s.steps.len())
+                    .unwrap_or(0);
+                let next = clamp_idx(self.explore_selected_step as isize + delta, steps);
+                self.explore_selected_step = next;
+            }
+        }
+    }
+
+    fn explore_move_home(&mut self) {
+        match self.explore_focus {
+            ColumnFocus::Feature => self.explore_set_feature(0),
+            ColumnFocus::Scenario => self.explore_set_scenario(0),
+            ColumnFocus::Step => self.explore_selected_step = 0,
+        }
+    }
+
+    fn explore_move_end(&mut self) {
+        match self.explore_focus {
+            ColumnFocus::Feature => {
+                if !self.project.features.is_empty() {
+                    self.explore_set_feature(self.project.features.len() - 1);
+                }
+            }
+            ColumnFocus::Scenario => {
+                if let Some(f) = self.project.features.get(self.explore_selected_feature)
+                    && !f.scenarios.is_empty()
+                {
+                    self.explore_set_scenario(f.scenarios.len() - 1);
+                }
+            }
+            ColumnFocus::Step => {
+                if let Some(s) = self
+                    .project
+                    .features
+                    .get(self.explore_selected_feature)
+                    .and_then(|f| f.scenarios.get(self.explore_selected_scenario))
+                    && !s.steps.is_empty()
+                {
+                    self.explore_selected_step = s.steps.len() - 1;
+                }
+            }
+        }
+    }
+
+    fn explore_focus_next(&mut self) {
+        self.explore_focus = match self.explore_focus {
+            ColumnFocus::Feature => ColumnFocus::Scenario,
+            ColumnFocus::Scenario => ColumnFocus::Step,
+            ColumnFocus::Step => ColumnFocus::Feature,
+        };
+    }
+
+    fn explore_focus_prev(&mut self) {
+        self.explore_focus = match self.explore_focus {
+            ColumnFocus::Feature => ColumnFocus::Step,
+            ColumnFocus::Scenario => ColumnFocus::Feature,
+            ColumnFocus::Step => ColumnFocus::Scenario,
+        };
+    }
+
+    fn explore_selected_step_line(&self) -> Option<usize> {
+        let feature = self.project.features.get(self.explore_selected_feature)?;
+        let scenario = feature.scenarios.get(self.explore_selected_scenario)?;
+        let step = scenario.steps.get(self.explore_selected_step)?;
+        Some(step.line_number)
+    }
+
+    fn explore_enter_edit(&mut self) {
+        let Some(line) = self.explore_selected_step_line() else {
+            self.status = "No step to edit".to_string();
+            return;
+        };
+        if self.active_buffer_idx != Some(self.explore_selected_feature) {
+            self.switch_to_buffer(self.explore_selected_feature);
+        }
+        self.editor_goto_line(line);
+        self.clear_step_input_state();
+        self.clear_step_keyword_picker();
+        self.explore_edit_mode = true;
+        self.status = "Explore edit mode".to_string();
+    }
+
+    fn explore_exit_edit(&mut self) {
+        self.clear_step_input_state();
+        self.clear_step_keyword_picker();
+        self.explore_edit_mode = false;
+        self.status = "Explore mode".to_string();
     }
 
     // ── Stage transitions ───────────────────────────────────────────
@@ -552,6 +750,7 @@ impl App {
         self.mindmap_index = mindmap::build_index(&self.project);
         self.tree_state = mindmap::init_tree_state(&self.mindmap_index);
         self.mindmap_location_selection.clear();
+        self.normalize_explore_selection();
     }
 
     // ── Tree navigation ─────────────────────────────────────────────
@@ -659,6 +858,38 @@ impl App {
 
     pub fn handle_action(&mut self, action: Action) -> Result<()> {
         match action {
+            // Explore tab navigation
+            Action::FocusNextColumn => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_focus_next();
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::FocusPrevColumn => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_focus_prev();
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::RunScenario => {
+                if self.active_tab == MainTab::Explore {
+                    self.status = "Run scenario: not implemented".to_string();
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::AiSuggest => {
+                if self.active_tab == MainTab::Explore {
+                    self.status = "AI suggest: not implemented".to_string();
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::EnterEdit => {
+                if self.active_tab == MainTab::Explore {
+                    self.explore_enter_edit();
+                    self.quit_pending_confirm = false;
+                }
+            }
+
             // Tree navigation (MindMap stages 1 & 2)
             Action::TreeUp => self.tree_move_up(),
             Action::TreeDown => self.tree_move_down(),
@@ -677,12 +908,52 @@ impl App {
             Action::StageBack => self.stage_back(),
 
             // Editor navigation (MindMap stage 3 & legacy)
-            Action::MoveUp => self.move_up(),
-            Action::MoveDown => self.move_down(),
-            Action::MoveLeft => self.move_left(),
-            Action::MoveRight => self.move_right(),
-            Action::MoveHome => self.move_home(),
-            Action::MoveEnd => self.move_end(),
+            Action::MoveUp => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_move_selection(-1);
+                    self.quit_pending_confirm = false;
+                } else {
+                    self.move_up();
+                }
+            }
+            Action::MoveDown => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_move_selection(1);
+                    self.quit_pending_confirm = false;
+                } else {
+                    self.move_down();
+                }
+            }
+            Action::MoveLeft => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    // No-op in Explore browse mode
+                } else {
+                    self.move_left();
+                }
+            }
+            Action::MoveRight => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    // No-op in Explore browse mode
+                } else {
+                    self.move_right();
+                }
+            }
+            Action::MoveHome => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_move_home();
+                    self.quit_pending_confirm = false;
+                } else {
+                    self.move_home();
+                }
+            }
+            Action::MoveEnd => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.explore_move_end();
+                    self.quit_pending_confirm = false;
+                } else {
+                    self.move_end();
+                }
+            }
             Action::PageUp => self.page_up(),
             Action::PageDown => self.page_down(),
             Action::Insert(ch) => {
@@ -784,6 +1055,8 @@ impl App {
                     self.clear_step_input_state();
                     self.clear_step_keyword_picker();
                     self.status = "Input state cleared".to_string();
+                } else if self.active_tab == MainTab::Explore && self.explore_edit_mode {
+                    self.explore_exit_edit();
                 } else if self.view_stage != ViewStage::TreeOnly {
                     self.stage_back();
                 }
@@ -836,10 +1109,14 @@ impl App {
             self.clear_step_input_state();
         }
         self.clear_step_keyword_picker();
+        if self.active_tab == MainTab::Explore {
+            self.explore_edit_mode = false;
+        }
         self.quit_pending_confirm = false;
         self.active_tab = tab;
         self.status = match tab {
             MainTab::MindMap => "Switched to MindMap tab",
+            MainTab::Explore => "Switched to Explore tab",
             MainTab::Help => "Switched to Help tab",
         }
         .to_string();
@@ -884,10 +1161,11 @@ impl App {
 
     /// Returns `true` when the editor panel is active and accepts editing operations.
     fn is_editor_active(&self) -> bool {
-        self.active_tab == MainTab::MindMap && self.view_stage == ViewStage::EditorAndPanel
+        (self.active_tab == MainTab::MindMap && self.view_stage == ViewStage::EditorAndPanel)
+            || (self.active_tab == MainTab::Explore && self.explore_edit_mode)
     }
 
-    fn is_editor_nav_mode(&self) -> bool {
+    pub fn is_editor_nav_mode(&self) -> bool {
         self.is_editor_active() && !self.step_input_active && self.step_keyword_picker.is_none()
     }
 
@@ -1110,7 +1388,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        App, BddFocusSlot, MainTab, ViewStage, current_step_keyword_index,
+        App, BddFocusSlot, ColumnFocus, MainTab, ViewStage, current_step_keyword_index,
         replace_step_keyword_line,
     };
     use crate::bdd_nav::step_edit_start_col;
@@ -1511,6 +1789,11 @@ mod tests {
             step_input_row: 0,
             step_input_min_col: 0,
             step_keyword_picker: None,
+            explore_focus: ColumnFocus::Feature,
+            explore_selected_feature: 0,
+            explore_selected_scenario: 0,
+            explore_selected_step: 0,
+            explore_edit_mode: false,
             quit_pending_confirm: false,
         };
 

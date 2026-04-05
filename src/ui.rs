@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use tui_tree_widget::Tree;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, BddFocusSlot, MainTab, STEP_KEYWORDS_CYCLE, ViewStage};
+use crate::app::{App, BddFocusSlot, ColumnFocus, MainTab, STEP_KEYWORDS_CYCLE, ViewStage};
 use crate::bdd_nav::{is_feature_narrative_row, keyword_char_range, nav_body_char_range_in_buffer};
 use crate::highlight::{KeywordSet, highlight_line};
 
@@ -17,6 +17,12 @@ const NODE_FOCUS_BG: Color = Color::Rgb(140, 190, 255);
 /// Stage-2 preview: one solid style for the tree-selected line (avoids span-patch gaps that read as bright blocks).
 const PREVIEW_CURSOR_BG: Color = Color::DarkGray;
 const PREVIEW_CURSOR_FG: Color = Color::White;
+const STATUS_PENDING: Color = Color::DarkGray;
+const KEYWORD_GIVEN: Color = Color::Blue;
+const KEYWORD_WHEN: Color = Color::Yellow;
+const KEYWORD_THEN: Color = Color::Green;
+const KEYWORD_AND: Color = Color::Gray;
+const KEYWORD_BUT: Color = Color::Gray;
 
 /// Applies `patch` on UTF-8 character indices `[range.start, range.end)` within each span.
 fn apply_patch_to_char_range(
@@ -127,18 +133,23 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         ])
         .split(frame.area());
 
-    let top_tabs = Tabs::new(vec![Line::from(" MindMap [1] "), Line::from(" Help [2] ")])
-        .select(match app.active_tab {
-            MainTab::MindMap => 0,
-            MainTab::Help => 1,
-        })
-        .style(Style::default().fg(Color::DarkGray))
-        .highlight_style(
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )
-        .divider(" ");
+    let top_tabs = Tabs::new(vec![
+        Line::from(" MindMap [1] "),
+        Line::from(" Explore [2] "),
+        Line::from(" Help [3] "),
+    ])
+    .select(match app.active_tab {
+        MainTab::MindMap => 0,
+        MainTab::Explore => 1,
+        MainTab::Help => 2,
+    })
+    .style(Style::default().fg(Color::DarkGray))
+    .highlight_style(
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )
+    .divider(" ");
     frame.render_widget(top_tabs, chunks[0]);
 
     let divider_w = chunks[1].width as usize;
@@ -150,19 +161,24 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     render_main_panel(frame, app, chunks[2]);
 
-    let key_hints = footer_hints(app);
-    frame.render_widget(Paragraph::new(key_hints), chunks[3]);
+    if app.active_tab == MainTab::Explore {
+        render_explore_footer(frame, app, chunks[3]);
+    } else {
+        let key_hints = footer_hints(app);
+        frame.render_widget(Paragraph::new(key_hints), chunks[3]);
+    }
 }
 
 fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     match app.active_tab {
         MainTab::MindMap => render_mindmap_panel(frame, app, area),
+        MainTab::Explore => render_explore_panel(frame, app, area),
         MainTab::Help => {
             let block = Block::default().borders(Borders::ALL).title("Help");
             let inner = block.inner(area);
             frame.render_widget(block, area);
             let help = vec![
-                Line::raw("Tabs: MindMap [1], Help [2]"),
+                Line::raw("Tabs: MindMap [1], Explore [2], Help [3]"),
                 Line::raw(""),
                 Line::raw("── MindMap (Stage 1: Tree only) ──"),
                 Line::raw(
@@ -178,6 +194,10 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Line::raw("── MindMap (Stage 3: Editor) ──"),
                 Line::raw("↑↓ BDD nav   ←→ keyword/body focus   Space edit"),
                 Line::raw("← on keyword: back to tree   Esc: clear input / back"),
+                Line::raw(""),
+                Line::raw("── Explore (Three Columns) ──"),
+                Line::raw("Tab switch column   ↑↓ navigate   e edit   r run   a AI"),
+                Line::raw("Esc exit edit"),
                 Line::raw(""),
                 Line::raw("Global: s save, q quit (dirty needs confirmation)"),
             ];
@@ -221,6 +241,231 @@ fn render_mindmap_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             render_reserved_panel(frame, cols[1]);
         }
     }
+}
+
+/// Renders the Explore tab: three-column feature/scenario/step browser.
+fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(20),
+            Constraint::Percentage(30),
+            Constraint::Percentage(50),
+        ])
+        .split(area);
+
+    render_explore_features(frame, app, cols[0]);
+    render_explore_scenarios(frame, app, cols[1]);
+    render_explore_steps(frame, app, cols[2]);
+}
+
+fn explore_select_style(focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .bg(NAV_CELL_BG)
+            .fg(NAV_CELL_FG)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().bg(Color::DarkGray).fg(Color::White)
+    }
+}
+
+fn explore_block(title: &str, focused: bool) -> Block<'_> {
+    let title_style = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_style(title_style)
+}
+
+fn feature_display_name(path: &std::path::Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "feature".to_string())
+}
+
+fn truncate_string_to_cols(text: &str, max_cols: u16) -> String {
+    let max = max_cols as usize;
+    let mut budget = max;
+    let mut out = String::new();
+    for ch in text.chars() {
+        let w = ch.width().unwrap_or(0);
+        if w == 0 {
+            out.push(ch);
+            continue;
+        }
+        if w > budget {
+            break;
+        }
+        out.push(ch);
+        budget -= w;
+    }
+    out
+}
+
+fn render_explore_features(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let focused = app.explore_focus == ColumnFocus::Feature;
+    let block = explore_block("Features", focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let highlight_style = explore_select_style(focused);
+    let normal = Style::default();
+    let mut lines: Vec<Line> = Vec::new();
+
+    if app.project.features.is_empty() {
+        lines.push(Line::styled(
+            " (no features)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        for (i, feature) in app.project.features.iter().enumerate() {
+            let label = feature_display_name(&feature.file_path);
+            let style = if i == app.explore_selected_feature {
+                highlight_style
+            } else {
+                normal
+            };
+            let mut line = Line::from(Span::styled(format!(" {label}"), style));
+            line = truncate_line_to_cols(line, inner.width);
+            let trail = if i == app.explore_selected_feature {
+                highlight_style
+            } else {
+                Style::default()
+            };
+            line = pad_line_to_width(line, inner.width, trail);
+            lines.push(line);
+        }
+    }
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
+fn render_explore_scenarios(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let focused = app.explore_focus == ColumnFocus::Scenario;
+    let block = explore_block("Scenarios", focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let normal = Style::default();
+    let mut lines: Vec<Line> = Vec::new();
+
+    let scenarios = app
+        .project
+        .features
+        .get(app.explore_selected_feature)
+        .map(|f| &f.scenarios);
+
+    if scenarios.is_none_or(|s| s.is_empty()) {
+        lines.push(Line::styled(
+            " (no scenarios)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else if let Some(scenarios) = scenarios {
+        for (i, scenario) in scenarios.iter().enumerate() {
+            let status_dot = Span::styled("●", Style::default().fg(STATUS_PENDING));
+            let name = Span::styled(format!(" {}", scenario.name), normal);
+            let mut line = Line::from(vec![status_dot, name]);
+            if i == app.explore_selected_scenario {
+                line = apply_line_background(line, explore_select_style(focused));
+            }
+            line = truncate_line_to_cols(line, inner.width);
+            let trail = if i == app.explore_selected_scenario {
+                explore_select_style(focused)
+            } else {
+                Style::default()
+            };
+            line = pad_line_to_width(line, inner.width, trail);
+            lines.push(line);
+        }
+    }
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
+fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let focused = app.explore_focus == ColumnFocus::Step;
+    if app.explore_edit_mode {
+        render_editor_panel(frame, app, area, false);
+        return;
+    }
+    let block = explore_block("Steps", focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let highlight_style = explore_select_style(focused);
+    let mut lines: Vec<Line> = Vec::new();
+
+    let steps = app
+        .project
+        .features
+        .get(app.explore_selected_feature)
+        .and_then(|f| f.scenarios.get(app.explore_selected_scenario))
+        .map(|s| &s.steps);
+
+    if steps.is_none_or(|s| s.is_empty()) {
+        lines.push(Line::styled(
+            " (no steps)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else if let Some(steps) = steps {
+        for (i, step) in steps.iter().enumerate() {
+            let kw = format!("{:>6}", step.keyword);
+            let kw_color = match step.keyword.as_str() {
+                "Given" => KEYWORD_GIVEN,
+                "When" => KEYWORD_WHEN,
+                "Then" => KEYWORD_THEN,
+                "And" => KEYWORD_AND,
+                "But" => KEYWORD_BUT,
+                _ => Color::White,
+            };
+            let kw_span = Span::styled(kw, Style::default().fg(kw_color));
+            let body_span = Span::raw(format!(" {}", step.text));
+            let status_span = Span::styled(" pending", Style::default().fg(STATUS_PENDING));
+            let mut line = Line::from(vec![kw_span, body_span, status_span]);
+            if i == app.explore_selected_step {
+                line = apply_line_background(line, highlight_style);
+            }
+            line = truncate_line_to_cols(line, inner.width);
+            let trail = if i == app.explore_selected_step {
+                highlight_style
+            } else {
+                Style::default()
+            };
+            line = pad_line_to_width(line, inner.width, trail);
+            lines.push(line);
+        }
+    }
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
+fn apply_line_background(line: Line<'static>, bg: Style) -> Line<'static> {
+    let mut out_spans: Vec<Span<'static>> = Vec::new();
+    for span in line.spans {
+        let text = span.content.to_string();
+        let style = span.style.patch(bg);
+        out_spans.push(Span::styled(text, style));
+    }
+    let mut out = Line::from(out_spans);
+    out.style = line.style.patch(bg);
+    out.alignment = line.alignment;
+    out
 }
 
 /// Renders the collapsible tree using `tui-tree-widget`.
@@ -346,10 +591,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
         if row == cursor_row && !preview {
             let nav_cell_style = Style::default().bg(NAV_CELL_BG).fg(NAV_CELL_FG);
             let line_len = line.chars().count();
-            if app.view_stage == ViewStage::EditorAndPanel
-                && !app.step_input_active
-                && app.step_keyword_picker.is_none()
-            {
+            if app.is_editor_nav_mode() {
                 let focus_patch = Style::default().bg(NODE_FOCUS_BG);
                 let hl_range = match app.focus_slot {
                     BddFocusSlot::Keyword => keyword_char_range(&line).or_else(|| {
@@ -537,6 +779,57 @@ fn render_reserved_panel(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(Paragraph::new(Text::from(content)), inner);
 }
 
+fn render_explore_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let feature_name = app
+        .project
+        .features
+        .get(app.explore_selected_feature)
+        .map(|f| feature_display_name(&f.file_path))
+        .unwrap_or_else(|| "-".to_string());
+    let scenario_name = app
+        .project
+        .features
+        .get(app.explore_selected_feature)
+        .and_then(|f| f.scenarios.get(app.explore_selected_scenario))
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| "-".to_string());
+    let left = format!("{feature_name}  {scenario_name}");
+
+    let total = app
+        .project
+        .features
+        .get(app.explore_selected_feature)
+        .map(|f| f.scenarios.len())
+        .unwrap_or(0);
+    let right = format!("0/{total} 通过");
+
+    let width = area.width as usize;
+    let left_w = UnicodeWidthStr::width(left.as_str());
+    let right_w = UnicodeWidthStr::width(right.as_str());
+
+    let text = if right_w >= width {
+        truncate_string_to_cols(right.as_str(), area.width)
+    } else {
+        let mut out = String::new();
+        let mut left_trimmed = left;
+        let avail_left = width.saturating_sub(right_w + 1);
+        if left_w > avail_left {
+            left_trimmed = truncate_string_to_cols(left_trimmed.as_str(), avail_left as u16);
+        }
+        let left_trimmed_w = UnicodeWidthStr::width(left_trimmed.as_str());
+        let spaces = width.saturating_sub(left_trimmed_w + right_w);
+        out.push_str(&left_trimmed);
+        out.push_str(&" ".repeat(spaces));
+        out.push_str(&right);
+        out
+    };
+
+    frame.render_widget(Paragraph::new(text), area);
+}
+
 fn footer_pill(label: &'static str) -> Span<'static> {
     Span::styled(
         label,
@@ -588,6 +881,19 @@ fn footer_hints(app: &App) -> Line<'static> {
             footer_pill(" Quit [q] "),
             Span::raw(" "),
             footer_pill(" Clear [Esc] "),
+        ]),
+        (MainTab::Explore, _) => Line::from(vec![
+            footer_pill(" Focus [Tab] "),
+            Span::raw(" "),
+            footer_pill(" Navigate [↑↓] "),
+            Span::raw(" "),
+            footer_pill(" Edit [e] "),
+            Span::raw(" "),
+            footer_pill(" Run [r] "),
+            Span::raw(" "),
+            footer_pill(" AI [a] "),
+            Span::raw(" "),
+            footer_pill(" Quit [q] "),
         ]),
         (MainTab::Help, _) => Line::from(vec![
             footer_pill(" Save [s] "),

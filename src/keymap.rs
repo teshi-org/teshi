@@ -9,6 +9,7 @@ pub struct KeyContext {
     pub step_input_active: bool,
     pub active_tab: MainTab,
     pub view_stage: ViewStage,
+    pub explore_edit_mode: bool,
 }
 
 /// High-level editor command derived from keyboard input.
@@ -34,6 +35,12 @@ pub enum Action {
     SelectTab(MainTab),
     ActivateStepInput,
     ClearInputState,
+    // Explore navigation
+    FocusNextColumn,
+    FocusPrevColumn,
+    RunScenario,
+    AiSuggest,
+    EnterEdit,
     // Step keyword picker overlay
     StepKeywordPickerUp,
     StepKeywordPickerDown,
@@ -89,6 +96,28 @@ impl Action {
             };
         }
 
+        // Explore tab: three-column navigation
+        if context.active_tab == MainTab::Explore && !context.explore_edit_mode {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Tab, _) => Some(Self::FocusNextColumn),
+                (KeyCode::BackTab, _) => Some(Self::FocusPrevColumn),
+                (KeyCode::Up, _) => Some(Self::MoveUp),
+                (KeyCode::Down, _) => Some(Self::MoveDown),
+                (KeyCode::Home, _) => Some(Self::MoveHome),
+                (KeyCode::End, _) => Some(Self::MoveEnd),
+                (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Self::RunScenario),
+                (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::AiSuggest),
+                (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Self::EnterEdit),
+                (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
+                (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
+                (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Help)),
+                (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
+                (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
+                (KeyCode::Esc, _) => Some(Self::ClearInputState),
+                _ => None,
+            };
+        }
+
         // MindMap tab: tree navigation (stages 1 & 2)
         if context.active_tab == MainTab::MindMap
             && matches!(
@@ -109,7 +138,8 @@ impl Action {
                 (KeyCode::Char(']'), _) => Some(Self::TreeLocationNext),
                 (KeyCode::Esc, _) => Some(Self::StageBack),
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
-                (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Help)),
+                (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
+                (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Help)),
                 (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                 _ => None,
@@ -119,12 +149,14 @@ impl Action {
         // Default: editor (stage 3) and global keys
         match (event.code, event.modifiers) {
             (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
-            (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Help)),
+            (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
+            (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Help)),
             (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
             (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
             (KeyCode::Char(' '), KeyModifiers::NONE)
-                if context.active_tab == MainTab::MindMap
-                    && context.view_stage == ViewStage::EditorAndPanel =>
+                if (context.active_tab == MainTab::MindMap
+                    && context.view_stage == ViewStage::EditorAndPanel)
+                    || (context.active_tab == MainTab::Explore && context.explore_edit_mode) =>
             {
                 Some(Self::ActivateStepInput)
             }
@@ -155,12 +187,13 @@ mod tests {
             step_input_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::TreeOnly,
+            explore_edit_mode: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
             context,
         );
-        assert_eq!(action, Some(Action::SelectTab(MainTab::Help)));
+        assert_eq!(action, Some(Action::SelectTab(MainTab::Explore)));
     }
 
     #[test]
@@ -170,6 +203,7 @@ mod tests {
             step_input_active: true,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::EditorAndPanel,
+            explore_edit_mode: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
@@ -185,6 +219,7 @@ mod tests {
             step_input_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::TreeOnly,
+            explore_edit_mode: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -210,6 +245,7 @@ mod tests {
             step_input_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::EditorAndPanel,
+            explore_edit_mode: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -221,6 +257,28 @@ mod tests {
                 context
             ),
             Some(Action::ActivateStepInput)
+        );
+    }
+
+    #[test]
+    fn test_explore_tab_navigation_keys() {
+        let context = KeyContext {
+            step_keyword_picker_active: false,
+            step_input_active: false,
+            active_tab: MainTab::Explore,
+            view_stage: ViewStage::TreeOnly,
+            explore_edit_mode: false,
+        };
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
+            Some(Action::FocusNextColumn)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::EnterEdit)
         );
     }
 }
