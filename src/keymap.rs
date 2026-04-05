@@ -101,6 +101,8 @@ impl Action {
             return match (event.code, event.modifiers) {
                 (KeyCode::Tab, _) => Some(Self::FocusNextColumn),
                 (KeyCode::BackTab, _) => Some(Self::FocusPrevColumn),
+                (KeyCode::Left, _) => Some(Self::FocusPrevColumn),
+                (KeyCode::Right, _) => Some(Self::FocusNextColumn),
                 (KeyCode::Up, _) => Some(Self::MoveUp),
                 (KeyCode::Down, _) => Some(Self::MoveDown),
                 (KeyCode::Home, _) => Some(Self::MoveHome),
@@ -272,6 +274,14 @@ mod tests {
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
             Some(Action::FocusNextColumn)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), context),
+            Some(Action::FocusNextColumn)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), context),
+            Some(Action::FocusPrevColumn)
         );
         assert_eq!(
             Action::from_key_event(
