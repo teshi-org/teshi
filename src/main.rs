@@ -65,6 +65,7 @@ fn main() -> Result<()> {
                     step_input_active: app.step_input_active,
                     active_tab: app.active_tab,
                     view_stage: app.view_stage,
+                    explore_edit_mode: app.explore_edit_mode,
                 },
             ) {
                 app.handle_action(action)?;
