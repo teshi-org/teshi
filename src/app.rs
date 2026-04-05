@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Receiver;
 
 use anyhow::{Context, Result};
 
@@ -13,6 +14,7 @@ use crate::editor_buffer::EditorBuffer;
 use crate::gherkin::{self, BddProject};
 use crate::keymap::Action;
 use crate::mindmap;
+use crate::runner::{self, RunCase, RunEvent, RunRequest, RunnerConfig};
 use crate::step_index::StepIndex;
 
 /// Step keywords in cycle order (re-exported for UI pickers).
@@ -49,6 +51,31 @@ pub enum ColumnFocus {
     Feature,
     Scenario,
     Step,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStatus {
+    Idle,
+    Running,
+    Passed,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone)]
+pub struct FailureDetail {
+    pub message: String,
+    pub stack: Option<String>,
+    pub attachments: Vec<runner::RunAttachment>,
+    pub logs: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunSummary {
+    pub total: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub skipped: usize,
 }
 
 /// UI state for the step-keyword list shown after Space on the keyword prefix.
@@ -97,12 +124,22 @@ pub struct App {
     step_input_row: usize,
     step_input_min_col: usize,
     pub step_keyword_picker: Option<StepKeywordPicker>,
+    pub runner_config: Option<RunnerConfig>,
+    runner_rx: Option<Receiver<RunEvent>>,
     // ── Explore tab state ───────────────────────────────────────────
     pub explore_focus: ColumnFocus,
     pub explore_selected_feature: usize,
     pub explore_selected_scenario: usize,
     pub explore_selected_step: usize,
     pub explore_edit_mode: bool,
+    pub explore_feature_scenario_memory: HashMap<usize, usize>,
+    pub explore_scenario_step_memory: HashMap<(usize, usize), usize>,
+    pub explore_case_map: HashMap<String, (usize, usize)>,
+    pub explore_case_status: HashMap<(usize, usize), RunStatus>,
+    pub explore_failure_details: HashMap<(usize, usize), FailureDetail>,
+    pub explore_detail_open: bool,
+    pub explore_detail_case: Option<(usize, usize)>,
+    pub explore_run_summary: Option<RunSummary>,
     quit_pending_confirm: bool,
 }
 
@@ -178,11 +215,21 @@ impl App {
             step_input_row: 0,
             step_input_min_col: 0,
             step_keyword_picker: None,
+            runner_config: runner::load_runner_config(None).ok(),
+            runner_rx: None,
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
             explore_edit_mode: false,
+            explore_feature_scenario_memory: HashMap::new(),
+            explore_scenario_step_memory: HashMap::new(),
+            explore_case_map: HashMap::new(),
+            explore_case_status: HashMap::new(),
+            explore_failure_details: HashMap::new(),
+            explore_detail_open: false,
+            explore_detail_case: None,
+            explore_run_summary: None,
             quit_pending_confirm: false,
         };
         let n = app.buffers.len();
@@ -236,11 +283,21 @@ impl App {
             step_input_row: 0,
             step_input_min_col: 0,
             step_keyword_picker: None,
+            runner_config: runner::load_runner_config(None).ok(),
+            runner_rx: None,
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
             explore_edit_mode: false,
+            explore_feature_scenario_memory: HashMap::new(),
+            explore_scenario_step_memory: HashMap::new(),
+            explore_case_map: HashMap::new(),
+            explore_case_status: HashMap::new(),
+            explore_failure_details: HashMap::new(),
+            explore_detail_open: false,
+            explore_detail_case: None,
+            explore_run_summary: None,
             quit_pending_confirm: false,
         };
         app.sync_cursor_to_first_node();
@@ -284,11 +341,21 @@ impl App {
             step_input_row: 0,
             step_input_min_col: 0,
             step_keyword_picker: None,
+            runner_config: runner::load_runner_config(None).ok(),
+            runner_rx: None,
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
             explore_edit_mode: false,
+            explore_feature_scenario_memory: HashMap::new(),
+            explore_scenario_step_memory: HashMap::new(),
+            explore_case_map: HashMap::new(),
+            explore_case_status: HashMap::new(),
+            explore_failure_details: HashMap::new(),
+            explore_detail_open: false,
+            explore_detail_case: None,
+            explore_run_summary: None,
             quit_pending_confirm: false,
         };
         app.sync_cursor_to_first_node();
@@ -337,17 +404,296 @@ impl App {
         }
     }
 
-    fn explore_set_feature(&mut self, idx: usize) {
-        self.explore_selected_feature = idx;
-        self.explore_selected_scenario = 0;
-        self.explore_selected_step = 0;
+    pub fn poll_runner_events(&mut self) {
+        let Some(rx) = self.runner_rx.take() else {
+            return;
+        };
+        let mut keep_rx = true;
+        loop {
+            match rx.try_recv() {
+                Ok(event) => {
+                    let end = matches!(
+                        event,
+                        RunEvent::RunnerExit { .. } | RunEvent::RunnerError { .. }
+                    );
+                    self.apply_run_event(event);
+                    if end {
+                        keep_rx = false;
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    keep_rx = false;
+                    break;
+                }
+            }
+        }
+        if keep_rx {
+            self.runner_rx = Some(rx);
+        }
+    }
+
+    fn apply_run_event(&mut self, event: RunEvent) {
+        match event {
+            RunEvent::StartRun { total, .. } => {
+                self.explore_run_summary = Some(RunSummary {
+                    total: total.unwrap_or(0),
+                    passed: 0,
+                    failed: 0,
+                    skipped: 0,
+                });
+            }
+            RunEvent::StartCase { case_id, .. } => {
+                if let Some(key) = self.explore_case_map.get(&case_id).copied() {
+                    self.explore_case_status.insert(key, RunStatus::Running);
+                }
+            }
+            RunEvent::CasePassed { case_id, .. } => {
+                if let Some(key) = self.explore_case_map.get(&case_id).copied() {
+                    self.explore_case_status.insert(key, RunStatus::Passed);
+                    self.explore_failure_details.remove(&key);
+                    if let Some(summary) = self.explore_run_summary.as_mut() {
+                        summary.passed = summary.passed.saturating_add(1);
+                    }
+                }
+            }
+            RunEvent::CaseFailed { case_id, error, .. } => {
+                if let Some(key) = self.explore_case_map.get(&case_id).copied() {
+                    self.explore_case_status.insert(key, RunStatus::Failed);
+                    self.explore_failure_details.insert(
+                        key,
+                        FailureDetail {
+                            message: error.message,
+                            stack: error.stack,
+                            attachments: error.attachments,
+                            logs: Vec::new(),
+                        },
+                    );
+                    if let Some(summary) = self.explore_run_summary.as_mut() {
+                        summary.failed = summary.failed.saturating_add(1);
+                    }
+                }
+            }
+            RunEvent::CaseSkipped { case_id, .. } => {
+                if let Some(key) = self.explore_case_map.get(&case_id).copied() {
+                    self.explore_case_status.insert(key, RunStatus::Skipped);
+                    if let Some(summary) = self.explore_run_summary.as_mut() {
+                        summary.skipped = summary.skipped.saturating_add(1);
+                    }
+                }
+            }
+            RunEvent::Log { case_id, message } => {
+                if let Some(case_id) = case_id
+                    && let Some(key) = self.explore_case_map.get(&case_id).copied()
+                    && let Some(detail) = self.explore_failure_details.get_mut(&key)
+                {
+                    if detail.logs.len() >= 200 {
+                        detail.logs.remove(0);
+                    }
+                    detail.logs.push(message);
+                }
+            }
+            RunEvent::Artifact {
+                case_id,
+                kind,
+                path,
+            } => {
+                if let Some(case_id) = case_id
+                    && let Some(key) = self.explore_case_map.get(&case_id).copied()
+                    && let Some(detail) = self.explore_failure_details.get_mut(&key)
+                {
+                    detail
+                        .attachments
+                        .push(runner::RunAttachment { kind, path });
+                }
+            }
+            RunEvent::EndRun {
+                passed,
+                failed,
+                skipped,
+            } => {
+                let total = passed + failed + skipped;
+                self.explore_run_summary = Some(RunSummary {
+                    total,
+                    passed,
+                    failed,
+                    skipped,
+                });
+                self.status = format!("Run complete: {passed} passed, {failed} failed");
+            }
+            RunEvent::RunnerExit { success, .. } => {
+                if !success {
+                    self.status = "Runner exited with error".to_string();
+                }
+                self.runner_rx = None;
+            }
+            RunEvent::RunnerError { message } => {
+                self.status = format!("Runner error: {message}");
+                self.runner_rx = None;
+            }
+        }
+        self.quit_pending_confirm = false;
+    }
+
+    fn reset_explore_run_state(&mut self) {
+        self.explore_case_map.clear();
+        self.explore_case_status.clear();
+        self.explore_failure_details.clear();
+        self.explore_run_summary = None;
+        self.explore_detail_open = false;
+        self.explore_detail_case = None;
+    }
+
+    fn start_explore_run(&mut self) {
+        if self.runner_rx.is_some() {
+            self.status = "Runner already active".to_string();
+            return;
+        }
+        let Some(config) = self.runner_config.clone() else {
+            self.status = "Runner not configured (teshi.toml or TESHI_RUNNER_CMD)".to_string();
+            return;
+        };
+        let cases = self.build_explore_cases();
+        if cases.is_empty() {
+            self.status = "No scenarios to run".to_string();
+            return;
+        }
+        self.reset_explore_run_state();
+        self.explore_run_summary = Some(RunSummary {
+            total: cases.len(),
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+        });
+        for case in &cases {
+            if let Some((fi, si)) = parse_case_key(&case.id) {
+                self.explore_case_map.insert(case.id.clone(), (fi, si));
+                self.explore_case_status
+                    .insert((fi, si), RunStatus::Running);
+            }
+        }
+        let request = RunRequest {
+            command: "run".to_string(),
+            cases,
+            meta: HashMap::new(),
+        };
+        match runner::spawn_runner(config, request) {
+            Ok(rx) => {
+                self.runner_rx = Some(rx);
+                self.status = "Run started".to_string();
+            }
+            Err(err) => {
+                self.status = format!("Failed to start runner: {err}");
+            }
+        }
+    }
+
+    fn build_explore_cases(&self) -> Vec<RunCase> {
+        let mut cases = Vec::new();
+        let Some(feature) = self.project.features.get(self.explore_selected_feature) else {
+            return cases;
+        };
+        match self.explore_focus {
+            ColumnFocus::Feature => {
+                for (si, scenario) in feature.scenarios.iter().enumerate() {
+                    cases.push(build_case(
+                        self.explore_selected_feature,
+                        si,
+                        feature,
+                        scenario,
+                    ));
+                }
+            }
+            ColumnFocus::Scenario | ColumnFocus::Step => {
+                if let Some(scenario) = feature.scenarios.get(self.explore_selected_scenario) {
+                    cases.push(build_case(
+                        self.explore_selected_feature,
+                        self.explore_selected_scenario,
+                        feature,
+                        scenario,
+                    ));
+                }
+            }
+        }
+        cases
+    }
+
+    fn toggle_failure_detail(&mut self) {
+        if self.explore_detail_open {
+            self.explore_detail_open = false;
+            self.explore_detail_case = None;
+            return;
+        }
+        let key = (
+            self.explore_selected_feature,
+            self.explore_selected_scenario,
+        );
+        if self.explore_case_status.get(&key) == Some(&RunStatus::Failed)
+            && self.explore_failure_details.contains_key(&key)
+        {
+            self.explore_detail_open = true;
+            self.explore_detail_case = Some(key);
+        } else {
+            self.status = "No failure details for selection".to_string();
+        }
+    }
+
+    fn persist_explore_memory(&mut self) {
+        self.explore_feature_scenario_memory.insert(
+            self.explore_selected_feature,
+            self.explore_selected_scenario,
+        );
+        self.explore_scenario_step_memory.insert(
+            (
+                self.explore_selected_feature,
+                self.explore_selected_scenario,
+            ),
+            self.explore_selected_step,
+        );
+    }
+
+    fn restore_explore_memory(&mut self) {
+        if let Some(&scenario_idx) = self
+            .explore_feature_scenario_memory
+            .get(&self.explore_selected_feature)
+        {
+            self.explore_selected_scenario = scenario_idx;
+        } else {
+            self.explore_selected_scenario = 0;
+        }
+        if let Some(&step_idx) = self.explore_scenario_step_memory.get(&(
+            self.explore_selected_feature,
+            self.explore_selected_scenario,
+        )) {
+            self.explore_selected_step = step_idx;
+        } else {
+            self.explore_selected_step = 0;
+        }
         self.normalize_explore_selection();
     }
 
+    fn explore_set_feature(&mut self, idx: usize) {
+        self.persist_explore_memory();
+        self.explore_selected_feature = idx;
+        self.restore_explore_memory();
+        self.explore_detail_open = false;
+        self.explore_detail_case = None;
+    }
+
     fn explore_set_scenario(&mut self, idx: usize) {
+        self.persist_explore_memory();
         self.explore_selected_scenario = idx;
-        self.explore_selected_step = 0;
+        if let Some(&step_idx) = self.explore_scenario_step_memory.get(&(
+            self.explore_selected_feature,
+            self.explore_selected_scenario,
+        )) {
+            self.explore_selected_step = step_idx;
+        } else {
+            self.explore_selected_step = 0;
+        }
         self.normalize_explore_selection();
+        self.explore_detail_open = false;
+        self.explore_detail_case = None;
     }
 
     fn explore_move_selection(&mut self, delta: isize) {
@@ -387,16 +733,24 @@ impl App {
                     .unwrap_or(0);
                 let next = clamp_idx(self.explore_selected_step as isize + delta, steps);
                 self.explore_selected_step = next;
+                self.persist_explore_memory();
             }
         }
+        self.explore_detail_open = false;
+        self.explore_detail_case = None;
     }
 
     fn explore_move_home(&mut self) {
         match self.explore_focus {
             ColumnFocus::Feature => self.explore_set_feature(0),
             ColumnFocus::Scenario => self.explore_set_scenario(0),
-            ColumnFocus::Step => self.explore_selected_step = 0,
+            ColumnFocus::Step => {
+                self.explore_selected_step = 0;
+                self.persist_explore_memory();
+            }
         }
+        self.explore_detail_open = false;
+        self.explore_detail_case = None;
     }
 
     fn explore_move_end(&mut self) {
@@ -422,9 +776,12 @@ impl App {
                     && !s.steps.is_empty()
                 {
                     self.explore_selected_step = s.steps.len() - 1;
+                    self.persist_explore_memory();
                 }
             }
         }
+        self.explore_detail_open = false;
+        self.explore_detail_case = None;
     }
 
     fn explore_focus_next(&mut self) {
@@ -433,6 +790,8 @@ impl App {
             ColumnFocus::Scenario => ColumnFocus::Step,
             ColumnFocus::Step => ColumnFocus::Step,
         };
+        self.explore_detail_open = false;
+        self.explore_detail_case = None;
     }
 
     fn explore_focus_prev(&mut self) {
@@ -441,6 +800,8 @@ impl App {
             ColumnFocus::Scenario => ColumnFocus::Feature,
             ColumnFocus::Step => ColumnFocus::Scenario,
         };
+        self.explore_detail_open = false;
+        self.explore_detail_case = None;
     }
 
     fn explore_selected_step_line(&self) -> Option<usize> {
@@ -462,6 +823,8 @@ impl App {
         self.clear_step_input_state();
         self.clear_step_keyword_picker();
         self.explore_edit_mode = true;
+        self.explore_detail_open = false;
+        self.explore_detail_case = None;
         self.status = "Explore edit mode".to_string();
     }
 
@@ -816,7 +1179,7 @@ impl App {
             }
             Action::RunScenario => {
                 if self.active_tab == MainTab::Explore {
-                    self.status = "Run scenario: not implemented".to_string();
+                    self.start_explore_run();
                     self.quit_pending_confirm = false;
                 }
             }
@@ -829,6 +1192,12 @@ impl App {
             Action::EnterEdit => {
                 if self.active_tab == MainTab::Explore {
                     self.explore_enter_edit();
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ToggleFailureDetail => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.toggle_failure_detail();
                     self.quit_pending_confirm = false;
                 }
             }
@@ -996,6 +1365,9 @@ impl App {
                     self.clear_step_input_state();
                     self.clear_step_keyword_picker();
                     self.status = "Input state cleared".to_string();
+                } else if self.explore_detail_open {
+                    self.explore_detail_open = false;
+                    self.explore_detail_case = None;
                 } else if self.active_tab == MainTab::Explore && self.explore_edit_mode {
                     self.explore_exit_edit();
                 } else if self.view_stage != ViewStage::TreeOnly {
@@ -1052,6 +1424,8 @@ impl App {
         self.clear_step_keyword_picker();
         if self.active_tab == MainTab::Explore {
             self.explore_edit_mode = false;
+            self.explore_detail_open = false;
+            self.explore_detail_case = None;
         }
         self.quit_pending_confirm = false;
         self.active_tab = tab;
@@ -1331,6 +1705,29 @@ impl App {
         }
         self.quit_pending_confirm = false;
     }
+}
+
+fn build_case(
+    feature_idx: usize,
+    scenario_idx: usize,
+    feature: &gherkin::BddFeature,
+    scenario: &gherkin::BddScenario,
+) -> RunCase {
+    RunCase {
+        id: format!("f{feature_idx}:s{scenario_idx}"),
+        feature_path: feature.file_path.to_string_lossy().to_string(),
+        scenario: scenario.name.clone(),
+        line_number: Some(scenario.line_number),
+    }
+}
+
+fn parse_case_key(id: &str) -> Option<(usize, usize)> {
+    let mut parts = id.split(':');
+    let f = parts.next()?;
+    let s = parts.next()?;
+    let f_idx = f.strip_prefix('f')?.parse::<usize>().ok()?;
+    let s_idx = s.strip_prefix('s')?.parse::<usize>().ok()?;
+    Some((f_idx, s_idx))
 }
 
 #[cfg(test)]
@@ -1744,11 +2141,21 @@ mod tests {
             step_input_row: 0,
             step_input_min_col: 0,
             step_keyword_picker: None,
+            runner_config: None,
+            runner_rx: None,
             explore_focus: ColumnFocus::Step,
             explore_selected_feature: 0,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
             explore_edit_mode: false,
+            explore_feature_scenario_memory: HashMap::new(),
+            explore_scenario_step_memory: HashMap::new(),
+            explore_case_map: HashMap::new(),
+            explore_case_status: HashMap::new(),
+            explore_failure_details: HashMap::new(),
+            explore_detail_open: false,
+            explore_detail_case: None,
+            explore_run_summary: None,
             quit_pending_confirm: false,
         };
 
@@ -1759,5 +2166,101 @@ mod tests {
         app.handle_action(Action::MoveLeft)
             .expect("left on keyword should exit edit");
         assert!(!app.explore_edit_mode);
+    }
+
+    #[test]
+    fn test_explore_memory_restores_scenario_and_step() {
+        use crate::gherkin;
+        use std::path::PathBuf;
+
+        let fa = gherkin::parse_feature(
+            "\
+Feature: A
+  Scenario: S1
+    Given a1
+    When a2
+    Then a3
+  Scenario: S2
+    Given b1
+    When b2
+    Then b3
+",
+            PathBuf::from("a.feature"),
+        );
+        let fb = gherkin::parse_feature(
+            "\
+Feature: B
+  Scenario: T1
+    Given c1
+",
+            PathBuf::from("b.feature"),
+        );
+        let project = crate::gherkin::BddProject {
+            root_dir: PathBuf::from("."),
+            features: vec![fa, fb],
+        };
+        let step_index = crate::step_index::StepIndex::build(&project);
+        let mindmap_index = crate::mindmap::build_index(&project);
+        let tree_state = crate::mindmap::init_tree_state(&mindmap_index);
+
+        let mut app = App {
+            project,
+            step_index,
+            mindmap_index,
+            mindmap_location_selection: HashMap::new(),
+            buffers: Vec::new(),
+            active_buffer_idx: None,
+            view_stage: ViewStage::TreeOnly,
+            tree_state,
+            buffer: EditorBuffer::from_string(String::new()),
+            file_path: None,
+            cursor_row: 0,
+            cursor_col: 0,
+            desired_col: 0,
+            scroll_row: 0,
+            focus_slot: BddFocusSlot::Keyword,
+            preview_buffer: None,
+            preview_title: String::new(),
+            preview_cursor_row: 0,
+            preview_scroll_row: 0,
+            should_quit: false,
+            active_tab: MainTab::Explore,
+            dirty: false,
+            status: String::new(),
+            step_input_active: false,
+            step_input_row: 0,
+            step_input_min_col: 0,
+            step_keyword_picker: None,
+            runner_config: None,
+            runner_rx: None,
+            explore_focus: ColumnFocus::Feature,
+            explore_selected_feature: 0,
+            explore_selected_scenario: 0,
+            explore_selected_step: 0,
+            explore_edit_mode: false,
+            explore_feature_scenario_memory: HashMap::new(),
+            explore_scenario_step_memory: HashMap::new(),
+            explore_case_map: HashMap::new(),
+            explore_case_status: HashMap::new(),
+            explore_failure_details: HashMap::new(),
+            explore_detail_open: false,
+            explore_detail_case: None,
+            explore_run_summary: None,
+            quit_pending_confirm: false,
+        };
+
+        app.explore_selected_feature = 0;
+        app.explore_selected_scenario = 1;
+        app.explore_selected_step = 2;
+        app.persist_explore_memory();
+
+        app.explore_selected_feature = 1;
+        app.explore_selected_scenario = 0;
+        app.explore_selected_step = 0;
+        app.persist_explore_memory();
+
+        app.explore_set_feature(0);
+        assert_eq!(app.explore_selected_scenario, 1);
+        assert_eq!(app.explore_selected_step, 2);
     }
 }

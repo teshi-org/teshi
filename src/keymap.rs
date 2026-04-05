@@ -42,6 +42,7 @@ pub enum Action {
     RunScenario,
     AiSuggest,
     EnterEdit,
+    ToggleFailureDetail,
     // Step keyword picker overlay
     StepKeywordPickerUp,
     StepKeywordPickerDown,
@@ -108,6 +109,7 @@ impl Action {
                 (KeyCode::Down, _) => Some(Self::MoveDown),
                 (KeyCode::Home, _) => Some(Self::MoveHome),
                 (KeyCode::End, _) => Some(Self::MoveEnd),
+                (KeyCode::Enter, _) => Some(Self::ToggleFailureDetail),
                 (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Self::RunScenario),
                 (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::AiSuggest),
                 (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Self::EnterEdit),
@@ -281,6 +283,10 @@ mod tests {
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), context),
             Some(Action::FocusPrevColumn)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
+            Some(Action::ToggleFailureDetail)
         );
         assert_eq!(
             Action::from_key_event(
