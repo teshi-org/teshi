@@ -6,9 +6,11 @@ mod gherkin_keywords;
 mod highlight;
 mod keymap;
 mod mindmap;
+mod runner;
 mod step_index;
 mod ui;
 
+use std::env;
 use std::io;
 use std::time::Duration;
 
@@ -44,12 +46,18 @@ impl Drop for TerminalGuard {
 }
 
 fn main() -> Result<()> {
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    if matches!(args.first().map(|s| s.as_str()), Some("run")) {
+        args.remove(0);
+        return runner::run_cli(&args);
+    }
     let _guard = TerminalGuard::setup()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let mut app = App::from_args()?;
 
     while !app.should_quit {
+        app.poll_runner_events();
         terminal.draw(|frame| ui::render(frame, &mut app))?;
 
         if event::poll(Duration::from_millis(50))?

@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use tui_tree_widget::Tree;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, BddFocusSlot, ColumnFocus, MainTab, STEP_KEYWORDS_CYCLE};
+use crate::app::{App, BddFocusSlot, ColumnFocus, MainTab, RunStatus, STEP_KEYWORDS_CYCLE};
 use crate::bdd_nav::{is_feature_narrative_row, keyword_char_range, nav_body_char_range_in_buffer};
 use crate::highlight::{KeywordSet, highlight_line};
 
@@ -18,6 +18,10 @@ const NODE_FOCUS_BG: Color = Color::Rgb(140, 190, 255);
 const PREVIEW_CURSOR_BG: Color = Color::DarkGray;
 const PREVIEW_CURSOR_FG: Color = Color::White;
 const STATUS_PENDING: Color = Color::DarkGray;
+const STATUS_RUNNING: Color = Color::Yellow;
+const STATUS_PASSED: Color = Color::Green;
+const STATUS_FAILED: Color = Color::Red;
+const STATUS_SKIPPED: Color = Color::Gray;
 const KEYWORD_GIVEN: Color = Color::Blue;
 const KEYWORD_WHEN: Color = Color::Yellow;
 const KEYWORD_THEN: Color = Color::Green;
@@ -122,6 +126,16 @@ fn pad_line_to_width(mut line: Line<'static>, target_cols: u16, trail: Style) ->
     line
 }
 
+fn status_color(status: RunStatus) -> Color {
+    match status {
+        RunStatus::Idle => STATUS_PENDING,
+        RunStatus::Running => STATUS_RUNNING,
+        RunStatus::Passed => STATUS_PASSED,
+        RunStatus::Failed => STATUS_FAILED,
+        RunStatus::Skipped => STATUS_SKIPPED,
+    }
+}
+
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -186,7 +200,8 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Line::raw(""),
                 Line::raw("── Explore (Three Columns) ──"),
                 Line::raw("Tab/Shift+Tab/←→ switch column   ↑↓ navigate"),
-                Line::raw("→ on Step or e edit   Esc/← exit edit"),
+                Line::raw("→ on Step or e edit   Enter details   Esc/← exit edit"),
+                Line::raw("r run   a AI"),
                 Line::raw(""),
                 Line::raw("Global: s save, q quit (dirty needs confirmation)"),
             ];
@@ -224,6 +239,7 @@ fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     render_explore_features(frame, app, cols[0]);
     render_explore_scenarios(frame, app, cols[1]);
     render_explore_steps(frame, app, cols[2]);
+    render_failure_detail(frame, app, area);
 }
 
 fn explore_select_style(focused: bool) -> Style {
@@ -342,7 +358,12 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ));
     } else if let Some(scenarios) = scenarios {
         for (i, scenario) in scenarios.iter().enumerate() {
-            let status_dot = Span::styled("●", Style::default().fg(STATUS_PENDING));
+            let status = app
+                .explore_case_status
+                .get(&(app.explore_selected_feature, i))
+                .copied()
+                .unwrap_or(RunStatus::Idle);
+            let status_dot = Span::styled("●", Style::default().fg(status_color(status)));
             let name = Span::styled(format!(" {}", scenario.name), normal);
             let mut line = Line::from(vec![status_dot, name]);
             if i == app.explore_selected_scenario {
@@ -403,8 +424,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             };
             let kw_span = Span::styled(kw, Style::default().fg(kw_color));
             let body_span = Span::raw(format!(" {}", step.text));
-            let status_span = Span::styled(" pending", Style::default().fg(STATUS_PENDING));
-            let mut line = Line::from(vec![kw_span, body_span, status_span]);
+            let mut line = Line::from(vec![kw_span, body_span]);
             if i == app.explore_selected_step {
                 line = apply_line_background(line, highlight_style);
             }
@@ -420,6 +440,82 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
+fn render_failure_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    if !app.explore_detail_open {
+        return;
+    }
+    let Some((fi, si)) = app.explore_detail_case else {
+        return;
+    };
+    let Some(detail) = app.explore_failure_details.get(&(fi, si)) else {
+        return;
+    };
+    let Some(feature) = app.project.features.get(fi) else {
+        return;
+    };
+    let Some(scenario) = feature.scenarios.get(si) else {
+        return;
+    };
+
+    let popup_w = (area.width as f32 * 0.75) as u16;
+    let popup_h = (area.height as f32 * 0.70) as u16;
+    let popup_w = popup_w.max(20).min(area.width);
+    let popup_h = popup_h.max(10).min(area.height);
+    let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Failure Details");
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::styled(
+        format!("Scenario: {}", scenario.name),
+        Style::default().add_modifier(Modifier::BOLD),
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::raw("Message:"));
+    lines.push(Line::raw(detail.message.clone()));
+
+    if let Some(stack) = &detail.stack {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw("Stack:"));
+        for line in stack.lines() {
+            lines.push(Line::raw(line.to_string()));
+        }
+    }
+
+    if !detail.attachments.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw("Attachments:"));
+        for att in &detail.attachments {
+            lines.push(Line::raw(format!("- {}: {}", att.kind, att.path)));
+        }
+    }
+
+    if !detail.logs.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw("Logs:"));
+        for line in detail.logs.iter().take(20) {
+            lines.push(Line::raw(line.clone()));
+        }
+    }
+
+    let mut out_lines: Vec<Line> = Vec::new();
+    for line in lines {
+        out_lines.push(truncate_line_to_cols(line, inner.width));
+    }
+    frame.render_widget(Paragraph::new(Text::from(out_lines)), inner);
 }
 
 fn apply_line_background(line: Line<'static>, bg: Style) -> Line<'static> {
@@ -750,7 +846,14 @@ fn render_explore_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .get(app.explore_selected_feature)
         .map(|f| f.scenarios.len())
         .unwrap_or(0);
-    let right = format!("0/{total} 通过");
+    let right = if let Some(summary) = &app.explore_run_summary {
+        format!(
+            "{}/{} passed, {} failed",
+            summary.passed, summary.total, summary.failed
+        )
+    } else {
+        format!("0/{total} 通过")
+    };
 
     let width = area.width as usize;
     let left_w = UnicodeWidthStr::width(left.as_str());
@@ -802,6 +905,8 @@ fn footer_hints(app: &App) -> Line<'static> {
             footer_pill(" Navigate [↑↓] "),
             Span::raw(" "),
             footer_pill(" Edit [e/→] "),
+            Span::raw(" "),
+            footer_pill(" Detail [Enter] "),
             Span::raw(" "),
             footer_pill(" Run [r] "),
             Span::raw(" "),
