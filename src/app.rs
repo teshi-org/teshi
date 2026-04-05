@@ -60,17 +60,6 @@ pub struct StepKeywordPicker {
     pub selected: usize,
 }
 
-/// Display info for the MindMap location selector when a step path maps to multiple sources.
-#[derive(Debug, Clone)]
-pub struct LocationInfo {
-    /// Zero-based index of the currently previewed location.
-    pub index: usize,
-    /// Total number of distinct locations for this node.
-    pub total: usize,
-    /// Human-readable feature and scenario (or background) label.
-    pub label: String,
-}
-
 pub struct App {
     // ── Multi-file project ──────────────────────────────────────────
     pub project: BddProject,
@@ -118,32 +107,6 @@ pub struct App {
 }
 
 impl App {
-    /// Returns location selector metadata in stage 2 when the selected node has multiple source locations.
-    ///
-    /// `None` when not in tree+preview stage, when selection is missing, or when only one location exists.
-    pub fn current_location_info(&self) -> Option<LocationInfo> {
-        if self.view_stage != ViewStage::TreeAndEditor {
-            return None;
-        }
-        let id = mindmap::selected_node_id(&self.tree_state)?;
-        let locations = self.mindmap_index.locations_for(id)?;
-        if locations.len() <= 1 {
-            return None;
-        }
-        let idx = self
-            .mindmap_location_selection
-            .get(id)
-            .copied()
-            .unwrap_or(0)
-            .min(locations.len().saturating_sub(1));
-        let label = mindmap::format_location_label(&self.project, &locations[idx]);
-        Some(LocationInfo {
-            index: idx,
-            total: locations.len(),
-            label,
-        })
-    }
-
     /// Builds the editor state from process arguments.
     ///
     /// Accepts a directory path (recursive `.feature` scan) or a single file path.
@@ -203,7 +166,7 @@ impl App {
             preview_cursor_row: 0,
             preview_scroll_row: 0,
             should_quit: false,
-            active_tab: MainTab::MindMap,
+            active_tab: MainTab::Explore,
             dirty: false,
             status: format!(
                 "Opened directory with {} feature file(s)",
@@ -266,7 +229,7 @@ impl App {
             preview_cursor_row: 0,
             preview_scroll_row: 0,
             should_quit: false,
-            active_tab: MainTab::MindMap,
+            active_tab: MainTab::Explore,
             dirty: false,
             status: "Opened file".to_string(),
             step_input_active: false,
@@ -314,7 +277,7 @@ impl App {
             preview_cursor_row: 0,
             preview_scroll_row: 0,
             should_quit: false,
-            active_tab: MainTab::MindMap,
+            active_tab: MainTab::Explore,
             dirty: false,
             status: "New buffer".to_string(),
             step_input_active: false,
@@ -674,31 +637,6 @@ impl App {
         self.preview_scroll_row = 0;
     }
 
-    /// Transition from Stage 1 → Stage 2: open editor preview for the selected tree node.
-    fn stage_open_editor_preview(&mut self) {
-        if let Some((fi, line)) = self.selected_tree_location() {
-            if self.active_buffer_idx != Some(fi) {
-                self.switch_to_buffer(fi);
-            }
-            self.editor_goto_line(line);
-        }
-        self.view_stage = ViewStage::TreeAndEditor;
-        self.rebuild_preview();
-        self.status = "Preview opened".to_string();
-    }
-
-    /// Transition from Stage 2 → Stage 3: activate editor for full editing.
-    fn stage_enter_editor(&mut self) {
-        if let Some((fi, line)) = self.selected_tree_location() {
-            if self.active_buffer_idx != Some(fi) {
-                self.switch_to_buffer(fi);
-            }
-            self.editor_goto_line(line);
-        }
-        self.view_stage = ViewStage::EditorAndPanel;
-        self.status = "Editor active".to_string();
-    }
-
     /// Transition back one stage.
     fn stage_back(&mut self) {
         match self.view_stage {
@@ -794,12 +732,7 @@ impl App {
     }
 
     fn tree_toggle_or_expand(&mut self) {
-        if self.view_stage == ViewStage::TreeAndEditor {
-            self.stage_enter_editor();
-            self.quit_pending_confirm = false;
-            return;
-        }
-        // Stage 1: expand tree nodes
+        // Tree-only mode: expand tree nodes
         self.tree_state.key_right();
         self.quit_pending_confirm = false;
     }
@@ -871,6 +804,16 @@ impl App {
                     self.quit_pending_confirm = false;
                 }
             }
+            Action::ExploreRight => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    if self.explore_focus == ColumnFocus::Step {
+                        self.explore_enter_edit();
+                    } else {
+                        self.explore_focus_next();
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
             Action::RunScenario => {
                 if self.active_tab == MainTab::Explore {
                     self.status = "Run scenario: not implemented".to_string();
@@ -896,16 +839,14 @@ impl App {
             Action::TreeExpand => self.tree_toggle_or_expand(),
             Action::TreeCollapse => self.tree_collapse(),
             Action::TreeToggle => self.tree_toggle(),
-            Action::TreeOpen => match self.view_stage {
-                ViewStage::TreeOnly => self.stage_open_editor_preview(),
-                ViewStage::TreeAndEditor => self.stage_back(),
-                _ => {}
-            },
+            Action::TreeOpen => {
+                self.status = "MindMap is display-only".to_string();
+                self.quit_pending_confirm = false;
+            }
             Action::TreeHome => self.tree_home(),
             Action::TreeEnd => self.tree_end(),
             Action::TreeLocationPrev => self.tree_cycle_location(-1),
             Action::TreeLocationNext => self.tree_cycle_location(1),
-            Action::StageBack => self.stage_back(),
 
             // Editor navigation (MindMap stage 3 & legacy)
             Action::MoveUp => {
@@ -1114,6 +1055,9 @@ impl App {
         }
         self.quit_pending_confirm = false;
         self.active_tab = tab;
+        if self.active_tab == MainTab::MindMap {
+            self.view_stage = ViewStage::TreeOnly;
+        }
         self.status = match tab {
             MainTab::MindMap => "Switched to MindMap tab",
             MainTab::Explore => "Switched to Explore tab",
@@ -1269,11 +1213,17 @@ impl App {
             return;
         }
         if self.is_editor_nav_mode() {
-            // In stage 3 with keyword focus: go back to stage 2
             if self.focus_slot == BddFocusSlot::Keyword {
                 let line = self.buffer.line(self.cursor_row);
                 if keyword_char_range(&line).is_some() {
-                    self.stage_back();
+                    if self.active_tab == MainTab::Explore && self.explore_edit_mode {
+                        self.explore_exit_edit();
+                        self.quit_pending_confirm = false;
+                    } else if self.active_tab == MainTab::MindMap
+                        && self.view_stage == ViewStage::EditorAndPanel
+                    {
+                        self.stage_back();
+                    }
                     return;
                 }
             }
@@ -1398,6 +1348,7 @@ mod tests {
     /// Helper: create an app pre-set to editor-active mode (stage 3) for existing editor tests.
     fn editor_test_app() -> App {
         let mut app = App::from_args().expect("app init should work");
+        app.active_tab = MainTab::MindMap;
         app.view_stage = ViewStage::EditorAndPanel;
         app
     }
@@ -1732,35 +1683,25 @@ mod tests {
     }
 
     #[test]
-    fn test_stage_transitions() {
+    fn test_tree_open_is_noop_in_display_only_mode() {
         let mut app = App::from_args().expect("app init should work");
         assert_eq!(app.view_stage, ViewStage::TreeOnly);
 
-        // TreeOpen → Stage 2
         app.handle_action(Action::TreeOpen)
-            .expect("open should work");
-        assert_eq!(app.view_stage, ViewStage::TreeAndEditor);
-
-        // TreeOpen again → Stage 1
-        app.handle_action(Action::TreeOpen)
-            .expect("close should work");
+            .expect("tree open should be ignored");
         assert_eq!(app.view_stage, ViewStage::TreeOnly);
     }
 
     #[test]
-    fn test_tree_expand_in_stage2_enters_editor() {
+    fn test_tree_expand_does_not_enter_editor() {
         let mut app = App::from_args().expect("app init should work");
-        app.handle_action(Action::TreeOpen)
-            .expect("open preview should work");
-        assert_eq!(app.view_stage, ViewStage::TreeAndEditor);
-
         app.handle_action(Action::TreeExpand)
-            .expect("enter editor should work");
-        assert_eq!(app.view_stage, ViewStage::EditorAndPanel);
+            .expect("expand should work");
+        assert_eq!(app.view_stage, ViewStage::TreeOnly);
     }
 
     #[test]
-    fn test_edit_sync_on_stage_back() {
+    fn test_explore_right_enters_and_left_exits_edit() {
         use crate::gherkin;
         use std::path::PathBuf;
 
@@ -1782,7 +1723,7 @@ mod tests {
             mindmap_location_selection: HashMap::new(),
             buffers,
             active_buffer_idx: Some(0),
-            view_stage: ViewStage::EditorAndPanel,
+            view_stage: ViewStage::TreeOnly,
             tree_state,
             buffer: EditorBuffer::from_string(content.to_string()),
             file_path: Some(PathBuf::from("test.feature")),
@@ -1796,14 +1737,14 @@ mod tests {
             preview_cursor_row: 0,
             preview_scroll_row: 0,
             should_quit: false,
-            active_tab: MainTab::MindMap,
+            active_tab: MainTab::Explore,
             dirty: false,
             status: String::new(),
             step_input_active: false,
             step_input_row: 0,
             step_input_min_col: 0,
             step_keyword_picker: None,
-            explore_focus: ColumnFocus::Feature,
+            explore_focus: ColumnFocus::Step,
             explore_selected_feature: 0,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
@@ -1811,21 +1752,12 @@ mod tests {
             quit_pending_confirm: false,
         };
 
-        // Simulate editing the buffer
-        app.buffer.replace_line(2, "    Given modified step");
-        app.dirty = true;
+        app.handle_action(Action::ExploreRight)
+            .expect("right should enter edit");
+        assert!(app.explore_edit_mode);
 
-        // Going back from Stage 3 → Stage 2 triggers sync
-        app.handle_action(Action::StageBack)
-            .expect("stage back should work");
-        assert_eq!(app.view_stage, ViewStage::TreeAndEditor);
-
-        // Verify the project AST was re-parsed
-        assert_eq!(
-            app.project.features[0].scenarios[0].steps[0].text,
-            "modified step"
-        );
-        // Verify the buffer was persisted to the buffers vec
-        assert!(app.buffers[0].line(2).contains("modified"));
+        app.handle_action(Action::MoveLeft)
+            .expect("left on keyword should exit edit");
+        assert!(!app.explore_edit_mode);
     }
 }

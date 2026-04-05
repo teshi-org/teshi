@@ -192,9 +192,9 @@ Feature: BDD Editor
 
   Scenario: Switch between tabs
     Given the MindMap tab is active
-    When I press 2
+    When I press 3
     Then the Help tab becomes active
-    When I press 1
+    When I press 2
     Then the MindMap tab becomes active again
 
   Scenario: Tab switch clears active edit state

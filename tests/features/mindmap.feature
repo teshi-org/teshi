@@ -89,87 +89,15 @@ Feature: Mind Map Tree View
     Then no editing mode activates
     And the tree content remains unchanged
 
-  # --- Three-stage view transitions ---
+  # --- Tree-only view ---
 
-  Scenario: Stage 1 - tree occupies full width
+  Scenario: Tree occupies full width
     Given I have opened a directory of feature files
     Then the tree panel occupies the full terminal width
     And no editor or reserved panel is visible
 
-  Scenario: Stage 1 to Stage 2 - open editor preview
-    Given the view is in Stage 1
+  Scenario: Enter does not open preview
+    Given the MindMap tree is displayed
     When I press Enter on a tree node
-    Then the view transitions to Stage 2
-    And the tree panel shrinks to approximately 45 percent width
-    And the editor preview panel appears on the right at approximately 55 percent width
-    And the corresponding feature file content is shown in the editor preview
-
-  Scenario: Stage 2 - editor preview tracks tree selection
-    Given the view is in Stage 2
-    When I move the selection to a different tree node
-    Then the editor preview scrolls to the line corresponding to the selected node
-    And the selected line is highlighted in the editor preview
-
-  Scenario: Stage 2 - cross-file navigation auto-switches buffer
-    Given the view is in Stage 2
-    And the editor preview shows editor.feature
-    When I navigate to a node belonging to mindmap.feature
-    Then the editor preview automatically switches to mindmap.feature
-    And the view scrolls to the corresponding line
-
-  Scenario: Stage 2 - editor preview shows full Gherkin with keywords
-    Given the view is in Stage 2
-    And a step in the tree shows "I am on the login page"
-    Then the editor preview shows the full line "Given I am on the login page"
-    And the Gherkin syntax highlighting is applied
-
-  Scenario: Stage 2 to Stage 3 - enter editor with reserved panel
-    Given the view is in Stage 2
-    When I press the right arrow key on a leaf node with no children
-    Then the view transitions to Stage 3
-    And the tree panel is completely hidden
-    And the editor panel moves to the left at approximately 65 percent width
-    And the reserved panel appears on the right at approximately 35 percent width
-
-  Scenario: Stage 2 to Stage 3 - cursor lands on selected node line
-    Given the view is in Stage 2
-    And the selected tree node corresponds to line 10 of the feature file
-    When I press the right arrow key to enter Stage 3
-    Then the editor cursor is positioned at line 10
-    And the focus is on keyword
-
-  Scenario: Stage 3 - full editor functionality
-    Given the view is in Stage 3
-    Then all BDD navigation features are available in the editor panel
-    And step body editing via Space is available
-    And step keyword picker via Space on keyword focus is available
-    And save and quit keybindings work normally
-
-  Scenario: Stage 3 - reserved panel shows placeholder
-    Given the view is in Stage 3
-    Then the reserved panel displays a placeholder message
-    And the placeholder indicates planned features including step impl code
-    And the placeholder indicates planned features including BDD executor
-    And the placeholder indicates planned features including test results
-
-  Scenario: Stage 3 to Stage 2 - return to tree
-    Given the view is in Stage 3
-    And no edit mode is active
-    And the focus is on keyword
-    When I press the left arrow key
-    Then the view transitions to Stage 2
-    And the tree panel reappears on the left
-    And the reserved panel is hidden
-
-  Scenario: Stage 3 to Stage 2 - tree selection syncs to editor position
-    Given the view is in Stage 3
-    And I have navigated from "Scenario: Login" to "Scenario: Search" in the editor
-    When I press the left arrow key to return to Stage 2
-    Then the tree selection updates to the node closest to the editor cursor position
-
-  Scenario: Stage 2 to Stage 1 - close editor preview
-    Given the view is in Stage 2
-    When I press Escape
-    Then the view transitions to Stage 1
-    And the editor preview panel is hidden
-    And the tree takes the full terminal width
+    Then the view remains tree-only
+    And no editor or reserved panel is visible
