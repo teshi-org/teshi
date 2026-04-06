@@ -12,6 +12,7 @@ mod ui;
 
 use std::env;
 use std::io;
+use std::io::Write;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -27,25 +28,59 @@ use ratatui::backend::CrosstermBackend;
 use app::App;
 use keymap::{Action, KeyContext};
 
-struct TerminalGuard;
+struct TerminalGuard {
+    raw_mode: bool,
+    alt_screen: bool,
+    cursor_hidden: bool,
+}
 
 impl TerminalGuard {
     fn setup() -> Result<Self> {
-        enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen, Hide)?;
-        Ok(Self)
+        let no_raw = std::env::var_os("TESHI_NO_RAW").is_some();
+        let no_alt = std::env::var_os("TESHI_NO_ALT").is_some();
+        let mut guard = Self {
+            raw_mode: false,
+            alt_screen: false,
+            cursor_hidden: false,
+        };
+        if !no_raw {
+            enable_raw_mode()?;
+            guard.raw_mode = true;
+        }
+        if !no_alt {
+            execute!(io::stdout(), EnterAlternateScreen)?;
+            guard.alt_screen = true;
+        }
+        execute!(io::stdout(), Hide)?;
+        guard.cursor_hidden = true;
+        Ok(guard)
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), Show);
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        if self.cursor_hidden {
+            let _ = execute!(io::stdout(), Show);
+        }
+        if self.raw_mode {
+            let _ = disable_raw_mode();
+        }
+        if self.alt_screen {
+            let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        }
     }
 }
 
 fn main() -> Result<()> {
+    if let Ok(path) = std::env::var("TESHI_DIAG_PATH")
+        && let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+    {
+        let _ = writeln!(file, "pid {}: entered main", std::process::id());
+    }
+
     let mut args: Vec<String> = env::args().skip(1).collect();
     if matches!(args.first().map(|s| s.as_str()), Some("run")) {
         args.remove(0);
