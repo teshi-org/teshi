@@ -21,6 +21,9 @@ Thumbs.db
 # Codex: local rule copies (canonical copy is under .cursor/rules/)
 .codex/
 
+# Local runner config (machine-specific paths); see teshi.toml.example
+teshi.toml
+
 # Keep Cargo.lock tracked by default.
 # If this repository is a library and you explicitly want to ignore it, uncomment:
 # Cargo.lock

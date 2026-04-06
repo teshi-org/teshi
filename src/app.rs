@@ -63,8 +63,11 @@ pub enum RunStatus {
 }
 
 #[derive(Debug, Clone)]
-pub struct FailureDetail {
-    pub message: String,
+pub struct CaseDetail {
+    pub case_id: String,
+    pub status: RunStatus,
+    pub duration_ms: Option<u64>,
+    pub message: Option<String>,
     pub stack: Option<String>,
     pub attachments: Vec<runner::RunAttachment>,
     pub logs: Vec<String>,
@@ -136,7 +139,7 @@ pub struct App {
     pub explore_scenario_step_memory: HashMap<(usize, usize), usize>,
     pub explore_case_map: HashMap<String, (usize, usize)>,
     pub explore_case_status: HashMap<(usize, usize), RunStatus>,
-    pub explore_failure_details: HashMap<(usize, usize), FailureDetail>,
+    pub explore_case_details: HashMap<(usize, usize), CaseDetail>,
     pub explore_detail_open: bool,
     pub explore_detail_case: Option<(usize, usize)>,
     pub explore_run_summary: Option<RunSummary>,
@@ -226,7 +229,7 @@ impl App {
             explore_scenario_step_memory: HashMap::new(),
             explore_case_map: HashMap::new(),
             explore_case_status: HashMap::new(),
-            explore_failure_details: HashMap::new(),
+            explore_case_details: HashMap::new(),
             explore_detail_open: false,
             explore_detail_case: None,
             explore_run_summary: None,
@@ -294,7 +297,7 @@ impl App {
             explore_scenario_step_memory: HashMap::new(),
             explore_case_map: HashMap::new(),
             explore_case_status: HashMap::new(),
-            explore_failure_details: HashMap::new(),
+            explore_case_details: HashMap::new(),
             explore_detail_open: false,
             explore_detail_case: None,
             explore_run_summary: None,
@@ -352,7 +355,7 @@ impl App {
             explore_scenario_step_memory: HashMap::new(),
             explore_case_map: HashMap::new(),
             explore_case_status: HashMap::new(),
-            explore_failure_details: HashMap::new(),
+            explore_case_details: HashMap::new(),
             explore_detail_open: false,
             explore_detail_case: None,
             explore_run_summary: None,
@@ -446,37 +449,96 @@ impl App {
             RunEvent::StartCase { case_id, .. } => {
                 if let Some(key) = self.explore_case_map.get(&case_id).copied() {
                     self.explore_case_status.insert(key, RunStatus::Running);
+                    self.explore_case_details
+                        .entry(key)
+                        .or_insert_with(|| CaseDetail {
+                            case_id: case_id.clone(),
+                            status: RunStatus::Running,
+                            duration_ms: None,
+                            message: None,
+                            stack: None,
+                            attachments: Vec::new(),
+                            logs: Vec::new(),
+                        });
                 }
             }
-            RunEvent::CasePassed { case_id, .. } => {
+            RunEvent::CasePassed {
+                case_id,
+                duration_ms,
+            } => {
                 if let Some(key) = self.explore_case_map.get(&case_id).copied() {
                     self.explore_case_status.insert(key, RunStatus::Passed);
-                    self.explore_failure_details.remove(&key);
+                    let detail =
+                        self.explore_case_details
+                            .entry(key)
+                            .or_insert_with(|| CaseDetail {
+                                case_id: case_id.clone(),
+                                status: RunStatus::Passed,
+                                duration_ms: None,
+                                message: None,
+                                stack: None,
+                                attachments: Vec::new(),
+                                logs: Vec::new(),
+                            });
+                    detail.status = RunStatus::Passed;
+                    detail.duration_ms = duration_ms;
+                    detail.message = None;
+                    detail.stack = None;
                     if let Some(summary) = self.explore_run_summary.as_mut() {
                         summary.passed = summary.passed.saturating_add(1);
                     }
                 }
             }
-            RunEvent::CaseFailed { case_id, error, .. } => {
+            RunEvent::CaseFailed {
+                case_id,
+                duration_ms,
+                error,
+            } => {
                 if let Some(key) = self.explore_case_map.get(&case_id).copied() {
                     self.explore_case_status.insert(key, RunStatus::Failed);
-                    self.explore_failure_details.insert(
-                        key,
-                        FailureDetail {
-                            message: error.message,
-                            stack: error.stack,
-                            attachments: error.attachments,
-                            logs: Vec::new(),
-                        },
-                    );
+                    let detail =
+                        self.explore_case_details
+                            .entry(key)
+                            .or_insert_with(|| CaseDetail {
+                                case_id: case_id.clone(),
+                                status: RunStatus::Failed,
+                                duration_ms: None,
+                                message: None,
+                                stack: None,
+                                attachments: Vec::new(),
+                                logs: Vec::new(),
+                            });
+                    detail.status = RunStatus::Failed;
+                    detail.duration_ms = duration_ms;
+                    detail.message = Some(error.message);
+                    detail.stack = error.stack;
+                    if !error.attachments.is_empty() {
+                        detail.attachments.extend(error.attachments);
+                    }
                     if let Some(summary) = self.explore_run_summary.as_mut() {
                         summary.failed = summary.failed.saturating_add(1);
                     }
                 }
             }
-            RunEvent::CaseSkipped { case_id, .. } => {
+            RunEvent::CaseSkipped { case_id, reason } => {
                 if let Some(key) = self.explore_case_map.get(&case_id).copied() {
                     self.explore_case_status.insert(key, RunStatus::Skipped);
+                    let detail =
+                        self.explore_case_details
+                            .entry(key)
+                            .or_insert_with(|| CaseDetail {
+                                case_id: case_id.clone(),
+                                status: RunStatus::Skipped,
+                                duration_ms: None,
+                                message: None,
+                                stack: None,
+                                attachments: Vec::new(),
+                                logs: Vec::new(),
+                            });
+                    detail.status = RunStatus::Skipped;
+                    detail.duration_ms = None;
+                    detail.message = reason;
+                    detail.stack = None;
                     if let Some(summary) = self.explore_run_summary.as_mut() {
                         summary.skipped = summary.skipped.saturating_add(1);
                     }
@@ -485,8 +547,19 @@ impl App {
             RunEvent::Log { case_id, message } => {
                 if let Some(case_id) = case_id
                     && let Some(key) = self.explore_case_map.get(&case_id).copied()
-                    && let Some(detail) = self.explore_failure_details.get_mut(&key)
                 {
+                    let detail =
+                        self.explore_case_details
+                            .entry(key)
+                            .or_insert_with(|| CaseDetail {
+                                case_id: case_id.clone(),
+                                status: RunStatus::Running,
+                                duration_ms: None,
+                                message: None,
+                                stack: None,
+                                attachments: Vec::new(),
+                                logs: Vec::new(),
+                            });
                     if detail.logs.len() >= 200 {
                         detail.logs.remove(0);
                     }
@@ -500,8 +573,19 @@ impl App {
             } => {
                 if let Some(case_id) = case_id
                     && let Some(key) = self.explore_case_map.get(&case_id).copied()
-                    && let Some(detail) = self.explore_failure_details.get_mut(&key)
                 {
+                    let detail =
+                        self.explore_case_details
+                            .entry(key)
+                            .or_insert_with(|| CaseDetail {
+                                case_id: case_id.clone(),
+                                status: RunStatus::Running,
+                                duration_ms: None,
+                                message: None,
+                                stack: None,
+                                attachments: Vec::new(),
+                                logs: Vec::new(),
+                            });
                     detail
                         .attachments
                         .push(runner::RunAttachment { kind, path });
@@ -538,7 +622,7 @@ impl App {
     fn reset_explore_run_state(&mut self) {
         self.explore_case_map.clear();
         self.explore_case_status.clear();
-        self.explore_failure_details.clear();
+        self.explore_case_details.clear();
         self.explore_run_summary = None;
         self.explore_detail_open = false;
         self.explore_detail_case = None;
@@ -628,8 +712,8 @@ impl App {
             self.explore_selected_feature,
             self.explore_selected_scenario,
         );
-        if self.explore_case_status.get(&key) == Some(&RunStatus::Failed)
-            && self.explore_failure_details.contains_key(&key)
+        if let Some(detail) = self.explore_case_details.get(&key)
+            && detail.status == RunStatus::Failed
         {
             self.explore_detail_open = true;
             self.explore_detail_case = Some(key);
@@ -2152,7 +2236,7 @@ mod tests {
             explore_scenario_step_memory: HashMap::new(),
             explore_case_map: HashMap::new(),
             explore_case_status: HashMap::new(),
-            explore_failure_details: HashMap::new(),
+            explore_case_details: HashMap::new(),
             explore_detail_open: false,
             explore_detail_case: None,
             explore_run_summary: None,
@@ -2242,7 +2326,7 @@ Feature: B
             explore_scenario_step_memory: HashMap::new(),
             explore_case_map: HashMap::new(),
             explore_case_status: HashMap::new(),
-            explore_failure_details: HashMap::new(),
+            explore_case_details: HashMap::new(),
             explore_detail_open: false,
             explore_detail_case: None,
             explore_run_summary: None,
