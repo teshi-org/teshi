@@ -6,7 +6,9 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use tui_tree_widget::Tree;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, BddFocusSlot, ColumnFocus, MainTab, RunStatus, STEP_KEYWORDS_CYCLE};
+use crate::app::{
+    App, BddFocusSlot, CaseDetail, ColumnFocus, MainTab, RunStatus, STEP_KEYWORDS_CYCLE,
+};
 use crate::bdd_nav::{is_feature_narrative_row, keyword_char_range, nav_body_char_range_in_buffer};
 use crate::highlight::{KeywordSet, highlight_line};
 
@@ -224,7 +226,7 @@ fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
             .split(area);
         render_editor_panel(frame, app, cols[0], false);
-        render_reserved_panel(frame, cols[1]);
+        render_reserved_panel(frame, app, cols[1]);
         return;
     }
     let cols = Layout::default()
@@ -449,9 +451,12 @@ fn render_failure_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some((fi, si)) = app.explore_detail_case else {
         return;
     };
-    let Some(detail) = app.explore_failure_details.get(&(fi, si)) else {
+    let Some(detail) = app.explore_case_details.get(&(fi, si)) else {
         return;
     };
+    if detail.status != RunStatus::Failed {
+        return;
+    }
     let Some(feature) = app.project.features.get(fi) else {
         return;
     };
@@ -478,43 +483,7 @@ fn render_failure_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
         return;
     }
 
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::styled(
-        format!("Scenario: {}", scenario.name),
-        Style::default().add_modifier(Modifier::BOLD),
-    ));
-    lines.push(Line::raw(""));
-    lines.push(Line::raw("Message:"));
-    lines.push(Line::raw(detail.message.clone()));
-
-    if let Some(stack) = &detail.stack {
-        lines.push(Line::raw(""));
-        lines.push(Line::raw("Stack:"));
-        for line in stack.lines() {
-            lines.push(Line::raw(line.to_string()));
-        }
-    }
-
-    if !detail.attachments.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::raw("Attachments:"));
-        for att in &detail.attachments {
-            lines.push(Line::raw(format!("- {}: {}", att.kind, att.path)));
-        }
-    }
-
-    if !detail.logs.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::raw("Logs:"));
-        for line in detail.logs.iter().take(20) {
-            lines.push(Line::raw(line.clone()));
-        }
-    }
-
-    let mut out_lines: Vec<Line> = Vec::new();
-    for line in lines {
-        out_lines.push(truncate_line_to_cols(line, inner.width));
-    }
+    let out_lines = truncate_lines(build_case_detail_lines(&scenario.name, detail), inner.width);
     frame.render_widget(Paragraph::new(Text::from(out_lines)), inner);
 }
 
@@ -797,28 +766,113 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rec
 }
 
 /// Renders the reserved panel placeholder (stage 3, right side).
-fn render_reserved_panel(frame: &mut Frame<'_>, area: Rect) {
+fn render_reserved_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("Reserved")
+        .title("Run Details")
         .style(Style::default().fg(Color::DarkGray));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let content = vec![
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let detail_key = (app.explore_selected_feature, app.explore_selected_scenario);
+    let content = if let Some(detail) = app.explore_case_details.get(&detail_key) {
+        let scenario_name = app
+            .project
+            .features
+            .get(app.explore_selected_feature)
+            .and_then(|f| f.scenarios.get(app.explore_selected_scenario))
+            .map(|s| s.name.as_str())
+            .unwrap_or("-");
+        truncate_lines(build_case_detail_lines(scenario_name, detail), inner.width)
+    } else {
+        truncate_lines(no_run_detail_lines(), inner.width)
+    };
+    frame.render_widget(Paragraph::new(Text::from(content)), inner);
+}
+
+fn build_case_detail_lines(scenario_name: &str, detail: &CaseDetail) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::styled(
+        format!("Scenario: {scenario_name}"),
+        Style::default().add_modifier(Modifier::BOLD),
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(format!(
+        "Status: {}",
+        status_label(detail.status)
+    )));
+    lines.push(Line::raw(format!("Case: {}", detail.case_id)));
+    let duration = detail
+        .duration_ms
+        .map(|ms| format!("{ms} ms"))
+        .unwrap_or_else(|| "-".to_string());
+    lines.push(Line::raw(format!("Duration: {duration}")));
+
+    if let Some(message) = &detail.message {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw("Message:"));
+        lines.push(Line::raw(message.clone()));
+    }
+
+    if let Some(stack) = &detail.stack {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw("Stack:"));
+        for line in stack.lines() {
+            lines.push(Line::raw(line.to_string()));
+        }
+    }
+
+    if !detail.attachments.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw("Attachments:"));
+        for att in &detail.attachments {
+            lines.push(Line::raw(format!("- {}: {}", att.kind, att.path)));
+        }
+    }
+
+    if !detail.logs.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw("Logs:"));
+        for line in detail.logs.iter().take(20) {
+            lines.push(Line::raw(line.clone()));
+        }
+    }
+
+    lines
+}
+
+fn no_run_detail_lines() -> Vec<Line<'static>> {
+    vec![
         Line::raw(""),
         Line::styled(
-            "  Coming Soon",
+            "  No run details yet",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
-        Line::raw("  Planned:"),
-        Line::raw("  · Step impl code"),
-        Line::raw("  · BDD executor"),
-        Line::raw("  · Test results"),
-    ];
-    frame.render_widget(Paragraph::new(Text::from(content)), inner);
+        Line::raw("  Run [r] to execute scenarios."),
+    ]
+}
+
+fn truncate_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
+    let mut out_lines = Vec::with_capacity(lines.len());
+    for line in lines {
+        out_lines.push(truncate_line_to_cols(line, width));
+    }
+    out_lines
+}
+
+fn status_label(status: RunStatus) -> &'static str {
+    match status {
+        RunStatus::Idle => "Idle",
+        RunStatus::Running => "Running",
+        RunStatus::Passed => "Passed",
+        RunStatus::Failed => "Failed",
+        RunStatus::Skipped => "Skipped",
+    }
 }
 
 fn render_explore_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
