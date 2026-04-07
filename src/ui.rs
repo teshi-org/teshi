@@ -10,7 +10,7 @@ use crate::app::{
     App, BddFocusSlot, CaseDetail, ColumnFocus, MainTab, RunStatus, STEP_KEYWORDS_CYCLE,
 };
 use crate::bdd_nav::{is_feature_narrative_row, keyword_char_range, nav_body_char_range_in_buffer};
-use crate::highlight::{KeywordSet, highlight_line};
+use crate::highlight::{KeywordSet, StepHighlightState, highlight_line_with_state};
 
 const NAV_CELL_BG: Color = Color::LightBlue;
 const NAV_CELL_FG: Color = Color::Black;
@@ -29,6 +29,7 @@ const KEYWORD_WHEN: Color = Color::Yellow;
 const KEYWORD_THEN: Color = Color::Green;
 const KEYWORD_AND: Color = Color::Gray;
 const KEYWORD_BUT: Color = Color::Gray;
+const STEP_KEYWORD_COL_WIDTH: usize = 6;
 
 /// Applies `patch` on UTF-8 character indices `[range.start, range.end)` within each span.
 fn apply_patch_to_char_range(
@@ -128,6 +129,31 @@ fn pad_line_to_width(mut line: Line<'static>, target_cols: u16, trail: Style) ->
     line
 }
 
+fn step_line_display(line: &str, in_doc_string: bool) -> (String, usize, usize) {
+    if in_doc_string {
+        return (line.to_string(), 0, 0);
+    }
+    let trimmed = line.trim_start();
+    let leading = line.len().saturating_sub(trimmed.len());
+    let Some(keyword) = STEP_KEYWORDS_CYCLE
+        .iter()
+        .find(|kw| trimmed.starts_with(**kw))
+    else {
+        return (line.to_string(), 0, 0);
+    };
+    let kw_len = keyword.chars().count();
+    if kw_len >= STEP_KEYWORD_COL_WIDTH {
+        return (line.to_string(), 0, 0);
+    }
+    let pad = STEP_KEYWORD_COL_WIDTH - kw_len;
+    let mut out = String::new();
+    let lead: String = line.chars().take(leading).collect();
+    out.push_str(&lead);
+    out.push_str(&" ".repeat(pad));
+    out.push_str(trimmed);
+    (out, pad, leading)
+}
+
 fn status_color(status: RunStatus) -> Color {
     match status {
         RunStatus::Idle => STATUS_PENDING,
@@ -204,6 +230,9 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Line::raw("Tab/Shift+Tab/←→ switch column   ↑↓ navigate"),
                 Line::raw("→ on Step or e edit   Enter details   Esc/← exit edit"),
                 Line::raw("r run   a AI"),
+                Line::raw(""),
+                Line::raw("── Editor (Edit Mode) ──"),
+                Line::raw("Space edit   Tab new step line   Enter commit   Esc cancel"),
                 Line::raw(""),
                 Line::raw("Global: s save, q quit (dirty needs confirmation)"),
             ];
@@ -414,14 +443,24 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             Style::default().fg(Color::DarkGray),
         ));
     } else if let Some(steps) = steps {
+        let mut last_major: Option<Color> = None;
         for (i, step) in steps.iter().enumerate() {
             let kw = format!("{:>6}", step.keyword);
             let kw_color = match step.keyword.as_str() {
-                "Given" => KEYWORD_GIVEN,
-                "When" => KEYWORD_WHEN,
-                "Then" => KEYWORD_THEN,
-                "And" => KEYWORD_AND,
-                "But" => KEYWORD_BUT,
+                "Given" => {
+                    last_major = Some(KEYWORD_GIVEN);
+                    KEYWORD_GIVEN
+                }
+                "When" => {
+                    last_major = Some(KEYWORD_WHEN);
+                    KEYWORD_WHEN
+                }
+                "Then" => {
+                    last_major = Some(KEYWORD_THEN);
+                    KEYWORD_THEN
+                }
+                "And" => last_major.unwrap_or(KEYWORD_AND),
+                "But" => last_major.unwrap_or(KEYWORD_BUT),
                 _ => Color::White,
             };
             let kw_span = Span::styled(kw, Style::default().fg(kw_color));
@@ -576,14 +615,13 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
 
     let mut lines = Vec::with_capacity(visible_lines);
     let preview_row_style = Style::default().bg(PREVIEW_CURSOR_BG).fg(PREVIEW_CURSOR_FG);
-    let mut in_doc = false;
+    let mut step_state = StepHighlightState::default();
     for row in 0..scroll_row {
         if row >= buffer.line_count() {
             break;
         }
         let line = buffer.line(row);
-        let (_, next_doc) = highlight_line(&line, in_doc, &KeywordSet::default());
-        in_doc = next_doc;
+        let _ = highlight_line_with_state(&line, &mut step_state, &KeywordSet::default());
     }
     for row in scroll_row..scroll_row.saturating_add(visible_lines) {
         if row >= buffer.line_count() {
@@ -596,12 +634,15 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             continue;
         }
         let line = buffer.line(row);
-        let (mut styled, next_doc) = highlight_line(&line, in_doc, &KeywordSet::default());
-        in_doc = next_doc;
+        let (display_line, pad_offset, pad_start) =
+            step_line_display(&line, step_state.in_doc_string);
+        let display_len = display_line.chars().count();
+        let mut styled =
+            highlight_line_with_state(&display_line, &mut step_state, &KeywordSet::default());
 
         if row == cursor_row && !preview {
             let nav_cell_style = Style::default().bg(NAV_CELL_BG).fg(NAV_CELL_FG);
-            let line_len = line.chars().count();
+            let line_len = display_len;
             if app.is_editor_nav_mode() {
                 let focus_patch = Style::default().bg(NODE_FOCUS_BG);
                 let hl_range = match app.focus_slot {
@@ -614,18 +655,27 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
                     }),
                     BddFocusSlot::Body => nav_body_char_range_in_buffer(buffer, row, &line),
                 };
-                if let Some(r) = hl_range
+                if let Some(mut r) = hl_range
                     && r.start < r.end
                 {
+                    if pad_offset > 0 && r.start >= pad_start {
+                        r.start += pad_offset;
+                        r.end += pad_offset;
+                    }
                     styled = apply_patch_to_char_range(styled, r, focus_patch);
                 }
             } else if app.step_input_active || app.step_keyword_picker.is_some() {
+                let cursor_col = if pad_offset > 0 && app.cursor_col >= pad_start {
+                    app.cursor_col + pad_offset
+                } else {
+                    app.cursor_col
+                };
                 if line_len == 0 {
                     styled = Line::from(vec![Span::styled(" ", nav_cell_style)]);
-                } else if app.cursor_col < line_len {
+                } else if cursor_col < line_len {
                     styled = apply_patch_to_char_range(
                         styled,
-                        app.cursor_col..app.cursor_col.saturating_add(1),
+                        cursor_col..cursor_col.saturating_add(1),
                         nav_cell_style,
                     );
                 } else {
@@ -637,10 +687,10 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
         } else if row == cursor_row && preview {
             // Do not patch syntax-highlight spans: patching by char range can leave columns with
             // default colors between spans, which terminals show as a bright "hole" or bar.
-            styled = if line.is_empty() {
+            styled = if display_line.is_empty() {
                 Line::from(vec![Span::styled(" ", preview_row_style)])
             } else {
-                Line::from(Span::styled(line.to_string(), preview_row_style))
+                Line::from(Span::styled(display_line.to_string(), preview_row_style))
             };
         }
         let pad_trail = if preview && row == cursor_row && row < buffer.line_count() {
@@ -777,7 +827,7 @@ fn render_reserved_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         return;
     }
     let detail_key = (app.explore_selected_feature, app.explore_selected_scenario);
-    let content = if let Some(detail) = app.explore_case_details.get(&detail_key) {
+    let detail_content = if let Some(detail) = app.explore_case_details.get(&detail_key) {
         let scenario_name = app
             .project
             .features
@@ -789,6 +839,19 @@ fn render_reserved_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         truncate_lines(no_run_detail_lines(), inner.width)
     };
+    let planned_style = Style::default().fg(Color::DarkGray);
+    let mut content = vec![
+        Line::styled(
+            "Planned features:",
+            planned_style.add_modifier(Modifier::BOLD),
+        ),
+        Line::styled("Step implementation code", planned_style),
+        Line::styled("BDD runner", planned_style),
+        Line::styled("Test results", planned_style),
+        Line::raw(""),
+    ];
+    content.extend(detail_content);
+    let content = truncate_lines(content, inner.width);
     frame.render_widget(Paragraph::new(Text::from(content)), inner);
 }
 

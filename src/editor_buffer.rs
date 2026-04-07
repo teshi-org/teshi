@@ -65,6 +65,11 @@ impl EditorBuffer {
         self.rope.insert_char(idx, ch);
     }
 
+    pub fn insert_str(&mut self, row: usize, col: usize, text: &str) {
+        let idx = self.line_col_to_char_idx(row, col);
+        self.rope.insert(idx, text);
+    }
+
     pub fn backspace(&mut self, row: usize, col: usize) -> (usize, usize, bool) {
         if row == 0 && col == 0 {
             return (0, 0, false);
