@@ -1393,6 +1393,30 @@ impl App {
                     self.quit_pending_confirm = false;
                 }
             }
+            Action::InsertNewline => {
+                if !self.step_input_active {
+                    return Ok(());
+                }
+                let row = self.step_input_row;
+                let line = self.buffer.line(row);
+                if current_step_keyword_index(&line).is_none() {
+                    self.status = "New line is available on step lines only".to_string();
+                    self.quit_pending_confirm = false;
+                    return Ok(());
+                }
+                let prefix: String = line.chars().take(self.step_input_min_col).collect();
+                self.buffer.insert_char(row, self.cursor_col, '\n');
+                self.buffer.insert_str(row + 1, 0, &prefix);
+                self.cursor_row = row + 1;
+                self.cursor_col = prefix.chars().count();
+                self.desired_col = self.cursor_col;
+                self.step_input_row = self.cursor_row;
+                self.step_input_min_col = self.cursor_col;
+                self.focus_slot = BddFocusSlot::Body;
+                self.dirty = true;
+                self.status = "Inserted new step line".to_string();
+                self.quit_pending_confirm = false;
+            }
             Action::Save => self.save()?,
             Action::Quit => self.quit(),
             Action::SelectTab(tab) => self.select_tab(tab),
@@ -1911,6 +1935,41 @@ mod tests {
             .expect("activate should work");
         assert!(app.step_input_active);
         assert_eq!(app.cursor_col, 11);
+    }
+
+    #[test]
+    fn test_tab_inserts_new_step_line() {
+        let mut app = editor_test_app();
+        app.buffer = EditorBuffer::from_string("Given hello".to_string());
+        app.sync_cursor_to_first_node();
+        app.focus_slot = BddFocusSlot::Body;
+        app.handle_action(Action::ActivateStepInput)
+            .expect("activate should work");
+        app.handle_action(Action::InsertNewline)
+            .expect("insert newline should work");
+        assert!(app.step_input_active);
+        assert_eq!(app.buffer.line(0), "Given hello");
+        assert_eq!(app.buffer.line(1), "Given ");
+        assert_eq!(app.cursor_row, 1);
+        assert_eq!(app.cursor_col, 6);
+    }
+
+    #[test]
+    fn test_tab_splits_step_line_and_carries_suffix() {
+        let mut app = editor_test_app();
+        app.buffer = EditorBuffer::from_string("Given hello world".to_string());
+        app.sync_cursor_to_first_node();
+        app.focus_slot = BddFocusSlot::Body;
+        app.handle_action(Action::ActivateStepInput)
+            .expect("activate should work");
+        app.cursor_col = 11;
+        app.desired_col = 11;
+        app.handle_action(Action::InsertNewline)
+            .expect("insert newline should work");
+        assert_eq!(app.buffer.line(0), "Given hello");
+        assert_eq!(app.buffer.line(1), "Given  world");
+        assert_eq!(app.cursor_row, 1);
+        assert_eq!(app.cursor_col, 6);
     }
 
     #[test]

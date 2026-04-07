@@ -29,6 +29,7 @@ pub enum Action {
     Enter,
     Backspace,
     Delete,
+    InsertNewline,
     // Global
     Save,
     Quit,
@@ -91,6 +92,7 @@ impl Action {
                 (KeyCode::PageUp, _) => Some(Self::PageUp),
                 (KeyCode::PageDown, _) => Some(Self::PageDown),
                 (KeyCode::Enter, _) => Some(Self::Enter),
+                (KeyCode::Tab, _) => Some(Self::InsertNewline),
                 (KeyCode::Backspace, _) => Some(Self::Backspace),
                 (KeyCode::Delete, _) => Some(Self::Delete),
                 (KeyCode::Char(ch), modifiers) if modifiers.is_empty() => Some(Self::Insert(ch)),
