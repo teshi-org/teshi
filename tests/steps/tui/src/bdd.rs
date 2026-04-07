@@ -90,6 +90,10 @@ async fn selection_moves(world: &mut TuiWorld) -> Result<()> {
 }
 
 pub async fn run_move_selection_down() {
+    if !crate::tui_e2e_host_supported() {
+        eprintln!("Skipping: TUI E2E tests run on Linux only");
+        return;
+    }
     let feature_path = feature_path("mindmap.feature");
     let _ = TuiWorld::cucumber()
         .filter_run_and_exit(feature_path, |_, _, scenario| {
@@ -111,7 +115,7 @@ fn locate_teshi_bin() -> Result<PathBuf> {
     if let Ok(bin) = std::env::var("TESHI_BIN") {
         let path = PathBuf::from(bin);
         if path.exists() {
-            return Ok(path);
+            return Ok(path.canonicalize().unwrap_or(path));
         }
         anyhow::bail!("TESHI_BIN points to missing path: {}", path.display());
     }
@@ -121,7 +125,7 @@ fn locate_teshi_bin() -> Result<PathBuf> {
         .ancestors()
         .nth(3)
         .context("failed to infer repo root")?;
-    let candidate = root.join("target").join("debug").join("teshi.exe");
+    let candidate = root.join("target").join("debug").join("teshi");
     if candidate.exists() {
         return Ok(candidate);
     }

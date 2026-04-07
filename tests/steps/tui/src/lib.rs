@@ -8,8 +8,22 @@ pub mod driver;
 
 pub const SCENARIO_MOVE_SELECTION_DOWN: &str = "Move selection down in tree";
 
-pub fn supports_scenario(scenario: &str) -> bool {
+/// Returns `true` when this host can run TUI end-to-end tests.
+///
+/// The harness uses a Unix PTY (`portable-pty`); Windows is intentionally unsupported so CI and
+/// local runs use Linux (or WSL) only.
+pub fn tui_e2e_host_supported() -> bool {
+    cfg!(target_os = "linux")
+}
+
+/// Returns `true` if `scenario` is implemented by the TUI E2E step crate.
+pub fn is_tui_scenario(scenario: &str) -> bool {
     scenario == SCENARIO_MOVE_SELECTION_DOWN
+}
+
+/// Returns `true` if the scenario should be executed on this host.
+pub fn supports_scenario(scenario: &str) -> bool {
+    tui_e2e_host_supported() && is_tui_scenario(scenario)
 }
 
 pub fn run_scenario(scenario: &str, teshi_bin: &Path) -> Result<()> {
@@ -56,6 +70,7 @@ fn infer_repo_root(teshi_bin: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn e2e_move_selection_down() -> Result<()> {
         let teshi_bin = locate_teshi_bin()?;
@@ -66,7 +81,7 @@ mod tests {
         if let Ok(bin) = std::env::var("TESHI_BIN") {
             let path = PathBuf::from(bin);
             if path.exists() {
-                return Ok(path);
+                return Ok(path.canonicalize().unwrap_or(path));
             }
             bail!("TESHI_BIN points to missing path: {}", path.display());
         }
@@ -75,7 +90,7 @@ mod tests {
             .ancestors()
             .nth(3)
             .context("failed to infer repo root")?;
-        let candidate = root.join("target").join("debug").join("teshi.exe");
+        let candidate = root.join("target").join("debug").join("teshi");
         if candidate.exists() {
             return Ok(candidate);
         }

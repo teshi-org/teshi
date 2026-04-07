@@ -113,7 +113,7 @@ fn write_event<T: Serialize>(out: &mut impl Write, event: Event<'_, T>) -> io::R
 fn run_request(request: RunRequest) -> Result<()> {
     let mut out = io::BufWriter::new(io::stdout());
     let total = request.cases.len();
-    let teshi_bin = locate_teshi_bin().context("locate teshi binary")?;
+    let mut teshi_bin: Option<std::path::PathBuf> = None;
 
     write_event(
         &mut out,
@@ -139,6 +139,21 @@ fn run_request(request: RunRequest) -> Result<()> {
             },
         )?;
 
+        if tui_steps::is_tui_scenario(&case.scenario) && !tui_steps::tui_e2e_host_supported() {
+            skipped = skipped.saturating_add(1);
+            write_event(
+                &mut out,
+                Event {
+                    kind: "case_skipped",
+                    payload: CaseSkipped {
+                        case_id: &case.id,
+                        reason: "TUI E2E tests run on Linux only",
+                    },
+                },
+            )?;
+            continue;
+        }
+
         if !tui_steps::supports_scenario(&case.scenario) {
             skipped = skipped.saturating_add(1);
             write_event(
@@ -154,8 +169,13 @@ fn run_request(request: RunRequest) -> Result<()> {
             continue;
         }
 
+        if teshi_bin.is_none() {
+            teshi_bin = Some(locate_teshi_bin().context("locate teshi binary")?);
+        }
+        let bin = teshi_bin.as_ref().context("teshi binary path")?;
+
         let start = Instant::now();
-        match tui_steps::run_scenario(&case.scenario, &teshi_bin) {
+        match tui_steps::run_scenario(&case.scenario, bin) {
             Ok(()) => {
                 passed = passed.saturating_add(1);
                 write_event(
