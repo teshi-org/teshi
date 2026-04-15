@@ -40,6 +40,9 @@ jobs:
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Build debug binary for TUI E2E tests
+        run: cargo build --locked --bin teshi
+
       - name: Run tests
         run: cargo test --all --locked
 
