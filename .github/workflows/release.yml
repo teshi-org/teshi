@@ -103,6 +103,10 @@ jobs:
             throw "Release tag must start with 'v' (got: $tag)."
           }
 
+          if (-not (Test-Path "wix/main.wxs")) {
+            cargo wix init --package teshi
+          }
+
           cargo wix --package teshi --no-build --output "target/wix/teshi-$tag-x64.msi"
 
       - name: Upload binary artifact
