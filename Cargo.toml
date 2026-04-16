@@ -1,7 +1,17 @@
 [package]
 name = "teshi"
-version = "0.1.0"
+version = "0.0.6"
 edition = "2024"
+authors = ["teshi-org"]
+license = "MIT"
+description = "Terminal-first mindmap editor for structured notes and navigation."
+repository = "https://github.com/teshi-org/teshi"
+readme = "README.md"
+keywords = ["tui", "mindmap", "editor", "terminal", "notes"]
+publish = false
+
+[package.metadata.wix]
+eula = false
 
 [workspace]
 members = ["runner", "tests/steps/tui"]
