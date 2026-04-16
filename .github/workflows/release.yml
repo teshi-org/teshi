@@ -81,6 +81,30 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }} --bin teshi
 
+      - name: Install WiX Toolset
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: choco install wixtoolset --no-progress -y
+
+      - name: Install cargo-wix
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo install cargo-wix --locked
+
+      - name: Build MSI installer
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ github.event.inputs.release_tag }}"
+          }
+
+          if (-not $tag.StartsWith("v")) {
+            throw "Release tag must start with 'v' (got: $tag)."
+          }
+
+          cargo wix --no-build --output "target/wix/teshi-$tag-x64.msi"
+
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
@@ -90,8 +114,16 @@ jobs:
             target/${{ matrix.target }}/release/teshi.exe
           if-no-files-found: error
 
+      - name: Upload MSI artifact
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: teshi-msi
+          path: target/wix/teshi-*-x64.msi
+          if-no-files-found: error
+
   publish:
-    name: Publish GitHub Release
+    name: Publish Release Assets
     runs-on: ubuntu-latest
     needs: build
 
@@ -123,13 +155,8 @@ jobs:
             exit 1
           fi
 
-          # Resolve the commit SHA that the tag points to so we can pass an
-          # accurate target_commitish to the release action. This is necessary
-          # for workflow_dispatch where github.sha is the HEAD of the branch
-          # that triggered the run, which may differ from the tagged commit.
           tag_sha=$(git rev-list -n 1 "${tag}")
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          # FIX: Use the SHA the tag actually points to, not github.sha.
           echo "tag_sha=${tag_sha}" >> "$GITHUB_OUTPUT"
 
       - name: Package release assets
@@ -175,7 +202,9 @@ jobs:
 
           (
             cd dist
-            find . -maxdepth 1 \( -name "*.zip" -o -name "*.tar.gz" \) \
+            cp ../artifacts/teshi-msi/*.msi .
+
+            find . -maxdepth 1 \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.msi" \) \
               -exec sha256sum {} + \
               | sed 's|\./||' \
               > SHA256SUMS
@@ -190,4 +219,5 @@ jobs:
           files: |
             dist/*.zip
             dist/*.tar.gz
+            dist/*.msi
             dist/SHA256SUMS
