@@ -107,6 +107,14 @@ jobs:
             cargo wix init --package teshi
           }
 
+          $builtExe = "target/${{ matrix.target }}/release/teshi.exe"
+          $wixExe = "target/release/teshi.exe"
+          if (-not (Test-Path $builtExe)) {
+            throw "Missing built binary at $builtExe"
+          }
+          New-Item -ItemType Directory -Force -Path "target/release" | Out-Null
+          Copy-Item $builtExe $wixExe -Force
+
           cargo wix --package teshi --no-build --nocapture --output "target/wix/teshi-$tag-x64.msi"
 
       - name: Upload binary artifact
