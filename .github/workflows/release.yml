@@ -107,7 +107,7 @@ jobs:
             cargo wix init --package teshi
           }
 
-          cargo wix --package teshi --no-build --output "target/wix/teshi-$tag-x64.msi"
+          cargo wix --package teshi --no-build --nocapture --output "target/wix/teshi-$tag-x64.msi"
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4

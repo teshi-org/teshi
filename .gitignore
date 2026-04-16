@@ -30,4 +30,6 @@ teshi.toml
 
 # Added by cargo
 
+wix/
+
 /target
