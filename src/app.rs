@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
@@ -7,8 +7,11 @@ use anyhow::{Context, Result};
 
 use crate::bdd_nav::{
     bdd_node_rows, bdd_step_and_header_title_rows, body_char_range, current_step_keyword_index,
-    header_title_edit_start_col, is_feature_narrative_row, keyword_char_range,
+    delete_scenario_block, delete_step, header_title_edit_start_col, insert_scenario_after_current,
+    insert_step_above, insert_step_below, is_feature_narrative_row, keyword_char_range,
     line_body_edit_min_col_in_buffer, next_node_row, prev_node_row, replace_step_keyword_line,
+    scenario_content_rows, scenario_header_for_row, scenario_step_rows, swap_step_with_next,
+    swap_step_with_prev,
 };
 use crate::editor_buffer::EditorBuffer;
 use crate::gherkin::{self, BddProject};
@@ -127,6 +130,11 @@ pub struct App {
     step_input_row: usize,
     step_input_min_col: usize,
     pub step_keyword_picker: Option<StepKeywordPicker>,
+    pub pending_char: Option<char>,
+    pub clipboard: Option<String>,
+    pub scenario_fold: HashSet<usize>,
+    undo_stack: Vec<(EditorBuffer, usize, usize)>,
+    redo_stack: Vec<(EditorBuffer, usize, usize)>,
     pub runner_config: Option<RunnerConfig>,
     runner_rx: Option<Receiver<RunEvent>>,
     // ── Explore tab state ───────────────────────────────────────────
@@ -218,6 +226,11 @@ impl App {
             step_input_row: 0,
             step_input_min_col: 0,
             step_keyword_picker: None,
+            pending_char: None,
+            clipboard: None,
+            scenario_fold: HashSet::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             runner_config: runner::load_runner_config(None).ok(),
             runner_rx: None,
             explore_focus: ColumnFocus::Feature,
@@ -286,6 +299,11 @@ impl App {
             step_input_row: 0,
             step_input_min_col: 0,
             step_keyword_picker: None,
+            pending_char: None,
+            clipboard: None,
+            scenario_fold: HashSet::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             runner_config: runner::load_runner_config(None).ok(),
             runner_rx: None,
             explore_focus: ColumnFocus::Feature,
@@ -344,6 +362,11 @@ impl App {
             step_input_row: 0,
             step_input_min_col: 0,
             step_keyword_picker: None,
+            pending_char: None,
+            clipboard: None,
+            scenario_fold: HashSet::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             runner_config: runner::load_runner_config(None).ok(),
             runner_rx: None,
             explore_focus: ColumnFocus::Feature,
@@ -915,6 +938,7 @@ impl App {
     fn explore_exit_edit(&mut self) {
         self.clear_step_input_state();
         self.clear_step_keyword_picker();
+        self.pending_char = None;
         self.explore_edit_mode = false;
         self.status = "Explore mode".to_string();
     }
@@ -940,6 +964,8 @@ impl App {
         self.desired_col = 0;
         self.scroll_row = 0;
         self.focus_slot = BddFocusSlot::Keyword;
+        self.pending_char = None;
+        self.scenario_fold.clear();
     }
 
     /// Scroll the editor to show `line_number` (1-based) centered in view.
@@ -1237,6 +1263,9 @@ impl App {
     // ── Action handler ──────────────────────────────────────────────
 
     pub fn handle_action(&mut self, action: Action) -> Result<()> {
+        if !matches!(action, Action::PendingChar(_)) {
+            self.pending_char = None;
+        }
         match action {
             // Explore tab navigation
             Action::FocusNextColumn => {
@@ -1350,10 +1379,34 @@ impl App {
             }
             Action::PageUp => self.page_up(),
             Action::PageDown => self.page_down(),
+            Action::MoveStepUp => self.move_step_block(false),
+            Action::MoveStepDown => self.move_step_block(true),
+            Action::SwitchKeyword(keyword) => self.switch_step_keyword(keyword),
+            Action::InsertStepBelow => self.insert_step(false),
+            Action::InsertStepAbove => self.insert_step(true),
+            Action::NewScenario => self.insert_scenario(),
+            Action::DeleteNode => self.delete_current_node(),
+            Action::CopyStep => self.copy_current_step(),
+            Action::PasteStep => self.paste_step(),
+            Action::ToggleScenarioFold => self.toggle_current_scenario_fold(),
+            Action::FoldAllScenarios => self.fold_all_scenarios(),
+            Action::RunBackground => self.run_background(),
+            Action::Undo => self.undo(),
+            Action::Redo => self.redo(),
+            Action::PendingChar(ch) => {
+                self.pending_char = Some(ch);
+                self.status = match ch {
+                    'd' => "`dd` to delete".to_string(),
+                    'y' => "`yy` to copy".to_string(),
+                    _ => "Pending command".to_string(),
+                };
+                self.quit_pending_confirm = false;
+            }
             Action::Insert(ch) => {
                 if !self.step_input_active {
                     return Ok(());
                 }
+                self.push_undo();
                 self.buffer
                     .insert_char(self.cursor_row, self.cursor_col, ch);
                 self.cursor_col += 1;
@@ -1375,6 +1428,7 @@ impl App {
                 if self.cursor_col <= self.step_input_min_col {
                     return Ok(());
                 }
+                self.push_undo();
                 let (row, col, changed) = self.buffer.backspace(self.cursor_row, self.cursor_col);
                 self.cursor_row = row;
                 self.cursor_col = col;
@@ -1388,6 +1442,7 @@ impl App {
                 if !self.step_input_active {
                     return Ok(());
                 }
+                self.push_undo();
                 if self.buffer.delete(self.cursor_row, self.cursor_col) {
                     self.dirty = true;
                     self.quit_pending_confirm = false;
@@ -1405,6 +1460,7 @@ impl App {
                     return Ok(());
                 }
                 let prefix: String = line.chars().take(self.step_input_min_col).collect();
+                self.push_undo();
                 self.buffer.insert_char(row, self.cursor_col, '\n');
                 self.buffer.insert_str(row + 1, 0, &prefix);
                 self.cursor_row = row + 1;
@@ -1420,46 +1476,7 @@ impl App {
             Action::Save => self.save()?,
             Action::Quit => self.quit(),
             Action::SelectTab(tab) => self.select_tab(tab),
-            Action::ActivateStepInput => {
-                if !self.is_editor_active() {
-                    self.status = "Enter editor mode first".to_string();
-                    return Ok(());
-                }
-                let line = self.buffer.line(self.cursor_row);
-                match self.focus_slot {
-                    BddFocusSlot::Keyword => {
-                        self.clear_step_input_state();
-                        if let Some(idx) = current_step_keyword_index(&line) {
-                            self.step_keyword_picker = Some(StepKeywordPicker {
-                                buffer_row: self.cursor_row,
-                                selected: idx,
-                            });
-                            self.status = "Select step keyword (↑↓ Enter, Esc cancel)".to_string();
-                        } else {
-                            self.status =
-                                "Step keyword list is available on step lines only".to_string();
-                        }
-                    }
-                    BddFocusSlot::Body => {
-                        self.clear_step_keyword_picker();
-                        let Some(body_start) =
-                            line_body_edit_min_col_in_buffer(&self.buffer, self.cursor_row)
-                        else {
-                            self.status = "No editable text region on this line".to_string();
-                            self.quit_pending_confirm = false;
-                            return Ok(());
-                        };
-                        self.step_input_active = true;
-                        self.step_input_row = self.cursor_row;
-                        self.step_input_min_col = body_start;
-                        let end = self.buffer.line_len_chars(self.cursor_row);
-                        self.cursor_col = end;
-                        self.desired_col = end;
-                        self.status = "Editing active".to_string();
-                    }
-                }
-                self.quit_pending_confirm = false;
-            }
+            Action::ActivateStepInput => self.begin_step_or_title_edit()?,
             Action::StepKeywordPickerUp => self.step_keyword_picker_move(-1),
             Action::StepKeywordPickerDown => self.step_keyword_picker_move(1),
             Action::StepKeywordPickerConfirm => self.confirm_step_keyword_picker(),
@@ -1530,6 +1547,7 @@ impl App {
             self.clear_step_input_state();
         }
         self.clear_step_keyword_picker();
+        self.pending_char = None;
         if self.active_tab == MainTab::Explore {
             self.explore_edit_mode = false;
             self.explore_detail_open = false;
@@ -1556,6 +1574,411 @@ impl App {
         self.step_keyword_picker = None;
     }
 
+    fn push_undo(&mut self) {
+        self.undo_stack
+            .push((self.buffer.clone(), self.cursor_row, self.cursor_col));
+        self.redo_stack.clear();
+    }
+
+    fn restore_snapshot(&mut self, snapshot: (EditorBuffer, usize, usize)) {
+        self.buffer = snapshot.0;
+        self.cursor_row = snapshot.1;
+        self.cursor_col = snapshot.2;
+        self.desired_col = self.cursor_col;
+        self.clear_step_input_state();
+        self.clear_step_keyword_picker();
+        self.pending_char = None;
+        self.scenario_fold.clear();
+    }
+
+    fn hidden_editor_rows(&self) -> HashSet<usize> {
+        self.scenario_fold
+            .iter()
+            .flat_map(|&scenario_row| scenario_content_rows(&self.buffer, scenario_row))
+            .collect()
+    }
+
+    pub fn visible_editor_rows(&self) -> Vec<usize> {
+        let hidden = self.hidden_editor_rows();
+        let last_row = self.buffer.line_count().saturating_sub(1);
+        let mut rows: Vec<usize> = (0..self.buffer.line_count())
+            .filter(|row| !hidden.contains(row))
+            .filter(|&row| !(row == last_row && self.buffer.line(row).is_empty()))
+            .collect();
+        if rows.is_empty() {
+            rows.push(0);
+        }
+        rows
+    }
+
+    pub fn folded_step_count(&self, scenario_row: usize) -> Option<usize> {
+        self.scenario_fold
+            .contains(&scenario_row)
+            .then(|| scenario_step_rows(&self.buffer, scenario_row).len())
+    }
+
+    fn clear_structural_state(&mut self) {
+        self.pending_char = None;
+        self.scenario_fold.clear();
+    }
+
+    fn current_editor_scenario(&self) -> Option<(usize, usize)> {
+        let feature_idx = self.active_buffer_idx?;
+        let feature = self.project.features.get(feature_idx)?;
+        let line_number = self.cursor_row + 1;
+        let mut selected = None;
+        for (scenario_idx, scenario) in feature.scenarios.iter().enumerate() {
+            if scenario.line_number <= line_number {
+                selected = Some(scenario_idx);
+            } else {
+                break;
+            }
+        }
+        selected.map(|scenario_idx| (feature_idx, scenario_idx))
+    }
+
+    fn begin_step_or_title_edit(&mut self) -> Result<()> {
+        if !self.is_editor_active() {
+            self.status = "Enter editor mode first".to_string();
+            return Ok(());
+        }
+        let line = self.buffer.line(self.cursor_row);
+        match self.focus_slot {
+            BddFocusSlot::Keyword => {
+                self.clear_step_input_state();
+                if let Some(idx) = current_step_keyword_index(&line) {
+                    self.step_keyword_picker = Some(StepKeywordPicker {
+                        buffer_row: self.cursor_row,
+                        selected: idx,
+                    });
+                    self.status = "Select step keyword (↑↓ Enter, Esc cancel)".to_string();
+                } else {
+                    self.status = "Step keyword list is available on step lines only".to_string();
+                }
+            }
+            BddFocusSlot::Body => {
+                self.clear_step_keyword_picker();
+                let Some(body_start) =
+                    line_body_edit_min_col_in_buffer(&self.buffer, self.cursor_row)
+                else {
+                    self.status = "No editable text region on this line".to_string();
+                    self.quit_pending_confirm = false;
+                    return Ok(());
+                };
+                self.step_input_active = true;
+                self.step_input_row = self.cursor_row;
+                self.step_input_min_col = body_start;
+                let end = self.buffer.line_len_chars(self.cursor_row);
+                self.cursor_col = end;
+                self.desired_col = end;
+                self.status = "Editing active".to_string();
+            }
+        }
+        self.pending_char = None;
+        self.quit_pending_confirm = false;
+        Ok(())
+    }
+
+    fn switch_step_keyword(&mut self, keyword: &'static str) {
+        let line = self.buffer.line(self.cursor_row);
+        if let Some(new_line) = replace_step_keyword_line(&line, keyword) {
+            self.push_undo();
+            self.buffer.replace_line(self.cursor_row, &new_line);
+            self.focus_slot = BddFocusSlot::Keyword;
+            self.dirty = true;
+            self.pending_char = None;
+            self.quit_pending_confirm = false;
+            self.status = format!("Step keyword set to {keyword}");
+        } else {
+            self.status = "Step keyword shortcuts work on step lines only".to_string();
+        }
+    }
+
+    fn insert_step(&mut self, above: bool) {
+        if !self.is_editor_active() {
+            self.status = "Enter editor mode first".to_string();
+            return;
+        }
+        self.push_undo();
+        let inserted_row = if above {
+            insert_step_above(&mut self.buffer, self.cursor_row)
+        } else {
+            insert_step_below(&mut self.buffer, self.cursor_row)
+        };
+        let Some(row) = inserted_row else {
+            let _ = self.undo_stack.pop();
+            self.status = "No scenario selected for step insertion".to_string();
+            return;
+        };
+        self.cursor_row = row;
+        self.focus_slot = BddFocusSlot::Body;
+        self.dirty = true;
+        self.clear_structural_state();
+        let _ = self.begin_step_or_title_edit();
+        self.status = if above {
+            "Inserted step above".to_string()
+        } else {
+            "Inserted step below".to_string()
+        };
+    }
+
+    fn insert_scenario(&mut self) {
+        if !self.is_editor_active() {
+            self.status = "Enter editor mode first".to_string();
+            return;
+        }
+        self.push_undo();
+        let Some(row) = insert_scenario_after_current(&mut self.buffer, self.cursor_row) else {
+            let _ = self.undo_stack.pop();
+            self.status = "No scenario selected".to_string();
+            return;
+        };
+        self.cursor_row = row;
+        self.cursor_col = 0;
+        self.desired_col = 0;
+        self.focus_slot = BddFocusSlot::Body;
+        self.dirty = true;
+        self.clear_structural_state();
+        let _ = self.begin_step_or_title_edit();
+        self.status = "Inserted scenario".to_string();
+    }
+
+    fn delete_current_node(&mut self) {
+        if !self.is_editor_active() {
+            self.status = "Enter editor mode first".to_string();
+            return;
+        }
+        let line = self.buffer.line(self.cursor_row);
+        self.push_undo();
+        let target_row = if scenario_header_for_row(&self.buffer, self.cursor_row)
+            == Some(self.cursor_row)
+            && line.trim_start().starts_with("Scenario")
+        {
+            delete_scenario_block(&mut self.buffer, self.cursor_row)
+        } else {
+            delete_step(&mut self.buffer, self.cursor_row)
+        };
+        let Some(row) = target_row else {
+            let _ = self.undo_stack.pop();
+            self.status = "Delete works on steps or scenario headers".to_string();
+            return;
+        };
+        self.cursor_row = row;
+        self.cursor_col = 0;
+        self.desired_col = 0;
+        self.focus_slot = if is_feature_narrative_row(&self.buffer, self.cursor_row) {
+            BddFocusSlot::Body
+        } else {
+            BddFocusSlot::Keyword
+        };
+        self.dirty = true;
+        self.clear_structural_state();
+        self.status = "Deleted node".to_string();
+    }
+
+    fn copy_current_step(&mut self) {
+        let Some(lines) = crate::bdd_nav::step_block_lines(&self.buffer, self.cursor_row) else {
+            self.status = "Copy works on steps only".to_string();
+            return;
+        };
+        self.clipboard = Some(lines.join("\n"));
+        self.pending_char = None;
+        self.quit_pending_confirm = false;
+        self.status = "Step copied".to_string();
+    }
+
+    fn paste_step(&mut self) {
+        if !self.is_editor_active() {
+            self.status = "Enter editor mode first".to_string();
+            return;
+        }
+        let Some(clipboard) = self.clipboard.clone() else {
+            self.status = "Clipboard is empty".to_string();
+            return;
+        };
+        let scenario_row = scenario_header_for_row(&self.buffer, self.cursor_row);
+        let Some(scenario_row) = scenario_row else {
+            self.status = "Paste works inside a scenario".to_string();
+            return;
+        };
+        let block_lines = clipboard
+            .lines()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let insert_at = if crate::bdd_nav::step_block_lines(&self.buffer, self.cursor_row).is_some()
+        {
+            let step_rows = scenario_step_rows(&self.buffer, scenario_row);
+            if step_rows.contains(&self.cursor_row) {
+                let mut end_row = self.cursor_row + 1;
+                while end_row < self.buffer.line_count() {
+                    let line = self.buffer.line(end_row);
+                    let trimmed = line.trim_start();
+                    if crate::bdd_nav::step_edit_start_col(&line).is_some()
+                        || trimmed.starts_with("Scenario:")
+                        || trimmed.starts_with("Scenario Outline:")
+                        || trimmed.starts_with("Background:")
+                        || trimmed.starts_with("Feature:")
+                    {
+                        break;
+                    }
+                    end_row += 1;
+                }
+                end_row
+            } else {
+                scenario_row + 1
+            }
+        } else {
+            scenario_row + 1
+        };
+        self.push_undo();
+        let (mut lines, trailing_newline) = {
+            let text = self.buffer.as_string();
+            let trailing_newline = text.ends_with('\n');
+            let mut lines = (0..self.buffer.line_count())
+                .map(|row| self.buffer.line(row))
+                .collect::<Vec<_>>();
+            if trailing_newline && lines.last().is_some_and(|line| line.is_empty()) {
+                lines.pop();
+            }
+            (lines, trailing_newline)
+        };
+        let insert_at = insert_at.min(lines.len());
+        lines.splice(insert_at..insert_at, block_lines.clone());
+        let mut text = if lines.is_empty() {
+            String::new()
+        } else {
+            lines.join("\n")
+        };
+        if trailing_newline {
+            text.push('\n');
+        }
+        self.buffer = EditorBuffer::from_string(text);
+        self.cursor_row = insert_at;
+        self.cursor_col = 0;
+        self.desired_col = 0;
+        self.focus_slot = BddFocusSlot::Keyword;
+        self.dirty = true;
+        self.clear_structural_state();
+        self.status = "Step pasted".to_string();
+    }
+
+    fn move_step_block(&mut self, down: bool) {
+        if !self.is_editor_active() {
+            self.status = "Enter editor mode first".to_string();
+            return;
+        }
+        self.push_undo();
+        let moved_to = if down {
+            swap_step_with_next(&mut self.buffer, self.cursor_row)
+        } else {
+            swap_step_with_prev(&mut self.buffer, self.cursor_row)
+        };
+        let Some(row) = moved_to else {
+            let _ = self.undo_stack.pop();
+            self.status = if down {
+                "Step cannot move further down".to_string()
+            } else {
+                "Step cannot move further up".to_string()
+            };
+            return;
+        };
+        self.cursor_row = row;
+        self.cursor_col = 0;
+        self.desired_col = 0;
+        self.focus_slot = BddFocusSlot::Keyword;
+        self.dirty = true;
+        self.clear_structural_state();
+        self.status = if down {
+            "Moved step down".to_string()
+        } else {
+            "Moved step up".to_string()
+        };
+    }
+
+    fn toggle_current_scenario_fold(&mut self) {
+        let Some(scenario_row) = scenario_header_for_row(&self.buffer, self.cursor_row) else {
+            self.status = "Fold works inside a scenario".to_string();
+            return;
+        };
+        if self.scenario_fold.insert(scenario_row) {
+            self.status = "Scenario folded".to_string();
+        } else {
+            self.scenario_fold.remove(&scenario_row);
+            self.status = "Scenario expanded".to_string();
+        }
+        if self.hidden_editor_rows().contains(&self.cursor_row) {
+            self.cursor_row = scenario_row;
+            self.cursor_col = 0;
+            self.desired_col = 0;
+            self.focus_slot = BddFocusSlot::Keyword;
+        }
+        self.pending_char = None;
+        self.quit_pending_confirm = false;
+    }
+
+    fn fold_all_scenarios(&mut self) {
+        self.scenario_fold = (0..self.buffer.line_count())
+            .filter(|&row| {
+                let line = self.buffer.line(row);
+                let trimmed = line.trim_start();
+                trimmed.starts_with("Scenario:") || trimmed.starts_with("Scenario Outline:")
+            })
+            .collect();
+        if self.hidden_editor_rows().contains(&self.cursor_row)
+            && let Some(scenario_row) = scenario_header_for_row(&self.buffer, self.cursor_row)
+        {
+            self.cursor_row = scenario_row;
+            self.cursor_col = 0;
+            self.desired_col = 0;
+            self.focus_slot = BddFocusSlot::Keyword;
+        }
+        self.pending_char = None;
+        self.quit_pending_confirm = false;
+        self.status = "All scenarios folded".to_string();
+    }
+
+    fn run_background(&mut self) {
+        if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+            self.start_explore_run();
+            return;
+        }
+        let Some((feature_idx, scenario_idx)) = self.current_editor_scenario() else {
+            self.status = "No scenario selected to run".to_string();
+            return;
+        };
+        self.explore_selected_feature = feature_idx;
+        self.explore_selected_scenario = scenario_idx;
+        self.explore_selected_step = 0;
+        self.start_explore_run();
+        self.status = "Background run started".to_string();
+    }
+
+    fn undo(&mut self) {
+        let Some(snapshot) = self.undo_stack.pop() else {
+            self.status = "Nothing to undo".to_string();
+            return;
+        };
+        self.redo_stack
+            .push((self.buffer.clone(), self.cursor_row, self.cursor_col));
+        self.restore_snapshot(snapshot);
+        self.dirty = true;
+        self.status = "Undo".to_string();
+        self.quit_pending_confirm = false;
+    }
+
+    fn redo(&mut self) {
+        let Some(snapshot) = self.redo_stack.pop() else {
+            self.status = "Nothing to redo".to_string();
+            return;
+        };
+        self.undo_stack
+            .push((self.buffer.clone(), self.cursor_row, self.cursor_col));
+        self.restore_snapshot(snapshot);
+        self.dirty = true;
+        self.status = "Redo".to_string();
+        self.quit_pending_confirm = false;
+    }
+
     fn step_keyword_picker_move(&mut self, delta: isize) {
         let Some(ref mut p) = self.step_keyword_picker else {
             return;
@@ -1573,6 +1996,7 @@ impl App {
         let line = self.buffer.line(picker.buffer_row);
         let new_kw = STEP_KEYWORDS_CYCLE[picker.selected];
         if let Some(new_line) = replace_step_keyword_line(&line, new_kw) {
+            self.push_undo();
             self.buffer.replace_line(picker.buffer_row, &new_line);
             self.cursor_row = picker.buffer_row;
             self.cursor_col = 0;
@@ -1582,11 +2006,12 @@ impl App {
             self.status = "Step keyword updated".to_string();
         }
         self.step_keyword_picker = None;
+        self.pending_char = None;
         self.quit_pending_confirm = false;
     }
 
     /// Returns `true` when the editor panel is active and accepts editing operations.
-    fn is_editor_active(&self) -> bool {
+    pub fn is_editor_active(&self) -> bool {
         (self.active_tab == MainTab::MindMap && self.view_stage == ViewStage::EditorAndPanel)
             || (self.active_tab == MainTab::Explore && self.explore_edit_mode)
     }
@@ -1617,11 +2042,15 @@ impl App {
         let body_chain_nav = self.focus_slot == BddFocusSlot::Body
             && (body_char_range(&line).is_some() || header_title_edit_start_col(&line).is_some())
             && !is_feature_narrative_row(&self.buffer, self.cursor_row);
+        let hidden = self.hidden_editor_rows();
         let rows = if body_chain_nav {
             bdd_step_and_header_title_rows(&self.buffer)
         } else {
             bdd_node_rows(&self.buffer)
-        };
+        }
+        .into_iter()
+        .filter(|row| !hidden.contains(row))
+        .collect();
         (rows, body_chain_nav)
     }
 
@@ -1840,7 +2269,7 @@ fn parse_case_key(id: &str) -> Option<(usize, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use super::{
         App, BddFocusSlot, ColumnFocus, MainTab, ViewStage, current_step_keyword_index,
@@ -2284,6 +2713,11 @@ mod tests {
             step_input_row: 0,
             step_input_min_col: 0,
             step_keyword_picker: None,
+            pending_char: None,
+            clipboard: None,
+            scenario_fold: HashSet::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             runner_config: None,
             runner_rx: None,
             explore_focus: ColumnFocus::Step,
@@ -2374,6 +2808,11 @@ Feature: B
             step_input_row: 0,
             step_input_min_col: 0,
             step_keyword_picker: None,
+            pending_char: None,
+            clipboard: None,
+            scenario_fold: HashSet::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             runner_config: None,
             runner_rx: None,
             explore_focus: ColumnFocus::Feature,
@@ -2405,5 +2844,82 @@ Feature: B
         app.explore_set_feature(0);
         assert_eq!(app.explore_selected_scenario, 1);
         assert_eq!(app.explore_selected_step, 2);
+    }
+
+    #[test]
+    fn test_undo_and_redo_restore_buffer_state() {
+        let mut app = editor_test_app();
+        app.buffer = EditorBuffer::from_string("Given hello".to_string());
+        app.sync_cursor_to_first_node();
+        app.focus_slot = BddFocusSlot::Body;
+        app.handle_action(Action::ActivateStepInput)
+            .expect("activate should work");
+        app.handle_action(Action::Insert('!'))
+            .expect("insert should work");
+        assert_eq!(app.buffer.line(0), "Given hello!");
+
+        app.handle_action(Action::Undo).expect("undo should work");
+        assert_eq!(app.buffer.line(0), "Given hello");
+
+        app.handle_action(Action::Redo).expect("redo should work");
+        assert_eq!(app.buffer.line(0), "Given hello!");
+    }
+
+    #[test]
+    fn test_pending_delete_sequence_deletes_current_step() {
+        let mut app = editor_test_app();
+        app.buffer = EditorBuffer::from_string(
+            "Feature: A\n  Scenario: S\n    Given one\n    Then two\n".to_string(),
+        );
+        app.cursor_row = 2;
+        app.focus_slot = BddFocusSlot::Keyword;
+
+        app.handle_action(Action::PendingChar('d'))
+            .expect("first d should work");
+        assert_eq!(app.pending_char, Some('d'));
+
+        app.handle_action(Action::DeleteNode)
+            .expect("second d should delete");
+        assert_eq!(app.buffer.line(2), "    Then two");
+        assert!(app.pending_char.is_none());
+    }
+
+    #[test]
+    fn test_copy_and_paste_step_duplicate_block() {
+        let mut app = editor_test_app();
+        app.buffer = EditorBuffer::from_string(
+            "Feature: A\n  Scenario: S\n    Given one\n      | a |\n    Then two\n".to_string(),
+        );
+        app.cursor_row = 2;
+        app.focus_slot = BddFocusSlot::Keyword;
+
+        app.handle_action(Action::CopyStep)
+            .expect("copy should work");
+        app.handle_action(Action::MoveDown)
+            .expect("move should work");
+        app.handle_action(Action::PasteStep)
+            .expect("paste should work");
+
+        assert_eq!(app.buffer.line(4), "    Then two");
+        assert_eq!(app.buffer.line(5), "    Given one");
+        assert_eq!(app.buffer.line(6), "      | a |");
+    }
+
+    #[test]
+    fn test_toggle_fold_hides_scenario_rows_from_visible_editor_rows() {
+        let mut app = editor_test_app();
+        app.buffer = EditorBuffer::from_string(
+            "Feature: A\n  Scenario: S\n    Given one\n    Then two\n  Scenario: T\n    When next\n"
+                .to_string(),
+        );
+        app.cursor_row = 2;
+        app.focus_slot = BddFocusSlot::Keyword;
+
+        app.handle_action(Action::ToggleScenarioFold)
+            .expect("fold should work");
+
+        assert_eq!(app.cursor_row, 1);
+        assert_eq!(app.folded_step_count(1), Some(2));
+        assert_eq!(app.visible_editor_rows(), vec![0, 1, 4, 5]);
     }
 }
