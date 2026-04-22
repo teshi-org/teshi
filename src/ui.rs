@@ -209,6 +209,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         let key_hints = footer_hints(app);
         frame.render_widget(Paragraph::new(key_hints), chunks[3]);
     }
+
+    render_external_change_prompt(frame, app, chunks[2]);
 }
 
 fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -539,6 +541,44 @@ fn render_failure_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     let out_lines = truncate_lines(build_case_detail_lines(&scenario.name, detail), inner.width);
     frame.render_widget(Paragraph::new(Text::from(out_lines)), inner);
+}
+
+fn render_external_change_prompt(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    if !app.has_external_change_prompt() {
+        return;
+    }
+    if area.width < 10 || area.height < 3 {
+        return;
+    }
+    let title = app
+        .external_change_prompt_title()
+        .unwrap_or("Feature changed on disk");
+    let file_name = app
+        .external_change_prompt_path()
+        .unwrap_or_else(|| "feature".to_string());
+
+    let popup_w = (area.width as f32 * 0.60) as u16;
+    let popup_h = area.height.clamp(3, 7);
+    let popup_w = popup_w.max(30).min(area.width);
+    let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let lines = vec![
+        Line::raw(format!("Detected external updates for {file_name}.")),
+        Line::raw(""),
+        Line::raw("Reload latest input: [Enter] / [r]"),
+        Line::raw("Keep local buffer: [Esc] / [k]"),
+    ];
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
 fn apply_line_background(line: Line<'static>, bg: Style) -> Line<'static> {

@@ -132,3 +132,23 @@ Feature: Project File Management
     When the tree refreshes
     Then the new step appears in the tree under its scenario
     And the StepIndex includes the new step body
+
+  Scenario: External feature update reloads clean views
+    Given a feature file is open without local unsaved changes
+    When another tool updates the same .feature file on disk
+    Then the latest file content is reloaded into the current tool
+    And the Explore tab shows the updated scenarios and steps
+    And the MindMap tree reflects the updated structure
+
+  Scenario: External feature update prompts on local conflict
+    Given a feature file has local unsaved changes in the current tool
+    When another tool updates the same .feature file on disk
+    Then the current tool prompts whether to reload the latest disk content
+    And the local buffer is not overwritten before the user chooses
+
+  Scenario: Confirming reload applies the latest external feature content
+    Given a feature file has both local unsaved changes and a newer disk version
+    When I choose to reload the latest disk content
+    Then the editor buffer is replaced with the disk version
+    And the Explore tab shows the latest scenarios and steps
+    And the MindMap tree is rebuilt from the latest feature content

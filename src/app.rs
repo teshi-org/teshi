@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 
@@ -93,6 +94,29 @@ pub struct StepKeywordPicker {
     pub selected: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+impl FileStamp {
+    fn capture(path: &Path) -> Option<Self> {
+        let meta = fs::metadata(path).ok()?;
+        Some(Self {
+            modified: meta.modified().ok(),
+            len: meta.len(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ExternalChangePrompt {
+    feature_idx: usize,
+    path: PathBuf,
+    disk_stamp: Option<FileStamp>,
+}
+
 pub struct App {
     // ── Multi-file project ──────────────────────────────────────────
     pub project: BddProject,
@@ -101,6 +125,8 @@ pub struct App {
     pub mindmap_location_selection: HashMap<String, usize>,
     /// One `EditorBuffer` per feature file; order matches `project.features`.
     pub buffers: Vec<EditorBuffer>,
+    buffer_dirty: Vec<bool>,
+    disk_stamps: Vec<Option<FileStamp>>,
     /// Which buffer is shown in the editor panel (`None` when no file is loaded).
     pub active_buffer_idx: Option<usize>,
     pub view_stage: ViewStage,
@@ -137,6 +163,8 @@ pub struct App {
     redo_stack: Vec<(EditorBuffer, usize, usize)>,
     pub runner_config: Option<RunnerConfig>,
     runner_rx: Option<Receiver<RunEvent>>,
+    last_external_check: Instant,
+    external_change_prompt: Option<ExternalChangePrompt>,
     // ── Explore tab state ───────────────────────────────────────────
     pub explore_focus: ColumnFocus,
     pub explore_selected_feature: usize,
@@ -155,6 +183,14 @@ pub struct App {
 }
 
 impl App {
+    fn capture_disk_stamps(project: &BddProject) -> Vec<Option<FileStamp>> {
+        project
+            .features
+            .iter()
+            .map(|feature| FileStamp::capture(&feature.file_path))
+            .collect()
+    }
+
     /// Builds the editor state from process arguments.
     ///
     /// Accepts a directory path (recursive `.feature` scan) or a single file path.
@@ -175,6 +211,7 @@ impl App {
         let project = gherkin::parse_project(dir);
         let step_index = StepIndex::build(&project);
         let mindmap_index = mindmap::build_index(&project);
+        let disk_stamps = Self::capture_disk_stamps(&project);
         let buffers: Vec<EditorBuffer> = project
             .features
             .iter()
@@ -183,6 +220,7 @@ impl App {
                 EditorBuffer::from_string(content)
             })
             .collect();
+        let buffer_dirty = vec![false; buffers.len()];
         let tree_state = mindmap::init_tree_state(&mindmap_index);
         let (buffer, file_path, active_idx) = if buffers.is_empty() {
             (EditorBuffer::from_string(String::new()), None, None)
@@ -199,6 +237,8 @@ impl App {
             mindmap_index,
             mindmap_location_selection: HashMap::new(),
             buffers,
+            buffer_dirty,
+            disk_stamps,
             active_buffer_idx: active_idx,
             view_stage: ViewStage::TreeOnly,
             tree_state,
@@ -233,6 +273,8 @@ impl App {
             redo_stack: Vec::new(),
             runner_config: runner::load_runner_config(None).ok(),
             runner_rx: None,
+            last_external_check: Instant::now(),
+            external_change_prompt: None,
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
             explore_selected_scenario: 0,
@@ -270,6 +312,8 @@ impl App {
         let step_index = StepIndex::build(&project);
         let mindmap_index = mindmap::build_index(&project);
         let buffers = vec![EditorBuffer::from_string(content.clone())];
+        let buffer_dirty = vec![false; buffers.len()];
+        let disk_stamps = Self::capture_disk_stamps(&project);
         let tree_state = mindmap::init_tree_state(&mindmap_index);
         let mut app = Self {
             project,
@@ -277,6 +321,8 @@ impl App {
             mindmap_index,
             mindmap_location_selection: HashMap::new(),
             buffers,
+            buffer_dirty,
+            disk_stamps,
             active_buffer_idx: Some(0),
             view_stage: ViewStage::TreeOnly,
             tree_state,
@@ -306,6 +352,8 @@ impl App {
             redo_stack: Vec::new(),
             runner_config: runner::load_runner_config(None).ok(),
             runner_rx: None,
+            last_external_check: Instant::now(),
+            external_change_prompt: None,
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
             explore_selected_scenario: 0,
@@ -340,6 +388,8 @@ impl App {
             mindmap_index,
             mindmap_location_selection: HashMap::new(),
             buffers: Vec::new(),
+            buffer_dirty: Vec::new(),
+            disk_stamps: Vec::new(),
             active_buffer_idx: None,
             view_stage: ViewStage::TreeOnly,
             tree_state,
@@ -369,6 +419,8 @@ impl App {
             redo_stack: Vec::new(),
             runner_config: runner::load_runner_config(None).ok(),
             runner_rx: None,
+            last_external_check: Instant::now(),
+            external_change_prompt: None,
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
             explore_selected_scenario: 0,
@@ -430,6 +482,50 @@ impl App {
         }
     }
 
+    fn sync_dirty_flag_with_active_buffer(&mut self) {
+        self.dirty = self
+            .active_buffer_idx
+            .and_then(|idx| self.buffer_dirty.get(idx).copied())
+            .unwrap_or(false);
+    }
+
+    fn set_buffer_dirty(&mut self, idx: usize, dirty: bool) {
+        if let Some(slot) = self.buffer_dirty.get_mut(idx) {
+            *slot = dirty;
+        }
+        if self.active_buffer_idx == Some(idx) {
+            self.dirty = dirty;
+        }
+    }
+
+    fn mark_current_buffer_dirty(&mut self) {
+        if let Some(idx) = self.active_buffer_idx {
+            self.set_buffer_dirty(idx, true);
+        } else {
+            self.dirty = true;
+        }
+    }
+
+    pub fn has_external_change_prompt(&self) -> bool {
+        self.external_change_prompt.is_some()
+    }
+
+    pub fn external_change_prompt_title(&self) -> Option<&'static str> {
+        self.external_change_prompt
+            .as_ref()
+            .map(|_| "Feature changed on disk")
+    }
+
+    pub fn external_change_prompt_path(&self) -> Option<String> {
+        self.external_change_prompt.as_ref().map(|prompt| {
+            prompt
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| prompt.path.display().to_string())
+        })
+    }
+
     pub fn poll_runner_events(&mut self) {
         let Some(rx) = self.runner_rx.take() else {
             return;
@@ -457,6 +553,125 @@ impl App {
         if keep_rx {
             self.runner_rx = Some(rx);
         }
+    }
+
+    pub fn poll_external_feature_changes(&mut self) {
+        if self.project.features.is_empty() || self.external_change_prompt.is_some() {
+            return;
+        }
+        if self.last_external_check.elapsed() < Duration::from_millis(250) {
+            return;
+        }
+        self.last_external_check = Instant::now();
+
+        for idx in 0..self.project.features.len() {
+            let path = self.project.features[idx].file_path.clone();
+            let current_stamp = FileStamp::capture(&path);
+            let known_stamp = self.disk_stamps.get(idx).cloned().unwrap_or(None);
+            if current_stamp == known_stamp {
+                continue;
+            }
+
+            if self.buffer_dirty.get(idx).copied().unwrap_or(false) {
+                self.external_change_prompt = Some(ExternalChangePrompt {
+                    feature_idx: idx,
+                    path: path.clone(),
+                    disk_stamp: current_stamp,
+                });
+                self.status = format!(
+                    "Feature changed on disk: {}. Reload [Enter/r] or keep local [Esc/k].",
+                    path.display()
+                );
+            } else if let Err(err) = self.reload_feature_from_disk(idx, current_stamp) {
+                self.status = format!("Failed to reload {}: {err}", path.display());
+            }
+            self.quit_pending_confirm = false;
+            break;
+        }
+    }
+
+    fn reload_feature_from_disk(&mut self, idx: usize, stamp: Option<FileStamp>) -> Result<()> {
+        if idx >= self.project.features.len() || idx >= self.buffers.len() {
+            return Ok(());
+        }
+
+        let selected_tree_location = self.selected_tree_location();
+        let path = self.project.features[idx].file_path.clone();
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let reloaded_buffer = EditorBuffer::from_string(content.clone());
+        let feature = gherkin::parse_feature(&content, path.clone());
+
+        self.project.features[idx] = feature;
+        self.buffers[idx] = reloaded_buffer.clone();
+        self.set_buffer_dirty(idx, false);
+        if let Some(slot) = self.disk_stamps.get_mut(idx) {
+            *slot = stamp.or_else(|| FileStamp::capture(&path));
+        }
+
+        if self.active_buffer_idx == Some(idx) {
+            self.buffer = reloaded_buffer;
+            self.file_path = Some(path.clone());
+            self.clear_step_input_state();
+            self.clear_step_keyword_picker();
+            self.pending_char = None;
+            self.scenario_fold.clear();
+            self.clamp_cursor();
+        }
+
+        self.rebuild_project_views(selected_tree_location);
+        self.external_change_prompt = None;
+        self.status = format!("Reloaded from disk: {}", path.display());
+        self.quit_pending_confirm = false;
+        Ok(())
+    }
+
+    fn rebuild_project_views(&mut self, selected_tree_location: Option<(usize, usize)>) {
+        self.step_index = StepIndex::build(&self.project);
+        self.mindmap_index = mindmap::build_index(&self.project);
+        self.tree_state = mindmap::init_tree_state(&self.mindmap_index);
+        self.mindmap_location_selection.clear();
+        self.normalize_explore_selection();
+
+        if let Some((feature_idx, line_number)) = selected_tree_location {
+            self.restore_tree_selection_from_line(feature_idx, line_number);
+        }
+
+        if self.active_tab == MainTab::MindMap && self.view_stage == ViewStage::TreeAndEditor {
+            self.rebuild_preview();
+        }
+    }
+
+    fn restore_tree_selection_from_line(&mut self, feature_idx: usize, line_number: usize) {
+        let Some(node_match) =
+            mindmap::find_closest_node(&self.mindmap_index, feature_idx, line_number)
+        else {
+            return;
+        };
+        let Some(path) = mindmap::node_id_to_path(&node_match.node_id, &self.mindmap_index) else {
+            return;
+        };
+        self.tree_state.select(path);
+        self.mindmap_location_selection
+            .insert(node_match.node_id, node_match.location_index);
+    }
+
+    fn accept_external_reload(&mut self) -> Result<()> {
+        let Some(prompt) = self.external_change_prompt.clone() else {
+            return Ok(());
+        };
+        self.reload_feature_from_disk(prompt.feature_idx, prompt.disk_stamp)
+    }
+
+    fn keep_local_external_version(&mut self) {
+        let Some(prompt) = self.external_change_prompt.take() else {
+            return;
+        };
+        if let Some(slot) = self.disk_stamps.get_mut(prompt.feature_idx) {
+            *slot = prompt.disk_stamp;
+        }
+        self.status = format!("Kept local buffer for {}", prompt.path.display());
+        self.quit_pending_confirm = false;
     }
 
     fn apply_run_event(&mut self, event: RunEvent) {
@@ -958,6 +1173,7 @@ impl App {
         }
         self.active_buffer_idx = Some(idx);
         self.buffer = self.buffers[idx].clone();
+        self.sync_dirty_flag_with_active_buffer();
         self.file_path = self.project.features.get(idx).map(|f| f.file_path.clone());
         self.cursor_row = 0;
         self.cursor_col = 0;
@@ -1157,11 +1373,8 @@ impl App {
         let path = self.project.features[idx].file_path.clone();
         let content = self.buffer.as_string();
         self.project.features[idx] = gherkin::parse_feature(&content, path);
-        self.step_index = StepIndex::build(&self.project);
-        self.mindmap_index = mindmap::build_index(&self.project);
-        self.tree_state = mindmap::init_tree_state(&self.mindmap_index);
-        self.mindmap_location_selection.clear();
-        self.normalize_explore_selection();
+        let selected_tree_location = self.selected_tree_location();
+        self.rebuild_project_views(selected_tree_location);
     }
 
     // ── Tree navigation ─────────────────────────────────────────────
@@ -1263,6 +1476,16 @@ impl App {
     // ── Action handler ──────────────────────────────────────────────
 
     pub fn handle_action(&mut self, action: Action) -> Result<()> {
+        if self.external_change_prompt.is_some() {
+            return match action {
+                Action::ExternalChangeReload => self.accept_external_reload(),
+                Action::ExternalChangeKeepLocal => {
+                    self.keep_local_external_version();
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+        }
         if !matches!(action, Action::PendingChar(_)) {
             self.pending_char = None;
         }
@@ -1411,7 +1634,7 @@ impl App {
                     .insert_char(self.cursor_row, self.cursor_col, ch);
                 self.cursor_col += 1;
                 self.desired_col = self.cursor_col;
-                self.dirty = true;
+                self.mark_current_buffer_dirty();
                 self.quit_pending_confirm = false;
             }
             Action::Enter => {
@@ -1434,7 +1657,7 @@ impl App {
                 self.cursor_col = col;
                 self.desired_col = col;
                 if changed {
-                    self.dirty = true;
+                    self.mark_current_buffer_dirty();
                     self.quit_pending_confirm = false;
                 }
             }
@@ -1444,7 +1667,7 @@ impl App {
                 }
                 self.push_undo();
                 if self.buffer.delete(self.cursor_row, self.cursor_col) {
-                    self.dirty = true;
+                    self.mark_current_buffer_dirty();
                     self.quit_pending_confirm = false;
                 }
             }
@@ -1469,7 +1692,7 @@ impl App {
                 self.step_input_row = self.cursor_row;
                 self.step_input_min_col = self.cursor_col;
                 self.focus_slot = BddFocusSlot::Body;
-                self.dirty = true;
+                self.mark_current_buffer_dirty();
                 self.status = "Inserted new step line".to_string();
                 self.quit_pending_confirm = false;
             }
@@ -1485,6 +1708,7 @@ impl App {
                 self.status = "Step keyword selection canceled".to_string();
                 self.quit_pending_confirm = false;
             }
+            Action::ExternalChangeReload | Action::ExternalChangeKeepLocal => {}
             Action::ClearInputState => {
                 if self.step_input_active || self.step_keyword_picker.is_some() {
                     self.clear_step_input_state();
@@ -1506,11 +1730,18 @@ impl App {
     }
 
     fn save(&mut self) -> Result<()> {
-        if let Some(path) = &self.file_path {
-            fs::write(path, self.buffer.as_string())
+        if let Some(path) = self.file_path.clone() {
+            fs::write(&path, self.buffer.as_string())
                 .with_context(|| format!("failed to write {}", path.display()))?;
             self.status = format!("Saved {}", path.display());
-            self.dirty = false;
+            if let Some(idx) = self.active_buffer_idx {
+                self.set_buffer_dirty(idx, false);
+                if let Some(slot) = self.disk_stamps.get_mut(idx) {
+                    *slot = FileStamp::capture(&path);
+                }
+            } else {
+                self.dirty = false;
+            }
             self.sync_editor_to_project();
         } else {
             self.status = "No file path: run with `cargo run -- path/to/file.feature`".to_string();
@@ -1685,7 +1916,7 @@ impl App {
             self.push_undo();
             self.buffer.replace_line(self.cursor_row, &new_line);
             self.focus_slot = BddFocusSlot::Keyword;
-            self.dirty = true;
+            self.mark_current_buffer_dirty();
             self.pending_char = None;
             self.quit_pending_confirm = false;
             self.status = format!("Step keyword set to {keyword}");
@@ -1712,7 +1943,7 @@ impl App {
         };
         self.cursor_row = row;
         self.focus_slot = BddFocusSlot::Body;
-        self.dirty = true;
+        self.mark_current_buffer_dirty();
         self.clear_structural_state();
         let _ = self.begin_step_or_title_edit();
         self.status = if above {
@@ -1737,7 +1968,7 @@ impl App {
         self.cursor_col = 0;
         self.desired_col = 0;
         self.focus_slot = BddFocusSlot::Body;
-        self.dirty = true;
+        self.mark_current_buffer_dirty();
         self.clear_structural_state();
         let _ = self.begin_step_or_title_edit();
         self.status = "Inserted scenario".to_string();
@@ -1771,7 +2002,7 @@ impl App {
         } else {
             BddFocusSlot::Keyword
         };
-        self.dirty = true;
+        self.mark_current_buffer_dirty();
         self.clear_structural_state();
         self.status = "Deleted node".to_string();
     }
@@ -1857,7 +2088,7 @@ impl App {
         self.cursor_col = 0;
         self.desired_col = 0;
         self.focus_slot = BddFocusSlot::Keyword;
-        self.dirty = true;
+        self.mark_current_buffer_dirty();
         self.clear_structural_state();
         self.status = "Step pasted".to_string();
     }
@@ -1886,7 +2117,7 @@ impl App {
         self.cursor_col = 0;
         self.desired_col = 0;
         self.focus_slot = BddFocusSlot::Keyword;
-        self.dirty = true;
+        self.mark_current_buffer_dirty();
         self.clear_structural_state();
         self.status = if down {
             "Moved step down".to_string()
@@ -1961,7 +2192,7 @@ impl App {
         self.redo_stack
             .push((self.buffer.clone(), self.cursor_row, self.cursor_col));
         self.restore_snapshot(snapshot);
-        self.dirty = true;
+        self.mark_current_buffer_dirty();
         self.status = "Undo".to_string();
         self.quit_pending_confirm = false;
     }
@@ -1974,7 +2205,7 @@ impl App {
         self.undo_stack
             .push((self.buffer.clone(), self.cursor_row, self.cursor_col));
         self.restore_snapshot(snapshot);
-        self.dirty = true;
+        self.mark_current_buffer_dirty();
         self.status = "Redo".to_string();
         self.quit_pending_confirm = false;
     }
@@ -2002,7 +2233,7 @@ impl App {
             self.cursor_col = 0;
             self.desired_col = 0;
             self.focus_slot = BddFocusSlot::Keyword;
-            self.dirty = true;
+            self.mark_current_buffer_dirty();
             self.status = "Step keyword updated".to_string();
         }
         self.step_keyword_picker = None;
@@ -2270,6 +2501,9 @@ fn parse_case_key(id: &str) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
         App, BddFocusSlot, ColumnFocus, MainTab, ViewStage, current_step_keyword_index,
@@ -2285,6 +2519,24 @@ mod tests {
         app.active_tab = MainTab::MindMap;
         app.view_stage = ViewStage::EditorAndPanel;
         app
+    }
+
+    fn temp_feature_path(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "teshi-{name}-{}-{unique}.feature",
+            std::process::id()
+        ))
+    }
+
+    fn feature_file_app(name: &str, content: &str) -> (App, PathBuf) {
+        let path = temp_feature_path(name);
+        fs::write(&path, content).expect("feature fixture should be written");
+        let app = App::from_file(&path).expect("app should open fixture file");
+        (app, path)
     }
 
     #[test]
@@ -2691,6 +2943,8 @@ mod tests {
             mindmap_index,
             mindmap_location_selection: HashMap::new(),
             buffers,
+            buffer_dirty: vec![false],
+            disk_stamps: vec![None],
             active_buffer_idx: Some(0),
             view_stage: ViewStage::TreeOnly,
             tree_state,
@@ -2720,6 +2974,8 @@ mod tests {
             redo_stack: Vec::new(),
             runner_config: None,
             runner_rx: None,
+            last_external_check: Instant::now(),
+            external_change_prompt: None,
             explore_focus: ColumnFocus::Step,
             explore_selected_feature: 0,
             explore_selected_scenario: 0,
@@ -2786,6 +3042,8 @@ Feature: B
             mindmap_index,
             mindmap_location_selection: HashMap::new(),
             buffers: Vec::new(),
+            buffer_dirty: Vec::new(),
+            disk_stamps: vec![None, None],
             active_buffer_idx: None,
             view_stage: ViewStage::TreeOnly,
             tree_state,
@@ -2815,6 +3073,8 @@ Feature: B
             redo_stack: Vec::new(),
             runner_config: None,
             runner_rx: None,
+            last_external_check: Instant::now(),
+            external_change_prompt: None,
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
             explore_selected_scenario: 0,
@@ -2921,5 +3181,80 @@ Feature: B
         assert_eq!(app.cursor_row, 1);
         assert_eq!(app.folded_step_count(1), Some(2));
         assert_eq!(app.visible_editor_rows(), vec![0, 1, 4, 5]);
+    }
+
+    #[test]
+    fn test_external_change_clean_buffer_auto_reloads() {
+        let original = "Feature: T\n  Scenario: S\n    Given one\n";
+        let updated = "Feature: T\n  Scenario: S\n    Given updated step text\n";
+        let (mut app, path) = feature_file_app("external-clean", original);
+
+        fs::write(&path, updated).expect("updated feature should be written");
+        app.last_external_check = Instant::now() - Duration::from_secs(1);
+        app.poll_external_feature_changes();
+
+        assert_eq!(app.buffer.as_string(), updated);
+        assert_eq!(
+            app.project.features[0].scenarios[0].steps[0].text,
+            "updated step text"
+        );
+        assert!(app.external_change_prompt.is_none());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_external_change_dirty_buffer_prompts_without_overwrite() {
+        let original = "Feature: T\n  Scenario: S\n    Given one\n";
+        let updated = "Feature: T\n  Scenario: S\n    Given disk version\n";
+        let (mut app, path) = feature_file_app("external-dirty", original);
+
+        app.buffer
+            .replace_line(2, "    Given local unsaved version");
+        app.mark_current_buffer_dirty();
+        fs::write(&path, updated).expect("updated feature should be written");
+
+        app.last_external_check = Instant::now() - Duration::from_secs(1);
+        app.poll_external_feature_changes();
+
+        assert_eq!(app.buffer.line(2), "    Given local unsaved version");
+        assert!(app.external_change_prompt.is_some());
+        assert!(app.dirty);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_external_change_reload_choice_updates_project_and_mindmap() {
+        let original = "Feature: T\n  Scenario: S\n    Given one\n";
+        let updated = "Feature: T\n  Scenario: S\n    Given disk version\n    Then synced change\n";
+        let (mut app, path) = feature_file_app("external-reload-choice", original);
+
+        app.buffer
+            .replace_line(2, "    Given local unsaved version");
+        app.mark_current_buffer_dirty();
+        fs::write(&path, updated).expect("updated feature should be written");
+
+        app.last_external_check = Instant::now() - Duration::from_secs(1);
+        app.poll_external_feature_changes();
+        assert!(app.external_change_prompt.is_some());
+
+        app.handle_action(Action::ExternalChangeReload)
+            .expect("reload choice should succeed");
+
+        assert_eq!(app.buffer.as_string(), updated);
+        assert_eq!(app.project.features[0].scenarios[0].steps.len(), 2);
+        assert_eq!(
+            app.project.features[0].scenarios[0].steps[0].text,
+            "disk version"
+        );
+        assert!(
+            crate::mindmap::find_closest_node(&app.mindmap_index, 0, 3).is_some(),
+            "mind map index should rebuild after reloading from disk"
+        );
+        assert!(app.external_change_prompt.is_none());
+        assert!(!app.dirty);
+
+        let _ = fs::remove_file(path);
     }
 }
