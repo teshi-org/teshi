@@ -47,7 +47,6 @@ pub struct MindMapIndex {
     pub items: Vec<tui_tree_widget::TreeItem<'static, String>>,
     node_paths: HashMap<String, Vec<String>>,
     node_locations: HashMap<String, Vec<NodeLocation>>,
-    node_child_counts: HashMap<String, usize>,
     occurrences_by_feature: Vec<Vec<NodeOccurrence>>,
 }
 
@@ -60,11 +59,6 @@ impl MindMapIndex {
     /// Returns the path from root to `id` for [`TreeState`] selection.
     pub fn path_for(&self, id: &str) -> Option<&Vec<String>> {
         self.node_paths.get(id)
-    }
-
-    /// Returns whether `id` is a leaf in the MindMap widget (no child trie nodes).
-    pub fn is_leaf(&self, id: &str) -> bool {
-        self.node_child_counts.get(id).copied().unwrap_or(0) == 0
     }
 
     /// Lists node occurrences ordered for closest-line lookup within one feature file.
@@ -148,7 +142,6 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
 
     let mut node_paths: HashMap<String, Vec<String>> = HashMap::new();
     let mut node_locations: HashMap<String, Vec<NodeLocation>> = HashMap::new();
-    let mut node_child_counts: HashMap<String, usize> = HashMap::new();
     let mut next_id = 0usize;
 
     let mut ctx = BuildItemsCtx {
@@ -157,7 +150,6 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
         next_id: &mut next_id,
         node_paths: &mut node_paths,
         node_locations: &mut node_locations,
-        node_child_counts: &mut node_child_counts,
     };
     let root_item = build_items(0, &mut ctx, &[]);
 
@@ -178,7 +170,6 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
         items: vec![root_item],
         node_paths,
         node_locations,
-        node_child_counts,
         occurrences_by_feature,
     }
 }
@@ -225,7 +216,6 @@ struct BuildItemsCtx<'a> {
     next_id: &'a mut usize,
     node_paths: &'a mut HashMap<String, Vec<String>>,
     node_locations: &'a mut HashMap<String, Vec<NodeLocation>>,
-    node_child_counts: &'a mut HashMap<String, usize>,
 }
 
 fn build_items(
@@ -245,8 +235,6 @@ fn build_items(
     ctx.node_paths.insert(id.clone(), path.clone());
     ctx.node_locations
         .insert(id.clone(), ctx.arena[node_idx].locations.clone());
-    ctx.node_child_counts
-        .insert(id.clone(), ctx.arena[node_idx].children.len());
 
     let label = if node_idx == 0 {
         ctx.root_label.to_string()
@@ -263,23 +251,9 @@ fn build_items(
     tui_tree_widget::TreeItem::new(id, label, children).expect("tree item construction")
 }
 
-/// Creates a [`TreeState`] with default open nodes: root and every non-leaf trie node.
-pub fn init_tree_state(index: &MindMapIndex) -> TreeState<String> {
+/// Creates a [`TreeState`] with all nodes collapsed by default; only the root is selected.
+pub fn init_tree_state(_index: &MindMapIndex) -> TreeState<String> {
     let mut state = TreeState::default();
-
-    if let Some(path) = index.path_for("root") {
-        state.open(path.clone());
-    }
-
-    for (id, path) in &index.node_paths {
-        if id == "root" {
-            continue;
-        }
-        if !index.is_leaf(id) {
-            state.open(path.clone());
-        }
-    }
-
     state.select(vec!["root".to_string()]);
     state
 }
@@ -327,4 +301,52 @@ pub fn find_closest_node(
     }
 
     best
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{build_index, init_tree_state};
+    use crate::gherkin::{self, BddProject};
+
+    fn sample_project() -> BddProject {
+        let content = "\
+Feature: F
+  Scenario: S1
+    Given a
+    When b
+    Then c
+  Scenario: S2
+    Given a
+    When d
+";
+        let feature = gherkin::parse_feature(content, PathBuf::from("sample.feature"));
+        BddProject {
+            root_dir: PathBuf::from("."),
+            features: vec![feature],
+        }
+    }
+
+    #[test]
+    fn test_init_tree_state_collapses_all_nodes_by_default() {
+        let project = sample_project();
+        let index = build_index(&project);
+        assert!(
+            index.items.len() == 1 && !index.node_paths.is_empty(),
+            "index should have built non-trivial node paths for the test"
+        );
+
+        let state = init_tree_state(&index);
+
+        assert!(
+            state.opened().is_empty(),
+            "no tree nodes should be expanded on initialization"
+        );
+        assert_eq!(
+            state.selected(),
+            &["root".to_string()],
+            "root should remain selected on initialization"
+        );
+    }
 }
