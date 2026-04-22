@@ -109,6 +109,7 @@ fn main() -> Result<()> {
                     active_tab: app.active_tab,
                     view_stage: app.view_stage,
                     explore_edit_mode: app.explore_edit_mode,
+                    pending_char: app.pending_char,
                 },
             ) {
                 app.handle_action(action)?;

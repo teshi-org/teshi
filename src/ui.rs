@@ -232,7 +232,11 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Line::raw("r run   a AI"),
                 Line::raw(""),
                 Line::raw("── Editor (Edit Mode) ──"),
-                Line::raw("Space edit   Tab new step line   Enter commit   Esc cancel"),
+                Line::raw("hjkl / arrows navigate   Enter edit   Tab new step line"),
+                Line::raw("o/O add step   dd delete   yy copy   p paste"),
+                Line::raw("Ctrl+g/w/t/a switch keyword   Ctrl+j/k move step"),
+                Line::raw("Space fold scenario   Ctrl+Space fold all"),
+                Line::raw("Ctrl+r run   Ctrl+s save   Ctrl+/ undo   Ctrl+y redo"),
                 Line::raw(""),
                 Line::raw("Global: s save, q quit (dirty needs confirmation)"),
             ];
@@ -366,7 +370,8 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 fn render_explore_scenarios(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let focused = app.explore_focus == ColumnFocus::Scenario;
-    let block = explore_block("Scenarios", focused);
+    let scenarios_title = explore_scenarios_title(app);
+    let block = explore_block(scenarios_title.as_str(), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -412,6 +417,16 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
+fn explore_scenarios_title(app: &App) -> String {
+    let count = app
+        .project
+        .features
+        .get(app.explore_selected_feature)
+        .map(|f| f.scenarios.len())
+        .unwrap_or(0);
+    format!("Scenarios ({count})")
 }
 
 fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -597,34 +612,51 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
     } else {
         app.cursor_row
     };
-    let mut scroll_row = if preview {
+    let scroll_row = if preview {
         app.preview_scroll_row
     } else {
         app.scroll_row
     };
+    let mut visible_rows = if preview {
+        (0..buffer.line_count()).collect::<Vec<_>>()
+    } else {
+        app.visible_editor_rows()
+    };
+    if visible_rows.is_empty() {
+        visible_rows.push(0);
+    }
+    let cursor_idx = visible_rows
+        .iter()
+        .position(|&row| row == cursor_row)
+        .or_else(|| visible_rows.iter().rposition(|&row| row <= cursor_row))
+        .unwrap_or(0);
+    let mut scroll_idx = visible_rows
+        .iter()
+        .position(|&row| row == scroll_row)
+        .or_else(|| visible_rows.iter().position(|&row| row >= scroll_row))
+        .unwrap_or(0);
     if !preview {
-        if cursor_row < scroll_row {
-            scroll_row = cursor_row;
-        } else if cursor_row >= scroll_row.saturating_add(visible_lines) {
-            scroll_row = cursor_row.saturating_sub(visible_lines.saturating_sub(1));
+        if cursor_idx < scroll_idx {
+            scroll_idx = cursor_idx;
+        } else if cursor_idx >= scroll_idx.saturating_add(visible_lines) {
+            scroll_idx = cursor_idx.saturating_sub(visible_lines.saturating_sub(1));
         }
     } else {
-        // In preview mode, center the cursor row
-        scroll_row = cursor_row.saturating_sub(visible_lines / 2);
+        scroll_idx = cursor_idx.saturating_sub(visible_lines / 2);
     }
 
     let mut lines = Vec::with_capacity(visible_lines);
     let preview_row_style = Style::default().bg(PREVIEW_CURSOR_BG).fg(PREVIEW_CURSOR_FG);
     let mut step_state = StepHighlightState::default();
-    for row in 0..scroll_row {
+    for &row in visible_rows.iter().take(scroll_idx) {
         if row >= buffer.line_count() {
             break;
         }
         let line = buffer.line(row);
         let _ = highlight_line_with_state(&line, &mut step_state, &KeywordSet::default());
     }
-    for row in scroll_row..scroll_row.saturating_add(visible_lines) {
-        if row >= buffer.line_count() {
+    for visible_idx in scroll_idx..scroll_idx.saturating_add(visible_lines) {
+        let Some(&row) = visible_rows.get(visible_idx) else {
             let empty = pad_line_to_width(
                 Line::raw(String::new()),
                 editor_area.width,
@@ -632,10 +664,14 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             );
             lines.push(empty);
             continue;
-        }
+        };
         let line = buffer.line(row);
+        let mut display_line = line.clone();
+        if !preview && let Some(step_count) = app.folded_step_count(row) {
+            display_line.push_str(&format!("  [folded: {step_count} steps]"));
+        }
         let (display_line, pad_offset, pad_start) =
-            step_line_display(&line, step_state.in_doc_string);
+            step_line_display(&display_line, step_state.in_doc_string);
         let display_len = display_line.chars().count();
         let mut styled =
             highlight_line_with_state(&display_line, &mut step_state, &KeywordSet::default());
@@ -713,7 +749,10 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             if y >= editor_area.bottom() {
                 break;
             }
-            let buffer_row = scroll_row.saturating_add(i);
+            let buffer_row = visible_rows
+                .get(scroll_idx.saturating_add(i))
+                .copied()
+                .unwrap_or(usize::MAX);
             let row_fill = if buffer_row == cursor_row && buffer_row < buffer.line_count() {
                 preview_row_style
             } else {
@@ -735,9 +774,9 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
         buf.set_line(editor_area.x, y, line, editor_area.width);
     }
     if preview {
-        app.preview_scroll_row = scroll_row;
+        app.preview_scroll_row = visible_rows.get(scroll_idx).copied().unwrap_or(0);
     } else {
-        app.scroll_row = scroll_row;
+        app.scroll_row = visible_rows.get(scroll_idx).copied().unwrap_or(0);
     }
     if !preview {
         render_step_keyword_picker(frame, app, editor_area);
@@ -1004,6 +1043,19 @@ fn footer_pill(label: &'static str) -> Span<'static> {
 }
 
 fn footer_hints(app: &App) -> Line<'static> {
+    if app.is_editor_active() {
+        return Line::from(vec![
+            footer_pill(" Navigate [hjkl/arrows] "),
+            Span::raw(" "),
+            footer_pill(" Edit [Enter] "),
+            Span::raw(" "),
+            footer_pill(" Step [o/O dd yy p] "),
+            Span::raw(" "),
+            footer_pill(" Fold [Space/Ctrl+Space] "),
+            Span::raw(" "),
+            footer_pill(" Save [Ctrl+s] "),
+        ]);
+    }
     match (app.active_tab, app.view_stage) {
         (MainTab::MindMap, _) => Line::from(vec![
             footer_pill(" Navigate [↑↓] "),
@@ -1041,7 +1093,11 @@ fn footer_hints(app: &App) -> Line<'static> {
 
 #[cfg(test)]
 mod truncate_tests {
-    use super::{Line, Span, truncate_line_to_cols};
+    use std::path::PathBuf;
+
+    use super::{Line, Span, explore_scenarios_title, truncate_line_to_cols};
+    use crate::app::App;
+    use crate::gherkin;
 
     #[test]
     fn truncate_line_to_cols_limits_display_width() {
@@ -1049,5 +1105,23 @@ mod truncate_tests {
         assert!(line.width() > 68);
         let out = truncate_line_to_cols(line, 68);
         assert!(out.width() <= 68);
+    }
+
+    #[test]
+    fn test_explore_scenarios_title_shows_zero_when_no_feature_selected() {
+        let app = App::from_args().expect("app init should work");
+        assert_eq!(explore_scenarios_title(&app), "Scenarios (0)");
+    }
+
+    #[test]
+    fn test_explore_scenarios_title_shows_selected_feature_scenario_count() {
+        let mut app = App::from_args().expect("app init should work");
+        let feature = gherkin::parse_feature(
+            "Feature: A\n  Scenario: S1\n    Given a\n  Scenario: S2\n    Given b\n",
+            PathBuf::from("a.feature"),
+        );
+        app.project.features = vec![feature];
+        app.explore_selected_feature = 0;
+        assert_eq!(explore_scenarios_title(&app), "Scenarios (2)");
     }
 }
