@@ -1,0 +1,235 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to publish (for example: v0.1.0)"
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  RESOLVED_REF: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref }}
+
+jobs:
+  quality:
+    name: Quality gates
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RESOLVED_REF }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build debug binary for TUI E2E tests
+        run: cargo build --locked --bin teshi
+
+      - name: Run tests
+        run: cargo test --all --locked
+
+      - name: Run clippy with warnings denied
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-14
+            target: aarch64-apple-darwin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RESOLVED_REF }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin teshi
+
+      - name: Install WiX Toolset
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: choco install wixtoolset --no-progress -y
+
+      - name: Install cargo-wix
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo install cargo-wix --locked
+
+      - name: Build MSI installer
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ github.event.inputs.release_tag }}"
+          }
+
+          if (-not $tag.StartsWith("v")) {
+            throw "Release tag must start with 'v' (got: $tag)."
+          }
+
+          if (-not (Test-Path "wix/main.wxs")) {
+            cargo wix init --package teshi
+          }
+
+          $builtExe = "target/${{ matrix.target }}/release/teshi.exe"
+          $wixExe = "target/release/teshi.exe"
+          if (-not (Test-Path $builtExe)) {
+            throw "Missing built binary at $builtExe"
+          }
+          New-Item -ItemType Directory -Force -Path "target/release" | Out-Null
+          Copy-Item $builtExe $wixExe -Force
+
+          cargo wix --package teshi --no-build --nocapture --output "target/wix/teshi-$tag-x64.msi"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: teshi-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/teshi
+            target/${{ matrix.target }}/release/teshi.exe
+          if-no-files-found: error
+
+      - name: Upload MSI artifact
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: teshi-msi
+          path: target/wix/teshi-*-x64.msi
+          if-no-files-found: error
+
+  publish:
+    name: Publish Release Assets
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RESOLVED_REF }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Resolve release metadata
+        id: release_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${{ github.event.inputs.release_tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+
+          if [[ ! "${tag}" =~ ^v.+$ ]]; then
+            echo "Release tag must start with 'v' (got: ${tag})." >&2
+            exit 1
+          fi
+
+          tag_sha=$(git rev-list -n 1 "${tag}")
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "tag_sha=${tag_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${{ steps.release_meta.outputs.tag }}"
+          mkdir -p dist
+
+          targets=(
+            x86_64-unknown-linux-gnu
+            x86_64-pc-windows-msvc
+            aarch64-apple-darwin
+          )
+
+          for target in "${targets[@]}"; do
+            artifact_dir="artifacts/teshi-${target}"
+            binary_name="teshi"
+            if [[ "${target}" == *"windows"* ]]; then
+              binary_name="teshi.exe"
+            fi
+
+            stage_dir="dist/teshi-${version}-${target}"
+            mkdir -p "${stage_dir}"
+
+            cp "${artifact_dir}/${binary_name}" "${stage_dir}/"
+            cp README.md LICENSE "${stage_dir}/"
+
+            if [[ "${target}" != *"windows"* ]]; then
+              chmod +x "${stage_dir}/teshi"
+            fi
+
+            if [[ "${target}" == *"windows"* ]]; then
+              (
+                cd dist
+                zip -r "teshi-${version}-${target}.zip" "teshi-${version}-${target}"
+              )
+            else
+              tar -C dist -czf "dist/teshi-${version}-${target}.tar.gz" "teshi-${version}-${target}"
+            fi
+          done
+
+          (
+            cd dist
+            cp ../artifacts/teshi-msi/*.msi .
+
+            find . -maxdepth 1 \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.msi" \) \
+              -exec sha256sum {} + \
+              | sed 's|\./||' \
+              > SHA256SUMS
+          )
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          target_commitish: ${{ steps.release_meta.outputs.tag_sha }}
+          generate_release_notes: true
+          files: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.msi
+            dist/SHA256SUMS

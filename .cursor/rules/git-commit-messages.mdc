@@ -1,0 +1,22 @@
+---
+description: Git commit message formatting rules (always apply)
+alwaysApply: true
+---
+
+# Git commit message rules
+
+- Use a Conventional-Commits style subject line:
+  - `feat:` for new features
+  - `fix:` for bug fixes
+  - `chore:` for maintenance/no user-facing behavior change
+  - `docs:` for documentation-only changes
+  - `refactor:` for internal restructuring without behavior change
+  - `test:` for tests only
+- Subject line format:
+  - `<type>: <imperative summary>` (imperative mood, no trailing period)
+  - Keep it reasonably short (roughly <= 72 characters when possible)
+- If the change needs details, add a body after a blank line:
+  - Use bullet points for key motivations/decisions and any notable trade-offs
+  - Avoid restating the diff; focus on “why” and “what matters”
+- If multiple areas changed, consider splitting into multiple commits rather than mixing unrelated concerns.
+

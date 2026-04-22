@@ -1,0 +1,17 @@
+[package]
+name = "teshi-tui-steps"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+portable-pty = "0.8"
+cucumber = "0.21"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+
+[features]
+winpty-backend = ["dep:winpty", "dep:windows-sys"]
+
+[target.'cfg(windows)'.dependencies]
+winpty = { version = "0.2", optional = true }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"], optional = true }

@@ -1,0 +1,20 @@
+---
+description: Rust documentation (rustdoc) conventions (project-scoped)
+globs: **/*.rs
+alwaysApply: false
+---
+
+# Rust documentation (rustdoc) conventions
+
+- Document public items with rustdoc comments (`/// ...`): types, public functions, traits, and structs/enums.
+- Keep docs focused on intent and usage:
+  - What the item does
+  - Key invariants/assumptions
+  - Panics and error behavior (if any)
+- Use a standard section layout when relevant:
+  - `# Examples` for runnable usage examples
+  - `# Errors` for error types/conditions
+  - `# Panics` if the code can panic
+- For examples, keep them minimal and compile-ready.
+- Avoid copying implementation details; prefer explaining the contract.
+

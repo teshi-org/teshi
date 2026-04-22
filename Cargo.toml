@@ -1,0 +1,28 @@
+[package]
+name = "teshi"
+version = "0.0.7"
+edition = "2024"
+authors = ["teshi-org"]
+license = "MIT"
+description = "Terminal-first mindmap editor for structured notes and navigation."
+repository = "https://github.com/teshi-org/teshi"
+readme = "README.md"
+keywords = ["tui", "mindmap", "editor", "terminal", "notes"]
+publish = false
+
+[package.metadata.wix]
+eula = false
+
+[workspace]
+members = ["runner", "tests/steps/tui"]
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.29"
+ratatui = "0.29"
+ropey = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tui-tree-widget = "0.23"
+unicode-width = "0.2"
