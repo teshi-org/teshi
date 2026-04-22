@@ -7,6 +7,7 @@ use crate::app::{MainTab, ViewStage};
 pub struct KeyContext {
     pub step_keyword_picker_active: bool,
     pub step_input_active: bool,
+    pub external_change_prompt_active: bool,
     pub active_tab: MainTab,
     pub view_stage: ViewStage,
     pub explore_edit_mode: bool,
@@ -66,6 +67,8 @@ pub enum Action {
     StepKeywordPickerDown,
     StepKeywordPickerConfirm,
     StepKeywordPickerCancel,
+    ExternalChangeReload,
+    ExternalChangeKeepLocal,
     // Tree navigation (stages 1 & 2)
     TreeUp,
     TreeDown,
@@ -91,6 +94,18 @@ impl Action {
                 ('y', KeyCode::Char('y'), KeyModifiers::NONE) => return Some(Self::CopyStep),
                 _ => {}
             }
+        }
+
+        if context.external_change_prompt_active {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Enter, _) | (KeyCode::Char('r'), KeyModifiers::NONE) => {
+                    Some(Self::ExternalChangeReload)
+                }
+                (KeyCode::Esc, _)
+                | (KeyCode::Char('k'), KeyModifiers::NONE)
+                | (KeyCode::Char('K'), KeyModifiers::SHIFT) => Some(Self::ExternalChangeKeepLocal),
+                _ => None,
+            };
         }
 
         // Step keyword picker intercepts all keys
@@ -274,6 +289,7 @@ mod tests {
         let context = KeyContext {
             step_keyword_picker_active: false,
             step_input_active: false,
+            external_change_prompt_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::TreeOnly,
             explore_edit_mode: false,
@@ -291,6 +307,7 @@ mod tests {
         let context = KeyContext {
             step_keyword_picker_active: false,
             step_input_active: true,
+            external_change_prompt_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
@@ -308,6 +325,7 @@ mod tests {
         let context = KeyContext {
             step_keyword_picker_active: false,
             step_input_active: false,
+            external_change_prompt_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::TreeOnly,
             explore_edit_mode: false,
@@ -335,6 +353,7 @@ mod tests {
         let context = KeyContext {
             step_keyword_picker_active: false,
             step_input_active: false,
+            external_change_prompt_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
@@ -362,6 +381,7 @@ mod tests {
         let context = KeyContext {
             step_keyword_picker_active: false,
             step_input_active: false,
+            external_change_prompt_active: false,
             active_tab: MainTab::Explore,
             view_stage: ViewStage::TreeOnly,
             explore_edit_mode: false,
@@ -397,6 +417,7 @@ mod tests {
         let context = KeyContext {
             step_keyword_picker_active: false,
             step_input_active: true,
+            external_change_prompt_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
@@ -414,6 +435,7 @@ mod tests {
         let context = KeyContext {
             step_keyword_picker_active: false,
             step_input_active: true,
+            external_change_prompt_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
@@ -431,6 +453,7 @@ mod tests {
         let context = KeyContext {
             step_keyword_picker_active: false,
             step_input_active: false,
+            external_change_prompt_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
@@ -468,6 +491,7 @@ mod tests {
         let delete_context = KeyContext {
             step_keyword_picker_active: false,
             step_input_active: false,
+            external_change_prompt_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
@@ -490,6 +514,27 @@ mod tests {
                 copy_context
             ),
             Some(Action::CopyStep)
+        );
+    }
+
+    #[test]
+    fn test_external_change_prompt_intercepts_confirm_keys() {
+        let context = KeyContext {
+            step_keyword_picker_active: false,
+            step_input_active: false,
+            external_change_prompt_active: true,
+            active_tab: MainTab::Explore,
+            view_stage: ViewStage::TreeOnly,
+            explore_edit_mode: false,
+            pending_char: None,
+        };
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
+            Some(Action::ExternalChangeReload)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
+            Some(Action::ExternalChangeKeepLocal)
         );
     }
 }
