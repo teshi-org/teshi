@@ -95,7 +95,11 @@ impl Action {
                 (KeyCode::Tab, _) => Some(Self::InsertNewline),
                 (KeyCode::Backspace, _) => Some(Self::Backspace),
                 (KeyCode::Delete, _) => Some(Self::Delete),
-                (KeyCode::Char(ch), modifiers) if modifiers.is_empty() => Some(Self::Insert(ch)),
+                (KeyCode::Char(ch), modifiers)
+                    if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
+                {
+                    Some(Self::Insert(ch))
+                }
                 _ => None,
             };
         }
@@ -297,5 +301,37 @@ mod tests {
             ),
             Some(Action::EnterEdit)
         );
+    }
+
+    #[test]
+    fn test_step_input_allows_shift_insert() {
+        let context = KeyContext {
+            step_keyword_picker_active: false,
+            step_input_active: true,
+            active_tab: MainTab::MindMap,
+            view_stage: ViewStage::EditorAndPanel,
+            explore_edit_mode: false,
+        };
+        let action = Action::from_key_event(
+            KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
+            context,
+        );
+        assert_eq!(action, Some(Action::Insert('A')));
+    }
+
+    #[test]
+    fn test_step_input_rejects_control_modified_insert() {
+        let context = KeyContext {
+            step_keyword_picker_active: false,
+            step_input_active: true,
+            active_tab: MainTab::MindMap,
+            view_stage: ViewStage::EditorAndPanel,
+            explore_edit_mode: false,
+        };
+        let action = Action::from_key_event(
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            context,
+        );
+        assert_eq!(action, None);
     }
 }
