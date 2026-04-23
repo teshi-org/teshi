@@ -233,3 +233,85 @@ jobs:
             dist/*.tar.gz
             dist/*.msi
             dist/SHA256SUMS
+
+  submit_winget:
+    name: Submit WinGet manifest
+    runs-on: windows-latest
+    needs: publish
+
+    steps:
+      - name: Ensure release tag format
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ github.event.inputs.release_tag }}"
+          }
+          if (-not $tag.StartsWith("v")) {
+            throw "Release tag must start with 'v' (got: $tag)."
+          }
+
+      - name: Install wingetcreate
+        shell: pwsh
+        run: winget install --id Microsoft.WingetCreate -e --source winget --accept-package-agreements --accept-source-agreements
+
+      - name: Submit MSI to winget-pkgs
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINGET_TOKEN)) {
+            throw "Missing WINGET_TOKEN secret."
+          }
+
+          $tag = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ github.event.inputs.release_tag }}"
+          }
+
+          $msiUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/teshi-$tag-x64.msi"
+          $prTitle = "Add teshi $($tag.TrimStart('v'))"
+          $version = $tag.TrimStart('v')
+          $pkgId = "teshi-org.teshi"
+          $manifestDir = ".\winget-manifests\manifests\t\teshi-org\teshi\$version"
+
+          New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
+
+          $msiPath = Join-Path $manifestDir "teshi-$tag-x64.msi"
+          Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath
+          $sha256 = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash
+          Remove-Item -Path $msiPath -Force
+
+          @"
+          PackageIdentifier: $pkgId
+          PackageVersion: $version
+          DefaultLocale: en-US
+          ManifestType: version
+          ManifestVersion: 1.6.0
+          "@ | Set-Content -NoNewline (Join-Path $manifestDir "$pkgId.yaml")
+
+          @"
+          PackageIdentifier: $pkgId
+          PackageVersion: $version
+          Installers:
+            - Architecture: x64
+              InstallerType: wix
+              InstallerUrl: $msiUrl
+              InstallerSha256: $sha256
+          ManifestType: installer
+          ManifestVersion: 1.6.0
+          "@ | Set-Content -NoNewline (Join-Path $manifestDir "$pkgId.installer.yaml")
+
+          @"
+          PackageIdentifier: $pkgId
+          PackageVersion: $version
+          PackageLocale: en-US
+          Publisher: teshi-org
+          PackageName: teshi
+          License: MIT
+          ShortDescription: Terminal-first mindmap editor for structured notes and navigation.
+          ManifestType: defaultLocale
+          ManifestVersion: 1.6.0
+          "@ | Set-Content -NoNewline (Join-Path $manifestDir "$pkgId.locale.en-US.yaml")
+
+          wingetcreate submit --prtitle $prTitle --token $env:WINGET_TOKEN --no-open $manifestDir
