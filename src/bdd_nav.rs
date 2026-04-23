@@ -319,9 +319,7 @@ fn remove_range(lines: &mut Vec<String>, range: Range<usize>) {
 
 pub fn step_block_lines(buffer: &EditorBuffer, step_row: usize) -> Option<Vec<String>> {
     let start = step_row.min(buffer.line_count().saturating_sub(1));
-    if step_edit_start_col(&buffer.line(start)).is_none() {
-        return None;
-    }
+    step_edit_start_col(&buffer.line(start))?;
     let end = step_block_end(buffer, start);
     Some((start..end).map(|row| buffer.line(row)).collect())
 }
@@ -434,9 +432,7 @@ pub fn insert_scenario_after_current(buffer: &mut EditorBuffer, row: usize) -> O
 /// Deletes the full current step block, including attached doc-string / table rows.
 pub fn delete_step(buffer: &mut EditorBuffer, row: usize) -> Option<usize> {
     let line = buffer.line(row);
-    if step_edit_start_col(&line).is_none() {
-        return None;
-    }
+    step_edit_start_col(&line)?;
     let start = row;
     let end = step_block_end(buffer, row);
     let (mut lines, trailing_newline) = line_vec(buffer);
@@ -461,9 +457,7 @@ pub fn delete_scenario_block(buffer: &mut EditorBuffer, scenario_row: usize) -> 
 /// Swaps the current full step block with the previous step block in the same scenario.
 pub fn swap_step_with_prev(buffer: &mut EditorBuffer, row: usize) -> Option<usize> {
     let scenario_row = scenario_header_for_row(buffer, row)?;
-    if step_edit_start_col(&buffer.line(row)).is_none() {
-        return None;
-    }
+    step_edit_start_col(&buffer.line(row))?;
     let steps = scenario_step_rows(buffer, scenario_row);
     let index = steps.iter().position(|&step_row| step_row == row)?;
     if index == 0 {
@@ -486,9 +480,7 @@ pub fn swap_step_with_prev(buffer: &mut EditorBuffer, row: usize) -> Option<usiz
 /// Swaps the current full step block with the next step block in the same scenario.
 pub fn swap_step_with_next(buffer: &mut EditorBuffer, row: usize) -> Option<usize> {
     let scenario_row = scenario_header_for_row(buffer, row)?;
-    if step_edit_start_col(&buffer.line(row)).is_none() {
-        return None;
-    }
+    step_edit_start_col(&buffer.line(row))?;
     let steps = scenario_step_rows(buffer, scenario_row);
     let index = steps.iter().position(|&step_row| step_row == row)?;
     let next_row = *steps.get(index + 1)?;
