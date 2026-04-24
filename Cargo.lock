@@ -1972,7 +1972,7 @@ dependencies = [
 
 [[package]]
 name = "teshi"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "crossterm 0.29.0",
