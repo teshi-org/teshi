@@ -515,13 +515,13 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             lines.push(Line::raw(""));
         }
 
-        if let Some(scenario) = scenario {
-            if !scenario.tags.is_empty() {
-                lines.push(Line::styled(
-                    format!(" {}", scenario.tags.join(" ")),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
+        if let Some(scenario) = scenario
+            && !scenario.tags.is_empty()
+        {
+            lines.push(Line::styled(
+                format!(" {}", scenario.tags.join(" ")),
+                Style::default().fg(Color::DarkGray),
+            ));
         }
 
         for (i, step) in scenario_steps.iter().enumerate() {
