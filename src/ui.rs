@@ -23,7 +23,7 @@ const KEYWORD_WHEN: Color = Color::Yellow;
 const KEYWORD_THEN: Color = Color::Green;
 const KEYWORD_AND: Color = Color::Gray;
 const KEYWORD_BUT: Color = Color::Gray;
-const EXPLORE_SELECTED_FOCUSED_BG: Color = Color::Rgb(28, 94, 214);
+const EXPLORE_SELECTED_FOCUSED_BG: Color = Color::Rgb(16, 64, 168);
 const EXPLORE_SELECTED_UNFOCUSED_BG: Color = Color::Rgb(125, 170, 242);
 const STEP_KEYWORD_COL_WIDTH: usize = 6;
 const HIGHLIGHT_FOCUSED_FG: Color = Color::White;
@@ -222,7 +222,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     render_main_panel(frame, app, chunks[2]);
 
-    if app.active_tab == MainTab::Explore {
+    if app.active_tab == MainTab::Explore && !app.is_editor_active() {
         render_explore_footer(frame, app, chunks[3]);
     } else {
         let key_hints = footer_hints(app);
@@ -253,7 +253,7 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Line::raw("r run   a AI"),
                 Line::raw(""),
                 Line::raw("── Editor (Edit Mode) ──"),
-                Line::raw("hjkl / arrows navigate   Enter edit   Tab new step line"),
+                Line::raw("hjkl / arrows navigate   Enter edit"),
                 Line::raw("o/O add step   dd delete   yy copy   p paste"),
                 Line::raw("Ctrl+g/w/t/a switch keyword   Ctrl+j/k move step"),
                 Line::raw("Space fold scenario   Ctrl+Space fold all"),
@@ -459,21 +459,72 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let highlight_style = explore_select_style(focused);
     let mut lines: Vec<Line> = Vec::new();
 
-    let steps = app
-        .project
-        .features
-        .get(app.explore_selected_feature)
+    let feature = app.project.features.get(app.explore_selected_feature);
+    let background_steps = feature
+        .and_then(|f| f.background.as_ref())
+        .map(|bg| bg.steps.as_slice())
+        .unwrap_or(&[]);
+    let scenario_steps = feature
         .and_then(|f| f.scenarios.get(app.explore_selected_scenario))
-        .map(|s| &s.steps);
+        .map(|s| s.steps.as_slice())
+        .unwrap_or(&[]);
 
-    if steps.is_none_or(|s| s.is_empty()) {
+    if background_steps.is_empty() && scenario_steps.is_empty() {
         lines.push(Line::styled(
             " (no steps)",
             Style::default().fg(Color::DarkGray),
         ));
-    } else if let Some(steps) = steps {
+    } else {
         let mut last_major: Option<Color> = None;
-        for (i, step) in steps.iter().enumerate() {
+        if !background_steps.is_empty() {
+            lines.push(Line::styled(
+                " Background",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            for step in background_steps {
+                let kw = format!("{:>6}", step.keyword);
+                let kw_color = match step.keyword.as_str() {
+                    "Given" => {
+                        last_major = Some(KEYWORD_GIVEN);
+                        KEYWORD_GIVEN
+                    }
+                    "When" => {
+                        last_major = Some(KEYWORD_WHEN);
+                        KEYWORD_WHEN
+                    }
+                    "Then" => {
+                        last_major = Some(KEYWORD_THEN);
+                        KEYWORD_THEN
+                    }
+                    "And" => last_major.unwrap_or(KEYWORD_AND),
+                    "But" => last_major.unwrap_or(KEYWORD_BUT),
+                    _ => Color::White,
+                };
+                let kw_span = Span::styled(kw, Style::default().fg(kw_color));
+                let body_span = Span::styled(
+                    format!(" {}", step.text),
+                    Style::default().fg(Color::DarkGray),
+                );
+                let mut line = Line::from(vec![kw_span, body_span]);
+                line = truncate_line_to_cols(line, inner.width);
+                line = pad_line_to_width(line, inner.width, Style::default());
+                lines.push(line);
+            }
+            lines.push(Line::raw(""));
+        }
+
+        if !scenario_steps.is_empty() {
+            lines.push(Line::styled(
+                " Scenario",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        for (i, step) in scenario_steps.iter().enumerate() {
             let kw = format!("{:>6}", step.keyword);
             let kw_color = match step.keyword.as_str() {
                 "Given" => {
@@ -731,7 +782,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             let nav_cell_style = selected_style(true);
             let line_len = display_len;
             if app.is_editor_nav_mode() {
-                let focus_patch = selected_style(false);
+                let focus_patch = selected_style(true);
                 let hl_range = nav_body_char_range_in_buffer(buffer, row, &line);
                 if let Some(mut r) = hl_range
                     && r.start < r.end
@@ -1084,13 +1135,21 @@ fn footer_pill(label: &'static str) -> Span<'static> {
 fn footer_hints(app: &App) -> Line<'static> {
     if app.is_editor_active() {
         return Line::from(vec![
-            footer_pill(" Navigate [hjkl/arrows] "),
-            Span::raw(" "),
             footer_pill(" Edit [Enter] "),
             Span::raw(" "),
-            footer_pill(" Step [o/O dd yy p] "),
+            footer_pill(" Given/When/Then/And [Ctrl+g/w/t/a] "),
             Span::raw(" "),
-            footer_pill(" Fold [Space/Ctrl+Space] "),
+            footer_pill(" Step [o/O] "),
+            Span::raw(" "),
+            footer_pill(" Delete [dd] "),
+            Span::raw(" "),
+            footer_pill(" Copy/Paste [yy/p] "),
+            Span::raw(" "),
+            footer_pill(" MoveStep [Ctrl+j/k] "),
+            Span::raw(" "),
+            footer_pill(" Fold [Space] "),
+            Span::raw(" "),
+            footer_pill(" FoldAll [Ctrl+Space] "),
             Span::raw(" "),
             footer_pill(" Save [Ctrl+s] "),
         ]);

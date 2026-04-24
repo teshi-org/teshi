@@ -236,6 +236,7 @@ impl Action {
                 Some(Self::ToggleScenarioFold)
             }
             (KeyCode::Char(' '), KeyModifiers::CONTROL)
+            | (KeyCode::Null, KeyModifiers::CONTROL)
                 if (context.active_tab == MainTab::MindMap
                     && context.view_stage == ViewStage::EditorAndPanel)
                     || (context.active_tab == MainTab::Explore && context.explore_edit_mode) =>
@@ -483,6 +484,10 @@ mod tests {
                 context
             ),
             Some(Action::PasteStep)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Null, KeyModifiers::CONTROL), context),
+            Some(Action::FoldAllScenarios)
         );
     }
 
