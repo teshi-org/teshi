@@ -12,10 +12,6 @@ use crate::app::{
 use crate::bdd_nav::{is_feature_narrative_row, keyword_char_range, nav_body_char_range_in_buffer};
 use crate::highlight::{KeywordSet, StepHighlightState, highlight_line_with_state};
 
-const NAV_CELL_BG: Color = Color::LightBlue;
-const NAV_CELL_FG: Color = Color::Black;
-/// Pale background for the focused keyword or step body in navigation mode.
-const NODE_FOCUS_BG: Color = Color::Rgb(140, 190, 255);
 /// Stage-2 preview: one solid style for the tree-selected line (avoids span-patch gaps that read as bright blocks).
 const PREVIEW_CURSOR_BG: Color = Color::DarkGray;
 const PREVIEW_CURSOR_FG: Color = Color::White;
@@ -29,7 +25,32 @@ const KEYWORD_WHEN: Color = Color::Yellow;
 const KEYWORD_THEN: Color = Color::Green;
 const KEYWORD_AND: Color = Color::Gray;
 const KEYWORD_BUT: Color = Color::Gray;
+const EXPLORE_SELECTED_FOCUSED_BG: Color = Color::Rgb(28, 94, 214);
+const EXPLORE_SELECTED_UNFOCUSED_BG: Color = Color::Rgb(125, 170, 242);
 const STEP_KEYWORD_COL_WIDTH: usize = 6;
+const HIGHLIGHT_FOCUSED_FG: Color = Color::White;
+const HIGHLIGHT_UNFOCUSED_FG: Color = Color::Black;
+
+fn selected_style(focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .bg(EXPLORE_SELECTED_FOCUSED_BG)
+            .fg(HIGHLIGHT_FOCUSED_FG)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .bg(EXPLORE_SELECTED_UNFOCUSED_BG)
+            .fg(HIGHLIGHT_UNFOCUSED_FG)
+    }
+}
+
+fn popup_highlight_block(title: &'static str) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_style(Style::default().fg(EXPLORE_SELECTED_FOCUSED_BG))
+        .border_style(Style::default().fg(EXPLORE_SELECTED_UNFOCUSED_BG))
+}
 
 /// Applies `patch` on UTF-8 character indices `[range.start, range.end)` within each span.
 fn apply_patch_to_char_range(
@@ -280,14 +301,7 @@ fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn explore_select_style(focused: bool) -> Style {
-    if focused {
-        Style::default()
-            .bg(NAV_CELL_BG)
-            .fg(NAV_CELL_FG)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().bg(Color::DarkGray).fg(Color::White)
-    }
+    selected_style(focused)
 }
 
 fn explore_block(title: &str, focused: bool) -> Block<'_> {
@@ -529,9 +543,7 @@ fn render_failure_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
 
     frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Failure Details");
+    let block = popup_highlight_block("Failure Details");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -565,7 +577,11 @@ fn render_external_change_prompt(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
 
     frame.render_widget(Clear, popup);
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_style(Style::default().fg(EXPLORE_SELECTED_FOCUSED_BG))
+        .border_style(Style::default().fg(EXPLORE_SELECTED_UNFOCUSED_BG));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     if inner.width == 0 || inner.height == 0 {
@@ -598,10 +614,7 @@ fn apply_line_background(line: Line<'static>, bg: Style) -> Line<'static> {
 fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let items = &app.mindmap_index.items;
 
-    let highlight_style = Style::default()
-        .bg(NAV_CELL_BG)
-        .fg(NAV_CELL_FG)
-        .add_modifier(Modifier::BOLD);
+    let highlight_style = selected_style(true);
 
     let block = Block::default().borders(Borders::ALL).title("MindMap");
 
@@ -717,10 +730,10 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             highlight_line_with_state(&display_line, &mut step_state, &KeywordSet::default());
 
         if row == cursor_row && !preview {
-            let nav_cell_style = Style::default().bg(NAV_CELL_BG).fg(NAV_CELL_FG);
+            let nav_cell_style = selected_style(true);
             let line_len = display_len;
             if app.is_editor_nav_mode() {
-                let focus_patch = Style::default().bg(NODE_FOCUS_BG);
+                let focus_patch = selected_style(false);
                 let hl_range = match app.focus_slot {
                     BddFocusSlot::Keyword => keyword_char_range(&line).or_else(|| {
                         if is_feature_narrative_row(buffer, row) {
@@ -872,13 +885,13 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rec
     let row_width = inner.width as usize;
     let max_rows = inner.height as usize;
 
-    let selected_style = Style::default().bg(NAV_CELL_BG).fg(NAV_CELL_FG);
+    let selected_row_style = selected_style(true);
     let normal = Style::default();
 
     let mut lines: Vec<Line> = Vec::with_capacity(max_rows.min(n_items));
     for (i, kw) in STEP_KEYWORDS_CYCLE.iter().enumerate().take(max_rows) {
         let style = if i == picker.selected {
-            selected_style
+            selected_row_style
         } else {
             normal
         };
@@ -1076,10 +1089,7 @@ fn render_explore_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn footer_pill(label: &'static str) -> Span<'static> {
-    Span::styled(
-        label,
-        Style::default().bg(Color::LightBlue).fg(Color::Black),
-    )
+    Span::styled(label, selected_style(false))
 }
 
 fn footer_hints(app: &App) -> Line<'static> {
