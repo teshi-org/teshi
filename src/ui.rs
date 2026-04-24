@@ -460,12 +460,12 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
     let feature = app.project.features.get(app.explore_selected_feature);
+    let scenario = feature.and_then(|f| f.scenarios.get(app.explore_selected_scenario));
     let background_steps = feature
         .and_then(|f| f.background.as_ref())
         .map(|bg| bg.steps.as_slice())
         .unwrap_or(&[]);
-    let scenario_steps = feature
-        .and_then(|f| f.scenarios.get(app.explore_selected_scenario))
+    let scenario_steps = scenario
         .map(|s| s.steps.as_slice())
         .unwrap_or(&[]);
 
@@ -478,7 +478,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let mut last_major: Option<Color> = None;
         if !background_steps.is_empty() {
             lines.push(Line::styled(
-                " Background",
+                " Background:",
                 Style::default()
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD),
@@ -515,13 +515,13 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             lines.push(Line::raw(""));
         }
 
-        if !scenario_steps.is_empty() {
-            lines.push(Line::styled(
-                " Scenario",
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            ));
+        if let Some(scenario) = scenario {
+            if !scenario.tags.is_empty() {
+                lines.push(Line::styled(
+                    format!(" {}", scenario.tags.join(" ")),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
         }
 
         for (i, step) in scenario_steps.iter().enumerate() {
@@ -558,9 +558,67 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             line = pad_line_to_width(line, inner.width, trail);
             lines.push(line);
         }
+
+        if let Some(scenario) = scenario
+            && !scenario.examples.is_empty()
+        {
+            lines.push(Line::raw(""));
+            for table in &scenario.examples {
+                if !table.tags.is_empty() {
+                    lines.push(Line::styled(
+                        format!(" {}", table.tags.join(" ")),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                lines.push(Line::styled(
+                    " Examples:",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                for row in render_examples_table_lines(&table.headers, &table.rows) {
+                    lines.push(Line::raw(format!("   {row}")));
+                }
+            }
+        }
     }
 
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
+fn render_examples_table_lines(headers: &[String], rows: &[Vec<String>]) -> Vec<String> {
+    if headers.is_empty() {
+        return Vec::new();
+    }
+    let mut widths: Vec<usize> = headers.iter().map(|h| UnicodeWidthStr::width(h.as_str())).collect();
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if let Some(width) = widths.get_mut(i) {
+                *width = (*width).max(UnicodeWidthStr::width(cell.as_str()));
+            }
+        }
+    }
+    let format_row = |cells: &[String]| {
+        let mut out = String::from("|");
+        for (i, width) in widths.iter().enumerate() {
+            let cell = cells.get(i).map_or("", String::as_str);
+            let cell_w = UnicodeWidthStr::width(cell);
+            let pad = width.saturating_sub(cell_w);
+            out.push(' ');
+            out.push_str(cell);
+            out.push_str(&" ".repeat(pad));
+            out.push(' ');
+            out.push('|');
+        }
+        out
+    };
+
+    let mut out = Vec::with_capacity(rows.len() + 2);
+    out.push(format_row(headers));
+    for row in rows {
+        out.push(format_row(row));
+    }
+    out
 }
 
 fn render_failure_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
