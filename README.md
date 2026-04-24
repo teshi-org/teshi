@@ -35,6 +35,10 @@ teshi's own feature matrix is described in BDD feature files under `tests/featur
 - `mindmap.feature` — mind map tree view, three-stage layout, step reuse detection
 - `project.feature` — single/multi-file loading, Gherkin parsing, edit-to-tree sync
 
+Additional standalone demos live under `tests/features_demo/`:
+
+- `github_ui/demo.feature` — GitHub UI automation-oriented BDD syntax coverage demo (`Feature`, `Background`, `Scenario`, `Scenario Outline`, `Examples`, tags). Runner implementation is intentionally out of scope for now.
+
 The project aims to eventually run these BDD specifications against itself.
 
 ## Keybindings
