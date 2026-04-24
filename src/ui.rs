@@ -6,10 +6,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use tui_tree_widget::Tree;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{
-    App, BddFocusSlot, CaseDetail, ColumnFocus, MainTab, RunStatus, STEP_KEYWORDS_CYCLE,
-};
-use crate::bdd_nav::{is_feature_narrative_row, keyword_char_range, nav_body_char_range_in_buffer};
+use crate::app::{App, CaseDetail, ColumnFocus, MainTab, RunStatus, STEP_KEYWORDS_CYCLE};
+use crate::bdd_nav::nav_body_char_range_in_buffer;
 use crate::highlight::{KeywordSet, StepHighlightState, highlight_line_with_state};
 
 /// Stage-2 preview: one solid style for the tree-selected line (avoids span-patch gaps that read as bright blocks).
@@ -734,16 +732,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             let line_len = display_len;
             if app.is_editor_nav_mode() {
                 let focus_patch = selected_style(false);
-                let hl_range = match app.focus_slot {
-                    BddFocusSlot::Keyword => keyword_char_range(&line).or_else(|| {
-                        if is_feature_narrative_row(buffer, row) {
-                            nav_body_char_range_in_buffer(buffer, row, &line)
-                        } else {
-                            None
-                        }
-                    }),
-                    BddFocusSlot::Body => nav_body_char_range_in_buffer(buffer, row, &line),
-                };
+                let hl_range = nav_body_char_range_in_buffer(buffer, row, &line);
                 if let Some(mut r) = hl_range
                     && r.start < r.end
                 {

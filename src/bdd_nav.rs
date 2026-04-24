@@ -1,38 +1,17 @@
-//! BDD/Gherkin navigation helpers: which buffer lines are structural nodes and UTF-8 character
-//! ranges for keyword tokens vs step bodies (used for TUI focus and highlighting).
+//! BDD/Gherkin navigation helpers for step-focused editor navigation and editing ranges.
 use std::ops::Range;
 
 use crate::editor_buffer::EditorBuffer;
-use crate::gherkin_keywords::{HEADER_PREFIXES, HEADER_TITLE_EDIT_PREFIXES};
+use crate::gherkin_keywords::HEADER_TITLE_EDIT_PREFIXES;
 
 /// Gherkin step keywords in **picker cycle** order (re-exported from shared module).
 pub use crate::gherkin_keywords::STEP_KEYWORDS as STEP_KEYWORDS_CYCLE;
 
-/// Collects row indices (ascending) for BDD navigation: `Feature:` prose lines, headers, and steps.
-pub fn bdd_node_rows(buffer: &EditorBuffer) -> Vec<usize> {
-    let narr = feature_narrative_row_flags(buffer);
-    let mut out = Vec::new();
-    for (row, &is_narr) in narr.iter().enumerate() {
-        if is_narr {
-            out.push(row);
-            continue;
-        }
-        let line = buffer.line(row);
-        if line_is_bdd_node(&line) {
-            out.push(row);
-        }
-    }
-    out
-}
-
-/// Row indices in document order for **body** vertical navigation: steps plus editable header titles
-/// (`Feature:` / `Scenario:` / `Scenario Outline:` / `Examples:`), so `↑`/`↓` can move between steps
-/// and the scenario/feature title lines.
-pub fn bdd_step_and_header_title_rows(buffer: &EditorBuffer) -> Vec<usize> {
+/// Collects row indices (ascending) for step-only navigation.
+pub fn bdd_step_rows(buffer: &EditorBuffer) -> Vec<usize> {
     let mut out = Vec::new();
     for row in 0..buffer.line_count() {
-        let line = buffer.line(row);
-        if step_edit_start_col(&line).is_some() || header_title_edit_start_col(&line).is_some() {
+        if step_edit_start_col(&buffer.line(row)).is_some() {
             out.push(row);
         }
     }
@@ -53,12 +32,6 @@ pub fn prev_node_row(rows: &[usize], current_row: usize) -> Option<usize> {
         }
     }
     best
-}
-
-fn line_is_bdd_node(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    HEADER_PREFIXES.iter().any(|p| trimmed.starts_with(p))
-        || step_keyword_at_line_start(trimmed).is_some()
 }
 
 /// Ends the free-text block after `Feature:`: the next structural header or a step line.
@@ -105,35 +78,6 @@ fn step_keyword_at_line_start(trimmed: &str) -> Option<&'static str> {
         }
     }
     None
-}
-
-/// UTF-8 character index range for the leading Gherkin keyword token (header or step keyword).
-///
-/// Indices count Unicode scalar values (Rust `char`), matching the editor buffer column model.
-pub fn keyword_char_range(line: &str) -> Option<Range<usize>> {
-    let trimmed = line.trim_start();
-    let leading = line.len().saturating_sub(trimmed.len());
-    for p in HEADER_PREFIXES {
-        if let Some(rest) = trimmed.strip_prefix(*p) {
-            let _ = rest;
-            let end = leading + p.chars().count();
-            return Some(leading..end);
-        }
-    }
-    if let Some(kw) = step_keyword_at_line_start(trimmed) {
-        let end = leading + kw.chars().count();
-        return Some(leading..end);
-    }
-    None
-}
-
-/// UTF-8 character index range for editable step body text (after keyword and one optional space).
-///
-/// Returns `None` when the line is not a step line. The range may be empty (`start == end`) when the body is empty.
-pub fn body_char_range(line: &str) -> Option<Range<usize>> {
-    let body_start = step_edit_start_col(line)?;
-    let end = line.chars().count();
-    Some(body_start..end)
 }
 
 /// First UTF-8 column where the header title starts (after `Feature:` / `Scenario:` / … and one optional space).
@@ -501,16 +445,7 @@ mod tests {
     use crate::editor_buffer::EditorBuffer;
 
     #[test]
-    fn test_bdd_node_rows_headers_and_steps() {
-        let buf = EditorBuffer::from_string(
-            "@t\nFeature: A\n  Scenario: S\n  Given x\n  Examples:\n".to_string(),
-        );
-        let rows = bdd_node_rows(&buf);
-        assert_eq!(rows, vec![1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn test_feature_narrative_rows_in_bdd_nodes() {
+    fn test_feature_narrative_rows() {
         let buf = EditorBuffer::from_string(
             "Feature: T\n  One\n  Two\nBackground:\n  Given x\n".to_string(),
         );
@@ -518,7 +453,6 @@ mod tests {
         assert!(!flags[0]);
         assert!(flags[1] && flags[2]);
         assert!(!flags[3]);
-        assert_eq!(bdd_node_rows(&buf), vec![0, 1, 2, 3, 4]);
         assert_eq!(line_body_edit_min_col_in_buffer(&buf, 1), Some(0));
     }
 
@@ -527,19 +461,7 @@ mod tests {
         let buf = EditorBuffer::from_string(
             "Feature: A\n  Scenario: S\n  Given a\n  Scenario: T\n  When b\n".to_string(),
         );
-        assert_eq!(bdd_node_rows(&buf), vec![0, 1, 2, 3, 4]);
-        let step_only_rows: Vec<usize> = (0..buf.line_count())
-            .filter(|&r| step_edit_start_col(&buf.line(r)).is_some())
-            .collect();
-        assert_eq!(step_only_rows, vec![2, 4]);
-    }
-
-    #[test]
-    fn test_bdd_step_and_header_title_rows_merges_document_order() {
-        let buf = EditorBuffer::from_string(
-            "Feature: A\n  Scenario: S\n  Given a\n  Scenario: T\n  When b\n".to_string(),
-        );
-        assert_eq!(bdd_step_and_header_title_rows(&buf), vec![0, 1, 2, 3, 4]);
+        assert_eq!(bdd_step_rows(&buf), vec![2, 4]);
     }
 
     #[test]
@@ -551,21 +473,6 @@ mod tests {
         assert_eq!(prev_node_row(&rows, 6), Some(5));
         assert_eq!(prev_node_row(&rows, 5), Some(3));
         assert_eq!(prev_node_row(&rows, 0), None);
-    }
-
-    #[test]
-    fn test_keyword_char_range_header_and_step() {
-        assert_eq!(keyword_char_range("  Feature: A"), Some(2..10));
-        assert_eq!(keyword_char_range("    Scenario Outline: X"), Some(4..21));
-        assert_eq!(keyword_char_range("  Given hello"), Some(2..7));
-        assert_eq!(keyword_char_range("When x"), Some(0..4));
-    }
-
-    #[test]
-    fn test_body_char_range() {
-        assert_eq!(body_char_range("  Given I log in"), Some(8..16));
-        assert_eq!(body_char_range("Given"), Some(5..5));
-        assert_eq!(body_char_range("Feature: x"), None);
     }
 
     #[test]

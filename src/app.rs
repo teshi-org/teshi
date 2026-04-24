@@ -7,9 +7,8 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result};
 
 use crate::bdd_nav::{
-    bdd_node_rows, bdd_step_and_header_title_rows, body_char_range, current_step_keyword_index,
-    delete_scenario_block, delete_step, header_title_edit_start_col, insert_scenario_after_current,
-    insert_step_above, insert_step_below, is_feature_narrative_row, keyword_char_range,
+    bdd_step_rows, current_step_keyword_index, delete_scenario_block, delete_step,
+    insert_scenario_after_current, insert_step_above, insert_step_below,
     line_body_edit_min_col_in_buffer, next_node_row, prev_node_row, replace_step_keyword_line,
     scenario_content_rows, scenario_header_for_row, scenario_step_rows, swap_step_with_next,
     swap_step_with_prev,
@@ -248,7 +247,7 @@ impl App {
             cursor_col: 0,
             desired_col: 0,
             scroll_row: 0,
-            focus_slot: BddFocusSlot::Keyword,
+            focus_slot: BddFocusSlot::Body,
             preview_buffer: None,
             preview_title: String::new(),
             preview_cursor_row: 0,
@@ -332,7 +331,7 @@ impl App {
             cursor_col: 0,
             desired_col: 0,
             scroll_row: 0,
-            focus_slot: BddFocusSlot::Keyword,
+            focus_slot: BddFocusSlot::Body,
             preview_buffer: None,
             preview_title: String::new(),
             preview_cursor_row: 0,
@@ -399,7 +398,7 @@ impl App {
             cursor_col: 0,
             desired_col: 0,
             scroll_row: 0,
-            focus_slot: BddFocusSlot::Keyword,
+            focus_slot: BddFocusSlot::Body,
             preview_buffer: None,
             preview_title: String::new(),
             preview_cursor_row: 0,
@@ -443,13 +442,13 @@ impl App {
 
     /// Positions the navigation row on the first BDD node, or keeps row `0` when there are none.
     fn sync_cursor_to_first_node(&mut self) {
-        let rows = bdd_node_rows(&self.buffer);
+        let rows = bdd_step_rows(&self.buffer);
         if let Some(&r) = rows.first() {
             self.cursor_row = r;
             self.cursor_col = 0;
             self.desired_col = 0;
         }
-        self.focus_slot = BddFocusSlot::Keyword;
+        self.focus_slot = BddFocusSlot::Body;
     }
 
     fn normalize_explore_selection(&mut self) {
@@ -1179,7 +1178,7 @@ impl App {
         self.cursor_col = 0;
         self.desired_col = 0;
         self.scroll_row = 0;
-        self.focus_slot = BddFocusSlot::Keyword;
+        self.focus_slot = BddFocusSlot::Body;
         self.pending_char = None;
         self.scenario_fold.clear();
     }
@@ -1191,7 +1190,7 @@ impl App {
         self.cursor_row = row.min(last);
         self.cursor_col = 0;
         self.desired_col = 0;
-        self.focus_slot = BddFocusSlot::Keyword;
+        self.focus_slot = BddFocusSlot::Body;
     }
 
     /// Returns the selected node's concrete source location.
@@ -1997,11 +1996,7 @@ impl App {
         self.cursor_row = row;
         self.cursor_col = 0;
         self.desired_col = 0;
-        self.focus_slot = if is_feature_narrative_row(&self.buffer, self.cursor_row) {
-            BddFocusSlot::Body
-        } else {
-            BddFocusSlot::Keyword
-        };
+        self.focus_slot = BddFocusSlot::Body;
         self.mark_current_buffer_dirty();
         self.clear_structural_state();
         self.status = "Deleted node".to_string();
@@ -2087,7 +2082,7 @@ impl App {
         self.cursor_row = insert_at;
         self.cursor_col = 0;
         self.desired_col = 0;
-        self.focus_slot = BddFocusSlot::Keyword;
+        self.focus_slot = BddFocusSlot::Body;
         self.mark_current_buffer_dirty();
         self.clear_structural_state();
         self.status = "Step pasted".to_string();
@@ -2116,7 +2111,7 @@ impl App {
         self.cursor_row = row;
         self.cursor_col = 0;
         self.desired_col = 0;
-        self.focus_slot = BddFocusSlot::Keyword;
+        self.focus_slot = BddFocusSlot::Body;
         self.mark_current_buffer_dirty();
         self.clear_structural_state();
         self.status = if down {
@@ -2141,7 +2136,7 @@ impl App {
             self.cursor_row = scenario_row;
             self.cursor_col = 0;
             self.desired_col = 0;
-            self.focus_slot = BddFocusSlot::Keyword;
+            self.focus_slot = BddFocusSlot::Body;
         }
         self.pending_char = None;
         self.quit_pending_confirm = false;
@@ -2161,7 +2156,7 @@ impl App {
             self.cursor_row = scenario_row;
             self.cursor_col = 0;
             self.desired_col = 0;
-            self.focus_slot = BddFocusSlot::Keyword;
+            self.focus_slot = BddFocusSlot::Body;
         }
         self.pending_char = None;
         self.quit_pending_confirm = false;
@@ -2232,7 +2227,7 @@ impl App {
             self.cursor_row = picker.buffer_row;
             self.cursor_col = 0;
             self.desired_col = 0;
-            self.focus_slot = BddFocusSlot::Keyword;
+            self.focus_slot = BddFocusSlot::Body;
             self.mark_current_buffer_dirty();
             self.status = "Step keyword updated".to_string();
         }
@@ -2252,36 +2247,16 @@ impl App {
     }
 
     fn toggle_focus_slot_horizontal(&mut self) {
-        let line = self.buffer.line(self.cursor_row);
-        if line_body_edit_min_col_in_buffer(&self.buffer, self.cursor_row).is_none() {
-            return;
-        }
-        match self.focus_slot {
-            BddFocusSlot::Keyword => {
-                self.focus_slot = BddFocusSlot::Body;
-            }
-            BddFocusSlot::Body => {
-                if keyword_char_range(&line).is_some() {
-                    self.focus_slot = BddFocusSlot::Keyword;
-                }
-            }
-        }
+        self.focus_slot = BddFocusSlot::Body;
     }
 
     fn vertical_nav_rows(&self) -> (Vec<usize>, bool) {
-        let line = self.buffer.line(self.cursor_row);
-        let body_chain_nav = self.focus_slot == BddFocusSlot::Body
-            && (body_char_range(&line).is_some() || header_title_edit_start_col(&line).is_some())
-            && !is_feature_narrative_row(&self.buffer, self.cursor_row);
+        let body_chain_nav = self.focus_slot == BddFocusSlot::Body;
         let hidden = self.hidden_editor_rows();
-        let rows = if body_chain_nav {
-            bdd_step_and_header_title_rows(&self.buffer)
-        } else {
-            bdd_node_rows(&self.buffer)
-        }
-        .into_iter()
-        .filter(|row| !hidden.contains(row))
-        .collect();
+        let rows = bdd_step_rows(&self.buffer)
+            .into_iter()
+            .filter(|row| !hidden.contains(row))
+            .collect();
         (rows, body_chain_nav)
     }
 
@@ -2292,11 +2267,7 @@ impl App {
         if body_chain_nav {
             return;
         }
-        self.focus_slot = if is_feature_narrative_row(&self.buffer, new_row) {
-            BddFocusSlot::Body
-        } else {
-            BddFocusSlot::Keyword
-        };
+        self.focus_slot = BddFocusSlot::Body;
     }
 
     #[allow(dead_code)]
@@ -2355,19 +2326,14 @@ impl App {
             return;
         }
         if self.is_editor_nav_mode() {
-            if self.focus_slot == BddFocusSlot::Keyword {
-                let line = self.buffer.line(self.cursor_row);
-                if keyword_char_range(&line).is_some() {
-                    if self.active_tab == MainTab::Explore && self.explore_edit_mode {
-                        self.explore_exit_edit();
-                        self.quit_pending_confirm = false;
-                    } else if self.active_tab == MainTab::MindMap
-                        && self.view_stage == ViewStage::EditorAndPanel
-                    {
-                        self.stage_back();
-                    }
-                    return;
-                }
+            if self.active_tab == MainTab::Explore && self.explore_edit_mode {
+                self.explore_exit_edit();
+                self.quit_pending_confirm = false;
+                return;
+            }
+            if self.active_tab == MainTab::MindMap && self.view_stage == ViewStage::EditorAndPanel {
+                self.stage_back();
+                return;
             }
             self.toggle_focus_slot_horizontal();
             self.quit_pending_confirm = false;
@@ -2658,11 +2624,12 @@ mod tests {
         let mut app = editor_test_app();
         app.buffer = EditorBuffer::from_string("Feature: X\n".to_string());
         app.sync_cursor_to_first_node();
-        assert_eq!(app.focus_slot, BddFocusSlot::Keyword);
+        assert_eq!(app.focus_slot, BddFocusSlot::Body);
         app.handle_action(Action::ActivateStepInput)
             .expect("activate should work");
         assert!(app.step_keyword_picker.is_none());
-        assert!(!app.step_input_active);
+        assert!(app.step_input_active);
+        assert_eq!(app.step_input_min_col, 9);
     }
 
     #[test]
@@ -2688,16 +2655,13 @@ mod tests {
         app.sync_cursor_to_first_node();
         app.handle_action(Action::MoveDown)
             .expect("move to description should work");
-        assert_eq!(app.cursor_row, 1);
+        assert_eq!(app.cursor_row, 0);
         assert_eq!(app.focus_slot, BddFocusSlot::Body);
-        assert!(crate::bdd_nav::is_feature_narrative_row(&app.buffer, 1));
+        assert!(!crate::bdd_nav::is_feature_narrative_row(&app.buffer, 0));
         app.handle_action(Action::ActivateStepInput)
             .expect("edit should work");
         assert!(app.step_input_active);
-        assert_eq!(app.step_input_min_col, 0);
-        app.handle_action(Action::Insert('!'))
-            .expect("insert should work");
-        assert_eq!(app.buffer.line(1), "  Desc line!");
+        assert_eq!(app.step_input_min_col, 9);
     }
 
     #[test]
@@ -2790,100 +2754,65 @@ mod tests {
         let mut app = editor_test_app();
         app.buffer = EditorBuffer::from_string("Feature: A\n  Given x\n".to_string());
         app.sync_cursor_to_first_node();
-        assert_eq!(app.cursor_row, 0);
-        assert_eq!(app.focus_slot, BddFocusSlot::Keyword);
+        assert_eq!(app.cursor_row, 1);
+        assert_eq!(app.focus_slot, BddFocusSlot::Body);
         app.handle_action(Action::MoveDown)
             .expect("move should work");
         assert_eq!(app.cursor_row, 1);
-        assert_eq!(app.focus_slot, BddFocusSlot::Keyword);
+        assert_eq!(app.focus_slot, BddFocusSlot::Body);
     }
 
     #[test]
-    fn test_nav_body_move_down_chain_includes_scenario_title() {
+    fn test_nav_move_down_skips_non_step_rows() {
         let mut app = editor_test_app();
         app.buffer = EditorBuffer::from_string(
             "Feature: A\n  Scenario: S\n  Given a\n  Scenario: T\n  When b\n".to_string(),
         );
         app.sync_cursor_to_first_node();
-        app.handle_action(Action::MoveDown)
-            .expect("move should work");
-        app.handle_action(Action::MoveDown)
-            .expect("move should work");
         assert_eq!(app.cursor_row, 2);
-        app.handle_action(Action::MoveRight)
-            .expect("body focus should work");
-        assert_eq!(app.focus_slot, BddFocusSlot::Body);
         app.handle_action(Action::MoveDown)
-            .expect("body-chain move should work");
-        assert_eq!(app.cursor_row, 3);
-        assert!(app.buffer.line(3).trim_start().starts_with("Scenario"));
-        assert_eq!(app.focus_slot, BddFocusSlot::Body);
-        app.handle_action(Action::MoveDown)
-            .expect("body-chain move should work");
+            .expect("step move should work");
         assert_eq!(app.cursor_row, 4);
+        assert!(app.buffer.line(4).trim_start().starts_with("When"));
         assert_eq!(app.focus_slot, BddFocusSlot::Body);
     }
 
     #[test]
-    fn test_nav_body_on_feature_title_uses_body_chain() {
+    fn test_nav_sync_starts_at_first_step() {
         let mut app = editor_test_app();
         app.buffer =
             EditorBuffer::from_string("Feature: A\n  Scenario: S\n  Given a\n".to_string());
         app.sync_cursor_to_first_node();
-        assert_eq!(app.cursor_row, 0);
-        app.handle_action(Action::MoveRight)
-            .expect("body focus on feature title should work");
-        assert_eq!(app.focus_slot, BddFocusSlot::Body);
-        app.handle_action(Action::MoveDown)
-            .expect("move should work");
-        assert_eq!(app.cursor_row, 1);
-        assert!(app.buffer.line(1).trim_start().starts_with("Scenario"));
-        assert_eq!(app.focus_slot, BddFocusSlot::Body);
-        app.handle_action(Action::MoveDown)
-            .expect("move should work");
         assert_eq!(app.cursor_row, 2);
         assert!(app.buffer.line(2).trim_start().starts_with("Given"));
         assert_eq!(app.focus_slot, BddFocusSlot::Body);
     }
 
     #[test]
-    fn test_nav_body_move_up_from_step_to_scenario_title() {
+    fn test_nav_move_up_stays_on_step_rows() {
         let mut app = editor_test_app();
         app.buffer = EditorBuffer::from_string("Feature: F\nScenario: S\n  When x\n".to_string());
         app.sync_cursor_to_first_node();
-        app.handle_action(Action::MoveDown)
-            .expect("move should work");
-        app.handle_action(Action::MoveDown)
-            .expect("move should work");
-        assert!(
-            app.buffer
-                .line(app.cursor_row)
-                .trim_start()
-                .starts_with("When")
-        );
-        app.handle_action(Action::MoveRight)
-            .expect("body focus should work");
+        assert_eq!(app.cursor_row, 2);
         assert_eq!(app.focus_slot, BddFocusSlot::Body);
         app.handle_action(Action::MoveUp)
-            .expect("body-chain move should work");
-        assert_eq!(app.cursor_row, 1);
-        assert!(app.buffer.line(1).trim_start().starts_with("Scenario"));
+            .expect("step move should work");
+        assert_eq!(app.cursor_row, 2);
         assert_eq!(app.focus_slot, BddFocusSlot::Body);
     }
 
     #[test]
-    fn test_nav_left_right_toggles_keyword_and_body() {
+    fn test_nav_left_right_keeps_body_focus() {
         let mut app = editor_test_app();
         app.buffer = EditorBuffer::from_string("  When hello".to_string());
         app.sync_cursor_to_first_node();
-        assert_eq!(app.focus_slot, BddFocusSlot::Keyword);
-        app.handle_action(Action::MoveRight)
-            .expect("toggle should work");
         assert_eq!(app.focus_slot, BddFocusSlot::Body);
-        // MoveLeft from Body toggles back to Keyword
+        app.handle_action(Action::MoveRight)
+            .expect("right should work");
+        assert_eq!(app.focus_slot, BddFocusSlot::Body);
         app.handle_action(Action::MoveLeft)
-            .expect("toggle should work");
-        assert_eq!(app.focus_slot, BddFocusSlot::Keyword);
+            .expect("left should work");
+        assert_eq!(app.focus_slot, BddFocusSlot::Body);
     }
 
     #[test]
