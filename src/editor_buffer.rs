@@ -28,6 +28,9 @@ impl EditorBuffer {
         if line.ends_with('\n') {
             line.pop();
         }
+        if line.ends_with('\r') {
+            line.pop();
+        }
         line
     }
 
@@ -136,5 +139,13 @@ mod tests {
         assert_eq!(buffer.line(0), "a");
         assert_eq!(buffer.line(1), "B");
         assert_eq!(buffer.line(2), "c");
+    }
+
+    #[test]
+    fn test_line_trims_crlf_trailing_cr() {
+        let buffer = EditorBuffer::from_string("Given x\r\nThen y\r\n".to_string());
+        assert_eq!(buffer.line(0), "Given x");
+        assert_eq!(buffer.line(1), "Then y");
+        assert_eq!(buffer.line_len_chars(0), "Given x".chars().count());
     }
 }
