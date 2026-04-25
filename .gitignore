@@ -30,6 +30,7 @@ teshi.toml
 
 # Added by cargo
 
-wix/
+# Keep wix/ tracked so MSI customization is reproducible in CI
+# wix/
 
 /target
