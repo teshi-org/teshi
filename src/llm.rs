@@ -8,6 +8,12 @@
 //! Streaming is the only mode: partial text chunks are delivered via
 //! `LlmEvent::Chunk` so the UI can render the response in real time.
 //!
+//! # Tool calling
+//!
+//! When `LlmRequest::Chat` includes `tools`, the model may respond with
+//! `LlmEvent::ToolCallRequest` instead of text. The caller should execute the
+//! requested tools and feed results back as `ChatMessage` with `role: "tool"`.
+//!
 //! # Usage
 //!
 //! ```ignore
@@ -15,18 +21,26 @@
 //! let (handle, rx) = spawn_llm(config);
 //! handle.send(LlmRequest::Chat {
 //!     system: Some("You are a helpful assistant.".into()),
-//!     messages: vec!["What is BDD?".into()],
+//!     messages: vec![ChatMessage {
+//!         role: "user".into(),
+//!         content: "What is BDD?".into(),
+//!         tool_calls: None,
+//!         tool_call_id: None,
+//!     }],
+//!     tools: None,
 //! })?;
 //!
 //! while let Ok(event) = rx.recv() {
 //!     match event {
 //!         LlmEvent::Chunk { content, .. } => { /* stream partial */ }
 //!         LlmEvent::Done { full_text, .. } => { /* done */ }
+//!         LlmEvent::ToolCallRequest { tool_calls } => { /* execute tools */ }
 //!         LlmEvent::Error { message } => { /* handle */ }
 //!     }
 //! }
 //! ```
 
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
@@ -85,17 +99,59 @@ impl LlmConfig {
     }
 }
 
+// ── Tool types ───────────────────────────────────────────────────────────────
+
+/// A tool definition conforming to OpenAI's function-calling JSON Schema format.
+#[derive(Debug, Clone)]
+pub struct ToolDefinition {
+    /// The name of the function (a-z, A-Z, 0-9, underscores, dashes).
+    pub name: String,
+    /// A description of what the function does.
+    pub description: String,
+    /// JSON Schema for the function parameters.
+    pub parameters: serde_json::Value,
+}
+
+/// A tool call request returned by the LLM.
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    /// Unique identifier for this tool call.
+    pub id: String,
+    /// The name of the function to call.
+    pub name: String,
+    /// JSON-encoded arguments for the function.
+    pub arguments: String,
+}
+
+// ── Message types ────────────────────────────────────────────────────────────
+
+/// A structured chat message with role, content, and optional tool fields.
+#[derive(Debug, Clone)]
+pub struct ChatMessage {
+    /// One of `"user"`, `"assistant"`, `"system"`, or `"tool"`.
+    pub role: String,
+    /// The message content (may be empty for assistant messages that only
+    /// contain tool calls).
+    pub content: String,
+    /// Tool calls included in an assistant message.
+    pub tool_calls: Option<Vec<ToolCall>>,
+    /// The tool call ID this message responds to (for `role: "tool"`).
+    pub tool_call_id: Option<String>,
+}
+
 // ── Request / Event types ────────────────────────────────────────────────────
 
 /// A request sent into the LLM background thread.
 #[derive(Debug, Clone)]
 pub enum LlmRequest {
-    /// A simple chat completion.
+    /// A chat completion request with optional tools.
     Chat {
         /// Optional system prompt.
         system: Option<String>,
-        /// User messages, each sent as a separate user turn.
-        messages: Vec<String>,
+        /// Messages in conversation order.
+        messages: Vec<ChatMessage>,
+        /// Optional tool definitions for function calling.
+        tools: Option<Vec<ToolDefinition>>,
     },
 }
 
@@ -106,13 +162,17 @@ pub enum LlmEvent {
     Chunk {
         content: String,
     },
-    /// The completion finished successfully.
+    /// The completion finished successfully with a text response.
     Done {
         full_text: String,
         /// Input + output token usage, if reported.
         input_tokens: Option<u32>,
         output_tokens: Option<u32>,
         model: String,
+    },
+    /// The model requested one or more tool calls instead of a text response.
+    ToolCallRequest {
+        tool_calls: Vec<ToolCall>,
     },
     /// A non-recoverable error occurred.
     Error {
@@ -179,8 +239,14 @@ fn run_llm_worker(
 
     while let Ok(request) = req_rx.recv() {
         match request {
-            LlmRequest::Chat { system, messages } => {
-                rt.block_on(process_chat_request(&config, system, messages, &evt_tx));
+            LlmRequest::Chat {
+                system,
+                messages,
+                tools,
+            } => {
+                rt.block_on(process_chat_request(
+                    &config, system, messages, tools, &evt_tx,
+                ));
             }
         }
     }
@@ -190,13 +256,14 @@ fn run_llm_worker(
 async fn process_chat_request(
     config: &LlmConfig,
     system: Option<String>,
-    messages: Vec<String>,
+    messages: Vec<ChatMessage>,
+    tools: Option<Vec<ToolDefinition>>,
     evt_tx: &Sender<LlmEvent>,
 ) {
     let timeout_dur = std::time::Duration::from_secs(120);
     match tokio::time::timeout(
         timeout_dur,
-        chat_completion(config, system, messages, evt_tx),
+        chat_completion(config, system, messages, tools, evt_tx),
     )
     .await
     {
@@ -209,20 +276,136 @@ async fn process_chat_request(
     }
 }
 
+// ── Message conversion helpers ───────────────────────────────────────────────
+
+use async_openai::types::chat::{
+    ChatCompletionMessageToolCall as OpenAiMessageToolCall,
+    ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessageArgs,
+    ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
+    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestSystemMessageContent,
+    ChatCompletionRequestToolMessageArgs, ChatCompletionRequestToolMessageContent,
+    ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent,
+    FunctionCall,
+};
+
+fn build_openai_messages(
+    system: Option<String>,
+    messages: &[ChatMessage],
+) -> Vec<ChatCompletionRequestMessage> {
+    let mut req_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
+
+    if let Some(sys) = system {
+        if let Ok(msg) = ChatCompletionRequestSystemMessageArgs::default()
+            .content(ChatCompletionRequestSystemMessageContent::Text(sys))
+            .build()
+            .map(ChatCompletionRequestMessage::System)
+        {
+            req_messages.push(msg);
+        }
+    }
+
+    for msg in messages {
+        let openai_msg = match msg.role.as_str() {
+            "user" => {
+                let Ok(m) = ChatCompletionRequestUserMessageArgs::default()
+                    .content(ChatCompletionRequestUserMessageContent::Text(
+                        msg.content.clone(),
+                    ))
+                    .build()
+                    .map(ChatCompletionRequestMessage::User)
+                else {
+                    continue;
+                };
+                m
+            }
+            "assistant" => {
+                let mut builder = ChatCompletionRequestAssistantMessageArgs::default();
+                if let Some(ref tool_calls) = msg.tool_calls {
+                    let oai_tool_calls: Vec<ChatCompletionMessageToolCalls> = tool_calls
+                        .iter()
+                        .map(|tc| {
+                            ChatCompletionMessageToolCalls::Function(
+                                OpenAiMessageToolCall {
+                                    id: tc.id.clone(),
+                                    function: FunctionCall {
+                                        name: tc.name.clone(),
+                                        arguments: tc.arguments.clone(),
+                                    },
+                                },
+                            )
+                        })
+                        .collect();
+                    builder.tool_calls(oai_tool_calls);
+                }
+                if !msg.content.is_empty() {
+                    builder.content(
+                        ChatCompletionRequestAssistantMessageContent::Text(
+                            msg.content.clone(),
+                        ),
+                    );
+                }
+                let Ok(m) = builder
+                    .build()
+                    .map(ChatCompletionRequestMessage::Assistant)
+                else {
+                    continue;
+                };
+                m
+            }
+            "tool" => {
+                let Ok(m) = ChatCompletionRequestToolMessageArgs::default()
+                    .content(ChatCompletionRequestToolMessageContent::Text(
+                        msg.content.clone(),
+                    ))
+                    .tool_call_id(msg.tool_call_id.clone().unwrap_or_default())
+                    .build()
+                    .map(ChatCompletionRequestMessage::Tool)
+                else {
+                    continue;
+                };
+                m
+            }
+            _ => continue,
+        };
+        req_messages.push(openai_msg);
+    }
+
+    req_messages
+}
+
+fn build_openai_tools(
+    tools: &[ToolDefinition],
+) -> Vec<async_openai::types::chat::ChatCompletionTools> {
+    use async_openai::types::chat::{
+        ChatCompletionTool, ChatCompletionTools, FunctionObject,
+    };
+
+    tools
+        .iter()
+        .map(|td| {
+            let func = FunctionObject {
+                name: td.name.clone(),
+                description: Some(td.description.clone()),
+                parameters: Some(td.parameters.clone()),
+                strict: None,
+            };
+            ChatCompletionTools::Function(ChatCompletionTool { function: func })
+        })
+        .collect()
+}
+
 // ── Streaming chat completion ────────────────────────────────────────────────
 
 async fn chat_completion(
     config: &LlmConfig,
     system: Option<String>,
-    messages: Vec<String>,
+    messages: Vec<ChatMessage>,
+    tools: Option<Vec<ToolDefinition>>,
     evt_tx: &Sender<LlmEvent>,
 ) {
     use async_openai::Client;
     use async_openai::config::OpenAIConfig;
-    use async_openai::types::chat::{
-        ChatCompletionRequestMessage, CreateChatCompletionRequestArgs,
-        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-    };
+    use async_openai::types::chat::CreateChatCompletionRequestArgs;
     use futures::StreamExt;
 
     let openai_config = OpenAIConfig::default()
@@ -231,35 +414,21 @@ async fn chat_completion(
 
     let client = Client::with_config(openai_config);
 
-    let mut req_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
+    let req_messages = build_openai_messages(system, &messages);
 
-    if let Some(sys) = system {
-        if let Ok(msg) = ChatCompletionRequestSystemMessageArgs::default()
-            .content(sys)
-            .build()
-            .map(|m| ChatCompletionRequestMessage::System(m))
-        {
-            req_messages.push(msg);
-        }
-    }
-
-    for msg_text in &messages {
-        if let Ok(msg) = ChatCompletionRequestUserMessageArgs::default()
-            .content(msg_text.clone())
-            .build()
-            .map(|m| ChatCompletionRequestMessage::User(m))
-        {
-            req_messages.push(msg);
-        }
-    }
-
-    let request = match CreateChatCompletionRequestArgs::default()
+    let mut request_builder = CreateChatCompletionRequestArgs::default();
+    request_builder
         .model(&config.model)
         .messages(req_messages)
         .max_tokens(config.max_tokens)
-        .temperature(config.temperature)
-        .build()
-    {
+        .temperature(config.temperature);
+
+    if let Some(ref tool_defs) = tools {
+        let oai_tools = build_openai_tools(tool_defs);
+        request_builder.tools(oai_tools);
+    }
+
+    let request = match request_builder.build() {
         Ok(req) => req,
         Err(e) => {
             let _ = evt_tx.send(LlmEvent::Error {
@@ -284,23 +453,47 @@ async fn chat_completion(
     let mut input_tokens: Option<u32> = None;
     let mut output_tokens: Option<u32> = None;
 
+    // Accumulate streaming tool call chunks keyed by index.
+    // (id, name, accumulated_arguments_json)
+    let mut tool_call_chunks: HashMap<u32, (Option<String>, Option<String>, String)> =
+        HashMap::new();
+
     while let Some(chunk_result) = stream.next().await {
         match chunk_result {
             Ok(chunk) => {
                 if model_name.is_empty() {
                     model_name = chunk.model.clone();
                 }
-                // Capture usage from the final chunk if present
                 if let Some(usage) = chunk.usage {
                     input_tokens = Some(usage.prompt_tokens as u32);
                     output_tokens = Some(usage.completion_tokens as u32);
                 }
                 for choice in &chunk.choices {
+                    // Handle text content deltas
                     if let Some(ref delta) = choice.delta.content {
                         full_text.push_str(delta);
                         let _ = evt_tx.send(LlmEvent::Chunk {
                             content: delta.clone(),
                         });
+                    }
+                    // Handle tool call deltas
+                    if let Some(ref tc_chunks) = choice.delta.tool_calls {
+                        for tc in tc_chunks {
+                            let entry = tool_call_chunks
+                                .entry(tc.index)
+                                .or_insert((None, None, String::new()));
+                            if let Some(ref id) = tc.id {
+                                entry.0 = Some(id.clone());
+                            }
+                            if let Some(ref func) = tc.function {
+                                if let Some(ref name) = func.name {
+                                    entry.1 = Some(name.clone());
+                                }
+                                if let Some(ref args) = func.arguments {
+                                    entry.2.push_str(args);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -313,10 +506,37 @@ async fn chat_completion(
         }
     }
 
-    let _ = evt_tx.send(LlmEvent::Done {
-        full_text,
-        input_tokens,
-        output_tokens,
-        model: model_name,
-    });
+    // Emit tool calls if the model requested any
+    if !tool_call_chunks.is_empty() {
+        let mut sorted: Vec<_> = tool_call_chunks.into_iter().collect();
+        // Sort by index to preserve the model's intended order
+        sorted.sort_by_key(|(idx, _)| *idx);
+        let tool_calls: Vec<ToolCall> = sorted
+            .into_iter()
+            .map(|(_, (id, name, args))| ToolCall {
+                id: id.unwrap_or_default(),
+                name: name.unwrap_or_default(),
+                arguments: args,
+            })
+            .collect();
+
+        let _ = evt_tx.send(LlmEvent::ToolCallRequest { tool_calls });
+
+        // Also emit Done if there was text content before the tool call
+        if !full_text.is_empty() {
+            let _ = evt_tx.send(LlmEvent::Done {
+                full_text,
+                input_tokens,
+                output_tokens,
+                model: model_name,
+            });
+        }
+    } else {
+        let _ = evt_tx.send(LlmEvent::Done {
+            full_text,
+            input_tokens,
+            output_tokens,
+            model: model_name,
+        });
+    }
 }

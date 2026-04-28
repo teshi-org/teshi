@@ -36,6 +36,10 @@ pub enum MainTab {
 pub struct AiChatMessage {
     pub role: AiRole,
     pub content: String,
+    /// Tool calls included in an assistant message (for function calling).
+    pub tool_calls: Option<Vec<crate::llm::ToolCall>>,
+    /// The tool call ID this message responds to (for `Tool` role).
+    pub tool_call_id: Option<String>,
 }
 
 /// Who sent the message.
@@ -43,6 +47,8 @@ pub struct AiChatMessage {
 pub enum AiRole {
     User,
     Assistant,
+    /// A tool result message fed back to the LLM.
+    Tool,
 }
 
 /// Current state of the AI interaction.
@@ -208,6 +214,10 @@ pub struct App {
     pub ai_partial_response: String,
     pub ai_llm_handle: Option<crate::llm::LlmHandle>,
     pub ai_llm_rx: Option<std::sync::mpsc::Receiver<crate::llm::LlmEvent>>,
+    /// Human-readable status text shown while the agent executes a tool.
+    pub ai_tool_status: Option<String>,
+    /// Bounds the agent loop to prevent infinite tool-call cycles.
+    agent_loop_count: u32,
     quit_pending_confirm: bool,
 }
 
@@ -323,6 +333,8 @@ impl App {
             ai_partial_response: String::new(),
             ai_llm_handle: None,
             ai_llm_rx: None,
+            ai_tool_status: None,
+            agent_loop_count: 0,
             quit_pending_confirm: false,
         };
         app.spawn_llm_if_configured();
@@ -383,6 +395,8 @@ impl App {
             ai_partial_response: String::new(),
             ai_llm_handle: None,
             ai_llm_rx: None,
+            ai_tool_status: None,
+            agent_loop_count: 0,
             step_input_active: false,
             step_input_row: 0,
             step_input_min_col: 0,
@@ -457,6 +471,8 @@ impl App {
             ai_partial_response: String::new(),
             ai_llm_handle: None,
             ai_llm_rx: None,
+            ai_tool_status: None,
+            agent_loop_count: 0,
             step_input_active: false,
             step_input_row: 0,
             step_input_min_col: 0,
@@ -626,7 +642,11 @@ impl App {
         }
     }
 
-    /// Poll the LLM response channel and push any completed responses into the chat history.
+    /// Poll the LLM response channel and push completed responses into chat history.
+    ///
+    /// When the LLM requests tool calls, this method executes them and
+    /// re-invokes the LLM with the results (the "agent loop") until a plain
+    /// text response is received or the iteration limit is reached.
     pub fn poll_llm_events(&mut self) {
         let Some(rx) = self.ai_llm_rx.take() else {
             return;
@@ -639,17 +659,95 @@ impl App {
                     model,
                     ..
                 }) => {
-                    self.ai_messages.push(AiChatMessage {
-                        role: AiRole::Assistant,
-                        content: full_text,
-                    });
+                    // If we already have a partial response from streaming,
+                    // use that instead; otherwise store the full text.
+                    if self.ai_partial_response.is_empty() {
+                        self.ai_messages.push(AiChatMessage {
+                            role: AiRole::Assistant,
+                            content: full_text,
+                            tool_calls: None,
+                            tool_call_id: None,
+                        });
+                    } else {
+                        let content = std::mem::take(&mut self.ai_partial_response);
+                        self.ai_messages.push(AiChatMessage {
+                            role: AiRole::Assistant,
+                            content,
+                            tool_calls: None,
+                            tool_call_id: None,
+                        });
+                    }
                     self.ai_partial_response.clear();
                     self.ai_status = AiStatus::Idle;
+                    self.ai_tool_status = None;
+                    self.agent_loop_count = 0;
                     self.status = format!("AI response received ({model})");
+                }
+                Ok(crate::llm::LlmEvent::ToolCallRequest { tool_calls }) => {
+                    // Store the assistant message with its tool calls
+                    let partial_text =
+                        std::mem::take(&mut self.ai_partial_response);
+                    self.ai_messages.push(AiChatMessage {
+                        role: AiRole::Assistant,
+                        content: partial_text,
+                        tool_calls: Some(tool_calls.clone()),
+                        tool_call_id: None,
+                    });
+
+                    // Execute each requested tool and append results
+                    for tc in &tool_calls {
+                        self.ai_tool_status = Some(format!(
+                            "AI is calling {}...",
+                            tc.name
+                        ));
+                        match crate::agent::execute_tool(
+                            self,
+                            &tc.name,
+                            &tc.arguments,
+                        ) {
+                            Ok(result) => {
+                                self.ai_messages.push(AiChatMessage {
+                                    role: AiRole::Tool,
+                                    content: result,
+                                    tool_calls: None,
+                                    tool_call_id: Some(tc.id.clone()),
+                                });
+                            }
+                            Err(e) => {
+                                self.ai_messages.push(AiChatMessage {
+                                    role: AiRole::Tool,
+                                    content: format!("Error: {e}"),
+                                    tool_calls: None,
+                                    tool_call_id: Some(tc.id.clone()),
+                                });
+                            }
+                        }
+                    }
+
+                    // Continue the conversation: re-invoke LLM with results
+                    self.agent_loop_count += 1;
+                    if self.agent_loop_count > 5 {
+                        self.ai_status = AiStatus::Error;
+                        self.ai_tool_status = None;
+                        self.agent_loop_count = 0;
+                        self.status =
+                            "AI error: too many tool call iterations".to_string();
+                    } else if let Some(ref handle) = self.ai_llm_handle {
+                        let messages = self.build_chat_messages_for_llm();
+                        let tools =
+                            Some(crate::agent::get_tools());
+                        let _ = handle.send(crate::llm::LlmRequest::Chat {
+                            system: Some(Self::ai_system_prompt().into()),
+                            messages,
+                            tools,
+                        });
+                    }
                 }
                 Ok(crate::llm::LlmEvent::Error { message }) => {
                     self.ai_partial_response.clear();
                     self.ai_status = AiStatus::Error;
+                    self.ai_tool_status = None;
+                    self.agent_loop_count = 0;
                     self.status = format!("AI error: {message}");
                 }
                 Ok(crate::llm::LlmEvent::Chunk { content }) => {
@@ -660,7 +758,10 @@ impl App {
                     keep_rx = false;
                     self.ai_partial_response.clear();
                     self.ai_status = AiStatus::Error;
-                    self.status = "AI error: background LLM thread has exited".to_string();
+                    self.ai_tool_status = None;
+                    self.agent_loop_count = 0;
+                    self.status =
+                        "AI error: background LLM thread has exited".to_string();
                     break;
                 }
             }
@@ -668,6 +769,31 @@ impl App {
         if keep_rx {
             self.ai_llm_rx = Some(rx);
         }
+    }
+
+    /// Build `ChatMessage` list from the current AI chat history for LLM
+    /// requests.
+    fn build_chat_messages_for_llm(&self) -> Vec<crate::llm::ChatMessage> {
+        self.ai_messages
+            .iter()
+            .map(|m| crate::llm::ChatMessage {
+                role: match m.role {
+                    AiRole::User => "user".into(),
+                    AiRole::Assistant => "assistant".into(),
+                    AiRole::Tool => "tool".into(),
+                },
+                content: m.content.clone(),
+                tool_calls: m.tool_calls.clone(),
+                tool_call_id: m.tool_call_id.clone(),
+            })
+            .collect()
+    }
+
+    /// The system prompt used for all AI chat requests.
+    fn ai_system_prompt() -> &'static str {
+        "You are a helpful assistant specialized in BDD, Gherkin, and software testing. \
+         You have access to tools that let you inspect the current project. \
+         Use them when the user asks about the project."
     }
 
     pub fn poll_external_feature_changes(&mut self) {
@@ -1837,9 +1963,12 @@ impl App {
                 self.ai_messages.push(AiChatMessage {
                     role: AiRole::User,
                     content: user_msg.clone(),
+                    tool_calls: None,
+                    tool_call_id: None,
                 });
                 self.ai_status = AiStatus::Waiting;
                 self.ai_partial_response.clear();
+                self.agent_loop_count = 0;
                 self.status = "Sending message to AI...".to_string();
 
                 // If the LLM is not configured, add a mock response
@@ -1847,19 +1976,21 @@ impl App {
                     self.ai_messages.push(AiChatMessage {
                         role: AiRole::Assistant,
                         content: "AI is not configured. Set TESHI_LLM_API_KEY in your environment to enable AI responses.".to_string(),
+                        tool_calls: None,
+                        tool_call_id: None,
                     });
                     self.ai_status = AiStatus::Idle;
                     self.ai_partial_response.clear();
                     self.status = "AI not configured".to_string();
                 } else if let Some(ref handle) = self.ai_llm_handle {
                     use crate::llm::LlmRequest;
+                    let messages = self.build_chat_messages_for_llm();
+                    let tools = Some(crate::agent::get_tools());
                     if handle
                         .send(LlmRequest::Chat {
-                            system: Some(
-                                "You are a helpful assistant specialized in BDD, Gherkin, and software testing."
-                                    .into(),
-                            ),
-                            messages: vec![user_msg],
+                            system: Some(Self::ai_system_prompt().into()),
+                            messages,
+                            tools,
                         })
                         .is_err()
                     {
@@ -3105,6 +3236,8 @@ mod tests {
             ai_partial_response: String::new(),
             ai_llm_handle: None,
             ai_llm_rx: None,
+            ai_tool_status: None,
+            agent_loop_count: 0,
             quit_pending_confirm: false,
         };
 
@@ -3210,6 +3343,8 @@ Feature: B
             ai_partial_response: String::new(),
             ai_llm_handle: None,
             ai_llm_rx: None,
+            ai_tool_status: None,
+            agent_loop_count: 0,
             quit_pending_confirm: false,
         };
 

@@ -306,6 +306,11 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         AiStatus::Idle => Style::default().fg(Color::DarkGray),
     };
     let status_line = match app.ai_status {
+        AiStatus::Waiting if app.ai_partial_response.is_empty()
+            && app.ai_tool_status.is_some() =>
+        {
+            Line::raw(app.ai_tool_status.as_deref().unwrap_or("AI is thinking..."))
+        }
         AiStatus::Waiting if app.ai_partial_response.is_empty() => Line::raw("AI is thinking..."),
         AiStatus::Waiting => Line::raw(""),
         AiStatus::Error => {
@@ -335,16 +340,32 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     for msg in &app.ai_messages {
+        // Skip internal tool messages — they are not user-visible.
+        if matches!(msg.role, AiRole::Tool) {
+            continue;
+        }
         let prefix = match msg.role {
             AiRole::User => "▶ You",
             AiRole::Assistant => "✦ AI",
+            AiRole::Tool => unreachable!(),
         };
         let role_color = match msg.role {
             AiRole::User => Color::Cyan,
             AiRole::Assistant => Color::Green,
+            AiRole::Tool => unreachable!(),
+        };
+        // Show tool call indicator if present
+        let tool_note = msg.tool_calls.as_ref().map(|tcs| {
+            let names: Vec<&str> = tcs.iter().map(|tc| tc.name.as_str()).collect();
+            format!(" [called: {}]", names.join(", "))
+        });
+        let prefix_text = if let Some(note) = tool_note {
+            format!("{prefix}:{note}")
+        } else {
+            format!("{prefix}:")
         };
         chat_lines.push(
-            Line::raw(format!("{prefix}:"))
+            Line::raw(prefix_text)
                 .style(Style::default().fg(role_color).add_modifier(Modifier::BOLD)),
         );
         // Wrap long messages
@@ -419,17 +440,25 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
 /// Renders the footer bar for the AI tab.
 fn render_ai_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let _ = app;
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let hints = Line::from(vec![
+    let mut hint_spans = vec![
         footer_pill(" Type & Enter to send "),
         Span::raw(" "),
         footer_pill(" Esc clear input "),
         Span::raw(" "),
         footer_pill(" Quit [q] "),
-    ]);
+    ];
+    // Show tool execution status in the footer when the agent is acting
+    if let Some(ref tool_status) = app.ai_tool_status {
+        hint_spans.push(Span::raw("  "));
+        hint_spans.push(Span::styled(
+            tool_status.clone(),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    let hints = Line::from(hint_spans);
     frame.render_widget(Paragraph::new(hints), area);
 }
 

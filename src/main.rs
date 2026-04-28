@@ -1,3 +1,4 @@
+mod agent;
 mod app;
 mod bdd_nav;
 mod editor_buffer;
