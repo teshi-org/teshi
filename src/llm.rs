@@ -1,4 +1,4 @@
-//! LLM integration module using the async-openai crate.
+//! LLM integration module — streaming chat completions over HTTP.
 //!
 //! This module provides a minimal, non-blocking interface for sending prompts
 //! to an OpenAI-compatible API and receiving streaming completions. It follows
@@ -14,31 +14,10 @@
 //! `LlmEvent::ToolCallRequest` instead of text. The caller should execute the
 //! requested tools and feed results back as `ChatMessage` with `role: "tool"`.
 //!
-//! # Usage
+//! # DeepSeek V4 thinking mode (reasoning_content)
 //!
-//! ```ignore
-//! let config = LlmConfig::from_env().unwrap();
-//! let (handle, rx) = spawn_llm(config);
-//! handle.send(LlmRequest::Chat {
-//!     system: Some("You are a helpful assistant.".into()),
-//!     messages: vec![ChatMessage {
-//!         role: "user".into(),
-//!         content: "What is BDD?".into(),
-//!         tool_calls: None,
-//!         tool_call_id: None,
-//!     }],
-//!     tools: None,
-//! })?;
-//!
-//! while let Ok(event) = rx.recv() {
-//!     match event {
-//!         LlmEvent::Chunk { content, .. } => { /* stream partial */ }
-//!         LlmEvent::Done { full_text, .. } => { /* done */ }
-//!         LlmEvent::ToolCallRequest { tool_calls } => { /* execute tools */ }
-//!         LlmEvent::Error { message } => { /* handle */ }
-//!     }
-//! }
-//! ```
+//! The `reasoning_content` field is captured from streaming deltas and must be
+//! passed back in subsequent requests when tool calls are involved.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -136,6 +115,8 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
     /// The tool call ID this message responds to (for `role: "tool"`).
     pub tool_call_id: Option<String>,
+    /// DeepSeek V4 thinking chain — must be preserved across tool-call turns.
+    pub reasoning_content: Option<String>,
 }
 
 // ── Request / Event types ────────────────────────────────────────────────────
@@ -162,6 +143,8 @@ pub enum LlmEvent {
     /// The completion finished successfully with a text response.
     Done {
         full_text: String,
+        /// DeepSeek V4 thinking chain for this assistant message.
+        reasoning_content: Option<String>,
         /// Input + output token usage, if reported.
         #[allow(dead_code)]
         input_tokens: Option<u32>,
@@ -170,7 +153,12 @@ pub enum LlmEvent {
         model: String,
     },
     /// The model requested one or more tool calls instead of a text response.
-    ToolCallRequest { tool_calls: Vec<ToolCall> },
+    ToolCallRequest {
+        tool_calls: Vec<ToolCall>,
+        /// DeepSeek V4 thinking chain — must be preserved in the assistant
+        /// message sent back in follow-up requests.
+        reasoning_content: Option<String>,
+    },
     /// A non-recoverable error occurred.
     Error { message: String },
 }
@@ -267,111 +255,93 @@ async fn process_chat_request(
     }
 }
 
-// ── Message conversion helpers ───────────────────────────────────────────────
+// ── Request body builder ─────────────────────────────────────────────────────
 
-use async_openai::types::chat::{
-    ChatCompletionMessageToolCall as OpenAiMessageToolCall, ChatCompletionMessageToolCalls,
-    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestAssistantMessageContent,
-    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
-    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessageArgs,
-    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessageArgs,
-    ChatCompletionRequestUserMessageContent, FunctionCall,
-};
-
-fn build_openai_messages(
+/// Build the JSON request body for a streaming chat completion.
+fn build_request_body(
+    config: &LlmConfig,
     system: Option<String>,
     messages: &[ChatMessage],
-) -> Vec<ChatCompletionRequestMessage> {
-    let mut req_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
+    tools: Option<&[ToolDefinition]>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": config.model,
+        "messages": [],
+        "max_tokens": config.max_tokens,
+        "temperature": config.temperature,
+        "stream": true,
+    });
 
-    if let Some(sys) = system
-        && let Ok(msg) = ChatCompletionRequestSystemMessageArgs::default()
-            .content(ChatCompletionRequestSystemMessageContent::Text(sys))
-            .build()
-            .map(ChatCompletionRequestMessage::System)
-    {
-        req_messages.push(msg);
+    let mut json_messages: Vec<serde_json::Value> = Vec::new();
+
+    if let Some(sys) = system {
+        json_messages.push(serde_json::json!({
+            "role": "system",
+            "content": sys,
+        }));
     }
 
     for msg in messages {
-        let openai_msg = match msg.role.as_str() {
-            "user" => {
-                let Ok(m) = ChatCompletionRequestUserMessageArgs::default()
-                    .content(ChatCompletionRequestUserMessageContent::Text(
-                        msg.content.clone(),
-                    ))
-                    .build()
-                    .map(ChatCompletionRequestMessage::User)
-                else {
-                    continue;
-                };
-                m
-            }
-            "assistant" => {
-                let mut builder = ChatCompletionRequestAssistantMessageArgs::default();
-                if let Some(ref tool_calls) = msg.tool_calls {
-                    let oai_tool_calls: Vec<ChatCompletionMessageToolCalls> = tool_calls
-                        .iter()
-                        .map(|tc| {
-                            ChatCompletionMessageToolCalls::Function(OpenAiMessageToolCall {
-                                id: tc.id.clone(),
-                                function: FunctionCall {
-                                    name: tc.name.clone(),
-                                    arguments: tc.arguments.clone(),
-                                },
-                            })
-                        })
-                        .collect();
-                    builder.tool_calls(oai_tool_calls);
-                }
-                if !msg.content.is_empty() {
-                    builder.content(ChatCompletionRequestAssistantMessageContent::Text(
-                        msg.content.clone(),
-                    ));
-                }
-                let Ok(m) = builder.build().map(ChatCompletionRequestMessage::Assistant) else {
-                    continue;
-                };
-                m
-            }
-            "tool" => {
-                let Ok(m) = ChatCompletionRequestToolMessageArgs::default()
-                    .content(ChatCompletionRequestToolMessageContent::Text(
-                        msg.content.clone(),
-                    ))
-                    .tool_call_id(msg.tool_call_id.clone().unwrap_or_default())
-                    .build()
-                    .map(ChatCompletionRequestMessage::Tool)
-                else {
-                    continue;
-                };
-                m
-            }
-            _ => continue,
-        };
-        req_messages.push(openai_msg);
+        let mut j = serde_json::json!({
+            "role": msg.role,
+        });
+
+        // Include content if non-empty, otherwise null
+        if msg.content.is_empty() && (msg.tool_calls.is_some() || msg.role == "assistant") {
+            j["content"] = serde_json::Value::Null;
+        } else {
+            j["content"] = serde_json::json!(msg.content);
+        }
+
+        if let Some(ref tcs) = msg.tool_calls {
+            let tool_calls_json: Vec<serde_json::Value> = tcs
+                .iter()
+                .map(|tc| {
+                    serde_json::json!({
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": tc.arguments,
+                        },
+                    })
+                })
+                .collect();
+            j["tool_calls"] = serde_json::Value::Array(tool_calls_json);
+        }
+
+        if let Some(ref tci) = msg.tool_call_id {
+            j["tool_call_id"] = serde_json::json!(tci);
+        }
+
+        // DeepSeek V4: preserve reasoning_content in assistant messages
+        if let Some(ref rc) = msg.reasoning_content {
+            j["reasoning_content"] = serde_json::json!(rc);
+        }
+
+        json_messages.push(j);
     }
 
-    req_messages
-}
+    body["messages"] = serde_json::Value::Array(json_messages);
 
-fn build_openai_tools(
-    tools: &[ToolDefinition],
-) -> Vec<async_openai::types::chat::ChatCompletionTools> {
-    use async_openai::types::chat::{ChatCompletionTool, ChatCompletionTools, FunctionObject};
+    if let Some(tool_defs) = tools {
+        let tools_json: Vec<serde_json::Value> = tool_defs
+            .iter()
+            .map(|td| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": td.name,
+                        "description": td.description,
+                        "parameters": td.parameters,
+                    },
+                })
+            })
+            .collect();
+        body["tools"] = serde_json::Value::Array(tools_json);
+    }
 
-    tools
-        .iter()
-        .map(|td| {
-            let func = FunctionObject {
-                name: td.name.clone(),
-                description: Some(td.description.clone()),
-                parameters: Some(td.parameters.clone()),
-                strict: None,
-            };
-            ChatCompletionTools::Function(ChatCompletionTool { function: func })
-        })
-        .collect()
+    body
 }
 
 // ── Streaming chat completion ────────────────────────────────────────────────
@@ -383,95 +353,137 @@ async fn chat_completion(
     tools: Option<Vec<ToolDefinition>>,
     evt_tx: &Sender<LlmEvent>,
 ) {
-    use async_openai::Client;
-    use async_openai::config::OpenAIConfig;
-    use async_openai::types::chat::CreateChatCompletionRequestArgs;
-    use futures::StreamExt;
+    let request_body = build_request_body(config, system, &messages, tools.as_deref());
 
-    let openai_config = OpenAIConfig::default()
-        .with_api_key(&config.api_key)
-        .with_api_base(&config.base_url);
+    let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
 
-    let client = Client::with_config(openai_config);
+    let client = match reqwest::Client::builder().build() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = evt_tx.send(LlmEvent::Error {
+                message: format!("failed to build HTTP client: {e}"),
+            });
+            return;
+        }
+    };
 
-    let req_messages = build_openai_messages(system, &messages);
+    let response = match client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream")
+        .json(&request_body)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = evt_tx.send(LlmEvent::Error {
+                message: format!("HTTP request failed: {e}"),
+            });
+            return;
+        }
+    };
 
-    let mut request_builder = CreateChatCompletionRequestArgs::default();
-    request_builder
-        .model(&config.model)
-        .messages(req_messages)
-        .max_tokens(config.max_tokens)
-        .temperature(config.temperature);
-
-    if let Some(ref tool_defs) = tools {
-        let oai_tools = build_openai_tools(tool_defs);
-        request_builder.tools(oai_tools);
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let _ = evt_tx.send(LlmEvent::Error {
+            message: format!("API returned {status}: {body}"),
+        });
+        return;
     }
 
-    let request = match request_builder.build() {
-        Ok(req) => req,
-        Err(e) => {
-            let _ = evt_tx.send(LlmEvent::Error {
-                message: format!("failed to build request: {e}"),
-            });
-            return;
-        }
-    };
-
-    let mut stream = match client.chat().create_stream(request).await {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = evt_tx.send(LlmEvent::Error {
-                message: format!("API call failed: {e}"),
-            });
-            return;
-        }
-    };
-
+    // Stream SSE chunks
     let mut full_text = String::new();
+    let mut full_reasoning = String::new();
     let mut model_name = String::new();
     let mut input_tokens: Option<u32> = None;
     let mut output_tokens: Option<u32> = None;
-
-    // Accumulate streaming tool call chunks keyed by index.
-    // (id, name, accumulated_arguments_json)
     let mut tool_call_chunks: HashMap<u32, (Option<String>, Option<String>, String)> =
         HashMap::new();
 
+    let mut stream = response.bytes_stream();
+    let mut buf = String::new();
+
+    use futures::StreamExt;
     while let Some(chunk_result) = stream.next().await {
-        match chunk_result {
-            Ok(chunk) => {
-                if model_name.is_empty() {
-                    model_name = chunk.model.clone();
+        let chunk = match chunk_result {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = evt_tx.send(LlmEvent::Error {
+                    message: format!("stream read error: {e}"),
+                });
+                return;
+            }
+        };
+
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+
+        // Split by double-newline to get complete SSE events
+        while let Some(pos) = buf.find("\n\n") {
+            let event = buf[..pos].to_string();
+            buf = buf[pos + 2..].to_string();
+
+            // Process this SSE event
+            for line in event.lines() {
+                let line = line.trim();
+                if line.is_empty() || !line.starts_with("data: ") {
+                    continue;
                 }
-                if let Some(usage) = chunk.usage {
-                    input_tokens = Some(usage.prompt_tokens);
-                    output_tokens = Some(usage.completion_tokens);
+                let data = &line[6..]; // strip "data: "
+                if data == "[DONE]" {
+                    break;
                 }
-                for choice in &chunk.choices {
-                    // Handle text content deltas
-                    if let Some(ref delta) = choice.delta.content {
-                        full_text.push_str(delta);
+                let v: serde_json::Value = match serde_json::from_str(data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                if model_name.is_empty()
+                    && let Some(m) = v["model"].as_str()
+                {
+                    model_name = m.to_string();
+                }
+
+                if let Some(usage) = v.get("usage") {
+                    input_tokens = usage["prompt_tokens"].as_u64().map(|n| n as u32);
+                    output_tokens = usage["completion_tokens"].as_u64().map(|n| n as u32);
+                }
+
+                for choice in v["choices"].as_array().into_iter().flatten() {
+                    let delta = &choice["delta"];
+
+                    // Text content
+                    if let Some(text) = delta["content"].as_str() {
+                        full_text.push_str(text);
                         let _ = evt_tx.send(LlmEvent::Chunk {
-                            content: delta.clone(),
+                            content: text.to_string(),
                         });
                     }
-                    // Handle tool call deltas
-                    if let Some(ref tc_chunks) = choice.delta.tool_calls {
-                        for tc in tc_chunks {
-                            let entry = tool_call_chunks.entry(tc.index).or_insert((
+
+                    // DeepSeek V4 reasoning_content — accumulate and preserve
+                    if let Some(rc) = delta["reasoning_content"].as_str() {
+                        full_reasoning.push_str(rc);
+                    }
+
+                    // Tool calls
+                    if let Some(tc_array) = delta["tool_calls"].as_array() {
+                        for tc in tc_array {
+                            let index = tc["index"].as_u64().unwrap_or(0) as u32;
+                            let entry = tool_call_chunks.entry(index).or_insert((
                                 None,
                                 None,
                                 String::new(),
                             ));
-                            if let Some(ref id) = tc.id {
-                                entry.0 = Some(id.clone());
+                            if let Some(id) = tc["id"].as_str() {
+                                entry.0 = Some(id.to_string());
                             }
-                            if let Some(ref func) = tc.function {
-                                if let Some(ref name) = func.name {
-                                    entry.1 = Some(name.clone());
+                            if let Some(func) = tc.get("function") {
+                                if let Some(name) = func["name"].as_str() {
+                                    entry.1 = Some(name.to_string());
                                 }
-                                if let Some(ref args) = func.arguments {
+                                if let Some(args) = func["arguments"].as_str() {
                                     entry.2.push_str(args);
                                 }
                             }
@@ -479,19 +491,19 @@ async fn chat_completion(
                     }
                 }
             }
-            Err(e) => {
-                let _ = evt_tx.send(LlmEvent::Error {
-                    message: format!("stream error: {e}"),
-                });
-                return;
-            }
         }
     }
+
+    // Build extracted reasoning_content
+    let reasoning: Option<String> = if full_reasoning.is_empty() {
+        None
+    } else {
+        Some(full_reasoning)
+    };
 
     // Emit tool calls if the model requested any
     if !tool_call_chunks.is_empty() {
         let mut sorted: Vec<_> = tool_call_chunks.into_iter().collect();
-        // Sort by index to preserve the model's intended order
         sorted.sort_by_key(|(idx, _)| *idx);
         let tool_calls: Vec<ToolCall> = sorted
             .into_iter()
@@ -502,12 +514,16 @@ async fn chat_completion(
             })
             .collect();
 
-        let _ = evt_tx.send(LlmEvent::ToolCallRequest { tool_calls });
+        let _ = evt_tx.send(LlmEvent::ToolCallRequest {
+            tool_calls,
+            reasoning_content: reasoning,
+        });
 
         // Also emit Done if there was text content before the tool call
         if !full_text.is_empty() {
             let _ = evt_tx.send(LlmEvent::Done {
                 full_text,
+                reasoning_content: None,
                 input_tokens,
                 output_tokens,
                 model: model_name,
@@ -516,6 +532,7 @@ async fn chat_completion(
     } else {
         let _ = evt_tx.send(LlmEvent::Done {
             full_text,
+            reasoning_content: reasoning,
             input_tokens,
             output_tokens,
             model: model_name,

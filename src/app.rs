@@ -40,6 +40,8 @@ pub struct AiChatMessage {
     pub tool_calls: Option<Vec<crate::llm::ToolCall>>,
     /// The tool call ID this message responds to (for `Tool` role).
     pub tool_call_id: Option<String>,
+    /// DeepSeek V4 thinking chain — preserved across tool-call turns.
+    pub reasoning_content: Option<String>,
 }
 
 /// Who sent the message.
@@ -655,7 +657,10 @@ impl App {
         loop {
             match rx.try_recv() {
                 Ok(crate::llm::LlmEvent::Done {
-                    full_text, model, ..
+                    full_text,
+                    reasoning_content,
+                    model,
+                    ..
                 }) => {
                     // If we already have a partial response from streaming,
                     // use that instead; otherwise store the full text.
@@ -665,6 +670,7 @@ impl App {
                             content: full_text,
                             tool_calls: None,
                             tool_call_id: None,
+                            reasoning_content,
                         });
                     } else {
                         let content = std::mem::take(&mut self.ai_partial_response);
@@ -673,6 +679,7 @@ impl App {
                             content,
                             tool_calls: None,
                             tool_call_id: None,
+                            reasoning_content,
                         });
                     }
                     self.ai_partial_response.clear();
@@ -681,7 +688,10 @@ impl App {
                     self.agent_loop_count = 0;
                     self.status = format!("AI response received ({model})");
                 }
-                Ok(crate::llm::LlmEvent::ToolCallRequest { tool_calls }) => {
+                Ok(crate::llm::LlmEvent::ToolCallRequest {
+                    tool_calls,
+                    reasoning_content,
+                }) => {
                     // Store the assistant message with its tool calls
                     let partial_text = std::mem::take(&mut self.ai_partial_response);
                     self.ai_messages.push(AiChatMessage {
@@ -689,6 +699,7 @@ impl App {
                         content: partial_text,
                         tool_calls: Some(tool_calls.clone()),
                         tool_call_id: None,
+                        reasoning_content,
                     });
 
                     // Execute each requested tool and append results
@@ -701,6 +712,7 @@ impl App {
                                     content: result,
                                     tool_calls: None,
                                     tool_call_id: Some(tc.id.clone()),
+                                    reasoning_content: None,
                                 });
                             }
                             Err(e) => {
@@ -709,6 +721,7 @@ impl App {
                                     content: format!("Error: {e}"),
                                     tool_calls: None,
                                     tool_call_id: Some(tc.id.clone()),
+                                    reasoning_content: None,
                                 });
                             }
                         }
@@ -772,6 +785,7 @@ impl App {
                 content: m.content.clone(),
                 tool_calls: m.tool_calls.clone(),
                 tool_call_id: m.tool_call_id.clone(),
+                reasoning_content: m.reasoning_content.clone(),
             })
             .collect()
     }
@@ -1950,6 +1964,7 @@ impl App {
                     content: user_msg.clone(),
                     tool_calls: None,
                     tool_call_id: None,
+                    reasoning_content: None,
                 });
                 self.ai_status = AiStatus::Waiting;
                 self.ai_partial_response.clear();
@@ -1963,6 +1978,7 @@ impl App {
                         content: "AI is not configured. Set TESHI_LLM_API_KEY in your environment to enable AI responses.".to_string(),
                         tool_calls: None,
                         tool_call_id: None,
+                        reasoning_content: None,
                     });
                     self.ai_status = AiStatus::Idle;
                     self.ai_partial_response.clear();
