@@ -69,6 +69,10 @@ pub enum Action {
     StepKeywordPickerCancel,
     ExternalChangeReload,
     ExternalChangeKeepLocal,
+    // AI tab input
+    AiSendChar(char),
+    AiSendMessage,
+    AiBackspace,
     // Tree navigation (stages 1 & 2)
     TreeUp,
     TreeDown,
@@ -171,9 +175,27 @@ impl Action {
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
                 (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Help)),
+                (KeyCode::Char('4'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
                 (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                 (KeyCode::Esc, _) => Some(Self::ClearInputState),
+                _ => None,
+            };
+        }
+
+        // AI tab: text input
+        if context.active_tab == MainTab::Ai {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Enter, _) => Some(Self::AiSendMessage),
+                (KeyCode::Backspace, _) => Some(Self::AiBackspace),
+                (KeyCode::Esc, _) => Some(Self::ClearInputState),
+                (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
+                (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
+                (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Help)),
+                (KeyCode::Char('4'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
+                (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
+                (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
+                (KeyCode::Char(ch), _) if !ch.is_control() => Some(Self::AiSendChar(ch)),
                 _ => None,
             };
         }
@@ -204,6 +226,7 @@ impl Action {
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
                 (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Help)),
+                (KeyCode::Char('4'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
                 (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                 _ => None,
@@ -215,6 +238,7 @@ impl Action {
             (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
             (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
             (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Help)),
+            (KeyCode::Char('4'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
             (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
             (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
             (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
