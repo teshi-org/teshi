@@ -262,6 +262,8 @@ pub struct App {
     pub ai_partial_response: String,
     /// Scroll offset from the bottom of the chat (0 = showing latest).
     pub ai_scroll_offset: usize,
+    /// Whether the AI tab input bar has keyboard focus (Esc toggles this off).
+    pub ai_input_focused: bool,
     pub ai_llm_handle: Option<crate::llm::LlmHandle>,
     pub ai_llm_rx: Option<std::sync::mpsc::Receiver<crate::llm::LlmEvent>>,
     /// Human-readable status text shown while the agent executes a tool.
@@ -404,6 +406,7 @@ impl App {
             mindmap_ai_panel_visible: true,
             ai_messages: Vec::new(),
             ai_scroll_offset: 0,
+            ai_input_focused: true,
             ai_input: String::new(),
             ai_input_cursor: 0,
             ai_status: AiStatus::Idle,
@@ -470,6 +473,7 @@ impl App {
             status: "Opened file".to_string(),
             ai_messages: Vec::new(),
             ai_scroll_offset: 0,
+            ai_input_focused: true,
             ai_input: String::new(),
             ai_input_cursor: 0,
             ai_status: AiStatus::Idle,
@@ -553,6 +557,7 @@ impl App {
             status: "New buffer".to_string(),
             ai_messages: Vec::new(),
             ai_scroll_offset: 0,
+            ai_input_focused: true,
             ai_input: String::new(),
             ai_input_cursor: 0,
             ai_status: AiStatus::Idle,
@@ -2391,6 +2396,7 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::AiSendChar(ch) => {
+                self.ai_input_focused = true;
                 let byte_idx = char_to_byte_idx(&self.ai_input, self.ai_input_cursor);
                 self.ai_input.insert(byte_idx, ch);
                 self.ai_input_cursor += 1;
@@ -2497,6 +2503,12 @@ impl App {
             Action::AiScrollBottom => {
                 self.ai_scroll_offset = 0;
             }
+            Action::AiBlurInput => {
+                self.ai_input_focused = false;
+            }
+            Action::AiFocusInput => {
+                self.ai_input_focused = true;
+            }
             Action::ExternalChangeReload | Action::ExternalChangeKeepLocal => {}
             // Handled in early-return guard above; unreachable here.
             Action::AgentChangeAccept | Action::AgentChangeReject => {}
@@ -2599,6 +2611,9 @@ impl App {
         if self.active_tab == MainTab::MindMap {
             self.view_stage = ViewStage::TreeOnly;
             self.mindmap_focus = MindMapFocus::Main;
+        }
+        if self.active_tab == MainTab::Ai {
+            self.ai_input_focused = true;
         }
         self.status = match tab {
             MainTab::MindMap => "Switched to MindMap tab",
@@ -3736,6 +3751,7 @@ mod tests {
             mindmap_ai_panel_visible: true,
             ai_messages: Vec::new(),
             ai_scroll_offset: 0,
+            ai_input_focused: true,
             ai_input: String::new(),
             ai_input_cursor: 0,
             ai_status: AiStatus::Idle,
@@ -3850,6 +3866,7 @@ Feature: B
             mindmap_ai_panel_visible: true,
             ai_messages: Vec::new(),
             ai_scroll_offset: 0,
+            ai_input_focused: true,
             ai_input: String::new(),
             ai_input_cursor: 0,
             ai_status: AiStatus::Idle,

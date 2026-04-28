@@ -19,7 +19,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -34,6 +36,7 @@ struct TerminalGuard {
     raw_mode: bool,
     alt_screen: bool,
     cursor_hidden: bool,
+    mouse_capture: bool,
 }
 
 impl TerminalGuard {
@@ -44,6 +47,7 @@ impl TerminalGuard {
             raw_mode: false,
             alt_screen: false,
             cursor_hidden: false,
+            mouse_capture: false,
         };
         if !no_raw {
             enable_raw_mode()?;
@@ -55,12 +59,17 @@ impl TerminalGuard {
         }
         execute!(io::stdout(), Hide)?;
         guard.cursor_hidden = true;
+        execute!(io::stdout(), EnableMouseCapture)?;
+        guard.mouse_capture = true;
         Ok(guard)
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        if self.mouse_capture {
+            let _ = execute!(io::stdout(), DisableMouseCapture);
+        }
         if self.cursor_hidden {
             let _ = execute!(io::stdout(), Show);
         }
@@ -100,28 +109,49 @@ fn main() -> Result<()> {
         app.poll_status_message_expiry();
         terminal.draw(|frame| ui::render(frame, &mut app))?;
 
-        if event::poll(Duration::from_millis(50))?
-            && let Event::Key(key_event) = event::read()?
-        {
-            if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-                continue;
-            }
-            if let Some(action) = Action::from_key_event(
-                key_event,
-                KeyContext {
-                    step_keyword_picker_active: app.step_keyword_picker.is_some(),
-                    step_input_active: app.step_input_active,
-                    external_change_prompt_active: app.has_external_change_prompt(),
-                    agent_change_prompt_active: app.has_agent_change_prompt(),
-                    active_tab: app.active_tab,
-                    view_stage: app.view_stage,
-                    explore_edit_mode: app.explore_edit_mode,
-                    pending_char: app.pending_char,
-                    mindmap_focus: app.mindmap_focus,
-                    mindmap_ai_panel_visible: app.mindmap_ai_panel_visible,
-                },
-            ) {
-                app.handle_action(action)?;
+        if event::poll(Duration::from_millis(50))? {
+            match event::read()? {
+                Event::Key(key_event) => {
+                    if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                        continue;
+                    }
+                    if let Some(action) = Action::from_key_event(
+                        key_event,
+                        KeyContext {
+                            step_keyword_picker_active: app.step_keyword_picker.is_some(),
+                            step_input_active: app.step_input_active,
+                            external_change_prompt_active: app.has_external_change_prompt(),
+                            agent_change_prompt_active: app.has_agent_change_prompt(),
+                            active_tab: app.active_tab,
+                            view_stage: app.view_stage,
+                            explore_edit_mode: app.explore_edit_mode,
+                            pending_char: app.pending_char,
+                            mindmap_focus: app.mindmap_focus,
+                            mindmap_ai_panel_visible: app.mindmap_ai_panel_visible,
+                            ai_input_focused: app.ai_input_focused,
+                        },
+                    ) {
+                        app.handle_action(action)?;
+                    }
+                }
+                Event::Mouse(mouse_event) => {
+                    let in_ai_context =
+                        app.active_tab == app::MainTab::Ai
+                            || (app.active_tab == app::MainTab::MindMap
+                                && app.mindmap_focus == app::MindMapFocus::AiPanel);
+                    if in_ai_context {
+                        match mouse_event.kind {
+                            MouseEventKind::ScrollUp => {
+                                app.handle_action(Action::AiScrollUp)?;
+                            }
+                            MouseEventKind::ScrollDown => {
+                                app.handle_action(Action::AiScrollDown)?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }

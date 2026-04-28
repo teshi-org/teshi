@@ -468,12 +468,24 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
 
     // ── Input bar ───────────────────────────────────────────────────
-    let input_block = Block::default().borders(Borders::ALL).title("Input");
+    let (input_title, input_border_style) = if app.ai_input_focused {
+        ("Input", Style::default())
+    } else {
+        ("Input (Esc to focus)", Style::default().fg(Color::DarkGray))
+    };
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .title(input_title)
+        .border_style(input_border_style);
     let input_inner = input_block.inner(input_area);
     frame.render_widget(input_block, input_area);
 
     let input_display = if app.ai_input.is_empty() {
-        "Type your message..."
+        if app.ai_input_focused {
+            "Type your message..."
+        } else {
+            "Press any key to type..."
+        }
     } else {
         app.ai_input.as_str()
     };
