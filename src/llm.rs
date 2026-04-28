@@ -1,9 +1,12 @@
 //! LLM integration module using the async-openai crate.
 //!
 //! This module provides a minimal, non-blocking interface for sending prompts
-//! to an OpenAI-compatible API and receiving completions. It follows the same
-//! background-thread + channel pattern as `runner.rs` so the synchronous TUI
-//! event loop never blocks on network I/O.
+//! to an OpenAI-compatible API and receiving streaming completions. It follows
+//! the same background-thread + channel pattern as `runner.rs` so the
+//! synchronous TUI event loop never blocks on network I/O.
+//!
+//! Streaming is the only mode: partial text chunks are delivered via
+//! `LlmEvent::Chunk` so the UI can render the response in real time.
 //!
 //! # Usage
 //!
@@ -20,7 +23,6 @@
 //!         LlmEvent::Chunk { content, .. } => { /* stream partial */ }
 //!         LlmEvent::Done { full_text, .. } => { /* done */ }
 //!         LlmEvent::Error { message } => { /* handle */ }
-//!         _ => {}
 //!     }
 //! }
 //! ```
@@ -58,7 +60,8 @@ impl LlmConfig {
             .map_err(|_| anyhow::anyhow!("TESHI_LLM_API_KEY must be set"))?;
         let base_url = std::env::var("TESHI_LLM_BASE_URL")
             .unwrap_or_else(|_| "https://api.openai.com/v1".into());
-        let model = std::env::var("TESHI_LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
+        let model = std::env::var("TESHI_LLM_MODEL")
+            .unwrap_or_else(|_| "gpt-4o-mini".into());
         let max_tokens = std::env::var("TESHI_LLM_MAX_TOKENS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -99,7 +102,7 @@ pub enum LlmRequest {
 /// An event emitted by the LLM background thread.
 #[derive(Debug, Clone)]
 pub enum LlmEvent {
-    /// A streaming text chunk (only emitted when streaming is enabled).
+    /// A streaming text chunk.
     Chunk {
         content: String,
     },
@@ -136,7 +139,8 @@ impl LlmHandle {
 
 // ── Spawn ────────────────────────────────────────────────────────────────────
 
-/// Spawn a background thread that runs a tokio runtime and services LLM requests.
+/// Spawn a background thread that runs a tokio runtime and services LLM
+/// requests with streaming completions.
 ///
 /// Returns a `(LlmHandle, Receiver<LlmEvent>)` pair. Drop the handle when you
 /// no longer need to send requests; the thread will shut down once the channel
@@ -173,158 +177,41 @@ fn run_llm_worker(
         }
     };
 
-    // Process requests until the channel is closed
     while let Ok(request) = req_rx.recv() {
-        rt.block_on(process_request(&config, request, &evt_tx));
-    }
-}
-
-async fn process_request(config: &LlmConfig, request: LlmRequest, evt_tx: &Sender<LlmEvent>) {
-    match request {
-        LlmRequest::Chat { system, messages } => {
-            let timeout_dur = std::time::Duration::from_secs(120);
-            match tokio::time::timeout(timeout_dur, chat_completion(config, system, messages, evt_tx)).await {
-                Ok(()) => {}
-                Err(_elapsed) => {
-                    let _ = evt_tx.send(LlmEvent::Error {
-                        message: "API call timed out after 120 seconds".to_string(),
-                    });
-                }
+        match request {
+            LlmRequest::Chat { system, messages } => {
+                rt.block_on(process_chat_request(&config, system, messages, &evt_tx));
             }
         }
     }
 }
 
-async fn chat_completion(
+/// Process a chat request with a 120-second timeout.
+async fn process_chat_request(
     config: &LlmConfig,
     system: Option<String>,
     messages: Vec<String>,
     evt_tx: &Sender<LlmEvent>,
 ) {
-    use async_openai::Client;
-    use async_openai::config::OpenAIConfig;
-    use async_openai::types::chat::{
-        ChatCompletionRequestMessage, CreateChatCompletionRequestArgs,
-        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-    };
-
-    let openai_config = OpenAIConfig::default()
-        .with_api_key(&config.api_key)
-        .with_api_base(&config.base_url);
-
-    let client = Client::with_config(openai_config);
-
-    let mut req_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
-
-    if let Some(sys) = system {
-        if let Ok(msg) = ChatCompletionRequestSystemMessageArgs::default()
-            .content(sys)
-            .build()
-            .map(|m| ChatCompletionRequestMessage::System(m))
-        {
-            req_messages.push(msg);
-        }
-    }
-
-    for msg_text in &messages {
-        if let Ok(msg) = ChatCompletionRequestUserMessageArgs::default()
-            .content(msg_text.clone())
-            .build()
-            .map(|m| ChatCompletionRequestMessage::User(m))
-        {
-            req_messages.push(msg);
-        }
-    }
-
-    let request = match CreateChatCompletionRequestArgs::default()
-        .model(&config.model)
-        .messages(req_messages)
-        .max_tokens(config.max_tokens)
-        .temperature(config.temperature)
-        .build()
+    let timeout_dur = std::time::Duration::from_secs(120);
+    match tokio::time::timeout(
+        timeout_dur,
+        chat_completion(config, system, messages, evt_tx),
+    )
+    .await
     {
-        Ok(req) => req,
-        Err(e) => {
+        Ok(()) => {}
+        Err(_elapsed) => {
             let _ = evt_tx.send(LlmEvent::Error {
-                message: format!("failed to build request: {e}"),
-            });
-            return;
-        }
-    };
-
-    match client.chat().create(request).await {
-        Ok(response) => {
-            let full_text = response
-                .choices
-                .first()
-                .and_then(|c| c.message.content.clone())
-                .unwrap_or_default();
-
-            let usage = response.usage;
-            let (input_tokens, output_tokens) = usage.map_or((None, None), |u| {
-                (Some(u.prompt_tokens as u32), Some(u.completion_tokens as u32))
-            });
-
-            let _ = evt_tx.send(LlmEvent::Done {
-                full_text,
-                input_tokens,
-                output_tokens,
-                model: response.model,
-            });
-        }
-        Err(e) => {
-            let _ = evt_tx.send(LlmEvent::Error {
-                message: format!("API call failed: {e}"),
+                message: "API call timed out after 120 seconds".to_string(),
             });
         }
     }
 }
 
-// ── Streaming variant (optional) ─────────────────────────────────────────────
+// ── Streaming chat completion ────────────────────────────────────────────────
 
-/// Like [`spawn_llm`] but streams partial text chunks via `LlmEvent::Chunk`.
-/// For now this is a simple wrapper; if streaming is not needed, prefer
-/// [`spawn_llm`].
-pub fn spawn_llm_streaming(config: LlmConfig) -> (LlmHandle, Receiver<LlmEvent>) {
-    let (req_tx, req_rx) = mpsc::channel::<LlmRequest>();
-    let (evt_tx, evt_rx) = mpsc::channel::<LlmEvent>();
-
-    thread::Builder::new()
-        .name("teshi-llm-stream".into())
-        .spawn(move || run_llm_worker_streaming(config, req_rx, evt_tx))
-        .expect("failed to spawn LLM streaming worker thread");
-
-    (LlmHandle { tx: req_tx }, evt_rx)
-}
-
-fn run_llm_worker_streaming(
-    config: LlmConfig,
-    req_rx: Receiver<LlmRequest>,
-    evt_tx: Sender<LlmEvent>,
-) {
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            let _ = evt_tx.send(LlmEvent::Error {
-                message: format!("failed to build tokio runtime: {e}"),
-            });
-            return;
-        }
-    };
-
-    while let Ok(request) = req_rx.recv() {
-        match request {
-            LlmRequest::Chat { system, messages } => {
-                rt.block_on(chat_completion_streaming(&config, system, messages, &evt_tx));
-            }
-        }
-    }
-}
-
-async fn chat_completion_streaming(
+async fn chat_completion(
     config: &LlmConfig,
     system: Option<String>,
     messages: Vec<String>,

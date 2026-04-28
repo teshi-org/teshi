@@ -205,6 +205,7 @@ pub struct App {
     pub ai_messages: Vec<AiChatMessage>,
     pub ai_input: String,
     pub ai_status: AiStatus,
+    pub ai_partial_response: String,
     pub ai_llm_handle: Option<crate::llm::LlmHandle>,
     pub ai_llm_rx: Option<std::sync::mpsc::Receiver<crate::llm::LlmEvent>>,
     quit_pending_confirm: bool,
@@ -319,6 +320,7 @@ impl App {
             ai_messages: Vec::new(),
             ai_input: String::new(),
             ai_status: AiStatus::Idle,
+            ai_partial_response: String::new(),
             ai_llm_handle: None,
             ai_llm_rx: None,
             quit_pending_confirm: false,
@@ -378,6 +380,7 @@ impl App {
             ai_messages: Vec::new(),
             ai_input: String::new(),
             ai_status: AiStatus::Idle,
+            ai_partial_response: String::new(),
             ai_llm_handle: None,
             ai_llm_rx: None,
             step_input_active: false,
@@ -451,6 +454,7 @@ impl App {
             ai_messages: Vec::new(),
             ai_input: String::new(),
             ai_status: AiStatus::Idle,
+            ai_partial_response: String::new(),
             ai_llm_handle: None,
             ai_llm_rx: None,
             step_input_active: false,
@@ -639,19 +643,22 @@ impl App {
                         role: AiRole::Assistant,
                         content: full_text,
                     });
+                    self.ai_partial_response.clear();
                     self.ai_status = AiStatus::Idle;
                     self.status = format!("AI response received ({model})");
                 }
                 Ok(crate::llm::LlmEvent::Error { message }) => {
+                    self.ai_partial_response.clear();
                     self.ai_status = AiStatus::Error;
                     self.status = format!("AI error: {message}");
                 }
-                Ok(crate::llm::LlmEvent::Chunk { .. }) => {
-                    // Chunks are collected during streaming; we only emit Done.
+                Ok(crate::llm::LlmEvent::Chunk { content }) => {
+                    self.ai_partial_response.push_str(&content);
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     keep_rx = false;
+                    self.ai_partial_response.clear();
                     self.ai_status = AiStatus::Error;
                     self.status = "AI error: background LLM thread has exited".to_string();
                     break;
@@ -1832,6 +1839,7 @@ impl App {
                     content: user_msg.clone(),
                 });
                 self.ai_status = AiStatus::Waiting;
+                self.ai_partial_response.clear();
                 self.status = "Sending message to AI...".to_string();
 
                 // If the LLM is not configured, add a mock response
@@ -1841,6 +1849,7 @@ impl App {
                         content: "AI is not configured. Set TESHI_LLM_API_KEY in your environment to enable AI responses.".to_string(),
                     });
                     self.ai_status = AiStatus::Idle;
+                    self.ai_partial_response.clear();
                     self.status = "AI not configured".to_string();
                 } else if let Some(ref handle) = self.ai_llm_handle {
                     use crate::llm::LlmRequest;
@@ -1855,12 +1864,14 @@ impl App {
                         .is_err()
                     {
                         self.ai_status = AiStatus::Error;
+                        self.ai_partial_response.clear();
                         self.status =
                             "AI error: background LLM thread has exited".to_string();
                     }
                 } else {
                     // LLM is configured but the handle is None — shouldn't happen normally.
                     self.ai_status = AiStatus::Error;
+                    self.ai_partial_response.clear();
                     self.status = "AI error: LLM handle not available".to_string();
                 }
                 self.quit_pending_confirm = false;
@@ -1873,6 +1884,7 @@ impl App {
             Action::ClearInputState => {
                 if self.active_tab == MainTab::Ai {
                     self.ai_input.clear();
+                    self.ai_partial_response.clear();
                     self.ai_status = AiStatus::Idle;
                     self.status = "Input cleared".to_string();
                 } else {
@@ -3090,6 +3102,7 @@ mod tests {
             ai_messages: Vec::new(),
             ai_input: String::new(),
             ai_status: AiStatus::Idle,
+            ai_partial_response: String::new(),
             ai_llm_handle: None,
             ai_llm_rx: None,
             quit_pending_confirm: false,
@@ -3194,6 +3207,7 @@ Feature: B
             ai_messages: Vec::new(),
             ai_input: String::new(),
             ai_status: AiStatus::Idle,
+            ai_partial_response: String::new(),
             ai_llm_handle: None,
             ai_llm_rx: None,
             quit_pending_confirm: false,

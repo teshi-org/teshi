@@ -306,7 +306,8 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         AiStatus::Idle => Style::default().fg(Color::DarkGray),
     };
     let status_line = match app.ai_status {
-        AiStatus::Waiting => Line::raw("AI is thinking..."),
+        AiStatus::Waiting if app.ai_partial_response.is_empty() => Line::raw("AI is thinking..."),
+        AiStatus::Waiting => Line::raw(""),
         AiStatus::Error => {
             let err_text = if app.status.starts_with("AI error:") {
                 app.status.clone()
@@ -350,6 +351,26 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         for line_text in msg.content.lines() {
             chat_lines.push(Line::raw(format!("  {line_text}")));
         }
+        chat_lines.push(Line::raw(""));
+    }
+
+    // Show streaming partial response as a live assistant message
+    if !app.ai_partial_response.is_empty() {
+        chat_lines.push(
+            Line::raw("✦ AI:")
+                .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        );
+        for line_text in app.ai_partial_response.lines() {
+            chat_lines.push(Line::raw(format!("  {line_text}")));
+        }
+        // Append a blinking cursor
+        let last_line = chat_lines.pop().unwrap_or(Line::raw(""));
+        let mut spans: Vec<Span<'_>> = last_line.spans.into_iter().collect();
+        spans.push(Span::styled(
+            "▌",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK),
+        ));
+        chat_lines.push(Line::from(spans));
         chat_lines.push(Line::raw(""));
     }
 
