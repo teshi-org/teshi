@@ -80,6 +80,11 @@ pub enum Action {
     AiSendChar(char),
     AiSendMessage,
     AiBackspace,
+    AiDelete,
+    AiCursorLeft,
+    AiCursorRight,
+    AiCursorHome,
+    AiCursorEnd,
     /// Send the selected MindMap node context as a user message to the AI.
     MindMapSendToAi,
     /// Toggle the AI preview panel visibility (global `Ctrl+\`).
@@ -111,6 +116,11 @@ impl Action {
                 ('y', KeyCode::Char('y'), KeyModifiers::NONE) => return Some(Self::CopyStep),
                 _ => {}
             }
+        }
+
+        // Ctrl+C always maps to Quit, regardless of mode.
+        if event.code == KeyCode::Char('c') && event.modifiers == KeyModifiers::CONTROL {
+            return Some(Self::Quit);
         }
 
         if context.external_change_prompt_active {
@@ -213,6 +223,11 @@ impl Action {
             return match (event.code, event.modifiers) {
                 (KeyCode::Enter, _) => Some(Self::AiSendMessage),
                 (KeyCode::Backspace, _) => Some(Self::AiBackspace),
+                (KeyCode::Delete, _) => Some(Self::AiDelete),
+                (KeyCode::Left, _) => Some(Self::AiCursorLeft),
+                (KeyCode::Right, _) => Some(Self::AiCursorRight),
+                (KeyCode::Home, _) => Some(Self::AiCursorHome),
+                (KeyCode::End, _) => Some(Self::AiCursorEnd),
                 (KeyCode::Esc, _) => Some(Self::ClearInputState),
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
