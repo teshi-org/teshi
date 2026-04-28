@@ -74,8 +74,7 @@ impl LlmConfig {
             .map_err(|_| anyhow::anyhow!("TESHI_LLM_API_KEY must be set"))?;
         let base_url = std::env::var("TESHI_LLM_BASE_URL")
             .unwrap_or_else(|_| "https://api.openai.com/v1".into());
-        let model = std::env::var("TESHI_LLM_MODEL")
-            .unwrap_or_else(|_| "gpt-4o-mini".into());
+        let model = std::env::var("TESHI_LLM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
         let max_tokens = std::env::var("TESHI_LLM_MAX_TOKENS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -159,25 +158,21 @@ pub enum LlmRequest {
 #[derive(Debug, Clone)]
 pub enum LlmEvent {
     /// A streaming text chunk.
-    Chunk {
-        content: String,
-    },
+    Chunk { content: String },
     /// The completion finished successfully with a text response.
     Done {
         full_text: String,
         /// Input + output token usage, if reported.
+        #[allow(dead_code)]
         input_tokens: Option<u32>,
+        #[allow(dead_code)]
         output_tokens: Option<u32>,
         model: String,
     },
     /// The model requested one or more tool calls instead of a text response.
-    ToolCallRequest {
-        tool_calls: Vec<ToolCall>,
-    },
+    ToolCallRequest { tool_calls: Vec<ToolCall> },
     /// A non-recoverable error occurred.
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }
 
 // ── Handle ───────────────────────────────────────────────────────────────────
@@ -219,11 +214,7 @@ pub fn spawn_llm(config: LlmConfig) -> (LlmHandle, Receiver<LlmEvent>) {
 
 // ── Background worker ────────────────────────────────────────────────────────
 
-fn run_llm_worker(
-    config: LlmConfig,
-    req_rx: Receiver<LlmRequest>,
-    evt_tx: Sender<LlmEvent>,
-) {
+fn run_llm_worker(config: LlmConfig, req_rx: Receiver<LlmRequest>, evt_tx: Sender<LlmEvent>) {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -279,13 +270,12 @@ async fn process_chat_request(
 // ── Message conversion helpers ───────────────────────────────────────────────
 
 use async_openai::types::chat::{
-    ChatCompletionMessageToolCall as OpenAiMessageToolCall,
-    ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessageArgs,
-    ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
-    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestSystemMessageContent,
-    ChatCompletionRequestToolMessageArgs, ChatCompletionRequestToolMessageContent,
-    ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContent,
-    FunctionCall,
+    ChatCompletionMessageToolCall as OpenAiMessageToolCall, ChatCompletionMessageToolCalls,
+    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestAssistantMessageContent,
+    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
+    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessageArgs,
+    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessageArgs,
+    ChatCompletionRequestUserMessageContent, FunctionCall,
 };
 
 fn build_openai_messages(
@@ -294,14 +284,13 @@ fn build_openai_messages(
 ) -> Vec<ChatCompletionRequestMessage> {
     let mut req_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
 
-    if let Some(sys) = system {
-        if let Ok(msg) = ChatCompletionRequestSystemMessageArgs::default()
+    if let Some(sys) = system
+        && let Ok(msg) = ChatCompletionRequestSystemMessageArgs::default()
             .content(ChatCompletionRequestSystemMessageContent::Text(sys))
             .build()
             .map(ChatCompletionRequestMessage::System)
-        {
-            req_messages.push(msg);
-        }
+    {
+        req_messages.push(msg);
     }
 
     for msg in messages {
@@ -324,30 +313,23 @@ fn build_openai_messages(
                     let oai_tool_calls: Vec<ChatCompletionMessageToolCalls> = tool_calls
                         .iter()
                         .map(|tc| {
-                            ChatCompletionMessageToolCalls::Function(
-                                OpenAiMessageToolCall {
-                                    id: tc.id.clone(),
-                                    function: FunctionCall {
-                                        name: tc.name.clone(),
-                                        arguments: tc.arguments.clone(),
-                                    },
+                            ChatCompletionMessageToolCalls::Function(OpenAiMessageToolCall {
+                                id: tc.id.clone(),
+                                function: FunctionCall {
+                                    name: tc.name.clone(),
+                                    arguments: tc.arguments.clone(),
                                 },
-                            )
+                            })
                         })
                         .collect();
                     builder.tool_calls(oai_tool_calls);
                 }
                 if !msg.content.is_empty() {
-                    builder.content(
-                        ChatCompletionRequestAssistantMessageContent::Text(
-                            msg.content.clone(),
-                        ),
-                    );
+                    builder.content(ChatCompletionRequestAssistantMessageContent::Text(
+                        msg.content.clone(),
+                    ));
                 }
-                let Ok(m) = builder
-                    .build()
-                    .map(ChatCompletionRequestMessage::Assistant)
-                else {
+                let Ok(m) = builder.build().map(ChatCompletionRequestMessage::Assistant) else {
                     continue;
                 };
                 m
@@ -376,9 +358,7 @@ fn build_openai_messages(
 fn build_openai_tools(
     tools: &[ToolDefinition],
 ) -> Vec<async_openai::types::chat::ChatCompletionTools> {
-    use async_openai::types::chat::{
-        ChatCompletionTool, ChatCompletionTools, FunctionObject,
-    };
+    use async_openai::types::chat::{ChatCompletionTool, ChatCompletionTools, FunctionObject};
 
     tools
         .iter()
@@ -465,8 +445,8 @@ async fn chat_completion(
                     model_name = chunk.model.clone();
                 }
                 if let Some(usage) = chunk.usage {
-                    input_tokens = Some(usage.prompt_tokens as u32);
-                    output_tokens = Some(usage.completion_tokens as u32);
+                    input_tokens = Some(usage.prompt_tokens);
+                    output_tokens = Some(usage.completion_tokens);
                 }
                 for choice in &chunk.choices {
                     // Handle text content deltas
@@ -479,9 +459,11 @@ async fn chat_completion(
                     // Handle tool call deltas
                     if let Some(ref tc_chunks) = choice.delta.tool_calls {
                         for tc in tc_chunks {
-                            let entry = tool_call_chunks
-                                .entry(tc.index)
-                                .or_insert((None, None, String::new()));
+                            let entry = tool_call_chunks.entry(tc.index).or_insert((
+                                None,
+                                None,
+                                String::new(),
+                            ));
                             if let Some(ref id) = tc.id {
                                 entry.0 = Some(id.clone());
                             }

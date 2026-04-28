@@ -655,9 +655,7 @@ impl App {
         loop {
             match rx.try_recv() {
                 Ok(crate::llm::LlmEvent::Done {
-                    full_text,
-                    model,
-                    ..
+                    full_text, model, ..
                 }) => {
                     // If we already have a partial response from streaming,
                     // use that instead; otherwise store the full text.
@@ -685,8 +683,7 @@ impl App {
                 }
                 Ok(crate::llm::LlmEvent::ToolCallRequest { tool_calls }) => {
                     // Store the assistant message with its tool calls
-                    let partial_text =
-                        std::mem::take(&mut self.ai_partial_response);
+                    let partial_text = std::mem::take(&mut self.ai_partial_response);
                     self.ai_messages.push(AiChatMessage {
                         role: AiRole::Assistant,
                         content: partial_text,
@@ -696,15 +693,8 @@ impl App {
 
                     // Execute each requested tool and append results
                     for tc in &tool_calls {
-                        self.ai_tool_status = Some(format!(
-                            "AI is calling {}...",
-                            tc.name
-                        ));
-                        match crate::agent::execute_tool(
-                            self,
-                            &tc.name,
-                            &tc.arguments,
-                        ) {
+                        self.ai_tool_status = Some(format!("AI is calling {}...", tc.name));
+                        match crate::agent::execute_tool(self, &tc.name, &tc.arguments) {
                             Ok(result) => {
                                 self.ai_messages.push(AiChatMessage {
                                     role: AiRole::Tool,
@@ -730,12 +720,10 @@ impl App {
                         self.ai_status = AiStatus::Error;
                         self.ai_tool_status = None;
                         self.agent_loop_count = 0;
-                        self.status =
-                            "AI error: too many tool call iterations".to_string();
+                        self.status = "AI error: too many tool call iterations".to_string();
                     } else if let Some(ref handle) = self.ai_llm_handle {
                         let messages = self.build_chat_messages_for_llm();
-                        let tools =
-                            Some(crate::agent::get_tools());
+                        let tools = Some(crate::agent::get_tools());
                         let _ = handle.send(crate::llm::LlmRequest::Chat {
                             system: Some(Self::ai_system_prompt().into()),
                             messages,
@@ -760,8 +748,7 @@ impl App {
                     self.ai_status = AiStatus::Error;
                     self.ai_tool_status = None;
                     self.agent_loop_count = 0;
-                    self.status =
-                        "AI error: background LLM thread has exited".to_string();
+                    self.status = "AI error: background LLM thread has exited".to_string();
                     break;
                 }
             }
@@ -1954,9 +1941,7 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::AiSendMessage => {
-                if self.ai_input.trim().is_empty()
-                    || self.ai_status == AiStatus::Waiting
-                {
+                if self.ai_input.trim().is_empty() || self.ai_status == AiStatus::Waiting {
                     return Ok(());
                 }
                 let user_msg = std::mem::take(&mut self.ai_input);
@@ -1996,8 +1981,7 @@ impl App {
                     {
                         self.ai_status = AiStatus::Error;
                         self.ai_partial_response.clear();
-                        self.status =
-                            "AI error: background LLM thread has exited".to_string();
+                        self.status = "AI error: background LLM thread has exited".to_string();
                     }
                 } else {
                     // LLM is configured but the handle is None — shouldn't happen normally.
@@ -2784,8 +2768,8 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
-        App, AiStatus, BddFocusSlot, ColumnFocus, MainTab, ViewStage,
-        current_step_keyword_index, replace_step_keyword_line,
+        AiStatus, App, BddFocusSlot, ColumnFocus, MainTab, ViewStage, current_step_keyword_index,
+        replace_step_keyword_line,
     };
     use crate::bdd_nav::step_edit_start_col;
     use crate::editor_buffer::EditorBuffer;

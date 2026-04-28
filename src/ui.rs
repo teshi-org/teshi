@@ -283,9 +283,7 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     }
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("AI Chat");
+    let block = Block::default().borders(Borders::ALL).title("AI Chat");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -301,15 +299,19 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     // ── Chat history ────────────────────────────────────────────────
     let status_style = match app.ai_status {
-        AiStatus::Waiting => Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK),
+        AiStatus::Waiting => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::SLOW_BLINK),
         AiStatus::Error => Style::default().fg(Color::Red),
         AiStatus::Idle => Style::default().fg(Color::DarkGray),
     };
     let status_line = match app.ai_status {
-        AiStatus::Waiting if app.ai_partial_response.is_empty()
-            && app.ai_tool_status.is_some() =>
-        {
-            Line::raw(app.ai_tool_status.as_deref().unwrap_or("AI is thinking..."))
+        AiStatus::Waiting if app.ai_partial_response.is_empty() && app.ai_tool_status.is_some() => {
+            let text = app
+                .ai_tool_status
+                .clone()
+                .unwrap_or_else(|| "AI is thinking...".into());
+            Line::raw(text)
         }
         AiStatus::Waiting if app.ai_partial_response.is_empty() => Line::raw("AI is thinking..."),
         AiStatus::Waiting => Line::raw(""),
@@ -378,8 +380,11 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     // Show streaming partial response as a live assistant message
     if !app.ai_partial_response.is_empty() {
         chat_lines.push(
-            Line::raw("✦ AI:")
-                .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Line::raw("✦ AI:").style(
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
         );
         for line_text in app.ai_partial_response.lines() {
             chat_lines.push(Line::raw(format!("  {line_text}")));
@@ -389,7 +394,9 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let mut spans: Vec<Span<'_>> = last_line.spans.into_iter().collect();
         spans.push(Span::styled(
             "▌",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::SLOW_BLINK),
         ));
         chat_lines.push(Line::from(spans));
         chat_lines.push(Line::raw(""));
@@ -418,9 +425,7 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
 
     // ── Input bar ───────────────────────────────────────────────────
-    let input_block = Block::default()
-        .borders(Borders::ALL)
-        .title("Input");
+    let input_block = Block::default().borders(Borders::ALL).title("Input");
     let input_inner = input_block.inner(input_area);
     frame.render_widget(input_block, input_area);
 
@@ -661,9 +666,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .and_then(|f| f.background.as_ref())
         .map(|bg| bg.steps.as_slice())
         .unwrap_or(&[]);
-    let scenario_steps = scenario
-        .map(|s| s.steps.as_slice())
-        .unwrap_or(&[]);
+    let scenario_steps = scenario.map(|s| s.steps.as_slice()).unwrap_or(&[]);
 
     if background_steps.is_empty() && scenario_steps.is_empty() {
         lines.push(Line::styled(
@@ -786,7 +789,10 @@ fn render_examples_table_lines(headers: &[String], rows: &[Vec<String>]) -> Vec<
     if headers.is_empty() {
         return Vec::new();
     }
-    let mut widths: Vec<usize> = headers.iter().map(|h| UnicodeWidthStr::width(h.as_str())).collect();
+    let mut widths: Vec<usize> = headers
+        .iter()
+        .map(|h| UnicodeWidthStr::width(h.as_str()))
+        .collect();
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
             if let Some(width) = widths.get_mut(i) {
@@ -1440,9 +1446,7 @@ fn footer_hints(app: &App) -> Line<'static> {
             Span::raw(" "),
             footer_pill(" Quit [q] "),
         ]),
-        (MainTab::Ai, _) => Line::from(vec![
-            footer_pill(" Quit [q] "),
-        ]),
+        (MainTab::Ai, _) => Line::from(vec![footer_pill(" Quit [q] ")]),
     }
 }
 

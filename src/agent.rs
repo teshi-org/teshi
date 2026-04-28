@@ -36,11 +36,7 @@ pub fn execute_tool(app: &crate::app::App, name: &str, _args_json: &str) -> Resu
 fn execute_get_project_info(app: &crate::app::App) -> Result<String> {
     let project = &app.project;
 
-    let total_scenarios: usize = project
-        .features
-        .iter()
-        .map(|f| f.scenarios.len())
-        .sum();
+    let total_scenarios: usize = project.features.iter().map(|f| f.scenarios.len()).sum();
     let total_steps: usize = project
         .features
         .iter()
@@ -58,11 +54,7 @@ fn execute_get_project_info(app: &crate::app::App) -> Result<String> {
     let file_list: Vec<String> = project
         .features
         .iter()
-        .map(|f| {
-            f.file_path
-                .to_string_lossy()
-                .to_string()
-        })
+        .map(|f| f.file_path.to_string_lossy().to_string())
         .collect();
 
     let active_file = app
