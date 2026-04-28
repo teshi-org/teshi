@@ -34,6 +34,37 @@ pub struct NodeOccurrence {
     pub line_number: usize,
 }
 
+/// Structured context extracted from the currently selected MindMap node.
+#[derive(Debug, Clone)]
+pub struct MindMapContext {
+    /// The step text (the trie node label for this node).
+    pub step_text: String,
+    /// Labels from root to this node, forming the full step sequence.
+    pub path_labels: Vec<String>,
+    /// The number of source locations referencing this node.
+    pub location_count: usize,
+}
+
+/// Extracts [`MindMapContext`] for the currently selected node in `state`.
+pub fn selected_node_context(
+    state: &TreeState<String>,
+    index: &MindMapIndex,
+) -> Option<MindMapContext> {
+    let id = selected_node_id(state)?;
+    let path_ids = index.path_for(id)?;
+    let locations = index.locations_for(id).unwrap_or(&[]);
+    let path_labels: Vec<String> = path_ids
+        .iter()
+        .map(|pid| index.label_for(pid).cloned().unwrap_or_default())
+        .collect();
+    let step_text = path_labels.last().cloned().unwrap_or_default();
+    Some(MindMapContext {
+        step_text,
+        path_labels,
+        location_count: locations.len(),
+    })
+}
+
 /// Result of a closest-node lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeMatch {
@@ -47,6 +78,7 @@ pub struct MindMapIndex {
     pub items: Vec<tui_tree_widget::TreeItem<'static, String>>,
     node_paths: HashMap<String, Vec<String>>,
     node_locations: HashMap<String, Vec<NodeLocation>>,
+    node_labels: HashMap<String, String>,
     occurrences_by_feature: Vec<Vec<NodeOccurrence>>,
 }
 
@@ -59,6 +91,11 @@ impl MindMapIndex {
     /// Returns the path from root to `id` for [`TreeState`] selection.
     pub fn path_for(&self, id: &str) -> Option<&Vec<String>> {
         self.node_paths.get(id)
+    }
+
+    /// Returns the display label for a node id.
+    pub fn label_for(&self, id: &str) -> Option<&String> {
+        self.node_labels.get(id)
     }
 
     /// Lists node occurrences ordered for closest-line lookup within one feature file.
@@ -142,6 +179,7 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
 
     let mut node_paths: HashMap<String, Vec<String>> = HashMap::new();
     let mut node_locations: HashMap<String, Vec<NodeLocation>> = HashMap::new();
+    let mut node_labels: HashMap<String, String> = HashMap::new();
     let mut next_id = 0usize;
 
     let mut ctx = BuildItemsCtx {
@@ -150,6 +188,7 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
         next_id: &mut next_id,
         node_paths: &mut node_paths,
         node_locations: &mut node_locations,
+        node_labels: &mut node_labels,
     };
     let root_item = build_items(0, &mut ctx, &[]);
 
@@ -170,6 +209,7 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
         items: vec![root_item],
         node_paths,
         node_locations,
+        node_labels,
         occurrences_by_feature,
     }
 }
@@ -216,6 +256,7 @@ struct BuildItemsCtx<'a> {
     next_id: &'a mut usize,
     node_paths: &'a mut HashMap<String, Vec<String>>,
     node_locations: &'a mut HashMap<String, Vec<NodeLocation>>,
+    node_labels: &'a mut HashMap<String, String>,
 }
 
 fn build_items(
@@ -241,6 +282,7 @@ fn build_items(
     } else {
         ctx.arena[node_idx].label.clone()
     };
+    ctx.node_labels.insert(id.clone(), label.clone());
 
     let mut children = Vec::new();
     for &child_idx in &ctx.arena[node_idx].children {
@@ -307,7 +349,7 @@ pub fn find_closest_node(
 mod tests {
     use std::path::PathBuf;
 
-    use super::{build_index, init_tree_state};
+    use super::{build_index, init_tree_state, selected_node_context};
     use crate::gherkin::{self, BddProject};
 
     fn sample_project() -> BddProject {
@@ -348,5 +390,17 @@ Feature: F
             &["root".to_string()],
             "root should remain selected on initialization"
         );
+    }
+
+    #[test]
+    fn test_selected_node_context_returns_root_context() {
+        let project = sample_project();
+        let index = build_index(&project);
+        let state = init_tree_state(&index);
+
+        let ctx = selected_node_context(&state, &index).expect("root should be selectable");
+        assert_eq!(ctx.step_text, ".", "root label is the project dir name");
+        assert_eq!(ctx.path_labels, &["."], "root path is just the root label");
+        assert_eq!(ctx.location_count, 0, "root has no source locations");
     }
 }

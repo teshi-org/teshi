@@ -356,15 +356,21 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             AiRole::Assistant => Color::Green,
             AiRole::Tool => unreachable!(),
         };
+        // Show source tag for MindMap-initiated messages
+        let source_tag = msg
+            .source
+            .as_ref()
+            .map(|s| format!("[{s}] "))
+            .unwrap_or_default();
         // Show tool call indicator if present
         let tool_note = msg.tool_calls.as_ref().map(|tcs| {
             let names: Vec<&str> = tcs.iter().map(|tc| tc.name.as_str()).collect();
             format!(" [called: {}]", names.join(", "))
         });
         let prefix_text = if let Some(note) = tool_note {
-            format!("{prefix}:{note}")
+            format!("{source_tag}{prefix}:{note}")
         } else {
-            format!("{prefix}:")
+            format!("{source_tag}{prefix}:")
         };
         chat_lines.push(
             Line::raw(prefix_text)

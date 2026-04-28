@@ -42,6 +42,8 @@ pub struct AiChatMessage {
     pub tool_call_id: Option<String>,
     /// DeepSeek V4 thinking chain — preserved across tool-call turns.
     pub reasoning_content: Option<String>,
+    /// Optional source tag for UI display (e.g., `"MindMap"`).
+    pub source: Option<String>,
 }
 
 /// Who sent the message.
@@ -671,6 +673,7 @@ impl App {
                             tool_calls: None,
                             tool_call_id: None,
                             reasoning_content,
+                            source: None,
                         });
                     } else {
                         let content = std::mem::take(&mut self.ai_partial_response);
@@ -680,6 +683,7 @@ impl App {
                             tool_calls: None,
                             tool_call_id: None,
                             reasoning_content,
+                            source: None,
                         });
                     }
                     self.ai_partial_response.clear();
@@ -700,6 +704,7 @@ impl App {
                         tool_calls: Some(tool_calls.clone()),
                         tool_call_id: None,
                         reasoning_content,
+                        source: None,
                     });
 
                     // Execute each requested tool and append results
@@ -713,6 +718,7 @@ impl App {
                                     tool_calls: None,
                                     tool_call_id: Some(tc.id.clone()),
                                     reasoning_content: None,
+                                    source: None,
                                 });
                             }
                             Err(e) => {
@@ -722,6 +728,7 @@ impl App {
                                     tool_calls: None,
                                     tool_call_id: Some(tc.id.clone()),
                                     reasoning_content: None,
+                                    source: None,
                                 });
                             }
                         }
@@ -1767,6 +1774,68 @@ impl App {
                     self.quit_pending_confirm = false;
                 }
             }
+            Action::MindMapSendToAi => {
+                if self.active_tab == MainTab::MindMap
+                    && let Some(ctx) = crate::mindmap::selected_node_context(
+                        &self.tree_state,
+                        &self.mindmap_index,
+                    )
+                {
+                        let path_str = ctx.path_labels.join(" > ");
+                        let msg = format!(
+                            "[MindMap] Selected step: \"{}\"\nPath: {}\nAppears in {} location(s)",
+                            ctx.step_text, path_str, ctx.location_count
+                        );
+                        self.ai_messages.push(AiChatMessage {
+                            role: AiRole::User,
+                            content: msg,
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning_content: None,
+                            source: Some("MindMap".into()),
+                        });
+                        self.active_tab = MainTab::Ai;
+                        self.ai_status = AiStatus::Waiting;
+                        self.ai_partial_response.clear();
+                        self.agent_loop_count = 0;
+                        self.status = "Sending MindMap context to AI...".to_string();
+
+                        if !crate::llm::LlmConfig::is_configured() {
+                            self.ai_messages.push(AiChatMessage {
+                                role: AiRole::Assistant,
+                                content: "AI is not configured. Set TESHI_LLM_API_KEY in your environment to enable AI responses.".to_string(),
+                                tool_calls: None,
+                                tool_call_id: None,
+                                reasoning_content: None,
+                                source: None,
+                            });
+                            self.ai_status = AiStatus::Idle;
+                            self.ai_partial_response.clear();
+                            self.status = "AI not configured".to_string();
+                        } else if let Some(ref handle) = self.ai_llm_handle {
+                            let messages = self.build_chat_messages_for_llm();
+                            let tools = Some(crate::agent::get_tools());
+                            if handle
+                                .send(crate::llm::LlmRequest::Chat {
+                                    system: Some(Self::ai_system_prompt().into()),
+                                    messages,
+                                    tools,
+                                })
+                                .is_err()
+                            {
+                                self.ai_status = AiStatus::Error;
+                                self.ai_partial_response.clear();
+                                self.status =
+                                    "AI error: background LLM thread has exited".to_string();
+                            }
+                        } else {
+                            self.ai_status = AiStatus::Error;
+                            self.ai_partial_response.clear();
+                            self.status = "AI error: LLM handle not available".to_string();
+                        }
+                    }
+                self.quit_pending_confirm = false;
+            }
             Action::EnterEdit => {
                 if self.active_tab == MainTab::Explore {
                     self.explore_enter_edit();
@@ -1965,6 +2034,7 @@ impl App {
                     tool_calls: None,
                     tool_call_id: None,
                     reasoning_content: None,
+                    source: None,
                 });
                 self.ai_status = AiStatus::Waiting;
                 self.ai_partial_response.clear();
@@ -1979,6 +2049,7 @@ impl App {
                         tool_calls: None,
                         tool_call_id: None,
                         reasoning_content: None,
+                        source: None,
                     });
                     self.ai_status = AiStatus::Idle;
                     self.ai_partial_response.clear();

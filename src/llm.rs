@@ -519,16 +519,8 @@ async fn chat_completion(
             reasoning_content: reasoning,
         });
 
-        // Also emit Done if there was text content before the tool call
-        if !full_text.is_empty() {
-            let _ = evt_tx.send(LlmEvent::Done {
-                full_text,
-                reasoning_content: None,
-                input_tokens,
-                output_tokens,
-                model: model_name,
-            });
-        }
+        // Text content before the tool call was already sent as Chunk
+        // events and stored in ai_partial_response — no separate Done needed.
     } else {
         let _ = evt_tx.send(LlmEvent::Done {
             full_text,

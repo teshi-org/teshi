@@ -73,6 +73,8 @@ pub enum Action {
     AiSendChar(char),
     AiSendMessage,
     AiBackspace,
+    /// Send the selected MindMap node context as a user message to the AI.
+    MindMapSendToAi,
     // Tree navigation (stages 1 & 2)
     TreeUp,
     TreeDown,
@@ -229,6 +231,7 @@ impl Action {
                 (KeyCode::Char('4'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
                 (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
+                (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::MindMapSendToAi),
                 _ => None,
             };
         }
