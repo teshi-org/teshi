@@ -455,13 +455,12 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         chat_lines.push(status_line.style(status_style));
     }
 
-    // Scroll the chat to the bottom by slicing
-    let visible_lines: Vec<Line<'static>> = if chat_lines.len() > chat_height as usize {
-        let start = chat_lines.len() - chat_height as usize;
-        chat_lines[start..].to_vec()
-    } else {
-        chat_lines
-    };
+    // Slice chat history based on scroll offset (0 = show bottom)
+    let total_lines = chat_lines.len();
+    let max_start = total_lines.saturating_sub(chat_height as usize);
+    let start = max_start.saturating_sub(app.ai_scroll_offset.min(max_start));
+    let end = (start + chat_height as usize).min(total_lines);
+    let visible_lines: Vec<Line<'static>> = chat_lines[start..end].to_vec();
 
     frame.render_widget(
         Paragraph::new(Text::from(visible_lines)).style(Style::default()),

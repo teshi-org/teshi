@@ -80,6 +80,14 @@ pub enum Action {
     AiSendChar(char),
     AiSendMessage,
     AiBackspace,
+    /// Scroll chat history up (PageUp).
+    AiScrollUp,
+    /// Scroll chat history down (PageDown).
+    AiScrollDown,
+    /// Jump to top of chat history (Home).
+    AiScrollTop,
+    /// Jump to bottom of chat history (End).
+    AiScrollBottom,
     /// Send the selected MindMap node context as a user message to the AI.
     MindMapSendToAi,
     /// Toggle the AI preview panel visibility (global `Ctrl+\`).
@@ -208,16 +216,20 @@ impl Action {
             };
         }
 
-        // AI tab: text input — only intercept navigation/control keys, pass all chars through
+        // AI tab: text input — only intercept control keys, pass all chars through
         if context.active_tab == MainTab::Ai {
             return match (event.code, event.modifiers) {
                 (KeyCode::Enter, _) => Some(Self::AiSendMessage),
                 (KeyCode::Backspace, _) => Some(Self::AiBackspace),
                 (KeyCode::Esc, _) => Some(Self::ClearInputState),
-                (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
-                (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
-                (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
-                (KeyCode::Char('4'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Help)),
+                (KeyCode::PageUp, _) | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
+                    Some(Self::AiScrollUp)
+                }
+                (KeyCode::PageDown, _) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+                    Some(Self::AiScrollDown)
+                }
+                (KeyCode::Home, _) => Some(Self::AiScrollTop),
+                (KeyCode::End, _) => Some(Self::AiScrollBottom),
                 (KeyCode::Char(ch), _) if !ch.is_control() => Some(Self::AiSendChar(ch)),
                 _ => None,
             };
@@ -231,10 +243,10 @@ impl Action {
                 (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
                     Some(Self::ClearInputState)
                 }
-                (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
-                (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
-                (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
-                (KeyCode::Char('4'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Help)),
+                (KeyCode::PageUp, _) => Some(Self::AiScrollUp),
+                (KeyCode::PageDown, _) => Some(Self::AiScrollDown),
+                (KeyCode::Home, _) => Some(Self::AiScrollTop),
+                (KeyCode::End, _) => Some(Self::AiScrollBottom),
                 _ => None,
             };
         }
