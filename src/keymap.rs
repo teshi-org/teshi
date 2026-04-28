@@ -208,7 +208,7 @@ impl Action {
             };
         }
 
-        // AI tab: text input
+        // AI tab: text input — only intercept navigation/control keys, pass all chars through
         if context.active_tab == MainTab::Ai {
             return match (event.code, event.modifiers) {
                 (KeyCode::Enter, _) => Some(Self::AiSendMessage),
@@ -218,8 +218,6 @@ impl Action {
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
                 (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
                 (KeyCode::Char('4'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Help)),
-                (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
-                (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                 (KeyCode::Char(ch), _) if !ch.is_control() => Some(Self::AiSendChar(ch)),
                 _ => None,
             };
@@ -237,8 +235,6 @@ impl Action {
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
                 (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
                 (KeyCode::Char('4'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Help)),
-                (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
-                (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                 _ => None,
             };
         }
