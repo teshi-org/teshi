@@ -6,7 +6,9 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use tui_tree_widget::Tree;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, CaseDetail, ColumnFocus, MainTab, RunStatus, STEP_KEYWORDS_CYCLE};
+use crate::app::{
+    App, CaseDetail, ColumnFocus, MainTab, MindMapFocus, RunStatus, STEP_KEYWORDS_CYCLE,
+};
 use crate::bdd_nav::nav_body_char_range_in_buffer;
 use crate::highlight::{KeywordSet, StepHighlightState, highlight_line_with_state};
 
@@ -248,8 +250,10 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             let help = vec![
                 Line::raw("Tabs: Explore [1], MindMap [2], Help [3], AI [4]"),
                 Line::raw(""),
-                Line::raw("── MindMap (Tree only) ──"),
+                Line::raw("── MindMap (Tree + AI Preview) ──"),
                 Line::raw("↑↓ navigate tree   Space toggle   ←→ collapse/expand"),
+                Line::raw("Enter focus AI preview   Esc/← return to tree"),
+                Line::raw("Ctrl+\\ toggle AI preview panel   a send to AI chat"),
                 Line::raw("Home/End first/last node"),
                 Line::raw(""),
                 Line::raw("── Explore (Three Columns) ──"),
@@ -473,10 +477,19 @@ fn render_ai_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(hints), area);
 }
 
-/// Renders the MindMap layout.
+/// Renders the MindMap layout: tree (60%) + optional AI preview panel (40%).
 fn render_mindmap_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let _ = app.view_stage;
-    render_tree_panel(frame, app, area);
+    if app.mindmap_ai_panel_visible && area.width >= 20 {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(area);
+        let tree_focused = app.mindmap_focus == MindMapFocus::Main;
+        render_tree_panel(frame, app, cols[0], tree_focused);
+        render_mindmap_ai_panel(frame, app, cols[1]);
+    } else {
+        render_tree_panel(frame, app, area, true);
+    }
 }
 
 /// Renders the Explore tab: three-column feature/scenario/step browser.
@@ -926,12 +939,26 @@ fn apply_line_background(line: Line<'static>, bg: Style) -> Line<'static> {
 }
 
 /// Renders the collapsible tree using `tui-tree-widget`.
-fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: bool) {
     let items = &app.mindmap_index.items;
 
     let highlight_style = selected_style(true);
 
-    let block = Block::default().borders(Borders::ALL).title("MindMap");
+    let block = if focused {
+        Block::default()
+            .borders(Borders::ALL)
+            .title("MindMap")
+            .title_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+    } else {
+        Block::default()
+            .borders(Borders::ALL)
+            .title("MindMap")
+            .title_style(Style::default().fg(Color::DarkGray))
+    };
 
     let tree = Tree::new(items)
         .expect("tree construction should succeed")
@@ -939,6 +966,111 @@ fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .highlight_style(highlight_style);
 
     frame.render_stateful_widget(tree, area, &mut app.tree_state);
+}
+
+/// Renders the AI preview panel in the MindMap tab.
+fn render_mindmap_ai_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    use crate::app::{AiRole, AiStatus};
+
+    if area.width < 10 || area.height < 3 {
+        return;
+    }
+
+    let focused = app.mindmap_focus == MindMapFocus::AiPanel;
+    let block = explore_block("AI Preview", focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Status line
+    let status_style = match app.ai_status {
+        AiStatus::Waiting => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::SLOW_BLINK),
+        AiStatus::Error => Style::default().fg(Color::Red),
+        AiStatus::Idle => Style::default().fg(Color::DarkGray),
+    };
+    let status_text = match app.ai_status {
+        AiStatus::Idle => "AI Ready",
+        AiStatus::Waiting => "AI is thinking...",
+        AiStatus::Error => "AI Error",
+    };
+    lines.push(Line::styled(status_text, status_style));
+    lines.push(Line::raw(""));
+
+    // Tool status
+    if let Some(ref tool_status) = app.ai_tool_status {
+        lines.push(Line::styled(
+            tool_status.clone(),
+            Style::default().fg(Color::Yellow),
+        ));
+        lines.push(Line::raw(""));
+    }
+
+    // Selected node context and filtered messages
+    let node_text = crate::mindmap::selected_node_context(&app.tree_state, &app.mindmap_index)
+        .map(|ctx| ctx.step_text)
+        .unwrap_or_default();
+
+    if !node_text.is_empty() {
+        lines.push(Line::styled(
+            format!("Selected: \"{node_text}\""),
+            Style::default().fg(Color::Cyan),
+        ));
+        lines.push(Line::raw(""));
+
+        let lower_node = node_text.to_lowercase();
+        let matching: Vec<&crate::app::AiChatMessage> = app
+            .ai_messages
+            .iter()
+            .filter(|msg| {
+                !matches!(msg.role, AiRole::Tool)
+                    && msg.content.to_lowercase().contains(&lower_node)
+            })
+            .collect();
+
+        if matching.is_empty() {
+            lines.push(Line::styled(
+                "  No related AI messages",
+                Style::default().fg(Color::DarkGray),
+            ));
+        } else {
+            lines.push(Line::styled(
+                format!("Related messages ({}):", matching.len()),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            for msg in matching.into_iter().take(8) {
+                let prefix = match msg.role {
+                    AiRole::User => "  \u{25b6} You",
+                    AiRole::Assistant => "  \u{2726} AI",
+                    AiRole::Tool => "  \u{2699} Tool",
+                };
+                let first = msg.content.lines().next().unwrap_or("");
+                let truncated =
+                    truncate_string_to_cols(first, inner.width.saturating_sub(4) as u16);
+                lines.push(Line::raw(format!("{prefix}: {truncated}")));
+            }
+        }
+        lines.push(Line::raw(""));
+    }
+
+    // Command hints
+    let hint_style = Style::default().fg(Color::DarkGray);
+    if focused {
+        lines.push(Line::styled("Esc / Left  return to tree", hint_style));
+    } else {
+        lines.push(Line::styled("Enter  focus AI preview", hint_style));
+    }
+    lines.push(Line::styled("Ctrl+\\  toggle panel", hint_style));
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
 /// Renders the editor panel showing the active feature file.
@@ -1421,17 +1553,31 @@ fn footer_hints(app: &App) -> Line<'static> {
         ]);
     }
     match (app.active_tab, app.view_stage) {
-        (MainTab::MindMap, _) => Line::from(vec![
-            footer_pill(" Navigate [↑↓] "),
-            Span::raw(" "),
-            footer_pill(" Toggle [Space] "),
-            Span::raw(" "),
-            footer_pill(" Expand [→] "),
-            Span::raw(" "),
-            footer_pill(" Collapse [←] "),
-            Span::raw(" "),
-            footer_pill(" Quit [q] "),
-        ]),
+        (MainTab::MindMap, _) => {
+            let mut hints = vec![
+                footer_pill(" Navigate [↑↓] "),
+                Span::raw(" "),
+                footer_pill(" Toggle [Space] "),
+                Span::raw(" "),
+                footer_pill(" Expand [→] "),
+                Span::raw(" "),
+                footer_pill(" Collapse [←] "),
+            ];
+            if app.mindmap_ai_panel_visible {
+                if app.mindmap_focus == MindMapFocus::Main {
+                    hints.push(Span::raw(" "));
+                    hints.push(footer_pill(" Focus Panel [Enter] "));
+                }
+                hints.push(Span::raw(" "));
+                hints.push(footer_pill(" Toggle Panel [Ctrl+\\] "));
+            } else {
+                hints.push(Span::raw(" "));
+                hints.push(footer_pill(" Show Panel [Ctrl+\\] "));
+            }
+            hints.push(Span::raw(" "));
+            hints.push(footer_pill(" Quit [q] "));
+            Line::from(hints)
+        }
         (MainTab::Explore, _) => Line::from(vec![
             footer_pill(" Focus [Tab/←→] "),
             Span::raw(" "),

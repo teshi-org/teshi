@@ -115,6 +115,8 @@ fn main() -> Result<()> {
                     view_stage: app.view_stage,
                     explore_edit_mode: app.explore_edit_mode,
                     pending_char: app.pending_char,
+                    mindmap_focus: app.mindmap_focus,
+                    mindmap_ai_panel_visible: app.mindmap_ai_panel_visible,
                 },
             ) {
                 app.handle_action(action)?;

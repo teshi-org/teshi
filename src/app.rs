@@ -89,6 +89,15 @@ pub enum ColumnFocus {
     Step,
 }
 
+/// Focus target within the MindMap tab when the AI preview panel is visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MindMapFocus {
+    /// Tree has keyboard focus.
+    Main,
+    /// AI preview panel has keyboard focus.
+    AiPanel,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStatus {
     Idle,
@@ -211,6 +220,9 @@ pub struct App {
     pub explore_detail_open: bool,
     pub explore_detail_case: Option<(usize, usize)>,
     pub explore_run_summary: Option<RunSummary>,
+    // ── MindMap AI panel state ────────────────────────────────────────
+    pub mindmap_focus: MindMapFocus,
+    pub mindmap_ai_panel_visible: bool,
     // ── AI tab state ───────────────────────────────────────────────
     pub ai_messages: Vec<AiChatMessage>,
     pub ai_input: String,
@@ -331,6 +343,8 @@ impl App {
             explore_detail_open: false,
             explore_detail_case: None,
             explore_run_summary: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: true,
             ai_messages: Vec::new(),
             ai_input: String::new(),
             ai_status: AiStatus::Idle,
@@ -427,6 +441,8 @@ impl App {
             explore_detail_open: false,
             explore_detail_case: None,
             explore_run_summary: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: true,
             quit_pending_confirm: false,
         };
         app.spawn_llm_if_configured();
@@ -503,6 +519,8 @@ impl App {
             explore_detail_open: false,
             explore_detail_case: None,
             explore_run_summary: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: true,
             quit_pending_confirm: false,
         };
         app.spawn_llm_if_configured();
@@ -1776,32 +1794,30 @@ impl App {
             }
             Action::MindMapSendToAi => {
                 if self.active_tab == MainTab::MindMap
-                    && let Some(ctx) = crate::mindmap::selected_node_context(
-                        &self.tree_state,
-                        &self.mindmap_index,
-                    )
+                    && let Some(ctx) =
+                        crate::mindmap::selected_node_context(&self.tree_state, &self.mindmap_index)
                 {
-                        let path_str = ctx.path_labels.join(" > ");
-                        let msg = format!(
-                            "[MindMap] Selected step: \"{}\"\nPath: {}\nAppears in {} location(s)",
-                            ctx.step_text, path_str, ctx.location_count
-                        );
-                        self.ai_messages.push(AiChatMessage {
-                            role: AiRole::User,
-                            content: msg,
-                            tool_calls: None,
-                            tool_call_id: None,
-                            reasoning_content: None,
-                            source: Some("MindMap".into()),
-                        });
-                        self.active_tab = MainTab::Ai;
-                        self.ai_status = AiStatus::Waiting;
-                        self.ai_partial_response.clear();
-                        self.agent_loop_count = 0;
-                        self.status = "Sending MindMap context to AI...".to_string();
+                    let path_str = ctx.path_labels.join(" > ");
+                    let msg = format!(
+                        "[MindMap] Selected step: \"{}\"\nPath: {}\nAppears in {} location(s)",
+                        ctx.step_text, path_str, ctx.location_count
+                    );
+                    self.ai_messages.push(AiChatMessage {
+                        role: AiRole::User,
+                        content: msg,
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content: None,
+                        source: Some("MindMap".into()),
+                    });
+                    self.active_tab = MainTab::Ai;
+                    self.ai_status = AiStatus::Waiting;
+                    self.ai_partial_response.clear();
+                    self.agent_loop_count = 0;
+                    self.status = "Sending MindMap context to AI...".to_string();
 
-                        if !crate::llm::LlmConfig::is_configured() {
-                            self.ai_messages.push(AiChatMessage {
+                    if !crate::llm::LlmConfig::is_configured() {
+                        self.ai_messages.push(AiChatMessage {
                                 role: AiRole::Assistant,
                                 content: "AI is not configured. Set TESHI_LLM_API_KEY in your environment to enable AI responses.".to_string(),
                                 tool_calls: None,
@@ -1809,31 +1825,43 @@ impl App {
                                 reasoning_content: None,
                                 source: None,
                             });
-                            self.ai_status = AiStatus::Idle;
-                            self.ai_partial_response.clear();
-                            self.status = "AI not configured".to_string();
-                        } else if let Some(ref handle) = self.ai_llm_handle {
-                            let messages = self.build_chat_messages_for_llm();
-                            let tools = Some(crate::agent::get_tools());
-                            if handle
-                                .send(crate::llm::LlmRequest::Chat {
-                                    system: Some(Self::ai_system_prompt().into()),
-                                    messages,
-                                    tools,
-                                })
-                                .is_err()
-                            {
-                                self.ai_status = AiStatus::Error;
-                                self.ai_partial_response.clear();
-                                self.status =
-                                    "AI error: background LLM thread has exited".to_string();
-                            }
-                        } else {
+                        self.ai_status = AiStatus::Idle;
+                        self.ai_partial_response.clear();
+                        self.status = "AI not configured".to_string();
+                    } else if let Some(ref handle) = self.ai_llm_handle {
+                        let messages = self.build_chat_messages_for_llm();
+                        let tools = Some(crate::agent::get_tools());
+                        if handle
+                            .send(crate::llm::LlmRequest::Chat {
+                                system: Some(Self::ai_system_prompt().into()),
+                                messages,
+                                tools,
+                            })
+                            .is_err()
+                        {
                             self.ai_status = AiStatus::Error;
                             self.ai_partial_response.clear();
-                            self.status = "AI error: LLM handle not available".to_string();
+                            self.status = "AI error: background LLM thread has exited".to_string();
                         }
+                    } else {
+                        self.ai_status = AiStatus::Error;
+                        self.ai_partial_response.clear();
+                        self.status = "AI error: LLM handle not available".to_string();
                     }
+                }
+                self.quit_pending_confirm = false;
+            }
+            Action::ToggleMindMapAiPanel => {
+                self.mindmap_ai_panel_visible = !self.mindmap_ai_panel_visible;
+                if !self.mindmap_ai_panel_visible {
+                    self.mindmap_focus = MindMapFocus::Main;
+                }
+                self.quit_pending_confirm = false;
+            }
+            Action::MindMapFocusAiPanel => {
+                if self.active_tab == MainTab::MindMap && self.mindmap_ai_panel_visible {
+                    self.mindmap_focus = MindMapFocus::AiPanel;
+                }
                 self.quit_pending_confirm = false;
             }
             Action::EnterEdit => {
@@ -2084,7 +2112,18 @@ impl App {
             }
             Action::ExternalChangeReload | Action::ExternalChangeKeepLocal => {}
             Action::ClearInputState => {
-                if self.active_tab == MainTab::Ai {
+                if self.active_tab == MainTab::MindMap
+                    && self.mindmap_focus == MindMapFocus::AiPanel
+                {
+                    self.mindmap_focus = MindMapFocus::Main;
+                    self.status = "Focus returned to tree".to_string();
+                } else if self.active_tab == MainTab::MindMap
+                    && self.mindmap_ai_panel_visible
+                    && self.mindmap_focus == MindMapFocus::Main
+                {
+                    self.mindmap_ai_panel_visible = false;
+                    self.status = "AI preview panel closed".to_string();
+                } else if self.active_tab == MainTab::Ai {
                     self.ai_input.clear();
                     self.ai_partial_response.clear();
                     self.ai_status = AiStatus::Idle;
@@ -2169,6 +2208,7 @@ impl App {
         self.active_tab = tab;
         if self.active_tab == MainTab::MindMap {
             self.view_stage = ViewStage::TreeOnly;
+            self.mindmap_focus = MindMapFocus::Main;
         }
         self.status = match tab {
             MainTab::MindMap => "Switched to MindMap tab",
@@ -2855,8 +2895,8 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
-        AiStatus, App, BddFocusSlot, ColumnFocus, MainTab, ViewStage, current_step_keyword_index,
-        replace_step_keyword_line,
+        AiStatus, App, BddFocusSlot, ColumnFocus, MainTab, MindMapFocus, ViewStage,
+        current_step_keyword_index, replace_step_keyword_line,
     };
     use crate::bdd_nav::step_edit_start_col;
     use crate::editor_buffer::EditorBuffer;
@@ -3301,6 +3341,8 @@ mod tests {
             explore_detail_open: false,
             explore_detail_case: None,
             explore_run_summary: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: true,
             ai_messages: Vec::new(),
             ai_input: String::new(),
             ai_status: AiStatus::Idle,
@@ -3408,6 +3450,8 @@ Feature: B
             explore_detail_open: false,
             explore_detail_case: None,
             explore_run_summary: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: true,
             ai_messages: Vec::new(),
             ai_input: String::new(),
             ai_status: AiStatus::Idle,

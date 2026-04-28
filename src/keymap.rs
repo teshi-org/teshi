@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{MainTab, ViewStage};
+use crate::app::{MainTab, MindMapFocus, ViewStage};
 
 /// Inputs for [`Action::from_key_event`] to resolve mode-specific bindings.
 #[derive(Debug, Clone, Copy)]
@@ -12,6 +12,8 @@ pub struct KeyContext {
     pub view_stage: ViewStage,
     pub explore_edit_mode: bool,
     pub pending_char: Option<char>,
+    pub mindmap_focus: MindMapFocus,
+    pub mindmap_ai_panel_visible: bool,
 }
 
 /// High-level editor command derived from keyboard input.
@@ -75,6 +77,10 @@ pub enum Action {
     AiBackspace,
     /// Send the selected MindMap node context as a user message to the AI.
     MindMapSendToAi,
+    /// Toggle the AI preview panel visibility (global `Ctrl+\`).
+    ToggleMindMapAiPanel,
+    /// Move keyboard focus from tree to the AI preview panel.
+    MindMapFocusAiPanel,
     // Tree navigation (stages 1 & 2)
     TreeUp,
     TreeDown,
@@ -202,8 +208,27 @@ impl Action {
             };
         }
 
+        // MindMap tab: AI panel has focus — suppress tree nav, only Esc/Left/h return
+        if context.active_tab == MainTab::MindMap && context.mindmap_focus == MindMapFocus::AiPanel
+        {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Esc, _) => Some(Self::ClearInputState),
+                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                    Some(Self::ClearInputState)
+                }
+                (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
+                (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
+                (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Help)),
+                (KeyCode::Char('4'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
+                (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
+                (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
+                _ => None,
+            };
+        }
+
         // MindMap tab: tree navigation (stages 1 & 2)
         if context.active_tab == MainTab::MindMap
+            && context.mindmap_focus == MindMapFocus::Main
             && matches!(
                 context.view_stage,
                 ViewStage::TreeOnly | ViewStage::TreeAndEditor
@@ -225,6 +250,9 @@ impl Action {
                 (KeyCode::End, _) => Some(Self::TreeEnd),
                 (KeyCode::Char('['), _) => Some(Self::TreeLocationPrev),
                 (KeyCode::Char(']'), _) => Some(Self::TreeLocationNext),
+                (KeyCode::Enter, _) if context.mindmap_ai_panel_visible => {
+                    Some(Self::MindMapFocusAiPanel)
+                }
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
                 (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Help)),
@@ -245,6 +273,7 @@ impl Action {
             (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
             (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
             (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
+            (KeyCode::Char('\x1c'), _) => Some(Self::ToggleMindMapAiPanel),
             (KeyCode::Char('r'), KeyModifiers::CONTROL) => Some(Self::RunBackground),
             (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::NewScenario),
             (KeyCode::Char('g'), KeyModifiers::CONTROL) => Some(Self::SwitchKeyword("Given")),
@@ -309,7 +338,7 @@ impl Action {
 #[cfg(test)]
 mod tests {
     use super::{Action, KeyContext};
-    use crate::app::{MainTab, ViewStage};
+    use crate::app::{MainTab, MindMapFocus, ViewStage};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
@@ -322,6 +351,8 @@ mod tests {
             view_stage: ViewStage::TreeOnly,
             explore_edit_mode: false,
             pending_char: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -340,6 +371,8 @@ mod tests {
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
             pending_char: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -358,6 +391,8 @@ mod tests {
             view_stage: ViewStage::TreeOnly,
             explore_edit_mode: false,
             pending_char: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -386,6 +421,8 @@ mod tests {
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
             pending_char: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -414,6 +451,8 @@ mod tests {
             view_stage: ViewStage::TreeOnly,
             explore_edit_mode: false,
             pending_char: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
@@ -450,6 +489,8 @@ mod tests {
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
             pending_char: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
@@ -468,6 +509,8 @@ mod tests {
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
             pending_char: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
@@ -486,6 +529,8 @@ mod tests {
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
             pending_char: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), context),
@@ -528,9 +573,13 @@ mod tests {
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
             pending_char: Some('d'),
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: false,
         };
         let copy_context = KeyContext {
             pending_char: Some('y'),
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: false,
             ..delete_context
         };
         assert_eq!(
@@ -559,6 +608,8 @@ mod tests {
             view_stage: ViewStage::TreeOnly,
             explore_edit_mode: false,
             pending_char: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
