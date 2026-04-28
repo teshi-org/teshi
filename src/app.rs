@@ -295,15 +295,25 @@ impl App {
     /// Builds the editor state from process arguments.
     ///
     /// Accepts a directory path (recursive `.feature` scan) or a single file path.
+    /// When both a directory and a `.feature` file path are given (e.g.
+    /// `cargo run -- . path/to/demo.feature`), the specific file takes priority.
     pub fn from_args() -> Result<Self> {
-        let path = std::env::args()
+        let paths: Vec<PathBuf> = std::env::args()
             .skip(1)
-            .find(|arg| !arg.starts_with('-'))
-            .map(PathBuf::from);
+            .filter(|arg| !arg.starts_with('-'))
+            .map(PathBuf::from)
+            .collect();
 
-        match path {
-            Some(p) if p.is_dir() => Self::from_directory(&p),
-            Some(p) => Self::from_file(&p),
+        // Prefer an explicit .feature file path over a directory path
+        let feature_file = paths
+            .iter()
+            .find(|p| p.extension().is_some_and(|ext| ext == "feature"));
+        if let Some(p) = feature_file {
+            return Self::from_file(p);
+        }
+
+        match paths.iter().find(|p| p.is_dir()) {
+            Some(p) => Self::from_directory(p),
             None => Ok(Self::empty()),
         }
     }
