@@ -15,6 +15,7 @@ pub struct KeyContext {
     pub pending_char: Option<char>,
     pub mindmap_focus: MindMapFocus,
     pub mindmap_ai_panel_visible: bool,
+    pub ai_input_focused: bool,
 }
 
 /// High-level editor command derived from keyboard input.
@@ -80,14 +81,14 @@ pub enum Action {
     AiSendChar(char),
     AiSendMessage,
     AiBackspace,
-    /// Scroll chat history up (PageUp).
+    /// Scroll chat history up (Alt+Up).
     AiScrollUp,
-    /// Scroll chat history down (PageDown).
+    /// Scroll chat history down (Alt+Down).
     AiScrollDown,
-    /// Jump to top of chat history (Home).
-    AiScrollTop,
-    /// Jump to bottom of chat history (End).
-    AiScrollBottom,
+    /// Blur the AI input (Esc while focused), enables tab switching with 1-4.
+    AiBlurInput,
+    /// Focus the AI input (Esc while blurred, or any char press).
+    AiFocusInput,
     /// Send the selected MindMap node context as a user message to the AI.
     MindMapSendToAi,
     /// Toggle the AI preview panel visibility (global `Ctrl+\`).
@@ -216,20 +217,30 @@ impl Action {
             };
         }
 
-        // AI tab: text input — only intercept control keys, pass all chars through
+        // AI tab: blurred mode — 1-4 switch tabs, any char auto-focuses input
+        if context.active_tab == MainTab::Ai && !context.ai_input_focused {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
+                (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
+                (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
+                (KeyCode::Char('4'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Help)),
+                (KeyCode::Up, KeyModifiers::ALT) => Some(Self::AiScrollUp),
+                (KeyCode::Down, KeyModifiers::ALT) => Some(Self::AiScrollDown),
+                (KeyCode::Esc, _) => Some(Self::AiFocusInput),
+                (KeyCode::Enter, _) => Some(Self::AiFocusInput),
+                (KeyCode::Char(ch), _) if !ch.is_control() => Some(Self::AiSendChar(ch)),
+                _ => None,
+            };
+        }
+
+        // AI tab: focused mode — text input, Esc blurs instead of clearing
         if context.active_tab == MainTab::Ai {
             return match (event.code, event.modifiers) {
                 (KeyCode::Enter, _) => Some(Self::AiSendMessage),
                 (KeyCode::Backspace, _) => Some(Self::AiBackspace),
-                (KeyCode::Esc, _) => Some(Self::ClearInputState),
-                (KeyCode::PageUp, _) | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
-                    Some(Self::AiScrollUp)
-                }
-                (KeyCode::PageDown, _) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
-                    Some(Self::AiScrollDown)
-                }
-                (KeyCode::Home, _) => Some(Self::AiScrollTop),
-                (KeyCode::End, _) => Some(Self::AiScrollBottom),
+                (KeyCode::Esc, _) => Some(Self::AiBlurInput),
+                (KeyCode::Up, KeyModifiers::ALT) => Some(Self::AiScrollUp),
+                (KeyCode::Down, KeyModifiers::ALT) => Some(Self::AiScrollDown),
                 (KeyCode::Char(ch), _) if !ch.is_control() => Some(Self::AiSendChar(ch)),
                 _ => None,
             };
@@ -243,10 +254,8 @@ impl Action {
                 (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
                     Some(Self::ClearInputState)
                 }
-                (KeyCode::PageUp, _) => Some(Self::AiScrollUp),
-                (KeyCode::PageDown, _) => Some(Self::AiScrollDown),
-                (KeyCode::Home, _) => Some(Self::AiScrollTop),
-                (KeyCode::End, _) => Some(Self::AiScrollBottom),
+                (KeyCode::Up, KeyModifiers::ALT) => Some(Self::AiScrollUp),
+                (KeyCode::Down, KeyModifiers::ALT) => Some(Self::AiScrollDown),
                 _ => None,
             };
         }
@@ -379,6 +388,7 @@ mod tests {
             pending_char: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
+            ai_input_focused: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -400,6 +410,7 @@ mod tests {
             pending_char: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
+            ai_input_focused: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -421,6 +432,7 @@ mod tests {
             pending_char: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
+            ai_input_focused: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -452,6 +464,7 @@ mod tests {
             pending_char: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
+            ai_input_focused: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -483,6 +496,7 @@ mod tests {
             pending_char: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
+            ai_input_focused: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
@@ -522,6 +536,7 @@ mod tests {
             pending_char: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
+            ai_input_focused: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
@@ -543,6 +558,7 @@ mod tests {
             pending_char: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
+            ai_input_focused: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
@@ -564,6 +580,7 @@ mod tests {
             pending_char: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
+            ai_input_focused: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), context),
@@ -609,11 +626,13 @@ mod tests {
             pending_char: Some('d'),
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
+            ai_input_focused: false,
         };
         let copy_context = KeyContext {
             pending_char: Some('y'),
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
+            ai_input_focused: false,
             ..delete_context
         };
         assert_eq!(
@@ -645,6 +664,7 @@ mod tests {
             pending_char: None,
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: false,
+            ai_input_focused: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
