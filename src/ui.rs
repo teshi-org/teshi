@@ -199,14 +199,14 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let top_tabs = Tabs::new(vec![
         Line::from(" Explore [1] "),
         Line::from(" MindMap [2] "),
-        Line::from(" Help [3] "),
-        Line::from(" AI [4] "),
+        Line::from(" AI [3] "),
+        Line::from(" Help [4] "),
     ])
     .select(match app.active_tab {
         MainTab::Explore => 0,
         MainTab::MindMap => 1,
-        MainTab::Help => 2,
-        MainTab::Ai => 3,
+        MainTab::Ai => 2,
+        MainTab::Help => 3,
     })
     .style(Style::default().fg(Color::DarkGray))
     .highlight_style(
