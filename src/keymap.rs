@@ -234,8 +234,6 @@ impl Action {
                 (KeyCode::Delete, _) => Some(Self::AiDelete),
                 (KeyCode::Left, _) => Some(Self::AiCursorLeft),
                 (KeyCode::Right, _) => Some(Self::AiCursorRight),
-                (KeyCode::Home, _) => Some(Self::AiCursorHome),
-                (KeyCode::End, _) => Some(Self::AiCursorEnd),
                 (KeyCode::Esc, _) => Some(Self::ClearInputState),
                 (KeyCode::PageUp, _) | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
                     Some(Self::AiScrollUp)
@@ -245,6 +243,8 @@ impl Action {
                 }
                 (KeyCode::Home, KeyModifiers::CONTROL) => Some(Self::AiScrollTop),
                 (KeyCode::End, KeyModifiers::CONTROL) => Some(Self::AiScrollBottom),
+                (KeyCode::Home, _) => Some(Self::AiCursorHome),
+                (KeyCode::End, _) => Some(Self::AiCursorEnd),
                 (KeyCode::Char(ch), _) if !ch.is_control() => Some(Self::AiSendChar(ch)),
                 _ => None,
             };
