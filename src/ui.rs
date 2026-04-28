@@ -484,6 +484,17 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }),
         input_inner,
     );
+
+    // Show a visible cursor at the insertion point.
+    if app.ai_status != AiStatus::Waiting {
+        let cursor_col: u16 = app
+            .ai_input
+            .chars()
+            .take(app.ai_input_cursor)
+            .map(|c| c.width().unwrap_or(0) as u16)
+            .sum();
+        frame.set_cursor_position((input_inner.x + cursor_col, input_inner.y));
+    }
 }
 
 /// Renders the footer bar for the AI tab.

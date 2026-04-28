@@ -257,6 +257,7 @@ pub struct App {
     // ── AI tab state ───────────────────────────────────────────────
     pub ai_messages: Vec<AiChatMessage>,
     pub ai_input: String,
+    pub ai_input_cursor: usize,
     pub ai_status: AiStatus,
     pub ai_partial_response: String,
     /// Scroll offset from the bottom of the chat (0 = showing latest).
@@ -272,6 +273,14 @@ pub struct App {
     pub status_message: Option<String>,
     /// When the status message should be cleared (3-second lifespan).
     status_message_deadline: Option<Instant>,
+}
+
+/// Convert a character index to the corresponding byte offset in a UTF-8 string.
+fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len())
 }
 
 impl App {
@@ -386,6 +395,7 @@ impl App {
             ai_messages: Vec::new(),
             ai_scroll_offset: 0,
             ai_input: String::new(),
+            ai_input_cursor: 0,
             ai_status: AiStatus::Idle,
             ai_partial_response: String::new(),
             ai_llm_handle: None,
@@ -451,6 +461,7 @@ impl App {
             ai_messages: Vec::new(),
             ai_scroll_offset: 0,
             ai_input: String::new(),
+            ai_input_cursor: 0,
             ai_status: AiStatus::Idle,
             ai_partial_response: String::new(),
             ai_llm_handle: None,
@@ -533,6 +544,7 @@ impl App {
             ai_messages: Vec::new(),
             ai_scroll_offset: 0,
             ai_input: String::new(),
+            ai_input_cursor: 0,
             ai_status: AiStatus::Idle,
             ai_partial_response: String::new(),
             ai_llm_handle: None,
@@ -2369,7 +2381,9 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::AiSendChar(ch) => {
-                self.ai_input.push(ch);
+                let byte_idx = char_to_byte_idx(&self.ai_input, self.ai_input_cursor);
+                self.ai_input.insert(byte_idx, ch);
+                self.ai_input_cursor += 1;
                 self.quit_pending_confirm = false;
             }
             Action::AiSendMessage => {
@@ -2378,6 +2392,7 @@ impl App {
                 }
                 self.ai_scroll_offset = 0;
                 let user_msg = std::mem::take(&mut self.ai_input);
+                self.ai_input_cursor = 0;
                 self.ai_messages.push(AiChatMessage {
                     role: AiRole::User,
                     content: user_msg.clone(),
@@ -2429,7 +2444,35 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::AiBackspace => {
-                self.ai_input.pop();
+                if self.ai_input_cursor > 0 {
+                    let byte_idx = char_to_byte_idx(&self.ai_input, self.ai_input_cursor - 1);
+                    self.ai_input.remove(byte_idx);
+                    self.ai_input_cursor -= 1;
+                }
+                self.quit_pending_confirm = false;
+            }
+            Action::AiDelete => {
+                if self.ai_input_cursor < self.ai_input.chars().count() {
+                    let byte_idx = char_to_byte_idx(&self.ai_input, self.ai_input_cursor);
+                    self.ai_input.remove(byte_idx);
+                }
+                self.quit_pending_confirm = false;
+            }
+            Action::AiCursorLeft => {
+                self.ai_input_cursor = self.ai_input_cursor.saturating_sub(1);
+                self.quit_pending_confirm = false;
+            }
+            Action::AiCursorRight => {
+                let max = self.ai_input.chars().count();
+                self.ai_input_cursor = (self.ai_input_cursor + 1).min(max);
+                self.quit_pending_confirm = false;
+            }
+            Action::AiCursorHome => {
+                self.ai_input_cursor = 0;
+                self.quit_pending_confirm = false;
+            }
+            Action::AiCursorEnd => {
+                self.ai_input_cursor = self.ai_input.chars().count();
                 self.quit_pending_confirm = false;
             }
             Action::AiScrollUp => {
@@ -2461,6 +2504,7 @@ impl App {
                     self.status = "AI preview panel closed".to_string();
                 } else if self.active_tab == MainTab::Ai {
                     self.ai_input.clear();
+                    self.ai_input_cursor = 0;
                     self.ai_partial_response.clear();
                     self.ai_status = AiStatus::Idle;
                     self.status = "Input cleared".to_string();
@@ -2507,7 +2551,8 @@ impl App {
 
     fn quit(&mut self) {
         if self.dirty && !self.quit_pending_confirm {
-            self.status = "Unsaved changes. Press q again to quit.".to_string();
+            self.status = "Unsaved changes. Press q or Ctrl+C again to quit."
+                .to_string();
             self.quit_pending_confirm = true;
             return;
         }
@@ -3683,6 +3728,7 @@ mod tests {
             ai_messages: Vec::new(),
             ai_scroll_offset: 0,
             ai_input: String::new(),
+            ai_input_cursor: 0,
             ai_status: AiStatus::Idle,
             ai_partial_response: String::new(),
             ai_llm_handle: None,
@@ -3796,6 +3842,7 @@ Feature: B
             ai_messages: Vec::new(),
             ai_scroll_offset: 0,
             ai_input: String::new(),
+            ai_input_cursor: 0,
             ai_status: AiStatus::Idle,
             ai_partial_response: String::new(),
             ai_llm_handle: None,

@@ -88,6 +88,11 @@ pub enum Action {
     AiScrollTop,
     /// Jump to bottom of chat history (End).
     AiScrollBottom,
+    AiDelete,
+    AiCursorLeft,
+    AiCursorRight,
+    AiCursorHome,
+    AiCursorEnd,
     /// Send the selected MindMap node context as a user message to the AI.
     MindMapSendToAi,
     /// Toggle the AI preview panel visibility (global `Ctrl+\`).
@@ -119,6 +124,11 @@ impl Action {
                 ('y', KeyCode::Char('y'), KeyModifiers::NONE) => return Some(Self::CopyStep),
                 _ => {}
             }
+        }
+
+        // Ctrl+C always maps to Quit, regardless of mode.
+        if event.code == KeyCode::Char('c') && event.modifiers == KeyModifiers::CONTROL {
+            return Some(Self::Quit);
         }
 
         if context.external_change_prompt_active {
@@ -221,6 +231,11 @@ impl Action {
             return match (event.code, event.modifiers) {
                 (KeyCode::Enter, _) => Some(Self::AiSendMessage),
                 (KeyCode::Backspace, _) => Some(Self::AiBackspace),
+                (KeyCode::Delete, _) => Some(Self::AiDelete),
+                (KeyCode::Left, _) => Some(Self::AiCursorLeft),
+                (KeyCode::Right, _) => Some(Self::AiCursorRight),
+                (KeyCode::Home, _) => Some(Self::AiCursorHome),
+                (KeyCode::End, _) => Some(Self::AiCursorEnd),
                 (KeyCode::Esc, _) => Some(Self::ClearInputState),
                 (KeyCode::PageUp, _) | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
                     Some(Self::AiScrollUp)
@@ -228,8 +243,8 @@ impl Action {
                 (KeyCode::PageDown, _) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
                     Some(Self::AiScrollDown)
                 }
-                (KeyCode::Home, _) => Some(Self::AiScrollTop),
-                (KeyCode::End, _) => Some(Self::AiScrollBottom),
+                (KeyCode::Home, KeyModifiers::CONTROL) => Some(Self::AiScrollTop),
+                (KeyCode::End, KeyModifiers::CONTROL) => Some(Self::AiScrollBottom),
                 (KeyCode::Char(ch), _) if !ch.is_control() => Some(Self::AiSendChar(ch)),
                 _ => None,
             };
