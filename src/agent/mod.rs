@@ -4,143 +4,13 @@
 //! state and modify editor content. Read-only tools return results immediately;
 //! file-modifying tools (e.g. `insert_scenario`) queue changes for user confirmation.
 
+mod tools;
+
+pub use tools::get_tools;
+
 use anyhow::{Context, Result};
 
-use crate::app::AgentPendingChange;
-use crate::llm::ToolDefinition;
-
-/// Returns the full list of available tool definitions for the LLM.
-pub fn get_tools() -> Vec<ToolDefinition> {
-    vec![
-        ToolDefinition {
-            name: "get_project_info".into(),
-            description: "Get basic information about the current project, including \
-                          the project directory path, number of feature files, \
-                          and counts of scenarios and steps."
-                .into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }),
-        },
-        ToolDefinition {
-            name: "highlight_mindmap_nodes".into(),
-            description: "Highlight MindMap tree nodes whose step text matches a \
-                          condition. Use this to visually mark nodes for the user. \
-                          Multiple calls stack; new rules replace previous ones."
-                .into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "match_condition": {
-                        "type": "object",
-                        "description": "Condition for matching nodes",
-                        "properties": {
-                            "type": {
-                                "type": "string",
-                                "enum": ["step_contains"],
-                                "description": "Match type: 'step_contains' matches nodes whose label contains the given text (case-insensitive)"
-                            },
-                            "text": {
-                                "type": "string",
-                                "description": "Substring to match in node labels"
-                            }
-                        },
-                        "required": ["type", "text"]
-                    },
-                    "color": {
-                        "type": "string",
-                        "enum": ["red", "green", "yellow", "blue", "magenta", "cyan", "white"],
-                        "description": "Color to highlight matching nodes"
-                    }
-                },
-                "required": ["match_condition", "color"]
-            }),
-        },
-        ToolDefinition {
-            name: "apply_mindmap_filter".into(),
-            description: "Filter the MindMap tree to show only nodes whose label \
-                          contains a substring (plus their ancestors to preserve \
-                          tree structure). Use 'clear' as filter_type to remove \
-                          the active filter."
-                .into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "filter_type": {
-                        "type": "string",
-                        "enum": ["name_contains", "clear"],
-                        "description": "Filter type: 'name_contains' for substring match, 'clear' to remove the filter"
-                    },
-                    "value": {
-                        "type": "string",
-                        "description": "Substring to match (ignored when filter_type is 'clear')"
-                    }
-                },
-                "required": ["filter_type"]
-            }),
-        },
-        ToolDefinition {
-            name: "get_feature_content".into(),
-            description: "Return the full parsed content of a specific .feature file: \
-                          feature name, description, background steps, all scenarios \
-                          with their steps and line numbers. Use this before inserting \
-                          or editing scenarios to understand the current file structure."
-                .into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Path to the target .feature file (e.g. 'features/login.feature')"
-                    }
-                },
-                "required": ["file_path"]
-            }),
-        },
-        ToolDefinition {
-            name: "insert_scenario".into(),
-            description: "Insert a new Scenario (or Scenario Outline) into a \
-                          specified feature file. The change is staged in the \
-                          editor buffer and requires user confirmation before \
-                          being applied."
-                .into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Path to the target .feature file (e.g. 'features/login.feature')"
-                    },
-                    "scenario_name": {
-                        "type": "string",
-                        "description": "The name/title of the Scenario (e.g. 'Account locked after 3 failed attempts')"
-                    },
-                    "steps": {
-                        "type": "array",
-                        "description": "Ordered step lines (e.g. ['Given a registered user', 'When I enter an incorrect password 3 times', 'Then my account should be temporarily locked'])",
-                        "items": {
-                            "type": "string"
-                        }
-                    },
-                    "insert_after_line": {
-                        "type": "integer",
-                        "description": "1-based line number after which to insert the scenario (omit to append at end of file)"
-                    },
-                    "tags": {
-                        "type": "array",
-                        "description": "Optional tags for the scenario (e.g. ['@smoke', '@security'])",
-                        "items": {
-                            "type": "string"
-                        }
-                    }
-                },
-                "required": ["file_path", "scenario_name", "steps"]
-            }),
-        },
-    ]
-}
+use crate::app::{AgentMutation, AgentPendingChange};
 
 /// Execute a named tool with the given JSON arguments and return the result
 /// as plain text for the LLM.
@@ -160,6 +30,7 @@ pub fn execute_tool(
         "apply_mindmap_filter" => execute_apply_mindmap_filter(app, args_json),
         "get_feature_content" => execute_get_feature_content(app, args_json),
         "insert_scenario" => execute_insert_scenario(app, args_json, tool_call_id),
+        "update_step" => execute_update_step(app, args_json, tool_call_id),
         _ => anyhow::bail!("unknown tool: {name}"),
     }
 }
@@ -437,8 +308,10 @@ fn execute_insert_scenario(
         tool_name: "insert_scenario".into(),
         description: format!("insert scenario \"{scenario_name}\" in {file_path}"),
         file_path: file_path.to_string(),
-        insertion_line_1based: line,
-        text_to_insert: text_block.clone(),
+        mutation: AgentMutation::InsertAfterLine {
+            after_line_1based: line,
+            text: text_block.clone(),
+        },
         scenario_name: scenario_name.to_string(),
         tool_call_id: tool_call_id.to_string(),
     };
@@ -447,5 +320,92 @@ fn execute_insert_scenario(
 
     Ok(format!(
         "Scenario \"{scenario_name}\" queued for insertion in {file_path} at line {line}. Awaiting user confirmation."
+    ))
+}
+
+fn execute_update_step(
+    app: &mut crate::app::App,
+    args_json: &str,
+    tool_call_id: &str,
+) -> Result<String> {
+    let args: serde_json::Value =
+        serde_json::from_str(args_json).context("invalid JSON arguments")?;
+
+    let file_path = args
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .context("missing 'file_path'")?;
+    let scenario_name = args
+        .get("scenario_name")
+        .and_then(|v| v.as_str())
+        .context("missing 'scenario_name'")?;
+    let step_index: usize = args
+        .get("step_index")
+        .and_then(|v| v.as_u64())
+        .context("missing 'step_index'")? as usize;
+    let new_text = args
+        .get("new_text")
+        .and_then(|v| v.as_str())
+        .context("missing 'new_text'")?;
+
+    // Find the feature file
+    let feature_idx = app
+        .find_feature_idx_for_file(file_path)
+        .with_context(|| format!("feature file not found: {file_path}"))?;
+
+    // Find the scenario by name in the parsed AST
+    let scenario = app.project.features[feature_idx]
+        .scenarios
+        .iter()
+        .find(|s| s.name == scenario_name)
+        .with_context(|| format!("scenario \"{scenario_name}\" not found in {file_path}"))?;
+
+    // Verify step index is in bounds
+    if step_index >= scenario.steps.len() {
+        let count = scenario.steps.len();
+        anyhow::bail!(
+            "step_index {step_index} is out of bounds. Scenario \"{scenario_name}\" has {count} step(s) (valid indices: 0..{})",
+            if count == 0 { 0 } else { count - 1 }
+        );
+    }
+
+    let step = &scenario.steps[step_index];
+    let row_0based = step.line_number.saturating_sub(1);
+
+    // Read the current line from the buffer
+    let old_line = app.buffers[feature_idx].line(row_0based);
+
+    // Reconstruct the line: preserve indentation and keyword, replace the body text
+    let trimmed = old_line.trim_start();
+    let leading_len = old_line.len().saturating_sub(trimmed.len());
+    let leading_ws = &old_line[..leading_len];
+    let new_line = format!("{leading_ws}{} {}", step.keyword, new_text);
+
+    let short_desc = if scenario_name.len() > 30 {
+        format!("{}...", &scenario_name[..27])
+    } else {
+        scenario_name.to_string()
+    };
+
+    let change = AgentPendingChange {
+        tool_name: "update_step".into(),
+        description: format!(
+            "update step {} in scenario \"{short_desc}\" in {file_path}",
+            step_index
+        ),
+        file_path: file_path.to_string(),
+        mutation: AgentMutation::ReplaceLine {
+            row_0based,
+            new_text: new_line,
+        },
+        scenario_name: scenario_name.to_string(),
+        tool_call_id: tool_call_id.to_string(),
+    };
+
+    app.queue_agent_change(change);
+
+    Ok(format!(
+        "Step {step_index} in scenario \"{scenario_name}\" queued for update. New text will be: \"{}\"",
+        new_text
     ))
 }

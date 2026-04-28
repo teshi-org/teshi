@@ -158,6 +158,18 @@ struct ExternalChangePrompt {
     disk_stamp: Option<FileStamp>,
 }
 
+/// A concrete buffer mutation to apply when the user accepts the change.
+#[derive(Debug, Clone)]
+pub enum AgentMutation {
+    /// Insert text after a given 1-based line number.
+    InsertAfterLine {
+        after_line_1based: usize,
+        text: String,
+    },
+    /// Replace the contents of a single line (0-based row in the buffer).
+    ReplaceLine { row_0based: usize, new_text: String },
+}
+
 /// A pending text modification queued by an AI agent tool waiting for user approval.
 #[derive(Debug, Clone)]
 pub struct AgentPendingChange {
@@ -167,10 +179,8 @@ pub struct AgentPendingChange {
     pub description: String,
     /// Target file path (matches `BddFeature::file_path`).
     pub file_path: String,
-    /// 1-based line number *after which* the text should be inserted.
-    pub insertion_line_1based: usize,
-    /// The full text to insert (including trailing newline).
-    pub text_to_insert: String,
+    /// The buffer mutation to apply on acceptance.
+    pub mutation: AgentMutation,
     /// Short scenario name for status messages.
     pub scenario_name: String,
     /// The tool call ID this change responds to (for feeding back to the LLM).
@@ -1075,41 +1085,61 @@ impl App {
     /// Returns `(tool_call_id, result_text)` for feeding back to the LLM.
     pub fn accept_agent_change(&mut self) -> Result<(String, String)> {
         let change = self.pending_agent_changes.remove(0);
-        self.insert_text_into_buffer(
-            &change.file_path,
-            change.insertion_line_1based,
-            &change.text_to_insert,
-        )?;
+        let feature_idx = self
+            .find_feature_idx_for_file(&change.file_path)
+            .context("feature file not found")?;
+
+        let (cursor_row, result) = match &change.mutation {
+            AgentMutation::InsertAfterLine {
+                after_line_1based,
+                text,
+            } => {
+                self.insert_text_into_buffer(&change.file_path, *after_line_1based, text)?;
+                let new_row = *after_line_1based; // 0-based after insert_line
+                let result = format!(
+                    "Successfully inserted scenario \"{}\" into {} at line {}.",
+                    change.scenario_name,
+                    change.file_path,
+                    after_line_1based + 1
+                );
+                (new_row, result)
+            }
+            AgentMutation::ReplaceLine {
+                row_0based,
+                new_text,
+            } => {
+                self.buffers[feature_idx].replace_line(*row_0based, new_text);
+                self.set_buffer_dirty(feature_idx, true);
+                if self.active_buffer_idx == Some(feature_idx) {
+                    self.buffer = self.buffers[feature_idx].clone();
+                }
+                let result = format!(
+                    "Successfully updated step \"{}\" in {} at line {}.",
+                    change.scenario_name,
+                    change.file_path,
+                    row_0based + 1
+                );
+                (*row_0based, result)
+            }
+        };
 
         // Re-parse the project to update Gherkin AST and MindMap
         self.refresh_project_from_buffers();
 
-        // Move cursor to the newly inserted scenario area
-        if let Some(idx) = self.find_feature_idx_for_file(&change.file_path) {
-            if self.active_buffer_idx != Some(idx) {
-                // Switch to the modified buffer
-                self.switch_to_buffer(idx);
-            }
+        // Switch to the modified buffer and move cursor to the change area
+        if self.active_buffer_idx != Some(feature_idx) {
+            self.switch_to_buffer(feature_idx);
         }
-        // Position cursor at the start of the inserted text (first line after
-        // insertion point)
-        let new_cursor_row = change.insertion_line_1based;
-        self.cursor_row = new_cursor_row.min(self.buffer.line_count().saturating_sub(1));
+        self.cursor_row = cursor_row.min(self.buffer.line_count().saturating_sub(1));
         self.cursor_col = 0;
         self.desired_col = 0;
         self.scroll_row = self.cursor_row.saturating_sub(4).max(0);
 
         self.set_status_message(format!(
-            "AI inserted scenario \"{}\" in {}",
+            "AI applied change \"{}\" in {}",
             change.scenario_name, change.file_path
         ));
 
-        let file_name = change.file_path.clone();
-        let scenario_name = change.scenario_name.clone();
-        let result = format!(
-            "Successfully inserted scenario \"{scenario_name}\" into {file_name} at line {}.",
-            change.insertion_line_1based + 1
-        );
         Ok((change.tool_call_id, result))
     }
 
