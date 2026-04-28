@@ -235,6 +235,10 @@ pub struct App {
     /// Bounds the agent loop to prevent infinite tool-call cycles.
     agent_loop_count: u32,
     quit_pending_confirm: bool,
+    /// Temporary one-shot status message (e.g. "AI applied filter: @smoke").
+    pub status_message: Option<String>,
+    /// When the status message should be cleared (3-second lifespan).
+    status_message_deadline: Option<Instant>,
 }
 
 impl App {
@@ -354,6 +358,8 @@ impl App {
             ai_tool_status: None,
             agent_loop_count: 0,
             quit_pending_confirm: false,
+            status_message: None,
+            status_message_deadline: None,
         };
         app.spawn_llm_if_configured();
         let n = app.buffers.len();
@@ -444,6 +450,8 @@ impl App {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
             quit_pending_confirm: false,
+            status_message: None,
+            status_message_deadline: None,
         };
         app.spawn_llm_if_configured();
         app.sync_cursor_to_first_node();
@@ -522,6 +530,8 @@ impl App {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
             quit_pending_confirm: false,
+            status_message: None,
+            status_message_deadline: None,
         };
         app.spawn_llm_if_configured();
         app.sync_cursor_to_first_node();
@@ -855,6 +865,52 @@ impl App {
             self.quit_pending_confirm = false;
             break;
         }
+    }
+
+    /// Clear the temporary status message if its 3-second lifespan has elapsed.
+    pub fn poll_status_message_expiry(&mut self) {
+        if let Some(deadline) = self.status_message_deadline
+            && Instant::now() >= deadline
+        {
+            self.status_message = None;
+            self.status_message_deadline = None;
+        }
+    }
+
+    /// Set a temporary status message that auto-clears after 3 seconds.
+    fn set_status_message(&mut self, msg: String) {
+        self.status_message = Some(msg);
+        self.status_message_deadline = Some(Instant::now() + Duration::from_secs(3));
+    }
+
+    // ── Agent MindMap modification helpers ────────────────────────────
+
+    /// Apply highlight rules to the MindMap tree (called by Agent tools).
+    pub fn apply_mindmap_highlights(&mut self, rules: Vec<mindmap::HighlightRule>) {
+        let count = rules.len();
+        self.mindmap_index.apply_highlights(rules);
+        self.set_status_message(format!("AI applied {count} highlight rule(s)"));
+    }
+
+    /// Apply a filter to the MindMap tree (called by Agent tools).
+    pub fn apply_mindmap_filter(&mut self, filter: mindmap::MindMapFilter) {
+        let desc = match &filter {
+            mindmap::MindMapFilter::NameContains(text) => format!("@\u{200B}{text}"),
+        };
+        self.mindmap_index.apply_filter(filter);
+        self.set_status_message(format!("AI applied filter: {desc}"));
+    }
+
+    /// Clear all MindMap highlights (called by Agent tools).
+    pub fn clear_mindmap_highlights(&mut self) {
+        self.mindmap_index.clear_highlights();
+        self.set_status_message("AI cleared highlights".into());
+    }
+
+    /// Clear the MindMap filter (called by Agent tools).
+    pub fn clear_mindmap_filter(&mut self) {
+        self.mindmap_index.clear_filter();
+        self.set_status_message("AI cleared filter".into());
     }
 
     fn reload_feature_from_disk(&mut self, idx: usize, stamp: Option<FileStamp>) -> Result<()> {
@@ -3352,6 +3408,8 @@ mod tests {
             ai_tool_status: None,
             agent_loop_count: 0,
             quit_pending_confirm: false,
+            status_message: None,
+            status_message_deadline: None,
         };
 
         app.handle_action(Action::ExploreRight)
@@ -3461,6 +3519,8 @@ Feature: B
             ai_tool_status: None,
             agent_loop_count: 0,
             quit_pending_confirm: false,
+            status_message: None,
+            status_message_deadline: None,
         };
 
         app.explore_selected_feature = 0;

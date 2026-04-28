@@ -97,6 +97,7 @@ fn main() -> Result<()> {
         app.poll_runner_events();
         app.poll_llm_events();
         app.poll_external_feature_changes();
+        app.poll_status_message_expiry();
         terminal.draw(|frame| ui::render(frame, &mut app))?;
 
         if event::poll(Duration::from_millis(50))?

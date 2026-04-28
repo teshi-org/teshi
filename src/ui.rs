@@ -226,7 +226,16 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     render_main_panel(frame, app, chunks[2]);
 
-    if app.active_tab == MainTab::Explore && !app.is_editor_active() {
+    // Show temporary status message if present, otherwise render footer hints
+    if let Some(ref msg) = app.status_message {
+        let status_line = Line::from(vec![Span::styled(
+            msg.as_str(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]);
+        frame.render_widget(Paragraph::new(status_line), chunks[3]);
+    } else if app.active_tab == MainTab::Explore && !app.is_editor_active() {
         render_explore_footer(frame, app, chunks[3]);
     } else if app.active_tab == MainTab::Ai {
         render_ai_footer(frame, app, chunks[3]);
@@ -944,10 +953,20 @@ fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: 
 
     let highlight_style = selected_style(true);
 
+    // Build title with indicators when highlights/filter are active
+    let mut title_parts: Vec<&str> = vec!["MindMap"];
+    if app.mindmap_index.has_active_filter() {
+        title_parts.push("[filtered]");
+    }
+    if app.mindmap_index.has_active_highlights() {
+        title_parts.push("[highlighted]");
+    }
+    let title = title_parts.join(" ");
+
     let block = if focused {
         Block::default()
             .borders(Borders::ALL)
-            .title("MindMap")
+            .title(title)
             .title_style(
                 Style::default()
                     .fg(Color::Yellow)
@@ -956,7 +975,7 @@ fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: 
     } else {
         Block::default()
             .borders(Borders::ALL)
-            .title("MindMap")
+            .title(title)
             .title_style(Style::default().fg(Color::DarkGray))
     };
 

@@ -6,6 +6,10 @@
 
 use std::collections::HashMap;
 
+use ratatui::style::{Color, Style};
+use ratatui::text::Text as TuiText;
+use tui_tree_widget::TreeItem;
+
 use crate::gherkin::BddProject;
 
 pub use tui_tree_widget::TreeState;
@@ -72,14 +76,42 @@ pub struct NodeMatch {
     pub location_index: usize,
 }
 
+/// A condition for matching MindMap nodes.
+#[derive(Debug, Clone)]
+pub enum MatchCondition {
+    /// Match nodes whose step text contains the given substring (case-insensitive).
+    StepContains(String),
+}
+
+/// A highlight rule: nodes matching `condition` are styled with `color`.
+#[derive(Debug, Clone)]
+pub struct HighlightRule {
+    pub condition: MatchCondition,
+    pub color: Color,
+}
+
+/// A filter that restricts which nodes are visible in the tree.
+#[derive(Debug, Clone)]
+pub enum MindMapFilter {
+    /// Show only nodes whose label contains the string (case-insensitive),
+    /// plus ancestors to preserve tree structure.
+    NameContains(String),
+}
+
 /// Precomputed tree items and lookup maps for MindMap behavior.
 #[derive(Debug, Clone)]
 pub struct MindMapIndex {
-    pub items: Vec<tui_tree_widget::TreeItem<'static, String>>,
+    pub items: Vec<TreeItem<'static, String>>,
     node_paths: HashMap<String, Vec<String>>,
     node_locations: HashMap<String, Vec<NodeLocation>>,
     node_labels: HashMap<String, String>,
     occurrences_by_feature: Vec<Vec<NodeOccurrence>>,
+    /// Preserved trie arena for rebuilding items with different styling.
+    arena: Vec<TrieNode>,
+    /// Active highlight rules.
+    highlights: Vec<HighlightRule>,
+    /// Active filter.
+    filter: Option<MindMapFilter>,
 }
 
 impl MindMapIndex {
@@ -104,14 +136,91 @@ impl MindMapIndex {
             .get(feature_idx)
             .map(|v| v.as_slice())
     }
+
+    // ── Highlight methods ──────────────────────────────────────────────
+
+    /// Replace active highlights with `rules` and rebuild tree items.
+    pub fn apply_highlights(&mut self, rules: Vec<HighlightRule>) {
+        self.highlights = rules;
+        self.rebuild_items_from_arena();
+    }
+
+    /// Remove all highlights and rebuild tree items.
+    pub fn clear_highlights(&mut self) {
+        self.highlights.clear();
+        self.rebuild_items_from_arena();
+    }
+
+    /// Whether any highlight rules are active.
+    pub fn has_active_highlights(&self) -> bool {
+        !self.highlights.is_empty()
+    }
+
+    // ── Filter methods ─────────────────────────────────────────────────
+
+    /// Set the active filter and rebuild tree items.
+    pub fn apply_filter(&mut self, filter: MindMapFilter) {
+        self.filter = Some(filter);
+        self.rebuild_items_from_arena();
+    }
+
+    /// Remove the active filter and rebuild tree items.
+    pub fn clear_filter(&mut self) {
+        self.filter = None;
+        self.rebuild_items_from_arena();
+    }
+
+    /// Whether a filter is currently active.
+    pub fn has_active_filter(&self) -> bool {
+        self.filter.is_some()
+    }
+
+    // ── Internal rebuild ───────────────────────────────────────────────
+
+    fn rebuild_items_from_arena(&mut self) {
+        let label_colors = Self::build_label_colors(&self.highlights, &self.node_labels);
+        let root_label = self.node_labels.get("root").cloned().unwrap_or_default();
+        let mut next_id = 0usize;
+        let mut ctx = BuildItemsCtx {
+            arena: &self.arena,
+            root_label: &root_label,
+            next_id: &mut next_id,
+            node_paths: &mut self.node_paths,
+            node_locations: &mut self.node_locations,
+            node_labels: &mut self.node_labels,
+            label_colors: &label_colors,
+            filter: &self.filter,
+        };
+        let root_item = build_items(0, &mut ctx, &[])
+            .unwrap_or_else(|| TreeItem::new_leaf("root".to_string(), "(no matching nodes)"));
+        self.items = vec![root_item];
+    }
+
+    /// Build a cached map from node label to highlight color.
+    /// First matching rule wins.
+    fn build_label_colors(
+        rules: &[HighlightRule],
+        node_labels: &HashMap<String, String>,
+    ) -> HashMap<String, Color> {
+        let mut map = HashMap::new();
+        for (id, label) in node_labels {
+            for rule in rules {
+                if evaluate_condition(&rule.condition, label) {
+                    map.insert(id.clone(), rule.color);
+                    break;
+                }
+            }
+        }
+        map
+    }
 }
 
 #[derive(Debug, Clone)]
-struct TrieNode {
-    label: String,
-    children: Vec<usize>,
-    child_by_label: HashMap<String, usize>,
-    locations: Vec<NodeLocation>,
+pub(crate) struct TrieNode {
+    pub(crate) label: String,
+    pub(crate) children: Vec<usize>,
+    pub(crate) child_by_label: HashMap<String, usize>,
+    pub(crate) locations: Vec<NodeLocation>,
 }
 
 impl TrieNode {
@@ -122,6 +231,35 @@ impl TrieNode {
             child_by_label: HashMap::new(),
             locations: Vec::new(),
         }
+    }
+}
+
+/// Evaluate whether a label matches a match condition.
+fn evaluate_condition(cond: &MatchCondition, label: &str) -> bool {
+    match cond {
+        MatchCondition::StepContains(text) => label.to_lowercase().contains(&text.to_lowercase()),
+    }
+}
+
+/// Check whether a node label matches the active filter.
+fn matches_filter(filter: &MindMapFilter, label: &str) -> bool {
+    match filter {
+        MindMapFilter::NameContains(text) => label.to_lowercase().contains(&text.to_lowercase()),
+    }
+}
+
+/// Parse a named color string into a ratatui [`Color`].
+pub fn parse_color(s: &str) -> Option<Color> {
+    match s.to_lowercase().as_str() {
+        "red" => Some(Color::Red),
+        "green" => Some(Color::Green),
+        "yellow" => Some(Color::Yellow),
+        "blue" => Some(Color::Blue),
+        "magenta" => Some(Color::Magenta),
+        "cyan" => Some(Color::Cyan),
+        "white" => Some(Color::White),
+        "black" => Some(Color::Black),
+        _ => None,
     }
 }
 
@@ -182,6 +320,10 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
     let mut node_labels: HashMap<String, String> = HashMap::new();
     let mut next_id = 0usize;
 
+    // Build the initial label-to-color map (empty during initial construction)
+    let empty_colors: HashMap<String, Color> = HashMap::new();
+    let empty_filter: Option<MindMapFilter> = None;
+
     let mut ctx = BuildItemsCtx {
         arena: &arena,
         root_label: &root_label,
@@ -189,8 +331,11 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
         node_paths: &mut node_paths,
         node_locations: &mut node_locations,
         node_labels: &mut node_labels,
+        label_colors: &empty_colors,
+        filter: &empty_filter,
     };
-    let root_item = build_items(0, &mut ctx, &[]);
+    let root_item = build_items(0, &mut ctx, &[])
+        .expect("root item must always be constructable during initial build");
 
     let mut occurrences_by_feature = vec![Vec::new(); project.features.len()];
     for (node_id, locations) in &node_locations {
@@ -211,6 +356,9 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
         node_locations,
         node_labels,
         occurrences_by_feature,
+        arena,
+        highlights: Vec::new(),
+        filter: None,
     }
 }
 
@@ -257,13 +405,17 @@ struct BuildItemsCtx<'a> {
     node_paths: &'a mut HashMap<String, Vec<String>>,
     node_locations: &'a mut HashMap<String, Vec<NodeLocation>>,
     node_labels: &'a mut HashMap<String, String>,
+    /// Cached map from node ID to highlight color.
+    label_colors: &'a HashMap<String, Color>,
+    /// Active filter, if any.
+    filter: &'a Option<MindMapFilter>,
 }
 
 fn build_items(
     node_idx: usize,
     ctx: &mut BuildItemsCtx<'_>,
     parent_path: &[String],
-) -> tui_tree_widget::TreeItem<'static, String> {
+) -> Option<TreeItem<'static, String>> {
     let id = if node_idx == 0 {
         "root".to_string()
     } else {
@@ -284,13 +436,30 @@ fn build_items(
     };
     ctx.node_labels.insert(id.clone(), label.clone());
 
-    let mut children = Vec::new();
+    let mut children: Vec<TreeItem<'static, String>> = Vec::new();
     for &child_idx in &ctx.arena[node_idx].children {
-        children.push(build_items(child_idx, ctx, &path));
+        if let Some(child_item) = build_items(child_idx, ctx, &path) {
+            children.push(child_item);
+        }
     }
 
-    // `TreeItem::new` only fails on invalid widget invariants; our tree is built consistently.
-    tui_tree_widget::TreeItem::new(id, label, children).expect("tree item construction")
+    // Filtering: skip this node if it doesn't match and has no matching descendants
+    if let Some(filter) = ctx.filter.as_ref() {
+        let self_matches = matches_filter(filter, &label);
+        let has_matching_children = !children.is_empty();
+        if !self_matches && !has_matching_children {
+            return None;
+        }
+    }
+
+    // Apply highlight styling if this node has a color
+    let label_text = if let Some(&color) = ctx.label_colors.get(&id) {
+        TuiText::styled(label, Style::default().fg(color))
+    } else {
+        TuiText::from(label)
+    };
+
+    TreeItem::new(id, label_text, children).ok()
 }
 
 /// Creates a [`TreeState`] with all nodes collapsed by default; only the root is selected.
