@@ -2561,8 +2561,7 @@ impl App {
 
     fn quit(&mut self) {
         if self.dirty && !self.quit_pending_confirm {
-            self.status = "Unsaved changes. Press q or Ctrl+C again to quit."
-                .to_string();
+            self.status = "Unsaved changes. Press q or Ctrl+C again to quit.".to_string();
             self.quit_pending_confirm = true;
             return;
         }
