@@ -13,6 +13,9 @@ Thumbs.db
 *.swp
 *.swo
 
+# WSL Claude Agent ACP wrapper (local WSL-specific config)
+.claude-agent-acp.sh
+
 # Cursor: ignore local workspace state, keep shared rules
 .cursor/*
 !.cursor/rules/

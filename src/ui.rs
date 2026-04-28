@@ -198,11 +198,13 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         Line::from(" Explore [1] "),
         Line::from(" MindMap [2] "),
         Line::from(" Help [3] "),
+        Line::from(" AI [4] "),
     ])
     .select(match app.active_tab {
         MainTab::Explore => 0,
         MainTab::MindMap => 1,
         MainTab::Help => 2,
+        MainTab::Ai => 3,
     })
     .style(Style::default().fg(Color::DarkGray))
     .highlight_style(
@@ -224,6 +226,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     if app.active_tab == MainTab::Explore && !app.is_editor_active() {
         render_explore_footer(frame, app, chunks[3]);
+    } else if app.active_tab == MainTab::Ai {
+        render_ai_footer(frame, app, chunks[3]);
     } else {
         let key_hints = footer_hints(app);
         frame.render_widget(Paragraph::new(key_hints), chunks[3]);
@@ -236,12 +240,13 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     match app.active_tab {
         MainTab::MindMap => render_mindmap_panel(frame, app, area),
         MainTab::Explore => render_explore_panel(frame, app, area),
+        MainTab::Ai => render_ai_panel(frame, app, area),
         MainTab::Help => {
             let block = Block::default().borders(Borders::ALL).title("Help");
             let inner = block.inner(area);
             frame.render_widget(block, area);
             let help = vec![
-                Line::raw("Tabs: Explore [1], MindMap [2], Help [3]"),
+                Line::raw("Tabs: Explore [1], MindMap [2], Help [3], AI [4]"),
                 Line::raw(""),
                 Line::raw("── MindMap (Tree only) ──"),
                 Line::raw("↑↓ navigate tree   Space toggle   ←→ collapse/expand"),
@@ -259,11 +264,152 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Line::raw("Space fold scenario   Ctrl+Space fold all"),
                 Line::raw("Ctrl+r run   Ctrl+s save   Ctrl+/ undo   Ctrl+y redo"),
                 Line::raw(""),
+                Line::raw("── AI Tab ──"),
+                Line::raw("Type a message and press Enter to chat with the LLM."),
+                Line::raw("Set TESHI_LLM_API_KEY in your environment to enable."),
+                Line::raw(""),
                 Line::raw("Global: s save, q quit (dirty needs confirmation)"),
             ];
             frame.render_widget(Paragraph::new(Text::from(help)), inner);
         }
     }
+}
+
+/// Renders the AI chat panel.
+fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    use crate::app::{AiRole, AiStatus};
+
+    if area.width < 10 || area.height < 3 {
+        return;
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("AI Chat");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    // Layout: chat history (top) + input bar (bottom)
+    let input_height: u16 = 3;
+    let chat_height = inner.height.saturating_sub(input_height);
+    let chat_area = Rect::new(inner.x, inner.y, inner.width, chat_height);
+    let input_area = Rect::new(inner.x, inner.y + chat_height, inner.width, input_height);
+
+    // ── Chat history ────────────────────────────────────────────────
+    let status_style = match app.ai_status {
+        AiStatus::Waiting => Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK),
+        AiStatus::Error => Style::default().fg(Color::Red),
+        AiStatus::Idle => Style::default().fg(Color::DarkGray),
+    };
+    let status_line = match app.ai_status {
+        AiStatus::Waiting => Line::raw("AI is thinking..."),
+        AiStatus::Error => {
+            let err_text = if app.status.starts_with("AI error:") {
+                app.status.clone()
+            } else {
+                "AI error — check TESHI_LLM_API_KEY and your network connection.".to_string()
+            };
+            Line::raw(err_text)
+        }
+        AiStatus::Idle => Line::raw(""),
+    };
+
+    let mut chat_lines: Vec<Line<'static>> = Vec::new();
+
+    // Add a greeting if no messages
+    if app.ai_messages.is_empty() {
+        let greeting = Line::raw("Welcome to AI Chat! Type a message below and press Enter.");
+        chat_lines.push(greeting);
+        chat_lines.push(Line::raw(""));
+        if !crate::llm::LlmConfig::is_configured() {
+            chat_lines.push(
+                Line::raw("Note: Set TESHI_LLM_API_KEY to enable AI responses.")
+                    .style(Style::default().fg(Color::Yellow)),
+            );
+        }
+    }
+
+    for msg in &app.ai_messages {
+        let prefix = match msg.role {
+            AiRole::User => "▶ You",
+            AiRole::Assistant => "✦ AI",
+        };
+        let role_color = match msg.role {
+            AiRole::User => Color::Cyan,
+            AiRole::Assistant => Color::Green,
+        };
+        chat_lines.push(
+            Line::raw(format!("{prefix}:"))
+                .style(Style::default().fg(role_color).add_modifier(Modifier::BOLD)),
+        );
+        // Wrap long messages
+        for line_text in msg.content.lines() {
+            chat_lines.push(Line::raw(format!("  {line_text}")));
+        }
+        chat_lines.push(Line::raw(""));
+    }
+
+    // Add the status line (only non-empty strings)
+    let status_text = status_line
+        .spans
+        .iter()
+        .fold(String::new(), |acc, s| acc + &s.to_string());
+    if !status_text.trim().is_empty() {
+        chat_lines.push(status_line.style(status_style));
+    }
+
+    // Scroll the chat to the bottom by slicing
+    let visible_lines: Vec<Line<'static>> = if chat_lines.len() > chat_height as usize {
+        let start = chat_lines.len() - chat_height as usize;
+        chat_lines[start..].to_vec()
+    } else {
+        chat_lines
+    };
+
+    frame.render_widget(
+        Paragraph::new(Text::from(visible_lines)).style(Style::default()),
+        chat_area,
+    );
+
+    // ── Input bar ───────────────────────────────────────────────────
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .title("Input");
+    let input_inner = input_block.inner(input_area);
+    frame.render_widget(input_block, input_area);
+
+    let input_display = if app.ai_input.is_empty() {
+        "Type your message..."
+    } else {
+        app.ai_input.as_str()
+    };
+    frame.render_widget(
+        Paragraph::new(input_display).style(match app.ai_status {
+            AiStatus::Waiting => Style::default().fg(Color::DarkGray),
+            _ => Style::default(),
+        }),
+        input_inner,
+    );
+}
+
+/// Renders the footer bar for the AI tab.
+fn render_ai_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let _ = app;
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let hints = Line::from(vec![
+        footer_pill(" Type & Enter to send "),
+        Span::raw(" "),
+        footer_pill(" Esc clear input "),
+        Span::raw(" "),
+        footer_pill(" Quit [q] "),
+    ]);
+    frame.render_widget(Paragraph::new(hints), area);
 }
 
 /// Renders the MindMap layout.
@@ -1242,6 +1388,9 @@ fn footer_hints(app: &App) -> Line<'static> {
         (MainTab::Help, _) => Line::from(vec![
             footer_pill(" Save [s] "),
             Span::raw(" "),
+            footer_pill(" Quit [q] "),
+        ]),
+        (MainTab::Ai, _) => Line::from(vec![
             footer_pill(" Quit [q] "),
         ]),
     }

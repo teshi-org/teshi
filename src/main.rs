@@ -5,6 +5,7 @@ mod gherkin;
 mod gherkin_keywords;
 mod highlight;
 mod keymap;
+mod llm;
 mod mindmap;
 mod runner;
 mod step_index;
@@ -93,6 +94,7 @@ fn main() -> Result<()> {
 
     while !app.should_quit {
         app.poll_runner_events();
+        app.poll_llm_events();
         app.poll_external_feature_changes();
         terminal.draw(|frame| ui::render(frame, &mut app))?;
 
