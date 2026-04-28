@@ -259,6 +259,8 @@ pub struct App {
     pub ai_input: String,
     pub ai_status: AiStatus,
     pub ai_partial_response: String,
+    /// Scroll offset from the bottom of the chat (0 = showing latest).
+    pub ai_scroll_offset: usize,
     pub ai_llm_handle: Option<crate::llm::LlmHandle>,
     pub ai_llm_rx: Option<std::sync::mpsc::Receiver<crate::llm::LlmEvent>>,
     /// Human-readable status text shown while the agent executes a tool.
@@ -382,6 +384,7 @@ impl App {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
             ai_messages: Vec::new(),
+            ai_scroll_offset: 0,
             ai_input: String::new(),
             ai_status: AiStatus::Idle,
             ai_partial_response: String::new(),
@@ -446,6 +449,7 @@ impl App {
             dirty: false,
             status: "Opened file".to_string(),
             ai_messages: Vec::new(),
+            ai_scroll_offset: 0,
             ai_input: String::new(),
             ai_status: AiStatus::Idle,
             ai_partial_response: String::new(),
@@ -527,6 +531,7 @@ impl App {
             dirty: false,
             status: "New buffer".to_string(),
             ai_messages: Vec::new(),
+            ai_scroll_offset: 0,
             ai_input: String::new(),
             ai_status: AiStatus::Idle,
             ai_partial_response: String::new(),
@@ -2128,6 +2133,7 @@ impl App {
                     self.active_tab = MainTab::Ai;
                     self.ai_status = AiStatus::Waiting;
                     self.ai_partial_response.clear();
+                    self.ai_scroll_offset = 0;
                     self.agent_loop_count = 0;
                     self.status = "Sending MindMap context to AI...".to_string();
 
@@ -2370,6 +2376,7 @@ impl App {
                 if self.ai_input.trim().is_empty() || self.ai_status == AiStatus::Waiting {
                     return Ok(());
                 }
+                self.ai_scroll_offset = 0;
                 let user_msg = std::mem::take(&mut self.ai_input);
                 self.ai_messages.push(AiChatMessage {
                     role: AiRole::User,
@@ -2424,6 +2431,18 @@ impl App {
             Action::AiBackspace => {
                 self.ai_input.pop();
                 self.quit_pending_confirm = false;
+            }
+            Action::AiScrollUp => {
+                self.ai_scroll_offset = self.ai_scroll_offset.saturating_add(5);
+            }
+            Action::AiScrollDown => {
+                self.ai_scroll_offset = self.ai_scroll_offset.saturating_sub(5);
+            }
+            Action::AiScrollTop => {
+                self.ai_scroll_offset = usize::MAX;
+            }
+            Action::AiScrollBottom => {
+                self.ai_scroll_offset = 0;
             }
             Action::ExternalChangeReload | Action::ExternalChangeKeepLocal => {}
             // Handled in early-return guard above; unreachable here.
@@ -3662,6 +3681,7 @@ mod tests {
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
             ai_messages: Vec::new(),
+            ai_scroll_offset: 0,
             ai_input: String::new(),
             ai_status: AiStatus::Idle,
             ai_partial_response: String::new(),
@@ -3774,6 +3794,7 @@ Feature: B
             mindmap_focus: MindMapFocus::Main,
             mindmap_ai_panel_visible: true,
             ai_messages: Vec::new(),
+            ai_scroll_offset: 0,
             ai_input: String::new(),
             ai_status: AiStatus::Idle,
             ai_partial_response: String::new(),
