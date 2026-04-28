@@ -28,6 +28,29 @@ pub enum MainTab {
     MindMap,
     Explore,
     Help,
+    Ai,
+}
+
+/// A single message in the AI chat history.
+#[derive(Debug, Clone)]
+pub struct AiChatMessage {
+    pub role: AiRole,
+    pub content: String,
+}
+
+/// Who sent the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiRole {
+    User,
+    Assistant,
+}
+
+/// Current state of the AI interaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiStatus {
+    Idle,
+    Waiting,
+    Error,
 }
 
 /// Three-stage layout state machine for the MindMap tab.
@@ -178,6 +201,12 @@ pub struct App {
     pub explore_detail_open: bool,
     pub explore_detail_case: Option<(usize, usize)>,
     pub explore_run_summary: Option<RunSummary>,
+    // ── AI tab state ───────────────────────────────────────────────
+    pub ai_messages: Vec<AiChatMessage>,
+    pub ai_input: String,
+    pub ai_status: AiStatus,
+    pub ai_llm_handle: Option<crate::llm::LlmHandle>,
+    pub ai_llm_rx: Option<std::sync::mpsc::Receiver<crate::llm::LlmEvent>>,
     quit_pending_confirm: bool,
 }
 
@@ -287,8 +316,14 @@ impl App {
             explore_detail_open: false,
             explore_detail_case: None,
             explore_run_summary: None,
+            ai_messages: Vec::new(),
+            ai_input: String::new(),
+            ai_status: AiStatus::Idle,
+            ai_llm_handle: None,
+            ai_llm_rx: None,
             quit_pending_confirm: false,
         };
+        app.spawn_llm_if_configured();
         let n = app.buffers.len();
         app.status = format!("Opened directory with {n} feature file(s)");
         app.sync_cursor_to_first_node();
@@ -340,6 +375,11 @@ impl App {
             active_tab: MainTab::Explore,
             dirty: false,
             status: "Opened file".to_string(),
+            ai_messages: Vec::new(),
+            ai_input: String::new(),
+            ai_status: AiStatus::Idle,
+            ai_llm_handle: None,
+            ai_llm_rx: None,
             step_input_active: false,
             step_input_row: 0,
             step_input_min_col: 0,
@@ -368,6 +408,7 @@ impl App {
             explore_run_summary: None,
             quit_pending_confirm: false,
         };
+        app.spawn_llm_if_configured();
         app.sync_cursor_to_first_node();
         app.normalize_explore_selection();
         Ok(app)
@@ -407,6 +448,11 @@ impl App {
             active_tab: MainTab::Explore,
             dirty: false,
             status: "New buffer".to_string(),
+            ai_messages: Vec::new(),
+            ai_input: String::new(),
+            ai_status: AiStatus::Idle,
+            ai_llm_handle: None,
+            ai_llm_rx: None,
             step_input_active: false,
             step_input_row: 0,
             step_input_min_col: 0,
@@ -435,6 +481,7 @@ impl App {
             explore_run_summary: None,
             quit_pending_confirm: false,
         };
+        app.spawn_llm_if_configured();
         app.sync_cursor_to_first_node();
         app.normalize_explore_selection();
         app
@@ -551,6 +598,68 @@ impl App {
         }
         if keep_rx {
             self.runner_rx = Some(rx);
+        }
+    }
+
+    /// Spawn the LLM worker thread if `TESHI_LLM_API_KEY` is set and no handle exists yet.
+    pub fn spawn_llm_if_configured(&mut self) {
+        if self.ai_llm_handle.is_some() {
+            return;
+        }
+        match crate::llm::LlmConfig::from_env() {
+            Ok(config) => {
+                self.status = format!(
+                    "LLM configured: model={}, base_url={}",
+                    config.model, config.base_url
+                );
+                let (handle, rx) = crate::llm::spawn_llm(config);
+                self.ai_llm_handle = Some(handle);
+                self.ai_llm_rx = Some(rx);
+            }
+            Err(e) => {
+                self.status = format!("LLM not configured: {e}");
+            }
+        }
+    }
+
+    /// Poll the LLM response channel and push any completed responses into the chat history.
+    pub fn poll_llm_events(&mut self) {
+        let Some(rx) = self.ai_llm_rx.take() else {
+            return;
+        };
+        let mut keep_rx = true;
+        loop {
+            match rx.try_recv() {
+                Ok(crate::llm::LlmEvent::Done {
+                    full_text,
+                    model,
+                    ..
+                }) => {
+                    self.ai_messages.push(AiChatMessage {
+                        role: AiRole::Assistant,
+                        content: full_text,
+                    });
+                    self.ai_status = AiStatus::Idle;
+                    self.status = format!("AI response received ({model})");
+                }
+                Ok(crate::llm::LlmEvent::Error { message }) => {
+                    self.ai_status = AiStatus::Error;
+                    self.status = format!("AI error: {message}");
+                }
+                Ok(crate::llm::LlmEvent::Chunk { .. }) => {
+                    // Chunks are collected during streaming; we only emit Done.
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    keep_rx = false;
+                    self.ai_status = AiStatus::Error;
+                    self.status = "AI error: background LLM thread has exited".to_string();
+                    break;
+                }
+            }
+        }
+        if keep_rx {
+            self.ai_llm_rx = Some(rx);
         }
     }
 
@@ -1707,19 +1816,78 @@ impl App {
                 self.status = "Step keyword selection canceled".to_string();
                 self.quit_pending_confirm = false;
             }
+            Action::AiSendChar(ch) => {
+                self.ai_input.push(ch);
+                self.quit_pending_confirm = false;
+            }
+            Action::AiSendMessage => {
+                if self.ai_input.trim().is_empty()
+                    || self.ai_status == AiStatus::Waiting
+                {
+                    return Ok(());
+                }
+                let user_msg = std::mem::take(&mut self.ai_input);
+                self.ai_messages.push(AiChatMessage {
+                    role: AiRole::User,
+                    content: user_msg.clone(),
+                });
+                self.ai_status = AiStatus::Waiting;
+                self.status = "Sending message to AI...".to_string();
+
+                // If the LLM is not configured, add a mock response
+                if !crate::llm::LlmConfig::is_configured() {
+                    self.ai_messages.push(AiChatMessage {
+                        role: AiRole::Assistant,
+                        content: "AI is not configured. Set TESHI_LLM_API_KEY in your environment to enable AI responses.".to_string(),
+                    });
+                    self.ai_status = AiStatus::Idle;
+                    self.status = "AI not configured".to_string();
+                } else if let Some(ref handle) = self.ai_llm_handle {
+                    use crate::llm::LlmRequest;
+                    if handle
+                        .send(LlmRequest::Chat {
+                            system: Some(
+                                "You are a helpful assistant specialized in BDD, Gherkin, and software testing."
+                                    .into(),
+                            ),
+                            messages: vec![user_msg],
+                        })
+                        .is_err()
+                    {
+                        self.ai_status = AiStatus::Error;
+                        self.status =
+                            "AI error: background LLM thread has exited".to_string();
+                    }
+                } else {
+                    // LLM is configured but the handle is None — shouldn't happen normally.
+                    self.ai_status = AiStatus::Error;
+                    self.status = "AI error: LLM handle not available".to_string();
+                }
+                self.quit_pending_confirm = false;
+            }
+            Action::AiBackspace => {
+                self.ai_input.pop();
+                self.quit_pending_confirm = false;
+            }
             Action::ExternalChangeReload | Action::ExternalChangeKeepLocal => {}
             Action::ClearInputState => {
-                if self.step_input_active || self.step_keyword_picker.is_some() {
-                    self.clear_step_input_state();
-                    self.clear_step_keyword_picker();
-                    self.status = "Input state cleared".to_string();
-                } else if self.explore_detail_open {
-                    self.explore_detail_open = false;
-                    self.explore_detail_case = None;
-                } else if self.active_tab == MainTab::Explore && self.explore_edit_mode {
-                    self.explore_exit_edit();
-                } else if self.view_stage != ViewStage::TreeOnly {
-                    self.stage_back();
+                if self.active_tab == MainTab::Ai {
+                    self.ai_input.clear();
+                    self.ai_status = AiStatus::Idle;
+                    self.status = "Input cleared".to_string();
+                } else {
+                    if self.step_input_active || self.step_keyword_picker.is_some() {
+                        self.clear_step_input_state();
+                        self.clear_step_keyword_picker();
+                        self.status = "Input state cleared".to_string();
+                    } else if self.explore_detail_open {
+                        self.explore_detail_open = false;
+                        self.explore_detail_case = None;
+                    } else if self.active_tab == MainTab::Explore && self.explore_edit_mode {
+                        self.explore_exit_edit();
+                    } else if self.view_stage != ViewStage::TreeOnly {
+                        self.stage_back();
+                    }
                 }
                 self.quit_pending_confirm = false;
             }
@@ -1792,6 +1960,7 @@ impl App {
             MainTab::MindMap => "Switched to MindMap tab",
             MainTab::Explore => "Switched to Explore tab",
             MainTab::Help => "Switched to Help tab",
+            MainTab::Ai => "Switched to AI tab",
         }
         .to_string();
     }
@@ -2472,8 +2641,8 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
-        App, BddFocusSlot, ColumnFocus, MainTab, ViewStage, current_step_keyword_index,
-        replace_step_keyword_line,
+        App, AiStatus, BddFocusSlot, ColumnFocus, MainTab, ViewStage,
+        current_step_keyword_index, replace_step_keyword_line,
     };
     use crate::bdd_nav::step_edit_start_col;
     use crate::editor_buffer::EditorBuffer;
@@ -2918,6 +3087,11 @@ mod tests {
             explore_detail_open: false,
             explore_detail_case: None,
             explore_run_summary: None,
+            ai_messages: Vec::new(),
+            ai_input: String::new(),
+            ai_status: AiStatus::Idle,
+            ai_llm_handle: None,
+            ai_llm_rx: None,
             quit_pending_confirm: false,
         };
 
@@ -3017,6 +3191,11 @@ Feature: B
             explore_detail_open: false,
             explore_detail_case: None,
             explore_run_summary: None,
+            ai_messages: Vec::new(),
+            ai_input: String::new(),
+            ai_status: AiStatus::Idle,
+            ai_llm_handle: None,
+            ai_llm_rx: None,
             quit_pending_confirm: false,
         };
 
