@@ -8,6 +8,7 @@ pub struct KeyContext {
     pub step_keyword_picker_active: bool,
     pub step_input_active: bool,
     pub external_change_prompt_active: bool,
+    pub agent_change_prompt_active: bool,
     pub active_tab: MainTab,
     pub view_stage: ViewStage,
     pub explore_edit_mode: bool,
@@ -71,6 +72,10 @@ pub enum Action {
     StepKeywordPickerCancel,
     ExternalChangeReload,
     ExternalChangeKeepLocal,
+    /// Accept a pending agent-originated text change.
+    AgentChangeAccept,
+    /// Reject a pending agent-originated text change.
+    AgentChangeReject,
     // AI tab input
     AiSendChar(char),
     AiSendMessage,
@@ -116,6 +121,18 @@ impl Action {
                 (KeyCode::Esc, _)
                 | (KeyCode::Char('k'), KeyModifiers::NONE)
                 | (KeyCode::Char('K'), KeyModifiers::SHIFT) => Some(Self::ExternalChangeKeepLocal),
+                _ => None,
+            };
+        }
+
+        // Agent change confirmation prompt intercepts Y / N
+        if context.agent_change_prompt_active {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Char('y'), KeyModifiers::NONE)
+                | (KeyCode::Char('Y'), KeyModifiers::SHIFT) => Some(Self::AgentChangeAccept),
+                (KeyCode::Char('n'), KeyModifiers::NONE)
+                | (KeyCode::Char('N'), KeyModifiers::SHIFT)
+                | (KeyCode::Esc, _) => Some(Self::AgentChangeReject),
                 _ => None,
             };
         }
@@ -347,6 +364,7 @@ mod tests {
             step_keyword_picker_active: false,
             step_input_active: false,
             external_change_prompt_active: false,
+            agent_change_prompt_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::TreeOnly,
             explore_edit_mode: false,
@@ -367,6 +385,7 @@ mod tests {
             step_keyword_picker_active: false,
             step_input_active: true,
             external_change_prompt_active: false,
+            agent_change_prompt_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
@@ -387,6 +406,7 @@ mod tests {
             step_keyword_picker_active: false,
             step_input_active: false,
             external_change_prompt_active: false,
+            agent_change_prompt_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::TreeOnly,
             explore_edit_mode: false,
@@ -417,6 +437,7 @@ mod tests {
             step_keyword_picker_active: false,
             step_input_active: false,
             external_change_prompt_active: false,
+            agent_change_prompt_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
@@ -447,6 +468,7 @@ mod tests {
             step_keyword_picker_active: false,
             step_input_active: false,
             external_change_prompt_active: false,
+            agent_change_prompt_active: false,
             active_tab: MainTab::Explore,
             view_stage: ViewStage::TreeOnly,
             explore_edit_mode: false,
@@ -485,6 +507,7 @@ mod tests {
             step_keyword_picker_active: false,
             step_input_active: true,
             external_change_prompt_active: false,
+            agent_change_prompt_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
@@ -505,6 +528,7 @@ mod tests {
             step_keyword_picker_active: false,
             step_input_active: true,
             external_change_prompt_active: false,
+            agent_change_prompt_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
@@ -525,6 +549,7 @@ mod tests {
             step_keyword_picker_active: false,
             step_input_active: false,
             external_change_prompt_active: false,
+            agent_change_prompt_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
@@ -569,6 +594,7 @@ mod tests {
             step_keyword_picker_active: false,
             step_input_active: false,
             external_change_prompt_active: false,
+            agent_change_prompt_active: false,
             active_tab: MainTab::MindMap,
             view_stage: ViewStage::EditorAndPanel,
             explore_edit_mode: false,
@@ -604,6 +630,7 @@ mod tests {
             step_keyword_picker_active: false,
             step_input_active: false,
             external_change_prompt_active: true,
+            agent_change_prompt_active: false,
             active_tab: MainTab::Explore,
             view_stage: ViewStage::TreeOnly,
             explore_edit_mode: false,

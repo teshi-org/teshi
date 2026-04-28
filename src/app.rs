@@ -158,6 +158,25 @@ struct ExternalChangePrompt {
     disk_stamp: Option<FileStamp>,
 }
 
+/// A pending text modification queued by an AI agent tool waiting for user approval.
+#[derive(Debug, Clone)]
+pub struct AgentPendingChange {
+    /// The tool name that initiated this change (e.g. `"insert_scenario"`).
+    pub tool_name: String,
+    /// Human-readable description for the confirmation prompt.
+    pub description: String,
+    /// Target file path (matches `BddFeature::file_path`).
+    pub file_path: String,
+    /// 1-based line number *after which* the text should be inserted.
+    pub insertion_line_1based: usize,
+    /// The full text to insert (including trailing newline).
+    pub text_to_insert: String,
+    /// Short scenario name for status messages.
+    pub scenario_name: String,
+    /// The tool call ID this change responds to (for feeding back to the LLM).
+    pub tool_call_id: String,
+}
+
 pub struct App {
     // ── Multi-file project ──────────────────────────────────────────
     pub project: BddProject,
@@ -206,6 +225,8 @@ pub struct App {
     runner_rx: Option<Receiver<RunEvent>>,
     last_external_check: Instant,
     external_change_prompt: Option<ExternalChangePrompt>,
+    /// Pending text modifications requested by AI agent tools, awaiting user confirmation.
+    pending_agent_changes: Vec<AgentPendingChange>,
     // ── Explore tab state ───────────────────────────────────────────
     pub explore_focus: ColumnFocus,
     pub explore_selected_feature: usize,
@@ -334,6 +355,7 @@ impl App {
             runner_rx: None,
             last_external_check: Instant::now(),
             external_change_prompt: None,
+            pending_agent_changes: Vec::new(),
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
             explore_selected_scenario: 0,
@@ -434,6 +456,7 @@ impl App {
             runner_rx: None,
             last_external_check: Instant::now(),
             external_change_prompt: None,
+            pending_agent_changes: Vec::new(),
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
             explore_selected_scenario: 0,
@@ -514,6 +537,7 @@ impl App {
             runner_rx: None,
             last_external_check: Instant::now(),
             external_change_prompt: None,
+            pending_agent_changes: Vec::new(),
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
             explore_selected_scenario: 0,
@@ -736,18 +760,27 @@ impl App {
                     });
 
                     // Execute each requested tool and append results
+                    let mut pending_queued = false;
                     for tc in &tool_calls {
                         self.ai_tool_status = Some(format!("AI is calling {}...", tc.name));
-                        match crate::agent::execute_tool(self, &tc.name, &tc.arguments) {
+                        let pending_before = self.pending_agent_changes.len();
+                        match crate::agent::execute_tool(self, &tc.name, &tc.arguments, &tc.id) {
                             Ok(result) => {
-                                self.ai_messages.push(AiChatMessage {
-                                    role: AiRole::Tool,
-                                    content: result,
-                                    tool_calls: None,
-                                    tool_call_id: Some(tc.id.clone()),
-                                    reasoning_content: None,
-                                    source: None,
-                                });
+                                let pending_after = self.pending_agent_changes.len();
+                                if pending_after > pending_before {
+                                    // The tool queued a pending change — don't feed the
+                                    // placeholder result; user confirmation will do it.
+                                    pending_queued = true;
+                                } else {
+                                    self.ai_messages.push(AiChatMessage {
+                                        role: AiRole::Tool,
+                                        content: result,
+                                        tool_calls: None,
+                                        tool_call_id: Some(tc.id.clone()),
+                                        reasoning_content: None,
+                                        source: None,
+                                    });
+                                }
                             }
                             Err(e) => {
                                 self.ai_messages.push(AiChatMessage {
@@ -762,21 +795,29 @@ impl App {
                         }
                     }
 
-                    // Continue the conversation: re-invoke LLM with results
-                    self.agent_loop_count += 1;
-                    if self.agent_loop_count > 5 {
-                        self.ai_status = AiStatus::Error;
+                    // Continue the conversation: re-invoke LLM with results,
+                    // unless a tool queued a pending change that needs user confirmation.
+                    if pending_queued {
+                        self.ai_partial_response.clear();
+                        self.ai_status = AiStatus::Idle;
                         self.ai_tool_status = None;
-                        self.agent_loop_count = 0;
-                        self.status = "AI error: too many tool call iterations".to_string();
-                    } else if let Some(ref handle) = self.ai_llm_handle {
-                        let messages = self.build_chat_messages_for_llm();
-                        let tools = Some(crate::agent::get_tools());
-                        let _ = handle.send(crate::llm::LlmRequest::Chat {
-                            system: Some(Self::ai_system_prompt().into()),
-                            messages,
-                            tools,
-                        });
+                        // The agent loop will resume when the user confirms/rejects.
+                    } else {
+                        self.agent_loop_count += 1;
+                        if self.agent_loop_count > 5 {
+                            self.ai_status = AiStatus::Error;
+                            self.ai_tool_status = None;
+                            self.agent_loop_count = 0;
+                            self.status = "AI error: too many tool call iterations".to_string();
+                        } else if let Some(ref handle) = self.ai_llm_handle {
+                            let messages = self.build_chat_messages_for_llm();
+                            let tools = Some(crate::agent::get_tools());
+                            let _ = handle.send(crate::llm::LlmRequest::Chat {
+                                system: Some(Self::ai_system_prompt().into()),
+                                messages,
+                                tools,
+                            });
+                        }
                     }
                 }
                 Ok(crate::llm::LlmEvent::Error { message }) => {
@@ -827,9 +868,48 @@ impl App {
 
     /// The system prompt used for all AI chat requests.
     fn ai_system_prompt() -> &'static str {
-        "You are a helpful assistant specialized in BDD, Gherkin, and software testing. \
-         You have access to tools that let you inspect the current project. \
-         Use them when the user asks about the project."
+        "You are a BDD/Gherkin assistant. You have tools to inspect and edit feature files.\n\
+         \n\
+         Workflow when the user mentions a specific file (e.g. \"add a scenario to X.feature\"):\n\
+         1. Call get_feature_content first to see the file's current scenarios and line numbers.\n\
+         2. Then call insert_scenario with the right steps and insert_after_line.\n\
+         \n\
+         Use highlight_mindmap_nodes / apply_mindmap_filter only for visual exploration — \
+         they do NOT return text content. Use get_project_info for general project stats, \
+         and get_feature_content for specific file details.\n\
+         \n\
+         Keep tool calls to a minimum. One get_feature_content is enough before editing."
+    }
+
+    /// After a pending agent change is accepted or rejected, feed the result back
+    /// to the LLM as a tool result message and continue the agent loop.
+    fn feed_agent_tool_result(&mut self, tool_call_id: String, result: String) {
+        // Append tool result message
+        self.ai_messages.push(AiChatMessage {
+            role: AiRole::Tool,
+            content: result,
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id),
+            reasoning_content: None,
+            source: None,
+        });
+
+        // Re-invoke the LLM to continue the agent loop
+        self.agent_loop_count += 1;
+        if self.agent_loop_count > 5 {
+            self.ai_status = AiStatus::Error;
+            self.ai_tool_status = None;
+            self.agent_loop_count = 0;
+            self.status = "AI error: too many tool call iterations".to_string();
+        } else if let Some(ref handle) = self.ai_llm_handle {
+            let messages = self.build_chat_messages_for_llm();
+            let tools = Some(crate::agent::get_tools());
+            let _ = handle.send(crate::llm::LlmRequest::Chat {
+                system: Some(Self::ai_system_prompt().into()),
+                messages,
+                tools,
+            });
+        }
     }
 
     pub fn poll_external_feature_changes(&mut self) {
@@ -911,6 +991,138 @@ impl App {
     pub fn clear_mindmap_filter(&mut self) {
         self.mindmap_index.clear_filter();
         self.set_status_message("AI cleared filter".into());
+    }
+
+    // ── Agent editor modification helpers ───────────────────────────────
+
+    /// Finds the feature index in `project.features` whose file path matches
+    /// `file_path` (compared by file name and/or full path suffix).
+    pub fn find_feature_idx_for_file(&self, file_path: &str) -> Option<usize> {
+        self.project.features.iter().position(|f| {
+            let p = f.file_path.to_string_lossy();
+            p == file_path || p.ends_with(file_path) || file_path.ends_with(p.as_ref())
+        })
+    }
+
+    /// Insert text into the buffer for `file_path` after the given 1-based line number.
+    ///
+    /// Updates the active editor view if the target file is currently displayed.
+    /// Does not write to disk; the buffer is marked dirty.
+    pub fn insert_text_into_buffer(
+        &mut self,
+        file_path: &str,
+        after_line_1based: usize,
+        text: &str,
+    ) -> Result<()> {
+        let feature_idx = self
+            .find_feature_idx_for_file(file_path)
+            .with_context(|| format!("feature file not found: {file_path}"))?;
+
+        // Insert into the persistent buffer
+        self.buffers[feature_idx].insert_line(after_line_1based.saturating_sub(1), text);
+        self.set_buffer_dirty(feature_idx, true);
+
+        // Update active editor view if this is the current buffer
+        if self.active_buffer_idx == Some(feature_idx) {
+            self.buffer = self.buffers[feature_idx].clone();
+        }
+
+        Ok(())
+    }
+
+    /// Returns the content of the buffer for a given file path.
+    pub fn buffer_content_for_file(&self, file_path: &str) -> Option<String> {
+        let idx = self.find_feature_idx_for_file(file_path)?;
+        Some(self.buffers[idx].as_string())
+    }
+
+    /// Returns the line count of the buffer for a given file path.
+    pub fn line_count_for_file(&self, file_path: &str) -> Option<usize> {
+        let idx = self.find_feature_idx_for_file(file_path)?;
+        Some(self.buffers[idx].line_count())
+    }
+
+    /// Re-parse the project from the current buffer contents (applies pending
+    /// text edits to the Gherkin AST, MindMap, and step index).
+    pub fn refresh_project_from_buffers(&mut self) {
+        let selected = self.selected_tree_location();
+        for (idx, buffer) in self.buffers.iter().enumerate() {
+            if idx < self.project.features.len() {
+                let content = buffer.as_string();
+                let path = self.project.features[idx].file_path.clone();
+                self.project.features[idx] = gherkin::parse_feature(&content, path);
+            }
+        }
+        self.rebuild_project_views(selected);
+    }
+
+    // ── Agent pending change queue ──────────────────────────────────────
+
+    /// Whether an agent change is waiting for user confirmation.
+    pub fn has_agent_change_prompt(&self) -> bool {
+        !self.pending_agent_changes.is_empty()
+    }
+
+    /// Queue a pending change from the agent, show confirmation prompt.
+    pub fn queue_agent_change(&mut self, change: AgentPendingChange) {
+        let desc = change.description.clone();
+        self.pending_agent_changes.push(change);
+        self.status = format!("AI wants to {}. [Y] accept [N] reject [D] view diff", desc);
+    }
+
+    /// Accept and apply the first pending agent change.
+    ///
+    /// Returns `(tool_call_id, result_text)` for feeding back to the LLM.
+    pub fn accept_agent_change(&mut self) -> Result<(String, String)> {
+        let change = self.pending_agent_changes.remove(0);
+        self.insert_text_into_buffer(
+            &change.file_path,
+            change.insertion_line_1based,
+            &change.text_to_insert,
+        )?;
+
+        // Re-parse the project to update Gherkin AST and MindMap
+        self.refresh_project_from_buffers();
+
+        // Move cursor to the newly inserted scenario area
+        if let Some(idx) = self.find_feature_idx_for_file(&change.file_path) {
+            if self.active_buffer_idx != Some(idx) {
+                // Switch to the modified buffer
+                self.switch_to_buffer(idx);
+            }
+        }
+        // Position cursor at the start of the inserted text (first line after
+        // insertion point)
+        let new_cursor_row = change.insertion_line_1based;
+        self.cursor_row = new_cursor_row.min(self.buffer.line_count().saturating_sub(1));
+        self.cursor_col = 0;
+        self.desired_col = 0;
+        self.scroll_row = self.cursor_row.saturating_sub(4).max(0);
+
+        self.set_status_message(format!(
+            "AI inserted scenario \"{}\" in {}",
+            change.scenario_name, change.file_path
+        ));
+
+        let file_name = change.file_path.clone();
+        let scenario_name = change.scenario_name.clone();
+        let result = format!(
+            "Successfully inserted scenario \"{scenario_name}\" into {file_name} at line {}.",
+            change.insertion_line_1based + 1
+        );
+        Ok((change.tool_call_id, result))
+    }
+
+    /// Reject and discard the first pending agent change.
+    ///
+    /// Returns `(tool_call_id, result_text)` for feeding back to the LLM.
+    pub fn reject_agent_change(&mut self) -> (String, String) {
+        let change = self.pending_agent_changes.remove(0);
+        let desc = change.description.clone();
+        self.status = format!("Rejected AI change: {desc}");
+        self.quit_pending_confirm = false;
+        let result = format!("User rejected the change: {desc}");
+        (change.tool_call_id, result)
     }
 
     fn reload_feature_from_disk(&mut self, idx: usize, stamp: Option<FileStamp>) -> Result<()> {
@@ -1809,6 +2021,23 @@ impl App {
                 _ => Ok(()),
             };
         }
+
+        if self.has_agent_change_prompt() {
+            return match action {
+                Action::AgentChangeAccept => {
+                    let (tool_call_id, result) = self.accept_agent_change()?;
+                    self.feed_agent_tool_result(tool_call_id, result);
+                    Ok(())
+                }
+                Action::AgentChangeReject => {
+                    let (tool_call_id, result) = self.reject_agent_change();
+                    self.feed_agent_tool_result(tool_call_id, result);
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+        }
+
         if !matches!(action, Action::PendingChar(_)) {
             self.pending_char = None;
         }
@@ -2167,6 +2396,8 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::ExternalChangeReload | Action::ExternalChangeKeepLocal => {}
+            // Handled in early-return guard above; unreachable here.
+            Action::AgentChangeAccept | Action::AgentChangeReject => {}
             Action::ClearInputState => {
                 if self.active_tab == MainTab::MindMap
                     && self.mindmap_focus == MindMapFocus::AiPanel
@@ -3384,6 +3615,7 @@ mod tests {
             runner_rx: None,
             last_external_check: Instant::now(),
             external_change_prompt: None,
+            pending_agent_changes: Vec::new(),
             explore_focus: ColumnFocus::Step,
             explore_selected_feature: 0,
             explore_selected_scenario: 0,
@@ -3495,6 +3727,7 @@ Feature: B
             runner_rx: None,
             last_external_check: Instant::now(),
             external_change_prompt: None,
+            pending_agent_changes: Vec::new(),
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
             explore_selected_scenario: 0,

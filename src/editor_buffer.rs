@@ -100,6 +100,33 @@ impl EditorBuffer {
         false
     }
 
+    /// Insert a new line after `after_row` with `text` as its content.
+    ///
+    /// If `after_row` is beyond the last line, the text is appended at the end.
+    /// A trailing newline is added so the inserted line becomes its own rope line.
+    pub fn insert_line(&mut self, after_row: usize, text: &str) {
+        if self.rope.len_chars() == 0 {
+            self.rope.insert(0, text);
+            return;
+        }
+        let line_count = self.rope.len_lines();
+        let safe_row = after_row.min(line_count.saturating_sub(1));
+        let at_end = safe_row + 1 >= line_count;
+        let insert_pos = if at_end {
+            self.rope.len_chars()
+        } else {
+            self.rope.line_to_char(safe_row + 1)
+        };
+        // Mid-file: insert "text\n" (text first, then newline to separate from next line).
+        // End-of-file: insert "\ntext" (newline first to end the last line, then text).
+        let fragment = if at_end {
+            format!("\n{text}")
+        } else {
+            format!("{text}\n")
+        };
+        self.rope.insert(insert_pos, &fragment);
+    }
+
     fn line_col_to_char_idx(&self, row: usize, col: usize) -> usize {
         let safe_row = row.min(self.line_count() - 1);
         let line_start = self.rope.line_to_char(safe_row);
@@ -139,6 +166,33 @@ mod tests {
         assert_eq!(buffer.line(0), "a");
         assert_eq!(buffer.line(1), "B");
         assert_eq!(buffer.line(2), "c");
+    }
+
+    #[test]
+    fn test_insert_line_mid_buffer() {
+        let mut buffer = EditorBuffer::from_string("a\nb\nd".to_string());
+        buffer.insert_line(1, "c");
+        assert_eq!(buffer.line(0), "a");
+        assert_eq!(buffer.line(1), "b");
+        assert_eq!(buffer.line(2), "c");
+        assert_eq!(buffer.line(3), "d");
+        assert_eq!(buffer.line_count(), 4);
+    }
+
+    #[test]
+    fn test_insert_line_at_end() {
+        let mut buffer = EditorBuffer::from_string("a\nb".to_string());
+        buffer.insert_line(10, "c");
+        assert_eq!(buffer.line(2), "c");
+        assert_eq!(buffer.line_count(), 3);
+    }
+
+    #[test]
+    fn test_insert_line_empty_buffer() {
+        let mut buffer = EditorBuffer::from_string(String::new());
+        buffer.insert_line(0, "Feature: X");
+        // For an empty rope we just set the content directly (no trailing newline).
+        assert_eq!(buffer.as_string(), "Feature: X");
     }
 
     #[test]

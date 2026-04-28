@@ -1,11 +1,12 @@
 //! Agent module: tool definitions and execution for LLM function calling.
 //!
 //! Tools defined here can be registered with the LLM so it can inspect project
-//! state and (in future) modify editor content. Each tool is side-effect-free
-//! and read-only unless otherwise noted.
+//! state and modify editor content. Read-only tools return results immediately;
+//! file-modifying tools (e.g. `insert_scenario`) queue changes for user confirmation.
 
 use anyhow::{Context, Result};
 
+use crate::app::AgentPendingChange;
 use crate::llm::ToolDefinition;
 
 /// Returns the full list of available tool definitions for the LLM.
@@ -80,16 +81,85 @@ pub fn get_tools() -> Vec<ToolDefinition> {
                 "required": ["filter_type"]
             }),
         },
+        ToolDefinition {
+            name: "get_feature_content".into(),
+            description: "Return the full parsed content of a specific .feature file: \
+                          feature name, description, background steps, all scenarios \
+                          with their steps and line numbers. Use this before inserting \
+                          or editing scenarios to understand the current file structure."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the target .feature file (e.g. 'features/login.feature')"
+                    }
+                },
+                "required": ["file_path"]
+            }),
+        },
+        ToolDefinition {
+            name: "insert_scenario".into(),
+            description: "Insert a new Scenario (or Scenario Outline) into a \
+                          specified feature file. The change is staged in the \
+                          editor buffer and requires user confirmation before \
+                          being applied."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the target .feature file (e.g. 'features/login.feature')"
+                    },
+                    "scenario_name": {
+                        "type": "string",
+                        "description": "The name/title of the Scenario (e.g. 'Account locked after 3 failed attempts')"
+                    },
+                    "steps": {
+                        "type": "array",
+                        "description": "Ordered step lines (e.g. ['Given a registered user', 'When I enter an incorrect password 3 times', 'Then my account should be temporarily locked'])",
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "insert_after_line": {
+                        "type": "integer",
+                        "description": "1-based line number after which to insert the scenario (omit to append at end of file)"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "description": "Optional tags for the scenario (e.g. ['@smoke', '@security'])",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "required": ["file_path", "scenario_name", "steps"]
+            }),
+        },
     ]
 }
 
 /// Execute a named tool with the given JSON arguments and return the result
 /// as plain text for the LLM.
-pub fn execute_tool(app: &mut crate::app::App, name: &str, args_json: &str) -> Result<String> {
+///
+/// `tool_call_id` is the unique identifier from the LLM tool-call request —
+/// needed so high-risk tools like `insert_scenario` can associate a pending
+/// change with the correct tool result.
+pub fn execute_tool(
+    app: &mut crate::app::App,
+    name: &str,
+    args_json: &str,
+    tool_call_id: &str,
+) -> Result<String> {
     match name {
         "get_project_info" => execute_get_project_info(app),
         "highlight_mindmap_nodes" => execute_highlight_mindmap_nodes(app, args_json),
         "apply_mindmap_filter" => execute_apply_mindmap_filter(app, args_json),
+        "get_feature_content" => execute_get_feature_content(app, args_json),
+        "insert_scenario" => execute_insert_scenario(app, args_json, tool_call_id),
         _ => anyhow::bail!("unknown tool: {name}"),
     }
 }
@@ -209,5 +279,173 @@ fn execute_get_project_info(app: &crate::app::App) -> Result<String> {
             .map(|f| format!("  - {f}"))
             .collect::<Vec<_>>()
             .join("\n"),
+    ))
+}
+
+fn execute_get_feature_content(app: &mut crate::app::App, args_json: &str) -> Result<String> {
+    let args: serde_json::Value =
+        serde_json::from_str(args_json).context("invalid JSON arguments")?;
+    let file_path = args
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .context("missing 'file_path'")?;
+
+    let feature_idx = app
+        .find_feature_idx_for_file(file_path)
+        .with_context(|| format!("feature file not found: {file_path}"))?;
+
+    let feature = &app.project.features[feature_idx];
+    let path = feature.file_path.to_string_lossy();
+    let mut out = String::new();
+
+    out.push_str(&format!("File: {path} ({} lines)\n", feature.line_count));
+    out.push_str(&format!("Feature: {}\n", feature.name));
+    if !feature.tags.is_empty() {
+        out.push_str(&format!("Tags: {}\n", feature.tags.join(" ")));
+    }
+    if !feature.description.is_empty() {
+        out.push_str("Description:\n");
+        for line in &feature.description {
+            out.push_str(&format!("  {line}\n"));
+        }
+    }
+    if let Some(bg) = &feature.background {
+        out.push_str(&format!("\nBackground (line {}):\n", bg.line_number));
+        for step in &bg.steps {
+            out.push_str(&format!(
+                "  {} {} (line {})\n",
+                step.keyword, step.text, step.line_number
+            ));
+        }
+    }
+    out.push_str(&format!("\nScenarios: {}\n", feature.scenarios.len()));
+    for (idx, sc) in feature.scenarios.iter().enumerate() {
+        let kind = match sc.kind {
+            crate::gherkin::ScenarioKind::Scenario => "Scenario",
+            crate::gherkin::ScenarioKind::ScenarioOutline => "Scenario Outline",
+        };
+        out.push_str(&format!(
+            "\n  [{idx}] {kind}: {} (line {})\n",
+            sc.name, sc.line_number
+        ));
+        if !sc.tags.is_empty() {
+            out.push_str(&format!("      Tags: {}\n", sc.tags.join(" ")));
+        }
+        for step in &sc.steps {
+            out.push_str(&format!(
+                "      {} {} (line {})\n",
+                step.keyword, step.text, step.line_number
+            ));
+        }
+        for (ei, ex) in sc.examples.iter().enumerate() {
+            out.push_str(&format!(
+                "      Examples [{ei}] (line {}):\n",
+                ex.line_number
+            ));
+            if !ex.headers.is_empty() {
+                out.push_str(&format!("        | {} |\n", ex.headers.join(" | ")));
+            }
+            for row in &ex.rows {
+                out.push_str(&format!("        | {} |\n", row.join(" | ")));
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn execute_insert_scenario(
+    app: &mut crate::app::App,
+    args_json: &str,
+    tool_call_id: &str,
+) -> Result<String> {
+    let args: serde_json::Value =
+        serde_json::from_str(args_json).context("invalid JSON arguments")?;
+
+    let file_path = args
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .context("missing 'file_path'")?;
+    let scenario_name = args
+        .get("scenario_name")
+        .and_then(|v| v.as_str())
+        .context("missing 'scenario_name'")?;
+    let steps: Vec<String> = args
+        .get("steps")
+        .and_then(|v| v.as_array())
+        .context("missing 'steps'")?
+        .iter()
+        .map(|v| v.as_str().unwrap_or("").to_string())
+        .collect();
+    let insert_after_line: Option<usize> = args
+        .get("insert_after_line")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+    let tags: Vec<String> = args
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Build the Gherkin text block
+    let mut text_block = String::new();
+    // Leading blank line for separation
+    text_block.push('\n');
+    // Tags
+    if !tags.is_empty() {
+        text_block.push_str("  ");
+        text_block.push_str(&tags.join(" "));
+        text_block.push('\n');
+    }
+    // Scenario header
+    text_block.push_str(&format!("  Scenario: {scenario_name}\n"));
+    // Steps
+    if steps.is_empty() {
+        anyhow::bail!("at least one step is required");
+    }
+    for step in &steps {
+        text_block.push_str(&format!("    {step}\n"));
+    }
+
+    // Determine insertion line: use provided value, or default to end of file
+    let line = insert_after_line.unwrap_or_else(|| app.line_count_for_file(file_path).unwrap_or(0));
+
+    // Verify the file exists in the project
+    if app.find_feature_idx_for_file(file_path).is_none() {
+        let available: Vec<String> = app
+            .project
+            .features
+            .iter()
+            .map(|f| f.file_path.to_string_lossy().to_string())
+            .collect();
+        anyhow::bail!(
+            "Feature file '{}' not found in project. Available files: {}",
+            file_path,
+            if available.is_empty() {
+                "(none)".into()
+            } else {
+                available.join(", ")
+            }
+        );
+    }
+
+    let change = AgentPendingChange {
+        tool_name: "insert_scenario".into(),
+        description: format!("insert scenario \"{scenario_name}\" in {file_path}"),
+        file_path: file_path.to_string(),
+        insertion_line_1based: line,
+        text_to_insert: text_block.clone(),
+        scenario_name: scenario_name.to_string(),
+        tool_call_id: tool_call_id.to_string(),
+    };
+
+    app.queue_agent_change(change);
+
+    Ok(format!(
+        "Scenario \"{scenario_name}\" queued for insertion in {file_path} at line {line}. Awaiting user confirmation."
     ))
 }

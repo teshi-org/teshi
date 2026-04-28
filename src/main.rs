@@ -112,6 +112,7 @@ fn main() -> Result<()> {
                     step_keyword_picker_active: app.step_keyword_picker.is_some(),
                     step_input_active: app.step_input_active,
                     external_change_prompt_active: app.has_external_change_prompt(),
+                    agent_change_prompt_active: app.has_agent_change_prompt(),
                     active_tab: app.active_tab,
                     view_stage: app.view_stage,
                     explore_edit_mode: app.explore_edit_mode,

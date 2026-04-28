@@ -226,8 +226,33 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     render_main_panel(frame, app, chunks[2]);
 
-    // Show temporary status message if present, otherwise render footer hints
-    if let Some(ref msg) = app.status_message {
+    // Agent change confirmation prompt takes top priority
+    if app.has_agent_change_prompt() {
+        let prompt = Line::from(vec![
+            Span::styled(
+                "AI wants to modify a file",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" — "),
+            Span::styled(
+                "[Y]",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" accept  "),
+            Span::styled(
+                "[N]",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" reject  "),
+            Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
+            Span::raw(" reject"),
+        ]);
+        frame.render_widget(Paragraph::new(prompt), chunks[3]);
+    } else if let Some(ref msg) = app.status_message {
         let status_line = Line::from(vec![Span::styled(
             msg.as_str(),
             Style::default()
