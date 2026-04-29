@@ -173,8 +173,6 @@ pub enum AgentMutation {
 /// A pending text modification queued by an AI agent tool waiting for user approval.
 #[derive(Debug, Clone)]
 pub struct AgentPendingChange {
-    /// The tool name that initiated this change (e.g. `"insert_scenario"`).
-    pub tool_name: String,
     /// Human-readable description for the confirmation prompt.
     pub description: String,
     /// Target file path (matches `BddFeature::file_path`).
@@ -1070,12 +1068,6 @@ impl App {
         }
 
         Ok(())
-    }
-
-    /// Returns the content of the buffer for a given file path.
-    pub fn buffer_content_for_file(&self, file_path: &str) -> Option<String> {
-        let idx = self.find_feature_idx_for_file(file_path)?;
-        Some(self.buffers[idx].as_string())
     }
 
     /// Returns the line count of the buffer for a given file path.

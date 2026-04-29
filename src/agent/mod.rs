@@ -305,7 +305,6 @@ fn execute_insert_scenario(
     }
 
     let change = AgentPendingChange {
-        tool_name: "insert_scenario".into(),
         description: format!("insert scenario \"{scenario_name}\" in {file_path}"),
         file_path: file_path.to_string(),
         mutation: AgentMutation::InsertAfterLine {
@@ -388,7 +387,6 @@ fn execute_update_step(
     };
 
     let change = AgentPendingChange {
-        tool_name: "update_step".into(),
         description: format!(
             "update step {} in scenario \"{short_desc}\" in {file_path}",
             step_index

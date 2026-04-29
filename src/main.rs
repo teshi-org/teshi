@@ -135,10 +135,9 @@ fn main() -> Result<()> {
                     }
                 }
                 Event::Mouse(mouse_event) => {
-                    let in_ai_context =
-                        app.active_tab == app::MainTab::Ai
-                            || (app.active_tab == app::MainTab::MindMap
-                                && app.mindmap_focus == app::MindMapFocus::AiPanel);
+                    let in_ai_context = app.active_tab == app::MainTab::Ai
+                        || (app.active_tab == app::MainTab::MindMap
+                            && app.mindmap_focus == app::MindMapFocus::AiPanel);
                     if in_ai_context {
                         match mouse_event.kind {
                             MouseEventKind::ScrollUp => {
