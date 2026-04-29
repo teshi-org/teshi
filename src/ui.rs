@@ -1119,8 +1119,7 @@ fn render_mindmap_ai_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     AiRole::Tool => "  \u{2699} Tool",
                 };
                 let first = msg.content.lines().next().unwrap_or("");
-                let truncated =
-                    truncate_string_to_cols(first, inner.width.saturating_sub(4) as u16);
+                let truncated = truncate_string_to_cols(first, inner.width.saturating_sub(4));
                 lines.push(Line::raw(format!("{prefix}: {truncated}")));
             }
         }

@@ -1157,7 +1157,7 @@ impl App {
         self.cursor_row = cursor_row.min(self.buffer.line_count().saturating_sub(1));
         self.cursor_col = 0;
         self.desired_col = 0;
-        self.scroll_row = self.cursor_row.saturating_sub(4).max(0);
+        self.scroll_row = self.cursor_row.saturating_sub(4);
 
         self.set_status_message(format!(
             "AI applied change \"{}\" in {}",
