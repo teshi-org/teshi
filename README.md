@@ -127,9 +127,48 @@ Additional demo files live under `tests/features_demo/`.
 - Strings (`"..."`)
 - Tables and doc string markers (`|`, `"""`)
 
+## Environment Variables
+
+### LLM (AI tab)
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `TESHI_LLM_API_KEY` | Yes | — | API key for the LLM provider |
+| `TESHI_LLM_BASE_URL` | No | `https://api.openai.com/v1` | OpenAI-compatible API base URL |
+| `TESHI_LLM_MODEL` | No | `gpt-4o-mini` | Model name to use |
+| `TESHI_LLM_MAX_TOKENS` | No | `1024` | Max tokens per completion |
+| `TESHI_LLM_TEMPERATURE` | No | `0.7` | Sampling temperature |
+
+The AI tab is hidden when `TESHI_LLM_API_KEY` is not set.
+
+### Runner
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `TESHI_RUNNER_CMD` | Yes (if no `teshi.toml`) | — | Executable for the test runner |
+| `TESHI_RUNNER_ARGS` | No | — | Space-separated args for the runner |
+| `TESHI_RUNNER_CWD` | No | current dir | Working directory for the runner |
+
+Env vars take precedence over `teshi.toml` values.
+
+### Diagnostics
+
+| Variable | Purpose |
+|---|---|
+| `TESHI_DIAG_PATH` | Write diagnostic log to this file path |
+| `TESHI_NO_RAW` | Disable raw terminal mode |
+| `TESHI_NO_ALT` | Disable alternate screen |
+
 ## Config
 
-The `teshi.toml` config file in the working directory controls:
+The `teshi.toml` config file in the working directory supports:
 
-- `[llm]` — AI provider settings (endpoint, model, API key env var, max tokens)
-- `[runner]` — external test runner command and args
+```toml
+[runner]
+command = "cargo"
+args = ["run", "--bin", "teshi-runner"]
+cwd = "."          # optional working directory
+
+[llm]
+# Not yet supported in toml; use environment variables above.
+```
