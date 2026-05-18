@@ -19,6 +19,8 @@ pub enum GenerationStage {
     Planning,
     /// LLM is writing .feature files.
     Writing,
+    /// User confirmation of pending changes.
+    Confirming,
     /// LLM is validating the generated output.
     Validating,
     /// Generation complete.
@@ -33,6 +35,7 @@ impl GenerationStage {
             Self::Gathering => "Requirements Gathering",
             Self::Planning => "Scenario Planning",
             Self::Writing => "Feature Writing",
+            Self::Confirming => "Awaiting Confirmation",
             Self::Validating => "Validation",
             Self::Complete => "Complete",
         }
@@ -64,6 +67,7 @@ impl GenerationStage {
                  - Reuse existing step patterns from Project Context\n\
                  - After writing, call validate_feature"
             }
+            Self::Confirming => "", // User-action phase, no LLM guidance needed
             Self::Validating => {
                 "\n\n## Current Phase: Validation\n\
                  Review the generated feature for completeness.\n\
@@ -137,6 +141,7 @@ mod tests {
         assert_eq!(GenerationStage::Gathering.label(), "Requirements Gathering");
         assert_eq!(GenerationStage::Planning.label(), "Scenario Planning");
         assert_eq!(GenerationStage::Writing.label(), "Feature Writing");
+        assert_eq!(GenerationStage::Confirming.label(), "Awaiting Confirmation");
         assert_eq!(GenerationStage::Validating.label(), "Validation");
         assert_eq!(GenerationStage::Complete.label(), "Complete");
     }
@@ -145,6 +150,7 @@ mod tests {
     fn idle_stage_has_empty_guidance() {
         assert!(GenerationStage::Idle.prompt_guidance().is_empty());
         assert!(GenerationStage::Complete.prompt_guidance().is_empty());
+        assert!(GenerationStage::Confirming.prompt_guidance().is_empty());
     }
 
     #[test]
@@ -177,6 +183,7 @@ mod tests {
             GenerationStage::Gathering,
             GenerationStage::Planning,
             GenerationStage::Writing,
+            GenerationStage::Confirming,
             GenerationStage::Validating,
             GenerationStage::Complete,
         ];

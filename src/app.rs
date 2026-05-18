@@ -1214,6 +1214,15 @@ impl App {
                             self.agents[i].partial_response.clear();
                             self.agents[i].status = AiStatus::AwaitingApproval;
                             self.agents[i].tool_status = None;
+                            // Advance stage to Confirming when pipeline is active
+                            if !matches!(
+                                self.generation_stage,
+                                crate::agent::pipeline::GenerationStage::Idle
+                                    | crate::agent::pipeline::GenerationStage::Complete
+                            ) {
+                                self.generation_stage =
+                                    crate::agent::pipeline::GenerationStage::Confirming;
+                            }
                         } else if self.project.features.is_empty() {
                             self.agents[i].partial_response.clear();
                             self.agents[i].status = AiStatus::Idle;
@@ -1576,6 +1585,7 @@ impl App {
             self.generation_stage,
             crate::agent::pipeline::GenerationStage::Idle
                 | crate::agent::pipeline::GenerationStage::Complete
+                | crate::agent::pipeline::GenerationStage::Confirming
         ) {
             prompt.push_str("\n## Generation Pipeline Status\n");
             prompt.push_str(&format!(
@@ -1642,6 +1652,10 @@ impl App {
         // Re-invoke the LLM to continue the agent loop
         // Compact context before sending to avoid exceeding token limits
         self.compact_context_if_needed(agent_idx);
+        // Restore stage from Confirming after user decision
+        if self.generation_stage == crate::agent::pipeline::GenerationStage::Confirming {
+            self.generation_stage = crate::agent::pipeline::GenerationStage::Writing;
+        }
         let messages = self.build_chat_messages_for_agent(agent_idx);
         let tools = Some(crate::agent::get_tools());
         let system_prompt = self.ai_system_prompt(None);

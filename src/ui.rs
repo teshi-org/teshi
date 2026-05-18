@@ -682,7 +682,16 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         AiStatus::Waiting if app.agent().partial_response.is_empty() => {
             format!("{} Teshi is thinking...", spinner_frame())
         }
-        AiStatus::AwaitingApproval => "◆ Waiting for approval — Y/N".into(),
+        AiStatus::AwaitingApproval => {
+            if matches!(app.generation_stage, GenerationStage::Confirming) {
+                format!(
+                    "◆ Changes pending — Press Y to accept, N to reject · {}",
+                    app.generation_stage.label()
+                )
+            } else {
+                "◆ Waiting for approval — Y/N".into()
+            }
+        }
         AiStatus::Error => {
             if app.status.starts_with("AI error:") {
                 app.status.clone()
@@ -693,10 +702,12 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         _ => String::new(),
     };
     // Pipeline stage indicator (append to status_text when active)
+    // Skip when already showing in AwaitingApproval status
     let status_text = if !matches!(
         app.generation_stage,
         GenerationStage::Idle | GenerationStage::Complete
-    ) {
+    ) && !matches!(app.agent().status, AiStatus::AwaitingApproval)
+    {
         let stage_label = app.generation_stage.label();
         if status_text.is_empty() {
             stage_label.to_string()
