@@ -1172,7 +1172,7 @@ fn execute_validate_feature(app: &mut crate::app::App, args_json: &str) -> Resul
     // Build a temporary project filtered by file if needed
     let project = &app.project;
 
-    let issues = if let Some(fp) = file_path_opt {
+    let mut issues = if let Some(fp) = file_path_opt {
         // Filter to just the requested file
         let filtered: Vec<_> = project
             .features
@@ -1209,6 +1209,34 @@ fn execute_validate_feature(app: &mut crate::app::App, args_json: &str) -> Resul
     } else {
         crate::agent::validator::validate_project(project)
     };
+
+    // Coverage check: compare generated scenarios against skill templates
+    if let Some(fp) = file_path_opt
+        && let Some(feature) = project.features.iter().find(|f| {
+            let path_str = f.file_path.to_string_lossy();
+            path_str == fp || path_str.ends_with(fp)
+        })
+    {
+        // Collect scenarios from both scenarios and rules for coverage check
+        let all_scenarios: Vec<crate::gherkin::BddScenario> = feature
+            .scenarios
+            .iter()
+            .chain(feature.rules.iter().flat_map(|r| r.scenarios.iter()))
+            .cloned()
+            .collect();
+
+        if !all_scenarios.is_empty() {
+            let coverage_issues = crate::agent::validator::check_coverage(
+                &feature.name,
+                &all_scenarios,
+                &app.skill_registry,
+            );
+            for mut ci in coverage_issues {
+                ci.file = fp.to_string();
+                issues.push(ci);
+            }
+        }
+    }
 
     if issues.is_empty() {
         app.generation_stage = crate::agent::pipeline::GenerationStage::Complete;

@@ -64,7 +64,6 @@ impl SkillRegistry {
 
     /// Match skills by keyword intersection (case-insensitive) and name contains.
     /// Returns up to 5 matches, ranked by number of matched keywords.
-    #[expect(dead_code)]
     pub fn match_skills(&self, text: &str) -> Vec<&SkillDefinition> {
         let lower = text.to_lowercase();
         let text_words: Vec<&str> = lower.split_whitespace().collect();
