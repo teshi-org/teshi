@@ -25,9 +25,11 @@ pub struct BddProject {
 pub struct BddFeature {
     pub file_path: PathBuf,
     pub name: String,
+    pub language: String,
     pub tags: Vec<String>,
     pub description: Vec<String>,
     pub background: Option<BddBackground>,
+    pub rules: Vec<BddRule>,
     pub scenarios: Vec<BddScenario>,
     pub line_count: usize,
 }
@@ -54,6 +56,17 @@ pub struct BddScenario {
     pub line_number: usize,
 }
 
+/// A `Rule:` block that groups related scenarios.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct BddRule {
+    pub name: String,
+    pub tags: Vec<String>,
+    pub description: Vec<String>,
+    pub scenarios: Vec<BddScenario>,
+    pub line_number: usize,
+}
+
 /// A single step line (e.g. `Given I am on the login page`).
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -66,6 +79,10 @@ pub struct BddStep {
     pub text: String,
     /// 1-based line number.
     pub line_number: usize,
+    /// Content between """...""" or ```...``` attached to this step.
+    pub doc_string: Option<String>,
+    /// Inline |...| data table attached to this step.
+    pub data_table: Option<Vec<Vec<String>>>,
 }
 
 /// `Examples:` data table attached to a `Scenario Outline`.
@@ -110,6 +127,7 @@ fn parse_feature_with_lang(
     let mut feature_name = String::new();
     let mut feature_description = Vec::new();
     let mut background: Option<BddBackground> = None;
+    let mut rules: Vec<BddRule> = Vec::new();
     let mut scenarios: Vec<BddScenario> = Vec::new();
 
     // Collect tags before Feature:
@@ -144,7 +162,7 @@ fn parse_feature_with_lang(
         }
     }
 
-    // Parse body: Background, Scenarios
+    // Parse body: Background, Rule, Scenarios
     while idx < lines.len() {
         idx = skip_blank_and_comments(&lines, idx);
         if idx >= lines.len() {
@@ -168,6 +186,96 @@ fn parse_feature_with_lang(
             background = Some(BddBackground {
                 steps,
                 line_number: bg_line,
+            });
+        } else if let Some((_kw, st)) = lang.match_structural_prefix(trimmed)
+            && st == StructuralType::Rule
+        {
+            let rule_line = idx + 1;
+            let rule_indent = lines[idx].len() - lines[idx].trim().len();
+            let rule_name = trimmed[_kw.len()..].trim().to_string();
+            idx += 1;
+
+            // Parse Rule description (free text until first structural keyword)
+            let mut rule_description = Vec::new();
+            while idx < lines.len() {
+                let rtrimmed = lines[idx].trim();
+                if rtrimmed.is_empty()
+                    || rtrimmed.starts_with('#')
+                    || (!lang.is_structural(rtrimmed) && !rtrimmed.starts_with('@'))
+                {
+                    if !rtrimmed.is_empty() && !rtrimmed.starts_with('#') {
+                        rule_description.push(rtrimmed.to_string());
+                    }
+                    idx += 1;
+                } else {
+                    break;
+                }
+            }
+
+            // Parse scenarios inside the Rule
+            let mut rule_scenarios = Vec::new();
+            loop {
+                idx = skip_blank_and_comments(&lines, idx);
+                if idx >= lines.len() {
+                    break;
+                }
+
+                let rtags = collect_tags(&lines, &mut idx);
+                if idx >= lines.len() {
+                    break;
+                }
+
+                let rtrimmed = lines[idx].trim();
+
+                // Only consume scenarios indented deeper than the Rule header
+                let line_indent = lines[idx].len() - lines[idx].trim().len();
+                if line_indent <= rule_indent {
+                    break;
+                }
+
+                if let Some((rkw, rst)) = lang.match_structural_prefix(rtrimmed) {
+                    if rst == StructuralType::ScenarioOutline {
+                        let sc_line = idx + 1;
+                        let sc_name = rtrimmed[rkw.len()..].trim().to_string();
+                        idx += 1;
+                        let steps = parse_steps(&lines, &mut idx, lang);
+                        let examples = parse_examples_blocks(&lines, &mut idx, lang);
+                        rule_scenarios.push(BddScenario {
+                            name: sc_name,
+                            tags: rtags,
+                            kind: ScenarioKind::ScenarioOutline,
+                            steps,
+                            examples,
+                            line_number: sc_line,
+                        });
+                        continue;
+                    } else if rst == StructuralType::Scenario {
+                        let sc_line = idx + 1;
+                        let sc_name = rtrimmed[rkw.len()..].trim().to_string();
+                        idx += 1;
+                        let steps = parse_steps(&lines, &mut idx, lang);
+                        let examples = parse_examples_blocks(&lines, &mut idx, lang);
+                        rule_scenarios.push(BddScenario {
+                            name: sc_name,
+                            tags: rtags,
+                            kind: ScenarioKind::Scenario,
+                            steps,
+                            examples,
+                            line_number: sc_line,
+                        });
+                        continue;
+                    }
+                }
+                // Not a scenario — stop Rule parsing
+                break;
+            }
+
+            rules.push(BddRule {
+                name: rule_name,
+                tags: block_tags,
+                description: rule_description,
+                scenarios: rule_scenarios,
+                line_number: rule_line,
             });
         } else if let Some((_kw, st)) = lang.match_structural_prefix(trimmed)
             && st == StructuralType::ScenarioOutline
@@ -210,9 +318,11 @@ fn parse_feature_with_lang(
     BddFeature {
         file_path,
         name: feature_name,
+        language: lang.code.clone(),
         tags: feature_tags,
         description: feature_description,
         background,
+        rules,
         scenarios,
         line_count,
     }
@@ -294,11 +404,13 @@ fn parse_steps(lines: &[&str], idx: &mut usize, lang: &GherkinLanguage) -> Vec<B
             *idx += 1;
             continue;
         }
-        if let Some(step) = try_parse_step(trimmed, *idx + 1, lang) {
-            steps.push(step);
+        if let Some(mut step) = try_parse_step(trimmed, *idx + 1, lang) {
             *idx += 1;
-            // Skip doc strings and data tables attached to this step
-            skip_doc_string_and_table(lines, idx);
+            // Parse doc string / data table after this step
+            let (ds, dt) = parse_step_attachment(lines, idx);
+            step.doc_string = ds;
+            step.data_table = dt;
+            steps.push(step);
         } else {
             break;
         }
@@ -316,39 +428,56 @@ fn try_parse_step(trimmed: &str, line_number: usize, lang: &GherkinLanguage) -> 
             keyword_type: kw_type,
             text,
             line_number,
+            doc_string: None,
+            data_table: None,
         });
     }
     None
 }
 
-fn skip_doc_string_and_table(lines: &[&str], idx: &mut usize) {
+/// Parse an optional doc string or data table following a step.
+/// Returns (doc_string, data_table).
+fn parse_step_attachment(
+    lines: &[&str],
+    idx: &mut usize,
+) -> (Option<String>, Option<Vec<Vec<String>>>) {
     // Skip blank lines
     while *idx < lines.len() && lines[*idx].trim().is_empty() {
         *idx += 1;
     }
     if *idx >= lines.len() {
-        return;
+        return (None, None);
     }
+
     let trimmed = lines[*idx].trim();
-    // Doc string
+
+    // Doc string (""" or ```)
     if trimmed.starts_with("\"\"\"") || trimmed.starts_with("```") {
         let marker = &trimmed[..3];
+        let mut content_lines = Vec::new();
         *idx += 1;
         while *idx < lines.len() {
             if lines[*idx].trim().starts_with(marker) {
                 *idx += 1;
-                break;
+                return (Some(content_lines.join("\n")), None);
             }
+            content_lines.push(lines[*idx].trim().to_string());
             *idx += 1;
         }
-        return;
+        return (Some(content_lines.join("\n")), None);
     }
+
     // Data table
     if trimmed.starts_with('|') {
+        let mut rows = Vec::new();
         while *idx < lines.len() && lines[*idx].trim().starts_with('|') {
+            rows.push(parse_table_row(lines[*idx]));
             *idx += 1;
         }
+        return (None, Some(rows));
     }
+
+    (None, None)
 }
 
 fn parse_examples_blocks(
@@ -568,5 +697,106 @@ Feature: User login
         assert_eq!(steps[2].keyword, "那么");
         assert_eq!(steps[2].keyword_type, StepKeywordType::Then);
         assert_eq!(steps[2].text, "我看到欢迎");
+    }
+
+    #[test]
+    fn parses_doc_string_after_step() {
+        let content = "\
+Feature: Doc
+  Scenario: With doc string
+    Given I have a document
+      \"\"\"
+      some text
+      across lines
+      \"\"\"
+";
+        let f = parse_feature(content, PathBuf::from("doc.feature"));
+        let step = &f.scenarios[0].steps[0];
+        assert_eq!(step.doc_string.as_deref(), Some("some text\nacross lines"));
+        assert!(step.data_table.is_none());
+    }
+
+    #[test]
+    fn parses_data_table_after_step() {
+        let content = "\
+Feature: Table
+  Scenario: With data table
+    Given I have data
+      | name | age |
+      | Alice | 30 |
+      | Bob   | 25 |
+";
+        let f = parse_feature(content, PathBuf::from("table.feature"));
+        let step = &f.scenarios[0].steps[0];
+        assert!(step.doc_string.is_none());
+        let dt = step.data_table.as_ref().expect("data_table should exist");
+        assert_eq!(dt.len(), 3);
+        assert_eq!(dt[0], vec!["name", "age"]);
+        assert_eq!(dt[1], vec!["Alice", "30"]);
+        assert_eq!(dt[2], vec!["Bob", "25"]);
+    }
+
+    #[test]
+    fn parses_doc_string_with_backtick_delimiter() {
+        let content = "\
+Feature: Backtick
+  Scenario: With backtick doc
+    Given I have code
+      ```
+      fn hello() {
+          println!(\"hi\");
+      }
+      ```
+";
+        let f = parse_feature(content, PathBuf::from("backtick.feature"));
+        let step = &f.scenarios[0].steps[0];
+        assert!(step.doc_string.is_some());
+        assert!(step.doc_string.as_ref().unwrap().contains("fn hello()"));
+    }
+
+    #[test]
+    fn parses_rule_with_scenarios() {
+        let content = "\
+Feature: With Rule
+  Rule: Login rules
+    @rule_tag
+    Scenario: Valid login
+      Given I am valid
+      Then I pass
+
+    Scenario: Invalid login
+      Given I am invalid
+      Then I fail
+
+  Scenario: No rule
+    Given standalone
+";
+        let f = parse_feature(content, PathBuf::from("rule.feature"));
+        assert_eq!(f.rules.len(), 1);
+        let rule = &f.rules[0];
+        assert_eq!(rule.name, "Login rules");
+        assert_eq!(rule.scenarios.len(), 2);
+        assert_eq!(rule.scenarios[0].name, "Valid login");
+        assert_eq!(rule.scenarios[0].tags, vec!["@rule_tag"]);
+        assert_eq!(rule.scenarios[0].steps.len(), 2);
+        assert_eq!(rule.scenarios[1].name, "Invalid login");
+        // Scenario after the Rule is not consumed by the Rule
+        assert_eq!(f.scenarios.len(), 1);
+        assert_eq!(f.scenarios[0].name, "No rule");
+    }
+
+    #[test]
+    fn parses_language_code() {
+        let f = parse_feature(SAMPLE, PathBuf::from("login.feature"));
+        assert_eq!(f.language, "en");
+
+        let chinese = "\
+# language: zh-CN
+功能: 登录
+  场景: 测试
+    当 我操作
+";
+        let f = parse_feature(chinese, PathBuf::from("zh.feature"));
+        assert_eq!(f.language, "zh-CN");
     }
 }

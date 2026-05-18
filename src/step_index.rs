@@ -50,6 +50,17 @@ impl StepIndex {
                     });
                 }
             }
+            // Steps inside Rule blocks
+            for (sci, rule) in feature.rules.iter().enumerate() {
+                for (sti, step) in rule.scenarios.iter().flat_map(|s| &s.steps).enumerate() {
+                    let key = normalize(&step.text);
+                    usages.entry(key).or_default().push(StepLocation {
+                        feature_idx: fi,
+                        scenario_idx: sci,
+                        step_idx: sti,
+                    });
+                }
+            }
         }
         Self { usages }
     }

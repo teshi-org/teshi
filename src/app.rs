@@ -1288,6 +1288,9 @@ impl App {
             ctx.push_str(&format!(
                 "  {path}: {sc_count} scenario(s), {st_count} step(s)"
             ));
+            if f.language != "en" {
+                ctx.push_str(&format!("     Language: {}", f.language));
+            }
             if !f.tags.is_empty() {
                 ctx.push_str(&format!(" [{}]", f.tags.join(" ")));
             }
