@@ -282,6 +282,8 @@ pub struct AgentPendingChange {
     pub tool_call_id: String,
     /// Snapshot of buffer content before the change (for diff computation).
     pub old_buffer_snapshot: String,
+    /// The agent that queued this change (for correct tool result routing).
+    pub agent_idx: usize,
 }
 
 pub struct App {
@@ -1174,8 +1176,13 @@ impl App {
                             self.agents[i].tool_status =
                                 Some(format!("AI is calling {}...", tc.name));
                             let pending_before = self.pending_agent_changes.len();
-                            match crate::agent::execute_tool(self, &tc.name, &tc.arguments, &tc.id)
-                            {
+                            match crate::agent::execute_tool(
+                                self,
+                                &tc.name,
+                                &tc.arguments,
+                                &tc.id,
+                                i,
+                            ) {
                                 Ok(result) => {
                                     let pending_after = self.pending_agent_changes.len();
                                     if pending_after > pending_before {
@@ -1241,11 +1248,11 @@ impl App {
                     }
                     Ok(crate::llm::LlmEvent::Error { message }) => {
                         self.agents[i].partial_response.clear();
-                        self.agents[i].status = AiStatus::Error;
+                        self.agents[i].status = AiStatus::Idle;
                         self.agents[i].tool_status = None;
                         self.agents[i].agent_loop_count = 0;
                         if i == self.selected_agent {
-                            self.status = format!("AI error: {message}");
+                            self.status = format!("AI: {message}");
                         }
                     }
                     Ok(crate::llm::LlmEvent::Chunk { content }) => {
@@ -1598,9 +1605,21 @@ impl App {
 
     /// After a pending agent change is accepted or rejected, feed the result back
     /// to the LLM as a tool result message and continue the agent loop.
+    #[allow(dead_code)]
     fn feed_agent_tool_result(&mut self, tool_call_id: String, result: String) {
+        self.feed_agent_tool_result_for_agent(self.selected_agent, tool_call_id, result);
+    }
+
+    /// Same as `feed_agent_tool_result` but operates on the specified agent index
+    /// (used when the accepting/rejecting agent may differ from `self.selected_agent`).
+    fn feed_agent_tool_result_for_agent(
+        &mut self,
+        agent_idx: usize,
+        tool_call_id: String,
+        result: String,
+    ) {
         // Append tool result message
-        self.agent_mut().messages.push(AiChatMessage {
+        self.agents[agent_idx].messages.push(AiChatMessage {
             role: AiRole::Tool,
             content: result,
             tool_calls: None,
@@ -1611,10 +1630,10 @@ impl App {
 
         // If the project is empty, terminate gracefully
         if self.project.features.is_empty() {
-            self.agent_mut().partial_response.clear();
-            self.agent_mut().status = AiStatus::Idle;
-            self.agent_mut().tool_status = None;
-            self.agent_mut().agent_loop_count = 0;
+            self.agents[agent_idx].partial_response.clear();
+            self.agents[agent_idx].status = AiStatus::Idle;
+            self.agents[agent_idx].tool_status = None;
+            self.agents[agent_idx].agent_loop_count = 0;
             self.status =
                 "The project directory has no .feature files. Add one to begin.".to_string();
             return;
@@ -1622,11 +1641,11 @@ impl App {
 
         // Re-invoke the LLM to continue the agent loop
         // Compact context before sending to avoid exceeding token limits
-        self.compact_context_if_needed(self.selected_agent);
-        let messages = self.build_chat_messages_for_agent(self.selected_agent);
+        self.compact_context_if_needed(agent_idx);
+        let messages = self.build_chat_messages_for_agent(agent_idx);
         let tools = Some(crate::agent::get_tools());
         let system_prompt = self.ai_system_prompt(None);
-        let agent = self.agent_mut();
+        let agent = &mut self.agents[agent_idx];
         agent.agent_loop_count += 1;
         if agent.agent_loop_count > 5 {
             agent.status = AiStatus::Error;
@@ -3258,13 +3277,15 @@ impl App {
             } else {
                 return match action {
                     Action::AgentChangeAccept => {
+                        let agent_idx = self.pending_agent_changes[0].agent_idx;
                         let (tool_call_id, result) = self.accept_agent_change()?;
-                        self.feed_agent_tool_result(tool_call_id, result);
+                        self.feed_agent_tool_result_for_agent(agent_idx, tool_call_id, result);
                         Ok(())
                     }
                     Action::AgentChangeReject => {
+                        let agent_idx = self.pending_agent_changes[0].agent_idx;
                         let (tool_call_id, result) = self.reject_agent_change();
-                        self.feed_agent_tool_result(tool_call_id, result);
+                        self.feed_agent_tool_result_for_agent(agent_idx, tool_call_id, result);
                         Ok(())
                     }
                     _ => Ok(()),

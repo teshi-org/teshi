@@ -27,18 +27,21 @@ pub fn execute_tool(
     name: &str,
     args_json: &str,
     tool_call_id: &str,
+    agent_idx: usize,
 ) -> Result<String> {
     match name {
         "get_project_info" => execute_get_project_info(app),
         "highlight_mindmap_nodes" => execute_highlight_mindmap_nodes(app, args_json),
         "apply_mindmap_filter" => execute_apply_mindmap_filter(app, args_json),
         "get_feature_content" => execute_get_feature_content(app, args_json),
-        "insert_scenario" => execute_insert_scenario(app, args_json, tool_call_id),
-        "update_step" => execute_update_step(app, args_json, tool_call_id),
-        "create_feature_file" => execute_create_feature_file(app, args_json, tool_call_id),
-        "delete_scenario" => execute_delete_scenario(app, args_json, tool_call_id),
-        "rename_scenario" => execute_rename_scenario(app, args_json, tool_call_id),
-        "reorder_steps" => execute_reorder_steps(app, args_json, tool_call_id),
+        "insert_scenario" => execute_insert_scenario(app, args_json, tool_call_id, agent_idx),
+        "update_step" => execute_update_step(app, args_json, tool_call_id, agent_idx),
+        "create_feature_file" => {
+            execute_create_feature_file(app, args_json, tool_call_id, agent_idx)
+        }
+        "delete_scenario" => execute_delete_scenario(app, args_json, tool_call_id, agent_idx),
+        "rename_scenario" => execute_rename_scenario(app, args_json, tool_call_id, agent_idx),
+        "reorder_steps" => execute_reorder_steps(app, args_json, tool_call_id, agent_idx),
         "search_features" => execute_search_features(app, args_json),
         "run_tests" => execute_run_tests(app, args_json),
         "load_skill" => execute_load_skill(app, args_json),
@@ -323,6 +326,7 @@ fn execute_insert_scenario(
     app: &mut crate::app::App,
     args_json: &str,
     tool_call_id: &str,
+    agent_idx: usize,
 ) -> Result<String> {
     let args: serde_json::Value =
         serde_json::from_str(args_json).context("invalid JSON arguments")?;
@@ -411,6 +415,7 @@ fn execute_insert_scenario(
             .buffers
             .get(feature_idx)
             .map_or(String::new(), |b| b.as_string()),
+        agent_idx,
     };
 
     app.queue_agent_change(change);
@@ -424,6 +429,7 @@ fn execute_update_step(
     app: &mut crate::app::App,
     args_json: &str,
     tool_call_id: &str,
+    agent_idx: usize,
 ) -> Result<String> {
     let args: serde_json::Value =
         serde_json::from_str(args_json).context("invalid JSON arguments")?;
@@ -500,6 +506,7 @@ fn execute_update_step(
             .buffers
             .get(feature_idx)
             .map_or(String::new(), |b| b.as_string()),
+        agent_idx,
     };
 
     app.queue_agent_change(change);
@@ -516,6 +523,7 @@ fn execute_create_feature_file(
     app: &mut crate::app::App,
     args_json: &str,
     tool_call_id: &str,
+    agent_idx: usize,
 ) -> Result<String> {
     let args: serde_json::Value =
         serde_json::from_str(args_json).context("invalid JSON arguments")?;
@@ -596,6 +604,7 @@ fn execute_create_feature_file(
         scenario_name: feature_name.to_string(),
         tool_call_id: tool_call_id.to_string(),
         old_buffer_snapshot: String::new(),
+        agent_idx,
     };
 
     app.queue_agent_change(change);
@@ -611,6 +620,7 @@ fn execute_delete_scenario(
     app: &mut crate::app::App,
     args_json: &str,
     tool_call_id: &str,
+    agent_idx: usize,
 ) -> Result<String> {
     let args: serde_json::Value =
         serde_json::from_str(args_json).context("invalid JSON arguments")?;
@@ -686,6 +696,7 @@ fn execute_delete_scenario(
         scenario_name: scenario_name.to_string(),
         tool_call_id: tool_call_id.to_string(),
         old_buffer_snapshot: app.buffers[feature_idx].as_string(),
+        agent_idx,
     };
 
     app.queue_agent_change(change);
@@ -701,6 +712,7 @@ fn execute_rename_scenario(
     app: &mut crate::app::App,
     args_json: &str,
     tool_call_id: &str,
+    agent_idx: usize,
 ) -> Result<String> {
     let args: serde_json::Value =
         serde_json::from_str(args_json).context("invalid JSON arguments")?;
@@ -752,6 +764,7 @@ fn execute_rename_scenario(
         scenario_name: new_name.to_string(),
         tool_call_id: tool_call_id.to_string(),
         old_buffer_snapshot: app.buffers[feature_idx].as_string(),
+        agent_idx,
     };
 
     app.queue_agent_change(change);
@@ -767,6 +780,7 @@ fn execute_reorder_steps(
     app: &mut crate::app::App,
     args_json: &str,
     tool_call_id: &str,
+    agent_idx: usize,
 ) -> Result<String> {
     let args: serde_json::Value =
         serde_json::from_str(args_json).context("invalid JSON arguments")?;
@@ -854,6 +868,7 @@ fn execute_reorder_steps(
         scenario_name: scenario_name.to_string(),
         tool_call_id: tool_call_id.to_string(),
         old_buffer_snapshot: app.buffers[feature_idx].as_string(),
+        agent_idx,
     };
 
     app.queue_agent_change(change);
