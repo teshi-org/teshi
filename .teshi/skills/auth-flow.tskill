@@ -1,0 +1,38 @@
+---
+name: auth-flow
+description: User authentication feature template — login, register, password reset, permissions
+keywords: [auth, login, password, authentication, register, signin, 登录, 认证]
+---
+
+## Applicable Scenarios
+- User login with credentials
+- User registration
+- Password reset flow
+- Account lockout after failed attempts
+- Role-based access control
+
+## Recommended Scenarios
+1. **Successful login** with valid credentials
+2. **Login failure** — incorrect password
+3. **Login failure** — non-existent account
+4. **Account locked** after N failed attempts (use Scenario Outline)
+5. **Password reset** — request → receive email → set new password → login with new password
+6. **Authorization** — accessing restricted resources without proper role
+
+## Suggested Background
+```gherkin
+Given a registered user with email "<email>" and password "<password>"
+```
+
+## Suggested Tags
+@auth @security @smoke
+
+## Common Step Patterns
+- Given I am on the login page
+- Given I am logged in as <role>
+- When I enter valid credentials
+- When I enter email "<email>" and password "<password>"
+- When I submit the login form
+- Then I should see the dashboard
+- Then I should see an error message "Invalid credentials"
+- Then I should be redirected to the login page

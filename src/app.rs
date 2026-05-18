@@ -417,6 +417,8 @@ pub struct App {
     pub session_panel_active: bool,
     pub session_panel_selection: usize,
     pub session_list: Vec<crate::session::Session>,
+    // ── Skill/template registry ─────────────────────────
+    pub skill_registry: crate::agent::skills::SkillRegistry,
 }
 
 /// Convert a character index to the corresponding byte offset in a UTF-8 string.
@@ -638,6 +640,7 @@ impl App {
             session_panel_active: false,
             session_panel_selection: 0,
             session_list: Vec::new(),
+            skill_registry: Self::load_skill_registry(dir),
         };
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -764,6 +767,10 @@ impl App {
             session_panel_active: false,
             session_panel_selection: 0,
             session_list: Vec::new(),
+            skill_registry: {
+                let root_dir = path.parent().unwrap_or(Path::new("."));
+                Self::load_skill_registry(root_dir)
+            },
         };
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -878,6 +885,7 @@ impl App {
             session_panel_active: false,
             session_panel_selection: 0,
             session_list: Vec::new(),
+            skill_registry: crate::agent::skills::SkillRegistry::new(),
         };
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -1211,7 +1219,7 @@ impl App {
                                 let tools = Some(crate::agent::get_tools());
                                 let handle = self.agents[i].llm_handle.as_ref().unwrap();
                                 let _ = handle.send(crate::llm::LlmRequest::Chat {
-                                    system: Some(Self::ai_system_prompt(None)),
+                                    system: Some(self.ai_system_prompt(None)),
                                     messages,
                                     tools,
                                 });
@@ -1351,9 +1359,30 @@ impl App {
         msgs
     }
 
+    /// Load the skill registry from the project directory or parent directories.
+    fn load_skill_registry(project_dir: &Path) -> crate::agent::skills::SkillRegistry {
+        // Try several paths for skill files
+        for dir in &[
+            project_dir.join(".teshi/skills"),
+            project_dir.join("skills"),
+        ] {
+            if dir.exists() {
+                return crate::agent::skills::SkillRegistry::load_from_dir(dir);
+            }
+        }
+        // Also check parent directories (useful when project is a subdirectory)
+        if let Some(parent) = project_dir.parent() {
+            let parent_skills = parent.join(".teshi/skills");
+            if parent_skills.exists() {
+                return crate::agent::skills::SkillRegistry::load_from_dir(&parent_skills);
+            }
+        }
+        crate::agent::skills::SkillRegistry::new()
+    }
+
     /// The system prompt used for all AI chat requests.
     /// When `request` contains generation keywords, additional guidance is appended.
-    fn ai_system_prompt(request: Option<&str>) -> String {
+    fn ai_system_prompt(&self, request: Option<&str>) -> String {
         let mut prompt = String::from(
             "You are a BDD/Gherkin assistant embedded in Teshi, a TUI editor for .feature files.\n\
              \n\
@@ -1466,6 +1495,13 @@ impl App {
              - Do not invent file names — use the ones the user provides or that exist.",
         );
 
+        // Add skill catalog
+        if !self.skill_registry.is_empty() {
+            prompt.push_str("\n\n## Available Generation Templates\n");
+            prompt.push_str(&self.skill_registry.catalog());
+            prompt.push_str("Use the `load_skill` tool to load the full template content.");
+        }
+
         // Append extra guidance for generation requests
         if let Some(req) = request
             && Self::is_generation_request(req)
@@ -1513,6 +1549,7 @@ impl App {
         self.compact_context_if_needed(self.selected_agent);
         let messages = self.build_chat_messages_for_agent(self.selected_agent);
         let tools = Some(crate::agent::get_tools());
+        let system_prompt = self.ai_system_prompt(None);
         let agent = self.agent_mut();
         agent.agent_loop_count += 1;
         if agent.agent_loop_count > 5 {
@@ -1524,7 +1561,7 @@ impl App {
             agent.status = AiStatus::Waiting;
             agent.tool_status = Some("Teshi is thinking...".into());
             let _ = handle.send(crate::llm::LlmRequest::Chat {
-                system: Some(Self::ai_system_prompt(None)),
+                system: Some(system_prompt),
                 messages,
                 tools,
             });
@@ -3240,7 +3277,7 @@ impl App {
                         let tools = Some(crate::agent::get_tools());
                         if handle
                             .send(crate::llm::LlmRequest::Chat {
-                                system: Some(Self::ai_system_prompt(None)),
+                                system: Some(self.ai_system_prompt(None)),
                                 messages,
                                 tools,
                             })
@@ -3867,7 +3904,7 @@ impl App {
                     let handle = self.agent().llm_handle.as_ref().unwrap();
                     if handle
                         .send(LlmRequest::Chat {
-                            system: Some(Self::ai_system_prompt(Some(&user_msg))),
+                            system: Some(self.ai_system_prompt(Some(&user_msg))),
                             messages,
                             tools,
                         })
@@ -5861,6 +5898,7 @@ mod tests {
             session_panel_active: false,
             session_panel_selection: 0,
             session_list: Vec::new(),
+            skill_registry: crate::agent::skills::SkillRegistry::new(),
         };
 
         app.handle_action(Action::ExploreRight)
@@ -6004,6 +6042,7 @@ Feature: B
             session_panel_active: false,
             session_panel_selection: 0,
             session_list: Vec::new(),
+            skill_registry: crate::agent::skills::SkillRegistry::new(),
         };
 
         app.explore_selected_feature = 0;

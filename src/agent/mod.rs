@@ -4,6 +4,7 @@
 //! state and modify editor content. Read-only tools return results immediately;
 //! file-modifying tools (e.g. `insert_scenario`) queue changes for user confirmation.
 
+pub mod skills;
 mod tools;
 
 pub use tools::get_tools;
@@ -38,6 +39,7 @@ pub fn execute_tool(
         "reorder_steps" => execute_reorder_steps(app, args_json, tool_call_id),
         "search_features" => execute_search_features(app, args_json),
         "run_tests" => execute_run_tests(app, args_json),
+        "load_skill" => execute_load_skill(app, args_json),
         _ => anyhow::bail!("unknown tool: {name}"),
     }
 }
@@ -960,4 +962,34 @@ fn execute_run_tests(app: &mut crate::app::App, args_json: &str) -> Result<Strin
         "Test run complete: {passed} passed, {failed} failed, {skipped} skipped out of {total} total.\n\nDetails:\n{}",
         details.join("\n")
     ))
+}
+
+// ── load_skill ────────────────────────────────────────────────────────────
+
+fn execute_load_skill(app: &mut crate::app::App, args_json: &str) -> Result<String> {
+    let args: serde_json::Value =
+        serde_json::from_str(args_json).context("invalid JSON arguments")?;
+    let skill_name = args
+        .get("skill_name")
+        .and_then(|v| v.as_str())
+        .context("missing 'skill_name'")?;
+
+    if let Some(skill) = app.skill_registry.get(skill_name) {
+        Ok(format!("## Skill: {}\n\n{}", skill.name, skill.content))
+    } else {
+        let catalog_text = app.skill_registry.catalog();
+        let available: Vec<_> = catalog_text
+            .lines()
+            .filter(|l| l.starts_with("  - "))
+            .collect();
+        Ok(format!(
+            "Skill '{}' not found. Available templates:\n{}",
+            skill_name,
+            if available.is_empty() {
+                "  (no templates loaded)".into()
+            } else {
+                available.join("\n")
+            }
+        ))
+    }
 }

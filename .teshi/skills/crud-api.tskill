@@ -1,0 +1,34 @@
+---
+name: crud-api
+description: CRUD API endpoint testing template — create, read, update, delete resources
+keywords: [crud, api, rest, endpoint, resource, create, read, update, delete]
+---
+
+## Applicable Scenarios
+- REST API endpoint testing (any resource type)
+- CRUD operations on a domain entity
+
+## Recommended Scenarios
+1. **Create** a new resource with valid data → 201 Created
+2. **Create** with invalid/missing data → 400 Bad Request
+3. **Read** an existing resource by ID → 200 OK with data
+4. **Read** a non-existent resource → 404 Not Found
+5. **List** all resources → 200 OK with paginated results
+6. **Update** an existing resource → 200 OK
+7. **Update** a non-existent resource → 404 Not Found
+8. **Delete** an existing resource → 204 No Content
+9. **Delete** a non-existent resource → 404 Not Found
+
+## Suggested Tags
+@api @crud @regression @automated
+
+## Common Step Patterns
+- Given the API endpoint "/api/<resource>" exists
+- Given there is an existing resource with id "<id>"
+- When I send a POST request to "/api/<resource>" with body:
+- When I send a GET request to "/api/<resource>/<id>"
+- When I send a PUT request to "/api/<resource>/<id>" with body:
+- When I send a DELETE request to "/api/<resource>/<id>"
+- Then the response status should be 200
+- Then the response body should contain "<field>"
+- And the response should include a paginated list
