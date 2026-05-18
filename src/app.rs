@@ -419,6 +419,10 @@ pub struct App {
     pub session_list: Vec<crate::session::Session>,
     // ── Skill/template registry ─────────────────────────
     pub skill_registry: crate::agent::skills::SkillRegistry,
+    // ── Generation pipeline state ───────────────────────
+    pub generation_stage: crate::agent::pipeline::GenerationStage,
+    pub pipeline_requirement: Option<crate::agent::pipeline::Requirement>,
+    pub pipeline_plan: Option<crate::agent::pipeline::GenerationPlan>,
 }
 
 /// Convert a character index to the corresponding byte offset in a UTF-8 string.
@@ -641,6 +645,9 @@ impl App {
             session_panel_selection: 0,
             session_list: Vec::new(),
             skill_registry: Self::load_skill_registry(dir),
+            generation_stage: crate::agent::pipeline::GenerationStage::Idle,
+            pipeline_requirement: None,
+            pipeline_plan: None,
         };
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -771,6 +778,9 @@ impl App {
                 let root_dir = path.parent().unwrap_or(Path::new("."));
                 Self::load_skill_registry(root_dir)
             },
+            generation_stage: crate::agent::pipeline::GenerationStage::Idle,
+            pipeline_requirement: None,
+            pipeline_plan: None,
         };
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -886,6 +896,9 @@ impl App {
             session_panel_selection: 0,
             session_list: Vec::new(),
             skill_registry: crate::agent::skills::SkillRegistry::new(),
+            generation_stage: crate::agent::pipeline::GenerationStage::Idle,
+            pipeline_requirement: None,
+            pipeline_plan: None,
         };
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -1500,6 +1513,34 @@ impl App {
             prompt.push_str("\n\n## Available Generation Templates\n");
             prompt.push_str(&self.skill_registry.catalog());
             prompt.push_str("Use the `load_skill` tool to load the full template content.");
+        }
+
+        // Generation pipeline guidance
+        prompt.push_str(
+            "\n\n## Feature Generation Pipeline\n\
+             When the user asks to create or generate a feature, follow this pipeline:\n\
+             1. **Requirements Gathering** — Ask questions about what they need. Call `submit_requirements` when done.\n\
+             2. **Planning** — Design the scenario structure. Call `generate_plan` to submit your plan.\n\
+             3. **Writing** — Execute the plan using `create_feature_file` and `insert_scenario`.\n\
+             4. **Validation** — Use `validate_feature` to check for issues.\n\
+             \n\
+             Do NOT skip steps. Start by gathering requirements.\n\
+             If the user's request is already detailed, you can ask 1-2 clarifying questions then proceed.\n\
+             Always check the [Project Context] to understand existing files before generating.",
+        );
+
+        // Inject pipeline stage guidance if a generation is in progress
+        if !matches!(
+            self.generation_stage,
+            crate::agent::pipeline::GenerationStage::Idle
+                | crate::agent::pipeline::GenerationStage::Complete
+        ) {
+            prompt.push_str("\n## Generation Pipeline Status\n");
+            prompt.push_str(&format!(
+                "Current stage: **{}**\n",
+                self.generation_stage.label()
+            ));
+            prompt.push_str(self.generation_stage.prompt_guidance());
         }
 
         // Append extra guidance for generation requests
@@ -5899,6 +5940,9 @@ mod tests {
             session_panel_selection: 0,
             session_list: Vec::new(),
             skill_registry: crate::agent::skills::SkillRegistry::new(),
+            generation_stage: crate::agent::pipeline::GenerationStage::Idle,
+            pipeline_requirement: None,
+            pipeline_plan: None,
         };
 
         app.handle_action(Action::ExploreRight)
@@ -6043,6 +6087,9 @@ Feature: B
             session_panel_selection: 0,
             session_list: Vec::new(),
             skill_registry: crate::agent::skills::SkillRegistry::new(),
+            generation_stage: crate::agent::pipeline::GenerationStage::Idle,
+            pipeline_requirement: None,
+            pipeline_plan: None,
         };
 
         app.explore_selected_feature = 0;
