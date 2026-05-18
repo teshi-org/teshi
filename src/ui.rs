@@ -1213,11 +1213,12 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 _ => Color::White,
             };
             let kw_span = Span::styled(kw, Style::default().fg(kw_color));
-            let body_span = Span::raw(format!(" {}", step.text));
+            let body_span = if i == app.explore_selected_step {
+                Span::styled(format!(" {}", step.text), highlight_style)
+            } else {
+                Span::raw(format!(" {}", step.text))
+            };
             let mut line = Line::from(vec![kw_span, body_span]);
-            if i == app.explore_selected_step {
-                line = apply_line_background(line, highlight_style);
-            }
             line = truncate_line_to_cols(line, inner.width);
             let trail = if i == app.explore_selected_step {
                 highlight_style
