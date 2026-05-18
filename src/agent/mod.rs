@@ -207,8 +207,8 @@ fn execute_get_feature_content(app: &mut crate::app::App, args_json: &str) -> Re
         out.push_str(&format!("\nBackground (line {}):\n", bg.line_number));
         for step in &bg.steps {
             out.push_str(&format!(
-                "  {} {} (line {})\n",
-                step.keyword, step.text, step.line_number
+                "  [{:?}] {} {} (line {})\n",
+                step.keyword_type, step.keyword, step.text, step.line_number
             ));
         }
     }
@@ -227,8 +227,8 @@ fn execute_get_feature_content(app: &mut crate::app::App, args_json: &str) -> Re
         }
         for step in &sc.steps {
             out.push_str(&format!(
-                "      {} {} (line {})\n",
-                step.keyword, step.text, step.line_number
+                "      [{:?}] {} {} (line {})\n",
+                step.keyword_type, step.keyword, step.text, step.line_number
             ));
         }
         for (ei, ex) in sc.examples.iter().enumerate() {
