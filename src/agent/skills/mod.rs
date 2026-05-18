@@ -66,7 +66,8 @@ impl SkillRegistry {
     /// Returns up to 5 matches, ranked by number of matched keywords.
     pub fn match_skills(&self, text: &str) -> Vec<&SkillDefinition> {
         let lower = text.to_lowercase();
-        let text_words: Vec<&str> = lower.split_whitespace().collect();
+        // Only use meaningful words (length >= 3) to avoid trivial substring matches
+        let text_words: Vec<&str> = lower.split_whitespace().filter(|w| w.len() >= 3).collect();
 
         let mut scored: Vec<(usize, &SkillDefinition)> = self
             .skills
@@ -126,5 +127,71 @@ impl SkillRegistry {
 impl Default for SkillRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_empty_by_default() {
+        let reg = SkillRegistry::new();
+        assert!(reg.is_empty());
+        assert!(reg.catalog().is_empty());
+    }
+
+    #[test]
+    fn registry_register_and_get() {
+        let mut reg = SkillRegistry::new();
+        let skill = SkillDefinition {
+            name: "test".into(),
+            description: "a test skill".into(),
+            keywords: vec![],
+            content: "# Test\ncontent".into(),
+            path: None,
+        };
+        reg.register(skill);
+        assert!(!reg.is_empty());
+        assert!(reg.get("test").is_some());
+        assert!(reg.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn registry_match_skills_by_keyword() {
+        let mut reg = SkillRegistry::new();
+        reg.register(SkillDefinition {
+            name: "auth".into(),
+            description: "auth template".into(),
+            keywords: vec!["login".into(), "password".into(), "auth".into()],
+            content: "".into(),
+            path: None,
+        });
+        reg.register(SkillDefinition {
+            name: "crud".into(),
+            description: "crud template".into(),
+            keywords: vec!["create".into(), "read".into(), "delete".into()],
+            content: "".into(),
+            path: None,
+        });
+
+        let matched = reg.match_skills("I need a login feature");
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].name, "auth");
+    }
+
+    #[test]
+    fn registry_catalog_format() {
+        let mut reg = SkillRegistry::new();
+        reg.register(SkillDefinition {
+            name: "s1".into(),
+            description: "desc1".into(),
+            keywords: vec![],
+            content: "".into(),
+            path: None,
+        });
+        let cat = reg.catalog();
+        assert!(cat.contains("s1"));
+        assert!(cat.contains("desc1"));
     }
 }

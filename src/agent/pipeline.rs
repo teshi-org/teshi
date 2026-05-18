@@ -121,3 +121,69 @@ pub struct ScenarioPlan {
     #[serde(default)]
     pub examples_rows: Vec<Vec<String>>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_default_is_idle() {
+        let stage = GenerationStage::default();
+        assert_eq!(stage, GenerationStage::Idle);
+    }
+
+    #[test]
+    fn stage_labels_are_not_empty_for_active_stages() {
+        assert_eq!(GenerationStage::Gathering.label(), "Requirements Gathering");
+        assert_eq!(GenerationStage::Planning.label(), "Scenario Planning");
+        assert_eq!(GenerationStage::Writing.label(), "Feature Writing");
+        assert_eq!(GenerationStage::Validating.label(), "Validation");
+        assert_eq!(GenerationStage::Complete.label(), "Complete");
+    }
+
+    #[test]
+    fn idle_stage_has_empty_guidance() {
+        assert!(GenerationStage::Idle.prompt_guidance().is_empty());
+        assert!(GenerationStage::Complete.prompt_guidance().is_empty());
+    }
+
+    #[test]
+    fn gathering_stage_has_guidance() {
+        let guidance = GenerationStage::Gathering.prompt_guidance();
+        assert!(!guidance.is_empty());
+        assert!(guidance.contains("submit_requirements"));
+        assert!(guidance.contains("Requirements Gathering"));
+    }
+
+    #[test]
+    fn planning_stage_has_guidance() {
+        let guidance = GenerationStage::Planning.prompt_guidance();
+        assert!(!guidance.is_empty());
+        assert!(guidance.contains("generate_plan"));
+        assert!(guidance.contains("Scenario Outline"));
+    }
+
+    #[test]
+    fn writing_stage_instructions() {
+        let guidance = GenerationStage::Writing.prompt_guidance();
+        assert!(guidance.contains("create_feature_file"));
+        assert!(guidance.contains("validate_feature"));
+    }
+
+    #[test]
+    fn stage_serde_roundtrip() {
+        let stages = vec![
+            GenerationStage::Idle,
+            GenerationStage::Gathering,
+            GenerationStage::Planning,
+            GenerationStage::Writing,
+            GenerationStage::Validating,
+            GenerationStage::Complete,
+        ];
+        for stage in &stages {
+            let json = serde_json::to_string(stage).unwrap();
+            let back: GenerationStage = serde_json::from_str(&json).unwrap();
+            assert_eq!(*stage, back);
+        }
+    }
+}
