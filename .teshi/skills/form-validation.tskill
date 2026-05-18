@@ -1,0 +1,30 @@
+---
+name: form-validation
+description: Form/input validation testing template — required fields, format rules, boundaries
+keywords: [form, validation, input, field, required, format, boundary, 表单, 验证]
+---
+
+## Applicable Scenarios
+- Web forms with input validation
+- API request validation
+- User profile / registration forms
+
+## Recommended Scenarios
+1. **Required fields** — submitting empty required fields shows validation errors
+2. **Format validation** — invalid email/phone/URL format rejected
+3. **Boundary values** — minimum/maximum length for text fields
+4. **Character restrictions** — special characters, XSS attempts
+5. **Duplicate values** — submitting an already-taken username/email
+6. **Field combinations** — dependent field validation (e.g. password confirmation match)
+
+## Suggested Tags
+@validation @form @negative @edge
+
+## Common Step Patterns
+- Given I am on the <form_name> form
+- Given the <field> field is required
+- When I submit with empty required fields
+- When I enter "<value>" into the <field> field
+- Then I should see a validation error for "<field>"
+- Then the form should not be submitted
+- Then I should see the error message "<message>"
