@@ -1,28 +1,10 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-pub struct KeywordSet {
-    pub headers: &'static [&'static str],
-    pub steps: &'static [&'static str],
-}
-
-impl Default for KeywordSet {
-    fn default() -> Self {
-        Self {
-            headers: &[
-                "Feature:",
-                "Background:",
-                "Scenario:",
-                "Scenario Outline:",
-                "Examples:",
-            ],
-            steps: &["Given", "When", "Then", "And", "But"],
-        }
-    }
-}
+use crate::gherkin_lang::{GherkinLanguage, StepKeywordType, StructuralType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StepMajor {
+enum StepMajor {
     Given,
     When,
     Then,
@@ -38,6 +20,20 @@ impl StepMajor {
     }
 }
 
+impl From<StepKeywordType> for StepMajor {
+    fn from(t: StepKeywordType) -> Self {
+        match t {
+            StepKeywordType::Given => StepMajor::Given,
+            StepKeywordType::When => StepMajor::When,
+            StepKeywordType::Then => StepMajor::Then,
+            StepKeywordType::And | StepKeywordType::But => {
+                // Fallback; callers that pass And/But should handle separately
+                StepMajor::Given
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StepHighlightState {
     pub in_doc_string: bool,
@@ -49,20 +45,20 @@ pub struct StepHighlightState {
 pub fn highlight_line(
     line: &str,
     in_doc_string: bool,
-    keywords: &KeywordSet,
+    lang: &GherkinLanguage,
 ) -> (Line<'static>, bool) {
     let mut state = StepHighlightState {
         in_doc_string,
         last_major: None,
     };
-    let line = highlight_line_with_state(line, &mut state, keywords);
+    let line = highlight_line_with_state(line, &mut state, lang);
     (line, state.in_doc_string)
 }
 
 pub fn highlight_line_with_state(
     line: &str,
     state: &mut StepHighlightState,
-    keywords: &KeywordSet,
+    lang: &GherkinLanguage,
 ) -> Line<'static> {
     let default = Style::default();
     let comment = Style::default().fg(Color::DarkGray);
@@ -101,59 +97,68 @@ pub fn highlight_line_with_state(
         return Line::from(spans);
     }
 
-    let reset_major = trimmed.starts_with("Feature:")
-        || trimmed.starts_with("Background:")
-        || trimmed.starts_with("Scenario Outline:")
-        || trimmed.starts_with("Scenario:");
-    if reset_major {
-        state.last_major = None;
+    // Reset major step type on scenario/feature boundaries
+    if let Some((_kw, st)) = lang.match_structural_prefix(trimmed) {
+        if matches!(
+            st,
+            StructuralType::Feature
+                | StructuralType::Scenario
+                | StructuralType::ScenarioOutline
+                | StructuralType::Background
+        ) {
+            state.last_major = None;
+        }
     }
 
-    for kw in keywords.headers {
-        if let Some(stripped) = trimmed.strip_prefix(kw) {
-            let leading_ws = line.len().saturating_sub(trimmed.len());
-            let mut spans = Vec::new();
-            if leading_ws > 0 {
-                spans.push(Span::raw(" ".repeat(leading_ws)));
-            }
-            spans.push(Span::styled((*kw).to_string(), header));
-            spans.push(Span::raw(stripped.to_string()));
-            return Line::from(spans);
+    // Structural header highlighting
+    if let Some((matched, _st)) = lang.match_structural_prefix(trimmed) {
+        let leading_ws = line.len().saturating_sub(trimmed.len());
+        let mut spans = Vec::new();
+        if leading_ws > 0 {
+            spans.push(Span::raw(" ".repeat(leading_ws)));
         }
+        let kw_text = matched.to_string();
+        let rest = &trimmed[kw_text.len()..];
+        spans.push(Span::styled(kw_text, header));
+        spans.push(Span::raw(rest.to_string()));
+        return Line::from(spans);
     }
-    for kw in keywords.steps {
-        if let Some(stripped) = trimmed.strip_prefix(kw) {
-            let leading_ws = line.len().saturating_sub(trimmed.len());
-            let mut spans = Vec::new();
-            if leading_ws > 0 {
-                spans.push(Span::raw(" ".repeat(leading_ws)));
-            }
-            let step_style = match *kw {
-                "Given" => {
-                    state.last_major = Some(StepMajor::Given);
-                    Style::default().fg(StepMajor::Given.color())
-                }
-                "When" => {
-                    state.last_major = Some(StepMajor::When);
-                    Style::default().fg(StepMajor::When.color())
-                }
-                "Then" => {
-                    state.last_major = Some(StepMajor::Then);
-                    Style::default().fg(StepMajor::Then.color())
-                }
-                "And" | "But" => {
-                    if let Some(major) = state.last_major {
-                        Style::default().fg(major.color())
-                    } else {
-                        Style::default().fg(Color::Gray)
-                    }
-                }
-                _ => step_default,
-            };
-            spans.push(Span::styled((*kw).to_string(), step_style));
-            spans.push(Span::raw(stripped.to_string()));
-            return Line::from(spans);
+
+    // Step keyword highlighting
+    if let Some((matched, kw_type)) = lang.match_step_prefix(trimmed) {
+        let leading_ws = line.len().saturating_sub(trimmed.len());
+        let mut spans = Vec::new();
+        if leading_ws > 0 {
+            spans.push(Span::raw(" ".repeat(leading_ws)));
         }
+        let kw_text = matched.to_string();
+        let rest = &trimmed[kw_text.len()..];
+
+        let step_style = match kw_type {
+            StepKeywordType::Given => {
+                state.last_major = Some(StepMajor::Given);
+                Style::default().fg(StepMajor::Given.color())
+            }
+            StepKeywordType::When => {
+                state.last_major = Some(StepMajor::When);
+                Style::default().fg(StepMajor::When.color())
+            }
+            StepKeywordType::Then => {
+                state.last_major = Some(StepMajor::Then);
+                Style::default().fg(StepMajor::Then.color())
+            }
+            StepKeywordType::And | StepKeywordType::But => {
+                if let Some(major) = state.last_major {
+                    Style::default().fg(major.color())
+                } else {
+                    Style::default().fg(Color::Gray)
+                }
+            }
+        };
+
+        spans.push(Span::styled(kw_text, step_style));
+        spans.push(Span::raw(rest.to_string()));
+        return Line::from(spans);
     }
 
     let mut spans = Vec::new();
@@ -177,28 +182,12 @@ pub fn highlight_line_with_state(
 
 #[cfg(test)]
 mod tests {
-    use super::{KeywordSet, StepHighlightState, highlight_line, highlight_line_with_state};
+    use super::*;
+    use crate::gherkin_lang::GherkinLanguages;
     use ratatui::style::Color;
-    use ratatui::text::Line;
 
-    #[test]
-    fn test_highlight_header() {
-        let (line, _) = highlight_line("Feature: Login", false, &KeywordSet::default());
-        assert_eq!(line.spans[0].content.as_ref(), "Feature:");
-    }
-
-    #[test]
-    fn test_highlight_comment() {
-        let (line, _) = highlight_line("# comment", false, &KeywordSet::default());
-        assert_eq!(line.spans[0].content.as_ref(), "# comment");
-    }
-
-    #[test]
-    fn test_doc_string_toggle() {
-        let (_, in_doc) = highlight_line("\"\"\"", false, &KeywordSet::default());
-        assert!(in_doc);
-        let (_, in_doc_2) = highlight_line("\"\"\"", in_doc, &KeywordSet::default());
-        assert!(!in_doc_2);
+    fn en() -> &'static GherkinLanguage {
+        GherkinLanguages::global().get("en")
     }
 
     fn keyword_fg(line: &Line<'_>, kw: &str) -> Option<Color> {
@@ -209,25 +198,44 @@ mod tests {
     }
 
     #[test]
+    fn test_highlight_header() {
+        let (line, _) = highlight_line("Feature: Login", false, en());
+        assert_eq!(line.spans[0].content.as_ref(), "Feature:");
+    }
+
+    #[test]
+    fn test_highlight_comment() {
+        let (line, _) = highlight_line("# comment", false, en());
+        assert_eq!(line.spans[0].content.as_ref(), "# comment");
+    }
+
+    #[test]
+    fn test_doc_string_toggle() {
+        let (_, in_doc) = highlight_line("\"\"\"", false, en());
+        assert!(in_doc);
+        let (_, in_doc_2) = highlight_line("\"\"\"", in_doc, en());
+        assert!(!in_doc_2);
+    }
+
+    #[test]
     fn test_and_inherits_previous_major_color() {
         let mut state = StepHighlightState::default();
-        let line1 = highlight_line_with_state("When I log in", &mut state, &KeywordSet::default());
+        let line1 = highlight_line_with_state("When I log in", &mut state, en());
         assert_eq!(keyword_fg(&line1, "When"), Some(Color::Yellow));
-        let line2 = highlight_line_with_state("And I see home", &mut state, &KeywordSet::default());
+        let line2 = highlight_line_with_state("And I see home", &mut state, en());
         assert_eq!(keyword_fg(&line2, "And"), Some(Color::Yellow));
-        let line3 = highlight_line_with_state("Then I log out", &mut state, &KeywordSet::default());
+        let line3 = highlight_line_with_state("Then I log out", &mut state, en());
         assert_eq!(keyword_fg(&line3, "Then"), Some(Color::Green));
-        let line4 =
-            highlight_line_with_state("And I see login", &mut state, &KeywordSet::default());
+        let line4 = highlight_line_with_state("And I see login", &mut state, en());
         assert_eq!(keyword_fg(&line4, "And"), Some(Color::Green));
     }
 
     #[test]
     fn test_and_resets_on_new_scenario() {
         let mut state = StepHighlightState::default();
-        let _ = highlight_line_with_state("Given A", &mut state, &KeywordSet::default());
-        let _ = highlight_line_with_state("Scenario: Next", &mut state, &KeywordSet::default());
-        let line = highlight_line_with_state("And B", &mut state, &KeywordSet::default());
+        let _ = highlight_line_with_state("Given A", &mut state, en());
+        let _ = highlight_line_with_state("Scenario: Next", &mut state, en());
+        let line = highlight_line_with_state("And B", &mut state, en());
         assert_eq!(keyword_fg(&line, "And"), Some(Color::Gray));
     }
 }

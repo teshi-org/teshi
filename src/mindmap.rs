@@ -11,6 +11,7 @@ use ratatui::text::Text as TuiText;
 use tui_tree_widget::TreeItem;
 
 use crate::gherkin::BddProject;
+use crate::gherkin_lang::StepKeywordType;
 
 pub use tui_tree_widget::TreeState;
 
@@ -382,7 +383,7 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
         for (sci, scenario) in feature.scenarios.iter().enumerate() {
             let mut node_idx = 0usize; // trie index of the last inserted step
             let mut parent_idx = 0usize; // parent of node_idx
-            let mut effective_keyword: Option<&str> = None; // Given/When/Then (And/But inherit)
+            let mut effective_keyword: Option<StepKeywordType> = None;
             let mut last_when_parent: usize = 0; // parent of the most recent When
             let mut has_then_since_when = false; // Then appeared since last When
 
@@ -399,23 +400,27 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
                     line_number: step.line_number,
                 };
 
-                let kw: &str = step.keyword.as_str();
+                let kw_type = step.keyword_type;
 
                 // ── Determine parent for this step ──────────────────────
-                let parent = if kw == "When" && has_then_since_when {
+                let parent = if kw_type == StepKeywordType::When && has_then_since_when {
                     // When after a Then → back to the first When's level
                     last_when_parent
-                } else if matches!(kw, "And" | "But") {
+                } else if matches!(kw_type, StepKeywordType::And | StepKeywordType::But) {
                     // And/But inherit from the effective keyword:
                     //   Then → sibling,  Given/When → nest
-                    if effective_keyword == Some("Then") {
+                    if effective_keyword == Some(StepKeywordType::Then) {
                         parent_idx
                     } else {
                         node_idx
                     }
-                } else if Some(kw) == effective_keyword {
+                } else if Some(kw_type) == effective_keyword {
                     // Same effective keyword – sibling only for Then
-                    if kw == "Then" { parent_idx } else { node_idx }
+                    if kw_type == StepKeywordType::Then {
+                        parent_idx
+                    } else {
+                        node_idx
+                    }
                 } else {
                     // Different keyword → child
                     node_idx
@@ -424,12 +429,12 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
                 let new_idx = insert_step(&mut arena, parent, &step.text, loc, false);
 
                 // ── Update state ────────────────────────────────────────
-                match kw {
-                    "And" | "But" => {
+                match kw_type {
+                    StepKeywordType::And | StepKeywordType::But => {
                         // Advance branch tip but keep parent_idx (Then group base)
                         node_idx = new_idx;
                     }
-                    "When" => {
+                    StepKeywordType::When => {
                         if has_then_since_when {
                             parent_idx = last_when_parent;
                             node_idx = new_idx;
@@ -439,23 +444,23 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
                             parent_idx = node_idx;
                             node_idx = new_idx;
                         }
-                        effective_keyword = Some("When");
+                        effective_keyword = Some(StepKeywordType::When);
                     }
-                    "Then" => {
+                    StepKeywordType::Then => {
                         has_then_since_when = true;
                         // First Then in a group saves the parent;
                         // subsequent Thens (including via And) keep the group base
-                        if effective_keyword != Some("Then") {
+                        if effective_keyword != Some(StepKeywordType::Then) {
                             parent_idx = node_idx;
                         }
                         node_idx = new_idx;
-                        effective_keyword = Some("Then");
+                        effective_keyword = Some(StepKeywordType::Then);
                     }
-                    _ => {
+                    StepKeywordType::Given => {
                         // Given, etc.
                         parent_idx = node_idx;
                         node_idx = new_idx;
-                        effective_keyword = Some("Given");
+                        effective_keyword = Some(StepKeywordType::Given);
                     }
                 }
             }

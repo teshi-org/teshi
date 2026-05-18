@@ -8,6 +8,7 @@ mod diff;
 mod editor_buffer;
 mod gherkin;
 mod gherkin_keywords;
+mod gherkin_lang;
 mod highlight;
 mod keymap;
 mod llm;

@@ -10,7 +10,8 @@ use crate::app::{
     App, CaseDetail, ChangeKind, ColumnFocus, MainTab, MindMapFocus, RunStatus, STEP_KEYWORDS_CYCLE,
 };
 use crate::bdd_nav::nav_body_char_range_in_buffer;
-use crate::highlight::{KeywordSet, StepHighlightState, highlight_line_with_state};
+use crate::gherkin_lang::{GherkinLanguages, StepKeywordType};
+use crate::highlight::{StepHighlightState, highlight_line_with_state};
 use crate::markdown::render_markdown;
 
 /// Stage-2 preview: one solid style for the tree-selected line (avoids span-patch gaps that read as bright blocks).
@@ -1154,22 +1155,21 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             ));
             for step in background_steps {
                 let kw = format!("{:>6}", step.keyword);
-                let kw_color = match step.keyword.as_str() {
-                    "Given" => {
+                let kw_color = match step.keyword_type {
+                    StepKeywordType::Given => {
                         last_major = Some(KEYWORD_GIVEN);
                         KEYWORD_GIVEN
                     }
-                    "When" => {
+                    StepKeywordType::When => {
                         last_major = Some(KEYWORD_WHEN);
                         KEYWORD_WHEN
                     }
-                    "Then" => {
+                    StepKeywordType::Then => {
                         last_major = Some(KEYWORD_THEN);
                         KEYWORD_THEN
                     }
-                    "And" => last_major.unwrap_or(KEYWORD_AND),
-                    "But" => last_major.unwrap_or(KEYWORD_BUT),
-                    _ => Color::White,
+                    StepKeywordType::And => last_major.unwrap_or(KEYWORD_AND),
+                    StepKeywordType::But => last_major.unwrap_or(KEYWORD_BUT),
                 };
                 let kw_span = Span::styled(kw, Style::default().fg(kw_color));
                 let body_span = Span::styled(
@@ -1195,22 +1195,21 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
         for (i, step) in scenario_steps.iter().enumerate() {
             let kw = format!("{:>6}", step.keyword);
-            let kw_color = match step.keyword.as_str() {
-                "Given" => {
+            let kw_color = match step.keyword_type {
+                StepKeywordType::Given => {
                     last_major = Some(KEYWORD_GIVEN);
                     KEYWORD_GIVEN
                 }
-                "When" => {
+                StepKeywordType::When => {
                     last_major = Some(KEYWORD_WHEN);
                     KEYWORD_WHEN
                 }
-                "Then" => {
+                StepKeywordType::Then => {
                     last_major = Some(KEYWORD_THEN);
                     KEYWORD_THEN
                 }
-                "And" => last_major.unwrap_or(KEYWORD_AND),
-                "But" => last_major.unwrap_or(KEYWORD_BUT),
-                _ => Color::White,
+                StepKeywordType::And => last_major.unwrap_or(KEYWORD_AND),
+                StepKeywordType::But => last_major.unwrap_or(KEYWORD_BUT),
             };
             let kw_span = Span::styled(kw, Style::default().fg(kw_color));
             let body_span = if i == app.explore_selected_step {
@@ -1595,8 +1594,11 @@ fn render_mindmap_scenario_preview(
         let line = buffer.line(buf_row);
         let (display_line, _pad_offset, _pad_start) =
             step_line_display(&line, step_state.in_doc_string);
-        let mut styled =
-            highlight_line_with_state(&display_line, &mut step_state, &KeywordSet::default());
+        let mut styled = highlight_line_with_state(
+            &display_line,
+            &mut step_state,
+            GherkinLanguages::global().get("en"),
+        );
 
         if buf_row == cursor_row {
             styled = Line::from(Span::styled(display_line.to_string(), preview_style));
@@ -2103,7 +2105,8 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             break;
         }
         let line = buffer.line(row);
-        let _ = highlight_line_with_state(&line, &mut step_state, &KeywordSet::default());
+        let _ =
+            highlight_line_with_state(&line, &mut step_state, GherkinLanguages::global().get("en"));
     }
     for visible_idx in scroll_idx..scroll_idx.saturating_add(visible_lines) {
         let Some(&row) = visible_rows.get(visible_idx) else {
@@ -2123,8 +2126,11 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
         let (display_line, pad_offset, pad_start) =
             step_line_display(&display_line, step_state.in_doc_string);
         let display_len = display_line.chars().count();
-        let mut styled =
-            highlight_line_with_state(&display_line, &mut step_state, &KeywordSet::default());
+        let mut styled = highlight_line_with_state(
+            &display_line,
+            &mut step_state,
+            GherkinLanguages::global().get("en"),
+        );
 
         // When a scenario is focused, dim steps in non-focused scenarios
         if !preview && let Some(focus_row) = app.editor_focus_scenario_row {
