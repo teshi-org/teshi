@@ -1291,7 +1291,17 @@ impl App {
             if !f.tags.is_empty() {
                 ctx.push_str(&format!(" [{}]", f.tags.join(" ")));
             }
-            ctx.push('\n');
+            if !f.description.is_empty() {
+                let desc_preview: String = f
+                    .description
+                    .iter()
+                    .flat_map(|l| l.chars())
+                    .take(80)
+                    .collect();
+                ctx.push_str(&format!("     Description: {}...\n", desc_preview));
+            } else {
+                ctx.push('\n');
+            }
         }
 
         // Most-reused step patterns
@@ -1404,6 +1414,28 @@ impl App {
              automated tools. You have access to files, scenarios, steps, test runners, and\n\
              visual aids (MindMap). Always think before acting: inspect the project structure\n\
              first, then make precise changes.\n\
+             \n\
+             ## Core Principles\n\
+             - **Understand first, then act**: Before making any changes, inspect the\n\
+               project context and existing files using get_project_info or get_feature_content.\n\
+             - **Prefer simplicity**: Start with the simplest approach. Do not create\n\
+               unnecessary scenarios or complex Scenario Outlines when a basic Scenario suffices.\n\
+             - **Do exactly what was asked**: Generate what the user requested. Do not\n\
+               add extra scenarios, tags, or features unless explicitly requested.\n\
+             - **Verify your work**: After creating a feature, call validate_feature to\n\
+               check for common issues.\n\
+             - **Respect project conventions**: Match the existing style, keyword language,\n\
+               indentation, tag format, and naming patterns from [Project Context].\n\
+             \n\
+             ## Generated Content Standards\n\
+             - Every scenario must have at least one **Given** and one **Then** step.\n\
+             - Scenario names should be descriptive and follow the pattern of existing scenarios.\n\
+             - Use @tags consistently with the project's tag conventions.\n\
+             - When the project uses non-English keywords (e.g. 中文), generate new steps\n\
+               using the same language.\n\
+             - Use Scenario Outline + Examples when the same steps apply to 3+ data variations,\n\
+               not for just 1-2 variations.\n\
+             - Each feature file should focus on one feature area.\n\
              \n\
              ## Available Tools\n\
              - **get_project_info**: Get project directory, file list, scenario/step counts.\n\

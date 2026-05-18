@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use tui_tree_widget::Tree;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::agent::pipeline::GenerationStage;
 use crate::app::{
     App, CaseDetail, ChangeKind, ClickableRegion, ColumnFocus, MainTab, MindMapFocus, RunStatus,
 };
@@ -628,9 +629,15 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     // ── Diff display (shown during AwaitingApproval) ─────────────────
     if diff_height > 0 {
+        let total_diffs = app.pending_change_diffs.len();
+        let title_str = if total_diffs > 1 {
+            format!(" Changes to Apply (1 of {total_diffs}) ")
+        } else {
+            " Changes to Apply ".to_string()
+        };
         let diff_block = Block::default()
             .borders(Borders::ALL)
-            .title(" Changes to Apply ")
+            .title(title_str)
             .border_style(Style::default().fg(Color::Cyan));
         let diff_inner = diff_block.inner(diff_area);
         frame.render_widget(diff_block, diff_area);
@@ -685,6 +692,20 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
         _ => String::new(),
     };
+    // Pipeline stage indicator (append to status_text when active)
+    let status_text = if !matches!(
+        app.generation_stage,
+        GenerationStage::Idle | GenerationStage::Complete
+    ) {
+        let stage_label = app.generation_stage.label();
+        if status_text.is_empty() {
+            stage_label.to_string()
+        } else {
+            format!("{status_text} · {stage_label}")
+        }
+    } else {
+        status_text
+    };
     let model_label = app.active_model_label.as_deref().unwrap_or("");
 
     if status_area.width > 0 {
@@ -694,16 +715,27 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .areas(status_area);
 
         if !status_text.is_empty() {
-            let st_style = match app.agent().status {
-                AiStatus::Waiting => Style::default().fg(Color::Yellow),
-                AiStatus::AwaitingApproval => Style::default().fg(Color::Cyan),
-                AiStatus::Error => Style::default().fg(Color::Red),
-                _ => Style::default().fg(Color::DarkGray),
-            };
-            frame.render_widget(
-                Paragraph::new(Text::from(Line::raw(status_text).style(st_style))),
-                status_left,
-            );
+            match app.agent().status {
+                AiStatus::Error => {
+                    let error_lines = vec![
+                        Line::raw(status_text.clone()).style(Style::default().fg(Color::Red)),
+                        Line::raw("Press Enter to retry or Esc to clear")
+                            .style(Style::default().fg(Color::DarkGray)),
+                    ];
+                    frame.render_widget(Paragraph::new(Text::from(error_lines)), status_left);
+                }
+                _ => {
+                    let st_style = match app.agent().status {
+                        AiStatus::Waiting => Style::default().fg(Color::Yellow),
+                        AiStatus::AwaitingApproval => Style::default().fg(Color::Cyan),
+                        _ => Style::default().fg(Color::DarkGray),
+                    };
+                    frame.render_widget(
+                        Paragraph::new(Text::from(Line::raw(status_text).style(st_style))),
+                        status_left,
+                    );
+                }
+            }
         }
         if !model_label.is_empty() {
             frame.render_widget(
