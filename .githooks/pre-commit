@@ -1,0 +1,42 @@
+#!/bin/bash
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m' # No Color
+PASS=true
+
+# ── 1. cargo fmt ────────────────────────────────────────────────────
+echo ":: Formatting check (cargo fmt --all --check) ..."
+if ! cargo fmt --all --check 2>/dev/null; then
+    echo -e "${RED}   ✘ Unformatted code. Run \`cargo fmt --all\` to fix.${NC}"
+    PASS=false
+else
+    echo -e "${GREEN}   ✔ OK${NC}"
+fi
+
+# ── 2. cargo check ──────────────────────────────────────────────────
+echo ":: Compilation check (cargo check) ..."
+if ! cargo check 2>/dev/null; then
+    echo -e "${RED}   ✘ Compilation errors.${NC}"
+    PASS=false
+else
+    echo -e "${GREEN}   ✔ OK${NC}"
+fi
+
+# ── 3. dbg!() in staged .rs files ───────────────────────────────────
+STAGED_DBG=$(git diff --cached -G'dbg!' -- '*.rs' || true)
+if [ -n "$STAGED_DBG" ]; then
+    echo -e "${RED}   ✘ dbg!() found in staged files:${NC}"
+    echo "$STAGED_DBG" | grep '^+++' | sed 's/^+++ //'
+    PASS=false
+else
+    echo -e "${GREEN}   ✔ No dbg!() in staged files${NC}"
+fi
+
+# ── Result ─────────────────────────────────────────────────────────
+if [ "$PASS" = false ]; then
+    echo -e "${RED}── pre-commit checks failed ──────────────────────────${NC}"
+    exit 1
+fi
+echo -e "${GREEN}── all pre-commit checks passed ────────────────────${NC}"

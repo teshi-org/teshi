@@ -1,0 +1,16 @@
+---
+description: Rust testing conventions (project-scoped)
+globs: **/*.rs
+alwaysApply: false
+---
+
+# Rust testing conventions
+
+- Prefer fast unit tests for pure logic and deterministic behavior; use integration tests for public API boundaries.
+- Put unit tests in the same module behind `#[cfg(test)]` when it helps access private helpers.
+- Use `assert_eq!` / `assert!` with clear failure messages (prefer messages over hunting through logs).
+- Favor table-driven tests for input/output cases (especially parsing and boundary conditions).
+- Name tests descriptively: `test_<scenario>_<expected_behavior>`.
+- Include both success and failure paths for error-returning code.
+- When debugging, run `cargo test -- --nocapture` to see `println!` output (remove or limit later).
+

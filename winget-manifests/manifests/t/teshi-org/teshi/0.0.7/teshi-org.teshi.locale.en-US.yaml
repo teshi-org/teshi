@@ -1,0 +1,9 @@
+PackageIdentifier: teshi-org.teshi
+PackageVersion: 0.0.7
+PackageLocale: en-US
+Publisher: teshi-org
+PackageName: teshi
+License: MIT
+ShortDescription: Terminal-first mindmap editor for structured notes and navigation.
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

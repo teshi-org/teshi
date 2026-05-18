@@ -1,0 +1,31 @@
+#!/bin/bash
+set -euo pipefail
+
+COMMIT_MSG_FILE="$1"
+
+# Read subject (first line)
+SUBJECT=$(head -n 1 "$COMMIT_MSG_FILE")
+
+# ── 1. Conventional Commits format ──────────────────────────────────
+if ! echo "$SUBJECT" | grep -qE '^(feat|fix|chore|docs|refactor|test): '; then
+    echo "✘ Commit message must follow Conventional Commits format:"
+    echo "   <type>: <imperative summary>"
+    echo "   Types: feat, fix, chore, docs, refactor, test"
+    echo "   Got:  $SUBJECT"
+    exit 1
+fi
+
+# ── 2. Subject length ≤ 72 ──────────────────────────────────────────
+LENGTH=${#SUBJECT}
+if [ "$LENGTH" -gt 72 ]; then
+    echo "✘ Subject line is $LENGTH characters (max 72):"
+    echo "   $SUBJECT"
+    exit 1
+fi
+
+# ── 3. No trailing period ───────────────────────────────────────────
+if echo "$SUBJECT" | grep -qE '\.$'; then
+    echo "✘ Subject line should not end with a period:"
+    echo "   $SUBJECT"
+    exit 1
+fi

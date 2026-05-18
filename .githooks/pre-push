@@ -1,0 +1,41 @@
+#!/bin/bash
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+PASS=true
+
+# ── 1. cargo clippy ─────────────────────────────────────────────────
+echo ":: Lint gate (cargo clippy --all-targets --all-features -D warnings) ..."
+if ! cargo clippy --all-targets --all-features -- -D warnings 2>/dev/null; then
+    echo -e "${RED}   ✘ Clippy warnings found (treated as errors).${NC}"
+    PASS=false
+else
+    echo -e "${GREEN}   ✔ OK${NC}"
+fi
+
+# ── 2. cargo test ──────────────────────────────────────────────────
+echo ":: Test gate (cargo test --all) ..."
+if ! cargo test --all 2>/dev/null; then
+    echo -e "${RED}   ✘ Tests failed.${NC}"
+    PASS=false
+else
+    echo -e "${GREEN}   ✔ OK${NC}"
+fi
+
+# ── 3. cargo doc (optional — comment out if too slow) ──────────────
+echo ":: Doc gate (cargo doc --no-deps --document-private-items) ..."
+if ! cargo doc --no-deps --document-private-items 2>/dev/null; then
+    echo -e "${RED}   ✘ Doc build failed.${NC}"
+    PASS=false
+else
+    echo -e "${GREEN}   ✔ OK${NC}"
+fi
+
+# ── Result ─────────────────────────────────────────────────────────
+if [ "$PASS" = false ]; then
+    echo -e "${RED}── pre-push checks failed ───────────────────────────${NC}"
+    exit 1
+fi
+echo -e "${GREEN}── all pre-push checks passed ───────────────────────${NC}"
