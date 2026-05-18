@@ -380,9 +380,14 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
             .unwrap_or_default();
 
         for (sci, scenario) in feature.scenarios.iter().enumerate() {
-            let mut node_idx = 0usize; // root
+            let mut node_idx = 0usize; // trie index of the last inserted step
+            let mut parent_idx = 0usize; // parent of node_idx
+            let mut effective_keyword: Option<&str> = None; // Given/When/Then (And/But inherit)
+            let mut last_when_parent: usize = 0; // parent of the most recent When
+            let mut has_then_since_when = false; // Then appeared since last When
 
             for (text, loc) in &bg_steps {
+                parent_idx = node_idx;
                 node_idx = insert_step(&mut arena, node_idx, text, *loc, true);
             }
 
@@ -393,7 +398,66 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
                     step_idx: sti,
                     line_number: step.line_number,
                 };
-                node_idx = insert_step(&mut arena, node_idx, &step.text, loc, false);
+
+                let kw: &str = step.keyword.as_str();
+
+                // ── Determine parent for this step ──────────────────────
+                let parent = if kw == "When" && has_then_since_when {
+                    // When after a Then → back to the first When's level
+                    last_when_parent
+                } else if matches!(kw, "And" | "But") {
+                    // And/But inherit from the effective keyword:
+                    //   Then → sibling,  Given/When → nest
+                    if effective_keyword == Some("Then") {
+                        parent_idx
+                    } else {
+                        node_idx
+                    }
+                } else if Some(kw) == effective_keyword {
+                    // Same effective keyword – sibling only for Then
+                    if kw == "Then" { parent_idx } else { node_idx }
+                } else {
+                    // Different keyword → child
+                    node_idx
+                };
+
+                let new_idx = insert_step(&mut arena, parent, &step.text, loc, false);
+
+                // ── Update state ────────────────────────────────────────
+                match kw {
+                    "And" | "But" => {
+                        // Advance branch tip but keep parent_idx (Then group base)
+                        node_idx = new_idx;
+                    }
+                    "When" => {
+                        if has_then_since_when {
+                            parent_idx = last_when_parent;
+                            node_idx = new_idx;
+                            has_then_since_when = false;
+                        } else {
+                            last_when_parent = parent;
+                            parent_idx = node_idx;
+                            node_idx = new_idx;
+                        }
+                        effective_keyword = Some("When");
+                    }
+                    "Then" => {
+                        has_then_since_when = true;
+                        // First Then in a group saves the parent;
+                        // subsequent Thens (including via And) keep the group base
+                        if effective_keyword != Some("Then") {
+                            parent_idx = node_idx;
+                        }
+                        node_idx = new_idx;
+                        effective_keyword = Some("Then");
+                    }
+                    _ => {
+                        // Given, etc.
+                        parent_idx = node_idx;
+                        node_idx = new_idx;
+                        effective_keyword = Some("Given");
+                    }
+                }
             }
         }
     }
