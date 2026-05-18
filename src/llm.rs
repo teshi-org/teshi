@@ -542,6 +542,9 @@ async fn chat_completion(
     while let Some(chunk_result) = stream.next().await {
         // Check for cancellation
         if cancel.load(Ordering::SeqCst) {
+            let _ = evt_tx.send(LlmEvent::Error {
+                message: "Request cancelled by user".to_string(),
+            });
             return Ok(());
         }
         let chunk = match chunk_result {
