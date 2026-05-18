@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use crate::gherkin_lang::{GherkinLanguage, StepKeywordType, StructuralType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StepMajor {
+pub(crate) enum StepMajor {
     Given,
     When,
     Then,
@@ -65,7 +65,7 @@ pub fn highlight_line_with_state(
     let header = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
-    let step_default = Style::default().fg(Color::Magenta);
+    let _step_default = Style::default().fg(Color::Magenta);
     let tag = Style::default().fg(Color::Yellow);
     let string = Style::default().fg(Color::Green);
     let meta = Style::default().fg(Color::Blue);
@@ -98,16 +98,16 @@ pub fn highlight_line_with_state(
     }
 
     // Reset major step type on scenario/feature boundaries
-    if let Some((_kw, st)) = lang.match_structural_prefix(trimmed) {
-        if matches!(
+    if let Some((_kw, st)) = lang.match_structural_prefix(trimmed)
+        && matches!(
             st,
             StructuralType::Feature
                 | StructuralType::Scenario
                 | StructuralType::ScenarioOutline
                 | StructuralType::Background
-        ) {
-            state.last_major = None;
-        }
+        )
+    {
+        state.last_major = None;
     }
 
     // Structural header highlighting

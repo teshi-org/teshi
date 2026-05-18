@@ -11,6 +11,7 @@ pub use tools::get_tools;
 use anyhow::{Context, Result};
 
 use crate::app::{AgentMutation, AgentPendingChange};
+use crate::gherkin_lang::StructuralType;
 
 /// Execute a named tool with the given JSON arguments and return the result
 /// as plain text for the LLM.
@@ -565,11 +566,23 @@ fn execute_delete_scenario(
     let mut end_row = lines.len();
     for (i, line) in lines.iter().enumerate().skip(start_row + 1) {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("Scenario:") || trimmed.starts_with("Scenario Outline:") {
+        let lang = app.buffers[feature_idx].language();
+        if lang
+            .match_structural_prefix(trimmed)
+            .is_some_and(|(_, st)| {
+                matches!(
+                    st,
+                    StructuralType::Scenario | StructuralType::ScenarioOutline
+                )
+            })
+        {
             end_row = i;
             break;
         }
-        if trimmed.starts_with("Examples:") {
+        if lang
+            .match_structural_prefix(trimmed)
+            .is_some_and(|(_, st)| st == StructuralType::Examples)
+        {
             // Let it pass — still part of the current scenario outline
             continue;
         }

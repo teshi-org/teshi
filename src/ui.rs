@@ -6,11 +6,9 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use tui_tree_widget::Tree;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{
-    App, CaseDetail, ChangeKind, ColumnFocus, MainTab, MindMapFocus, RunStatus, STEP_KEYWORDS_CYCLE,
-};
+use crate::app::{App, CaseDetail, ChangeKind, ColumnFocus, MainTab, MindMapFocus, RunStatus};
 use crate::bdd_nav::nav_body_char_range_in_buffer;
-use crate::gherkin_lang::{GherkinLanguages, StepKeywordType};
+use crate::gherkin_lang::{GherkinLanguage, StepKeywordType};
 use crate::highlight::{StepHighlightState, highlight_line_with_state};
 use crate::markdown::render_markdown;
 
@@ -186,16 +184,17 @@ fn pad_line_to_width(mut line: Line<'static>, target_cols: u16, trail: Style) ->
     line
 }
 
-fn step_line_display(line: &str, in_doc_string: bool) -> (String, usize, usize) {
+fn step_line_display(
+    line: &str,
+    in_doc_string: bool,
+    lang: &GherkinLanguage,
+) -> (String, usize, usize) {
     if in_doc_string {
         return (line.to_string(), 0, 0);
     }
     let trimmed = line.trim_start();
     let leading = line.len().saturating_sub(trimmed.len());
-    let Some(keyword) = STEP_KEYWORDS_CYCLE
-        .iter()
-        .find(|kw| trimmed.starts_with(**kw))
-    else {
+    let Some((keyword, _ty)) = lang.match_step_prefix(trimmed) else {
         return (line.to_string(), 0, 0);
     };
     let kw_len = keyword.chars().count();
@@ -1593,12 +1592,9 @@ fn render_mindmap_scenario_preview(
         }
         let line = buffer.line(buf_row);
         let (display_line, _pad_offset, _pad_start) =
-            step_line_display(&line, step_state.in_doc_string);
-        let mut styled = highlight_line_with_state(
-            &display_line,
-            &mut step_state,
-            GherkinLanguages::global().get("en"),
-        );
+            step_line_display(&line, step_state.in_doc_string, buffer.language());
+        let mut styled =
+            highlight_line_with_state(&display_line, &mut step_state, buffer.language());
 
         if buf_row == cursor_row {
             styled = Line::from(Span::styled(display_line.to_string(), preview_style));
@@ -2105,8 +2101,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             break;
         }
         let line = buffer.line(row);
-        let _ =
-            highlight_line_with_state(&line, &mut step_state, GherkinLanguages::global().get("en"));
+        let _ = highlight_line_with_state(&line, &mut step_state, buffer.language());
     }
     for visible_idx in scroll_idx..scroll_idx.saturating_add(visible_lines) {
         let Some(&row) = visible_rows.get(visible_idx) else {
@@ -2124,13 +2119,10 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             display_line.push_str(&format!("  [folded: {step_count} steps]"));
         }
         let (display_line, pad_offset, pad_start) =
-            step_line_display(&display_line, step_state.in_doc_string);
+            step_line_display(&display_line, step_state.in_doc_string, buffer.language());
         let display_len = display_line.chars().count();
-        let mut styled = highlight_line_with_state(
-            &display_line,
-            &mut step_state,
-            GherkinLanguages::global().get("en"),
-        );
+        let mut styled =
+            highlight_line_with_state(&display_line, &mut step_state, buffer.language());
 
         // When a scenario is focused, dim steps in non-focused scenarios
         if !preview && let Some(focus_row) = app.editor_focus_scenario_row {
@@ -2269,14 +2261,20 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rec
     };
 
     const TITLE: &str = "Step keyword";
-    let max_kw_ch = STEP_KEYWORDS_CYCLE
+    let all_kw = app.buffer.language().all_step_keywords();
+    let keywords: Vec<&str> = all_kw
+        .iter()
+        .filter(|kw| kw.as_str() != "*")
+        .map(|s| s.as_str())
+        .collect();
+    let max_kw_ch = keywords
         .iter()
         .map(|s| s.chars().count())
         .max()
         .unwrap_or(5);
     let inner_w_ch = max_kw_ch.max(TITLE.chars().count()).saturating_add(2);
     let list_w = (inner_w_ch as u16).saturating_add(2);
-    let n_items = STEP_KEYWORDS_CYCLE.len();
+    let n_items = keywords.len();
     let list_h = (n_items as u16).saturating_add(2);
 
     let visible_lines = editor_area.height as usize;
@@ -2315,7 +2313,7 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rec
     let normal = Style::default();
 
     let mut lines: Vec<Line> = Vec::with_capacity(max_rows.min(n_items));
-    for (i, kw) in STEP_KEYWORDS_CYCLE.iter().enumerate().take(max_rows) {
+    for (i, kw) in keywords.iter().enumerate().take(max_rows) {
         let style = if i == picker.selected {
             selected_row_style
         } else {
