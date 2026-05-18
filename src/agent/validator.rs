@@ -6,7 +6,8 @@
 
 use std::collections::HashMap;
 
-use crate::gherkin::{BddProject, ScenarioKind};
+use crate::agent::skills::SkillRegistry;
+use crate::gherkin::{BddProject, BddScenario, ScenarioKind};
 
 /// The severity of a validation issue.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,4 +212,116 @@ pub fn format_validation_result(issues: &[ValidationIssue]) -> String {
     }
 
     out
+}
+
+/// Check if a feature's scenarios cover the patterns recommended by matching
+/// skill templates. Returns suggestions for missing scenario types.
+pub fn check_coverage(
+    feature_name: &str,
+    scenarios: &[BddScenario],
+    skill_registry: &SkillRegistry,
+) -> Vec<ValidationIssue> {
+    let mut issues = Vec::new();
+
+    if skill_registry.is_empty() {
+        return issues;
+    }
+
+    // Match skills against the feature name
+    let matched = skill_registry.match_skills(feature_name);
+    if matched.is_empty() {
+        return issues;
+    }
+
+    // Extract scenario names from the generated feature
+    let generated_names: Vec<&str> = scenarios.iter().map(|s| s.name.as_str()).collect();
+    let generated_lower: Vec<String> = generated_names.iter().map(|n| n.to_lowercase()).collect();
+
+    for skill in &matched {
+        // Parse "Recommended Scenarios" section from skill content
+        let recommendations = extract_recommended_scenarios(&skill.content);
+        if recommendations.is_empty() {
+            continue;
+        }
+
+        let mut covered: usize = 0;
+        for rec in &recommendations {
+            let rec_lower = rec.to_lowercase();
+            let found = generated_lower.iter().any(|n| {
+                // Check if any generated scenario name contains keywords from the recommendation
+                let rec_keywords: Vec<&str> = rec_lower
+                    .split_whitespace()
+                    .filter(|w| w.len() > 3) // only meaningful words
+                    .collect();
+                let match_count = rec_keywords.iter().filter(|kw| n.contains(*kw)).count();
+                // Match if at least half of the keywords are found
+                !rec_keywords.is_empty() && match_count >= rec_keywords.len().max(1) / 2
+            });
+
+            if !found {
+                issues.push(ValidationIssue {
+                    severity: IssueSeverity::Suggestion,
+                    file: String::new(),
+                    line: None,
+                    message: format!(
+                        "Consider adding a scenario for '{}' (recommended by template '{}')",
+                        rec, skill.name
+                    ),
+                });
+            } else {
+                covered += 1;
+            }
+        }
+
+        if covered < recommendations.len() && recommendations.len() > 1 {
+            issues.push(ValidationIssue {
+                severity: IssueSeverity::Suggestion,
+                file: String::new(),
+                line: None,
+                message: format!(
+                    "Coverage: {}/{} recommended scenario patterns covered for template '{}'",
+                    covered,
+                    recommendations.len(),
+                    skill.name
+                ),
+            });
+        }
+    }
+
+    issues
+}
+
+/// Extract recommended scenario descriptions from a skill template's content.
+/// Looks for "## Recommended Scenarios" section and parses numbered items.
+fn extract_recommended_scenarios(content: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut in_section = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## Recommended Scenarios") {
+            in_section = true;
+            continue;
+        }
+        if in_section {
+            // Stop at next heading or section break
+            if trimmed.starts_with("## ") || trimmed.starts_with("---") {
+                break;
+            }
+            // Extract numbered items like "1. **text** — more text" or "- text"
+            if let Some(item) = trimmed
+                .strip_prefix(|c: char| c.is_ascii_digit())
+                .and_then(|s| s.trim().strip_prefix(". "))
+                .or_else(|| trimmed.strip_prefix("- "))
+            {
+                // Clean up markdown formatting: **text** → text
+                let clean = item.replace("**", "").trim().to_string();
+                if !clean.is_empty() {
+                    result.push(clean);
+                }
+            }
+        }
+    }
+
+    result
 }
