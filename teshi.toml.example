@@ -1,0 +1,4 @@
+# Copy to teshi.toml and set cmd to your NDJSON runner binary.
+# Override with environment variable TESHI_RUNNER_CMD if preferred.
+[runner]
+cmd = "runner"
