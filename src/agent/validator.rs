@@ -325,3 +325,93 @@ fn extract_recommended_scenarios(content: &str) -> Vec<String> {
 
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::skills::{SkillDefinition, SkillRegistry};
+    use crate::gherkin::ScenarioKind;
+
+    #[test]
+    fn check_coverage_finds_missing_scenarios() {
+        let mut registry = SkillRegistry::new();
+        registry.register(SkillDefinition {
+            name: "test-flow".into(),
+            description: "Test template".into(),
+            keywords: vec!["test".into()],
+            content: "\
+## Recommended Scenarios
+1. **Successful test** — basic positive case
+2. **Failed test** — error handling
+3. **Edge case** — boundary values
+"
+            .into(),
+            path: None,
+        });
+
+        // Only 1 of 3 recommended scenarios is present
+        let scenarios = vec![BddScenario {
+            name: "Successful test".into(),
+            tags: vec![],
+            kind: ScenarioKind::Scenario,
+            steps: vec![],
+            examples: vec![],
+            line_number: 1,
+        }];
+
+        let issues = check_coverage("test-flow", &scenarios, &registry);
+        assert!(!issues.is_empty(), "should find missing scenarios");
+
+        // Should have at least "Coverage: X/Y" line
+        let has_coverage = issues.iter().any(|i| i.message.contains("Coverage:"));
+        assert!(has_coverage, "should report coverage ratio");
+
+        // Should suggest "Failed test"
+        let has_failed = issues.iter().any(|i| i.message.contains("Failed test"));
+        assert!(has_failed, "should suggest missing 'Failed test'");
+    }
+
+    #[test]
+    fn check_coverage_empty_for_no_match() {
+        let registry = SkillRegistry::new();
+        let scenarios = vec![];
+        let issues = check_coverage("unmatched", &scenarios, &registry);
+        assert!(issues.is_empty(), "no issues when no skills match");
+    }
+
+    #[test]
+    fn extract_recommended_scenarios_parses_numbered_list() {
+        let content = "\
+# Some heading
+## Recommended Scenarios
+1. **First** — description one
+2. **Second** — description two
+## Other section
+- not extracted
+";
+        let recs = extract_recommended_scenarios(content);
+        assert_eq!(recs.len(), 2);
+        assert!(recs[0].contains("First"));
+        assert!(recs[1].contains("Second"));
+    }
+
+    #[test]
+    fn extract_recommended_scenarios_parses_bullet_list() {
+        let content = "\
+## Recommended Scenarios
+- **Login** with valid credentials
+- **Error** handling
+- **Edge** cases
+";
+        let recs = extract_recommended_scenarios(content);
+        assert_eq!(recs.len(), 3);
+        assert!(recs[0].contains("Login"));
+    }
+
+    #[test]
+    fn extract_recommended_scenarios_empty_when_no_section() {
+        let content = "# No section here\n- item\n";
+        let recs = extract_recommended_scenarios(content);
+        assert!(recs.is_empty());
+    }
+}
