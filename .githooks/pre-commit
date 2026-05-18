@@ -24,6 +24,15 @@ else
     echo -e "${GREEN}   ✔ OK${NC}"
 fi
 
+# ── 2b. cargo check --locked (Cargo.lock in sync) ──────────────────
+echo ":: Lock file check (cargo check --locked) ..."
+if ! cargo check --locked 2>/dev/null; then
+    echo -e "${RED}   ✘ Cargo.lock is out of sync. Run \`cargo check\` and stage Cargo.lock too.${NC}"
+    PASS=false
+else
+    echo -e "${GREEN}   ✔ OK${NC}"
+fi
+
 # ── 3. dbg!() in staged .rs files ───────────────────────────────────
 STAGED_DBG=$(git diff --cached -G'dbg!' -- '*.rs' || true)
 if [ -n "$STAGED_DBG" ]; then
