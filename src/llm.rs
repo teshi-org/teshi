@@ -301,13 +301,34 @@ async fn process_chat_request(
     evt_tx: &Sender<LlmEvent>,
     cancel: &Arc<AtomicBool>,
 ) {
-    const MAX_RETRIES: u32 = 3;
-    const RETRY_DELAYS_MS: [u64; 3] = [3000, 7000, 15000];
+    const MAX_RETRIES: u32 = 5;
+    const BACKOFF_MS: [u64; 5] = [3_000, 7_000, 15_000, 30_000, 60_000];
     let timeout_dur = std::time::Duration::from_secs(120);
 
     let mut last_error: Option<String> = None;
 
     for attempt in 0..MAX_RETRIES {
+        if attempt > 0 {
+            // Check cancel before sleeping
+            if cancel.load(Ordering::SeqCst) {
+                return;
+            }
+            // Interruptible sleep with deterministic jitter (±20%)
+            let base = BACKOFF_MS[(attempt - 1) as usize];
+            let delay = jitter_ms(base, attempt);
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(delay);
+            loop {
+                if cancel.load(Ordering::SeqCst) {
+                    return;
+                }
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200).min(remaining)).await;
+            }
+        }
+
         let result = tokio::time::timeout(
             timeout_dur,
             chat_completion(
@@ -337,19 +358,13 @@ async fn process_chat_request(
             }
             Err(_elapsed) => {
                 // Timeout is transient
-                last_error = Some("API call timed out after 120 seconds".to_string());
+                last_error = Some(format!(
+                    "API call timed out after {}s (attempt {}/{})",
+                    timeout_dur.as_secs(),
+                    attempt + 1,
+                    MAX_RETRIES
+                ));
             }
-        }
-
-        // Check cancellation before retrying
-        if cancel.load(Ordering::SeqCst) {
-            return;
-        }
-
-        // Sleep before retry
-        if attempt < MAX_RETRIES - 1 {
-            let delay_ms = RETRY_DELAYS_MS[attempt as usize];
-            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         }
     }
 
@@ -363,18 +378,69 @@ async fn process_chat_request(
 /// Returns true if the error message indicates a transient (retryable) failure.
 fn is_transient_error(msg: &str) -> bool {
     let lower = msg.to_lowercase();
-    lower.contains("timeout")
+
+    // Connection/network errors
+    if lower.contains("timeout")
         || lower.contains("timed out")
         || lower.contains("connection")
         || lower.contains("refused")
-        || lower.contains("reset")
+        || lower.contains("reset by peer")
         || lower.contains("broken pipe")
         || lower.contains("eof")
-        || (lower.contains("api returned")
-            && (lower.contains("500")
-                || lower.contains("502")
-                || lower.contains("503")
-                || lower.contains("504")))
+        || lower.contains("stream end")
+        || lower.contains("channel closed")
+        || lower.contains("incomplete chunked")
+    {
+        return true;
+    }
+
+    // HTTP status codes
+    if lower.contains("429") {
+        return true;
+    } // rate limit
+    if lower.contains("500") {
+        return true;
+    }
+    if lower.contains("502") {
+        return true;
+    }
+    if lower.contains("503") {
+        return true;
+    }
+    if lower.contains("504") {
+        return true;
+    }
+    if lower.contains("529") {
+        return true;
+    } // overloaded
+
+    // SDK-specific error messages
+    if lower.contains("rate limit") {
+        return true;
+    }
+    if lower.contains("overloaded") {
+        return true;
+    }
+    if lower.contains("service unavailable") {
+        return true;
+    }
+    if lower.contains("internal server error") {
+        return true;
+    }
+
+    false
+}
+
+/// Deterministic jitter (±20%) for retry backoff.
+///
+/// Produces a value in [base - offset, base + offset] where
+/// offset = base / 5, using a simple pseudo-random function
+/// keyed by attempt number.
+fn jitter_ms(base: u64, attempt: u32) -> u64 {
+    let offset = base / 5;
+    let pseudo = (attempt as u64 * 7 + 13) % (offset * 2 + 1);
+    let jitter = if pseudo > offset { offset } else { pseudo };
+    base + jitter - offset / 2
 }
 
 // ── Request body builder ─────────────────────────────────────────────────────
@@ -539,7 +605,9 @@ async fn chat_completion(
     let mut buf = String::new();
 
     use futures::StreamExt;
-    while let Some(chunk_result) = stream.next().await {
+    const CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    loop {
         // Check for cancellation
         if cancel.load(Ordering::SeqCst) {
             let _ = evt_tx.send(LlmEvent::Error {
@@ -547,11 +615,20 @@ async fn chat_completion(
             });
             return Ok(());
         }
-        let chunk = match chunk_result {
-            Ok(c) => c,
-            Err(e) => {
-                // Stream read error is transient
+
+        let next_chunk = tokio::time::timeout(CHUNK_TIMEOUT, stream.next()).await;
+
+        let chunk = match next_chunk {
+            Ok(Some(Ok(c))) => c,
+            Ok(Some(Err(e))) => {
                 return Err(anyhow::anyhow!("stream read error: {e}"));
+            }
+            Ok(None) => break, // Stream ended normally
+            Err(_elapsed) => {
+                return Err(anyhow::anyhow!(
+                    "response stream stalled: no data received for {}s",
+                    CHUNK_TIMEOUT.as_secs()
+                ));
             }
         };
 
