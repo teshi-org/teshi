@@ -3,10 +3,12 @@
 //! Converts raw `.feature` file content into a structured tree: `BddProject` → `BddFeature` →
 //! `BddScenario` → `BddStep`. Each node records its source `line_number` (1-based) for mapping
 //! back to the editor buffer.
+//!
+//! Supports multi-language Gherkin keywords via `# language: xx` directive.
 
 use std::path::PathBuf;
 
-use crate::gherkin_keywords::STEP_KEYWORDS;
+use crate::gherkin_lang::{GherkinLanguage, GherkinLanguages, StepKeywordType, StructuralType};
 
 // ── AST types ────────────────────────────────────────────────────────────────
 
@@ -56,8 +58,10 @@ pub struct BddScenario {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct BddStep {
-    /// Leading keyword: `Given`, `When`, `Then`, `And`, or `But`.
+    /// Leading keyword text as written in the source (e.g. "Given", "当", "假设").
     pub keyword: String,
+    /// Normalised keyword type, independent of language.
+    pub keyword_type: StepKeywordType,
     /// Body text after the keyword (trimmed of the leading space).
     pub text: String,
     /// 1-based line number.
@@ -85,7 +89,20 @@ pub enum ScenarioKind {
 // ── Parser ───────────────────────────────────────────────────────────────────
 
 /// Parses a single `.feature` file from its raw text content.
+///
+/// Language is auto-detected from the `# language: xx` directive.
 pub fn parse_feature(content: &str, file_path: PathBuf) -> BddFeature {
+    let langs = GherkinLanguages::global();
+    let code = GherkinLanguages::detect_from_content(content);
+    let lang = langs.get(code);
+    parse_feature_with_lang(content, file_path, lang)
+}
+
+fn parse_feature_with_lang(
+    content: &str,
+    file_path: PathBuf,
+    lang: &GherkinLanguage,
+) -> BddFeature {
     let lines: Vec<&str> = content.lines().collect();
     let line_count = lines.len();
     let mut idx = 0;
@@ -95,15 +112,18 @@ pub fn parse_feature(content: &str, file_path: PathBuf) -> BddFeature {
     let mut background: Option<BddBackground> = None;
     let mut scenarios: Vec<BddScenario> = Vec::new();
 
-    // Collect tags before `Feature:`
+    // Collect tags before Feature:
     idx = skip_blank_and_comments(&lines, idx);
     let feature_tags = collect_tags(&lines, &mut idx);
 
-    // Find `Feature:` line
+    // Find Feature: line
     if idx < lines.len() {
         let trimmed = lines[idx].trim();
-        if let Some(rest) = trimmed.strip_prefix("Feature:") {
-            feature_name = rest.trim().to_string();
+        if let Some((_kw, st)) = lang.match_structural_prefix(trimmed)
+            && st == StructuralType::Feature
+        {
+            let after_colon = &trimmed[_kw.len()..];
+            feature_name = after_colon.trim().to_string();
             idx += 1;
         }
     }
@@ -113,7 +133,7 @@ pub fn parse_feature(content: &str, file_path: PathBuf) -> BddFeature {
         let trimmed = lines[idx].trim();
         if trimmed.is_empty()
             || trimmed.starts_with('#')
-            || (!is_structural_keyword(trimmed) && !trimmed.starts_with('@'))
+            || (!lang.is_structural(trimmed) && !trimmed.starts_with('@'))
         {
             if !trimmed.is_empty() && !trimmed.starts_with('#') {
                 feature_description.push(trimmed.to_string());
@@ -139,20 +159,24 @@ pub fn parse_feature(content: &str, file_path: PathBuf) -> BddFeature {
 
         let trimmed = lines[idx].trim();
 
-        if trimmed.starts_with("Background:") {
+        if let Some((_kw, st)) = lang.match_structural_prefix(trimmed)
+            && st == StructuralType::Background
+        {
             let bg_line = idx + 1; // 1-based
             idx += 1;
-            let steps = parse_steps(&lines, &mut idx);
+            let steps = parse_steps(&lines, &mut idx, lang);
             background = Some(BddBackground {
                 steps,
                 line_number: bg_line,
             });
-        } else if let Some(rest) = trimmed.strip_prefix("Scenario Outline:") {
+        } else if let Some((_kw, st)) = lang.match_structural_prefix(trimmed)
+            && st == StructuralType::ScenarioOutline
+        {
             let sc_line = idx + 1;
-            let sc_name = rest.trim().to_string();
+            let sc_name = trimmed[_kw.len()..].trim().to_string();
             idx += 1;
-            let steps = parse_steps(&lines, &mut idx);
-            let examples = parse_examples_blocks(&lines, &mut idx);
+            let steps = parse_steps(&lines, &mut idx, lang);
+            let examples = parse_examples_blocks(&lines, &mut idx, lang);
             scenarios.push(BddScenario {
                 name: sc_name,
                 tags: block_tags,
@@ -161,12 +185,14 @@ pub fn parse_feature(content: &str, file_path: PathBuf) -> BddFeature {
                 examples,
                 line_number: sc_line,
             });
-        } else if let Some(rest) = trimmed.strip_prefix("Scenario:") {
+        } else if let Some((_kw, st)) = lang.match_structural_prefix(trimmed)
+            && st == StructuralType::Scenario
+        {
             let sc_line = idx + 1;
-            let sc_name = rest.trim().to_string();
+            let sc_name = trimmed[_kw.len()..].trim().to_string();
             idx += 1;
-            let steps = parse_steps(&lines, &mut idx);
-            let examples = parse_examples_blocks(&lines, &mut idx);
+            let steps = parse_steps(&lines, &mut idx, lang);
+            let examples = parse_examples_blocks(&lines, &mut idx, lang);
             scenarios.push(BddScenario {
                 name: sc_name,
                 tags: block_tags,
@@ -260,27 +286,7 @@ fn collect_tags(lines: &[&str], idx: &mut usize) -> Vec<String> {
     tags
 }
 
-fn is_structural_keyword(trimmed: &str) -> bool {
-    trimmed.starts_with("Feature:")
-        || trimmed.starts_with("Background:")
-        || trimmed.starts_with("Scenario Outline:")
-        || trimmed.starts_with("Scenario:")
-        || trimmed.starts_with("Examples:")
-        || is_step_line(trimmed)
-}
-
-fn is_step_line(trimmed: &str) -> bool {
-    for kw in STEP_KEYWORDS {
-        if let Some(rest) = trimmed.strip_prefix(kw)
-            && (rest.is_empty() || rest.starts_with(' '))
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn parse_steps(lines: &[&str], idx: &mut usize) -> Vec<BddStep> {
+fn parse_steps(lines: &[&str], idx: &mut usize, lang: &GherkinLanguage) -> Vec<BddStep> {
     let mut steps = Vec::new();
     while *idx < lines.len() {
         let trimmed = lines[*idx].trim();
@@ -288,7 +294,7 @@ fn parse_steps(lines: &[&str], idx: &mut usize) -> Vec<BddStep> {
             *idx += 1;
             continue;
         }
-        if let Some(step) = try_parse_step(trimmed, *idx + 1) {
+        if let Some(step) = try_parse_step(trimmed, *idx + 1, lang) {
             steps.push(step);
             *idx += 1;
             // Skip doc strings and data tables attached to this step
@@ -300,18 +306,17 @@ fn parse_steps(lines: &[&str], idx: &mut usize) -> Vec<BddStep> {
     steps
 }
 
-fn try_parse_step(trimmed: &str, line_number: usize) -> Option<BddStep> {
-    for kw in STEP_KEYWORDS {
-        if let Some(rest) = trimmed.strip_prefix(kw)
-            && (rest.is_empty() || rest.starts_with(' '))
-        {
-            let text = rest.strip_prefix(' ').unwrap_or(rest).to_string();
-            return Some(BddStep {
-                keyword: kw.to_string(),
-                text,
-                line_number,
-            });
-        }
+fn try_parse_step(trimmed: &str, line_number: usize, lang: &GherkinLanguage) -> Option<BddStep> {
+    if let Some((matched, kw_type)) = lang.match_step_prefix(trimmed) {
+        let keyword = matched.to_string();
+        let rest = &trimmed[matched.len()..];
+        let text = rest.strip_prefix(' ').unwrap_or(rest).to_string();
+        return Some(BddStep {
+            keyword,
+            keyword_type: kw_type,
+            text,
+            line_number,
+        });
     }
     None
 }
@@ -346,7 +351,11 @@ fn skip_doc_string_and_table(lines: &[&str], idx: &mut usize) {
     }
 }
 
-fn parse_examples_blocks(lines: &[&str], idx: &mut usize) -> Vec<ExamplesTable> {
+fn parse_examples_blocks(
+    lines: &[&str],
+    idx: &mut usize,
+    lang: &GherkinLanguage,
+) -> Vec<ExamplesTable> {
     let mut examples = Vec::new();
     loop {
         // Skip blanks and comments
@@ -366,7 +375,11 @@ fn parse_examples_blocks(lines: &[&str], idx: &mut usize) -> Vec<ExamplesTable> 
         }
 
         let trimmed = lines[*idx].trim();
-        if !trimmed.starts_with("Examples:") {
+        let is_examples = lang
+            .match_structural_prefix(trimmed)
+            .is_some_and(|(_kw, st)| st == StructuralType::Examples);
+
+        if !is_examples {
             // Revert: these tags belong to the next scenario
             *idx = if tags.is_empty() { saved } else { peek };
             break;
@@ -424,6 +437,7 @@ fn parse_table_row(line: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gherkin_lang::StepKeywordType;
 
     const SAMPLE: &str = "\
 @auth @smoke
@@ -523,5 +537,36 @@ Feature: User login
                 assert!(step.line_number >= 1);
             }
         }
+    }
+
+    #[test]
+    fn parses_chinese_feature_with_keyword_types() {
+        let content = "\
+# language: zh-CN
+功能: 登录
+  场景: 成功登录
+    假如 我在登录页面
+    当 我输入用户名
+    那么 我看到欢迎
+";
+        let f = parse_feature(content, PathBuf::from("login.feature"));
+        assert_eq!(f.name, "登录");
+        assert_eq!(f.scenarios.len(), 1);
+        let s = &f.scenarios[0];
+        assert_eq!(s.name, "成功登录");
+
+        let steps = &s.steps;
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[0].keyword, "假如");
+        assert_eq!(steps[0].keyword_type, StepKeywordType::Given);
+        assert_eq!(steps[0].text, "我在登录页面");
+
+        assert_eq!(steps[1].keyword, "当");
+        assert_eq!(steps[1].keyword_type, StepKeywordType::When);
+        assert_eq!(steps[1].text, "我输入用户名");
+
+        assert_eq!(steps[2].keyword, "那么");
+        assert_eq!(steps[2].keyword_type, StepKeywordType::Then);
+        assert_eq!(steps[2].text, "我看到欢迎");
     }
 }
