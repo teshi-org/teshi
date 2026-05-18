@@ -4,8 +4,10 @@
 //! state and modify editor content. Read-only tools return results immediately;
 //! file-modifying tools (e.g. `insert_scenario`) queue changes for user confirmation.
 
+pub mod pipeline;
 pub mod skills;
 mod tools;
+pub mod validator;
 
 pub use tools::get_tools;
 
@@ -40,6 +42,9 @@ pub fn execute_tool(
         "search_features" => execute_search_features(app, args_json),
         "run_tests" => execute_run_tests(app, args_json),
         "load_skill" => execute_load_skill(app, args_json),
+        "submit_requirements" => execute_submit_requirements(app, args_json),
+        "generate_plan" => execute_generate_plan(app, args_json),
+        "validate_feature" => execute_validate_feature(app, args_json),
         _ => anyhow::bail!("unknown tool: {name}"),
     }
 }
@@ -992,4 +997,136 @@ fn execute_load_skill(app: &mut crate::app::App, args_json: &str) -> Result<Stri
             }
         ))
     }
+}
+
+// ── submit_requirements ───────────────────────────────────────────────────────
+
+fn execute_submit_requirements(app: &mut crate::app::App, args_json: &str) -> Result<String> {
+    let args: serde_json::Value =
+        serde_json::from_str(args_json).context("invalid JSON arguments")?;
+
+    let feature_name = args
+        .get("feature_name")
+        .and_then(|v| v.as_str())
+        .context("missing 'feature_name'")?
+        .to_string();
+    let description = args
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let scenario_descriptions: Vec<String> = args
+        .get("scenario_descriptions")
+        .and_then(|v| v.as_array())
+        .context("missing 'scenario_descriptions'")?
+        .iter()
+        .map(|v| v.as_str().unwrap_or("").to_string())
+        .collect();
+    let tags: Vec<String> = args
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let requirement = crate::agent::pipeline::Requirement {
+        feature_name,
+        description,
+        scenario_descriptions,
+        tags,
+    };
+
+    app.pipeline_requirement = Some(requirement);
+    app.generation_stage = crate::agent::pipeline::GenerationStage::Planning;
+
+    Ok("Requirements collected. Now call `generate_plan` to design the scenario structure.".into())
+}
+
+// ── generate_plan ───────────────────────────────────────────────────────────
+
+fn execute_generate_plan(app: &mut crate::app::App, args_json: &str) -> Result<String> {
+    let plan: crate::agent::pipeline::GenerationPlan = serde_json::from_str(args_json)
+        .context("invalid plan JSON — expected a GenerationPlan object with a 'features' array")?;
+
+    if plan.features.is_empty() {
+        anyhow::bail!("plan must include at least one feature");
+    }
+
+    for feature in &plan.features {
+        if !feature.file_name.ends_with(".feature") {
+            anyhow::bail!(
+                "file_name must end with '.feature', got: '{}'",
+                feature.file_name
+            );
+        }
+        if feature.scenarios.is_empty() {
+            anyhow::bail!(
+                "feature '{}' has no scenarios (each feature needs at least one)",
+                feature.feature_name
+            );
+        }
+    }
+
+    app.pipeline_plan = Some(plan);
+    app.generation_stage = crate::agent::pipeline::GenerationStage::Writing;
+
+    Ok("Plan accepted. Now use `create_feature_file` and `insert_scenario` to generate the feature files.".into())
+}
+
+// ── validate_feature ─────────────────────────────────────────────────────────
+
+fn execute_validate_feature(app: &mut crate::app::App, args_json: &str) -> Result<String> {
+    let args: serde_json::Value =
+        serde_json::from_str(args_json).context("invalid JSON arguments")?;
+
+    let file_path_opt = args.get("file_path").and_then(|v| v.as_str());
+
+    // Build a temporary project filtered by file if needed
+    let project = &app.project;
+
+    let issues = if let Some(fp) = file_path_opt {
+        // Filter to just the requested file
+        let filtered: Vec<_> = project
+            .features
+            .iter()
+            .filter(|f| {
+                let path_str = f.file_path.to_string_lossy();
+                path_str == fp || path_str.ends_with(fp)
+            })
+            .cloned()
+            .collect();
+
+        if filtered.is_empty() {
+            let available: Vec<_> = project
+                .features
+                .iter()
+                .map(|f| f.file_path.to_string_lossy().to_string())
+                .collect();
+            anyhow::bail!(
+                "Feature file '{}' not found. Available files: {}",
+                fp,
+                if available.is_empty() {
+                    "(none)".into()
+                } else {
+                    available.join(", ")
+                }
+            );
+        }
+
+        let temp_project = crate::gherkin::BddProject {
+            root_dir: project.root_dir.clone(),
+            features: filtered,
+        };
+        crate::agent::validator::validate_project(&temp_project)
+    } else {
+        crate::agent::validator::validate_project(project)
+    };
+
+    if issues.is_empty() {
+        app.generation_stage = crate::agent::pipeline::GenerationStage::Complete;
+    }
+
+    Ok(crate::agent::validator::format_validation_result(&issues))
 }

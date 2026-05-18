@@ -340,5 +340,97 @@ pub fn get_tools() -> Vec<ToolDefinition> {
                 "required": []
             }),
         },
+        ToolDefinition {
+            name: "submit_requirements".into(),
+            description: "Submit gathered requirements for a new feature and advance to the \
+                          planning phase. Call this after asking the user enough questions \
+                          to understand what they want to build."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "feature_name": {
+                        "type": "string",
+                        "description": "Name of the feature (e.g. 'User Authentication')"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional description/user story for the feature"
+                    },
+                    "scenario_descriptions": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Short descriptions of each scenario to include"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional tags for the feature (e.g. ['@auth', '@smoke'])"
+                    }
+                },
+                "required": ["feature_name", "scenario_descriptions"]
+            }),
+        },
+        ToolDefinition {
+            name: "generate_plan".into(),
+            description: "Submit a complete scenario plan based on gathered requirements. \
+                          Call this AFTER submit_requirements to propose the full structure \
+                          including file names, scenarios, steps, and Examples tables."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "features": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file_name": { "type": "string", "description": "Feature file name (must end with .feature)" },
+                                "feature_name": { "type": "string", "description": "The feature title" },
+                                "tags": { "type": "array", "items": { "type": "string" }, "description": "Feature-level tags" },
+                                "background_steps": { "type": "array", "items": { "type": "string" }, "description": "Optional background steps" },
+                                "scenarios": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "is_outline": { "type": "boolean", "description": "True for Scenario Outline" },
+                                            "name": { "type": "string" },
+                                            "tags": { "type": "array", "items": { "type": "string" } },
+                                            "steps": { "type": "array", "items": { "type": "string" } },
+                                            "examples_headers": { "type": "array", "items": { "type": "string" } },
+                                            "examples_rows": {
+                                                "type": "array",
+                                                "items": { "type": "array", "items": { "type": "string" } }
+                                            }
+                                        },
+                                        "required": ["name", "steps"]
+                                    }
+                                }
+                            },
+                            "required": ["file_name", "feature_name", "scenarios"]
+                        }
+                    }
+                },
+                "required": ["features"]
+            }),
+        },
+        ToolDefinition {
+            name: "validate_feature".into(),
+            description: "Validate one or all feature files for Gherkin best practices. \
+                          Checks: Given/When/Then ordering, missing Examples tables, \
+                          duplicate scenario names, step count warnings."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Optional: validate only this file (e.g. 'login.feature'). If omitted, validates all files."
+                    }
+                },
+                "required": []
+            }),
+        },
     ]
 }
