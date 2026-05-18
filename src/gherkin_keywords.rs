@@ -1,5 +1,6 @@
 //! Shared Gherkin keyword constants used by both the line-level editor navigation (`bdd_nav`)
 //! and the file-level AST parser (`gherkin`).
+#![allow(dead_code)]
 
 /// Step keywords in picker cycle order.
 pub const STEP_KEYWORDS: &[&str] = &["Given", "When", "Then", "And", "But"];

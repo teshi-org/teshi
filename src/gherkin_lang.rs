@@ -55,8 +55,14 @@ struct RawLanguage {
 /// A single Gherkin language with pre-built lookup maps.
 #[derive(Debug, Clone)]
 pub struct GherkinLanguage {
+    /// Language code (e.g. "en", "zh-CN").
+    #[allow(dead_code)]
     pub code: String,
+    /// Language name in English.
+    #[allow(dead_code)]
     pub name: String,
+    /// Language name in its own script.
+    #[allow(dead_code)]
     pub native: String,
     /// Maps any step keyword string → StepKeywordType.
     step_map: HashMap<String, StepKeywordType>,
@@ -125,23 +131,28 @@ impl GherkinLanguage {
 
         let primary_step = [
             raw.given
-                .first()
+                .iter()
+                .find(|s| s.trim() != "*")
                 .map(|s| s.trim().to_string())
                 .unwrap_or_default(),
             raw.when
-                .first()
+                .iter()
+                .find(|s| s.trim() != "*")
                 .map(|s| s.trim().to_string())
                 .unwrap_or_default(),
             raw.then
-                .first()
+                .iter()
+                .find(|s| s.trim() != "*")
                 .map(|s| s.trim().to_string())
                 .unwrap_or_default(),
             raw.and
-                .first()
+                .iter()
+                .find(|s| s.trim() != "*")
                 .map(|s| s.trim().to_string())
                 .unwrap_or_default(),
             raw.but
-                .first()
+                .iter()
+                .find(|s| s.trim() != "*")
                 .map(|s| s.trim().to_string())
                 .unwrap_or_default(),
         ];
@@ -216,6 +227,7 @@ impl GherkinLanguage {
     // ── Public API ─────────────────────────────────────────────────────────
 
     /// Look up a step keyword string → its normalised type.
+    #[allow(dead_code)]
     pub fn classify_step(&self, word: &str) -> Option<StepKeywordType> {
         self.step_map.get(word).copied()
     }
@@ -225,12 +237,12 @@ impl GherkinLanguage {
     /// (preserving the trailing space in the JSON if any).
     pub fn match_step_prefix<'a>(&self, trimmed: &'a str) -> Option<(&'a str, StepKeywordType)> {
         for kw in &self.step_keywords {
-            if let Some(rest) = trimmed.strip_prefix(kw.as_str()) {
-                if rest.is_empty() || rest.starts_with(' ') {
-                    // re-match with the *input* slice to get the exact span
-                    let end = kw.len();
-                    return Some((&trimmed[..end], self.step_map[kw]));
-                }
+            if let Some(rest) = trimmed.strip_prefix(kw.as_str())
+                && (rest.is_empty() || rest.starts_with(' '))
+            {
+                // re-match with the *input* slice to get the exact span
+                let end = kw.len();
+                return Some((&trimmed[..end], self.step_map[kw]));
             }
         }
         None
@@ -243,6 +255,18 @@ impl GherkinLanguage {
 
     /// Primary display text for a step keyword type.
     pub fn primary_text(&self, ty: StepKeywordType) -> &str {
+        // Prefer canonical English keyword if this language supports it
+        let canonical = match ty {
+            StepKeywordType::Given => "Given",
+            StepKeywordType::When => "When",
+            StepKeywordType::Then => "Then",
+            StepKeywordType::And => "And",
+            StepKeywordType::But => "But",
+        };
+        // Check if the canonical keyword exists in this language's step_map
+        if self.step_map.contains_key(canonical) {
+            return canonical;
+        }
         let idx = ty as usize;
         if idx < 5 { &self.primary_step[idx] } else { "" }
     }
@@ -253,24 +277,37 @@ impl GherkinLanguage {
         trimmed: &'a str,
     ) -> Option<(&'a str, StructuralType)> {
         for kw in &self.structural_keywords {
-            if let Some(rest) = trimmed.strip_prefix(kw.as_str()) {
-                if rest.is_empty() || rest.starts_with(' ') {
-                    let end = kw.len();
-                    return Some((&trimmed[..end], self.structural_map[kw]));
-                }
+            if let Some(rest) = trimmed.strip_prefix(kw.as_str())
+                && (rest.is_empty() || rest.starts_with(' '))
+            {
+                let end = kw.len();
+                return Some((&trimmed[..end], self.structural_map[kw]));
             }
         }
         None
     }
 
     /// All structural keyword + ":" strings.
+    #[allow(dead_code)]
     pub fn all_structural_keywords(&self) -> &[String] {
         &self.structural_keywords
     }
 
     /// Returns the primary structural keyword + ":" for a type.
     pub fn primary_structural(&self, ty: StructuralType) -> &str {
-        // find the first matching entry in structural_map
+        // Prefer canonical English keyword if this language supports it
+        let canonical = match ty {
+            StructuralType::Feature => "Feature:",
+            StructuralType::Background => "Background:",
+            StructuralType::Scenario => "Scenario:",
+            StructuralType::ScenarioOutline => "Scenario Outline:",
+            StructuralType::Examples => "Examples:",
+            StructuralType::Rule => "Rule:",
+        };
+        if self.structural_map.contains_key(canonical) {
+            return canonical;
+        }
+        // Fallback to first matching entry in structural_keywords
         self.structural_keywords
             .iter()
             .find(|k| self.structural_map.get(k.as_str()) == Some(&ty))

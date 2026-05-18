@@ -1,15 +1,31 @@
 use ropey::Rope;
 
+use crate::gherkin_lang::GherkinLanguage;
+use crate::gherkin_lang::GherkinLanguages;
+
 #[derive(Debug, Clone)]
 pub struct EditorBuffer {
     rope: Rope,
+    lang_code: String,
 }
 
 impl EditorBuffer {
     pub fn from_string(content: String) -> Self {
+        let code = GherkinLanguages::detect_from_content(&content).to_string();
         Self {
             rope: Rope::from_str(&content),
+            lang_code: code,
         }
+    }
+
+    pub fn language(&self) -> &GherkinLanguage {
+        GherkinLanguages::global().get(&self.lang_code)
+    }
+
+    /// Get the language code (e.g. "en", "zh-CN").
+    #[allow(dead_code)]
+    pub fn lang_code(&self) -> &str {
+        &self.lang_code
     }
 
     pub fn as_string(&self) -> String {

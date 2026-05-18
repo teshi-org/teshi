@@ -19,14 +19,12 @@ use crate::editor_buffer::EditorBuffer;
 
 pub use crate::diff::{ChangeKind, DiffLine};
 use crate::gherkin::{self, BddProject};
+use crate::gherkin_lang::StructuralType;
 use crate::keymap::Action;
 use crate::mindmap;
 use crate::runner::{self, RunCase, RunEvent, RunRequest, RunnerConfig};
 use crate::step_index::StepIndex;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
-
-/// Step keywords in cycle order (re-exported for UI pickers).
-pub use crate::bdd_nav::STEP_KEYWORDS_CYCLE;
 
 /// Available slash commands: (name, description)
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -203,7 +201,7 @@ pub struct RunSummary {
 pub struct StepKeywordPicker {
     /// Buffer line index for the step being edited.
     pub buffer_row: usize,
-    /// Index into [`STEP_KEYWORDS_CYCLE`] for the highlighted item.
+    /// Index into the buffer's language `all_step_keywords()` for the highlighted item.
     pub selected: usize,
 }
 
@@ -3529,7 +3527,7 @@ impl App {
                 }
                 let row = self.step_input_row;
                 let line = self.buffer.line(row);
-                if current_step_keyword_index(&line).is_none() {
+                if current_step_keyword_index(&line, self.buffer.language()).is_none() {
                     self.status = "New line is available on step lines only".to_string();
                     self.quit_pending_confirm = false;
                     return Ok(());
@@ -4139,7 +4137,7 @@ impl App {
         match self.focus_slot {
             BddFocusSlot::Keyword => {
                 self.clear_step_input_state();
-                if let Some(idx) = current_step_keyword_index(&line) {
+                if let Some(idx) = current_step_keyword_index(&line, self.buffer.language()) {
                     self.step_keyword_picker = Some(StepKeywordPicker {
                         buffer_row: self.cursor_row,
                         selected: idx,
@@ -4174,7 +4172,7 @@ impl App {
 
     fn switch_step_keyword(&mut self, keyword: &'static str) {
         let line = self.buffer.line(self.cursor_row);
-        if let Some(new_line) = replace_step_keyword_line(&line, keyword) {
+        if let Some(new_line) = replace_step_keyword_line(&line, keyword, self.buffer.language()) {
             self.push_undo();
             self.buffer.replace_line(self.cursor_row, &new_line);
             self.focus_slot = BddFocusSlot::Keyword;
@@ -4304,11 +4302,20 @@ impl App {
                 while end_row < self.buffer.line_count() {
                     let line = self.buffer.line(end_row);
                     let trimmed = line.trim_start();
-                    if crate::bdd_nav::step_edit_start_col(&line).is_some()
-                        || trimmed.starts_with("Scenario:")
-                        || trimmed.starts_with("Scenario Outline:")
-                        || trimmed.starts_with("Background:")
-                        || trimmed.starts_with("Feature:")
+                    if crate::bdd_nav::step_edit_start_col(&line, self.buffer.language()).is_some()
+                        || self
+                            .buffer
+                            .language()
+                            .match_structural_prefix(trimmed)
+                            .is_some_and(|(_, st)| {
+                                matches!(
+                                    st,
+                                    StructuralType::Scenario
+                                        | StructuralType::ScenarioOutline
+                                        | StructuralType::Background
+                                        | StructuralType::Feature
+                                )
+                            })
                     {
                         break;
                     }
@@ -4401,8 +4408,16 @@ impl App {
                     // In editor mode, clicking on a scenario header focuses that scenario
                     if self.is_editor_active() && buf_row < self.buffer.line_count() {
                         let clicked_line = self.buffer.line(buf_row).trim_start().to_string();
-                        if clicked_line.starts_with("Scenario:")
-                            || clicked_line.starts_with("Scenario Outline:")
+                        if self
+                            .buffer
+                            .language()
+                            .match_structural_prefix(&clicked_line)
+                            .is_some_and(|(_, st)| {
+                                matches!(
+                                    st,
+                                    StructuralType::Scenario | StructuralType::ScenarioOutline
+                                )
+                            })
                         {
                             self.editor_focus_scenario_row = Some(buf_row);
                             self.scroll_row = buf_row;
@@ -4540,7 +4555,15 @@ impl App {
             .filter(|&row| {
                 let line = self.buffer.line(row);
                 let trimmed = line.trim_start();
-                trimmed.starts_with("Scenario:") || trimmed.starts_with("Scenario Outline:")
+                self.buffer
+                    .language()
+                    .match_structural_prefix(trimmed)
+                    .is_some_and(|(_, st)| {
+                        matches!(
+                            st,
+                            StructuralType::Scenario | StructuralType::ScenarioOutline
+                        )
+                    })
             })
             .collect();
         if self.hidden_editor_rows().contains(&self.cursor_row)
@@ -4602,7 +4625,8 @@ impl App {
         let Some(ref mut p) = self.step_keyword_picker else {
             return;
         };
-        let len = STEP_KEYWORDS_CYCLE.len();
+        let all_kw = self.buffer.language().all_step_keywords();
+        let len = all_kw.iter().filter(|kw| kw.as_str() != "*").count();
         let i = p.selected as isize + delta;
         p.selected = i.clamp(0, len as isize - 1) as usize;
         self.quit_pending_confirm = false;
@@ -4613,8 +4637,14 @@ impl App {
             return;
         };
         let line = self.buffer.line(picker.buffer_row);
-        let new_kw = STEP_KEYWORDS_CYCLE[picker.selected];
-        if let Some(new_line) = replace_step_keyword_line(&line, new_kw) {
+        let all_kw = self.buffer.language().all_step_keywords();
+        let kws: Vec<&str> = all_kw
+            .iter()
+            .filter(|kw| kw.as_str() != "*")
+            .map(|s| s.as_str())
+            .collect();
+        let new_kw = kws[picker.selected];
+        if let Some(new_line) = replace_step_keyword_line(&line, new_kw, self.buffer.language()) {
             self.push_undo();
             self.buffer.replace_line(picker.buffer_row, &new_line);
             self.cursor_row = picker.buffer_row;
@@ -5004,7 +5034,12 @@ mod tests {
     };
     use crate::bdd_nav::step_edit_start_col;
     use crate::editor_buffer::EditorBuffer;
+    use crate::gherkin_lang::GherkinLanguages;
     use crate::keymap::Action;
+
+    fn en() -> &'static crate::gherkin_lang::GherkinLanguage {
+        GherkinLanguages::global().get("en")
+    }
 
     /// Helper: create an app pre-set to editor-active mode (stage 3) for existing editor tests.
     fn editor_test_app() -> App {
@@ -5035,9 +5070,10 @@ mod tests {
 
     #[test]
     fn test_step_edit_boundary_detection() {
-        assert_eq!(step_edit_start_col("  Given I log in"), Some(8));
-        assert_eq!(step_edit_start_col("When x"), Some(5));
-        assert_eq!(step_edit_start_col("Feature: x"), None);
+        let en = en();
+        assert_eq!(step_edit_start_col("  Given I log in", en), Some(8));
+        assert_eq!(step_edit_start_col("When x", en), Some(5));
+        assert_eq!(step_edit_start_col("Feature: x", en), None);
     }
 
     #[test]
@@ -5194,16 +5230,17 @@ mod tests {
 
     #[test]
     fn test_replace_step_keyword_line_order() {
+        let en = en();
         assert_eq!(
-            replace_step_keyword_line("  Given x", "When").as_deref(),
+            replace_step_keyword_line("  Given x", "When", en).as_deref(),
             Some("  When x")
         );
         assert_eq!(
-            replace_step_keyword_line("But last", "Given").as_deref(),
+            replace_step_keyword_line("But last", "Given", en).as_deref(),
             Some("Given last")
         );
-        assert_eq!(current_step_keyword_index("  Given x"), Some(0));
-        assert_eq!(current_step_keyword_index("But last"), Some(4));
+        assert_eq!(current_step_keyword_index("  Given x", en), Some(0));
+        assert_eq!(current_step_keyword_index("But last", en), Some(4));
     }
 
     #[test]
