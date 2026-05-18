@@ -332,6 +332,12 @@ pub struct App {
     pub selection_end: Option<(usize, usize)>,
     /// Screen rectangle of the editor panel, updated each render frame.
     pub editor_panel_rect: Option<ratatui::layout::Rect>,
+    /// Clickable regions registered during the last render frame.
+    pub clickable_regions: Vec<ClickableRegion>,
+    /// Screen rectangle of the tree panel, updated each render frame.
+    pub tree_panel_rect: Option<ratatui::layout::Rect>,
+    /// Screen rectangle of the preview panel, updated each render frame.
+    pub preview_panel_rect: Option<ratatui::layout::Rect>,
     undo_stack: Vec<(EditorBuffer, usize, usize)>,
     redo_stack: Vec<(EditorBuffer, usize, usize)>,
     pub runner_config: Option<RunnerConfig>,
@@ -419,6 +425,37 @@ fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(i, _)| i)
         .unwrap_or(s.len())
+}
+
+/// A clickable region registered during rendering for mouse hit-testing.
+#[derive(Debug, Clone)]
+pub enum ClickableRegion {
+    Tab(MainTab),
+    Tree,
+    ExploreFeature {
+        feature_idx: usize,
+        row_y: u16,
+        col_x: u16,
+        col_right: u16,
+    },
+    ExploreScenario {
+        scenario_idx: usize,
+        row_y: u16,
+        col_x: u16,
+        col_right: u16,
+    },
+    ExploreStep {
+        step_idx: usize,
+        row_y: u16,
+        col_x: u16,
+        col_right: u16,
+    },
+    /// Editor panel area — reserved for click-to-focus.
+    #[allow(dead_code)]
+    EditorPanel,
+    /// Preview panel area — reserved for click-to-focus.
+    #[allow(dead_code)]
+    PreviewPanel,
 }
 
 impl App {
@@ -540,6 +577,9 @@ impl App {
             selection_anchor: None,
             selection_end: None,
             editor_panel_rect: None,
+            clickable_regions: Vec::new(),
+            tree_panel_rect: None,
+            preview_panel_rect: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             runner_config: runner::load_runner_config(None).ok(),
@@ -669,6 +709,9 @@ impl App {
             selection_anchor: None,
             selection_end: None,
             editor_panel_rect: None,
+            clickable_regions: Vec::new(),
+            tree_panel_rect: None,
+            preview_panel_rect: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             runner_config: runner::load_runner_config(None).ok(),
@@ -780,6 +823,9 @@ impl App {
             selection_anchor: None,
             selection_end: None,
             editor_panel_rect: None,
+            clickable_regions: Vec::new(),
+            tree_panel_rect: None,
+            preview_panel_rect: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             runner_config: runner::load_runner_config(None).ok(),
@@ -4390,9 +4436,8 @@ impl App {
 
     /// Handle a mouse event from crossterm.
     ///
-    /// Left-click/drag creates an in-app text selection.
-    /// Right-click copies the current selection to the system clipboard.
-    /// Scroll in AI context scrolls the chat history.
+    /// Dispatches to clickable UI regions first, then falls back to
+    /// editor text-selection and AI-chat scroll behaviour.
     pub fn handle_mouse_event(
         &mut self,
         kind: MouseEventKind,
@@ -4400,8 +4445,17 @@ impl App {
         row: u16,
         modifiers: KeyModifiers,
     ) -> Result<()> {
+        // Update hover tracking
+        let pos = ratatui::layout::Position::new(col, row);
+
         match kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // 1. Try clickable UI regions (tabs, tree, explore columns, etc.)
+                if let Some(region) = self.hit_test(&pos).cloned() {
+                    return self.handle_region_click(&region, &pos);
+                }
+
+                // 2. Fall through to editor text selection
                 if let Some((buf_row, buf_col)) = self.screen_to_buffer_pos(col, row) {
                     self.selection_anchor = Some((buf_row, buf_col));
                     self.selection_end = Some((buf_row, buf_col));
@@ -4437,9 +4491,34 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Right) => {
+                // Try clickable regions first (e.g. right-click on a tab/item)
+                if let Some(region) = self.hit_test(&pos).cloned() {
+                    return self.handle_region_click(&region, &pos);
+                }
+                // Fall through: copy selection
                 self.handle_action(Action::CopySelection)?;
             }
             MouseEventKind::ScrollUp => {
+                // Editor panel scroll
+                if let Some(rect) = self.editor_panel_rect
+                    && rect.contains(pos)
+                {
+                    if self.scroll_row > 0 {
+                        self.scroll_row = self.scroll_row.saturating_sub(1);
+                        self.quit_pending_confirm = false;
+                    }
+                    return Ok(());
+                }
+                // Preview panel scroll
+                if let Some(rect) = self.preview_panel_rect
+                    && rect.contains(pos)
+                {
+                    if self.preview_cursor_row > 0 {
+                        self.preview_cursor_row = self.preview_cursor_row.saturating_sub(1);
+                    }
+                    return Ok(());
+                }
+                // Fall through to AI context scroll
                 let in_ai_context = self.active_tab == MainTab::Ai
                     || (self.active_tab == MainTab::MindMap
                         && self.mindmap_focus == MindMapFocus::AiPanel);
@@ -4453,6 +4532,23 @@ impl App {
                 }
             }
             MouseEventKind::ScrollDown => {
+                // Editor panel scroll
+                if let Some(rect) = self.editor_panel_rect
+                    && rect.contains(pos)
+                {
+                    let max_scroll = self.buffer.line_count().saturating_sub(1);
+                    self.scroll_row = self.scroll_row.saturating_add(1).min(max_scroll);
+                    self.quit_pending_confirm = false;
+                    return Ok(());
+                }
+                // Preview panel scroll
+                if let Some(rect) = self.preview_panel_rect
+                    && rect.contains(pos)
+                {
+                    self.preview_cursor_row = self.preview_cursor_row.saturating_add(1);
+                    return Ok(());
+                }
+                // Fall through to AI context scroll
                 let in_ai_context = self.active_tab == MainTab::Ai
                     || (self.active_tab == MainTab::MindMap
                         && self.mindmap_focus == MindMapFocus::AiPanel);
@@ -4464,6 +4560,133 @@ impl App {
                         self.handle_action(Action::AiScrollDown)?;
                     }
                 }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Find the first clickable region that contains `pos`.
+    fn hit_test(&self, pos: &ratatui::layout::Position) -> Option<&ClickableRegion> {
+        // Tab bar: row is always 0, check x-position against known label widths
+        if pos.y == 0 {
+            let tab_bar_x = 0; // tab bar starts at column 0
+            let tab_labels = [
+                (MainTab::Explore, " Explore [1] ", 0u16),
+                (MainTab::MindMap, " MindMap [2] ", 15u16),
+                (MainTab::Ai, " AI [3] ", 30u16),
+            ];
+            for &(ref tab, label, start_x) in &tab_labels {
+                let end_x = start_x + label.chars().count() as u16;
+                if pos.x >= tab_bar_x + start_x && pos.x < tab_bar_x + end_x {
+                    // Return a matching Tab region from clickable_regions
+                    return self
+                        .clickable_regions
+                        .iter()
+                        .find(|r| matches!(r, ClickableRegion::Tab(t) if *t == *tab));
+                }
+            }
+        }
+
+        for region in &self.clickable_regions {
+            match region {
+                ClickableRegion::Tab(_) => {
+                    // Already handled above
+                }
+                ClickableRegion::Tree => {
+                    if let Some(rect) = self.tree_panel_rect
+                        && rect.contains(*pos)
+                    {
+                        return Some(region);
+                    }
+                }
+                ClickableRegion::ExploreFeature {
+                    row_y,
+                    col_x,
+                    col_right,
+                    ..
+                } => {
+                    if *row_y == pos.y && pos.x >= *col_x && pos.x < *col_right {
+                        return Some(region);
+                    }
+                }
+                ClickableRegion::ExploreScenario {
+                    row_y,
+                    col_x,
+                    col_right,
+                    ..
+                } => {
+                    if *row_y == pos.y && pos.x >= *col_x && pos.x < *col_right {
+                        return Some(region);
+                    }
+                }
+                ClickableRegion::ExploreStep {
+                    row_y,
+                    col_x,
+                    col_right,
+                    ..
+                } => {
+                    if *row_y == pos.y && pos.x >= *col_x && pos.x < *col_right {
+                        return Some(region);
+                    }
+                }
+                ClickableRegion::EditorPanel => {
+                    if let Some(rect) = self.editor_panel_rect
+                        && rect.contains(*pos)
+                    {
+                        return Some(region);
+                    }
+                }
+                ClickableRegion::PreviewPanel => {
+                    if let Some(rect) = self.preview_panel_rect
+                        && rect.contains(*pos)
+                    {
+                        return Some(region);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Execute the action associated with clicking on a UI region.
+    fn handle_region_click(
+        &mut self,
+        region: &ClickableRegion,
+        pos: &ratatui::layout::Position,
+    ) -> Result<()> {
+        match region {
+            ClickableRegion::Tab(tab) => {
+                self.active_tab = *tab;
+                self.status = format!("Switched to {tab:?} tab");
+            }
+            ClickableRegion::Tree => {
+                // tui-tree-widget uses absolute terminal coordinates internally
+                if self.tree_state.click_at(*pos)
+                    && let Some(id) = crate::mindmap::selected_node_id(&self.tree_state)
+                {
+                    self.mindmap_index.apply_highlight_categories(id);
+                    // rebuild preview
+                    if self.view_stage == crate::app::ViewStage::TreeAndEditor {
+                        self.rebuild_preview();
+                    }
+                }
+            }
+            ClickableRegion::ExploreFeature { feature_idx, .. } => {
+                self.explore_selected_feature = *feature_idx;
+                self.explore_focus = crate::app::ColumnFocus::Feature;
+                // Reset scenario/step selection
+                self.explore_selected_scenario = 0;
+                self.explore_selected_step = 0;
+            }
+            ClickableRegion::ExploreScenario { scenario_idx, .. } => {
+                self.explore_selected_scenario = *scenario_idx;
+                self.explore_focus = crate::app::ColumnFocus::Scenario;
+                self.explore_selected_step = 0;
+            }
+            ClickableRegion::ExploreStep { step_idx, .. } => {
+                self.explore_selected_step = *step_idx;
+                self.explore_focus = crate::app::ColumnFocus::Step;
             }
             _ => {}
         }
@@ -5437,6 +5660,9 @@ mod tests {
             selection_anchor: None,
             selection_end: None,
             editor_panel_rect: None,
+            clickable_regions: Vec::new(),
+            tree_panel_rect: None,
+            preview_panel_rect: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             runner_config: None,
@@ -5577,6 +5803,9 @@ Feature: B
             selection_anchor: None,
             selection_end: None,
             editor_panel_rect: None,
+            clickable_regions: Vec::new(),
+            tree_panel_rect: None,
+            preview_panel_rect: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             runner_config: None,

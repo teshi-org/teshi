@@ -6,7 +6,9 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use tui_tree_widget::Tree;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, CaseDetail, ChangeKind, ColumnFocus, MainTab, MindMapFocus, RunStatus};
+use crate::app::{
+    App, CaseDetail, ChangeKind, ClickableRegion, ColumnFocus, MainTab, MindMapFocus, RunStatus,
+};
 use crate::bdd_nav::nav_body_char_range_in_buffer;
 use crate::gherkin_lang::{GherkinLanguage, StepKeywordType};
 use crate::highlight::{StepHighlightState, highlight_line_with_state};
@@ -221,6 +223,8 @@ fn status_color(status: RunStatus) -> Color {
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
+    app.clickable_regions.clear();
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -249,6 +253,14 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     )
     .divider(" ");
     frame.render_widget(top_tabs, chunks[0]);
+
+    // Push tab regions for click/hover tracking
+    app.clickable_regions
+        .push(ClickableRegion::Tab(MainTab::Explore));
+    app.clickable_regions
+        .push(ClickableRegion::Tab(MainTab::MindMap));
+    app.clickable_regions
+        .push(ClickableRegion::Tab(MainTab::Ai));
 
     let divider_w = chunks[1].width as usize;
     let divider_line = "─".repeat(divider_w.max(1));
@@ -937,7 +949,7 @@ fn truncate_string_to_cols(text: &str, max_cols: u16) -> String {
     out
 }
 
-fn render_explore_features(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let focused = app.explore_focus == ColumnFocus::Feature;
     let block = explore_block("Features", focused);
     let inner = block.inner(area);
@@ -976,9 +988,19 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+
+    // Register clickable regions for each feature row
+    for (i, _feature) in app.project.features.iter().enumerate() {
+        app.clickable_regions.push(ClickableRegion::ExploreFeature {
+            feature_idx: i,
+            row_y: inner.y + i as u16,
+            col_x: inner.x,
+            col_right: inner.right(),
+        });
+    }
 }
 
-fn render_explore_scenarios(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let focused = app.explore_focus == ColumnFocus::Scenario;
     let scenarios_title = explore_scenarios_title(app);
     let block = explore_block(scenarios_title.as_str(), focused);
@@ -1027,6 +1049,24 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+
+    // Register clickable regions for each scenario row
+    if let Some(scenarios) = app
+        .project
+        .features
+        .get(app.explore_selected_feature)
+        .map(|f| &f.scenarios)
+    {
+        for (i, _scenario) in scenarios.iter().enumerate() {
+            app.clickable_regions
+                .push(ClickableRegion::ExploreScenario {
+                    scenario_idx: i,
+                    row_y: inner.y + i as u16,
+                    col_x: inner.x,
+                    col_right: inner.right(),
+                });
+        }
+    }
 }
 
 fn explore_scenarios_title(app: &App) -> String {
@@ -1129,6 +1169,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     let highlight_style = explore_select_style(focused);
     let mut lines: Vec<Line> = Vec::new();
+    let mut line_idx = inner.y;
 
     let feature = app.project.features.get(app.explore_selected_feature);
     let scenario = feature.and_then(|f| f.scenarios.get(app.explore_selected_scenario));
@@ -1143,6 +1184,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             " (no steps)",
             Style::default().fg(Color::DarkGray),
         ));
+        line_idx += 1;
     } else {
         let mut last_major: Option<Color> = None;
         if !background_steps.is_empty() {
@@ -1152,6 +1194,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD),
             ));
+            line_idx += 1;
             for step in background_steps {
                 let kw = format!("{:>6}", step.keyword);
                 let kw_color = match step.keyword_type {
@@ -1179,8 +1222,10 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 line = truncate_line_to_cols(line, inner.width);
                 line = pad_line_to_width(line, inner.width, Style::default());
                 lines.push(line);
+                line_idx += 1;
             }
             lines.push(Line::raw(""));
+            line_idx += 1;
         }
 
         if let Some(scenario) = scenario
@@ -1190,6 +1235,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 format!(" {}", scenario.tags.join(" ")),
                 Style::default().fg(Color::DarkGray),
             ));
+            line_idx += 1;
         }
 
         for (i, step) in scenario_steps.iter().enumerate() {
@@ -1225,18 +1271,27 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             };
             line = pad_line_to_width(line, inner.width, trail);
             lines.push(line);
+            line_idx += 1;
+            app.clickable_regions.push(ClickableRegion::ExploreStep {
+                step_idx: i,
+                row_y: line_idx - 1,
+                col_x: inner.x,
+                col_right: inner.right(),
+            });
         }
 
         if let Some(scenario) = scenario
             && !scenario.examples.is_empty()
         {
             lines.push(Line::raw(""));
+            line_idx += 1;
             for table in &scenario.examples {
                 if !table.tags.is_empty() {
                     lines.push(Line::styled(
                         format!(" {}", table.tags.join(" ")),
                         Style::default().fg(Color::DarkGray),
                     ));
+                    line_idx += 1;
                 }
                 lines.push(Line::styled(
                     " Examples:",
@@ -1244,13 +1299,16 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                         .fg(Color::DarkGray)
                         .add_modifier(Modifier::BOLD),
                 ));
+                line_idx += 1;
                 for row in render_examples_table_lines(&table.headers, &table.rows) {
                     lines.push(Line::raw(format!("   {row}")));
+                    line_idx += 1;
                 }
             }
         }
     }
 
+    let _ = line_idx;
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
@@ -1492,10 +1550,14 @@ fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: 
             .title_style(Style::default().fg(Color::DarkGray))
     };
 
+    let block_inner = block.inner(area);
     let tree = Tree::new(items)
         .expect("tree construction should succeed")
         .block(block)
         .highlight_style(highlight_style);
+
+    app.tree_panel_rect = Some(block_inner);
+    app.clickable_regions.push(ClickableRegion::Tree);
 
     frame.render_stateful_widget(tree, area, &mut app.tree_state);
 }
