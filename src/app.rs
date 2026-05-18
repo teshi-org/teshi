@@ -1205,13 +1205,13 @@ impl App {
                                         "AI error: too many tool call iterations".to_string();
                                 }
                             } else if self.agents[i].llm_handle.is_some() {
-                                // Trim context before re-invocation to avoid exceeding token limits
-                                self.trim_context_if_needed(i);
+                                // Compact context before re-invocation
+                                self.compact_context_if_needed(i);
                                 let messages = self.build_chat_messages_for_agent(i);
                                 let tools = Some(crate::agent::get_tools());
                                 let handle = self.agents[i].llm_handle.as_ref().unwrap();
                                 let _ = handle.send(crate::llm::LlmRequest::Chat {
-                                    system: Some(Self::ai_system_prompt().into()),
+                                    system: Some(Self::ai_system_prompt(None)),
                                     messages,
                                     tools,
                                 });
@@ -1250,13 +1250,93 @@ impl App {
         }
     }
 
+    /// Build a project-context summary to inject ahead of every LLM request.
+    /// This lets the LLM see the full project structure without extra tool calls.
+    fn build_project_context_summary(&self) -> String {
+        let mut ctx = String::from("[Project Context]\n");
+        ctx.push_str(&format!(
+            "Features: {} file(s)\n",
+            self.project.features.len()
+        ));
+
+        for f in &self.project.features {
+            let path = f.file_path.to_string_lossy();
+            let sc_count = f.scenarios.len();
+            let st_count: usize = f.scenarios.iter().map(|s| s.steps.len()).sum::<usize>()
+                + f.background.as_ref().map(|bg| bg.steps.len()).unwrap_or(0);
+            ctx.push_str(&format!(
+                "  {path}: {sc_count} scenario(s), {st_count} step(s)"
+            ));
+            if !f.tags.is_empty() {
+                ctx.push_str(&format!(" [{}]", f.tags.join(" ")));
+            }
+            ctx.push('\n');
+        }
+
+        // Most-reused step patterns
+        if !self.step_index.is_empty() {
+            ctx.push_str("\nFrequent step patterns:\n");
+            for (text, count) in self.step_index.most_common(8) {
+                ctx.push_str(&format!("  ({count}x) \"{text}\"\n"));
+            }
+        }
+
+        // Active file
+        if let Some(ref active_path) = self.file_path {
+            ctx.push_str(&format!(
+                "\nActive file: {}\n",
+                active_path.to_string_lossy()
+            ));
+        }
+
+        ctx
+    }
+
+    /// Check whether a user message is requesting feature/scenario generation.
+    fn is_generation_request(text: &str) -> bool {
+        let keywords = [
+            "create",
+            "generate",
+            "make",
+            "new feature",
+            "new scenario",
+            "add feature",
+            "add scenario",
+            "write a",
+            "write an",
+            "写",
+            "创建",
+            "生成",
+            "添加",
+            "新增",
+        ];
+        let lower = text.to_lowercase();
+        keywords.iter().any(|k| lower.contains(k))
+    }
+
     /// Build `ChatMessage` list from the current AI chat history for LLM
-    /// requests.
+    /// requests.  Prepends a project-context summary as a system message.
     fn build_chat_messages_for_agent(&self, agent_idx: usize) -> Vec<crate::llm::ChatMessage> {
-        self.agents[agent_idx]
+        let mut msgs: Vec<crate::llm::ChatMessage> = Vec::new();
+
+        // Inject project context as a system message at the front
+        if self.agents[agent_idx]
             .messages
             .iter()
-            .map(|m| crate::llm::ChatMessage {
+            .any(|m| matches!(m.role, AiRole::User))
+        {
+            msgs.push(crate::llm::ChatMessage {
+                role: "system".into(),
+                content: self.build_project_context_summary(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+        }
+
+        // Original 1:1 mapping
+        for m in &self.agents[agent_idx].messages {
+            msgs.push(crate::llm::ChatMessage {
                 role: match m.role {
                     AiRole::User => "user".into(),
                     AiRole::Assistant => "assistant".into(),
@@ -1266,108 +1346,142 @@ impl App {
                 tool_calls: m.tool_calls.clone(),
                 tool_call_id: m.tool_call_id.clone(),
                 reasoning_content: m.reasoning_content.clone(),
-            })
-            .collect()
+            });
+        }
+        msgs
     }
 
     /// The system prompt used for all AI chat requests.
-    fn ai_system_prompt() -> &'static str {
-        "You are a BDD/Gherkin assistant embedded in Teshi, a TUI editor for .feature files.\n\
-         \n\
-         ## Your Role\n\
-         You help users write, edit, organize, and validate Gherkin feature files using\n\
-         automated tools. You have access to files, scenarios, steps, test runners, and\n\
-         visual aids (MindMap). Always think before acting: inspect the project structure\n\
-         first, then make precise changes.\n\
-         \n\
-         ## Available Tools\n\
-         - **get_project_info**: Get project directory, file list, scenario/step counts.\n\
-           Use this FIRST when the user asks about the project.\n\
-         - **get_feature_content**: Get parsed content of a specific .feature file (names,\n\
-           steps, line numbers, tags, background, examples). Use this BEFORE editing any file.\n\
-         - **search_features**: Search all features for scenarios matching tag, step content,\n\
-           or scenario name. Use this when the user asks 'find scenarios that...'.\n\
-         - **create_feature_file**: Create a brand new .feature file with a feature name,\n\
-           optional description, tags, and background steps. Requires user approval.\n\
-         - **insert_scenario**: Insert a new Scenario or Scenario Outline into an existing\n\
-           feature file. Requires user approval. Always call get_feature_content first to\n\
-           determine the correct insert_after_line.\n\
-         - **update_step**: Replace the body text of a specific step in a scenario while\n\
-           preserving its keyword and indentation. Requires user approval.\n\
-         - **delete_scenario**: Delete an entire scenario from a feature file by name.\n\
-           Requires user approval.\n\
-         - **rename_scenario**: Rename a scenario. Requires user approval.\n\
-         - **reorder_steps**: Reorder the steps inside a scenario (providing a permutation\n\
-           of step indices). Requires user approval.\n\
-         - **run_tests**: Execute the external test runner for all or filtered scenarios.\n\
-           Returns pass/fail/skip summary with details. Use this when the user asks to\n\
-           'run the tests' or 'check if these scenarios pass'.\n\
-         - **highlight_mindmap_nodes**: Visually highlight MindMap tree nodes matching a\n\
-           condition. Use for visual exploration only — it does NOT return text content.\n\
-         - **apply_mindmap_filter**: Filter the MindMap tree to show only matching nodes.\n\
-           Use 'clear' to remove the active filter.\n\
-         \n\
-         ## Workflow Guidelines\n\
-         1. When the user mentions a specific file, ALWAYS call get_feature_content first.\n\
-         2. When creating a new file, call create_feature_file.\n\
-         3. After viewing content, make ONE editing tool call at a time. Do not batch.\n\
-         4. When editing, provide accurate line numbers from get_feature_content.\n\
-         5. When the user asks to search or find, use search_features.\n\
-         6. When the user asks to run or test, use run_tests.\n\
-         7. Use highlight_mindmap_nodes and apply_mindmap_filter only for visual\n\
-            exploration — never as a substitute for reading file content.\n\
-         \n\
-         ## Gherkin Conventions\n\
-         - Use standard keywords: **Given**, **When**, **Then**, **And**, **But**.\n\
-         - Indentation: Feature at column 0, Scenario at 2 spaces, Steps at 4 spaces.\n\
-         - Tags start with @ and appear before the element they annotate.\n\
-         - **Background** blocks contain steps common to all scenarios in a feature.\n\
-         - **Scenario Outline** uses `<placeholders>` and **Examples** tables.\n\
-         - Examples tables use pipe-delimited format: `| header1 | header2 |`.\n\
-         - Keep scenarios focused: one behavior per scenario.\n\
-         - Steps should be declarative, not imperative: describe WHAT, not HOW.\n\
-         \n\
-         ## Example Gherkin Structure\n\
-         ```gherkin\n\
-         @smoke @login\n\
-         Feature: User Login\n\
-           As a registered user\n\
-           I want to log in\n\
-           So that I can access my account\n\
-         \n\
-           Background:\n\
-             Given a registered user with email \"test@example.com\"\n\
-         \n\
-           Scenario: Successful login with valid credentials\n\
-             Given I am on the login page\n\
-             When I enter valid credentials\n\
-             Then I should see the dashboard\n\
-         \n\
-           Scenario Outline: Login with various roles\n\
-             Given I am on the login page\n\
-             When I log in as <role>\n\
-             Then I should see the <landing_page>\n\
-         \n\
-             Examples:\n\
-               | role    | landing_page |\n\
-               | admin   | Admin Panel  |\n\
-               | user    | Dashboard    |\n\
-           ```\n\
-         \n\
-         ## Error Recovery\n\
-         - If a tool call fails because a file or scenario was not found, re-read the\n\
-           project state with get_project_info or get_feature_content and try again.\n\
-         - If you are unsure about line numbers, call get_feature_content to verify.\n\
-         - If the project is empty, suggest creating a feature file with create_feature_file.\n\
-         - Do NOT call the same tool repeatedly in a loop if it keeps failing.\n\
-         \n\
-         ## Interaction Guidelines\n\
-         - Be concise. Tool results speak louder than words.\n\
-         - Explain what you are about to do before making file-modifying tool calls.\n\
-         - When a change is queued for approval, tell the user to press [Y] to accept\n\
-           or [N] to reject.\n\
-         - Respect the user's existing file structure, indentation, and naming style.\n\
-         - Do not invent file names — use the ones the user provides or that exist."
+    /// When `request` contains generation keywords, additional guidance is appended.
+    fn ai_system_prompt(request: Option<&str>) -> String {
+        let mut prompt = String::from(
+            "You are a BDD/Gherkin assistant embedded in Teshi, a TUI editor for .feature files.\n\
+             \n\
+             ## Your Role\n\
+             You help users write, edit, organize, and validate Gherkin feature files using\n\
+             automated tools. You have access to files, scenarios, steps, test runners, and\n\
+             visual aids (MindMap). Always think before acting: inspect the project structure\n\
+             first, then make precise changes.\n\
+             \n\
+             ## Available Tools\n\
+             - **get_project_info**: Get project directory, file list, scenario/step counts.\n\
+               Use this FIRST when the user asks about the project.\n\
+             - **get_feature_content**: Get parsed content of a specific .feature file (names,\n\
+               steps, line numbers, tags, background, examples). Use this BEFORE editing any file.\n\
+             - **search_features**: Search all features for scenarios matching tag, step content,\n\
+               or scenario name. Use this when the user asks 'find scenarios that...'.\n\
+             - **create_feature_file**: Create a brand new .feature file with a feature name,\n\
+               optional description, tags, and background steps. Requires user approval.\n\
+             - **insert_scenario**: Insert a new Scenario or Scenario Outline into an existing\n\
+               feature file. Requires user approval. Always call get_feature_content first to\n\
+               determine the correct insert_after_line.\n\
+             - **update_step**: Replace the body text of a specific step in a scenario while\n\
+               preserving its keyword and indentation. Requires user approval.\n\
+             - **delete_scenario**: Delete an entire scenario from a feature file by name.\n\
+               Requires user approval.\n\
+             - **rename_scenario**: Rename a scenario. Requires user approval.\n\
+             - **reorder_steps**: Reorder the steps inside a scenario (providing a permutation\n\
+               of step indices). Requires user approval.\n\
+             - **run_tests**: Execute the external test runner for all or filtered scenarios.\n\
+               Returns pass/fail/skip summary with details. Use this when the user asks to\n\
+               'run the tests' or 'check if these scenarios pass'.\n\
+             - **highlight_mindmap_nodes**: Visually highlight MindMap tree nodes matching a\n\
+               condition. Use for visual exploration only — it does NOT return text content.\n\
+             - **apply_mindmap_filter**: Filter the MindMap tree to show only matching nodes.\n\
+               Use 'clear' to remove the active filter.\n\
+             \n\
+             ## Workflow Guidelines\n\
+             1. When the user mentions a specific file, ALWAYS call get_feature_content first.\n\
+             2. When creating a new file, call create_feature_file.\n\
+             3. After viewing content, make ONE editing tool call at a time. Do not batch.\n\
+             4. When editing, provide accurate line numbers from get_feature_content.\n\
+             5. When the user asks to search or find, use search_features.\n\
+             6. When the user asks to run or test, use run_tests.\n\
+             7. Use highlight_mindmap_nodes and apply_mindmap_filter only for visual\n\
+                exploration — never as a substitute for reading file content.\n\
+             \n\
+             ## Gherkin Conventions\n\
+             - Use standard keywords: **Given**, **When**, **Then**, **And**, **But**.\n\
+             - Indentation: Feature at column 0, Scenario at 2 spaces, Steps at 4 spaces.\n\
+             - Tags start with @ and appear before the element they annotate.\n\
+             - **Background** blocks contain steps common to all scenarios in a feature.\n\
+             - **Scenario Outline** uses `<placeholders>` and **Examples** tables.\n\
+             - Examples tables use pipe-delimited format: `| header1 | header2 |`.\n\
+             - Keep scenarios focused: one behavior per scenario.\n\
+             - Steps should be declarative, not imperative: describe WHAT, not HOW.\n\
+             \n\
+             ## Example Gherkin Structure\n\
+             ```gherkin\n\
+             @smoke @login\n\
+             Feature: User Login\n\
+               As a registered user\n\
+               I want to log in\n\
+               So that I can access my account\n\
+             \n\
+               Background:\n\
+                 Given a registered user with email \"test@example.com\"\n\
+             \n\
+               Scenario: Successful login with valid credentials\n\
+                 Given I am on the login page\n\
+                 When I enter valid credentials\n\
+                 Then I should see the dashboard\n\
+             \n\
+               Scenario Outline: Login with various roles\n\
+                 Given I am on the login page\n\
+                 When I log in as <role>\n\
+                 Then I should see the <landing_page>\n\
+             \n\
+                 Examples:\n\
+                   | role    | landing_page |\n\
+                   | admin   | Admin Panel  |\n\
+                   | user    | Dashboard    |\n\
+               ```\n\
+             \n\
+             ## Feature Generation Process\n\
+             When the user asks to create, generate, or add a feature or scenario:\n\
+             1. FIRST look at [Project Context] (sent alongside your system prompt)\n\
+                to understand existing files, scenarios, and step patterns.\n\
+             2. THEN use get_feature_content to inspect the file you will edit.\n\
+             3. Plan before generating: consider what scenarios are needed.\n\
+             Always try to cover:\n\
+               - Happy path (the expected successful flow)\n\
+               - Error / validation paths (what happens when things go wrong)\n\
+               - Edge cases (empty inputs, boundary values, permissions, roles)\n\
+             Use Scenario Outline + Examples tables for data-driven variations.\n\
+             Reuse existing step patterns from [Project Context] to keep style consistent.\n\
+             \n\
+             ## Error Recovery\n\
+             - If a tool call fails because a file or scenario was not found, re-read the\n\
+               project state with get_project_info or get_feature_content and try again.\n\
+             - If you are unsure about line numbers, call get_feature_content to verify.\n\
+             - If the project is empty, suggest creating a feature file with create_feature_file.\n\
+             - Do NOT call the same tool repeatedly in a loop if it keeps failing.\n\
+             \n\
+             ## Interaction Guidelines\n\
+             - Be concise. Tool results speak louder than words.\n\
+             - Explain what you are about to do before making file-modifying tool calls.\n\
+             - When a change is queued for approval, tell the user to press [Y] to accept\n\
+               or [N] to reject.\n\
+             - Respect the user's existing file structure, indentation, and naming style.\n\
+             - Do not invent file names — use the ones the user provides or that exist.",
+        );
+
+        // Append extra guidance for generation requests
+        if let Some(req) = request
+            && Self::is_generation_request(req)
+        {
+            prompt.push_str(
+                "\n\n## Additional Guidance (Generation Request Detected)\n\
+                     The user is asking you to create or generate content. Follow the\n\
+                     Feature Generation Process above carefully. Before creating files,\n\
+                     scan the [Project Context] to understand existing patterns and reuse\n\
+                     step text where appropriate. Prioritize data-driven Scenario Outlines\n\
+                     over repetitive Basic scenarios when the same flow applies to\n\
+                     multiple input variations.",
+            );
+        }
+
+        prompt
     }
 
     /// After a pending agent change is accepted or rejected, feed the result back
@@ -1395,8 +1509,8 @@ impl App {
         }
 
         // Re-invoke the LLM to continue the agent loop
-        // Trim context before sending to avoid exceeding token limits
-        self.trim_context_if_needed(self.selected_agent);
+        // Compact context before sending to avoid exceeding token limits
+        self.compact_context_if_needed(self.selected_agent);
         let messages = self.build_chat_messages_for_agent(self.selected_agent);
         let tools = Some(crate::agent::get_tools());
         let agent = self.agent_mut();
@@ -1410,7 +1524,7 @@ impl App {
             agent.status = AiStatus::Waiting;
             agent.tool_status = Some("Teshi is thinking...".into());
             let _ = handle.send(crate::llm::LlmRequest::Chat {
-                system: Some(Self::ai_system_prompt().into()),
+                system: Some(Self::ai_system_prompt(None)),
                 messages,
                 tools,
             });
@@ -1507,9 +1621,10 @@ impl App {
             .unwrap_or(128000)
     }
 
-    /// Trim oldest User+Assistant message pairs from the agent's message list
-    /// if the estimated input token count exceeds 70% of the context window.
-    fn trim_context_if_needed(&mut self, agent_idx: usize) {
+    /// Compact oldest User+Assistant messages into a summary when the estimated
+    /// token count exceeds 70 % of the context window.  Tool messages are kept
+    /// intact (they belong to the current agent loop).
+    fn compact_context_if_needed(&mut self, agent_idx: usize) {
         let last_input = match self.agents[agent_idx].last_input_tokens {
             Some(v) => v,
             None => return,
@@ -1519,41 +1634,66 @@ impl App {
         if last_input <= threshold {
             return;
         }
-        // Estimate tokens at ~4 chars per token and remove oldest pairs
-        let target_tokens = threshold.saturating_sub(2000).max(1000);
-        let estimated_per_token = 4;
-        let target_chars = target_tokens as usize * estimated_per_token;
+        // Estimate tokens at ~4 chars per token
+        let target_chars = (threshold.saturating_sub(2000).max(1000) as usize) * 4;
 
         let messages = &mut self.agents[agent_idx].messages;
-        // Find the first non-System, non-Tool message after message 0 (skip system-like first message if present)
-        // We remove oldest User+Assistant pairs until estimated total is under limit
+
+        // Find oldest compactable block (User + Assistant pairs, keep Tool messages)
         let mut current_chars: usize = messages.iter().map(|m| m.content.len()).sum();
-        let mut remove_end: usize = 0;
+        let mut compact_end: usize = 0;
+        let mut compact_topics: Vec<String> = Vec::new();
         for (i, msg) in messages.iter().enumerate() {
             if current_chars <= target_chars {
                 break;
             }
             if matches!(msg.role, AiRole::Tool) {
-                // Tool messages are kept — they're part of the current turn
-                continue;
+                continue; // keep tool results
             }
-            // Remove this message and count characters freed
             if matches!(msg.role, AiRole::User | AiRole::Assistant) {
+                // Record first few words as "topic" for the summary
+                let preview: String = msg.content.chars().take(60).collect();
+                if !preview.is_empty() {
+                    compact_topics.push(preview);
+                }
                 current_chars = current_chars.saturating_sub(msg.content.len());
-                remove_end = i + 1;
+                compact_end = i + 1;
             }
         }
-        if remove_end > 1 {
-            // Keep at least the most recent 4 messages to avoid breaking the conversation
+
+        if compact_end > 1 {
             let keep_min = 4.min(messages.len());
             let max_remove = messages.len().saturating_sub(keep_min);
-            remove_end = remove_end.min(max_remove).max(1);
-            // Actually drain the messages
-            let drained: Vec<_> = messages.drain(0..remove_end).collect();
+            compact_end = compact_end.min(max_remove).max(1);
+
+            let drained: Vec<_> = messages.drain(0..compact_end).collect();
             let removed_count = drained.len();
+
+            // Insert a compacted summary message instead of losing context entirely
+            let summary = format!(
+                "[Compressed: {} earlier message(s) about: {}]",
+                removed_count,
+                compact_topics
+                    .into_iter()
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            );
+            messages.insert(
+                0,
+                AiChatMessage {
+                    role: AiRole::User,
+                    content: summary,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    source: Some("compacted".into()),
+                },
+            );
+
             self.agents[agent_idx].last_input_tokens = None;
             self.status_message = Some(format!(
-                "Context trimmed: removed {removed_count} oldest messages to stay within {} token window",
+                "Context compacted: {removed_count} message(s) → summary ({} token window)",
                 context_window
             ));
             self.status_message_deadline = Some(Instant::now() + Duration::from_secs(3));
@@ -3100,7 +3240,7 @@ impl App {
                         let tools = Some(crate::agent::get_tools());
                         if handle
                             .send(crate::llm::LlmRequest::Chat {
-                                system: Some(Self::ai_system_prompt().into()),
+                                system: Some(Self::ai_system_prompt(None)),
                                 messages,
                                 tools,
                             })
@@ -3719,15 +3859,15 @@ impl App {
                     self.agent_mut().partial_response.clear();
                     self.status = "AI not configured".to_string();
                 } else if self.agent().llm_handle.is_some() {
-                    // Trim context before sending to avoid exceeding token limits
-                    self.trim_context_if_needed(self.selected_agent);
+                    // Compact context before sending to avoid exceeding token limits
+                    self.compact_context_if_needed(self.selected_agent);
                     use crate::llm::LlmRequest;
                     let messages = self.build_chat_messages_for_agent(self.selected_agent);
                     let tools = Some(crate::agent::get_tools());
                     let handle = self.agent().llm_handle.as_ref().unwrap();
                     if handle
                         .send(LlmRequest::Chat {
-                            system: Some(Self::ai_system_prompt().into()),
+                            system: Some(Self::ai_system_prompt(Some(&user_msg))),
                             messages,
                             tools,
                         })

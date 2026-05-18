@@ -62,6 +62,23 @@ impl StepIndex {
         let key = normalize(step_text);
         self.usages.get(&key).map_or(0, |v| v.len())
     }
+
+    /// Returns the N most common step texts, sorted by frequency descending.
+    pub fn most_common(&self, limit: usize) -> Vec<(String, usize)> {
+        let mut entries: Vec<_> = self
+            .usages
+            .iter()
+            .map(|(text, locs)| (text.clone(), locs.len()))
+            .collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.truncate(limit);
+        entries
+    }
+
+    /// Returns true when the index contains no entries.
+    pub fn is_empty(&self) -> bool {
+        self.usages.is_empty()
+    }
 }
 
 /// Keyword-agnostic normalization: lowercase, collapse whitespace, trim.
