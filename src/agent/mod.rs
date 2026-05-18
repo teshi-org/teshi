@@ -193,7 +193,10 @@ fn execute_get_feature_content(app: &mut crate::app::App, args_json: &str) -> Re
     let mut out = String::new();
 
     out.push_str(&format!("File: {path} ({} lines)\n", feature.line_count));
-    out.push_str(&format!("Feature: {}\n", feature.name));
+    out.push_str(&format!(
+        "Feature: {} ({})\n",
+        feature.name, feature.language
+    ));
     if !feature.tags.is_empty() {
         out.push_str(&format!("Tags: {}\n", feature.tags.join(" ")));
     }
@@ -210,6 +213,18 @@ fn execute_get_feature_content(app: &mut crate::app::App, args_json: &str) -> Re
                 "  [{:?}] {} {} (line {})\n",
                 step.keyword_type, step.keyword, step.text, step.line_number
             ));
+            if let Some(ref ds) = step.doc_string {
+                out.push_str("    \"\"\"\n");
+                for l in ds.lines() {
+                    out.push_str(&format!("    {l}\n"));
+                }
+                out.push_str("    \"\"\"\n");
+            }
+            if let Some(ref dt) = step.data_table {
+                for row in dt {
+                    out.push_str(&format!("      | {} |\n", row.join(" | ")));
+                }
+            }
         }
     }
     out.push_str(&format!("\nScenarios: {}\n", feature.scenarios.len()));
@@ -230,6 +245,18 @@ fn execute_get_feature_content(app: &mut crate::app::App, args_json: &str) -> Re
                 "      [{:?}] {} {} (line {})\n",
                 step.keyword_type, step.keyword, step.text, step.line_number
             ));
+            if let Some(ref ds) = step.doc_string {
+                out.push_str("        \"\"\"\n");
+                for l in ds.lines() {
+                    out.push_str(&format!("        {l}\n"));
+                }
+                out.push_str("        \"\"\"\n");
+            }
+            if let Some(ref dt) = step.data_table {
+                for row in dt {
+                    out.push_str(&format!("          | {} |\n", row.join(" | ")));
+                }
+            }
         }
         for (ei, ex) in sc.examples.iter().enumerate() {
             out.push_str(&format!(
@@ -241,6 +268,50 @@ fn execute_get_feature_content(app: &mut crate::app::App, args_json: &str) -> Re
             }
             for row in &ex.rows {
                 out.push_str(&format!("        | {} |\n", row.join(" | ")));
+            }
+        }
+    }
+
+    if !feature.rules.is_empty() {
+        out.push_str(&format!("\nRules: {}\n", feature.rules.len()));
+        for rule in &feature.rules {
+            out.push_str(&format!(
+                "\n  Rule: {} (line {})\n",
+                rule.name, rule.line_number
+            ));
+            if !rule.tags.is_empty() {
+                out.push_str(&format!("    Tags: {}\n", rule.tags.join(" ")));
+            }
+            for sc in &rule.scenarios {
+                let kind = match sc.kind {
+                    crate::gherkin::ScenarioKind::Scenario => "Scenario",
+                    crate::gherkin::ScenarioKind::ScenarioOutline => "Scenario Outline",
+                };
+                out.push_str(&format!(
+                    "\n    {}: {} (line {})\n",
+                    kind, sc.name, sc.line_number
+                ));
+                if !sc.tags.is_empty() {
+                    out.push_str(&format!("      Tags: {}\n", sc.tags.join(" ")));
+                }
+                for step in &sc.steps {
+                    out.push_str(&format!(
+                        "      [{:?}] {} {} (line {})\n",
+                        step.keyword_type, step.keyword, step.text, step.line_number
+                    ));
+                    if let Some(ref ds) = step.doc_string {
+                        out.push_str("        \"\"\"\n");
+                        for l in ds.lines() {
+                            out.push_str(&format!("        {l}\n"));
+                        }
+                        out.push_str("        \"\"\"\n");
+                    }
+                    if let Some(ref dt) = step.data_table {
+                        for row in dt {
+                            out.push_str(&format!("          | {} |\n", row.join(" | ")));
+                        }
+                    }
+                }
             }
         }
     }
