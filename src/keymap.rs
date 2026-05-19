@@ -129,6 +129,10 @@ pub enum Action {
     AiScrollBottom,
     /// Insert pasted text into the AI input buffer in one shot.
     AiPaste(String),
+    /// Insert a literal newline into the AI input (Shift+Enter).
+    AiNewline,
+    /// Paste clipboard content into the AI input (Ctrl+V).
+    AiClipboardPaste,
     /// Cancel the current AI request / tool-call loop.
     AiCancel,
     // ── Agent lifecycle ──────────────────────────────
@@ -461,6 +465,7 @@ impl Action {
         // AI tab: focused mode — text input, Esc blurs instead of clearing
         if context.active_tab == MainTab::Ai {
             return match (event.code, event.modifiers) {
+                (KeyCode::Enter, KeyModifiers::SHIFT) => Some(Self::AiNewline),
                 (KeyCode::Enter, _) => Some(Self::AiSendMessage),
                 (KeyCode::Backspace, _) => Some(Self::AiBackspace),
                 (KeyCode::Delete, _) => Some(Self::AiDelete),
@@ -482,6 +487,7 @@ impl Action {
                 (KeyCode::End, KeyModifiers::CONTROL) => Some(Self::AiScrollBottom),
                 (KeyCode::Home, _) => Some(Self::AiCursorHome),
                 (KeyCode::End, _) => Some(Self::AiCursorEnd),
+                (KeyCode::Char('v'), KeyModifiers::CONTROL) => Some(Self::AiClipboardPaste),
                 (KeyCode::Char(ch), _) if !ch.is_control() => Some(Self::AiSendChar(ch)),
                 _ => None,
             };
@@ -493,6 +499,7 @@ impl Action {
             if context.ai_input_focused {
                 // AI input focused — same bindings as AI tab text input
                 return match (event.code, event.modifiers) {
+                    (KeyCode::Enter, KeyModifiers::SHIFT) => Some(Self::AiNewline),
                     (KeyCode::Enter, _) => Some(Self::AiSendMessage),
                     (KeyCode::Backspace, _) => Some(Self::AiBackspace),
                     (KeyCode::Delete, _) => Some(Self::AiDelete),
@@ -514,6 +521,7 @@ impl Action {
                     (KeyCode::End, KeyModifiers::CONTROL) => Some(Self::AiScrollBottom),
                     (KeyCode::Home, _) => Some(Self::AiCursorHome),
                     (KeyCode::End, _) => Some(Self::AiCursorEnd),
+                    (KeyCode::Char('v'), KeyModifiers::CONTROL) => Some(Self::AiClipboardPaste),
                     (KeyCode::Char(ch), _) if !ch.is_control() => Some(Self::AiSendChar(ch)),
                     _ => None,
                 };
