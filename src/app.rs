@@ -5364,12 +5364,10 @@ impl App {
             return;
         }
         if self.is_editor_nav_mode() {
-            let Some(scenario_row) =
-                crate::bdd_nav::scenario_header_for_row(&self.buffer, self.cursor_row)
-            else {
+            let Some(scenario_row) = scenario_header_for_row(&self.buffer, self.cursor_row) else {
                 return;
             };
-            let steps = crate::bdd_nav::scenario_step_rows(&self.buffer, scenario_row);
+            let steps = scenario_step_rows(&self.buffer, scenario_row);
             let hidden = self.hidden_editor_rows();
             let visible_steps: Vec<usize> =
                 steps.into_iter().filter(|r| !hidden.contains(r)).collect();
@@ -5388,12 +5386,10 @@ impl App {
             return;
         }
         if self.is_editor_nav_mode() {
-            let Some(scenario_row) =
-                crate::bdd_nav::scenario_header_for_row(&self.buffer, self.cursor_row)
-            else {
+            let Some(scenario_row) = scenario_header_for_row(&self.buffer, self.cursor_row) else {
                 return;
             };
-            let steps = crate::bdd_nav::scenario_step_rows(&self.buffer, scenario_row);
+            let steps = scenario_step_rows(&self.buffer, scenario_row);
             let hidden = self.hidden_editor_rows();
             let visible_steps: Vec<usize> =
                 steps.into_iter().filter(|r| !hidden.contains(r)).collect();

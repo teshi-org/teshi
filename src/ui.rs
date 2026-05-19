@@ -678,8 +678,7 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             let max_lines = chat_body
                 .height
                 .saturating_sub(chat_lines.len() as u16)
-                .min(20)
-                .max(3) as usize;
+                .clamp(3, 20) as usize;
             for dl in diff.iter().take(max_lines) {
                 let prefix = match dl.kind {
                     ChangeKind::Added => "+",
@@ -2163,8 +2162,7 @@ pub(crate) fn render_agent_chat_inner(
             let max_lines = chat_area
                 .height
                 .saturating_sub(chat_lines.len() as u16)
-                .min(20)
-                .max(3) as usize;
+                .clamp(3, 20) as usize;
             for dl in diff.iter().take(max_lines) {
                 let prefix = match dl.kind {
                     ChangeKind::Added => "+",
