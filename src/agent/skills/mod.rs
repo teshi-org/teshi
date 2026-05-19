@@ -102,7 +102,7 @@ impl SkillRegistry {
             .collect();
 
         // Sort by score descending
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|b| std::cmp::Reverse(b.0));
         scored.truncate(5);
         scored.into_iter().map(|(_, skill)| skill).collect()
     }

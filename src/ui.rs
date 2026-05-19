@@ -2505,15 +2505,39 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             };
         }
 
-        // Apply mouse-drag selection highlight (full-row).
-        if let (Some((anchor_row, _)), Some((end_row, _))) =
-            (app.selection_anchor, app.selection_end)
-        {
-            let sel_lo = anchor_row.min(end_row);
-            let sel_hi = anchor_row.max(end_row);
+        // Apply mouse-drag selection highlight (column-accurate).
+        if let (Some(anchor), Some(end)) = (app.selection_anchor, app.selection_end) {
+            let sel_lo = anchor.0.min(end.0);
+            let sel_hi = anchor.0.max(end.0);
             if !preview && row >= sel_lo && row <= sel_hi {
                 let sel_style = Style::default().bg(SELECTION_BG).fg(SELECTION_FG);
-                styled = apply_patch_to_char_range(styled, 0..display_len, sel_style);
+                let mut range = if sel_lo == sel_hi {
+                    // Single row: highlight the exact column range
+                    let lo_col = anchor.1.min(end.1);
+                    let hi_col = anchor.1.max(end.1).min(display_len);
+                    lo_col..hi_col
+                } else if row == sel_lo {
+                    // First row: from the earlier column to end of line
+                    let col = if anchor.0 < end.0 { anchor.1 } else { end.1 };
+                    col..display_len
+                } else if row == sel_hi {
+                    // Last row: from start of line to the later column
+                    let col = if anchor.0 > end.0 { anchor.1 } else { end.1 }.min(display_len);
+                    0..col
+                } else {
+                    // Middle rows: full row
+                    0..display_len
+                };
+                // Adjust for step-keyword padding, matching the cursor-row logic
+                if pad_offset > 0 && range.start >= pad_start {
+                    range.start = range.start.saturating_add(pad_offset);
+                }
+                if pad_offset > 0 && range.end > pad_start {
+                    range.end = range.end.saturating_add(pad_offset);
+                }
+                if range.start < range.end {
+                    styled = apply_patch_to_char_range(styled, range, sel_style);
+                }
             }
         }
 
