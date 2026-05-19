@@ -3901,6 +3901,26 @@ impl App {
                 self.agent_mut().input_cursor += text.chars().count();
                 self.quit_pending_confirm = false;
             }
+            Action::AiNewline => {
+                self.ai_input_focused = true;
+                let byte_idx = char_to_byte_idx(&self.agent().input, self.agent().input_cursor);
+                self.agent_mut().input.insert(byte_idx, '\n');
+                self.agent_mut().input_cursor += 1;
+                self.quit_pending_confirm = false;
+            }
+            Action::AiClipboardPaste => {
+                self.ai_input_focused = true;
+                if let Ok(mut cb) = arboard::Clipboard::new() {
+                    if let Ok(text) = cb.get_text() {
+                        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                        let byte_idx =
+                            char_to_byte_idx(&self.agent().input, self.agent().input_cursor);
+                        self.agent_mut().input.insert_str(byte_idx, &text);
+                        self.agent_mut().input_cursor += text.chars().count();
+                    }
+                }
+                self.quit_pending_confirm = false;
+            }
             Action::AiSendChar(ch) => {
                 self.ai_input_focused = true;
                 let byte_idx = char_to_byte_idx(&self.agent().input, self.agent().input_cursor);
