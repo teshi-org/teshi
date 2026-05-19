@@ -81,7 +81,7 @@ impl StepIndex {
             .iter()
             .map(|(text, locs)| (text.clone(), locs.len()))
             .collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.1));
         entries.truncate(limit);
         entries
     }
