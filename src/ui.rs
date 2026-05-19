@@ -497,48 +497,23 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         0
     };
 
-    // Diff area: shown when awaiting approval and diffs exist
-    let diff_height: u16 = if app.agent().status == AiStatus::AwaitingApproval
-        && !app.pending_change_diffs.is_empty()
-    {
-        let max_diff = inner
-            .height
-            .saturating_sub(status_height + sugg_height + input_height + 8);
-        let requested = (app
-            .pending_change_diffs
-            .first()
-            .map(|d: &Vec<crate::diff::DiffLine>| d.len())
-            .unwrap_or(0) as u16
-            + 1)
-        .min(8);
-        requested.min(max_diff)
-    } else {
-        0
-    };
-
     let chat_height = inner
         .height
-        .saturating_sub(status_height + sugg_height + input_height + diff_height);
+        .saturating_sub(status_height + sugg_height + input_height);
     let chat_area = Rect::new(inner.x, inner.y, inner.width, chat_height);
     let [chat_body, scrollbar_v] =
         Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(chat_area);
 
-    let diff_area = Rect::new(inner.x, inner.y + chat_height, inner.width, diff_height);
-    let status_area = Rect::new(
-        inner.x,
-        inner.y + chat_height + diff_height,
-        inner.width,
-        status_height,
-    );
+    let status_area = Rect::new(inner.x, inner.y + chat_height, inner.width, status_height);
     let sugg_area = Rect::new(
         inner.x,
-        inner.y + chat_height + diff_height + status_height,
+        inner.y + chat_height + status_height,
         inner.width,
         sugg_height,
     );
     let input_area = Rect::new(
         inner.x,
-        inner.y + chat_height + diff_height + status_height + sugg_height,
+        inner.y + chat_height + status_height + sugg_height,
         inner.width,
         input_height,
     );
@@ -640,6 +615,50 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         chat_lines.push(Line::raw(""));
     }
 
+    // ── Inline diff for pending changes ────────────────────────
+    if app.agent().status == AiStatus::AwaitingApproval && !app.pending_change_diffs.is_empty() {
+        let total_diffs = app.pending_change_diffs.len();
+        let title = if total_diffs > 1 {
+            format!(" Pending Change (1 of {total_diffs}) ")
+        } else {
+            " Pending Change ".to_string()
+        };
+        chat_lines.push(Line::raw(""));
+        chat_lines.push(
+            Line::raw(format!("  🔧{title}")).style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        );
+        if let Some(diff) = app.pending_change_diffs.first() {
+            let max_lines = chat_body
+                .height
+                .saturating_sub(chat_lines.len() as u16)
+                .min(20)
+                .max(3) as usize;
+            for dl in diff.iter().take(max_lines) {
+                let prefix = match dl.kind {
+                    ChangeKind::Added => "+",
+                    ChangeKind::Modified => "~",
+                    ChangeKind::Deleted => "-",
+                    ChangeKind::Unchanged => " ",
+                };
+                let color = match dl.kind {
+                    ChangeKind::Added => Color::Green,
+                    ChangeKind::Modified => Color::Yellow,
+                    ChangeKind::Deleted => Color::Red,
+                    ChangeKind::Unchanged => Color::DarkGray,
+                };
+                chat_lines.push(Line::styled(
+                    format!("    {} {}", prefix, dl.text),
+                    Style::default().fg(color),
+                ));
+            }
+        }
+        chat_lines.push(Line::raw(""));
+    }
+
     // Show streaming partial response as a live assistant message
     if !app.agent().partial_response.is_empty() {
         chat_lines.push(
@@ -714,46 +733,6 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .collect();
 
         frame.render_widget(Paragraph::new(Text::from(scrollbar_lines)), scrollbar_v);
-    }
-
-    // ── Diff display (shown during AwaitingApproval) ─────────────────
-    if diff_height > 0 {
-        let total_diffs = app.pending_change_diffs.len();
-        let title_str = if total_diffs > 1 {
-            format!(" Changes to Apply (1 of {total_diffs}) ")
-        } else {
-            " Changes to Apply ".to_string()
-        };
-        let diff_block = Block::default()
-            .borders(Borders::ALL)
-            .title(title_str)
-            .border_style(Style::default().fg(Color::Cyan));
-        let diff_inner = diff_block.inner(diff_area);
-        frame.render_widget(diff_block, diff_area);
-        if diff_inner.width > 0 && diff_inner.height > 0 {
-            let mut diff_lines: Vec<Line<'static>> = Vec::new();
-            if let Some(diff) = app.pending_change_diffs.first() {
-                for dl in diff.iter().take(diff_inner.height as usize) {
-                    let prefix = match dl.kind {
-                        ChangeKind::Added => "+",
-                        ChangeKind::Modified => "~",
-                        ChangeKind::Deleted => "-",
-                        ChangeKind::Unchanged => " ",
-                    };
-                    let color = match dl.kind {
-                        ChangeKind::Added => Color::Green,
-                        ChangeKind::Modified => Color::Yellow,
-                        ChangeKind::Deleted => Color::Red,
-                        ChangeKind::Unchanged => Color::DarkGray,
-                    };
-                    diff_lines.push(Line::styled(
-                        format!("{} {}", prefix, dl.text),
-                        Style::default().fg(color),
-                    ));
-                }
-            }
-            frame.render_widget(Paragraph::new(Text::from(diff_lines)), diff_inner);
-        }
     }
 
     // ── Status bar (thinking / model name) ─────────────────────────
@@ -2072,6 +2051,50 @@ pub(crate) fn render_agent_chat_inner(
             let mut line = Line::from(spans);
             line.style = md_line.style;
             chat_lines.push(line);
+        }
+        chat_lines.push(Line::raw(""));
+    }
+
+    // ── Inline diff for pending changes ────────────────────────
+    if app.agent().status == AiStatus::AwaitingApproval && !app.pending_change_diffs.is_empty() {
+        let total_diffs = app.pending_change_diffs.len();
+        let title = if total_diffs > 1 {
+            format!(" Pending Change (1 of {total_diffs}) ")
+        } else {
+            " Pending Change ".to_string()
+        };
+        chat_lines.push(Line::raw(""));
+        chat_lines.push(
+            Line::raw(format!("  🔧{title}")).style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        );
+        if let Some(diff) = app.pending_change_diffs.first() {
+            let max_lines = chat_area
+                .height
+                .saturating_sub(chat_lines.len() as u16)
+                .min(20)
+                .max(3) as usize;
+            for dl in diff.iter().take(max_lines) {
+                let prefix = match dl.kind {
+                    ChangeKind::Added => "+",
+                    ChangeKind::Modified => "~",
+                    ChangeKind::Deleted => "-",
+                    ChangeKind::Unchanged => " ",
+                };
+                let color = match dl.kind {
+                    ChangeKind::Added => Color::Green,
+                    ChangeKind::Modified => Color::Yellow,
+                    ChangeKind::Deleted => Color::Red,
+                    ChangeKind::Unchanged => Color::DarkGray,
+                };
+                chat_lines.push(Line::styled(
+                    format!("    {} {}", prefix, dl.text),
+                    Style::default().fg(color),
+                ));
+            }
         }
         chat_lines.push(Line::raw(""));
     }
