@@ -55,6 +55,7 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let input = &text;
     let mut pos = 0usize;
+    let mut needs_sep = false;
 
     while pos < input.len() {
         // Skip leading blank lines.
@@ -64,6 +65,17 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
             break;
         }
         let remaining = &input[pos..];
+
+        // Insert a blank line between consecutive blocks for visual breathing room.
+        if needs_sep {
+            let last = lines.last();
+            let already_blank = last.is_some_and(|l: &Line| {
+                l.spans.iter().all(|s| s.content.as_ref().is_empty()) && l.style == Style::default()
+            });
+            if !already_blank {
+                lines.push(Line::raw(""));
+            }
+        }
 
         // Detect block type by the first non-empty line.
         if let Some(block) = try_fenced_code_block(remaining) {
@@ -92,6 +104,8 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
                 lines.push(parse_inline(&text));
             }
         }
+
+        needs_sep = true;
     }
 
     lines
@@ -522,17 +536,23 @@ fn list_marker_info(line: &str) -> Option<(bool, usize, usize)> {
     if t.starts_with("- ") || t.starts_with("* ") {
         Some((false, indent, 2))
     } else {
-        let mut chars = t.chars();
-        let first = chars.next()?;
-        if first.is_ascii_digit() {
-            let digits: String = std::iter::once(first)
-                .chain(chars.by_ref().take_while(|c| c.is_ascii_digit()))
-                .collect();
-            if chars.next() == Some('.') && chars.next() == Some(' ') {
-                Some((true, indent, digits.len() + 2))
+        // Ordered list: digits followed by ". " (e.g. "1. ", "42. ")
+        // Use peek to avoid consuming the '.' by take_while.
+        let mut chars = t.chars().peekable();
+        if !chars.peek()?.is_ascii_digit() {
+            return None;
+        }
+        let mut digit_count = 0usize;
+        while let Some(&c) = chars.peek() {
+            if c.is_ascii_digit() {
+                chars.next();
+                digit_count += 1;
             } else {
-                None
+                break;
             }
+        }
+        if chars.next() == Some('.') && chars.next() == Some(' ') {
+            Some((true, indent, digit_count + 2))
         } else {
             None
         }
@@ -577,18 +597,15 @@ fn take_paragraph(text: &str) -> BlockResult {
 }
 
 fn is_ordered_list_marker(t: &str) -> bool {
-    let mut chars = t.chars();
-    if let Some(first) = chars.next()
-        && first.is_ascii_digit()
-    {
-        let _digits: String = std::iter::once(first)
-            .chain(chars.by_ref().take_while(|c| c.is_ascii_digit()))
-            .collect();
-        if chars.next() == Some('.') && chars.next() == Some(' ') {
-            return true;
+    let mut chars = t.chars().peekable();
+    if chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+        while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+            chars.next();
         }
+        chars.next() == Some('.') && chars.next() == Some(' ')
+    } else {
+        false
     }
-    false
 }
 
 // ---------------------------------------------------------------------------
@@ -610,17 +627,29 @@ fn parse_inline_with_style(text: &str, base: Style) -> Line<'static> {
             '*' if chars.peek() == Some(&'*') => {
                 flush(&mut buf, base, &mut spans);
                 chars.next(); // consume second '*'
-                let inner = collect_until(&mut chars, "**");
-                let inner_spans =
-                    parse_inline_with_style(&inner, base.add_modifier(Modifier::BOLD));
-                spans.extend(inner_spans.spans);
+                let (inner, found) = collect_until(&mut chars, "**");
+                if found {
+                    let inner_spans =
+                        parse_inline_with_style(&inner, base.add_modifier(Modifier::BOLD));
+                    spans.extend(inner_spans.spans);
+                } else {
+                    // Unclosed ** — render literally
+                    buf.push_str("**");
+                    buf.push_str(&inner);
+                }
             }
             '*' => {
                 flush(&mut buf, base, &mut spans);
-                let inner = collect_until_single(&mut chars, '*');
-                let inner_spans =
-                    parse_inline_with_style(&inner, base.add_modifier(Modifier::ITALIC));
-                spans.extend(inner_spans.spans);
+                let (inner, found) = collect_until_single(&mut chars, '*');
+                if found {
+                    let inner_spans =
+                        parse_inline_with_style(&inner, base.add_modifier(Modifier::ITALIC));
+                    spans.extend(inner_spans.spans);
+                } else {
+                    // Unclosed * — render literally
+                    buf.push('*');
+                    buf.push_str(&inner);
+                }
             }
             '`' => {
                 flush(&mut buf, base, &mut spans);
@@ -630,20 +659,27 @@ fn parse_inline_with_style(text: &str, base: Style) -> Line<'static> {
                     chars.next();
                     backtick_count += 1;
                 }
-                let inner = collect_until_backticks(&mut chars, backtick_count);
-                let code_style = Style::default()
-                    .bg(Color::Rgb(40, 40, 40))
-                    .fg(Color::Rgb(255, 220, 100));
-                spans.push(Span::styled(inner, code_style));
+                let (inner, found) = collect_until_backticks(&mut chars, backtick_count);
+                if found {
+                    let code_style = Style::default()
+                        .bg(Color::Rgb(40, 40, 40))
+                        .fg(Color::Rgb(255, 220, 100));
+                    spans.push(Span::styled(inner, code_style));
+                } else {
+                    // Unclosed backticks — render literally
+                    let opened: String = "`".repeat(backtick_count);
+                    buf.push_str(&opened);
+                    buf.push_str(&inner);
+                }
             }
             '!' if chars.peek() == Some(&'[') => {
                 // Image: ![alt](url)
                 flush(&mut buf, base, &mut spans);
                 chars.next(); // consume '['
-                let alt = collect_until_single(&mut chars, ']');
+                let (alt, _found) = collect_until_single(&mut chars, ']');
                 if chars.peek() == Some(&'(') {
                     chars.next(); // consume '('
-                    let _url = collect_until_single(&mut chars, ')');
+                    let (_url, _) = collect_until_single(&mut chars, ')');
                     spans.push(Span::styled(
                         format!(" 🖼 {alt} "),
                         Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
@@ -655,10 +691,10 @@ fn parse_inline_with_style(text: &str, base: Style) -> Line<'static> {
             }
             '[' => {
                 flush(&mut buf, base, &mut spans);
-                let link_text = collect_until_single(&mut chars, ']');
+                let (link_text, _found) = collect_until_single(&mut chars, ']');
                 if chars.peek() == Some(&'(') {
                     chars.next(); // consume '('
-                    let url = collect_until_single(&mut chars, ')');
+                    let (url, _) = collect_until_single(&mut chars, ')');
                     let link_style = Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::UNDERLINED);
@@ -674,10 +710,16 @@ fn parse_inline_with_style(text: &str, base: Style) -> Line<'static> {
             '~' if chars.peek() == Some(&'~') => {
                 flush(&mut buf, base, &mut spans);
                 chars.next(); // consume second '~'
-                let inner = collect_until(&mut chars, "~~");
-                let strike_style = base.add_modifier(Modifier::CROSSED_OUT);
-                let inner_spans = parse_inline_with_style(&inner, strike_style);
-                spans.extend(inner_spans.spans);
+                let (inner, found) = collect_until(&mut chars, "~~");
+                if found {
+                    let strike_style = base.add_modifier(Modifier::CROSSED_OUT);
+                    let inner_spans = parse_inline_with_style(&inner, strike_style);
+                    spans.extend(inner_spans.spans);
+                } else {
+                    // Unclosed ~~ — render literally
+                    buf.push_str("~~");
+                    buf.push_str(&inner);
+                }
             }
             '\\' => {
                 // Simple escape: consume next char literally.
@@ -702,11 +744,14 @@ fn flush(buf: &mut String, style: Style, spans: &mut Vec<Span<'static>>) {
     }
 }
 
-fn collect_until(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, delim: &str) -> String {
+fn collect_until(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    delim: &str,
+) -> (String, bool) {
     let mut out = String::new();
     let dchars: Vec<char> = delim.chars().collect();
     if dchars.is_empty() {
-        return out;
+        return (out, false);
     }
     'outer: while let Some(ch) = chars.next() {
         if ch == dchars[0] {
@@ -722,39 +767,39 @@ fn collect_until(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, delim: &s
                     continue 'outer;
                 }
             }
-            return out;
+            return (out, true);
         }
         out.push(ch);
     }
-    out
+    (out, false)
 }
 
 fn collect_until_single(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     delim: char,
-) -> String {
+) -> (String, bool) {
     let mut out = String::new();
     for ch in chars.by_ref() {
         if ch == delim {
-            return out;
+            return (out, true);
         }
         out.push(ch);
     }
-    out
+    (out, false)
 }
 
 /// Collect characters until a run of `count` backticks is found.
 fn collect_until_backticks(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     count: usize,
-) -> String {
+) -> (String, bool) {
     let mut out = String::new();
     let mut buf: Vec<char> = Vec::new();
     for ch in chars.by_ref() {
         if ch == '`' {
             buf.push(ch);
             if buf.len() == count {
-                return out;
+                return (out, true);
             }
         } else {
             out.extend(buf.drain(..));
@@ -764,7 +809,7 @@ fn collect_until_backticks(
     }
     // If closing backticks not found, include what was buffered
     out.extend(buf);
-    out
+    (out, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -902,7 +947,7 @@ mod tests {
         let lines = render_markdown("# Title\n\n## Subtitle\n\n### Subsubtitle\n\nParagraph here.");
         assert_eq!(
             lines.len(),
-            4,
+            7,
             "got {} lines: {:?}",
             lines.len(),
             lines
@@ -915,17 +960,17 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(lines[0].spans[0].content, "Title", "first heading");
-        assert_eq!(lines[1].spans[0].content, "Subtitle", "second heading");
-        assert_eq!(lines[2].spans[0].content, "Subsubtitle", "third heading");
-        assert_eq!(lines[3].spans[0].content, "Paragraph here.");
+        assert_eq!(lines[2].spans[0].content, "Subtitle", "second heading");
+        assert_eq!(lines[4].spans[0].content, "Subsubtitle", "third heading");
+        assert_eq!(lines[6].spans[0].content, "Paragraph here.");
     }
 
     #[test]
     fn test_heading_no_trailing_newline() {
         let lines = render_markdown("## Hello\n\n### World");
-        assert_eq!(lines.len(), 2, "got {} lines", lines.len());
+        assert_eq!(lines.len(), 3, "got {} lines", lines.len());
         assert_eq!(lines[0].spans[0].content, "Hello");
-        assert_eq!(lines[1].spans[0].content, "World");
+        assert_eq!(lines[2].spans[0].content, "World");
     }
 
     #[test]
@@ -933,5 +978,315 @@ mod tests {
         let lines = render_markdown("###World");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].spans[0].content, "###World");
+    }
+
+    // ── Comprehensive block-element tests ──────────────────────────
+
+    #[test]
+    fn test_code_block_with_language() {
+        let text = "```rust\nfn main() {}\n```";
+        let lines = render_markdown(text);
+        // Language label + 1 code line
+        assert_eq!(lines.len(), 2, "got {} lines", lines.len());
+        assert_eq!(lines[0].spans[0].content, " rust ", "language label");
+        assert_eq!(lines[1].spans[0].content, "fn main() {}", "code line");
+        assert_eq!(lines[0].style.bg, Some(Color::Rgb(30, 30, 30)));
+        assert_eq!(lines[1].style.bg, Some(Color::Rgb(30, 30, 30)));
+    }
+
+    #[test]
+    fn test_code_block_tilde_fence() {
+        let text = "~~~\ncode here\n~~~";
+        let lines = render_markdown(text);
+        assert_eq!(lines.len(), 1, "got {} lines", lines.len());
+        assert_eq!(lines[0].spans[0].content, "code here");
+    }
+
+    #[test]
+    fn test_horizontal_rules() {
+        for rule in &["---", "***", "___", "-----", "*****", "_____"] {
+            let lines = render_markdown(rule);
+            assert_eq!(
+                lines.len(),
+                1,
+                "rule {rule:?} produced {} lines",
+                lines.len()
+            );
+            assert_eq!(lines[0].spans[0].content, "─".repeat(50));
+        }
+    }
+
+    #[test]
+    fn test_horizontal_rule_too_short() {
+        // Only 2 chars → not a horizontal rule
+        let lines = render_markdown("--");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].content, "--");
+    }
+
+    #[test]
+    fn test_blockquote_multi_line() {
+        let text = "> line one\n> line two\n> line three";
+        let lines = render_markdown(text);
+        assert_eq!(lines.len(), 3);
+        for (i, line) in lines.iter().enumerate() {
+            assert!(
+                line.spans[0].content.starts_with('│'),
+                "line {i} missing │ prefix"
+            );
+            assert!(
+                line.spans[1]
+                    .content
+                    .contains(&format!("line {}", ["one", "two", "three"][i]))
+            );
+        }
+    }
+
+    #[test]
+    fn test_blockquote_with_blank_line() {
+        let text = "> para1\n>\n> para2";
+        let lines = render_markdown(text);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].spans[1].content.contains("para1"));
+        // Blank quoted line has only the │ prefix with no content span
+        assert_eq!(
+            lines[1].spans.len(),
+            1,
+            "blank quote line has only │ prefix"
+        );
+        assert!(lines[2].spans[1].content.contains("para2"));
+    }
+
+    // ── List tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_list_star_marker() {
+        let lines = render_markdown("* item 1\n* item 2");
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].spans[0].content.starts_with('•'),
+            "got {:#?}",
+            lines[0].spans[0].content
+        );
+        assert!(lines[1].spans[0].content.starts_with('•'));
+    }
+
+    #[test]
+    fn test_task_list_checked() {
+        let lines = render_markdown("- [x] done\n- [X] also done");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].spans[0].content, "☑ ");
+        assert_eq!(lines[1].spans[0].content, "☑ ");
+    }
+
+    #[test]
+    fn test_task_list_unchecked() {
+        let lines = render_markdown("- [ ] todo");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].content, "☐ ");
+    }
+
+    #[test]
+    fn test_task_list_star_marker() {
+        // `* [x]` is recognized as a task list (same as `- [x]`)
+        let lines = render_markdown("* [x] star task");
+        assert_eq!(lines[0].spans[0].content, "☑ ");
+    }
+
+    #[test]
+    fn test_list_item_with_continuation() {
+        let text = "- item one\n  continuation\n- item two";
+        let lines = render_markdown(text);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].spans[0].content.starts_with('•'));
+        assert_eq!(lines[1].spans[0].content, "   ", "continuation indent");
+        assert_eq!(lines[1].spans[1].content, "continuation");
+        assert!(lines[2].spans[0].content.starts_with('•'));
+    }
+
+    #[test]
+    fn test_ordered_list_custom_start() {
+        // The renderer always re-numbers from 1; test that documented.
+        let lines = render_markdown("3. third\n4. fourth");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].spans[0].content, "1. ");
+        assert_eq!(lines[1].spans[0].content, "2. ");
+    }
+
+    // ── Table tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_table_single_column() {
+        let text = "| H |\n|---|\n| v |";
+        let lines = render_markdown(text);
+        assert_eq!(lines.len(), 3, "got {} lines", lines.len());
+        assert!(lines[0].spans.iter().any(|s| s.content.contains("H")));
+        assert!(lines[2].spans.iter().any(|s| s.content.contains("v")));
+    }
+
+    #[test]
+    fn test_table_no_outer_pipes() {
+        // This is NOT recognized as a table (no leading/trailing |)
+        let text = "a|b\n-|-\nc|d";
+        let lines = render_markdown(text);
+        // Should be rendered as plain paragraphs
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.spans.iter().any(|s| s.content.contains("a|b")))
+        );
+    }
+
+    // ── Inline tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_inline_code_multi_backtick() {
+        let lines = render_markdown("``co`de`` here");
+        assert_eq!(lines.len(), 1);
+        let spans = &lines[0].spans;
+        assert_eq!(spans[0].content, "co`de");
+        assert_eq!(spans[1].content, " here");
+    }
+
+    #[test]
+    fn test_image() {
+        let lines = render_markdown("![alt](url)");
+        assert_eq!(lines.len(), 1);
+        let spans = &lines[0].spans;
+        assert!(
+            spans[0].content.contains("alt"),
+            "got {:?}",
+            spans[0].content
+        );
+    }
+
+    #[test]
+    fn test_backslash_escape() {
+        let lines = render_markdown("\\*not italic*");
+        assert_eq!(lines.len(), 1);
+        let all: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(all, "*not italic*");
+    }
+
+    #[test]
+    fn test_backslash_escape_backslash() {
+        let lines = render_markdown("\\\\backslash");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].content, "\\backslash");
+    }
+
+    #[test]
+    fn test_nested_bold_italic() {
+        // Note: italic uses `*`, not `_` (only `*` is supported).
+        // `***...***` (bold+italic) is not supported because the inline
+        // parser's `collect_until` for `**` greedily absorbs the inner `*`.
+        // Use separate `**bold** *italic*` instead.
+        let lines = render_markdown("**bold** and *italic*");
+        assert_eq!(lines.len(), 1);
+        let all: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(all, "bold and italic");
+    }
+
+    #[test]
+    fn test_unclosed_bold() {
+        // Unclosed ** should render the opening ** literally
+        let lines = render_markdown("**unclosed");
+        assert_eq!(lines.len(), 1);
+        let all: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        // Should contain "**unclosed" — the ** should not be silently consumed
+        assert!(all.contains("**unclosed"), "got {all:?}");
+    }
+
+    #[test]
+    fn test_unclosed_code() {
+        let lines = render_markdown("`unclosed code");
+        assert_eq!(lines.len(), 1);
+        let all: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        // Backtick should be rendered literally
+        assert!(all.contains('`'), "got {all:?}");
+    }
+
+    #[test]
+    fn test_multiple_inline_formats() {
+        let lines = render_markdown("**bold**, *italic*, `code`, and ~~strike~~.");
+        assert_eq!(lines.len(), 1);
+        let all: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(all.contains("bold"));
+        assert!(all.contains("italic"));
+        assert!(all.contains("code"));
+        assert!(all.contains("strike"));
+    }
+
+    // ── Edge cases ────────────────────────────────────────────────
+
+    #[test]
+    fn test_think_tag_stripping() {
+        let text = "before<think>internal reasoning</think>after";
+        let lines = render_markdown(text);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].content, "beforeafter");
+    }
+
+    #[test]
+    fn test_think_tag_multiline() {
+        let text = "hello\n<think>\nsecret\n</think>\nworld";
+        let lines = render_markdown(text);
+        // blank lines from stripped think block create spacing between paragraphs
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].spans[0].content, "hello");
+        assert_eq!(lines[2].spans[0].content, "world");
+    }
+
+    #[test]
+    fn test_heading_levels_4_5_6() {
+        for level in 4..=6 {
+            let md = format!("{} Heading {}", "#".repeat(level), level);
+            let lines = render_markdown(&md);
+            assert_eq!(lines.len(), 1, "level {level} got {} lines", lines.len());
+            assert_eq!(lines[0].spans[0].content, format!("Heading {level}"));
+        }
+    }
+
+    #[test]
+    fn test_unicode_content() {
+        let lines = render_markdown("你好 **世界**");
+        assert_eq!(lines.len(), 1);
+        let spans = &lines[0].spans;
+        assert_eq!(spans[0].content, "你好 ");
+        assert_eq!(spans[1].content, "世界");
+        assert!(spans[1].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_paragraph_with_multiple_lines() {
+        let text = "line one\nline two\nline three";
+        let lines = render_markdown(text);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].spans[0].content, "line one");
+        assert_eq!(lines[1].spans[0].content, "line two");
+        assert_eq!(lines[2].spans[0].content, "line three");
+    }
+
+    #[test]
+    fn test_mixed_blocks_without_blank_lines() {
+        // Blocks separated by blank lines in render_markdown's source are needed
+        // for proper block detection; without them, take_paragraph may grab
+        // subsequent content.
+        let text = "Paragraph\n- list\n> quote";
+        let lines = render_markdown(text);
+        // The paragraph parser should stop at `- list` before grabbing `> quote`
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.spans.iter().any(|s| s.content.contains("list")))
+        );
+    }
+
+    #[test]
+    fn test_render_markdown_does_not_panic_on_large_text() {
+        let long = "word ".repeat(500);
+        // Should not panic
+        let lines = render_markdown(&long);
+        assert!(!lines.is_empty());
     }
 }
