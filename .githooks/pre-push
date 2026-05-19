@@ -25,8 +25,8 @@ else
 fi
 
 # ── 3. cargo doc (optional — comment out if too slow) ──────────────
-echo ":: Doc gate (cargo doc --no-deps --document-private-items) ..."
-if ! cargo doc --no-deps --document-private-items 2>/dev/null; then
+echo ":: Doc gate (RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps --document-private-items) ..."
+if ! RUSTDOCFLAGS="-Dwarnings" cargo doc --no-deps --document-private-items 2>/dev/null; then
     echo -e "${RED}   ✘ Doc build failed.${NC}"
     PASS=false
 else

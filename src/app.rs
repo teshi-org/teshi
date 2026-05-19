@@ -2034,7 +2034,7 @@ impl App {
         self.status = format!("AI wants to {}. [Y] accept [N] reject", desc);
     }
 
-    /// Recompute [`pending_change_summary`] from [`pending_change_diffs`].
+    /// Recompute `pending_change_summary` from `pending_change_diffs`.
     fn compute_change_summary(&mut self) {
         let mut summary: Vec<ChangeSummaryNode> = Vec::new();
 
