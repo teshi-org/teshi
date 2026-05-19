@@ -562,6 +562,10 @@ impl Action {
             return match (event.code, event.modifiers) {
                 (KeyCode::Up, KeyModifiers::SHIFT) => Some(Self::TreeSiblingPrev),
                 (KeyCode::Down, KeyModifiers::SHIFT) => Some(Self::TreeSiblingNext),
+                (KeyCode::Char('K'), KeyModifiers::SHIFT)
+                | (KeyCode::Char('K'), KeyModifiers::NONE) => Some(Self::TreeSiblingPrev),
+                (KeyCode::Char('J'), KeyModifiers::SHIFT)
+                | (KeyCode::Char('J'), KeyModifiers::NONE) => Some(Self::TreeSiblingNext),
                 (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => Some(Self::TreeUp),
                 (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                     Some(Self::TreeDown)
@@ -643,6 +647,10 @@ impl Action {
             | (KeyCode::Char('j'), KeyModifiers::CONTROL) => Some(Self::MoveStepDown),
             (KeyCode::Up, KeyModifiers::SHIFT) => Some(Self::MoveSiblingUp),
             (KeyCode::Down, KeyModifiers::SHIFT) => Some(Self::MoveSiblingDown),
+            (KeyCode::Char('K'), KeyModifiers::SHIFT)
+            | (KeyCode::Char('K'), KeyModifiers::NONE) => Some(Self::MoveSiblingUp),
+            (KeyCode::Char('J'), KeyModifiers::SHIFT)
+            | (KeyCode::Char('J'), KeyModifiers::NONE) => Some(Self::MoveSiblingDown),
             (KeyCode::Up, _) => Some(Self::MoveUp),
             (KeyCode::Down, _) => Some(Self::MoveDown),
             (KeyCode::Left, _) => Some(Self::MoveLeft),
