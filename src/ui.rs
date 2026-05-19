@@ -384,6 +384,66 @@ fn render_agent_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Text::from(visible)), inner);
 }
 
+/// Number of visual (wrapped) rows the input text occupies when rendered in a
+/// widget of the given `width` (in columns).
+fn visual_line_count_for_width(input: &str, width: u16) -> u16 {
+    if width == 0 {
+        return input.lines().count().max(1) as u16;
+    }
+    let count: u16 = input
+        .lines()
+        .map(|line| {
+            let w: u16 = line.chars().map(|c| c.width().unwrap_or(0) as u16).sum();
+            if w == 0 {
+                1
+            } else {
+                ((w + width - 1) / width).max(1)
+            }
+        })
+        .sum();
+    count.max(1)
+}
+
+/// Compute the visual (wrapped) (row, col) for a character index in a
+/// multi-line string rendered at the given `width`.
+fn visual_cursor_pos(input: &str, cursor_char_idx: usize, width: u16) -> (u16, u16) {
+    if width == 0 {
+        return (0, 0);
+    }
+    let before: String = input.chars().take(cursor_char_idx).collect();
+    let lines: Vec<&str> = before.split('\n').collect();
+    if lines.is_empty() {
+        return (0, 0);
+    }
+
+    let mut visual_row: u16 = 0;
+
+    // Complete logical lines before the cursor's line
+    if lines.len() > 1 {
+        for line in &lines[..lines.len() - 1] {
+            let w: u16 = line.chars().map(|c| c.width().unwrap_or(0) as u16).sum();
+            visual_row += if w == 0 {
+                1
+            } else {
+                ((w + width - 1) / width).max(1)
+            };
+        }
+    }
+
+    // The partial line containing the cursor
+    let cursor_line = lines[lines.len() - 1];
+    let cursor_line_width: u16 = cursor_line
+        .chars()
+        .map(|c| c.width().unwrap_or(0) as u16)
+        .sum();
+    if cursor_line_width == 0 {
+        return (visual_row, 0);
+    }
+    let col = cursor_line_width % width;
+    visual_row += cursor_line_width / width;
+    (visual_row, col)
+}
+
 /// Renders the active agent's chat panel.
 fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     use crate::app::{AiRole, AiStatus};
@@ -403,10 +463,10 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     // Layout: chat history (top) + status bar + [suggestions] + input bar (bottom)
     let status_height: u16 = 1;
 
-    // Dynamic input height: at least 1 text row (3 with borders), grows with content
-    let input_line_count = app.agent().input.lines().count().max(1) as u16;
-    let max_input_text_rows = (inner.height / 3).max(3);
-    let input_text_rows = input_line_count.min(max_input_text_rows);
+    // Dynamic input height: based on visual wrapped line count, grows with content
+    let input_text_width = inner.width.saturating_sub(2); // Borders::ALL on input block
+    let input_text_rows = visual_line_count_for_width(&app.agent().input, input_text_width)
+        .min((inner.height / 3).max(3));
     let input_height: u16 = input_text_rows + 2; // +2 for top and bottom borders
 
     // Compute filtered suggestion count so height adapts to what's shown
@@ -842,27 +902,23 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Text::from(lines)
     };
     frame.render_widget(
-        Paragraph::new(input_display).style(match app.agent().status {
-            AiStatus::Waiting => Style::default().fg(Color::DarkGray),
-            _ => Style::default(),
-        }),
+        Paragraph::new(input_display)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .style(match app.agent().status {
+                AiStatus::Waiting => Style::default().fg(Color::DarkGray),
+                _ => Style::default(),
+            }),
         input_inner,
     );
 
-    // Show a visible cursor at the insertion point.
+    // Show a visible cursor at the insertion point, accounting for wrapping.
     if app.ai_input_focused && app.agent().status != AiStatus::Waiting {
-        let input = &app.agent().input;
-        let cursor = app.agent().input_cursor;
-        // Split the text before the cursor by newlines to find row and column
-        let before_cursor: String = input.chars().take(cursor).collect();
-        let cursor_row_offset = before_cursor.lines().count().saturating_sub(1);
-        let last_line: String = before_cursor.lines().last().unwrap_or("").to_string();
-        let cursor_col: u16 = last_line
-            .chars()
-            .map(|c| c.width().unwrap_or(0) as u16)
-            .sum();
-        let input_inner_y = input_inner.y + cursor_row_offset as u16;
-        frame.set_cursor_position((input_inner.x + cursor_col, input_inner_y));
+        let (vis_row, vis_col) = visual_cursor_pos(
+            &app.agent().input,
+            app.agent().input_cursor,
+            input_inner.width,
+        );
+        frame.set_cursor_position((input_inner.x + vis_col, input_inner.y + vis_row));
     }
 }
 
@@ -1884,9 +1940,9 @@ pub(crate) fn render_agent_chat_inner(
     // Layout: chat history (top) + status bar + input bar (bottom)
     let status_height: u16 = 1;
 
-    let input_line_count = app.agent().input.lines().count().max(1) as u16;
-    let max_input_text_rows = (inner.height / 3).max(3);
-    let input_text_rows = input_line_count.min(max_input_text_rows);
+    let input_text_width = inner.width.saturating_sub(2); // Borders::ALL on input block
+    let input_text_rows = visual_line_count_for_width(&app.agent().input, input_text_width)
+        .min((inner.height / 3).max(3));
     let input_height: u16 = input_text_rows + 2;
 
     let chat_height = inner.height.saturating_sub(status_height + input_height);
@@ -2103,26 +2159,23 @@ pub(crate) fn render_agent_chat_inner(
         Text::from(lines)
     };
     frame.render_widget(
-        Paragraph::new(input_display).style(match app.agent().status {
-            AiStatus::Waiting => Style::default().fg(Color::DarkGray),
-            _ => Style::default(),
-        }),
+        Paragraph::new(input_display)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .style(match app.agent().status {
+                AiStatus::Waiting => Style::default().fg(Color::DarkGray),
+                _ => Style::default(),
+            }),
         input_inner,
     );
 
-    // Cursor in input
+    // Cursor in input, accounting for wrapping
     if focused && app.ai_input_focused && app.agent().status != AiStatus::Waiting {
-        let input = &app.agent().input;
-        let cursor = app.agent().input_cursor;
-        let before_cursor: String = input.chars().take(cursor).collect();
-        let cursor_row_offset = before_cursor.lines().count().saturating_sub(1);
-        let last_line: String = before_cursor.lines().last().unwrap_or("").to_string();
-        let cursor_col: u16 = last_line
-            .chars()
-            .map(|c| c.width().unwrap_or(0) as u16)
-            .sum();
-        let input_inner_y = input_inner.y + cursor_row_offset as u16;
-        frame.set_cursor_position((input_inner.x + cursor_col, input_inner_y));
+        let (vis_row, vis_col) = visual_cursor_pos(
+            &app.agent().input,
+            app.agent().input_cursor,
+            input_inner.width,
+        );
+        frame.set_cursor_position((input_inner.x + vis_col, input_inner.y + vis_row));
     }
 }
 
