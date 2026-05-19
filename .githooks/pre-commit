@@ -43,6 +43,19 @@ else
     echo -e "${GREEN}   - OK${NC}"
 fi
 
+# ---- 2c. Root package version sync ------------------------------------------
+echo ":: Root version check (Cargo.toml vs Cargo.lock) ..."
+CARGO_VERSION=$(grep -m1 '^version = ' Cargo.toml | tr -d '\r' | sed 's/version = "\(.*\)"/\1/')
+LOCK_VERSION=$(grep -A2 '^name = "teshi"' Cargo.lock | grep '^version = ' | tr -d '\r' | sed 's/version = "\(.*\)"/\1/')
+if [ -z "$CARGO_VERSION" ] || [ -z "$LOCK_VERSION" ]; then
+    echo -e "${YELLOW}   !  Could not extract version from Cargo.toml or Cargo.lock.${NC}"
+elif [ "$CARGO_VERSION" != "$LOCK_VERSION" ]; then
+    echo -e "${RED}   x  Cargo.lock root package version ($LOCK_VERSION) does not match Cargo.toml ($CARGO_VERSION). Run 'cargo generate-lockfile' and stage Cargo.lock.${NC}"
+    PASS=false
+else
+    echo -e "${GREEN}   - OK ($CARGO_VERSION)${NC}"
+fi
+
 # ---- 3. dbg!() in staged .rs files -----------------------------------------
 STAGED_DBG=$(git diff --cached -G'dbg!' -- '*.rs' || true)
 if [ -n "$STAGED_DBG" ]; then
