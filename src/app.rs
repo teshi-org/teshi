@@ -1495,6 +1495,11 @@ impl App {
              - Use Scenario Outline + Examples when the same steps apply to 3+ data variations,\n\
                not for just 1-2 variations.\n\
              - Each feature file should focus on one feature area.\n\
+             - **Self-contained scenarios**: Every Scenario must have its own Given/When/Then\n\
+               chain. Missing When is an ERROR. Missing Then is an ERROR.\n\
+             - **No cross-scenario dependencies**: A scenario's Given must independently build\n\
+               all required state. Do NOT rely on state left by another scenario — use\n\
+               Background for shared state that applies to all scenarios.\n\
              \n\
              ## Available Tools\n\
              - **get_project_info**: Get project directory, file list, scenario/step counts.\n\

@@ -57,6 +57,8 @@ impl GenerationStage {
                 "\n\n## Current Phase: Scenario Planning\n\
                  Based on the gathered requirements, design the scenario structure.\n\
                  - Plan which scenarios to include (happy path, error cases, edge cases)\n\
+                 - Plan scenarios so each one is self-contained — treat every scenario\n\
+                   as independently runnable, not as steps in a sequence\n\
                  - Use Scenario Outline + Examples for data-driven variations\n\
                  - When the plan is ready, call generate_plan to record it"
             }
@@ -65,7 +67,20 @@ impl GenerationStage {
                  Execute the approved plan by creating the feature files.\n\
                  - Use create_feature_file and insert_scenario tools\n\
                  - Reuse existing step patterns from Project Context\n\
-                 - After writing, call validate_feature"
+                 - After writing, call validate_feature AND run_tests to verify\n\
+                   that each new scenario is executable\n\
+                 \n\
+                 ## Scenario Independence Rules\n\
+                 - Each scenario must have a complete Given/When/Then chain —\n\
+                   no missing keywords. Missing When or Then is an ERROR.\n\
+                 - A scenario's Given must independently establish ALL preconditions\n\
+                   for that scenario. Do NOT write scenarios that assume another\n\
+                   scenario has already been executed.\n\
+                 - For example, if Scenario A logs in, Scenario B cannot say\n\
+                   'Given I am still logged in' because runners execute scenarios\n\
+                   independently and in arbitrary order.\n\
+                 - If you need shared state, use Background (which runs before\n\
+                   each scenario independently)."
             }
             Self::Confirming => "", // User-action phase, no LLM guidance needed
             Self::Validating => {
