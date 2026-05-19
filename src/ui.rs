@@ -570,7 +570,7 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
         let prefix = match msg.role {
             AiRole::User => "▶ You",
-            AiRole::Assistant => "> 🥰",
+            AiRole::Assistant => "▷ 🥰",
             _ => unreachable!(),
         };
         let role_color = match msg.role {
@@ -704,7 +704,7 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     // Show streaming partial response as a live assistant message
     if !app.agent().partial_response.is_empty() {
         chat_lines.push(
-            Line::raw("> 🥰:").style(
+            Line::raw("▷ 🥰:").style(
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
@@ -2055,7 +2055,7 @@ pub(crate) fn render_agent_chat_inner(
         }
         let prefix = match msg.role {
             AiRole::User => "▶ You",
-            AiRole::Assistant => "> 🥰",
+            AiRole::Assistant => "▷ 🥰",
             _ => unreachable!(),
         };
         let role_color = match msg.role {
@@ -2188,7 +2188,7 @@ pub(crate) fn render_agent_chat_inner(
     // Show streaming partial response
     if !app.agent().partial_response.is_empty() {
         chat_lines.push(
-            Line::raw("> 🥰:").style(
+            Line::raw("▷ 🥰:").style(
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
