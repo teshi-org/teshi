@@ -1205,13 +1205,12 @@ impl App {
                                     // Update duration on the assistant message's tool call
                                     if let Some(msg) =
                                         self.agents[i].messages.get_mut(assistant_msg_idx)
+                                        && let Some(ref mut tcs) = msg.tool_calls
                                     {
-                                        if let Some(ref mut tcs) = msg.tool_calls {
-                                            for t in tcs.iter_mut() {
-                                                if t.id == tc.id {
-                                                    t.execution_duration_ms =
-                                                        Some(elapsed.as_millis() as u64);
-                                                }
+                                        for t in tcs.iter_mut() {
+                                            if t.id == tc.id {
+                                                t.execution_duration_ms =
+                                                    Some(elapsed.as_millis() as u64);
                                             }
                                         }
                                     }
@@ -1229,13 +1228,12 @@ impl App {
                                     // Update duration even on error
                                     if let Some(msg) =
                                         self.agents[i].messages.get_mut(assistant_msg_idx)
+                                        && let Some(ref mut tcs) = msg.tool_calls
                                     {
-                                        if let Some(ref mut tcs) = msg.tool_calls {
-                                            for t in tcs.iter_mut() {
-                                                if t.id == tc.id {
-                                                    t.execution_duration_ms =
-                                                        Some(elapsed.as_millis() as u64);
-                                                }
+                                        for t in tcs.iter_mut() {
+                                            if t.id == tc.id {
+                                                t.execution_duration_ms =
+                                                    Some(elapsed.as_millis() as u64);
                                             }
                                         }
                                     }
@@ -3212,27 +3210,25 @@ impl App {
     }
 
     fn tree_move_sibling_prev(&mut self) {
-        if let Some(id) = mindmap::selected_node_id(&self.tree_state) {
-            if let Some(sibling_id) = self.mindmap_index.prev_sibling(id) {
-                if let Some(path) = self.mindmap_index.path_for(&sibling_id) {
-                    self.tree_state.select(path.clone());
-                    self.mindmap_index.apply_highlight_categories(&sibling_id);
-                    self.tree_follow_editor();
-                }
-            }
+        if let Some(id) = mindmap::selected_node_id(&self.tree_state)
+            && let Some(sibling_id) = self.mindmap_index.prev_sibling(id)
+            && let Some(path) = self.mindmap_index.path_for(&sibling_id)
+        {
+            self.tree_state.select(path.clone());
+            self.mindmap_index.apply_highlight_categories(&sibling_id);
+            self.tree_follow_editor();
         }
         self.quit_pending_confirm = false;
     }
 
     fn tree_move_sibling_next(&mut self) {
-        if let Some(id) = mindmap::selected_node_id(&self.tree_state) {
-            if let Some(sibling_id) = self.mindmap_index.next_sibling(id) {
-                if let Some(path) = self.mindmap_index.path_for(&sibling_id) {
-                    self.tree_state.select(path.clone());
-                    self.mindmap_index.apply_highlight_categories(&sibling_id);
-                    self.tree_follow_editor();
-                }
-            }
+        if let Some(id) = mindmap::selected_node_id(&self.tree_state)
+            && let Some(sibling_id) = self.mindmap_index.next_sibling(id)
+            && let Some(path) = self.mindmap_index.path_for(&sibling_id)
+        {
+            self.tree_state.select(path.clone());
+            self.mindmap_index.apply_highlight_categories(&sibling_id);
+            self.tree_follow_editor();
         }
         self.quit_pending_confirm = false;
     }
@@ -4003,14 +3999,13 @@ impl App {
             }
             Action::AiClipboardPaste => {
                 self.ai_input_focused = true;
-                if let Ok(mut cb) = arboard::Clipboard::new() {
-                    if let Ok(text) = cb.get_text() {
-                        let text = text.replace("\r\n", "\n").replace('\r', "\n");
-                        let byte_idx =
-                            char_to_byte_idx(&self.agent().input, self.agent().input_cursor);
-                        self.agent_mut().input.insert_str(byte_idx, &text);
-                        self.agent_mut().input_cursor += text.chars().count();
-                    }
+                if let Ok(mut cb) = arboard::Clipboard::new()
+                    && let Ok(text) = cb.get_text()
+                {
+                    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                    let byte_idx = char_to_byte_idx(&self.agent().input, self.agent().input_cursor);
+                    self.agent_mut().input.insert_str(byte_idx, &text);
+                    self.agent_mut().input_cursor += text.chars().count();
                 }
                 self.quit_pending_confirm = false;
             }
@@ -5371,11 +5366,11 @@ impl App {
             let hidden = self.hidden_editor_rows();
             let visible_steps: Vec<usize> =
                 steps.into_iter().filter(|r| !hidden.contains(r)).collect();
-            if let Some(pos) = visible_steps.iter().position(|&r| r == self.cursor_row) {
-                if pos > 0 {
-                    let new_row = visible_steps[pos - 1];
-                    self.apply_vertical_nav_jump(new_row, self.focus_slot == BddFocusSlot::Body);
-                }
+            if let Some(pos) = visible_steps.iter().position(|&r| r == self.cursor_row)
+                && pos > 0
+            {
+                let new_row = visible_steps[pos - 1];
+                self.apply_vertical_nav_jump(new_row, self.focus_slot == BddFocusSlot::Body);
             }
         }
         self.quit_pending_confirm = false;
@@ -5393,11 +5388,11 @@ impl App {
             let hidden = self.hidden_editor_rows();
             let visible_steps: Vec<usize> =
                 steps.into_iter().filter(|r| !hidden.contains(r)).collect();
-            if let Some(pos) = visible_steps.iter().position(|&r| r == self.cursor_row) {
-                if pos + 1 < visible_steps.len() {
-                    let new_row = visible_steps[pos + 1];
-                    self.apply_vertical_nav_jump(new_row, self.focus_slot == BddFocusSlot::Body);
-                }
+            if let Some(pos) = visible_steps.iter().position(|&r| r == self.cursor_row)
+                && pos + 1 < visible_steps.len()
+            {
+                let new_row = visible_steps[pos + 1];
+                self.apply_vertical_nav_jump(new_row, self.focus_slot == BddFocusSlot::Body);
             }
         }
         self.quit_pending_confirm = false;
