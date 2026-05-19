@@ -2,50 +2,60 @@
 set -euo pipefail
 
 RED='\033[0;31m'
+YELLOW='\033[0;33m'
 GREEN='\033[0;32m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 PASS=true
 
-# ── 1. cargo fmt ────────────────────────────────────────────────────
+# ---- 0. Toolchain alignment check -----------------------------------------
+echo ":: Toolchain check ..."
+RUSTUP_CHECK=$(rustup check 2>/dev/null || true)
+if echo "$RUSTUP_CHECK" | grep -q "Update available"; then
+    echo -e "${YELLOW}   !  Stable toolchain update available. Run 'rustup update stable' to match CI.${NC}"
+    echo -e "${YELLOW}      (Not a hard failure)${NC}"
+fi
+echo -e "${GREEN}   - OK${NC}"
+
+# ---- 1. cargo fmt ----------------------------------------------------------
 echo ":: Formatting check (cargo fmt --all --check) ..."
 if ! cargo fmt --all --check 2>/dev/null; then
-    echo -e "${RED}   ✘ Unformatted code. Run \`cargo fmt --all\` to fix.${NC}"
+    echo -e "${RED}   x  Unformatted code. Run 'cargo fmt --all' to fix.${NC}"
     PASS=false
 else
-    echo -e "${GREEN}   ✔ OK${NC}"
+    echo -e "${GREEN}   - OK${NC}"
 fi
 
-# ── 2. cargo check ──────────────────────────────────────────────────
+# ---- 2. cargo check --------------------------------------------------------
 echo ":: Compilation check (cargo check) ..."
 if ! cargo check 2>/dev/null; then
-    echo -e "${RED}   ✘ Compilation errors.${NC}"
+    echo -e "${RED}   x  Compilation errors.${NC}"
     PASS=false
 else
-    echo -e "${GREEN}   ✔ OK${NC}"
+    echo -e "${GREEN}   - OK${NC}"
 fi
 
-# ── 2b. cargo check --locked (Cargo.lock in sync) ──────────────────
+# ---- 2b. cargo check --locked ---------------------------------------------
 echo ":: Lock file check (cargo check --locked) ..."
 if ! cargo check --locked 2>/dev/null; then
-    echo -e "${RED}   ✘ Cargo.lock is out of sync. Run \`cargo check\` and stage Cargo.lock too.${NC}"
+    echo -e "${RED}   x  Cargo.lock is out of sync. Run 'cargo check' and stage Cargo.lock too.${NC}"
     PASS=false
 else
-    echo -e "${GREEN}   ✔ OK${NC}"
+    echo -e "${GREEN}   - OK${NC}"
 fi
 
-# ── 3. dbg!() in staged .rs files ───────────────────────────────────
+# ---- 3. dbg!() in staged .rs files -----------------------------------------
 STAGED_DBG=$(git diff --cached -G'dbg!' -- '*.rs' || true)
 if [ -n "$STAGED_DBG" ]; then
-    echo -e "${RED}   ✘ dbg!() found in staged files:${NC}"
+    echo -e "${RED}   x  dbg!() found in staged files:${NC}"
     echo "$STAGED_DBG" | grep '^+++' | sed 's/^+++ //'
     PASS=false
 else
-    echo -e "${GREEN}   ✔ No dbg!() in staged files${NC}"
+    echo -e "${GREEN}   - No dbg!() in staged files${NC}"
 fi
 
-# ── Result ─────────────────────────────────────────────────────────
+# ---- Result ----------------------------------------------------------------
 if [ "$PASS" = false ]; then
-    echo -e "${RED}── pre-commit checks failed ──────────────────────────${NC}"
+    echo -e "${RED}-- pre-commit checks failed -----------------------------------${NC}"
     exit 1
 fi
-echo -e "${GREEN}── all pre-commit checks passed ────────────────────${NC}"
+echo -e "${GREEN}-- all pre-commit checks passed -------------------------------${NC}"

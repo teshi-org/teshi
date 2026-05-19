@@ -2,40 +2,50 @@
 set -euo pipefail
 
 RED='\033[0;31m'
+YELLOW='\033[0;33m'
 GREEN='\033[0;32m'
 NC='\033[0m'
 PASS=true
 
-# ── 1. cargo clippy ─────────────────────────────────────────────────
+# ---- 0. Toolchain alignment check -----------------------------------------
+echo ":: Toolchain check ..."
+RUSTUP_CHECK=$(rustup check 2>/dev/null || true)
+if echo "$RUSTUP_CHECK" | grep -q "Update available"; then
+    echo -e "${YELLOW}   !  Stable toolchain update available. Run 'rustup update stable' to match CI.${NC}"
+    echo -e "${YELLOW}      (Not a hard failure)${NC}"
+fi
+echo -e "${GREEN}   - OK${NC}"
+
+# ---- 1. cargo clippy -------------------------------------------------------
 echo ":: Lint gate (cargo clippy --all-targets --all-features -D warnings) ..."
 if ! cargo clippy --all-targets --all-features -- -D warnings 2>/dev/null; then
-    echo -e "${RED}   ✘ Clippy warnings found (treated as errors).${NC}"
+    echo -e "${RED}   x  Clippy warnings found (treated as errors).${NC}"
     PASS=false
 else
-    echo -e "${GREEN}   ✔ OK${NC}"
+    echo -e "${GREEN}   - OK${NC}"
 fi
 
-# ── 2. cargo test ──────────────────────────────────────────────────
+# ---- 2. cargo test ---------------------------------------------------------
 echo ":: Test gate (cargo test --all) ..."
 if ! cargo test --all 2>/dev/null; then
-    echo -e "${RED}   ✘ Tests failed.${NC}"
+    echo -e "${RED}   x  Tests failed.${NC}"
     PASS=false
 else
-    echo -e "${GREEN}   ✔ OK${NC}"
+    echo -e "${GREEN}   - OK${NC}"
 fi
 
-# ── 3. cargo doc (optional — comment out if too slow) ──────────────
+# ---- 3. cargo doc ----------------------------------------------------------
 echo ":: Doc gate (RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps --document-private-items) ..."
 if ! RUSTDOCFLAGS="-Dwarnings" cargo doc --no-deps --document-private-items 2>/dev/null; then
-    echo -e "${RED}   ✘ Doc build failed.${NC}"
+    echo -e "${RED}   x  Doc build failed.${NC}"
     PASS=false
 else
-    echo -e "${GREEN}   ✔ OK${NC}"
+    echo -e "${GREEN}   - OK${NC}"
 fi
 
-# ── Result ─────────────────────────────────────────────────────────
+# ---- Result ----------------------------------------------------------------
 if [ "$PASS" = false ]; then
-    echo -e "${RED}── pre-push checks failed ───────────────────────────${NC}"
+    echo -e "${RED}-- pre-push checks failed -------------------------------------${NC}"
     exit 1
 fi
-echo -e "${GREEN}── all pre-push checks passed ───────────────────────${NC}"
+echo -e "${GREEN}-- all pre-push checks passed ---------------------------------${NC}"
