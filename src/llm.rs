@@ -140,6 +140,9 @@ pub struct ToolCall {
     pub name: String,
     /// JSON-encoded arguments for the function.
     pub arguments: String,
+    /// Execution duration in milliseconds, set after tool completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_duration_ms: Option<u64>,
 }
 
 // ── Message types ────────────────────────────────────────────────────────────
@@ -725,6 +728,7 @@ async fn chat_completion(
                 id: id.unwrap_or_default(),
                 name: name.unwrap_or_default(),
                 arguments: args,
+                execution_duration_ms: None,
             })
             .collect();
 

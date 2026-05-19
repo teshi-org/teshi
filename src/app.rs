@@ -347,7 +347,7 @@ pub struct App {
     last_external_check: Instant,
     external_change_prompt: Option<ExternalChangePrompt>,
     /// Pending text modifications requested by AI agent tools, awaiting user confirmation.
-    pending_agent_changes: Vec<AgentPendingChange>,
+    pub pending_agent_changes: Vec<AgentPendingChange>,
     /// Computed diffs for each pending agent change (indexed parallel to `pending_agent_changes`).
     pub pending_change_diffs: Vec<Vec<DiffLine>>,
     /// Change summary nodes for the MindMap Change Summary panel.
@@ -1171,11 +1171,15 @@ impl App {
                             reasoning_content,
                             source: None,
                         });
+                        // Save the index of the assistant message so we can update
+                        // tool call durations after execution.
+                        let assistant_msg_idx = self.agents[i].messages.len() - 1;
                         let mut pending_queued = false;
                         for tc in &tool_calls {
                             self.agents[i].tool_status =
                                 Some(format!("AI is calling {}...", tc.name));
                             let pending_before = self.pending_agent_changes.len();
+                            let tool_start = std::time::Instant::now();
                             match crate::agent::execute_tool(
                                 self,
                                 &tc.name,
@@ -1184,6 +1188,7 @@ impl App {
                                 i,
                             ) {
                                 Ok(result) => {
+                                    let elapsed = tool_start.elapsed();
                                     let pending_after = self.pending_agent_changes.len();
                                     if pending_after > pending_before {
                                         pending_queued = true;
@@ -1197,8 +1202,22 @@ impl App {
                                             source: None,
                                         });
                                     }
+                                    // Update duration on the assistant message's tool call
+                                    if let Some(msg) =
+                                        self.agents[i].messages.get_mut(assistant_msg_idx)
+                                    {
+                                        if let Some(ref mut tcs) = msg.tool_calls {
+                                            for t in tcs.iter_mut() {
+                                                if t.id == tc.id {
+                                                    t.execution_duration_ms =
+                                                        Some(elapsed.as_millis() as u64);
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                                 Err(e) => {
+                                    let elapsed = tool_start.elapsed();
                                     self.agents[i].messages.push(AiChatMessage {
                                         role: AiRole::Tool,
                                         content: format!("Error: {e}"),
@@ -1207,6 +1226,19 @@ impl App {
                                         reasoning_content: None,
                                         source: None,
                                     });
+                                    // Update duration even on error
+                                    if let Some(msg) =
+                                        self.agents[i].messages.get_mut(assistant_msg_idx)
+                                    {
+                                        if let Some(ref mut tcs) = msg.tool_calls {
+                                            for t in tcs.iter_mut() {
+                                                if t.id == tc.id {
+                                                    t.execution_duration_ms =
+                                                        Some(elapsed.as_millis() as u64);
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
