@@ -560,19 +560,48 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     for msg in &app.agent().messages {
-        // Skip internal tool messages — they are not user-visible.
+        // Render tool result messages with a distinct style
         if matches!(msg.role, AiRole::Tool) {
+            let is_error = msg.content.starts_with("Error:");
+            let tool_id = msg.tool_call_id.as_deref().unwrap_or("?");
+            let status_icon = if is_error { "✗" } else { "✓" };
+            let status_color = if is_error {
+                Color::Red
+            } else {
+                Color::DarkGray
+            };
+            chat_lines.push(
+                Line::raw(format!("  {status_icon} Tool ({tool_id})")).style(
+                    Style::default()
+                        .fg(status_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            );
+            let md_lines = render_markdown(&msg.content);
+            for md_line in md_lines {
+                let mut spans = vec![Span::raw("    ")];
+                spans.extend(
+                    md_line
+                        .spans
+                        .into_iter()
+                        .map(|s| Span::styled(s.content.to_string(), s.style)),
+                );
+                let mut line = Line::from(spans);
+                line.style = md_line.style;
+                chat_lines.push(line);
+            }
+            chat_lines.push(Line::raw(""));
             continue;
         }
         let prefix = match msg.role {
             AiRole::User => "▶ You",
             AiRole::Assistant => "> 🥰",
-            AiRole::Tool => unreachable!(),
+            _ => unreachable!(),
         };
         let role_color = match msg.role {
             AiRole::User => Color::Cyan,
             AiRole::Assistant => Color::Green,
-            AiRole::Tool => unreachable!(),
+            _ => unreachable!(),
         };
         // Show source tag for MindMap-initiated messages
         let source_tag = msg
@@ -1970,18 +1999,48 @@ pub(crate) fn render_agent_chat_inner(
     }
 
     for msg in &app.agent().messages {
+        // Render tool result messages with a distinct style
         if matches!(msg.role, AiRole::Tool) {
+            let is_error = msg.content.starts_with("Error:");
+            let tool_id = msg.tool_call_id.as_deref().unwrap_or("?");
+            let status_icon = if is_error { "✗" } else { "✓" };
+            let status_color = if is_error {
+                Color::Red
+            } else {
+                Color::DarkGray
+            };
+            chat_lines.push(
+                Line::raw(format!("  {status_icon} Tool ({tool_id})")).style(
+                    Style::default()
+                        .fg(status_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            );
+            let md_lines = render_markdown(&msg.content);
+            for md_line in md_lines {
+                let mut spans = vec![Span::raw("    ")];
+                spans.extend(
+                    md_line
+                        .spans
+                        .into_iter()
+                        .map(|s| Span::styled(s.content.to_string(), s.style)),
+                );
+                let mut line = Line::from(spans);
+                line.style = md_line.style;
+                chat_lines.push(line);
+            }
+            chat_lines.push(Line::raw(""));
             continue;
         }
         let prefix = match msg.role {
             AiRole::User => "▶ You",
             AiRole::Assistant => "> 🥰",
-            AiRole::Tool => unreachable!(),
+            _ => unreachable!(),
         };
         let role_color = match msg.role {
             AiRole::User => Color::Cyan,
             AiRole::Assistant => Color::Green,
-            AiRole::Tool => unreachable!(),
+            _ => unreachable!(),
         };
         let source_tag = msg
             .source
