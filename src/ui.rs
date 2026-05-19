@@ -325,7 +325,7 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     // Layout: sidebar (left) + main panel (right)
     let [sidebar_area, main_area] =
-        Layout::horizontal([Constraint::Length(18), Constraint::Min(10)]).areas(area);
+        Layout::horizontal([Constraint::Length(28), Constraint::Min(10)]).areas(area);
 
     render_agent_sidebar(frame, app, sidebar_area);
     render_agent_chat(frame, app, main_area);
