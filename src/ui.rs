@@ -584,33 +584,76 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .as_ref()
             .map(|s| format!("[{s}] "))
             .unwrap_or_default();
-        // Show tool call indicator if present
-        let tool_note = msg.tool_calls.as_ref().map(|tcs| {
-            let names: Vec<&str> = tcs.iter().map(|tc| tc.name.as_str()).collect();
-            format!(" [called: {}]", names.join(", "))
-        });
-        let prefix_text = if let Some(note) = tool_note {
-            format!("{source_tag}{prefix}:{note}")
-        } else {
-            format!("{source_tag}{prefix}:")
-        };
+        let prefix_text = format!("{source_tag}{prefix}:");
         chat_lines.push(
             Line::raw(prefix_text)
                 .style(Style::default().fg(role_color).add_modifier(Modifier::BOLD)),
         );
         // Render message content as Markdown with a 2-space indent.
-        let md_lines = render_markdown(&msg.content);
-        for md_line in md_lines {
-            let mut spans = vec![Span::raw("  ")];
-            spans.extend(
-                md_line
-                    .spans
-                    .into_iter()
-                    .map(|s| Span::styled(s.content.to_string(), s.style)),
-            );
-            let mut line = Line::from(spans);
-            line.style = md_line.style;
-            chat_lines.push(line);
+        if !msg.content.is_empty() {
+            let md_lines = render_markdown(&msg.content);
+            for md_line in md_lines {
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(
+                    md_line
+                        .spans
+                        .into_iter()
+                        .map(|s| Span::styled(s.content.to_string(), s.style)),
+                );
+                let mut line = Line::from(spans);
+                line.style = md_line.style;
+                chat_lines.push(line);
+            }
+        }
+        // Render tool call blocks with status indicators
+        if let Some(tcs) = &msg.tool_calls {
+            for tc in tcs {
+                let is_pending = app.agent().status == AiStatus::AwaitingApproval
+                    && app
+                        .pending_agent_changes
+                        .iter()
+                        .any(|c| c.tool_call_id == tc.id);
+                let has_tool_result = app.agent().messages.iter().any(|m| {
+                    matches!(m.role, AiRole::Tool) && m.tool_call_id.as_deref() == Some(&tc.id)
+                });
+                let is_error = has_tool_result
+                    && app.agent().messages.iter().any(|m| {
+                        matches!(m.role, AiRole::Tool)
+                            && m.tool_call_id.as_deref() == Some(&tc.id)
+                            && m.content.starts_with("Error:")
+                    });
+                let (icon, status_color) = if is_error {
+                    ("✗", Color::Red)
+                } else if has_tool_result {
+                    ("✓", Color::Green)
+                } else if is_pending {
+                    ("◆", Color::Yellow)
+                } else {
+                    ("⏳", Color::Yellow)
+                };
+                let duration_str = tc
+                    .execution_duration_ms
+                    .map(|ms| {
+                        if ms >= 1000 {
+                            format!("{:.1}s", ms as f64 / 1000.0)
+                        } else {
+                            format!("{ms}ms")
+                        }
+                    })
+                    .unwrap_or_default();
+                let tool_line = if duration_str.is_empty() {
+                    format!("  🔧 {}  {icon}", tc.name)
+                } else {
+                    format!("  🔧 {}  {icon} {duration_str}", tc.name)
+                };
+                chat_lines.push(
+                    Line::raw(tool_line).style(
+                        Style::default()
+                            .fg(status_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                );
+            }
         }
         chat_lines.push(Line::raw(""));
     }
@@ -2026,31 +2069,76 @@ pub(crate) fn render_agent_chat_inner(
             .as_ref()
             .map(|s| format!("[{s}] "))
             .unwrap_or_default();
-        let tool_note = msg.tool_calls.as_ref().map(|tcs| {
-            let names: Vec<&str> = tcs.iter().map(|tc| tc.name.as_str()).collect();
-            format!(" [called: {}]", names.join(", "))
-        });
-        let prefix_text = if let Some(note) = tool_note {
-            format!("{source_tag}{prefix}:{note}")
-        } else {
-            format!("{source_tag}{prefix}:")
-        };
+        let prefix_text = format!("{source_tag}{prefix}:");
         chat_lines.push(
             Line::raw(prefix_text)
                 .style(Style::default().fg(role_color).add_modifier(Modifier::BOLD)),
         );
-        let md_lines = render_markdown(&msg.content);
-        for md_line in md_lines {
-            let mut spans = vec![Span::raw("  ")];
-            spans.extend(
-                md_line
-                    .spans
-                    .into_iter()
-                    .map(|s| Span::styled(s.content.to_string(), s.style)),
-            );
-            let mut line = Line::from(spans);
-            line.style = md_line.style;
-            chat_lines.push(line);
+        // Render message content as Markdown with a 2-space indent.
+        if !msg.content.is_empty() {
+            let md_lines = render_markdown(&msg.content);
+            for md_line in md_lines {
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(
+                    md_line
+                        .spans
+                        .into_iter()
+                        .map(|s| Span::styled(s.content.to_string(), s.style)),
+                );
+                let mut line = Line::from(spans);
+                line.style = md_line.style;
+                chat_lines.push(line);
+            }
+        }
+        // Render tool call blocks with status indicators
+        if let Some(tcs) = &msg.tool_calls {
+            for tc in tcs {
+                let is_pending = app.agent().status == AiStatus::AwaitingApproval
+                    && app
+                        .pending_agent_changes
+                        .iter()
+                        .any(|c| c.tool_call_id == tc.id);
+                let has_tool_result = app.agent().messages.iter().any(|m| {
+                    matches!(m.role, AiRole::Tool) && m.tool_call_id.as_deref() == Some(&tc.id)
+                });
+                let is_error = has_tool_result
+                    && app.agent().messages.iter().any(|m| {
+                        matches!(m.role, AiRole::Tool)
+                            && m.tool_call_id.as_deref() == Some(&tc.id)
+                            && m.content.starts_with("Error:")
+                    });
+                let (icon, status_color) = if is_error {
+                    ("✗", Color::Red)
+                } else if has_tool_result {
+                    ("✓", Color::Green)
+                } else if is_pending {
+                    ("◆", Color::Yellow)
+                } else {
+                    ("⏳", Color::Yellow)
+                };
+                let duration_str = tc
+                    .execution_duration_ms
+                    .map(|ms| {
+                        if ms >= 1000 {
+                            format!("{:.1}s", ms as f64 / 1000.0)
+                        } else {
+                            format!("{ms}ms")
+                        }
+                    })
+                    .unwrap_or_default();
+                let tool_line = if duration_str.is_empty() {
+                    format!("  🔧 {}  {icon}", tc.name)
+                } else {
+                    format!("  🔧 {}  {icon} {duration_str}", tc.name)
+                };
+                chat_lines.push(
+                    Line::raw(tool_line).style(
+                        Style::default()
+                            .fg(status_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                );
+            }
         }
         chat_lines.push(Line::raw(""));
     }
