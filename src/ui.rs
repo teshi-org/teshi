@@ -394,11 +394,7 @@ fn visual_line_count_for_width(input: &str, width: u16) -> u16 {
         .lines()
         .map(|line| {
             let w: u16 = line.chars().map(|c| c.width().unwrap_or(0) as u16).sum();
-            if w == 0 {
-                1
-            } else {
-                ((w + width - 1) / width).max(1)
-            }
+            if w == 0 { 1 } else { w.div_ceil(width).max(1) }
         })
         .sum();
     count.max(1)
@@ -422,11 +418,7 @@ fn visual_cursor_pos(input: &str, cursor_char_idx: usize, width: u16) -> (u16, u
     if lines.len() > 1 {
         for line in &lines[..lines.len() - 1] {
             let w: u16 = line.chars().map(|c| c.width().unwrap_or(0) as u16).sum();
-            visual_row += if w == 0 {
-                1
-            } else {
-                ((w + width - 1) / width).max(1)
-            };
+            visual_row += if w == 0 { 1 } else { w.div_ceil(width).max(1) };
         }
     }
 
