@@ -1111,7 +1111,7 @@ impl App {
     ///
     /// When the LLM requests tool calls, this method executes them and
     /// re-invokes the LLM with the results (the "agent loop") until a plain
-    /// text response is received or the iteration limit is reached.
+    /// text response is received or the iteration limit (10) is reached.
     pub fn poll_llm_events(&mut self) {
         for i in 0..self.agents.len() {
             let Some(rx) = self.agents[i].llm_rx.take() else {
@@ -1233,16 +1233,26 @@ impl App {
                             }
                         } else {
                             self.agents[i].agent_loop_count += 1;
-                            if self.agents[i].agent_loop_count > 5 {
-                                self.agents[i].status = AiStatus::Error;
-                                self.agents[i].tool_status = None;
-                                self.agents[i].agent_loop_count = 0;
+                            let max_iter = max_agent_iterations();
+                            if self.agents[i].agent_loop_count > max_iter {
+                                // Graceful fallback: no tools → LLM produces a text-only
+                                // wrap-up response (Chrys-style) instead of a hard error.
                                 if i == self.selected_agent {
                                     self.status =
-                                        "AI error: too many tool call iterations".to_string();
+                                        "Tool call limit reached, requesting final response…"
+                                            .to_string();
+                                }
+                                if self.agents[i].llm_handle.is_some() {
+                                    self.compact_context_if_needed(i);
+                                    let messages = self.build_chat_messages_for_agent(i);
+                                    let handle = self.agents[i].llm_handle.as_ref().unwrap();
+                                    let _ = handle.send(crate::llm::LlmRequest::Chat {
+                                        system: Some(self.ai_system_prompt(None)),
+                                        messages,
+                                        tools: None,
+                                    });
                                 }
                             } else if self.agents[i].llm_handle.is_some() {
-                                // Compact context before re-invocation
                                 self.compact_context_if_needed(i);
                                 let messages = self.build_chat_messages_for_agent(i);
                                 let tools = Some(crate::agent::get_tools());
@@ -1657,18 +1667,27 @@ impl App {
             self.generation_stage = crate::agent::pipeline::GenerationStage::Writing;
         }
         let messages = self.build_chat_messages_for_agent(agent_idx);
-        let tools = Some(crate::agent::get_tools());
         let system_prompt = self.ai_system_prompt(None);
         let agent = &mut self.agents[agent_idx];
         agent.agent_loop_count += 1;
-        if agent.agent_loop_count > 5 {
-            agent.status = AiStatus::Error;
-            agent.tool_status = None;
-            agent.agent_loop_count = 0;
-            self.status = "AI error: too many tool call iterations".to_string();
+        let max_iter = max_agent_iterations();
+        if agent.agent_loop_count > max_iter {
+            // Graceful fallback: no tools → LLM produces a text-only
+            // wrap-up response (Chrys-style) instead of a hard error.
+            self.status = "Tool call limit reached, requesting final response…".to_string();
+            if let Some(ref handle) = agent.llm_handle {
+                agent.status = AiStatus::Waiting;
+                agent.tool_status = Some("Teshi is thinking...".into());
+                let _ = handle.send(crate::llm::LlmRequest::Chat {
+                    system: Some(system_prompt),
+                    messages,
+                    tools: None,
+                });
+            }
         } else if let Some(ref handle) = agent.llm_handle {
             agent.status = AiStatus::Waiting;
             agent.tool_status = Some("Teshi is thinking...".into());
+            let tools = Some(crate::agent::get_tools());
             let _ = handle.send(crate::llm::LlmRequest::Chat {
                 system: Some(system_prompt),
                 messages,
@@ -3160,6 +3179,32 @@ impl App {
         self.quit_pending_confirm = false;
     }
 
+    fn tree_move_sibling_prev(&mut self) {
+        if let Some(id) = mindmap::selected_node_id(&self.tree_state) {
+            if let Some(sibling_id) = self.mindmap_index.prev_sibling(id) {
+                if let Some(path) = self.mindmap_index.path_for(&sibling_id) {
+                    self.tree_state.select(path.clone());
+                    self.mindmap_index.apply_highlight_categories(&sibling_id);
+                    self.tree_follow_editor();
+                }
+            }
+        }
+        self.quit_pending_confirm = false;
+    }
+
+    fn tree_move_sibling_next(&mut self) {
+        if let Some(id) = mindmap::selected_node_id(&self.tree_state) {
+            if let Some(sibling_id) = self.mindmap_index.next_sibling(id) {
+                if let Some(path) = self.mindmap_index.path_for(&sibling_id) {
+                    self.tree_state.select(path.clone());
+                    self.mindmap_index.apply_highlight_categories(&sibling_id);
+                    self.tree_follow_editor();
+                }
+            }
+        }
+        self.quit_pending_confirm = false;
+    }
+
     fn tree_home(&mut self) {
         self.tree_state.select_first();
         if let Some(id) = mindmap::selected_node_id(&self.tree_state) {
@@ -3736,6 +3781,8 @@ impl App {
             Action::TreeEnd => self.tree_end(),
             Action::TreeLocationPrev => self.tree_cycle_location(-1),
             Action::TreeLocationNext => self.tree_cycle_location(1),
+            Action::TreeSiblingPrev => self.tree_move_sibling_prev(),
+            Action::TreeSiblingNext => self.tree_move_sibling_next(),
 
             // Editor navigation (MindMap stage 3 & legacy)
             Action::MoveUp => {
@@ -3752,6 +3799,20 @@ impl App {
                     self.quit_pending_confirm = false;
                 } else {
                     self.move_down();
+                }
+            }
+            Action::MoveSiblingUp => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.quit_pending_confirm = false;
+                } else {
+                    self.move_sibling_up();
+                }
+            }
+            Action::MoveSiblingDown => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.quit_pending_confirm = false;
+                } else {
+                    self.move_sibling_down();
                 }
             }
             Action::MoveLeft => {
@@ -5266,6 +5327,54 @@ impl App {
         }
     }
 
+    fn move_sibling_up(&mut self) {
+        if self.step_input_active || self.step_keyword_picker.is_some() {
+            return;
+        }
+        if self.is_editor_nav_mode() {
+            let Some(scenario_row) =
+                crate::bdd_nav::scenario_header_for_row(&self.buffer, self.cursor_row)
+            else {
+                return;
+            };
+            let steps = crate::bdd_nav::scenario_step_rows(&self.buffer, scenario_row);
+            let hidden = self.hidden_editor_rows();
+            let visible_steps: Vec<usize> =
+                steps.into_iter().filter(|r| !hidden.contains(r)).collect();
+            if let Some(pos) = visible_steps.iter().position(|&r| r == self.cursor_row) {
+                if pos > 0 {
+                    let new_row = visible_steps[pos - 1];
+                    self.apply_vertical_nav_jump(new_row, self.focus_slot == BddFocusSlot::Body);
+                }
+            }
+        }
+        self.quit_pending_confirm = false;
+    }
+
+    fn move_sibling_down(&mut self) {
+        if self.step_input_active || self.step_keyword_picker.is_some() {
+            return;
+        }
+        if self.is_editor_nav_mode() {
+            let Some(scenario_row) =
+                crate::bdd_nav::scenario_header_for_row(&self.buffer, self.cursor_row)
+            else {
+                return;
+            };
+            let steps = crate::bdd_nav::scenario_step_rows(&self.buffer, scenario_row);
+            let hidden = self.hidden_editor_rows();
+            let visible_steps: Vec<usize> =
+                steps.into_iter().filter(|r| !hidden.contains(r)).collect();
+            if let Some(pos) = visible_steps.iter().position(|&r| r == self.cursor_row) {
+                if pos + 1 < visible_steps.len() {
+                    let new_row = visible_steps[pos + 1];
+                    self.apply_vertical_nav_jump(new_row, self.focus_slot == BddFocusSlot::Body);
+                }
+            }
+        }
+        self.quit_pending_confirm = false;
+    }
+
     fn move_left(&mut self) {
         if self.step_keyword_picker.is_some() {
             return;
@@ -5416,6 +5525,17 @@ fn parse_case_key(id: &str) -> Option<(usize, usize)> {
     let f_idx = f.strip_prefix('f')?.parse::<usize>().ok()?;
     let s_idx = s.strip_prefix('s')?.parse::<usize>().ok()?;
     Some((f_idx, s_idx))
+}
+
+/// Maximum number of tool-call iterations before the agent loop gracefully
+/// falls back to a final no-tools LLM request (Chrys-style).
+///
+/// Read from `TESHI_AI_MAX_ITERATIONS` env var; defaults to 100.
+fn max_agent_iterations() -> u32 {
+    std::env::var("TESHI_AI_MAX_ITERATIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100)
 }
 
 impl App {

@@ -157,6 +157,28 @@ impl MindMapIndex {
         self.children_map.get(id).is_some_and(|c| !c.is_empty())
     }
 
+    /// Returns the id of the previous sibling of `id`, if any.
+    /// Siblings are nodes that share the same parent.
+    pub fn prev_sibling(&self, id: &str) -> Option<String> {
+        let parent = self.parent_map.get(id)?;
+        let siblings = self.children_map.get(parent)?;
+        let pos = siblings.iter().position(|s| s == id)?;
+        if pos > 0 {
+            Some(siblings[pos - 1].clone())
+        } else {
+            None
+        }
+    }
+
+    /// Returns the id of the next sibling of `id`, if any.
+    /// Siblings are nodes that share the same parent.
+    pub fn next_sibling(&self, id: &str) -> Option<String> {
+        let parent = self.parent_map.get(id)?;
+        let siblings = self.children_map.get(parent)?;
+        let pos = siblings.iter().position(|s| s == id)?;
+        siblings.get(pos + 1).cloned()
+    }
+
     /// Lists node occurrences ordered for closest-line lookup within one feature file.
     pub fn occurrences_for_feature(&self, feature_idx: usize) -> Option<&[NodeOccurrence]> {
         self.occurrences_by_feature

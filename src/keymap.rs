@@ -54,6 +54,10 @@ pub enum Action {
     // BDD structural editing
     MoveStepUp,
     MoveStepDown,
+    /// Navigate to the previous sibling step within the same scenario (Shift+Up).
+    MoveSiblingUp,
+    /// Navigate to the next sibling step within the same scenario (Shift+Down).
+    MoveSiblingDown,
     SwitchKeyword(&'static str),
     InsertStepBelow,
     InsertStepAbove,
@@ -196,6 +200,10 @@ pub enum Action {
     TreeLocationPrev,
     /// Cycle the stage-2 preview to the next source location for a shared step path (right bracket).
     TreeLocationNext,
+    /// Navigate to the previous sibling node in the MindMap tree (Shift+Up).
+    TreeSiblingPrev,
+    /// Navigate to the next sibling node in the MindMap tree (Shift+Down).
+    TreeSiblingNext,
     // Mouse-driven selection actions (no key bindings — triggered by mouse events)
     /// Copy the current mouse-drag selection to the system clipboard and clear it.
     CopySelection,
@@ -552,6 +560,8 @@ impl Action {
             )
         {
             return match (event.code, event.modifiers) {
+                (KeyCode::Up, KeyModifiers::SHIFT) => Some(Self::TreeSiblingPrev),
+                (KeyCode::Down, KeyModifiers::SHIFT) => Some(Self::TreeSiblingNext),
                 (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => Some(Self::TreeUp),
                 (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                     Some(Self::TreeDown)
@@ -631,6 +641,8 @@ impl Action {
             }
             (KeyCode::Down, KeyModifiers::CONTROL)
             | (KeyCode::Char('j'), KeyModifiers::CONTROL) => Some(Self::MoveStepDown),
+            (KeyCode::Up, KeyModifiers::SHIFT) => Some(Self::MoveSiblingUp),
+            (KeyCode::Down, KeyModifiers::SHIFT) => Some(Self::MoveSiblingDown),
             (KeyCode::Up, _) => Some(Self::MoveUp),
             (KeyCode::Down, _) => Some(Self::MoveDown),
             (KeyCode::Left, _) => Some(Self::MoveLeft),
