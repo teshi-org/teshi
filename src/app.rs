@@ -162,6 +162,21 @@ pub enum AgentPanelMode {
     Editing,
 }
 
+/// Last config tab index in the agent profile form (Basic .. Model).
+const AGENT_CONFIG_TAB_MAX: usize = 4;
+
+/// Inclusive `(min, max)` `agent_form_focus` indices for a config tab.
+fn agent_config_tab_field_range(tab: usize) -> (usize, usize) {
+    match tab {
+        0 => (0, 1),
+        1 => (2, 2),
+        2 => (3, 3),
+        3 => (4, 4),
+        4 => (5, 5),
+        _ => (0, 0),
+    }
+}
+
 /// Navigation focus on the current line: Gherkin keyword/token vs editable trailing text (step body or header title).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BddFocusSlot {
@@ -3510,9 +3525,185 @@ impl App {
         self.quit_pending_confirm = false;
     }
 
+    /// Handle keyboard actions while the agent profile add/edit form is open.
+    fn handle_agent_profile_form_action(&mut self, action: Action) -> Result<()> {
+        match action {
+            Action::AgentPanelFormCancel => {
+                self.agent_panel_mode = AgentPanelMode::List;
+                self.status = "Agent profiles: a add · e edit · d delete · ↑↓ select · Enter apply · Esc close".to_string();
+                self.quit_pending_confirm = false;
+            }
+            Action::AgentPanelFormTabPrev => {
+                if self.agent_config_tab > 0 {
+                    self.agent_config_tab -= 1;
+                    let (min, _) = agent_config_tab_field_range(self.agent_config_tab);
+                    self.agent_form_focus = min;
+                }
+                self.quit_pending_confirm = false;
+            }
+            Action::AgentPanelFormTabNext => {
+                if self.agent_config_tab < AGENT_CONFIG_TAB_MAX {
+                    self.agent_config_tab += 1;
+                    let (min, _) = agent_config_tab_field_range(self.agent_config_tab);
+                    self.agent_form_focus = min;
+                }
+                self.quit_pending_confirm = false;
+            }
+            Action::AgentPanelFormNext => {
+                let (_, max) = agent_config_tab_field_range(self.agent_config_tab);
+                if self.agent_form_focus < max {
+                    self.agent_form_focus += 1;
+                } else if self.agent_config_tab < AGENT_CONFIG_TAB_MAX {
+                    self.agent_config_tab += 1;
+                    let (next_min, _) = agent_config_tab_field_range(self.agent_config_tab);
+                    self.agent_form_focus = next_min;
+                }
+                self.quit_pending_confirm = false;
+            }
+            Action::AgentPanelFormPrev => {
+                let (min, _) = agent_config_tab_field_range(self.agent_config_tab);
+                if self.agent_form_focus > min {
+                    self.agent_form_focus -= 1;
+                } else if self.agent_config_tab > 0 {
+                    self.agent_config_tab -= 1;
+                    let (_, prev_max) = agent_config_tab_field_range(self.agent_config_tab);
+                    self.agent_form_focus = prev_max;
+                }
+                self.quit_pending_confirm = false;
+            }
+            Action::AgentPanelFormInsert(ch) => {
+                let field = match self.agent_form_focus {
+                    0 => &mut self.agent_form_name,
+                    1 => &mut self.agent_form_description,
+                    2 => &mut self.agent_form_instructions,
+                    3 => &mut self.agent_form_tools_str,
+                    4 => &mut self.agent_form_skills_str,
+                    5 => &mut self.agent_form_model_ref,
+                    _ => return Ok(()),
+                };
+                field.push(ch);
+                self.quit_pending_confirm = false;
+            }
+            Action::AgentPanelFormBackspace => {
+                let field = match self.agent_form_focus {
+                    0 => &mut self.agent_form_name,
+                    1 => &mut self.agent_form_description,
+                    2 => &mut self.agent_form_instructions,
+                    3 => &mut self.agent_form_tools_str,
+                    4 => &mut self.agent_form_skills_str,
+                    5 => &mut self.agent_form_model_ref,
+                    _ => return Ok(()),
+                };
+                field.pop();
+                self.quit_pending_confirm = false;
+            }
+            Action::AgentPanelFormSubmit => {
+                let name = self.agent_form_name.trim().to_string();
+                if name.is_empty() {
+                    self.status = "Name is required.".to_string();
+                    self.quit_pending_confirm = false;
+                    return Ok(());
+                }
+
+                let is_editing = self.agent_form_editing_id.is_some();
+
+                let profile = if let Some(ref edit_id) = self.agent_form_editing_id {
+                    let mut p = match self
+                        .agent_profiles
+                        .iter()
+                        .find(|p| p.id == *edit_id)
+                        .cloned()
+                    {
+                        Some(p) => p,
+                        None => {
+                            self.status = "Profile not found for editing.".to_string();
+                            self.quit_pending_confirm = false;
+                            return Ok(());
+                        }
+                    };
+                    p.name = name;
+                    p.description = self.agent_form_description.trim().to_string();
+                    p.instructions = self.agent_form_instructions.to_string();
+                    p.tools = self
+                        .agent_form_tools_str
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    p.skills_dirs = self
+                        .agent_form_skills_str
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    p.model_ref = {
+                        let m = self.agent_form_model_ref.trim().to_string();
+                        if m.is_empty() { None } else { Some(m) }
+                    };
+                    p
+                } else {
+                    let mut p = crate::agent::profile::AgentProfile::new(&name);
+                    p.description = self.agent_form_description.trim().to_string();
+                    p.instructions = self.agent_form_instructions.to_string();
+                    p.tools = self
+                        .agent_form_tools_str
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    p.skills_dirs = self
+                        .agent_form_skills_str
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    p.model_ref = {
+                        let m = self.agent_form_model_ref.trim().to_string();
+                        if m.is_empty() { None } else { Some(m) }
+                    };
+                    p
+                };
+
+                if let Err(e) = profile.save_to_disk() {
+                    self.status = format!("Failed to save profile: {e}");
+                    self.quit_pending_confirm = false;
+                    return Ok(());
+                }
+
+                if is_editing {
+                    self.status = format!("Updated agent profile: {}", profile.name);
+                } else {
+                    self.status = format!("Added agent profile: {}", profile.name);
+                }
+
+                self.agent_profiles = crate::agent::profile::AgentProfileRegistry::load_all(Some(
+                    self.find_project_dir(),
+                ))
+                .list()
+                .to_vec();
+                self.agent_panel_mode = AgentPanelMode::List;
+                self.agent_form_editing_id = None;
+                self.agent_profile_panel_selection = 0;
+                self.quit_pending_confirm = false;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     // ── Action handler ──────────────────────────────────────────────
 
     pub fn handle_action(&mut self, action: Action) -> Result<()> {
+        // Agent profile form overlay wins over other prompts (external change, agent change, quit).
+        if self.agent_profile_panel_active
+            && matches!(
+                self.agent_panel_mode,
+                AgentPanelMode::Adding | AgentPanelMode::Editing
+            )
+        {
+            return self.handle_agent_profile_form_action(action);
+        }
+
         if self.external_change_prompt.is_some() {
             return match action {
                 Action::ExternalChangeReload => self.accept_external_reload(),
@@ -3575,291 +3766,126 @@ impl App {
             };
         }
 
-        // Agent profile selection panel intercept
+        // Agent profile selection panel intercept (list mode; form handled above).
         if self.agent_profile_panel_active {
-            if self.agent_panel_mode == AgentPanelMode::Adding
-                || self.agent_panel_mode == AgentPanelMode::Editing
-            {
-                // ── Form mode ──
-                return match action {
-                    Action::AgentPanelFormCancel => {
-                        self.agent_panel_mode = AgentPanelMode::List;
-                        self.status = "Agent profiles: a add · e edit · d delete · ↑↓ select · Enter apply · Esc close".to_string();
-                        self.quit_pending_confirm = false;
-                        Ok(())
+            return match action {
+                Action::AgentPanelUp => {
+                    if self.agent_profile_panel_selection > 0 {
+                        self.agent_profile_panel_selection -= 1;
                     }
-                    Action::AgentPanelFormNext => {
-                        let max = match self.agent_config_tab {
-                            0 => 1, // Name, Description
-                            1 => 2, // Instructions
-                            2 => 3, // Tools
-                            3 => 4, // Skills
-                            4 => 5, // Model
-                            _ => 0,
-                        };
-                        if self.agent_form_focus < max {
-                            self.agent_form_focus += 1;
-                        }
-                        self.quit_pending_confirm = false;
-                        Ok(())
+                    self.quit_pending_confirm = false;
+                    Ok(())
+                }
+                Action::AgentPanelDown => {
+                    if self.agent_profile_panel_selection + 1 < self.agent_profiles.len() {
+                        self.agent_profile_panel_selection += 1;
                     }
-                    Action::AgentPanelFormPrev => {
-                        let min = match self.agent_config_tab {
-                            0 => 0,
-                            1 => 2,
-                            2 => 3,
-                            3 => 4,
-                            4 => 5,
-                            _ => 0,
-                        };
-                        if self.agent_form_focus > min {
-                            self.agent_form_focus -= 1;
-                        }
-                        self.quit_pending_confirm = false;
-                        Ok(())
-                    }
-                    Action::AgentPanelFormInsert(ch) => {
-                        let field = match self.agent_form_focus {
-                            0 => &mut self.agent_form_name,
-                            1 => &mut self.agent_form_description,
-                            2 => &mut self.agent_form_instructions,
-                            3 => &mut self.agent_form_tools_str,
-                            4 => &mut self.agent_form_skills_str,
-                            5 => &mut self.agent_form_model_ref,
-                            _ => return Ok(()),
-                        };
-                        field.push(ch);
-                        self.quit_pending_confirm = false;
-                        Ok(())
-                    }
-                    Action::AgentPanelFormBackspace => {
-                        let field = match self.agent_form_focus {
-                            0 => &mut self.agent_form_name,
-                            1 => &mut self.agent_form_description,
-                            2 => &mut self.agent_form_instructions,
-                            3 => &mut self.agent_form_tools_str,
-                            4 => &mut self.agent_form_skills_str,
-                            5 => &mut self.agent_form_model_ref,
-                            _ => return Ok(()),
-                        };
-                        field.pop();
-                        self.quit_pending_confirm = false;
-                        Ok(())
-                    }
-                    Action::AgentPanelFormSubmit => {
-                        let name = self.agent_form_name.trim().to_string();
-                        if name.is_empty() {
-                            self.status = "Name is required.".to_string();
-                            self.quit_pending_confirm = false;
-                            return Ok(());
-                        }
-
-                        let is_editing = self.agent_form_editing_id.is_some();
-
-                        let profile = if let Some(ref edit_id) = self.agent_form_editing_id {
-                            let mut p = match self
-                                .agent_profiles
+                    self.quit_pending_confirm = false;
+                    Ok(())
+                }
+                Action::AgentPanelSelect => {
+                    let selected_idx = self.agent_profile_panel_selection;
+                    let profile_clone = self.agent_profiles.get(selected_idx).cloned();
+                    if let Some(profile) = profile_clone {
+                        let agent = self.agent_mut();
+                        agent.profile_id = Some(profile.id.clone());
+                        let _ = agent;
+                        if let Some(model_id) = &profile.model_ref {
+                            let model_profile_clone = self
+                                .model_profiles
                                 .iter()
-                                .find(|p| p.id == *edit_id)
-                                .cloned()
-                            {
-                                Some(p) => p,
-                                None => {
-                                    self.status = "Profile not found for editing.".to_string();
-                                    self.quit_pending_confirm = false;
-                                    return Ok(());
-                                }
-                            };
-                            p.name = name;
-                            p.description = self.agent_form_description.trim().to_string();
-                            p.instructions = self.agent_form_instructions.to_string();
-                            p.tools = self
-                                .agent_form_tools_str
-                                .split(',')
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                            p.skills_dirs = self
-                                .agent_form_skills_str
-                                .split(',')
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                            p.model_ref = {
-                                let m = self.agent_form_model_ref.trim().to_string();
-                                if m.is_empty() { None } else { Some(m) }
-                            };
-                            p
-                        } else {
-                            let mut p = crate::agent::profile::AgentProfile::new(&name);
-                            p.description = self.agent_form_description.trim().to_string();
-                            p.instructions = self.agent_form_instructions.to_string();
-                            p.tools = self
-                                .agent_form_tools_str
-                                .split(',')
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                            p.skills_dirs = self
-                                .agent_form_skills_str
-                                .split(',')
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                            p.model_ref = {
-                                let m = self.agent_form_model_ref.trim().to_string();
-                                if m.is_empty() { None } else { Some(m) }
-                            };
-                            p
-                        };
-
-                        if let Err(e) = profile.save_to_disk() {
-                            self.status = format!("Failed to save profile: {e}");
+                                .find(|m| m.id == *model_id)
+                                .cloned();
+                            if let Some(mp) = model_profile_clone {
+                                self.activate_model_profile(&mp);
+                            }
+                        }
+                        self.reload_skills_for_profile();
+                        self.status = format!("Switched to agent: {}", profile.name);
+                    }
+                    self.agent_profile_panel_active = false;
+                    self.quit_pending_confirm = false;
+                    Ok(())
+                }
+                Action::AgentPanelAdd => {
+                    self.agent_form_editing_id = None;
+                    self.agent_panel_mode = AgentPanelMode::Adding;
+                    self.agent_config_tab = 0;
+                    self.agent_form_focus = 0;
+                    self.agent_form_name.clear();
+                    self.agent_form_description.clear();
+                    self.agent_form_instructions.clear();
+                    self.agent_form_tools_str.clear();
+                    self.agent_form_skills_str.clear();
+                    self.agent_form_model_ref.clear();
+                    self.status = "Fill in the fields and press Enter to save.".to_string();
+                    self.quit_pending_confirm = false;
+                    Ok(())
+                }
+                Action::AgentPanelEdit => {
+                    if let Some(profile) = self
+                        .agent_profiles
+                        .get(self.agent_profile_panel_selection)
+                        .cloned()
+                    {
+                        self.agent_form_editing_id = Some(profile.id.clone());
+                        self.agent_panel_mode = AgentPanelMode::Editing;
+                        self.agent_config_tab = 0;
+                        self.agent_form_focus = 0;
+                        self.agent_form_name = profile.name;
+                        self.agent_form_description = profile.description;
+                        self.agent_form_instructions = profile.instructions;
+                        self.agent_form_tools_str = profile.tools.join(", ");
+                        self.agent_form_skills_str = profile.skills_dirs.join(", ");
+                        self.agent_form_model_ref = profile.model_ref.unwrap_or_default();
+                        self.status = "Edit the fields and press Enter to save.".to_string();
+                    }
+                    self.quit_pending_confirm = false;
+                    Ok(())
+                }
+                Action::AgentPanelDelete => {
+                    if let Some(profile) = self
+                        .agent_profiles
+                        .get(self.agent_profile_panel_selection)
+                        .cloned()
+                    {
+                        if profile.id == "default" {
+                            self.status = "Cannot delete the built-in default profile.".to_string();
                             self.quit_pending_confirm = false;
                             return Ok(());
                         }
-
-                        if is_editing {
-                            self.status = format!("Updated agent profile: {}", profile.name);
+                        let name = profile.name.clone();
+                        if let Err(e) = profile.delete_from_disk() {
+                            self.status = format!("Failed to delete profile: {e}");
                         } else {
-                            self.status = format!("Added agent profile: {}", profile.name);
-                        }
-
-                        self.agent_profiles =
-                            crate::agent::profile::AgentProfileRegistry::load_all(Some(
-                                self.find_project_dir(),
-                            ))
-                            .list()
-                            .to_vec();
-                        self.agent_panel_mode = AgentPanelMode::List;
-                        self.agent_form_editing_id = None;
-                        self.agent_profile_panel_selection = 0;
-                        self.quit_pending_confirm = false;
-                        Ok(())
-                    }
-
-                    _ => Ok(()),
-                };
-            } else {
-                // ── List mode ──
-                return match action {
-                    Action::AgentPanelUp => {
-                        if self.agent_profile_panel_selection > 0 {
-                            self.agent_profile_panel_selection -= 1;
-                        }
-                        self.quit_pending_confirm = false;
-                        Ok(())
-                    }
-                    Action::AgentPanelDown => {
-                        if self.agent_profile_panel_selection + 1 < self.agent_profiles.len() {
-                            self.agent_profile_panel_selection += 1;
-                        }
-                        self.quit_pending_confirm = false;
-                        Ok(())
-                    }
-                    Action::AgentPanelSelect => {
-                        let selected_idx = self.agent_profile_panel_selection;
-                        let profile_clone = self.agent_profiles.get(selected_idx).cloned();
-                        if let Some(profile) = profile_clone {
-                            let agent = self.agent_mut();
-                            agent.profile_id = Some(profile.id.clone());
-                            let _ = agent;
-                            if let Some(model_id) = &profile.model_ref {
-                                let model_profile_clone = self
-                                    .model_profiles
-                                    .iter()
-                                    .find(|m| m.id == *model_id)
-                                    .cloned();
-                                if let Some(mp) = model_profile_clone {
-                                    self.activate_model_profile(&mp);
-                                }
+                            self.agent_profiles =
+                                crate::agent::profile::AgentProfileRegistry::load_all(Some(
+                                    self.find_project_dir(),
+                                ))
+                                .list()
+                                .to_vec();
+                            if self.agent_profile_panel_selection >= self.agent_profiles.len() {
+                                self.agent_profile_panel_selection =
+                                    self.agent_profiles.len().saturating_sub(1);
                             }
-                            self.reload_skills_for_profile();
-                            self.status = format!("Switched to agent: {}", profile.name);
-                        }
-                        self.agent_profile_panel_active = false;
-                        self.quit_pending_confirm = false;
-                        Ok(())
-                    }
-                    Action::AgentPanelAdd => {
-                        self.agent_form_editing_id = None;
-                        self.agent_panel_mode = AgentPanelMode::Adding;
-                        self.agent_form_focus = 0;
-                        self.agent_form_name.clear();
-                        self.agent_form_description.clear();
-                        self.agent_form_instructions.clear();
-                        self.agent_form_tools_str.clear();
-                        self.agent_form_skills_str.clear();
-                        self.agent_form_model_ref.clear();
-                        self.status = "Fill in the fields and press Enter to save.".to_string();
-                        self.quit_pending_confirm = false;
-                        Ok(())
-                    }
-                    Action::AgentPanelEdit => {
-                        if let Some(profile) = self
-                            .agent_profiles
-                            .get(self.agent_profile_panel_selection)
-                            .cloned()
-                        {
-                            self.agent_form_editing_id = Some(profile.id.clone());
-                            self.agent_panel_mode = AgentPanelMode::Editing;
-                            self.agent_form_focus = 0;
-                            self.agent_form_name = profile.name;
-                            self.agent_form_description = profile.description;
-                            self.agent_form_instructions = profile.instructions;
-                            self.agent_form_tools_str = profile.tools.join(", ");
-                            self.agent_form_skills_str = profile.skills_dirs.join(", ");
-                            self.agent_form_model_ref = profile.model_ref.unwrap_or_default();
-                            self.status = "Edit the fields and press Enter to save.".to_string();
-                        }
-                        self.quit_pending_confirm = false;
-                        Ok(())
-                    }
-                    Action::AgentPanelDelete => {
-                        if let Some(profile) = self
-                            .agent_profiles
-                            .get(self.agent_profile_panel_selection)
-                            .cloned()
-                        {
-                            if profile.id == "default" {
-                                self.status =
-                                    "Cannot delete the built-in default profile.".to_string();
-                                self.quit_pending_confirm = false;
-                                return Ok(());
+                            if self.agent().profile_id.as_deref() == Some(&profile.id) {
+                                self.agent_mut().profile_id = Some("default".to_string());
+                                self.reload_skills_for_profile();
                             }
-                            let name = profile.name.clone();
-                            if let Err(e) = profile.delete_from_disk() {
-                                self.status = format!("Failed to delete profile: {e}");
-                            } else {
-                                self.agent_profiles =
-                                    crate::agent::profile::AgentProfileRegistry::load_all(Some(
-                                        self.find_project_dir(),
-                                    ))
-                                    .list()
-                                    .to_vec();
-                                if self.agent_profile_panel_selection >= self.agent_profiles.len() {
-                                    self.agent_profile_panel_selection =
-                                        self.agent_profiles.len().saturating_sub(1);
-                                }
-                                if self.agent().profile_id.as_deref() == Some(&profile.id) {
-                                    self.agent_mut().profile_id = Some("default".to_string());
-                                    self.reload_skills_for_profile();
-                                }
-                                self.status = format!("Deleted profile: {name}");
-                            }
+                            self.status = format!("Deleted profile: {name}");
                         }
-                        self.quit_pending_confirm = false;
-                        Ok(())
                     }
-                    Action::ClearInputState | Action::AgentPanelClose => {
-                        self.agent_profile_panel_active = false;
-                        self.agent_panel_mode = AgentPanelMode::List;
-                        self.quit_pending_confirm = false;
-                        Ok(())
-                    }
-                    _ => Ok(()),
-                };
-            }
+                    self.quit_pending_confirm = false;
+                    Ok(())
+                }
+                Action::ClearInputState | Action::AgentPanelClose => {
+                    self.agent_profile_panel_active = false;
+                    self.agent_panel_mode = AgentPanelMode::List;
+                    self.quit_pending_confirm = false;
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
         }
 
         // Approval mode selection panel intercept
@@ -4680,6 +4706,7 @@ impl App {
                             .list()
                             .to_vec();
                         self.agent_profile_panel_active = true;
+                        self.agent_panel_mode = AgentPanelMode::List;
                         self.agent_profile_panel_selection = self
                             .agent_profiles
                             .iter()
@@ -4897,6 +4924,7 @@ impl App {
                                 .list()
                                 .to_vec();
                             self.agent_profile_panel_active = true;
+                            self.agent_panel_mode = AgentPanelMode::List;
                             self.agent_profile_panel_selection = self
                                 .agent_profiles
                                 .iter()
@@ -5096,6 +5124,8 @@ impl App {
             | Action::AgentPanelDelete
             | Action::AgentPanelFormNext
             | Action::AgentPanelFormPrev
+            | Action::AgentPanelFormTabPrev
+            | Action::AgentPanelFormTabNext
             | Action::AgentPanelFormInsert(_)
             | Action::AgentPanelFormBackspace
             | Action::AgentPanelFormSubmit

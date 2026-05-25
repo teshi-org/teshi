@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Tabs};
 use tui_tree_widget::Tree;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -3581,43 +3581,79 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(Text::from(visible)), inner);
 }
 
-/// Render the agent profile selection popup panel.
-fn render_agent_profile_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    use crate::app::AgentPanelMode;
+/// Sidebar width for the agent configuration modal (matches AI agent sidebar).
+const AGENT_PROFILE_SIDEBAR_WIDTH: u16 = 28;
+/// Footer height for keyboard hints.
+const AGENT_PROFILE_FOOTER_HEIGHT: u16 = 3;
+const AGENT_PROFILE_PANEL_MIN_WIDTH: u16 = 60;
+const AGENT_PROFILE_PANEL_MAX_WIDTH: u16 = 100;
+const AGENT_PROFILE_PANEL_MIN_HEIGHT: u16 = 18;
+const AGENT_PROFILE_PANEL_MAX_HEIGHT: u16 = 50;
 
-    match app.agent_panel_mode {
-        AgentPanelMode::List => render_agent_profile_list(frame, app, area),
-        AgentPanelMode::Adding => {
-            render_agent_profile_form(frame, app, " Add Agent Profile ", area)
-        }
-        AgentPanelMode::Editing => {
-            render_agent_profile_form(frame, app, " Edit Agent Profile ", area)
-        }
-    }
-}
-
-fn render_agent_profile_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let profiles = &app.agent_profiles;
-    let panel_w = area.width.min(56);
-    let item_rows: u16 = profiles.len() as u16;
-    let panel_h = (item_rows * 2 + 4).min(area.height.saturating_sub(4));
+/// Compute centered agent configuration modal bounds (chrys-like 95% x 85% with caps).
+fn agent_profile_panel_rect(area: Rect) -> Rect {
+    let panel_w = ((area.width as u32 * 95) / 100).clamp(
+        AGENT_PROFILE_PANEL_MIN_WIDTH as u32,
+        AGENT_PROFILE_PANEL_MAX_WIDTH as u32,
+    ) as u16;
+    let panel_h = ((area.height as u32 * 85) / 100).clamp(
+        AGENT_PROFILE_PANEL_MIN_HEIGHT as u32,
+        AGENT_PROFILE_PANEL_MAX_HEIGHT as u32,
+    ) as u16;
     let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
     let panel_y = area.y + (area.height.saturating_sub(panel_h)) / 2;
-    let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
+    Rect::new(panel_x, panel_y, panel_w, panel_h)
+}
 
+/// Render the agent profile configuration overlay (chrys-style layout).
+fn render_agent_profile_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let panel_area = agent_profile_panel_rect(area);
     frame.render_widget(Clear, panel_area);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Agent Profile ")
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_type(BorderType::Rounded)
+        .title(" Agent Configuration ")
+        .border_style(Style::default().fg(Color::Cyan))
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
     let inner = block.inner(panel_area);
     frame.render_widget(block, panel_area);
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    let [body_area, footer_area] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(4),
+            Constraint::Length(AGENT_PROFILE_FOOTER_HEIGHT),
+        ])
+        .areas(inner);
 
-    for (i, profile) in profiles.iter().enumerate() {
-        // Determine if this profile is active for the current agent
+    let [sidebar_area, main_area] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(AGENT_PROFILE_SIDEBAR_WIDTH),
+            Constraint::Min(10),
+        ])
+        .areas(body_area);
+
+    render_agent_profile_sidebar(frame, app, sidebar_area);
+    render_agent_profile_main(frame, app, main_area);
+    render_agent_profile_footer(frame, app, footer_area);
+}
+
+/// Left sidebar: profile list with two-line entries (name + description).
+fn render_agent_profile_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::RIGHT)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, profile) in app.agent_profiles.iter().enumerate() {
         let is_active = app
             .agent()
             .profile_id
@@ -3625,190 +3661,436 @@ fn render_agent_profile_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .map_or(profile.id == "default", |id| id == profile.id);
         let is_selected = i == app.agent_profile_panel_selection;
 
-        // ── Title line ──
-        let (main_fg, marker) = if is_selected {
-            (Color::Yellow, "\u{25b6}")
+        let marker = if is_selected && is_active {
+            "▶◦"
+        } else if is_selected {
+            "▶ "
         } else if is_active {
-            (Color::Green, "\u{25cb}")
+            " ◦"
         } else {
-            (Color::White, "  ")
+            "  "
         };
-        let active_tag = if is_active { " [ACTIVE]" } else { "" };
-        let title = format!(" {} {}{}", marker, profile.name, active_tag);
-        lines.push(Line::styled(
-            title,
-            Style::default()
-                .fg(main_fg)
-                .add_modifier(if is_selected || is_active {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
-        ));
+        let main_fg = if is_selected {
+            Color::Yellow
+        } else if is_active {
+            Color::Green
+        } else {
+            Color::White
+        };
+        let name_style = Style::default()
+            .fg(main_fg)
+            .add_modifier(if is_selected || is_active {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            });
 
-        // ── Description line ──
+        let desc = if profile.description.is_empty() {
+            "(no description)".to_string()
+        } else {
+            profile.description.clone()
+        };
+        let desc_trunc = truncate_str_to_width(&desc, inner.width.saturating_sub(4) as usize);
+
+        lines.push(Line::from(vec![
+            Span::raw(marker),
+            Span::styled(format!(" {}", profile.name), name_style),
+        ]));
         lines.push(Line::styled(
-            format!("   {}", profile.description),
+            format!("    {}", desc_trunc),
             Style::default().fg(Color::DarkGray),
         ));
-
-        // ── Separator ──
-        if i < profiles.len() - 1 {
+        if i + 1 < app.agent_profiles.len() {
             lines.push(Line::raw(""));
         }
     }
 
-    // Navigation hint
-    lines.push(Line::styled(
-        "a add · e edit · d delete · ↑↓ select · Enter apply · Esc close",
-        Style::default().fg(Color::DarkGray),
-    ));
+    if app.agent_profiles.is_empty() {
+        lines.push(Line::styled(
+            "  No profiles",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
 
     let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
     frame.render_widget(Paragraph::new(Text::from(visible)), inner);
 }
 
-fn render_agent_profile_form(frame: &mut Frame<'_>, app: &App, title: &str, area: Rect) {
-    let panel_w = area.width.min(72);
-    let panel_h = 22u16.min(area.height.saturating_sub(4));
-    let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
-    let panel_y = area.y + (area.height.saturating_sub(panel_h)) / 2;
-    let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
+/// Right panel: list summary or add/edit form.
+fn render_agent_profile_main(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    use crate::app::AgentPanelMode;
 
-    frame.render_widget(Clear, panel_area);
+    match app.agent_panel_mode {
+        AgentPanelMode::List => render_agent_profile_summary(frame, app, area),
+        AgentPanelMode::Adding | AgentPanelMode::Editing => {
+            render_agent_profile_form_content(frame, app, area)
+        }
+    }
+}
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(Style::default().fg(Color::Cyan));
-    let inner = block.inner(panel_area);
-    frame.render_widget(block, panel_area);
+/// Read-only profile summary when not in the form editor.
+fn render_agent_profile_summary(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // ── Tab bar ──
-    let tabs = ["Basic", "Instructions", "Tools", "Skills", "Model"];
-    let tab_line: Vec<Span<'_>> = tabs
-        .iter()
-        .enumerate()
-        .flat_map(|(i, name)| {
-            let is_active = i == app.agent_config_tab;
-            let style = if is_active {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Cyan)
-            };
-            let mut parts = vec![Span::styled(format!(" {} ", name), style)];
-            if i < tabs.len() - 1 {
-                parts.push(Span::raw("│"));
-            }
-            parts
-        })
-        .collect();
+    let Some(profile) = app.agent_profiles.get(app.agent_profile_panel_selection) else {
+        lines.extend(hatched_empty_lines(
+            area.height as usize,
+            "No profile selected",
+        ));
+        frame.render_widget(Paragraph::new(Text::from(lines)), area);
+        return;
+    };
 
-    let mut lines: Vec<Line<'_>> = Vec::new();
-    lines.push(Line::from(tab_line));
-    lines.push(Line::styled(
-        "─".repeat(inner.width as usize),
-        Style::default().fg(Color::DarkGray),
-    ));
+    let section = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let muted = Style::default().fg(Color::DarkGray);
+    let body = Style::default().fg(Color::White);
 
-    // ── Tab content ──
+    lines.push(Line::styled("Profile", section));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("  Name: ", muted),
+        Span::styled(profile.name.clone(), body),
+    ]));
+    let desc = if profile.description.is_empty() {
+        "(empty)".to_string()
+    } else {
+        profile.description.clone()
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  Description: ", muted),
+        Span::styled(desc, body),
+    ]));
+
+    lines.push(Line::raw(""));
+    lines.push(Line::styled("Instructions (preview)", section));
+    let instr = profile.instructions_or_default();
+    let preview_lines = area.height.saturating_sub(14) as usize;
+    let mut shown = 0usize;
+    for line_text in instr.lines() {
+        if shown >= preview_lines.max(3) {
+            lines.push(Line::styled("  ...", muted));
+            break;
+        }
+        lines.push(Line::styled(format!("  {}", line_text), body));
+        shown += 1;
+    }
+    if shown == 0 {
+        lines.push(Line::styled("  (empty)", muted));
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::styled("Configuration", section));
+    let tools_summary = if profile.tools.is_empty() {
+        "all tools".to_string()
+    } else {
+        format!("{} enabled", profile.tools.len())
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  Tools: ", muted),
+        Span::styled(tools_summary, body),
+    ]));
+    let skills_summary = if profile.skills_dirs.is_empty() {
+        "(none)".to_string()
+    } else {
+        profile.skills_dirs.join(", ")
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  Skills: ", muted),
+        Span::styled(skills_summary, body),
+    ]));
+    let model_summary = profile
+        .model_ref
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "(active model profile)".to_string());
+    lines.push(Line::from(vec![
+        Span::styled("  Model: ", muted),
+        Span::styled(model_summary, body),
+    ]));
+
+    lines.push(Line::raw(""));
+    lines.push(Line::styled("e edit · Enter apply · Esc close", muted));
+
+    let visible: Vec<Line<'static>> = lines.into_iter().take(area.height as usize).collect();
+    frame.render_widget(Paragraph::new(Text::from(visible)), area);
+}
+
+/// Tabbed form editor (add/edit); footer is rendered separately.
+fn render_agent_profile_form_content(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    use crate::app::AgentPanelMode;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mode_hint = match app.agent_panel_mode {
+        AgentPanelMode::Adding => "New profile",
+        AgentPanelMode::Editing => "Editing profile",
+        AgentPanelMode::List => "",
+    };
+    if !mode_hint.is_empty() {
+        lines.push(Line::styled(
+            mode_hint,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::raw(""));
+    }
+    agent_profile_push_tab_bar(&mut lines, app, area.width as usize);
+
+    let content_budget = area.height.saturating_sub(6) as usize;
     match app.agent_config_tab {
-        0 => {
-            // Basic — Name + Description
-            render_tab_field(&mut lines, app, 0, "Name", &app.agent_form_name);
-            render_tab_field(
-                &mut lines,
-                app,
-                1,
-                "Description",
-                &app.agent_form_description,
-            );
-        }
-        1 => {
-            // Instructions — system prompt
-            let focused = app.agent_form_focus == 2;
-            let indicator = if focused { " ▸ " } else { "   " };
-            let label_style = if focused {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Cyan)
-            };
-            let val_style = if focused {
-                Style::default().bg(Color::DarkGray).fg(Color::White)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            lines.push(Line::raw(""));
-            lines.push(Line::from(vec![
-                Span::styled(indicator, label_style),
-                Span::styled("Instructions", label_style),
-            ]));
-            let instr_text = if app.agent_form_instructions.is_empty() {
-                if focused { "(type here...)" } else { "(empty)" }
-            } else {
-                &app.agent_form_instructions
-            };
-            // Show first few lines of the instructions
-            for line_text in instr_text.lines().take(6) {
-                lines.push(Line::styled(format!("   {}", line_text), val_style));
-            }
-            if instr_text.lines().count() > 6 {
-                lines.push(Line::styled("   ...", val_style));
-            }
-            lines.push(Line::styled(
-                "   (║ text will wrap in the terminal)",
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        2 => {
-            // Tools — comma-separated
-            render_tab_field(&mut lines, app, 3, "Tools (csv)", &app.agent_form_tools_str);
-            lines.push(Line::styled(
-                "   Available: get_project_info, get_feature_content, insert_scenario, ...",
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        3 => {
-            // Skills — comma-separated directories
-            render_tab_field(
-                &mut lines,
-                app,
-                4,
-                "Skills dirs (csv)",
-                &app.agent_form_skills_str,
-            );
-            lines.push(Line::styled(
-                "   Paths relative to project root, e.g. .teshi/skills",
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        4 => {
-            // Model — model_ref
-            render_tab_field(&mut lines, app, 5, "Model ref", &app.agent_form_model_ref);
-            lines.push(Line::styled(
-                "   Leave empty to use the active model profile",
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
+        0 => agent_profile_tab_basic(&mut lines, app),
+        1 => agent_profile_tab_instructions(&mut lines, app, content_budget),
+        2 => agent_profile_tab_tools(&mut lines, app, area.width as usize),
+        3 => agent_profile_tab_skills(&mut lines, app),
+        4 => agent_profile_tab_model(&mut lines, app),
         _ => {}
     }
 
-    // ── Footer ──
-    lines.push(Line::raw(""));
-    let footer = Line::styled(
-        "← → tabs · Tab/↑↓ field · Enter save · Esc cancel",
-        Style::default().fg(Color::DarkGray),
-    )
-    .alignment(Alignment::Center);
-    lines.push(footer);
+    let visible: Vec<Line<'static>> = lines.into_iter().take(area.height as usize).collect();
+    frame.render_widget(Paragraph::new(Text::from(visible)), area);
+}
 
-    let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
-    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+/// Docked footer with mode-specific keyboard hints.
+fn render_agent_profile_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    use crate::app::AgentPanelMode;
+
+    let sep = "─".repeat(area.width as usize);
+    frame.render_widget(
+        Paragraph::new(Line::styled(sep, Style::default().fg(Color::DarkGray))),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+
+    let hint = match app.agent_panel_mode {
+        AgentPanelMode::List => "[a] New  [e] Edit  [d] Delete          [Enter] Apply  [Esc] Close",
+        AgentPanelMode::Adding | AgentPanelMode::Editing => {
+            "← → tabs · Tab/↑↓ field          [Enter] Save  [Esc] Cancel"
+        }
+    };
+    let hint_area = Rect::new(
+        area.x,
+        area.y + 1,
+        area.width,
+        area.height.saturating_sub(1),
+    );
+    frame.render_widget(
+        Paragraph::new(Line::styled(hint, Style::default().fg(Color::DarkGray)))
+            .alignment(Alignment::Center),
+        hint_area,
+    );
+}
+
+fn agent_profile_push_tab_bar(lines: &mut Vec<Line<'static>>, app: &App, width: usize) {
+    const TABS: [&str; 5] = ["Basic", "Instructions", "Tools", "Skills", "Model"];
+    let active = app.agent_config_tab.min(TABS.len().saturating_sub(1));
+
+    let mut tab_spans: Vec<Span<'static>> = Vec::new();
+    for (i, name) in TABS.iter().enumerate() {
+        let style = if i == active {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        tab_spans.push(Span::styled(format!(" {} ", name), style));
+        if i + 1 < TABS.len() {
+            tab_spans.push(Span::raw(" "));
+        }
+    }
+    lines.push(Line::from(tab_spans));
+
+    let mut underline = String::new();
+    for (i, name) in TABS.iter().enumerate() {
+        let segment = format!(" {} ", name);
+        if i == active {
+            underline.push_str(&"━".repeat(segment.chars().count().max(4)));
+        } else {
+            underline.push_str(&" ".repeat(segment.chars().count()));
+        }
+        if i + 1 < TABS.len() {
+            underline.push(' ');
+        }
+    }
+    let underline = truncate_str_to_width(&underline, width);
+    lines.push(Line::styled(underline, Style::default().fg(Color::Cyan)));
+    lines.push(Line::raw(""));
+}
+
+fn agent_profile_push_section_header(lines: &mut Vec<Line<'static>>, title: &str, desc: &str) {
+    lines.push(Line::styled(
+        title.to_string(),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ));
+    lines.push(Line::styled(
+        desc.to_string(),
+        Style::default().fg(Color::DarkGray),
+    ));
+    lines.push(Line::raw(""));
+}
+
+fn agent_profile_tab_basic(lines: &mut Vec<Line<'static>>, app: &App) {
+    agent_profile_push_section_header(
+        lines,
+        "Identity",
+        "Name and short description shown in the profile list",
+    );
+    render_tab_field(lines, app, 0, "* Name", &app.agent_form_name);
+    render_tab_field(lines, app, 1, "Description", &app.agent_form_description);
+}
+
+fn agent_profile_tab_instructions(
+    lines: &mut Vec<Line<'static>>,
+    app: &App,
+    max_body_lines: usize,
+) {
+    agent_profile_push_section_header(
+        lines,
+        "System Instructions",
+        "Define the agent system prompt and behavior guidelines",
+    );
+
+    let focused = app.agent_form_focus == 2;
+    let indicator = if focused { "▸" } else { " " };
+    let label_style = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+    let val_style = if focused {
+        Style::default().bg(Color::DarkGray).fg(Color::White)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    lines.push(Line::from(vec![Span::styled(
+        format!(" {} Prompt", indicator),
+        label_style,
+    )]));
+
+    let instr_owned = if app.agent_form_instructions.is_empty() {
+        if focused {
+            "(type here...)".to_string()
+        } else {
+            "(empty)".to_string()
+        }
+    } else {
+        app.agent_form_instructions.clone()
+    };
+
+    let reserved = lines.len() + 2;
+    let line_budget = max_body_lines.saturating_sub(reserved).max(4);
+    let mut line_iter = instr_owned.lines();
+    for line_text in line_iter.by_ref().take(line_budget) {
+        lines.push(Line::styled(format!("   {}", line_text), val_style));
+    }
+    if line_iter.next().is_some() {
+        lines.push(Line::styled("   ...", val_style));
+    }
+}
+
+fn agent_profile_tab_tools(lines: &mut Vec<Line<'static>>, app: &App, width: usize) {
+    agent_profile_push_section_header(
+        lines,
+        "Enabled Tools",
+        "Comma-separated tool names; empty means all tools",
+    );
+    render_tab_field(lines, app, 3, "Tools (csv)", &app.agent_form_tools_str);
+
+    let tool_names: Vec<String> = crate::agent::get_tools(None)
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    let joined = tool_names.join(", ");
+    let hint = truncate_str_to_width(
+        &format!("Available: {}", joined),
+        width.saturating_sub(4),
+    );
+    lines.push(Line::styled(
+        format!("   {}", hint),
+        Style::default().fg(Color::DarkGray),
+    ));
+}
+
+fn agent_profile_tab_skills(lines: &mut Vec<Line<'static>>, app: &App) {
+    agent_profile_push_section_header(
+        lines,
+        "Skill Directories",
+        "Comma-separated paths relative to project root",
+    );
+    render_tab_field(
+        lines,
+        app,
+        4,
+        "Skills dirs (csv)",
+        &app.agent_form_skills_str,
+    );
+    lines.push(Line::styled(
+        "   e.g. .teshi/skills, skills",
+        Style::default().fg(Color::DarkGray),
+    ));
+}
+
+fn agent_profile_tab_model(lines: &mut Vec<Line<'static>>, app: &App) {
+    agent_profile_push_section_header(
+        lines,
+        "Model Binding",
+        "Optional model profile ID; empty uses active model",
+    );
+    render_tab_field(lines, app, 5, "Model ref", &app.agent_form_model_ref);
+    lines.push(Line::styled(
+        "   Leave empty to use the active model profile",
+        Style::default().fg(Color::DarkGray),
+    ));
+}
+
+/// Truncate a string to fit within `max_cols` display columns.
+fn truncate_str_to_width(s: &str, max_cols: usize) -> String {
+    if max_cols == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in s.chars() {
+        let w = ch.width().unwrap_or(0);
+        if width + w > max_cols {
+            break;
+        }
+        out.push(ch);
+        width += w;
+    }
+    out
+}
+
+/// Simple hatched empty placeholder (chrys HatchedEmptyState inspired).
+fn hatched_empty_lines(height: usize, label: &str) -> Vec<Line<'static>> {
+    let h = height.max(5);
+    let mut lines = Vec::with_capacity(h);
+    let mid = h / 2;
+    for row in 0..h {
+        if row == mid {
+            let pad = " ".repeat(4);
+            lines.push(Line::styled(
+                format!("{pad}{label}{pad}"),
+                Style::default().fg(Color::DarkGray),
+            ));
+        } else if row > 1 && row < h.saturating_sub(1) {
+            let hatch = " ╲ ".repeat(8);
+            lines.push(Line::styled(
+                hatch,
+                Style::default().fg(Color::Rgb(40, 40, 40)),
+            ));
+        } else {
+            lines.push(Line::raw(""));
+        }
+    }
+    lines
 }
 
 /// Helper to render a single form field row (label + value + focus highlight).
@@ -3843,7 +4125,6 @@ fn render_tab_field(
         value.to_string()
     };
 
-    lines.push(Line::raw(""));
     lines.push(Line::from(vec![
         Span::styled(indicator, label_style),
         Span::styled(format!("{:<18}", label), label_style),

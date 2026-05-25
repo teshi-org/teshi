@@ -266,6 +266,10 @@ pub enum Action {
     AgentPanelFormNext,
     /// Focus the previous form field (Shift+Tab).
     AgentPanelFormPrev,
+    /// Switch to the previous config tab (Left).
+    AgentPanelFormTabPrev,
+    /// Switch to the next config tab (Right).
+    AgentPanelFormTabNext,
     /// Insert a character into the currently focused form field.
     AgentPanelFormInsert(char),
     /// Delete the character before the cursor in the focused form field.
@@ -289,6 +293,31 @@ impl Action {
         // Ctrl+C always maps to Quit, regardless of mode.
         if event.code == KeyCode::Char('c') && event.modifiers == KeyModifiers::CONTROL {
             return Some(Self::Quit);
+        }
+
+        // Agent profile form takes priority over other overlays so Tab/Enter/Esc work while editing.
+        if context.agent_profile_panel_active && context.agent_panel_adding {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Esc, _) => Some(Self::AgentPanelFormCancel),
+                (KeyCode::Tab, _) => Some(Self::AgentPanelFormNext),
+                (KeyCode::BackTab, _) => Some(Self::AgentPanelFormPrev),
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                    Some(Self::AgentPanelFormPrev)
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    Some(Self::AgentPanelFormNext)
+                }
+                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                    Some(Self::AgentPanelFormTabPrev)
+                }
+                (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                    Some(Self::AgentPanelFormTabNext)
+                }
+                (KeyCode::Enter, _) => Some(Self::AgentPanelFormSubmit),
+                (KeyCode::Backspace, _) => Some(Self::AgentPanelFormBackspace),
+                (KeyCode::Char(ch), _) if !ch.is_control() => Some(Self::AgentPanelFormInsert(ch)),
+                _ => None,
+            };
         }
 
         if context.external_change_prompt_active {
@@ -340,44 +369,22 @@ impl Action {
             };
         }
 
-        // Agent profile selection panel intercepts keys while open
+        // Agent profile selection panel (list mode; form keys handled above).
         if context.agent_profile_panel_active {
-            if context.agent_panel_adding {
-                // ── Adding/editing form mode ──
-                return match (event.code, event.modifiers) {
-                    (KeyCode::Esc, _) => Some(Self::AgentPanelFormCancel),
-                    (KeyCode::Tab, _) => Some(Self::AgentPanelFormNext),
-                    (KeyCode::BackTab, _) => Some(Self::AgentPanelFormPrev),
-                    (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                        Some(Self::AgentPanelFormPrev)
-                    }
-                    (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                        Some(Self::AgentPanelFormNext)
-                    }
-                    (KeyCode::Enter, _) => Some(Self::AgentPanelFormSubmit),
-                    (KeyCode::Backspace, _) => Some(Self::AgentPanelFormBackspace),
-                    (KeyCode::Char(ch), _) if !ch.is_control() => {
-                        Some(Self::AgentPanelFormInsert(ch))
-                    }
-                    _ => None,
-                };
-            } else {
-                // ── List mode ──
-                return match (event.code, event.modifiers) {
-                    (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                        Some(Self::AgentPanelUp)
-                    }
-                    (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                        Some(Self::AgentPanelDown)
-                    }
-                    (KeyCode::Enter, _) => Some(Self::AgentPanelSelect),
-                    (KeyCode::Esc, _) => Some(Self::AgentPanelClose),
-                    (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::AgentPanelAdd),
-                    (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Self::AgentPanelEdit),
-                    (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Self::AgentPanelDelete),
-                    _ => None,
-                };
-            }
+            return match (event.code, event.modifiers) {
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                    Some(Self::AgentPanelUp)
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    Some(Self::AgentPanelDown)
+                }
+                (KeyCode::Enter, _) => Some(Self::AgentPanelSelect),
+                (KeyCode::Esc, _) => Some(Self::AgentPanelClose),
+                (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::AgentPanelAdd),
+                (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Self::AgentPanelEdit),
+                (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Self::AgentPanelDelete),
+                _ => None,
+            };
         }
 
         // Approval mode selection panel intercepts keys while open
@@ -1224,6 +1231,64 @@ mod tests {
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
             Some(Action::ExternalChangeKeepLocal)
+        );
+    }
+
+    fn agent_profile_form_key_context(agent_change_prompt_active: bool) -> KeyContext {
+        KeyContext {
+            step_keyword_picker_active: false,
+            step_input_active: false,
+            external_change_prompt_active: false,
+            agent_change_prompt_active,
+            active_tab: MainTab::Ai,
+            view_stage: ViewStage::TreeOnly,
+            explore_edit_mode: false,
+            pending_char: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: false,
+            ai_input_focused: true,
+            slash_suggestion_active: false,
+            auth_panel_active: false,
+            model_panel_active: false,
+            model_panel_adding: false,
+            session_panel_active: false,
+            change_summary_visible: false,
+            ai_status_waiting: false,
+            scenario_dropdown_open: false,
+            approval_panel_active: false,
+            agent_profile_panel_active: true,
+            agent_panel_adding: true,
+            quit_pending_confirm: true,
+        }
+    }
+
+    #[test]
+    fn test_agent_profile_form_keys_override_agent_change_prompt() {
+        let context = agent_profile_form_key_context(true);
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
+            Some(Action::AgentPanelFormNext)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
+            Some(Action::AgentPanelFormSubmit)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
+            Some(Action::AgentPanelFormCancel)
+        );
+    }
+
+    #[test]
+    fn test_agent_profile_form_left_right_switch_tabs() {
+        let context = agent_profile_form_key_context(false);
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), context),
+            Some(Action::AgentPanelFormTabPrev)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), context),
+            Some(Action::AgentPanelFormTabNext)
         );
     }
 }
