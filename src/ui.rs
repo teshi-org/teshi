@@ -12,7 +12,10 @@ use crate::app::{
 };
 use crate::bdd_nav::nav_body_char_range_in_buffer;
 use crate::gherkin_lang::{GherkinLanguage, StepKeywordType};
-use crate::highlight::{StepHighlightState, highlight_line_with_state};
+use crate::highlight::{
+    StepHighlightState, highlight_line_with_state, leading_whitespace_chars,
+    step_keyword_gutter_pad,
+};
 use crate::markdown::render_markdown;
 
 /// Stage-2 preview: one solid style for the tree-selected line (avoids span-patch gaps that read as bright blocks).
@@ -30,7 +33,6 @@ const KEYWORD_AND: Color = Color::Gray;
 const KEYWORD_BUT: Color = Color::Gray;
 const EXPLORE_SELECTED_FOCUSED_BG: Color = Color::Rgb(16, 64, 168);
 const EXPLORE_SELECTED_UNFOCUSED_BG: Color = Color::Rgb(125, 170, 242);
-const STEP_KEYWORD_COL_WIDTH: usize = 6;
 const SELECTION_BG: Color = Color::Rgb(64, 96, 160);
 const SELECTION_FG: Color = Color::White;
 const HIGHLIGHT_SELECTED_FG: Color = Color::Yellow;
@@ -196,21 +198,24 @@ fn step_line_display(
         return (line.to_string(), 0, 0);
     }
     let trimmed = line.trim_start();
-    let leading = line.len().saturating_sub(trimmed.len());
+    let leading = leading_whitespace_chars(line);
     let Some((keyword, _ty)) = lang.match_step_prefix(trimmed) else {
         return (line.to_string(), 0, 0);
     };
-    let kw_width = keyword.width();
-    if kw_width >= STEP_KEYWORD_COL_WIDTH {
+    let pad = step_keyword_gutter_pad(keyword);
+    if pad == 0 {
         return (line.to_string(), 0, 0);
     }
-    let pad = STEP_KEYWORD_COL_WIDTH - kw_width;
+    let rest: String = trimmed.chars().skip(keyword.chars().count()).collect();
     let mut out = String::new();
     let lead: String = line.chars().take(leading).collect();
     out.push_str(&lead);
     out.push_str(&" ".repeat(pad));
-    out.push_str(trimmed);
-    (out, pad, leading)
+    out.push_str(keyword);
+    out.push_str(&rest);
+    // Padding is inserted before the keyword; buffer columns from indent onward shift visually.
+    let pad_start = leading;
+    (out, pad, pad_start)
 }
 
 fn status_color(status: RunStatus) -> Color {
@@ -1381,15 +1386,11 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             ));
             line_idx += 1;
             for step in background_steps {
-                let kw_width = step.keyword.width();
-                let kw = if kw_width >= STEP_KEYWORD_COL_WIDTH {
+                let pad = step_keyword_gutter_pad(&step.keyword);
+                let kw = if pad == 0 {
                     step.keyword.clone()
                 } else {
-                    format!(
-                        "{}{}",
-                        " ".repeat(STEP_KEYWORD_COL_WIDTH - kw_width),
-                        step.keyword
-                    )
+                    format!("{}{}", " ".repeat(pad), step.keyword)
                 };
                 let kw_color = match step.keyword_type {
                     StepKeywordType::Given => {
@@ -1433,15 +1434,11 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
 
         for (i, step) in scenario_steps.iter().enumerate() {
-            let kw_width = step.keyword.width();
-            let kw = if kw_width >= STEP_KEYWORD_COL_WIDTH {
+            let pad = step_keyword_gutter_pad(&step.keyword);
+            let kw = if pad == 0 {
                 step.keyword.clone()
             } else {
-                format!(
-                    "{}{}",
-                    " ".repeat(STEP_KEYWORD_COL_WIDTH - kw_width),
-                    step.keyword
-                )
+                format!("{}{}", " ".repeat(pad), step.keyword)
             };
             let kw_color = match step.keyword_type {
                 StepKeywordType::Given => {
@@ -1871,10 +1868,7 @@ fn render_mindmap_scenario_preview(
             continue;
         }
         let line = buffer.line(buf_row);
-        let (display_line, _pad_offset, _pad_start) =
-            step_line_display(&line, step_state.in_doc_string, buffer.language());
-        let mut styled =
-            highlight_line_with_state(&display_line, &mut step_state, buffer.language());
+        let mut styled = highlight_line_with_state(&line, &mut step_state, buffer.language());
 
         if buf_row == cursor_row {
             // Highlight the selected step in yellow, but keep step keywords
@@ -2553,9 +2547,13 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
         if !preview && let Some(step_count) = app.folded_step_count(row) {
             display_line.push_str(&format!("  [folded: {step_count} steps]"));
         }
-        let (display_line, pad_offset, pad_start) =
+        let (padded_display, pad_offset, pad_start) =
             step_line_display(&display_line, step_state.in_doc_string, buffer.language());
-        let display_len = display_line.chars().count();
+        let display_len = if pad_offset > 0 {
+            padded_display.chars().count()
+        } else {
+            display_line.chars().count()
+        };
         let mut styled =
             highlight_line_with_state(&display_line, &mut step_state, buffer.language());
 
@@ -3891,11 +3889,12 @@ mod truncate_tests {
     #[test]
     fn test_step_line_display_chinese_keyword_alignment() {
         use crate::gherkin_lang::GherkinLanguages;
-        use unicode_width::UnicodeWidthStr;
+        use crate::highlight::{STEP_KEYWORD_COL_WIDTH, leading_whitespace_chars};
+        use unicode_width::UnicodeWidthChar;
 
         let zh = GherkinLanguages::global().get("zh-CN");
 
-        // All Chinese keywords must produce the same keyword-region display width
+        // At the same indent, keyword right edges and step body text must align.
         let cases = [
             ("  当 用户登录", "当"),
             ("  那么 显示结果", "那么"),
@@ -3905,23 +3904,105 @@ mod truncate_tests {
             ("  假如 用户存在", "假如"),
         ];
 
-        let mut prev_region_width: Option<usize> = None;
+        let mut prev_kw_end: Option<usize> = None;
+        let mut prev_body_start: Option<usize> = None;
         for (input, expected_kw) in &cases {
-            let (output, pad, leading) = super::step_line_display(input, false, zh);
-            let kw_display_w = expected_kw.width();
-            let region_width = leading + pad + kw_display_w;
-            eprintln!(
-                "input='{}' kw='{}' kw.width={} leading={} pad={} region_width={} output='{}'",
-                input, expected_kw, kw_display_w, leading, pad, region_width, output
+            let (output, pad, pad_start) = super::step_line_display(input, false, zh);
+            let leading = leading_whitespace_chars(input);
+            let kw_end = leading + STEP_KEYWORD_COL_WIDTH;
+            let kw_char_len = expected_kw.chars().count();
+            let body_start = leading
+                + STEP_KEYWORD_COL_WIDTH
+                + output
+                    .chars()
+                    .skip(pad_start + pad + kw_char_len)
+                    .take_while(|c| c.is_whitespace())
+                    .map(|c| c.width().unwrap_or(0))
+                    .sum::<usize>();
+            assert_eq!(
+                pad_start, leading,
+                "pad_start should be at indent for '{}'",
+                expected_kw
             );
-            if let Some(prev) = prev_region_width {
+            if let Some(prev) = prev_kw_end {
                 assert_eq!(
-                    region_width, prev,
-                    "Keyword '{}' region width {} differs from {}; output='{}'",
-                    expected_kw, region_width, prev, output
+                    kw_end, prev,
+                    "Keyword '{}' right edge should be at column {}, got {}; output='{}'",
+                    expected_kw, prev, kw_end, output
                 );
             }
-            prev_region_width = Some(region_width);
+            if let Some(prev) = prev_body_start {
+                assert_eq!(
+                    body_start, prev,
+                    "Body after '{}' should start at column {}, got {}; output='{}'",
+                    expected_kw, prev, body_start, output
+                );
+            }
+            prev_kw_end = Some(kw_end);
+            prev_body_start = Some(body_start);
+        }
+    }
+
+    #[test]
+    fn test_highlight_chinese_keyword_alignment() {
+        use crate::gherkin_lang::GherkinLanguages;
+        use crate::highlight::{
+            STEP_KEYWORD_COL_WIDTH, StepHighlightState, highlight_line_with_state,
+            leading_whitespace_chars,
+        };
+        let zh = GherkinLanguages::global().get("zh-CN");
+        let lines = [
+            "    当 我按下 `e` 进入编辑器",
+            "    那么 该行应进入步骤输入模式",
+        ];
+
+        let mut prev_body_start: Option<usize> = None;
+        for input in &lines {
+            let leading = leading_whitespace_chars(input);
+            let trimmed = input.trim_start();
+            let (kw, _) = zh.match_step_prefix(trimmed).expect("step line");
+            let kw_char_len = kw.chars().count();
+            let (display, pad, pad_start) = super::step_line_display(input, false, zh);
+            let body_start = leading
+                + STEP_KEYWORD_COL_WIDTH
+                + display
+                    .chars()
+                    .skip(pad_start + pad + kw_char_len)
+                    .take_while(|c| c.is_whitespace())
+                    .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+                    .sum::<usize>();
+
+            let mut state = StepHighlightState::default();
+            let styled = highlight_line_with_state(input, &mut state, zh);
+            let mut col = 0usize;
+            let mut measured = None;
+            let mut past_gutter = false;
+            for span in &styled.spans {
+                if span.style.fg.is_some() {
+                    past_gutter = true;
+                    col += span.width();
+                    continue;
+                }
+                if past_gutter && measured.is_none() && !span.content.trim_start().is_empty() {
+                    measured = Some(col);
+                    break;
+                }
+                col += span.width();
+            }
+            let measured = measured.expect("body span");
+            // Highlight reports the rest span start (includes the space before body).
+            assert!(
+                measured >= body_start.saturating_sub(1) && measured <= body_start,
+                "highlight body column mismatch for '{input}': expected ~{body_start}, got {measured}"
+            );
+            if let Some(prev) = prev_body_start {
+                assert_eq!(
+                    body_start, prev,
+                    "Body column mismatch for '{input}': expected {prev}, got {body_start}"
+                );
+            } else {
+                prev_body_start = Some(body_start);
+            }
         }
     }
 }

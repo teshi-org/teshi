@@ -1,7 +1,24 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 use crate::gherkin_lang::{GherkinLanguage, StepKeywordType, StructuralType};
+
+/// Display width reserved for the step keyword gutter (after leading indent).
+pub(crate) const STEP_KEYWORD_COL_WIDTH: usize = 6;
+
+/// Count leading whitespace characters (not bytes) before the first non-whitespace.
+pub(crate) fn leading_whitespace_chars(line: &str) -> usize {
+    line.chars().take_while(|c| c.is_whitespace()).count()
+}
+
+/// Extra spaces to insert before the keyword so the gutter is `STEP_KEYWORD_COL_WIDTH` wide.
+///
+/// Padding before the keyword right-aligns keyword glyphs (e.g. 当 vs 那么) so step body
+/// text starts on the same display column.
+pub(crate) fn step_keyword_gutter_pad(keyword: &str) -> usize {
+    STEP_KEYWORD_COL_WIDTH.saturating_sub(keyword.width())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StepMajor {
@@ -112,13 +129,13 @@ pub fn highlight_line_with_state(
 
     // Structural header highlighting
     if let Some((matched, _st)) = lang.match_structural_prefix(trimmed) {
-        let leading_ws = line.len().saturating_sub(trimmed.len());
+        let leading = leading_whitespace_chars(line);
         let mut spans = Vec::new();
-        if leading_ws > 0 {
-            spans.push(Span::raw(" ".repeat(leading_ws)));
+        if leading > 0 {
+            spans.push(Span::raw(line.chars().take(leading).collect::<String>()));
         }
         let kw_text = matched.to_string();
-        let rest = &trimmed[kw_text.len()..];
+        let rest: String = trimmed.chars().skip(matched.chars().count()).collect();
         spans.push(Span::styled(kw_text, header));
         spans.push(Span::raw(rest.to_string()));
         return Line::from(spans);
@@ -126,13 +143,14 @@ pub fn highlight_line_with_state(
 
     // Step keyword highlighting
     if let Some((matched, kw_type)) = lang.match_step_prefix(trimmed) {
-        let leading_ws = line.len().saturating_sub(trimmed.len());
+        let leading = leading_whitespace_chars(line);
+        let gutter_pad = step_keyword_gutter_pad(matched);
         let mut spans = Vec::new();
-        if leading_ws > 0 {
-            spans.push(Span::raw(" ".repeat(leading_ws)));
+        if leading > 0 {
+            spans.push(Span::raw(line.chars().take(leading).collect::<String>()));
         }
         let kw_text = matched.to_string();
-        let rest = &trimmed[kw_text.len()..];
+        let rest: String = trimmed.chars().skip(matched.chars().count()).collect();
 
         let step_style = match kw_type {
             StepKeywordType::Given => {
@@ -156,8 +174,11 @@ pub fn highlight_line_with_state(
             }
         };
 
+        if gutter_pad > 0 {
+            spans.push(Span::raw(" ".repeat(gutter_pad)));
+        }
         spans.push(Span::styled(kw_text, step_style));
-        spans.push(Span::raw(rest.to_string()));
+        spans.push(Span::raw(rest));
         return Line::from(spans);
     }
 
