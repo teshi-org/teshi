@@ -3379,7 +3379,6 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     // Symmetric button row: "  [Yes]    [No]  " (20 chars)
     let btn_row = inner.y + 3;
-    let btn_text = " [Yes] "; // 6 chars
     let btn_sep = "    "; // 4 chars gap
     // Total: "  " + btn_text + btn_sep + btn_text + "  " = 2+6+4+6+2 = 20
     let btn_line_total = 20usize;

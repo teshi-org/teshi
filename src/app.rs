@@ -5669,8 +5669,12 @@ impl App {
                     row_y,
                     col_x,
                     col_right,
+                } => {
+                    if *row_y == pos.y && pos.x >= *col_x && pos.x < *col_right {
+                        return Some(region);
+                    }
                 }
-                | ClickableRegion::QuitConfirmNo {
+                ClickableRegion::QuitConfirmNo {
                     row_y,
                     col_x,
                     col_right,
