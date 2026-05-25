@@ -3340,6 +3340,10 @@ impl App {
     // ── Tree navigation ─────────────────────────────────────────────
 
     fn tree_move_up(&mut self) {
+        // At root (path length == 1), up is a no-op: there is nothing above.
+        if self.tree_state.selected().len() <= 1 {
+            return;
+        }
         self.tree_state.key_up();
         if let Some(id) = mindmap::selected_node_id(&self.tree_state) {
             self.mindmap_index.apply_highlight_categories(id);
@@ -3439,7 +3443,9 @@ impl App {
     }
 
     fn tree_cycle_location(&mut self, delta: isize) {
-        if self.view_stage != ViewStage::TreeAndEditor {
+        let preview_visible =
+            self.view_stage == ViewStage::TreeAndEditor || self.mindmap_ai_panel_visible;
+        if !preview_visible {
             return;
         }
         let Some(id) = mindmap::selected_node_id(&self.tree_state) else {
@@ -3476,6 +3482,16 @@ impl App {
     }
 
     fn tree_collapse(&mut self) {
+        let selected_path = self.tree_state.selected().to_vec();
+        let at_root = selected_path.len() <= 1;
+
+        if at_root && !self.tree_state.opened().contains(&selected_path) {
+            // Root is already collapsed — nothing to do.
+            // Without this guard, tui_tree_widget::key_left() would pop
+            // the root from the selection, leaving nothing selected.
+            return;
+        }
+
         self.tree_state.key_left();
         if let Some(id) = mindmap::selected_node_id(&self.tree_state) {
             self.mindmap_index.apply_highlight_categories(id);
@@ -3486,7 +3502,9 @@ impl App {
 
     fn tree_toggle(&mut self) {
         self.tree_state.toggle_selected();
-        if self.view_stage == ViewStage::TreeAndEditor {
+        let preview_visible =
+            self.view_stage == ViewStage::TreeAndEditor || self.mindmap_ai_panel_visible;
+        if preview_visible {
             self.rebuild_preview();
         }
         self.quit_pending_confirm = false;
@@ -5769,8 +5787,10 @@ impl App {
                     && let Some(id) = crate::mindmap::selected_node_id(&self.tree_state)
                 {
                     self.mindmap_index.apply_highlight_categories(id);
-                    // rebuild preview
-                    if self.view_stage == crate::app::ViewStage::TreeAndEditor {
+                    // rebuild preview when the preview panel is visible
+                    let preview_visible = self.view_stage == ViewStage::TreeAndEditor
+                        || self.mindmap_ai_panel_visible;
+                    if preview_visible {
                         self.rebuild_preview();
                     }
                 }
