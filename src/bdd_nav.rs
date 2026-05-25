@@ -108,6 +108,55 @@ pub fn header_title_edit_start_col(line: &str, lang: &GherkinLanguage) -> Option
     }
 }
 
+/// UTF-8 column range of the leading structural keyword (including `:`), if any.
+pub fn structural_prefix_char_range(line: &str, lang: &GherkinLanguage) -> Option<Range<usize>> {
+    let trimmed = line.trim_start();
+    let leading = line.len().saturating_sub(trimmed.len());
+    let (matched, _st) = lang.match_structural_prefix(trimmed)?;
+    let end = leading + matched.chars().count();
+    Some(leading..end)
+}
+
+/// `true` when `line` is a `Background:` / localized background header.
+pub fn is_background_header_line(line: &str, lang: &GherkinLanguage) -> bool {
+    lang.match_structural_prefix(line.trim_start())
+        .is_some_and(|(_, st)| st == StructuralType::Background)
+}
+
+/// Row indices for editor ↑↓ navigation: step lines plus `Background:` headers.
+pub fn bdd_editor_nav_rows(buffer: &EditorBuffer) -> Vec<usize> {
+    let lang = buffer.language();
+    let mut rows = bdd_step_rows(buffer);
+    for row in 0..buffer.line_count() {
+        if is_background_header_line(&buffer.line(row), lang) {
+            rows.push(row);
+        }
+    }
+    rows.sort_unstable();
+    rows.dedup();
+    rows
+}
+
+/// `true` when `row` is on or below the feature's `Background:` header and before the next scenario boundary.
+pub fn row_is_in_background_block(buffer: &EditorBuffer, row: usize) -> bool {
+    let Some(bg_row) = (0..buffer.line_count())
+        .find(|&r| is_background_header_line(&buffer.line(r), buffer.language()))
+    else {
+        return false;
+    };
+    if row < bg_row {
+        return false;
+    }
+    let lang = buffer.language();
+    for r in (bg_row + 1)..buffer.line_count() {
+        let line = buffer.line(r);
+        if is_scenario_boundary(line.trim_start(), lang) {
+            return row < r;
+        }
+    }
+    true
+}
+
 /// First editable UTF-8 column for the navigable "body": step text or a supported header title.
 pub fn line_body_edit_min_col(line: &str, lang: &GherkinLanguage) -> Option<usize> {
     step_edit_start_col(line, lang).or_else(|| header_title_edit_start_col(line, lang))
@@ -508,6 +557,29 @@ mod tests {
             "Feature: A\n  Scenario: S\n  Given a\n  Scenario: T\n  When b\n".to_string(),
         );
         assert_eq!(bdd_step_rows(&buf), vec![2, 4]);
+    }
+
+    #[test]
+    fn test_bdd_editor_nav_rows_includes_background_header() {
+        let buf = EditorBuffer::from_string(
+            "Feature: A\n  Background:\n    Given shared\n  Scenario: S\n    When b\n".to_string(),
+        );
+        assert_eq!(bdd_editor_nav_rows(&buf), vec![1, 2, 4]);
+        assert_eq!(
+            structural_prefix_char_range(&buf.line(1), en()),
+            Some(2..13)
+        );
+    }
+
+    #[test]
+    fn test_background_header_line_zh() {
+        let zh = crate::gherkin_lang::GherkinLanguages::global().get("zh-CN");
+        let line = "  背景:";
+        assert!(is_background_header_line(line, zh));
+        assert_eq!(
+            structural_prefix_char_range(line, zh),
+            Some(2..(2 + "背景:".chars().count()))
+        );
     }
 
     #[test]

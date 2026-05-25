@@ -238,14 +238,18 @@ impl GherkinLanguage {
     pub fn match_step_prefix<'a>(&self, trimmed: &'a str) -> Option<(&'a str, StepKeywordType)> {
         for kw in &self.step_keywords {
             if let Some(rest) = trimmed.strip_prefix(kw.as_str())
-                && (rest.is_empty() || rest.starts_with(' '))
+                && (rest.is_empty() || rest.chars().next().is_some_and(Self::is_step_separator))
             {
-                // re-match with the *input* slice to get the exact span
-                let end = kw.len();
-                return Some((&trimmed[..end], self.step_map[kw]));
+                let matched_len = trimmed.len() - rest.len();
+                return Some((&trimmed[..matched_len], self.step_map[kw]));
             }
         }
         None
+    }
+
+    /// ASCII or ideographic space between a step keyword and the step body.
+    fn is_step_separator(c: char) -> bool {
+        matches!(c, ' ' | '\u{3000}')
     }
 
     /// Iterate all step keyword strings (useful for picker UI).
@@ -272,16 +276,20 @@ impl GherkinLanguage {
     }
 
     /// Check if `trimmed` starts with a structural keyword + ":".
+    ///
+    /// Longer keywords are tried first so e.g. `Scenario Outline:` wins over `Scenario:`.
     pub fn match_structural_prefix<'a>(
         &self,
         trimmed: &'a str,
     ) -> Option<(&'a str, StructuralType)> {
-        for kw in &self.structural_keywords {
+        let mut keywords: Vec<&String> = self.structural_keywords.iter().collect();
+        keywords.sort_by_key(|kw| std::cmp::Reverse(kw.len()));
+        for kw in keywords {
             if let Some(rest) = trimmed.strip_prefix(kw.as_str())
                 && (rest.is_empty() || rest.starts_with(' '))
             {
-                let end = kw.len();
-                return Some((&trimmed[..end], self.structural_map[kw]));
+                let matched_len = trimmed.len() - rest.len();
+                return Some((&trimmed[..matched_len], self.structural_map[kw]));
             }
         }
         None

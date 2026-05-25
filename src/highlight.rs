@@ -20,6 +20,22 @@ pub(crate) fn step_keyword_gutter_pad(keyword: &str) -> usize {
     STEP_KEYWORD_COL_WIDTH.saturating_sub(keyword.width())
 }
 
+/// Styled gutter span used by Explore Steps and the BDD Editor: pad spaces + keyword in one span.
+///
+/// Returns the span and the pad column count (0 when the keyword already fills the gutter).
+pub(crate) fn step_keyword_gutter_styled_span(
+    keyword: &str,
+    style: Style,
+) -> (Span<'static>, usize) {
+    let pad = step_keyword_gutter_pad(keyword);
+    let text = if pad == 0 {
+        keyword.to_string()
+    } else {
+        format!("{}{}", " ".repeat(pad), keyword)
+    };
+    (Span::styled(text, style), pad)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StepMajor {
     Given,
@@ -79,8 +95,9 @@ pub fn highlight_line_with_state(
 ) -> Line<'static> {
     let default = Style::default();
     let comment = Style::default().fg(Color::DarkGray);
+    // Bright foreground so structural headers stay readable on dark terminal themes.
     let header = Style::default()
-        .fg(Color::Cyan)
+        .fg(Color::Yellow)
         .add_modifier(Modifier::BOLD);
     let _step_default = Style::default().fg(Color::Magenta);
     let tag = Style::default().fg(Color::Yellow);
@@ -144,12 +161,10 @@ pub fn highlight_line_with_state(
     // Step keyword highlighting
     if let Some((matched, kw_type)) = lang.match_step_prefix(trimmed) {
         let leading = leading_whitespace_chars(line);
-        let gutter_pad = step_keyword_gutter_pad(matched);
         let mut spans = Vec::new();
         if leading > 0 {
             spans.push(Span::raw(line.chars().take(leading).collect::<String>()));
         }
-        let kw_text = matched.to_string();
         let rest: String = trimmed.chars().skip(matched.chars().count()).collect();
 
         let step_style = match kw_type {
@@ -174,10 +189,8 @@ pub fn highlight_line_with_state(
             }
         };
 
-        if gutter_pad > 0 {
-            spans.push(Span::raw(" ".repeat(gutter_pad)));
-        }
-        spans.push(Span::styled(kw_text, step_style));
+        let (kw_span, _) = step_keyword_gutter_styled_span(matched, step_style);
+        spans.push(kw_span);
         spans.push(Span::raw(rest));
         return Line::from(spans);
     }
@@ -214,7 +227,7 @@ mod tests {
     fn keyword_fg(line: &Line<'_>, kw: &str) -> Option<Color> {
         line.spans
             .iter()
-            .find(|s| s.content.as_ref() == kw)
+            .find(|s| s.style.fg.is_some() && s.content.as_ref().ends_with(kw))
             .and_then(|s| s.style.fg)
     }
 
@@ -222,6 +235,29 @@ mod tests {
     fn test_highlight_header() {
         let (line, _) = highlight_line("Feature: Login", false, en());
         assert_eq!(line.spans[0].content.as_ref(), "Feature:");
+    }
+
+    #[test]
+    fn test_highlight_background_header_en_and_zh() {
+        let en_line = highlight_line("  Background:", false, en()).0;
+        assert!(
+            en_line
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref().contains("Background:")),
+            "expected Background: span, got {:?}",
+            en_line.spans
+        );
+        let zh = GherkinLanguages::global().get("zh-CN");
+        let zh_line = highlight_line("  背景:", false, zh).0;
+        assert!(
+            zh_line
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref().contains("背景:")),
+            "expected 背景: span, got {:?}",
+            zh_line.spans
+        );
     }
 
     #[test]
@@ -258,5 +294,56 @@ mod tests {
         let _ = highlight_line_with_state("Scenario: Next", &mut state, en());
         let line = highlight_line_with_state("And B", &mut state, en());
         assert_eq!(keyword_fg(&line, "And"), Some(Color::Gray));
+    }
+
+    /// Display column where the styled gutter span ends (keyword right edge in the gutter).
+    fn gutter_keyword_end_col(line: &Line<'_>) -> usize {
+        let mut col = 0usize;
+        for span in &line.spans {
+            if span.style.fg.is_some() {
+                return col + span.width();
+            }
+            col += span.width();
+        }
+        0
+    }
+
+    #[test]
+    fn test_editor_zh_gutter_single_span_and_并且_right_edge() {
+        let zh = GherkinLanguages::global().get("zh-CN");
+        let cases = [
+            ("          当 用户", "    当"),
+            ("          那么 结果", "  那么"),
+            ("          并且 其他", "  并且"),
+            ("          而且 其他", "  而且"),
+            ("          假如 存在", "  假如"),
+        ];
+        let leading = leading_whitespace_chars(cases[0].0);
+        let mut prev_end = None;
+        for (input, expected_gutter) in cases {
+            let mut state = StepHighlightState::default();
+            let line = highlight_line_with_state(input, &mut state, zh);
+            let end = gutter_keyword_end_col(&line);
+            assert_eq!(
+                end,
+                leading + STEP_KEYWORD_COL_WIDTH,
+                "gutter right edge for '{input}'"
+            );
+            let styled: Vec<_> = line.spans.iter().filter(|s| s.style.fg.is_some()).collect();
+            assert_eq!(
+                styled.len(),
+                1,
+                "expected one styled gutter span for '{input}'"
+            );
+            assert_eq!(
+                styled[0].content.as_ref(),
+                expected_gutter,
+                "gutter span content for '{input}'"
+            );
+            if let Some(prev) = prev_end {
+                assert_eq!(end, prev);
+            }
+            prev_end = Some(end);
+        }
     }
 }

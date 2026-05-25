@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::bdd_nav::{
-    bdd_step_rows, current_step_keyword_index, delete_scenario_block, delete_step,
-    insert_scenario_after_current, insert_step_above, insert_step_below,
+    bdd_editor_nav_rows, bdd_step_rows, current_step_keyword_index, delete_scenario_block,
+    delete_step, insert_scenario_after_current, insert_step_above, insert_step_below,
     line_body_edit_min_col_in_buffer, next_node_row, prev_node_row, replace_step_keyword_line,
     scenario_content_rows, scenario_header_for_row, scenario_step_rows, swap_step_with_next,
     swap_step_with_prev,
@@ -6052,7 +6052,7 @@ impl App {
     fn vertical_nav_rows(&self) -> (Vec<usize>, bool) {
         let body_chain_nav = self.focus_slot == BddFocusSlot::Body;
         let hidden = self.hidden_editor_rows();
-        let rows = bdd_step_rows(&self.buffer)
+        let rows = bdd_editor_nav_rows(&self.buffer)
             .into_iter()
             .filter(|row| !hidden.contains(row))
             .collect();
@@ -6650,16 +6650,24 @@ mod tests {
         let mut app = editor_test_app();
         app.buffer =
             EditorBuffer::from_string("Feature: T\n  Desc line\nBackground:\n".to_string());
-        app.sync_cursor_to_first_node();
-        app.handle_action(Action::MoveDown)
-            .expect("move to description should work");
-        assert_eq!(app.cursor_row, 0);
-        assert_eq!(app.focus_slot, BddFocusSlot::Body);
-        assert!(!crate::bdd_nav::is_feature_narrative_row(&app.buffer, 0));
+        app.cursor_row = 0;
+        app.focus_slot = BddFocusSlot::Body;
         app.handle_action(Action::ActivateStepInput)
             .expect("edit should work");
         assert!(app.step_input_active);
         assert_eq!(app.step_input_min_col, 9);
+    }
+
+    #[test]
+    fn test_editor_nav_moves_to_background_header() {
+        let mut app = editor_test_app();
+        app.buffer =
+            EditorBuffer::from_string("Feature: T\n  Desc line\nBackground:\n".to_string());
+        app.cursor_row = 0;
+        app.handle_action(Action::MoveDown)
+            .expect("move to background header should work");
+        assert_eq!(app.cursor_row, 2);
+        assert_eq!(app.buffer.line(2).trim_start(), "Background:");
     }
 
     #[test]

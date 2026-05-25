@@ -10,11 +10,13 @@ use crate::agent::pipeline::GenerationStage;
 use crate::app::{
     App, CaseDetail, ChangeKind, ClickableRegion, ColumnFocus, MainTab, MindMapFocus, RunStatus,
 };
-use crate::bdd_nav::nav_body_char_range_in_buffer;
-use crate::gherkin_lang::{GherkinLanguage, StepKeywordType};
+use crate::bdd_nav::{
+    nav_body_char_range_in_buffer, row_is_in_background_block, structural_prefix_char_range,
+};
+use crate::gherkin_lang::{GherkinLanguage, GherkinLanguages, StepKeywordType, StructuralType};
 use crate::highlight::{
     StepHighlightState, highlight_line_with_state, leading_whitespace_chars,
-    step_keyword_gutter_pad,
+    step_keyword_gutter_pad, step_keyword_gutter_styled_span,
 };
 use crate::markdown::render_markdown;
 
@@ -1378,20 +1380,20 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         let mut last_major: Option<Color> = None;
         if !background_steps.is_empty() {
+            let background_label = feature
+                .map(|f| {
+                    let lang = GherkinLanguages::global().get(&f.language);
+                    format!(" {}", lang.primary_structural(StructuralType::Background))
+                })
+                .unwrap_or_else(|| " Background:".to_string());
             lines.push(Line::styled(
-                " Background:",
+                background_label,
                 Style::default()
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD),
             ));
             line_idx += 1;
             for step in background_steps {
-                let pad = step_keyword_gutter_pad(&step.keyword);
-                let kw = if pad == 0 {
-                    step.keyword.clone()
-                } else {
-                    format!("{}{}", " ".repeat(pad), step.keyword)
-                };
                 let kw_color = match step.keyword_type {
                     StepKeywordType::Given => {
                         last_major = Some(KEYWORD_GIVEN);
@@ -1408,7 +1410,8 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     StepKeywordType::And => last_major.unwrap_or(KEYWORD_AND),
                     StepKeywordType::But => last_major.unwrap_or(KEYWORD_BUT),
                 };
-                let kw_span = Span::styled(kw, Style::default().fg(kw_color));
+                let (kw_span, _) =
+                    step_keyword_gutter_styled_span(&step.keyword, Style::default().fg(kw_color));
                 let body_span = Span::styled(
                     format!(" {}", step.text),
                     Style::default().fg(Color::DarkGray),
@@ -1434,12 +1437,6 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
 
         for (i, step) in scenario_steps.iter().enumerate() {
-            let pad = step_keyword_gutter_pad(&step.keyword);
-            let kw = if pad == 0 {
-                step.keyword.clone()
-            } else {
-                format!("{}{}", " ".repeat(pad), step.keyword)
-            };
             let kw_color = match step.keyword_type {
                 StepKeywordType::Given => {
                     last_major = Some(KEYWORD_GIVEN);
@@ -1456,7 +1453,8 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 StepKeywordType::And => last_major.unwrap_or(KEYWORD_AND),
                 StepKeywordType::But => last_major.unwrap_or(KEYWORD_BUT),
             };
-            let kw_span = Span::styled(kw, Style::default().fg(kw_color));
+            let (kw_span, _) =
+                step_keyword_gutter_styled_span(&step.keyword, Style::default().fg(kw_color));
             let body_span = if i == app.explore_selected_step {
                 Span::styled(format!(" {}", step.text), highlight_style)
             } else {
@@ -2565,7 +2563,8 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             let is_different_scenario =
                 header_row.is_some() && header_row != Some(focus_row) && header_row != Some(row);
             let is_not_focused_header = row != focus_row;
-            if is_different_scenario && is_not_focused_header {
+            let in_background = row_is_in_background_block(buffer, row);
+            if is_different_scenario && is_not_focused_header && !in_background {
                 styled = apply_line_background(
                     styled,
                     Style::default()
@@ -2582,7 +2581,8 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             let line_len = display_len;
             if app.is_editor_nav_mode() {
                 let focus_patch = selected_style(true);
-                let hl_range = nav_body_char_range_in_buffer(buffer, row, &line);
+                let hl_range = nav_body_char_range_in_buffer(buffer, row, &line)
+                    .or_else(|| structural_prefix_char_range(&line, buffer.language()));
                 if let Some(mut r) = hl_range
                     && r.start < r.end
                 {
@@ -3875,6 +3875,19 @@ mod truncate_tests {
     }
 
     #[test]
+    fn explore_background_label_matches_feature_language() {
+        use crate::gherkin_lang::{GherkinLanguages, StructuralType};
+
+        let zh = GherkinLanguages::global().get("zh-CN");
+        assert_eq!(zh.primary_structural(StructuralType::Background), "背景:");
+        let en = GherkinLanguages::global().get("en");
+        assert_eq!(
+            en.primary_structural(StructuralType::Background),
+            "Background:"
+        );
+    }
+
+    #[test]
     fn test_explore_scenarios_title_shows_selected_feature_scenario_count() {
         let mut app = App::from_args().expect("app init should work");
         let feature = gherkin::parse_feature(
@@ -3954,6 +3967,8 @@ mod truncate_tests {
         let lines = [
             "    当 我按下 `e` 进入编辑器",
             "    那么 该行应进入步骤输入模式",
+            "    并且 其他操作",
+            "    而且 其他操作",
         ];
 
         let mut prev_body_start: Option<usize> = None;
