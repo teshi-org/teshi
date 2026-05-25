@@ -34,6 +34,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("copy", "Copy last N assistant responses to clipboard"),
     ("models", "Open model settings"),
     ("sessions", "Browse saved sessions"),
+    ("approval", "Switch approval mode (Manual/Auto/Bypass)"),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +100,8 @@ pub struct AgentThread {
     pub total_output_tokens: u64,
     /// Last reported input token count (used for context trimming).
     pub last_input_tokens: Option<u32>,
+    /// Selected agent profile ID (None = use default).
+    pub profile_id: Option<String>,
 }
 
 impl AgentThread {
@@ -120,6 +123,7 @@ impl AgentThread {
             total_input_tokens: 0,
             total_output_tokens: 0,
             last_input_tokens: None,
+            profile_id: None,
         }
     }
 }
@@ -142,6 +146,8 @@ pub enum ModelPanelMode {
     List,
     /// Show the "Add model" form.
     Adding,
+    /// Show the "Edit model" form.
+    Editing,
 }
 
 /// Navigation focus on the current line: Gherkin keyword/token vs editable trailing text (step body or header title).
@@ -385,6 +391,12 @@ pub struct App {
     pub agents: Vec<AgentThread>,
     pub selected_agent: usize,
     pub next_agent_id: usize,
+    /// Approval mode for agent tool calls (Manual / Auto / Bypass).
+    pub approval_mode: crate::agent::approval::ApprovalMode,
+    /// Whether the approval mode selection panel is active.
+    pub approval_panel_active: bool,
+    /// Selected index within the approval mode panel.
+    pub approval_panel_selection: usize,
     pub slash_suggestion_active: bool,
     pub slash_suggestion_selection: usize,
     /// Whether the AI tab input bar has keyboard focus (Esc toggles this off).
@@ -405,8 +417,10 @@ pub struct App {
     pub model_panel_active: bool,
     pub model_panel_selection: usize,
     pub active_model_label: Option<String>,
-    // ── Model profile "Add" form state ────────────────
+    // ── Model profile form state ───────────────────────
     pub model_panel_mode: ModelPanelMode,
+    /// When editing, the ID of the profile being edited.
+    pub model_form_editing_id: Option<String>,
     pub model_form_focus: usize,
     pub model_form_name: String,
     pub model_form_provider: String,
@@ -421,6 +435,10 @@ pub struct App {
     pub session_list: Vec<crate::session::Session>,
     // ── Skill/template registry ─────────────────────────
     pub skill_registry: crate::agent::skills::SkillRegistry,
+    // ── Agent profile state ─────────────────────────────
+    pub agent_profiles: Vec<crate::agent::profile::AgentProfile>,
+    pub agent_profile_panel_active: bool,
+    pub agent_profile_panel_selection: usize,
     // ── Generation pipeline state ───────────────────────
     pub generation_stage: crate::agent::pipeline::GenerationStage,
     pub pipeline_requirement: Option<crate::agent::pipeline::Requirement>,
@@ -440,6 +458,19 @@ fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
 pub enum ClickableRegion {
     Tab(MainTab),
     Tree,
+    /// Approval mode badge in the chat panel title bar (click to open picker).
+    ApprovalBadge {
+        row_y: u16,
+        col_x: u16,
+        col_right: u16,
+    },
+    /// An option row in the approval mode selection panel.
+    ApprovalOption {
+        option_idx: usize,
+        row_y: u16,
+        col_x: u16,
+        col_right: u16,
+    },
     ExploreFeature {
         feature_idx: usize,
         row_y: u16,
@@ -621,6 +652,9 @@ impl App {
             agents: vec![AgentThread::new(0, "Agent 1")],
             selected_agent: 0,
             next_agent_id: 1,
+            approval_mode: crate::agent::approval::ApprovalMode::default(),
+            approval_panel_active: false,
+            approval_panel_selection: 0,
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
@@ -634,6 +668,7 @@ impl App {
             model_panel_active: false,
             model_panel_selection: 0,
             model_panel_mode: ModelPanelMode::List,
+            model_form_editing_id: None,
             model_form_focus: 0,
             model_form_name: String::new(),
             model_form_provider: String::new(),
@@ -708,6 +743,9 @@ impl App {
             agents: vec![AgentThread::new(0, "Agent 1")],
             selected_agent: 0,
             next_agent_id: 1,
+            approval_mode: crate::agent::approval::ApprovalMode::default(),
+            approval_panel_active: false,
+            approval_panel_selection: 0,
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
@@ -764,6 +802,7 @@ impl App {
             model_panel_active: false,
             model_panel_selection: 0,
             model_panel_mode: ModelPanelMode::List,
+            model_form_editing_id: None,
             model_form_focus: 0,
             model_form_name: String::new(),
             model_form_provider: String::new(),
@@ -829,6 +868,9 @@ impl App {
             agents: vec![AgentThread::new(0, "Agent 1")],
             selected_agent: 0,
             next_agent_id: 1,
+            approval_mode: crate::agent::approval::ApprovalMode::default(),
+            approval_panel_active: false,
+            approval_panel_selection: 0,
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
@@ -885,6 +927,7 @@ impl App {
             model_panel_active: false,
             model_panel_selection: 0,
             model_panel_mode: ModelPanelMode::List,
+            model_form_editing_id: None,
             model_form_focus: 0,
             model_form_name: String::new(),
             model_form_provider: String::new(),
@@ -1241,17 +1284,77 @@ impl App {
                             }
                         }
                         if pending_queued {
-                            self.agents[i].partial_response.clear();
-                            self.agents[i].status = AiStatus::AwaitingApproval;
-                            self.agents[i].tool_status = None;
-                            // Advance stage to Confirming when pipeline is active
-                            if !matches!(
-                                self.generation_stage,
-                                crate::agent::pipeline::GenerationStage::Idle
-                                    | crate::agent::pipeline::GenerationStage::Complete
-                            ) {
-                                self.generation_stage =
-                                    crate::agent::pipeline::GenerationStage::Confirming;
+                            if self.approval_mode.requires_manual_approval() {
+                                // Manual mode: pause and wait for user Y/N
+                                self.agents[i].partial_response.clear();
+                                self.agents[i].status = AiStatus::AwaitingApproval;
+                                self.agents[i].tool_status = None;
+                                // Advance stage to Confirming when pipeline is active
+                                if !matches!(
+                                    self.generation_stage,
+                                    crate::agent::pipeline::GenerationStage::Idle
+                                        | crate::agent::pipeline::GenerationStage::Complete
+                                ) {
+                                    self.generation_stage =
+                                        crate::agent::pipeline::GenerationStage::Confirming;
+                                }
+                            } else {
+                                // Auto / Bypass mode: auto-accept all pending changes
+                                self.agents[i].partial_response.clear();
+                                self.agents[i].tool_status = None;
+                                while self.has_agent_change_prompt() {
+                                    let agent_idx = self.pending_agent_changes[0].agent_idx;
+                                    let (tool_call_id, result) = match self.accept_agent_change() {
+                                        Ok((id, res)) => (id, res),
+                                        Err(e) => {
+                                            self.pending_agent_changes.remove(0);
+                                            self.clear_pending_change_state();
+                                            (String::new(), format!("Error: {e}"))
+                                        }
+                                    };
+                                    if !tool_call_id.is_empty() {
+                                        self.agents[agent_idx].messages.push(AiChatMessage {
+                                            role: AiRole::Tool,
+                                            content: result,
+                                            tool_calls: None,
+                                            tool_call_id: Some(tool_call_id),
+                                            reasoning_content: None,
+                                            source: None,
+                                        });
+                                    }
+                                }
+                                // Continue the agent loop
+                                self.agents[i].agent_loop_count += 1;
+                                let max_iter = max_agent_iterations();
+                                if self.agents[i].agent_loop_count > max_iter
+                                    && self.agents[i].llm_handle.is_some()
+                                {
+                                    if i == self.selected_agent {
+                                        self.status =
+                                            "Tool call limit reached, requesting final response…"
+                                                .to_string();
+                                    }
+                                    self.compact_context_if_needed(i);
+                                    let messages = self.build_chat_messages_for_agent(i);
+                                    let _ = self.agents[i].llm_handle.as_ref().unwrap().send(
+                                        crate::llm::LlmRequest::Chat {
+                                            system: Some(self.ai_system_prompt(None)),
+                                            messages,
+                                            tools: None,
+                                        },
+                                    );
+                                } else if self.agents[i].llm_handle.is_some() {
+                                    self.compact_context_if_needed(i);
+                                    let messages = self.build_chat_messages_for_agent(i);
+                                    let tools = Some(crate::agent::get_tools());
+                                    let _ = self.agents[i].llm_handle.as_ref().unwrap().send(
+                                        crate::llm::LlmRequest::Chat {
+                                            system: Some(self.ai_system_prompt(None)),
+                                            messages,
+                                            tools,
+                                        },
+                                    );
+                                }
                             }
                         } else if self.project.features.is_empty() {
                             self.agents[i].partial_response.clear();
@@ -3385,6 +3488,49 @@ impl App {
             }
         }
 
+        // Approval mode selection panel intercept
+        if self.approval_panel_active {
+            return match action {
+                Action::ApprovalPanelUp => {
+                    if self.approval_panel_selection > 0 {
+                        self.approval_panel_selection -= 1;
+                    }
+                    Ok(())
+                }
+                Action::ApprovalPanelDown => {
+                    use crate::agent::approval::ApprovalMode;
+                    if self.approval_panel_selection + 1 < ApprovalMode::ALL.len() {
+                        self.approval_panel_selection += 1;
+                    }
+                    Ok(())
+                }
+                Action::ApprovalPanelSelect => {
+                    use crate::agent::approval::ApprovalMode;
+                    let modes = ApprovalMode::ALL;
+                    if let Some(&mode) = modes.get(self.approval_panel_selection) {
+                        let old = self.approval_mode;
+                        self.approval_mode = mode;
+                        self.approval_panel_active = false;
+                        self.status = format!(
+                            "Approval: {} → {} ({})",
+                            old.display_name(),
+                            mode.display_name(),
+                            mode.description()
+                        );
+                    }
+                    Ok(())
+                }
+                Action::ClearInputState
+                | Action::AuthPanelClose
+                | Action::ModelPanelClose
+                | Action::SessionPanelClose => {
+                    self.approval_panel_active = false;
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+        }
+
         if !matches!(action, Action::PendingChar(_)) {
             self.pending_char = None;
         }
@@ -3553,6 +3699,8 @@ impl App {
                 self.scenario_dropdown_open = false;
                 self.quit_pending_confirm = false;
             }
+            // Handled in the approval panel intercept above; unreachable here.
+            Action::ApprovalPanelUp | Action::ApprovalPanelDown | Action::ApprovalPanelSelect => {}
             Action::AuthPanelClose => {
                 self.auth_panel_active = false;
                 self.quit_pending_confirm = false;
@@ -3562,8 +3710,9 @@ impl App {
                 self.model_panel_selection = 0;
                 self.model_panel_mode = ModelPanelMode::List;
                 self.model_profiles = crate::profiles::ModelProfile::load_all();
-                self.status = "Model profiles [m]. a add · ↑↓ select · Enter activate · Esc close"
-                    .to_string();
+                self.status =
+                    "Model profiles [m]. a add · e edit · ↑↓ select · Enter activate · Esc close"
+                        .to_string();
                 self.quit_pending_confirm = false;
             }
             Action::ModelPanelClose => {
@@ -3596,6 +3745,7 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::ModelPanelAdd => {
+                self.model_form_editing_id = None;
                 self.model_panel_mode = ModelPanelMode::Adding;
                 self.model_form_focus = 0;
                 self.model_form_name.clear();
@@ -3605,8 +3755,24 @@ impl App {
                 self.model_form_api_key.clear();
                 self.model_form_max_tokens = String::from("4096");
                 self.model_form_temperature = String::from("0.7");
-                self.status =
-                    "Fill in the fields and press Enter to save. Tab to switch fields.".to_string();
+                self.status = "Fill in the fields and press Enter to save.".to_string();
+                self.quit_pending_confirm = false;
+            }
+            Action::ModelPanelEdit => {
+                if let Some(profile) = self.model_profiles.get(self.model_panel_selection).cloned()
+                {
+                    self.model_form_editing_id = Some(profile.id.clone());
+                    self.model_panel_mode = ModelPanelMode::Editing;
+                    self.model_form_focus = 0;
+                    self.model_form_name = profile.name;
+                    self.model_form_provider = profile.provider;
+                    self.model_form_model = profile.model;
+                    self.model_form_base_url = profile.base_url;
+                    self.model_form_api_key = profile.api_key;
+                    self.model_form_max_tokens = profile.max_tokens.to_string();
+                    self.model_form_temperature = profile.temperature.to_string();
+                    self.status = "Edit the fields and press Enter to save.".to_string();
+                }
                 self.quit_pending_confirm = false;
             }
             Action::ModelPanelDelete => {
@@ -3634,13 +3800,15 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::ModelPanelFormCancel => {
+                self.model_form_editing_id = None;
                 self.model_panel_mode = ModelPanelMode::List;
-                self.status = "Model profiles [m]. a add · ↑↓ select · Enter activate · Esc close"
-                    .to_string();
+                self.status =
+                    "Model profiles [m]. a add · e edit · ↑↓ select · Enter activate · Esc close"
+                        .to_string();
                 self.quit_pending_confirm = false;
             }
             Action::ModelPanelFormNext => {
-                let max = 7usize;
+                let max = 6usize; // last field index (Temperature)
                 if self.model_form_focus < max {
                     self.model_form_focus += 1;
                 }
@@ -3707,11 +3875,40 @@ impl App {
                 let max_tokens: u32 = self.model_form_max_tokens.trim().parse().unwrap_or(4096);
                 let temperature: f32 = self.model_form_temperature.trim().parse().unwrap_or(0.7);
 
-                let mut profile =
-                    crate::profiles::ModelProfile::new(&name, &provider, &model, &base_url);
-                profile.api_key = api_key;
-                profile.max_tokens = max_tokens;
-                profile.temperature = temperature;
+                let is_editing = self.model_form_editing_id.is_some();
+
+                let profile = if let Some(ref edit_id) = self.model_form_editing_id {
+                    // Editing existing profile — preserve the original ID.
+                    let mut p = match self
+                        .model_profiles
+                        .iter()
+                        .find(|p| p.id == *edit_id)
+                        .cloned()
+                    {
+                        Some(p) => p,
+                        None => {
+                            self.status = "Profile not found for editing.".to_string();
+                            self.quit_pending_confirm = false;
+                            return Ok(());
+                        }
+                    };
+                    p.name = name;
+                    p.provider = provider;
+                    p.model = model;
+                    p.base_url = base_url;
+                    p.api_key = api_key;
+                    p.max_tokens = max_tokens;
+                    p.temperature = temperature;
+                    p
+                } else {
+                    // Adding new profile.
+                    let mut p =
+                        crate::profiles::ModelProfile::new(&name, &provider, &model, &base_url);
+                    p.api_key = api_key;
+                    p.max_tokens = max_tokens;
+                    p.temperature = temperature;
+                    p
+                };
 
                 if let Err(e) = profile.save_to_disk() {
                     self.status = format!("Failed to save profile: {e}");
@@ -3719,15 +3916,24 @@ impl App {
                     return Ok(());
                 }
 
-                // Auto-activate the new profile
-                if let Err(e) = crate::profiles::ModelProfile::write_active_id(&profile.id) {
-                    self.status = format!("Profile saved but failed to activate: {e}");
+                if is_editing {
+                    self.status = format!("Updated profile: {}", profile.name);
+                    // Re-activate if the edited profile was active
+                    if self.model_active_id.as_deref() == Some(&profile.id) {
+                        self.activate_model_profile(&profile);
+                    }
                 } else {
-                    self.model_active_id = Some(profile.id.clone());
-                    self.activate_model_profile(&profile);
-                    self.status = format!("Added and activated profile: {}", profile.name);
+                    // Auto-activate the new profile
+                    if let Err(e) = crate::profiles::ModelProfile::write_active_id(&profile.id) {
+                        self.status = format!("Profile saved but failed to activate: {e}");
+                    } else {
+                        self.model_active_id = Some(profile.id.clone());
+                        self.activate_model_profile(&profile);
+                        self.status = format!("Added and activated profile: {}", profile.name);
+                    }
                 }
 
+                self.model_form_editing_id = None;
                 self.model_profiles = crate::profiles::ModelProfile::load_all();
                 self.model_panel_mode = ModelPanelMode::List;
                 self.model_panel_selection = 0;
@@ -4074,7 +4280,17 @@ impl App {
                     if cmd == "sessions" || cmd == "session" {
                         return self.cmd_sessions();
                     }
-                    self.status = "Unknown slash command. Try /new, /exit, /resume, /copy, /models, /sessions".to_string();
+                    if cmd == "approval" || cmd == "approve" || cmd == "app" {
+                        self.approval_panel_active = true;
+                        self.approval_panel_selection = crate::agent::approval::ApprovalMode::ALL
+                            .iter()
+                            .position(|m| *m == self.approval_mode)
+                            .unwrap_or(0);
+                        self.status = "Approval mode. up/down select | Enter confirm | Esc cancel"
+                            .to_string();
+                        return Ok(());
+                    }
+                    self.status = "Unknown slash command. Try /new, /exit, /resume, /copy, /models, /sessions, /approval".to_string();
                     return Ok(());
                 }
 
@@ -4248,6 +4464,18 @@ impl App {
                         }
                         "models" => self.cmd_models(),
                         "sessions" => self.cmd_sessions(),
+                        "approval" => {
+                            self.approval_panel_active = true;
+                            self.approval_panel_selection =
+                                crate::agent::approval::ApprovalMode::ALL
+                                    .iter()
+                                    .position(|m| *m == self.approval_mode)
+                                    .unwrap_or(0);
+                            self.status =
+                                "Approval mode. Up/Down select | Enter confirm | Esc cancel"
+                                    .to_string();
+                            Ok(())
+                        }
                         _ => Ok(()),
                     };
                 }
@@ -5001,6 +5229,25 @@ impl App {
                         return Some(region);
                     }
                 }
+                ClickableRegion::ApprovalBadge {
+                    row_y,
+                    col_x,
+                    col_right,
+                } => {
+                    if *row_y == pos.y && pos.x >= *col_x && pos.x < *col_right {
+                        return Some(region);
+                    }
+                }
+                ClickableRegion::ApprovalOption {
+                    row_y,
+                    col_x,
+                    col_right,
+                    ..
+                } => {
+                    if *row_y == pos.y && pos.x >= *col_x && pos.x < *col_right {
+                        return Some(region);
+                    }
+                }
                 ClickableRegion::ExploreFeature {
                     row_y,
                     col_x,
@@ -5089,7 +5336,31 @@ impl App {
                 self.explore_selected_step = *step_idx;
                 self.explore_focus = crate::app::ColumnFocus::Step;
             }
-            _ => {}
+            ClickableRegion::ApprovalBadge { .. } => {
+                // Click opens the approval mode picker panel
+                self.approval_panel_active = true;
+                self.approval_panel_selection = crate::agent::approval::ApprovalMode::ALL
+                    .iter()
+                    .position(|m| *m == self.approval_mode)
+                    .unwrap_or(0);
+            }
+            ClickableRegion::ApprovalOption { option_idx, .. } => {
+                // Click selects and confirms the option
+                use crate::agent::approval::ApprovalMode;
+                let modes = ApprovalMode::ALL;
+                if let Some(&mode) = modes.get(*option_idx) {
+                    let old = self.approval_mode;
+                    self.approval_mode = mode;
+                    self.approval_panel_active = false;
+                    self.status = format!(
+                        "Approval: {} → {} ({})",
+                        old.display_name(),
+                        mode.display_name(),
+                        mode.description()
+                    );
+                }
+            }
+            ClickableRegion::EditorPanel | ClickableRegion::PreviewPanel => {}
         }
         Ok(())
     }
@@ -5685,8 +5956,8 @@ impl App {
         self.model_panel_selection = 0;
         self.model_panel_mode = ModelPanelMode::List;
         self.model_profiles = crate::profiles::ModelProfile::load_all();
-        self.status =
-            "Model profiles [m]. a add · ↑↓ select · Enter activate · Esc close".to_string();
+        self.status = "Model profiles [m]. a add · e edit · ↑↓ select · Enter activate · Esc close"
+            .to_string();
         Ok(())
     }
 
@@ -6152,6 +6423,9 @@ mod tests {
             agents: vec![AgentThread::new(0, "Agent 1")],
             selected_agent: 0,
             next_agent_id: 1,
+            approval_mode: crate::agent::approval::ApprovalMode::default(),
+            approval_panel_active: false,
+            approval_panel_selection: 0,
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
@@ -6166,6 +6440,7 @@ mod tests {
             model_panel_selection: 0,
             active_model_label: None,
             model_panel_mode: ModelPanelMode::List,
+            model_form_editing_id: None,
             model_form_focus: 0,
             model_form_name: String::new(),
             model_form_provider: String::new(),
@@ -6299,6 +6574,9 @@ Feature: B
             agents: vec![AgentThread::new(0, "Agent 1")],
             selected_agent: 0,
             next_agent_id: 1,
+            approval_mode: crate::agent::approval::ApprovalMode::default(),
+            approval_panel_active: false,
+            approval_panel_selection: 0,
             slash_suggestion_active: false,
             slash_suggestion_selection: 0,
             ai_input_focused: true,
@@ -6313,6 +6591,7 @@ Feature: B
             model_panel_selection: 0,
             active_model_label: None,
             model_panel_mode: ModelPanelMode::List,
+            model_form_editing_id: None,
             model_form_focus: 0,
             model_form_name: String::new(),
             model_form_provider: String::new(),

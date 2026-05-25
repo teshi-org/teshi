@@ -213,11 +213,13 @@ fn main() -> Result<()> {
                             slash_suggestion_active: app.slash_suggestion_active,
                             auth_panel_active: app.auth_panel_active,
                             model_panel_active: app.model_panel_active,
-                            model_panel_adding: app.model_panel_mode == app::ModelPanelMode::Adding,
+                            model_panel_adding: app.model_panel_mode == app::ModelPanelMode::Adding
+                                || app.model_panel_mode == app::ModelPanelMode::Editing,
                             session_panel_active: app.session_panel_active,
                             change_summary_visible: app.change_summary_visible,
                             ai_status_waiting: app.agent().status == crate::app::AiStatus::Waiting,
                             scenario_dropdown_open: app.scenario_dropdown_open,
+                            approval_panel_active: app.approval_panel_active,
                         },
                     ) {
                         app.handle_action(action)?;

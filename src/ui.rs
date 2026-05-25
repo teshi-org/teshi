@@ -307,6 +307,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     if app.session_panel_active {
         render_session_panel(frame, app, frame.area());
     }
+
+    if app.approval_panel_active {
+        render_approval_panel(frame, app, frame.area());
+    }
 }
 
 fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -444,9 +448,33 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     }
 
-    let block = Block::default().borders(Borders::ALL).title("AI Chat");
+    let block = Block::default().borders(Borders::ALL).title(" AI Chat ");
     let inner = block.inner(area);
-    frame.render_widget(block, area);
+    frame.render_widget(&block, area);
+
+    // Render approval mode badge in the top-right corner
+    let badge_label = format!("[{}]", app.approval_mode.display_name());
+    let badge_width = badge_label.chars().count() as u16 + 2;
+    let badge_x = area.right().saturating_sub(badge_width + 1);
+    if badge_x > area.x {
+        // Register clickable region
+        app.clickable_regions.push(ClickableRegion::ApprovalBadge {
+            row_y: area.y,
+            col_x: badge_x,
+            col_right: area.right().saturating_sub(1),
+        });
+        // Badge styling based on mode
+        let badge_style = if app.approval_mode.requires_manual_approval() {
+            Style::default().fg(Color::Yellow)
+        } else if app.approval_mode.auto_accepts() {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        };
+        let badge = Paragraph::new(Line::styled(badge_label, badge_style));
+        let badge_area = Rect::new(badge_x, area.y, badge_width, 1);
+        frame.render_widget(badge, badge_area);
+    }
 
     if inner.width == 0 || inner.height == 0 {
         return;
@@ -1970,10 +1998,32 @@ pub(crate) fn render_agent_chat_inner(
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("AI Chat")
+        .title(" AI Chat ")
         .border_style(border_style);
     let inner = block.inner(area);
-    frame.render_widget(block, area);
+    frame.render_widget(&block, area);
+
+    // Render approval badge in top-right corner
+    let badge_label = format!("[{}]", app.approval_mode.display_name());
+    let badge_width = badge_label.chars().count() as u16 + 2;
+    let badge_x = area.right().saturating_sub(badge_width + 1);
+    if badge_x > area.x {
+        app.clickable_regions.push(ClickableRegion::ApprovalBadge {
+            row_y: area.y,
+            col_x: badge_x,
+            col_right: area.right().saturating_sub(1),
+        });
+        let badge_style = if app.approval_mode.requires_manual_approval() {
+            Style::default().fg(Color::Yellow)
+        } else if app.approval_mode.auto_accepts() {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        };
+        let badge = Paragraph::new(Line::styled(badge_label, badge_style));
+        let badge_area = Rect::new(badge_x, area.y, badge_width, 1);
+        frame.render_widget(badge, badge_area);
+    }
 
     if inner.width == 0 || inner.height == 0 {
         return;
@@ -3069,7 +3119,10 @@ fn render_model_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     match app.model_panel_mode {
         ModelPanelMode::List => render_model_list(frame, app, panel_area),
-        ModelPanelMode::Adding => render_model_form(frame, app, panel_area),
+        ModelPanelMode::Adding => render_model_form(frame, app, " Add Model Profile ", panel_area),
+        ModelPanelMode::Editing => {
+            render_model_form(frame, app, " Edit Model Profile ", panel_area)
+        }
     }
 }
 
@@ -3131,18 +3184,18 @@ fn render_model_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        "a add · d delete · ↑↓ select · Enter activate · Esc close",
+        "a add · e edit · d delete · ↑↓ select · Enter activate · Esc close",
         Style::default().fg(Color::DarkGray),
     ));
 
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// Renders the "Add model" form.
-fn render_model_form(frame: &mut Frame<'_>, app: &App, area: Rect) {
+/// Renders the model profile form (add or edit).
+fn render_model_form(frame: &mut Frame<'_>, app: &App, title: &str, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Add Model Profile ")
+        .title(title)
         .style(Style::default().fg(Color::White));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -3199,11 +3252,12 @@ fn render_model_form(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ]));
     }
 
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "Tab/Shift+Tab switch fields · Enter save · Esc cancel",
+    let footer = Line::styled(
+        "Save [Enter]  Cancel [Esc]",
         Style::default().fg(Color::DarkGray),
-    ));
+    )
+    .alignment(Alignment::Center);
+    lines.push(footer);
 
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -3265,6 +3319,94 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         " ↑↓ select · Enter load · d delete · Esc close ",
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
+    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+}
+
+/// Render the approval mode selection popup panel.
+fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    use crate::agent::approval::ApprovalMode;
+
+    let modes = ApprovalMode::ALL;
+    let panel_w = area.width.min(56);
+    // Layout: top border + 3 items × (title + desc) + separator line + hint + bottom border
+    let item_rows: u16 = (modes.len() * 2 + 1) as u16; // +1 for separator
+    let panel_h = item_rows + 4; // +4 for borders + hint line + padding
+    let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
+    let panel_y = area.y + (area.height.saturating_sub(panel_h)) / 2;
+    let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
+
+    frame.render_widget(Clear, panel_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Approval Mode ")
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(panel_area);
+    frame.render_widget(block, panel_area);
+
+    // Track which rows are rendered so we can register clickable regions
+    let mut row_offset = inner.y;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    for (i, mode) in modes.iter().enumerate() {
+        let is_current = *mode == app.approval_mode;
+        let is_selected = i == app.approval_panel_selection;
+        let label = mode.display_name();
+        let desc = mode.description();
+
+        // ── Title line ──
+        let (main_fg, desc_fg, marker) = if is_selected {
+            // Selected item: always yellow with arrow, regardless of current
+            (Color::Yellow, Color::DarkGray, "\u{25b6}")
+        } else if is_current {
+            // Current but not selected: dimmed with circle
+            (Color::DarkGray, Color::DarkGray, "\u{25cb}")
+        } else {
+            (Color::White, Color::Gray, "  ")
+        };
+        let title = format!(" {} {}", marker, label);
+        lines.push(Line::styled(
+            title,
+            Style::default()
+                .fg(main_fg)
+                .add_modifier(if is_selected || is_current {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
+
+        // Register clickable region for this option's title row
+        app.clickable_regions.push(ClickableRegion::ApprovalOption {
+            option_idx: i,
+            row_y: row_offset,
+            col_x: inner.x,
+            col_right: inner.right(),
+        });
+        row_offset += 1;
+
+        // ── Description line ──
+        let desc_text = format!("   {}", desc);
+        lines.push(Line::styled(desc_text, Style::default().fg(desc_fg)));
+        row_offset += 1;
+
+        // ── Separator ──
+        if i < modes.len() - 1 {
+            lines.push(Line::raw(""));
+            row_offset += 1;
+        }
+    }
+
+    // Navigation hint
+    lines.push(Line::styled(
+        format!(
+            " {}↓ select  Enter confirm  Esc cancel ",
+            std::char::from_u32(0x2191).unwrap_or('^')
+        ),
         Style::default().fg(Color::DarkGray),
     ));
 
