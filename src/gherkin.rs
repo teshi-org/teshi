@@ -422,9 +422,7 @@ fn try_parse_step(trimmed: &str, line_number: usize, lang: &GherkinLanguage) -> 
     if let Some((matched, kw_type)) = lang.match_step_prefix(trimmed) {
         let keyword = matched.to_string();
         let rest = &trimmed[matched.len()..];
-        let text = rest
-            .trim_start_matches(|c: char| matches!(c, ' ' | '\u{3000}'))
-            .to_string();
+        let text = rest.trim_start_matches([' ', '\u{3000}']).to_string();
         return Some(BddStep {
             keyword,
             keyword_type: kw_type,

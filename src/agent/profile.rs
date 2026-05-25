@@ -107,8 +107,6 @@ impl AgentProfile {
 #[derive(Debug)]
 pub struct AgentProfileRegistry {
     profiles: Vec<AgentProfile>,
-    /// Index of the built-in default profile in `profiles`.
-    default_idx: usize,
 }
 
 impl AgentProfileRegistry {
@@ -146,14 +144,11 @@ impl AgentProfileRegistry {
             }
         }
 
-        let default_idx = profiles.iter().position(|p| p.id == "default").unwrap_or(0);
-        Self {
-            profiles,
-            default_idx,
-        }
+        Self { profiles }
     }
 
     /// Get a profile by id.
+    #[allow(dead_code)]
     pub fn get(&self, id: &str) -> Option<&AgentProfile> {
         self.profiles.iter().find(|p| p.id == id)
     }
@@ -164,8 +159,12 @@ impl AgentProfileRegistry {
     }
 
     /// Return the default profile (always the built-in `"default"`).
+    #[allow(dead_code)]
     pub fn default(&self) -> &AgentProfile {
-        &self.profiles[self.default_idx]
+        self.profiles
+            .iter()
+            .find(|p| p.id == "default")
+            .expect("default profile should always be present")
     }
 }
 
@@ -179,12 +178,11 @@ fn load_from_dir(path: &Path) -> Vec<AgentProfile> {
     };
     for entry in dir.flatten() {
         let p = entry.path();
-        if p.extension().is_some_and(|ext| ext == "toml") {
-            if let Ok(content) = std::fs::read_to_string(&p) {
-                if let Ok(profile) = toml::from_str::<AgentProfile>(&content) {
-                    profiles.push(profile);
-                }
-            }
+        if p.extension().is_some_and(|ext| ext == "toml")
+            && let Ok(content) = std::fs::read_to_string(&p)
+            && let Ok(profile) = toml::from_str::<AgentProfile>(&content)
+        {
+            profiles.push(profile);
         }
     }
     profiles
