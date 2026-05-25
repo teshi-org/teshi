@@ -35,6 +35,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("models", "Open model settings"),
     ("sessions", "Browse saved sessions"),
     ("approval", "Switch approval mode (Manual/Auto/Bypass)"),
+    ("agent", "Switch agent profile"),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +148,17 @@ pub enum ModelPanelMode {
     /// Show the "Add model" form.
     Adding,
     /// Show the "Edit model" form.
+    Editing,
+}
+
+/// Mode of the agent profile management overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentPanelMode {
+    /// Show the list of profiles.
+    List,
+    /// Show the "Add agent" form.
+    Adding,
+    /// Show the "Edit agent" form.
     Editing,
 }
 
@@ -338,6 +350,8 @@ pub struct App {
     pub selection_anchor: Option<(usize, usize)>,
     /// Current drag position (row, col); updated on every drag event.
     pub selection_end: Option<(usize, usize)>,
+    /// Current mouse screen position for hover effects; `None` if mouse hasn't moved yet.
+    pub mouse_position: Option<(u16, u16)>,
     /// Screen rectangle of the editor panel, updated each render frame.
     pub editor_panel_rect: Option<ratatui::layout::Rect>,
     /// Clickable regions registered during the last render frame.
@@ -439,6 +453,17 @@ pub struct App {
     pub agent_profiles: Vec<crate::agent::profile::AgentProfile>,
     pub agent_profile_panel_active: bool,
     pub agent_profile_panel_selection: usize,
+    // ── Agent profile form state ────────────────────────
+    pub agent_panel_mode: AgentPanelMode,
+    /// When editing, the ID of the profile being edited.
+    pub agent_form_editing_id: Option<String>,
+    pub agent_form_focus: usize,
+    pub agent_form_name: String,
+    pub agent_form_description: String,
+    pub agent_form_instructions: String,
+    pub agent_form_tools_str: String,
+    pub agent_form_skills_str: String,
+    pub agent_form_model_ref: String,
     // ── Generation pipeline state ───────────────────────
     pub generation_stage: crate::agent::pipeline::GenerationStage,
     pub pipeline_requirement: Option<crate::agent::pipeline::Requirement>,
@@ -615,6 +640,7 @@ impl App {
             scenario_fold: HashSet::new(),
             selection_anchor: None,
             selection_end: None,
+            mouse_position: None,
             editor_panel_rect: None,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
@@ -681,11 +707,34 @@ impl App {
             session_panel_active: false,
             session_panel_selection: 0,
             session_list: Vec::new(),
-            skill_registry: Self::load_skill_registry(dir),
+            skill_registry: crate::agent::skills::SkillRegistry::new(), // reloaded below
+            agent_profiles: crate::agent::profile::AgentProfileRegistry::load_all(Some(dir))
+                .list()
+                .to_vec(),
+            agent_profile_panel_active: false,
+            agent_profile_panel_selection: 0,
+            agent_panel_mode: AgentPanelMode::List,
+            agent_form_editing_id: None,
+            agent_form_focus: 0,
+            agent_form_name: String::new(),
+            agent_form_description: String::new(),
+            agent_form_instructions: String::new(),
+            agent_form_tools_str: String::new(),
+            agent_form_skills_str: String::new(),
+            agent_form_model_ref: String::new(),
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
         };
+        // Load skill registry using the default profile's skill dirs
+        {
+            let default_profile = app
+                .agent_profiles
+                .iter()
+                .find(|p| p.id == "default")
+                .unwrap_or(&app.agent_profiles[0]);
+            app.skill_registry = Self::load_skill_registry(dir, &default_profile.skills_dirs);
+        }
         app.spawn_llm_if_configured();
         app.activate_active_profile();
         app.mindmap_index.apply_highlight_categories("root");
@@ -758,6 +807,7 @@ impl App {
             scenario_fold: HashSet::new(),
             selection_anchor: None,
             selection_end: None,
+            mouse_position: None,
             editor_panel_rect: None,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
@@ -816,13 +866,40 @@ impl App {
             session_panel_selection: 0,
             session_list: Vec::new(),
             skill_registry: {
-                let root_dir = path.parent().unwrap_or(Path::new("."));
-                Self::load_skill_registry(root_dir)
+                crate::agent::skills::SkillRegistry::new() // reloaded below
             },
+            agent_profiles: {
+                let root_dir = path.parent().unwrap_or(Path::new("."));
+                crate::agent::profile::AgentProfileRegistry::load_all(Some(root_dir))
+                    .list()
+                    .to_vec()
+            },
+            agent_profile_panel_active: false,
+            agent_profile_panel_selection: 0,
+            agent_panel_mode: AgentPanelMode::List,
+            agent_form_editing_id: None,
+            agent_form_focus: 0,
+            agent_form_name: String::new(),
+            agent_form_description: String::new(),
+            agent_form_instructions: String::new(),
+            agent_form_tools_str: String::new(),
+            agent_form_skills_str: String::new(),
+            agent_form_model_ref: String::new(),
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
         };
+
+        // Load skill registry using the default profile's skill dirs
+        {
+            let root_dir = path.parent().unwrap_or(Path::new("."));
+            let default_profile = app
+                .agent_profiles
+                .iter()
+                .find(|p| p.id == "default")
+                .unwrap_or(&app.agent_profiles[0]);
+            app.skill_registry = Self::load_skill_registry(root_dir, &default_profile.skills_dirs);
+        }
         app.spawn_llm_if_configured();
         app.activate_active_profile();
         app.sync_cursor_to_first_node();
@@ -883,6 +960,7 @@ impl App {
             scenario_fold: HashSet::new(),
             selection_anchor: None,
             selection_end: None,
+            mouse_position: None,
             editor_panel_rect: None,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
@@ -941,6 +1019,11 @@ impl App {
             session_panel_selection: 0,
             session_list: Vec::new(),
             skill_registry: crate::agent::skills::SkillRegistry::new(),
+            agent_profiles: crate::agent::profile::AgentProfileRegistry::load_all(None)
+                .list()
+                .to_vec(),
+            agent_profile_panel_active: false,
+            agent_profile_panel_selection: 0,
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
@@ -1150,6 +1233,31 @@ impl App {
         self.status = format!("Switched to model: {}", profile.name);
     }
 
+    /// Get the agent profile for a given agent index.
+    fn agent_profile(&self, agent_idx: usize) -> Option<&crate::agent::profile::AgentProfile> {
+        let profile_id = self.agents.get(agent_idx)?.profile_id.as_deref();
+        let id = profile_id.unwrap_or("default");
+        self.agent_profiles.iter().find(|p| p.id == id)
+    }
+
+    /// Get the active profile for the selected agent.
+    pub(crate) fn active_agent_profile(&self) -> &crate::agent::profile::AgentProfile {
+        self.agent_profile(self.selected_agent)
+            .unwrap_or_else(|| &self.agent_profiles[0])
+    }
+
+    /// Reload the skill registry based on the current active agent profile's skill dirs.
+    fn reload_skills_for_profile(&mut self) {
+        let profile = self.active_agent_profile().clone();
+        let project_dir = self.find_project_dir();
+        self.skill_registry = Self::load_skill_registry(project_dir, &profile.skills_dirs);
+    }
+
+    /// Try to find a sensible project root directory.
+    fn find_project_dir(&self) -> &Path {
+        &self.project.root_dir
+    }
+
     /// Poll the LLM response channel and push completed responses into chat history.
     ///
     /// When the LLM requests tool calls, this method executes them and
@@ -1338,7 +1446,7 @@ impl App {
                                     let messages = self.build_chat_messages_for_agent(i);
                                     let _ = self.agents[i].llm_handle.as_ref().unwrap().send(
                                         crate::llm::LlmRequest::Chat {
-                                            system: Some(self.ai_system_prompt(None)),
+                                            system: Some(self.ai_system_prompt(None, i)),
                                             messages,
                                             tools: None,
                                         },
@@ -1346,10 +1454,18 @@ impl App {
                                 } else if self.agents[i].llm_handle.is_some() {
                                     self.compact_context_if_needed(i);
                                     let messages = self.build_chat_messages_for_agent(i);
-                                    let tools = Some(crate::agent::get_tools());
+                                    let profile = self.agent_profile(i);
+                                    let allowed = profile.and_then(|p| {
+                                        if p.tools.is_empty() {
+                                            None
+                                        } else {
+                                            Some(p.tools.as_slice())
+                                        }
+                                    });
+                                    let tools = Some(crate::agent::get_tools(allowed));
                                     let _ = self.agents[i].llm_handle.as_ref().unwrap().send(
                                         crate::llm::LlmRequest::Chat {
-                                            system: Some(self.ai_system_prompt(None)),
+                                            system: Some(self.ai_system_prompt(None, i)),
                                             messages,
                                             tools,
                                         },
@@ -1380,7 +1496,7 @@ impl App {
                                     let messages = self.build_chat_messages_for_agent(i);
                                     let handle = self.agents[i].llm_handle.as_ref().unwrap();
                                     let _ = handle.send(crate::llm::LlmRequest::Chat {
-                                        system: Some(self.ai_system_prompt(None)),
+                                        system: Some(self.ai_system_prompt(None, i)),
                                         messages,
                                         tools: None,
                                     });
@@ -1388,10 +1504,18 @@ impl App {
                             } else if self.agents[i].llm_handle.is_some() {
                                 self.compact_context_if_needed(i);
                                 let messages = self.build_chat_messages_for_agent(i);
-                                let tools = Some(crate::agent::get_tools());
+                                let profile = self.agent_profile(i);
+                                let allowed = profile.and_then(|p| {
+                                    if p.tools.is_empty() {
+                                        None
+                                    } else {
+                                        Some(p.tools.as_slice())
+                                    }
+                                });
+                                let tools = Some(crate::agent::get_tools(allowed));
                                 let handle = self.agents[i].llm_handle.as_ref().unwrap();
                                 let _ = handle.send(crate::llm::LlmRequest::Chat {
-                                    system: Some(self.ai_system_prompt(None)),
+                                    system: Some(self.ai_system_prompt(None, i)),
                                     messages,
                                     tools,
                                 });
@@ -1544,13 +1668,22 @@ impl App {
         msgs
     }
 
-    /// Load the skill registry from the project directory or parent directories.
-    fn load_skill_registry(project_dir: &Path) -> crate::agent::skills::SkillRegistry {
-        // Try several paths for skill files
-        for dir in &[
-            project_dir.join(".teshi/skills"),
-            project_dir.join("skills"),
-        ] {
+    /// Load the skill registry from a project directory, using the provided skill dirs.
+    /// If `skills_dirs` is empty, falls back to the default hardcoded paths.
+    fn load_skill_registry(
+        project_dir: &Path,
+        skills_dirs: &[String],
+    ) -> crate::agent::skills::SkillRegistry {
+        let dirs: Vec<std::path::PathBuf> = if skills_dirs.is_empty() {
+            // Fallback to hardcoded defaults
+            vec![
+                project_dir.join(".teshi/skills"),
+                project_dir.join("skills"),
+            ]
+        } else {
+            skills_dirs.iter().map(|d| project_dir.join(d)).collect()
+        };
+        for dir in &dirs {
             if dir.exists() {
                 return crate::agent::skills::SkillRegistry::load_from_dir(dir);
             }
@@ -1566,146 +1699,14 @@ impl App {
     }
 
     /// The system prompt used for all AI chat requests.
-    /// When `request` contains generation keywords, additional guidance is appended.
-    fn ai_system_prompt(&self, request: Option<&str>) -> String {
-        let mut prompt = String::from(
-            "You are a BDD/Gherkin assistant embedded in Teshi, a TUI editor for .feature files.\n\
-             \n\
-             ## Your Role\n\
-             You help users write, edit, organize, and validate Gherkin feature files using\n\
-             automated tools. You have access to files, scenarios, steps, test runners, and\n\
-             visual aids (MindMap). Always think before acting: inspect the project structure\n\
-             first, then make precise changes.\n\
-             \n\
-             ## Core Principles\n\
-             - **Understand first, then act**: Before making any changes, inspect the\n\
-               project context and existing files using get_project_info or get_feature_content.\n\
-             - **Prefer simplicity**: Start with the simplest approach. Do not create\n\
-               unnecessary scenarios or complex Scenario Outlines when a basic Scenario suffices.\n\
-             - **Do exactly what was asked**: Generate what the user requested. Do not\n\
-               add extra scenarios, tags, or features unless explicitly requested.\n\
-             - **Verify your work**: After creating a feature, call validate_feature to\n\
-               check for common issues.\n\
-             - **Respect project conventions**: Match the existing style, keyword language,\n\
-               indentation, tag format, and naming patterns from [Project Context].\n\
-             \n\
-             ## Generated Content Standards\n\
-             - Every scenario must have at least one **Given** and one **Then** step.\n\
-             - Scenario names should be descriptive and follow the pattern of existing scenarios.\n\
-             - Use @tags consistently with the project's tag conventions.\n\
-             - When the project uses non-English keywords (e.g. 中文), generate new steps\n\
-               using the same language.\n\
-             - Use Scenario Outline + Examples when the same steps apply to 3+ data variations,\n\
-               not for just 1-2 variations.\n\
-             - Each feature file should focus on one feature area.\n\
-             - **Self-contained scenarios**: Every Scenario must have its own Given/When/Then\n\
-               chain. Missing When is an ERROR. Missing Then is an ERROR.\n\
-             - **No cross-scenario dependencies**: A scenario's Given must independently build\n\
-               all required state. Do NOT rely on state left by another scenario — use\n\
-               Background for shared state that applies to all scenarios.\n\
-             \n\
-             ## Available Tools\n\
-             - **get_project_info**: Get project directory, file list, scenario/step counts.\n\
-               Use this FIRST when the user asks about the project.\n\
-             - **get_feature_content**: Get parsed content of a specific .feature file (names,\n\
-               steps, line numbers, tags, background, examples). Use this BEFORE editing any file.\n\
-             - **search_features**: Search all features for scenarios matching tag, step content,\n\
-               or scenario name. Use this when the user asks 'find scenarios that...'.\n\
-             - **create_feature_file**: Create a brand new .feature file with a feature name,\n\
-               optional description, tags, and background steps. Requires user approval.\n\
-             - **insert_scenario**: Insert a new Scenario or Scenario Outline into an existing\n\
-               feature file. Requires user approval. Always call get_feature_content first to\n\
-               determine the correct insert_after_line.\n\
-             - **update_step**: Replace the body text of a specific step in a scenario while\n\
-               preserving its keyword and indentation. Requires user approval.\n\
-             - **delete_scenario**: Delete an entire scenario from a feature file by name.\n\
-               Requires user approval.\n\
-             - **rename_scenario**: Rename a scenario. Requires user approval.\n\
-             - **reorder_steps**: Reorder the steps inside a scenario (providing a permutation\n\
-               of step indices). Requires user approval.\n\
-             - **run_tests**: Execute the external test runner for all or filtered scenarios.\n\
-               Returns pass/fail/skip summary with details. Use this when the user asks to\n\
-               'run the tests' or 'check if these scenarios pass'.\n\
-             - **highlight_mindmap_nodes**: Visually highlight MindMap tree nodes matching a\n\
-               condition. Use for visual exploration only — it does NOT return text content.\n\
-             - **apply_mindmap_filter**: Filter the MindMap tree to show only matching nodes.\n\
-               Use 'clear' to remove the active filter.\n\
-             \n\
-             ## Workflow Guidelines\n\
-             1. When the user mentions a specific file, ALWAYS call get_feature_content first.\n\
-             2. When creating a new file, call create_feature_file.\n\
-             3. After viewing content, make ONE editing tool call at a time. Do not batch.\n\
-             4. When editing, provide accurate line numbers from get_feature_content.\n\
-             5. When the user asks to search or find, use search_features.\n\
-             6. When the user asks to run or test, use run_tests.\n\
-             7. Use highlight_mindmap_nodes and apply_mindmap_filter only for visual\n\
-                exploration — never as a substitute for reading file content.\n\
-             \n\
-             ## Gherkin Conventions\n\
-             - Use standard keywords: **Given**, **When**, **Then**, **And**, **But**.\n\
-             - Indentation: Feature at column 0, Scenario at 2 spaces, Steps at 4 spaces.\n\
-             - Tags start with @ and appear before the element they annotate.\n\
-             - **Background** blocks contain steps common to all scenarios in a feature.\n\
-             - **Scenario Outline** uses `<placeholders>` and **Examples** tables.\n\
-             - Examples tables use pipe-delimited format: `| header1 | header2 |`.\n\
-             - Keep scenarios focused: one behavior per scenario.\n\
-             - Steps should be declarative, not imperative: describe WHAT, not HOW.\n\
-             \n\
-             ## Example Gherkin Structure\n\
-             ```gherkin\n\
-             @smoke @login\n\
-             Feature: User Login\n\
-               As a registered user\n\
-               I want to log in\n\
-               So that I can access my account\n\
-             \n\
-               Background:\n\
-                 Given a registered user with email \"test@example.com\"\n\
-             \n\
-               Scenario: Successful login with valid credentials\n\
-                 Given I am on the login page\n\
-                 When I enter valid credentials\n\
-                 Then I should see the dashboard\n\
-             \n\
-               Scenario Outline: Login with various roles\n\
-                 Given I am on the login page\n\
-                 When I log in as <role>\n\
-                 Then I should see the <landing_page>\n\
-             \n\
-                 Examples:\n\
-                   | role    | landing_page |\n\
-                   | admin   | Admin Panel  |\n\
-                   | user    | Dashboard    |\n\
-               ```\n\
-             \n\
-             ## Feature Generation Process\n\
-             When the user asks to create, generate, or add a feature or scenario:\n\
-             1. FIRST look at [Project Context] (sent alongside your system prompt)\n\
-                to understand existing files, scenarios, and step patterns.\n\
-             2. THEN use get_feature_content to inspect the file you will edit.\n\
-             3. Plan before generating: consider what scenarios are needed.\n\
-             Always try to cover:\n\
-               - Happy path (the expected successful flow)\n\
-               - Error / validation paths (what happens when things go wrong)\n\
-               - Edge cases (empty inputs, boundary values, permissions, roles)\n\
-             Use Scenario Outline + Examples tables for data-driven variations.\n\
-             Reuse existing step patterns from [Project Context] to keep style consistent.\n\
-             \n\
-             ## Error Recovery\n\
-             - If a tool call fails because a file or scenario was not found, re-read the\n\
-               project state with get_project_info or get_feature_content and try again.\n\
-             - If you are unsure about line numbers, call get_feature_content to verify.\n\
-             - If the project is empty, suggest creating a feature file with create_feature_file.\n\
-             - Do NOT call the same tool repeatedly in a loop if it keeps failing.\n\
-             \n\
-             ## Interaction Guidelines\n\
-             - Be concise. Tool results speak louder than words.\n\
-             - Explain what you are about to do before making file-modifying tool calls.\n\
-             - When a change is queued for approval, tell the user to press [Y] to accept\n\
-               or [N] to reject.\n\
-             - Respect the user's existing file structure, indentation, and naming style.\n\
-             - Do not invent file names — use the ones the user provides or that exist.",
-        );
+    /// Uses the active agent profile's instructions as the base, then appends
+    /// skill catalog and pipeline guidance.
+    fn ai_system_prompt(&self, request: Option<&str>, agent_idx: usize) -> String {
+        let profile = self.agent_profile(agent_idx);
+        let instructions = profile
+            .map(|p| p.instructions_or_default())
+            .unwrap_or_else(crate::agent::profile::default_builtin_instructions);
+        let mut prompt = instructions;
 
         // Add skill catalog
         if !self.skill_registry.is_empty() {
@@ -1805,7 +1806,14 @@ impl App {
             self.generation_stage = crate::agent::pipeline::GenerationStage::Writing;
         }
         let messages = self.build_chat_messages_for_agent(agent_idx);
-        let system_prompt = self.ai_system_prompt(None);
+        let system_prompt = self.ai_system_prompt(None, agent_idx);
+        let allowed_tools: Option<Vec<String>> = self.agent_profile(agent_idx).and_then(|p| {
+            if p.tools.is_empty() {
+                None
+            } else {
+                Some(p.tools.clone())
+            }
+        });
         let agent = &mut self.agents[agent_idx];
         agent.agent_loop_count += 1;
         let max_iter = max_agent_iterations();
@@ -1825,7 +1833,7 @@ impl App {
         } else if let Some(ref handle) = agent.llm_handle {
             agent.status = AiStatus::Waiting;
             agent.tool_status = Some("Teshi is thinking...".into());
-            let tools = Some(crate::agent::get_tools());
+            let tools = Some(crate::agent::get_tools(allowed_tools.as_deref()));
             let _ = handle.send(crate::llm::LlmRequest::Chat {
                 system: Some(system_prompt),
                 messages,
@@ -3488,6 +3496,58 @@ impl App {
             }
         }
 
+        // Agent profile selection panel intercept
+        if self.agent_profile_panel_active {
+            return match action {
+                Action::AgentPanelUp => {
+                    if self.agent_profile_panel_selection > 0 {
+                        self.agent_profile_panel_selection -= 1;
+                    }
+                    self.quit_pending_confirm = false;
+                    Ok(())
+                }
+                Action::AgentPanelDown => {
+                    if self.agent_profile_panel_selection + 1 < self.agent_profiles.len() {
+                        self.agent_profile_panel_selection += 1;
+                    }
+                    self.quit_pending_confirm = false;
+                    Ok(())
+                }
+                Action::AgentPanelSelect => {
+                    let selected_idx = self.agent_profile_panel_selection;
+                    let profile_clone = self.agent_profiles.get(selected_idx).cloned();
+                    if let Some(profile) = profile_clone {
+                        let agent = self.agent_mut();
+                        agent.profile_id = Some(profile.id.clone());
+                        let _ = agent;
+                        // If profile has model_ref, auto-activate that model
+                        if let Some(model_id) = &profile.model_ref {
+                            let model_profile_clone = self
+                                .model_profiles
+                                .iter()
+                                .find(|m| m.id == *model_id)
+                                .cloned();
+                            if let Some(mp) = model_profile_clone {
+                                self.activate_model_profile(&mp);
+                            }
+                        }
+                        // Reload skills from the new profile's dirs
+                        self.reload_skills_for_profile();
+                        self.status = format!("Switched to agent: {}", profile.name);
+                    }
+                    self.agent_profile_panel_active = false;
+                    self.quit_pending_confirm = false;
+                    Ok(())
+                }
+                Action::ClearInputState | Action::AgentPanelClose => {
+                    self.agent_profile_panel_active = false;
+                    self.quit_pending_confirm = false;
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+        }
+
         // Approval mode selection panel intercept
         if self.approval_panel_active {
             return match action {
@@ -3609,10 +3669,18 @@ impl App {
                         self.status = "AI not configured".to_string();
                     } else if let Some(ref handle) = self.agent().llm_handle {
                         let messages = self.build_chat_messages_for_agent(self.selected_agent);
-                        let tools = Some(crate::agent::get_tools());
+                        let profile = self.agent_profile(self.selected_agent);
+                        let allowed = profile.and_then(|p| {
+                            if p.tools.is_empty() {
+                                None
+                            } else {
+                                Some(p.tools.as_slice())
+                            }
+                        });
+                        let tools = Some(crate::agent::get_tools(allowed));
                         if handle
                             .send(crate::llm::LlmRequest::Chat {
-                                system: Some(self.ai_system_prompt(None)),
+                                system: Some(self.ai_system_prompt(None, self.selected_agent)),
                                 messages,
                                 tools,
                             })
@@ -4286,11 +4354,30 @@ impl App {
                             .iter()
                             .position(|m| *m == self.approval_mode)
                             .unwrap_or(0);
-                        self.status = "Approval mode. up/down select | Enter confirm | Esc cancel"
-                            .to_string();
+                        self.status = "Approval mode".to_string();
                         return Ok(());
                     }
-                    self.status = "Unknown slash command. Try /new, /exit, /resume, /copy, /models, /sessions, /approval".to_string();
+                    if cmd == "agent" || cmd == "agents" {
+                        self.agent_profiles =
+                            crate::agent::profile::AgentProfileRegistry::load_all(Some(
+                                self.find_project_dir(),
+                            ))
+                            .list()
+                            .to_vec();
+                        self.agent_profile_panel_active = true;
+                        self.agent_profile_panel_selection = self
+                            .agent_profiles
+                            .iter()
+                            .position(|p| {
+                                Some(p.id.as_str()) == self.agent().profile_id.as_deref()
+                                    || (self.agent().profile_id.is_none() && p.id == "default")
+                            })
+                            .unwrap_or(0);
+                        self.status =
+                            "Agent profiles: ↑↓ select · Enter apply · Esc close".to_string();
+                        return Ok(());
+                    }
+                    self.status = "Unknown slash command. Try /new, /exit, /resume, /copy, /models, /sessions, /approval, /agent".to_string();
                     return Ok(());
                 }
 
@@ -4340,11 +4427,21 @@ impl App {
                     self.compact_context_if_needed(self.selected_agent);
                     use crate::llm::LlmRequest;
                     let messages = self.build_chat_messages_for_agent(self.selected_agent);
-                    let tools = Some(crate::agent::get_tools());
+                    let profile = self.agent_profile(self.selected_agent);
+                    let allowed = profile.and_then(|p| {
+                        if p.tools.is_empty() {
+                            None
+                        } else {
+                            Some(p.tools.as_slice())
+                        }
+                    });
+                    let tools = Some(crate::agent::get_tools(allowed));
                     let handle = self.agent().llm_handle.as_ref().unwrap();
                     if handle
                         .send(LlmRequest::Chat {
-                            system: Some(self.ai_system_prompt(Some(&user_msg))),
+                            system: Some(
+                                self.ai_system_prompt(Some(&user_msg), self.selected_agent),
+                            ),
                             messages,
                             tools,
                         })
@@ -4471,9 +4568,7 @@ impl App {
                                     .iter()
                                     .position(|m| *m == self.approval_mode)
                                     .unwrap_or(0);
-                            self.status =
-                                "Approval mode. Up/Down select | Enter confirm | Esc cancel"
-                                    .to_string();
+                            self.status = "Approval mode".to_string();
                             Ok(())
                         }
                         _ => Ok(()),
@@ -4653,6 +4748,11 @@ impl App {
                 }
                 self.quit_pending_confirm = false;
             }
+            // Agent panel actions are handled in the intercept above — unreachable here.
+            Action::AgentPanelUp
+            | Action::AgentPanelDown
+            | Action::AgentPanelSelect
+            | Action::AgentPanelClose => {}
         }
         self.clamp_cursor();
         Ok(())
@@ -5078,6 +5178,10 @@ impl App {
         let pos = ratatui::layout::Position::new(col, row);
 
         match kind {
+            MouseEventKind::Moved => {
+                self.mouse_position = Some((col, row));
+                return Ok(());
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 // 1. Try clickable UI regions (tabs, tree, explore columns, etc.)
                 if let Some(region) = self.hit_test(&pos).cloned() {
@@ -6386,6 +6490,7 @@ mod tests {
             scenario_fold: HashSet::new(),
             selection_anchor: None,
             selection_end: None,
+            mouse_position: None,
             editor_panel_rect: None,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
@@ -6453,6 +6558,11 @@ mod tests {
             session_panel_selection: 0,
             session_list: Vec::new(),
             skill_registry: crate::agent::skills::SkillRegistry::new(),
+            agent_profiles: crate::agent::profile::AgentProfileRegistry::load_all(None)
+                .list()
+                .to_vec(),
+            agent_profile_panel_active: false,
+            agent_profile_panel_selection: 0,
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
@@ -6537,6 +6647,7 @@ Feature: B
             scenario_fold: HashSet::new(),
             selection_anchor: None,
             selection_end: None,
+            mouse_position: None,
             editor_panel_rect: None,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
@@ -6604,6 +6715,11 @@ Feature: B
             session_panel_selection: 0,
             session_list: Vec::new(),
             skill_registry: crate::agent::skills::SkillRegistry::new(),
+            agent_profiles: crate::agent::profile::AgentProfileRegistry::load_all(None)
+                .list()
+                .to_vec(),
+            agent_profile_panel_active: false,
+            agent_profile_panel_selection: 0,
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,

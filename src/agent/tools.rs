@@ -6,8 +6,8 @@
 
 use crate::llm::ToolDefinition;
 
-/// Returns the full list of available tool definitions for the LLM.
-pub fn get_tools() -> Vec<ToolDefinition> {
+/// Returns all tool definitions (unfiltered).
+fn get_all_tools() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "get_project_info".into(),
@@ -433,4 +433,17 @@ pub fn get_tools() -> Vec<ToolDefinition> {
             }),
         },
     ]
+}
+
+/// Returns tool definitions for the LLM, optionally filtered by `allowed` list.
+///
+/// When `allowed` is `None` or empty, all tools are returned.
+pub fn get_tools(allowed: Option<&[String]>) -> Vec<ToolDefinition> {
+    let all = get_all_tools();
+    match allowed {
+        Some(list) if !list.is_empty() => {
+            all.into_iter().filter(|t| list.contains(&t.name)).collect()
+        }
+        _ => all,
+    }
 }

@@ -4,7 +4,9 @@
 //! state and modify editor content. Read-only tools return results immediately;
 //! file-modifying tools (e.g. `insert_scenario`) queue changes for user confirmation.
 
+pub mod approval;
 pub mod pipeline;
+pub mod profile;
 pub mod skills;
 mod tools;
 pub mod validator;

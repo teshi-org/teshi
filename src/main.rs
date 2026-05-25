@@ -39,16 +39,16 @@ use ratatui::backend::CrosstermBackend;
 
 /// Enable mouse tracking for in-app selection (click, drag, scroll) using
 /// ANSI escape sequences — basic tracking (`?1000h`) for click/release,
-/// button-event tracking (`?1002h`) for drag-based selection, and SGR extended
-/// coordinates (`?1006h`) for positions > 223. Omits any-event tracking
-/// (`?1003h`) to avoid flooding the event loop with free-motion reports.
+/// button-event tracking (`?1002h`) for drag-based selection, any-event
+/// tracking (`?1003h`) for hover detection, and SGR extended coordinates
+/// (`?1006h`) for positions > 223.
 ///
 /// Uses raw ANSI writes for all platforms so the same SGR mode is guaranteed.
 struct EnableAppMouseCapture;
 
 impl Command for EnableAppMouseCapture {
     fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        f.write_str("\x1b[?1000h\x1b[?1002h\x1b[?1006h")
+        f.write_str("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h")
     }
 
     #[cfg(windows)]
@@ -65,7 +65,7 @@ struct DisableAppMouseCapture;
 
 impl Command for DisableAppMouseCapture {
     fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        f.write_str("\x1b[?1006l\x1b[?1002l\x1b[?1000l")
+        f.write_str("\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l")
     }
 
     #[cfg(windows)]
@@ -220,6 +220,7 @@ fn main() -> Result<()> {
                             ai_status_waiting: app.agent().status == crate::app::AiStatus::Waiting,
                             scenario_dropdown_open: app.scenario_dropdown_open,
                             approval_panel_active: app.approval_panel_active,
+                            agent_profile_panel_active: app.agent_profile_panel_active,
                         },
                     ) {
                         app.handle_action(action)?;

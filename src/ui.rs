@@ -311,6 +311,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     if app.approval_panel_active {
         render_approval_panel(frame, app, frame.area());
     }
+
+    if app.agent_profile_panel_active {
+        render_agent_profile_panel(frame, app, frame.area());
+    }
 }
 
 fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -448,7 +452,9 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     }
 
-    let block = Block::default().borders(Borders::ALL).title(" AI Chat ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" AI Chat — {} ", app.active_agent_profile().name));
     let inner = block.inner(area);
     frame.render_widget(&block, area);
 
@@ -464,13 +470,19 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             col_right: area.right().saturating_sub(1),
         });
         // Badge styling based on mode
-        let badge_style = if app.approval_mode.requires_manual_approval() {
+        let mut badge_style = if app.approval_mode.requires_manual_approval() {
             Style::default().fg(Color::Yellow)
         } else if app.approval_mode.auto_accepts() {
             Style::default().fg(Color::Cyan)
         } else {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
         };
+        // Hover effect: reverse video to indicate clickability
+        if app.mouse_position.is_some_and(|(mx, my)| {
+            my == area.y && mx >= badge_x && mx < area.right().saturating_sub(1)
+        }) {
+            badge_style = badge_style.add_modifier(Modifier::REVERSED);
+        }
         let badge = Paragraph::new(Line::styled(badge_label, badge_style));
         let badge_area = Rect::new(badge_x, area.y, badge_width, 1);
         frame.render_widget(badge, badge_area);
@@ -1998,7 +2010,7 @@ pub(crate) fn render_agent_chat_inner(
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" AI Chat ")
+        .title(format!(" AI Chat — {} ", app.active_agent_profile().name))
         .border_style(border_style);
     let inner = block.inner(area);
     frame.render_widget(&block, area);
@@ -2013,13 +2025,19 @@ pub(crate) fn render_agent_chat_inner(
             col_x: badge_x,
             col_right: area.right().saturating_sub(1),
         });
-        let badge_style = if app.approval_mode.requires_manual_approval() {
+        let mut badge_style = if app.approval_mode.requires_manual_approval() {
             Style::default().fg(Color::Yellow)
         } else if app.approval_mode.auto_accepts() {
             Style::default().fg(Color::Cyan)
         } else {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
         };
+        // Hover effect: reverse video to indicate clickability
+        if app.mouse_position.is_some_and(|(mx, my)| {
+            my == area.y && mx >= badge_x && mx < area.right().saturating_sub(1)
+        }) {
+            badge_style = badge_style.add_modifier(Modifier::REVERSED);
+        }
         let badge = Paragraph::new(Line::styled(badge_label, badge_style));
         let badge_area = Rect::new(badge_x, area.y, badge_width, 1);
         frame.render_widget(badge, badge_area);
@@ -3369,16 +3387,22 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             (Color::White, Color::Gray, "  ")
         };
         let title = format!(" {} {}", marker, label);
-        lines.push(Line::styled(
-            title,
+        let mut title_style =
             Style::default()
                 .fg(main_fg)
                 .add_modifier(if is_selected || is_current {
                     Modifier::BOLD
                 } else {
                     Modifier::empty()
-                }),
-        ));
+                });
+        // Hover effect: reverse video to indicate clickability
+        let is_hovered = app
+            .mouse_position
+            .is_some_and(|(mx, my)| my == row_offset && mx >= inner.x && mx < inner.right());
+        if is_hovered {
+            title_style = title_style.add_modifier(Modifier::REVERSED);
+        }
+        lines.push(Line::styled(title, title_style));
 
         // Register clickable region for this option's title row
         app.clickable_regions.push(ClickableRegion::ApprovalOption {
@@ -3406,6 +3430,83 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         format!(
             " {}↓ select  Enter confirm  Esc cancel ",
             std::char::from_u32(0x2191).unwrap_or('^')
+        ),
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
+    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+}
+
+/// Render the agent profile selection popup panel.
+fn render_agent_profile_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let profiles = &app.agent_profiles;
+    let panel_w = area.width.min(56);
+    let item_rows: u16 = profiles.len() as u16;
+    let panel_h = (item_rows * 2 + 4).min(area.height.saturating_sub(4));
+    let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
+    let panel_y = area.y + (area.height.saturating_sub(panel_h)) / 2;
+    let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
+
+    frame.render_widget(Clear, panel_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Agent Profile ")
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(panel_area);
+    frame.render_widget(block, panel_area);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    for (i, profile) in profiles.iter().enumerate() {
+        // Determine if this profile is active for the current agent
+        let is_active = app
+            .agent()
+            .profile_id
+            .as_deref()
+            .map_or(profile.id == "default", |id| id == profile.id);
+        let is_selected = i == app.agent_profile_panel_selection;
+
+        // ── Title line ──
+        let (main_fg, marker) = if is_selected {
+            (Color::Yellow, "\u{25b6}")
+        } else if is_active {
+            (Color::Green, "\u{25cb}")
+        } else {
+            (Color::White, "  ")
+        };
+        let active_tag = if is_active { " [ACTIVE]" } else { "" };
+        let title = format!(" {} {}{}", marker, profile.name, active_tag);
+        lines.push(Line::styled(
+            title,
+            Style::default()
+                .fg(main_fg)
+                .add_modifier(if is_selected || is_active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
+
+        // ── Description line ──
+        lines.push(Line::styled(
+            format!("   {}", profile.description),
+            Style::default().fg(Color::DarkGray),
+        ));
+
+        // ── Separator ──
+        if i < profiles.len() - 1 {
+            lines.push(Line::raw(""));
+        }
+    }
+
+    // Navigation hint
+    lines.push(Line::styled(
+        format!(
+            " {} {}",
+            std::char::from_u32(0x2191).unwrap_or('^'),
+            "↓ select  Enter apply  Esc close"
         ),
         Style::default().fg(Color::DarkGray),
     ));

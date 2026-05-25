@@ -33,6 +33,8 @@ pub struct KeyContext {
     pub scenario_dropdown_open: bool,
     /// Whether the approval mode selection panel is open.
     pub approval_panel_active: bool,
+    /// Whether the agent profile selection panel is open.
+    pub agent_profile_panel_active: bool,
 }
 
 /// High-level editor command derived from keyboard input.
@@ -241,6 +243,15 @@ pub enum Action {
     ApprovalPanelDown,
     /// Confirm the selected approval mode.
     ApprovalPanelSelect,
+    // ── Agent profile panel actions ───────────
+    /// Navigate up in the agent profile selection panel.
+    AgentPanelUp,
+    /// Navigate down in the agent profile selection panel.
+    AgentPanelDown,
+    /// Confirm the selected agent profile.
+    AgentPanelSelect,
+    /// Close the agent profile selection panel.
+    AgentPanelClose,
 }
 
 impl Action {
@@ -284,6 +295,21 @@ impl Action {
                 | (KeyCode::Char('D'), KeyModifiers::SHIFT) => Some(Self::AgentChangeDiff),
                 (KeyCode::Char('s'), KeyModifiers::NONE)
                 | (KeyCode::Char('S'), KeyModifiers::SHIFT) => Some(Self::ToggleChangeSummary),
+                _ => None,
+            };
+        }
+
+        // Agent profile selection panel intercepts keys while open
+        if context.agent_profile_panel_active {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                    Some(Self::AgentPanelUp)
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    Some(Self::AgentPanelDown)
+                }
+                (KeyCode::Enter, _) => Some(Self::AgentPanelSelect),
+                (KeyCode::Esc, _) => Some(Self::AgentPanelClose),
                 _ => None,
             };
         }
@@ -736,6 +762,7 @@ mod tests {
             ai_status_waiting: false,
             scenario_dropdown_open: false,
             approval_panel_active: false,
+            agent_profile_panel_active: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -767,6 +794,7 @@ mod tests {
             ai_status_waiting: false,
             scenario_dropdown_open: false,
             approval_panel_active: false,
+            agent_profile_panel_active: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -798,6 +826,7 @@ mod tests {
             ai_status_waiting: false,
             scenario_dropdown_open: false,
             approval_panel_active: false,
+            agent_profile_panel_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -839,6 +868,7 @@ mod tests {
             ai_status_waiting: false,
             scenario_dropdown_open: false,
             approval_panel_active: false,
+            agent_profile_panel_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -880,6 +910,7 @@ mod tests {
             ai_status_waiting: false,
             scenario_dropdown_open: false,
             approval_panel_active: false,
+            agent_profile_panel_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
@@ -929,6 +960,7 @@ mod tests {
             ai_status_waiting: false,
             scenario_dropdown_open: false,
             approval_panel_active: false,
+            agent_profile_panel_active: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
@@ -960,6 +992,7 @@ mod tests {
             ai_status_waiting: false,
             scenario_dropdown_open: false,
             approval_panel_active: false,
+            agent_profile_panel_active: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
@@ -991,6 +1024,7 @@ mod tests {
             ai_status_waiting: false,
             scenario_dropdown_open: false,
             approval_panel_active: false,
+            agent_profile_panel_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), context),
@@ -1046,6 +1080,7 @@ mod tests {
             ai_status_waiting: false,
             scenario_dropdown_open: false,
             approval_panel_active: false,
+            agent_profile_panel_active: false,
         };
         let copy_context = KeyContext {
             pending_char: Some('y'),
@@ -1094,6 +1129,7 @@ mod tests {
             ai_status_waiting: false,
             scenario_dropdown_open: false,
             approval_panel_active: false,
+            agent_profile_panel_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
