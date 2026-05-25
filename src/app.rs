@@ -6028,6 +6028,9 @@ impl App {
         self.cursor_row = new_row;
         self.cursor_col = 0;
         self.desired_col = 0;
+        // When the cursor moves into a scenario's steps, focus that scenario
+        // so its steps stay visible while other scenarios' steps are dimmed.
+        self.editor_focus_scenario_row = scenario_header_for_row(&self.buffer, new_row);
         if body_chain_nav {
             return;
         }
