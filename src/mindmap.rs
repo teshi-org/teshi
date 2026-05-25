@@ -286,6 +286,9 @@ impl MindMapIndex {
         let label_colors = Self::build_label_colors(&self.highlights, &self.node_labels);
         let root_label = self.node_labels.get("root").cloned().unwrap_or_default();
         let mut next_id = 0usize;
+        // Clear and repopulate parent/children maps in trie traversal order.
+        self.parent_map.clear();
+        self.children_map.clear();
         let mut ctx = BuildItemsCtx {
             arena: &self.arena,
             root_label: &root_label,
@@ -296,6 +299,8 @@ impl MindMapIndex {
             label_colors: &label_colors,
             node_categories: &self.node_categories,
             filter: &self.filter,
+            parent_map: &mut self.parent_map,
+            children_map: &mut self.children_map,
         };
         let root_item = build_items(0, &mut ctx, &[])
             .unwrap_or_else(|| TreeItem::new_leaf("root".to_string(), "(no matching nodes)"));
@@ -499,6 +504,9 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
     let empty_categories: HashMap<String, HighlightCategory> = HashMap::new();
     let empty_filter: Option<MindMapFilter> = None;
 
+    let mut parent_map: HashMap<String, String> = HashMap::new();
+    let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
+
     let mut ctx = BuildItemsCtx {
         arena: &arena,
         root_label: &root_label,
@@ -509,6 +517,8 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
         label_colors: &empty_colors,
         node_categories: &empty_categories,
         filter: &empty_filter,
+        parent_map: &mut parent_map,
+        children_map: &mut children_map,
     };
     let root_item = build_items(0, &mut ctx, &[])
         .expect("root item must always be constructable during initial build");
@@ -523,20 +533,6 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
                     line_number: loc.line_number,
                 });
             }
-        }
-    }
-
-    // Derive parent_map and children_map from node_paths
-    let mut parent_map: HashMap<String, String> = HashMap::new();
-    let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
-    for (id, path) in &node_paths {
-        if path.len() >= 2 {
-            let parent_id = &path[path.len() - 2];
-            parent_map.insert(id.clone(), parent_id.clone());
-            children_map
-                .entry(parent_id.clone())
-                .or_default()
-                .push(id.clone());
         }
     }
 
@@ -604,6 +600,10 @@ struct BuildItemsCtx<'a> {
     node_categories: &'a HashMap<String, HighlightCategory>,
     /// Active filter, if any.
     filter: &'a Option<MindMapFilter>,
+    /// Maps child node ID → parent node ID (populated during trie traversal).
+    parent_map: &'a mut HashMap<String, String>,
+    /// Maps parent node ID → children node IDs in trie order (populated during trie traversal).
+    children_map: &'a mut HashMap<String, Vec<String>>,
 }
 
 fn build_items(
@@ -623,6 +623,15 @@ fn build_items(
     ctx.node_paths.insert(id.clone(), path.clone());
     ctx.node_locations
         .insert(id.clone(), ctx.arena[node_idx].locations.clone());
+
+    // Record parent-child relationship (in trie order, so sibling order is correct)
+    if let Some(parent_id) = parent_path.last() {
+        ctx.parent_map.insert(id.clone(), parent_id.clone());
+        ctx.children_map
+            .entry(parent_id.clone())
+            .or_default()
+            .push(id.clone());
+    }
 
     let label = if node_idx == 0 {
         ctx.root_label.to_string()
