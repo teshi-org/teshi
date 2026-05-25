@@ -3531,7 +3531,11 @@ impl App {
         if self.quit_pending_confirm {
             return match action {
                 Action::Quit => {
-                    self.should_quit = true;
+                    if self.quit_panel_selection == 0 {
+                        self.should_quit = true;
+                    } else {
+                        self.quit_pending_confirm = false;
+                    }
                     Ok(())
                 }
                 Action::ClearInputState => {
