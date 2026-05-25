@@ -466,6 +466,8 @@ pub struct App {
     pub agent_form_tools_str: String,
     pub agent_form_skills_str: String,
     pub agent_form_model_ref: String,
+    /// Active tab in the agent config form (0=Basic, 1=Instructions, 2=Tools, 3=Skills, 4=Model).
+    pub agent_config_tab: usize,
     // ── Generation pipeline state ───────────────────────
     pub generation_stage: crate::agent::pipeline::GenerationStage,
     pub pipeline_requirement: Option<crate::agent::pipeline::Requirement>,
@@ -737,6 +739,7 @@ impl App {
             agent_form_tools_str: String::new(),
             agent_form_skills_str: String::new(),
             agent_form_model_ref: String::new(),
+            agent_config_tab: 0,
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
@@ -901,6 +904,7 @@ impl App {
             agent_form_tools_str: String::new(),
             agent_form_skills_str: String::new(),
             agent_form_model_ref: String::new(),
+            agent_config_tab: 0,
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
@@ -1050,6 +1054,7 @@ impl App {
             agent_form_tools_str: String::new(),
             agent_form_skills_str: String::new(),
             agent_form_model_ref: String::new(),
+            agent_config_tab: 0,
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
@@ -3559,7 +3564,14 @@ impl App {
                         Ok(())
                     }
                     Action::AgentPanelFormNext => {
-                        let max = 5usize;
+                        let max = match self.agent_config_tab {
+                            0 => 1, // Name, Description
+                            1 => 2, // Instructions
+                            2 => 3, // Tools
+                            3 => 4, // Skills
+                            4 => 5, // Model
+                            _ => 0,
+                        };
                         if self.agent_form_focus < max {
                             self.agent_form_focus += 1;
                         }
@@ -3567,7 +3579,15 @@ impl App {
                         Ok(())
                     }
                     Action::AgentPanelFormPrev => {
-                        if self.agent_form_focus > 0 {
+                        let min = match self.agent_config_tab {
+                            0 => 0,
+                            1 => 2,
+                            2 => 3,
+                            3 => 4,
+                            4 => 5,
+                            _ => 0,
+                        };
+                        if self.agent_form_focus > min {
                             self.agent_form_focus -= 1;
                         }
                         self.quit_pending_confirm = false;
@@ -3692,6 +3712,18 @@ impl App {
                         self.quit_pending_confirm = false;
                         Ok(())
                     }
+                    Action::AgentPanelTabPrev => {
+                        self.agent_config_tab = self.agent_config_tab.saturating_sub(1);
+                        self.quit_pending_confirm = false;
+                        Ok(())
+                    }
+                    Action::AgentPanelTabNext => {
+                        if self.agent_config_tab < 4 {
+                            self.agent_config_tab += 1;
+                        }
+                        self.quit_pending_confirm = false;
+                        Ok(())
+                    }
                     _ => Ok(()),
                 };
             } else {
@@ -3755,12 +3787,6 @@ impl App {
                             .get(self.agent_profile_panel_selection)
                             .cloned()
                         {
-                            if profile.id == "default" {
-                                self.status =
-                                    "Cannot edit the built-in default profile.".to_string();
-                                self.quit_pending_confirm = false;
-                                return Ok(());
-                            }
                             self.agent_form_editing_id = Some(profile.id.clone());
                             self.agent_panel_mode = AgentPanelMode::Editing;
                             self.agent_form_focus = 0;
@@ -5035,7 +5061,9 @@ impl App {
             | Action::AgentPanelFormInsert(_)
             | Action::AgentPanelFormBackspace
             | Action::AgentPanelFormSubmit
-            | Action::AgentPanelFormCancel => {}
+            | Action::AgentPanelFormCancel
+            | Action::AgentPanelTabPrev
+            | Action::AgentPanelTabNext => {}
         }
         self.clamp_cursor();
         Ok(())
@@ -5062,11 +5090,15 @@ impl App {
     }
 
     fn quit(&mut self) {
-        if !self.quit_pending_confirm {
-            self.quit_pending_confirm = true;
-            return;
+        if self.dirty {
+            if !self.quit_pending_confirm {
+                self.quit_pending_confirm = true;
+                return;
+            }
+            self.should_quit = true;
+        } else {
+            self.should_quit = true;
         }
-        self.should_quit = true;
     }
 
     fn clamp_cursor(&mut self) {
@@ -6879,6 +6911,7 @@ mod tests {
             agent_form_tools_str: String::new(),
             agent_form_skills_str: String::new(),
             agent_form_model_ref: String::new(),
+            agent_config_tab: 0,
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
@@ -7046,6 +7079,7 @@ Feature: B
             agent_form_tools_str: String::new(),
             agent_form_skills_str: String::new(),
             agent_form_model_ref: String::new(),
+            agent_config_tab: 0,
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
