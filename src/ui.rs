@@ -200,11 +200,11 @@ fn step_line_display(
     let Some((keyword, _ty)) = lang.match_step_prefix(trimmed) else {
         return (line.to_string(), 0, 0);
     };
-    let kw_len = keyword.chars().count();
-    if kw_len >= STEP_KEYWORD_COL_WIDTH {
+    let kw_width = keyword.width();
+    if kw_width >= STEP_KEYWORD_COL_WIDTH {
         return (line.to_string(), 0, 0);
     }
-    let pad = STEP_KEYWORD_COL_WIDTH - kw_len;
+    let pad = STEP_KEYWORD_COL_WIDTH - kw_width;
     let mut out = String::new();
     let lead: String = line.chars().take(leading).collect();
     out.push_str(&lead);
@@ -1381,7 +1381,16 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             ));
             line_idx += 1;
             for step in background_steps {
-                let kw = format!("{:>6}", step.keyword);
+                let kw_width = step.keyword.width();
+                let kw = if kw_width >= STEP_KEYWORD_COL_WIDTH {
+                    step.keyword.clone()
+                } else {
+                    format!(
+                        "{}{}",
+                        " ".repeat(STEP_KEYWORD_COL_WIDTH - kw_width),
+                        step.keyword
+                    )
+                };
                 let kw_color = match step.keyword_type {
                     StepKeywordType::Given => {
                         last_major = Some(KEYWORD_GIVEN);
@@ -1424,7 +1433,16 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
 
         for (i, step) in scenario_steps.iter().enumerate() {
-            let kw = format!("{:>6}", step.keyword);
+            let kw_width = step.keyword.width();
+            let kw = if kw_width >= STEP_KEYWORD_COL_WIDTH {
+                step.keyword.clone()
+            } else {
+                format!(
+                    "{}{}",
+                    " ".repeat(STEP_KEYWORD_COL_WIDTH - kw_width),
+                    step.keyword
+                )
+            };
             let kw_color = match step.keyword_type {
                 StepKeywordType::Given => {
                     last_major = Some(KEYWORD_GIVEN);
@@ -1759,7 +1777,22 @@ fn render_mindmap_scenario_preview(
         return;
     }
 
-    let buffer = app.preview_buffer.as_ref().unwrap_or(&app.buffer);
+    let Some(buffer) = app.preview_buffer.as_ref() else {
+        // No preview available — render an empty placeholder panel
+        let title = "Preview";
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .title_style(if focused {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            });
+        frame.render_widget(block, area);
+        return;
+    };
 
     let title = if app.preview_title.is_empty() {
         "Preview"
@@ -1824,7 +1857,7 @@ fn render_mindmap_scenario_preview(
 
     // Render lines with Gherkin syntax highlighting
     let mut step_state = crate::highlight::StepHighlightState::default();
-    let preview_style = Style::default().fg(Color::Cyan);
+    let highlight_style = Style::default().fg(Color::Yellow);
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible_lines);
 
     for i in 0..visible_lines {
@@ -1844,12 +1877,24 @@ fn render_mindmap_scenario_preview(
             highlight_line_with_state(&display_line, &mut step_state, buffer.language());
 
         if buf_row == cursor_row {
-            styled = Line::from(Span::styled(display_line.to_string(), preview_style));
+            // Highlight the selected step in yellow, but keep step keywords
+            // (Given/When/Then/And/But) in their original colors.
+            let mut new_spans: Vec<Span<'static>> = Vec::with_capacity(styled.spans.len());
+            for span in styled.spans.iter() {
+                if span.style.fg.is_some() {
+                    // Keyword, tag, string literal, etc. — keep original color
+                    new_spans.push(span.clone());
+                } else {
+                    // Description text / rest — highlight in yellow
+                    new_spans.push(Span::styled(span.content.clone(), highlight_style));
+                }
+            }
+            styled = Line::from(new_spans);
         }
 
         styled = truncate_line_to_cols(styled, inner.width);
         let pad_trail = if buf_row == cursor_row {
-            preview_style
+            highlight_style
         } else {
             Style::default()
         };
@@ -2683,12 +2728,10 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rec
         .filter(|kw| kw.as_str() != "*")
         .map(|s| s.as_str())
         .collect();
-    let max_kw_ch = keywords
-        .iter()
-        .map(|s| s.chars().count())
-        .max()
-        .unwrap_or(5);
-    let inner_w_ch = max_kw_ch.max(TITLE.chars().count()).saturating_add(2);
+    let max_kw_w = keywords.iter().map(|s| s.width()).max().unwrap_or(5);
+    // Use max display width for popup width, but ensure at least title width
+    let title_width = TITLE.width();
+    let inner_w_ch = max_kw_w.max(title_width).saturating_add(2);
     let list_w = (inner_w_ch as u16).saturating_add(2);
     let n_items = keywords.len();
     let list_h = (n_items as u16).saturating_add(2);
@@ -3843,5 +3886,42 @@ mod truncate_tests {
         app.project.features = vec![feature];
         app.explore_selected_feature = 0;
         assert_eq!(explore_scenarios_title(&app), "Scenarios (2)");
+    }
+
+    #[test]
+    fn test_step_line_display_chinese_keyword_alignment() {
+        use crate::gherkin_lang::GherkinLanguages;
+        use unicode_width::UnicodeWidthStr;
+
+        let zh = GherkinLanguages::global().get("zh-CN");
+
+        // All Chinese keywords must produce the same keyword-region display width
+        let cases = [
+            ("  当 用户登录", "当"),
+            ("  那么 显示结果", "那么"),
+            ("  并且 其他操作", "并且"),
+            ("  而且 其他操作", "而且"),
+            ("  但是 退出", "但是"),
+            ("  假如 用户存在", "假如"),
+        ];
+
+        let mut prev_region_width: Option<usize> = None;
+        for (input, expected_kw) in &cases {
+            let (output, pad, leading) = super::step_line_display(input, false, zh);
+            let kw_display_w = expected_kw.width();
+            let region_width = leading + pad + kw_display_w;
+            eprintln!(
+                "input='{}' kw='{}' kw.width={} leading={} pad={} region_width={} output='{}'",
+                input, expected_kw, kw_display_w, leading, pad, region_width, output
+            );
+            if let Some(prev) = prev_region_width {
+                assert_eq!(
+                    region_width, prev,
+                    "Keyword '{}' region width {} differs from {}; output='{}'",
+                    expected_kw, region_width, prev, output
+                );
+            }
+            prev_region_width = Some(region_width);
+        }
     }
 }
