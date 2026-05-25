@@ -4498,6 +4498,7 @@ impl App {
                     self.step_input_active = false;
                     self.focus_slot = BddFocusSlot::Body;
                     self.status = "Edit committed".to_string();
+                    self.set_status_message("Edit committed".to_string());
                 }
             }
             Action::Backspace => {
@@ -5256,6 +5257,7 @@ impl App {
                 self.cursor_col = end;
                 self.desired_col = end;
                 self.status = "Editing active".to_string();
+                self.set_status_message("Editing active".to_string());
             }
         }
         self.pending_char = None;

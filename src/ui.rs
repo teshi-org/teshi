@@ -2533,7 +2533,9 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
         }
 
         if row == cursor_row && !preview {
-            let nav_cell_style = selected_style(true);
+            // Use a block-cursor background for edit mode so the cursor is visible
+            // even when positioned at the end of the line (on a space character).
+            let edit_cursor_style = Style::default().fg(Color::White).bg(SELECTION_BG);
             let line_len = display_len;
             if app.is_editor_nav_mode() {
                 let focus_patch = selected_style(true);
@@ -2554,16 +2556,16 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
                     app.cursor_col
                 };
                 if line_len == 0 {
-                    styled = Line::from(vec![Span::styled(" ", nav_cell_style)]);
+                    styled = Line::from(vec![Span::styled(" ", edit_cursor_style)]);
                 } else if cursor_col < line_len {
                     styled = apply_patch_to_char_range(
                         styled,
                         cursor_col..cursor_col.saturating_add(1),
-                        nav_cell_style,
+                        edit_cursor_style,
                     );
                 } else {
                     let mut spans = styled.spans;
-                    spans.push(Span::styled(" ", nav_cell_style));
+                    spans.push(Span::styled(" ", edit_cursor_style));
                     styled = Line::from(spans);
                 }
             }
