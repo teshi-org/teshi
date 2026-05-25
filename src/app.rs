@@ -3249,7 +3249,8 @@ impl App {
             .saturating_sub(start_line)
             .min(out.lines().count().saturating_sub(1));
 
-        self.preview_buffer = Some(EditorBuffer::from_string(out));
+        let lang_code = buffer.lang_code().to_string();
+        self.preview_buffer = Some(EditorBuffer::from_string_with_lang(out, lang_code));
         self.preview_title = title;
 
         // Append location index for nodes appearing in multiple scenarios

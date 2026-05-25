@@ -18,6 +18,18 @@ impl EditorBuffer {
         }
     }
 
+    /// Create a buffer from content with an explicit language code.
+    ///
+    /// Unlike [`from_string`], this does not auto-detect the language from
+    /// the content — useful when the content is a slice that lacks the
+    /// `# language:` directive (e.g. mindmap preview).
+    pub fn from_string_with_lang(content: String, lang_code: String) -> Self {
+        Self {
+            rope: Rope::from_str(&content),
+            lang_code,
+        }
+    }
+
     pub fn language(&self) -> &GherkinLanguage {
         GherkinLanguages::global().get(&self.lang_code)
     }
