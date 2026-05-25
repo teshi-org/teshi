@@ -3369,7 +3369,7 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // Centered message
-    let msg = "Are you sure you want to quit?";
+    let msg = "You have unsaved changes, quit anyway?";
     let msg_pad = (inner_w.saturating_sub(msg.len())) / 2;
     lines.push(Line::styled(
         format!("{}{}", " ".repeat(msg_pad), msg),
@@ -3626,8 +3626,8 @@ fn render_agent_profile_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn render_agent_profile_form(frame: &mut Frame<'_>, app: &App, title: &str, area: Rect) {
-    let panel_w = area.width.min(64);
-    let panel_h = 20u16.min(area.height.saturating_sub(4));
+    let panel_w = area.width.min(72);
+    let panel_h = 22u16.min(area.height.saturating_sub(4));
     let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
     let panel_y = area.y + (area.height.saturating_sub(panel_h)) / 2;
     let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
@@ -3641,53 +3641,124 @@ fn render_agent_profile_form(frame: &mut Frame<'_>, app: &App, title: &str, area
     let inner = block.inner(panel_area);
     frame.render_widget(block, panel_area);
 
-    let fields: [(&str, &str); 6] = [
-        ("Name", &app.agent_form_name),
-        ("Description", &app.agent_form_description),
-        ("Instructions", &app.agent_form_instructions),
-        ("Tools (csv)", &app.agent_form_tools_str),
-        ("Skills dirs (csv)", &app.agent_form_skills_str),
-        ("Model ref", &app.agent_form_model_ref),
-    ];
+    // ── Tab bar ──
+    let tabs = ["Basic", "Instructions", "Tools", "Skills", "Model"];
+    let tab_line: Vec<Span<'_>> = tabs
+        .iter()
+        .enumerate()
+        .flat_map(|(i, name)| {
+            let is_active = i == app.agent_config_tab;
+            let style = if is_active {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
+            let mut parts = vec![Span::styled(format!(" {} ", name), style)];
+            if i < tabs.len() - 1 {
+                parts.push(Span::raw("│"));
+            }
+            parts
+        })
+        .collect();
 
     let mut lines: Vec<Line<'_>> = Vec::new();
-    lines.push(Line::raw(""));
+    lines.push(Line::from(tab_line));
+    lines.push(Line::styled(
+        "─".repeat(inner.width as usize),
+        Style::default().fg(Color::DarkGray),
+    ));
 
-    for (i, (label, value)) in fields.iter().enumerate() {
-        let focused = i == app.agent_form_focus;
-        let indicator = if focused { " ▸ " } else { "   " };
-        let label_style = if focused {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Cyan)
-        };
-        let val_style = if focused {
-            Style::default().bg(Color::DarkGray).fg(Color::White)
-        } else {
-            Style::default().fg(Color::White)
-        };
-        let display_val = if value.is_empty() {
-            if focused {
-                "(type here...)".to_string()
+    // ── Tab content ──
+    match app.agent_config_tab {
+        0 => {
+            // Basic — Name + Description
+            render_tab_field(&mut lines, app, 0, "Name", &app.agent_form_name);
+            render_tab_field(
+                &mut lines,
+                app,
+                1,
+                "Description",
+                &app.agent_form_description,
+            );
+        }
+        1 => {
+            // Instructions — system prompt
+            let focused = app.agent_form_focus == 2;
+            let indicator = if focused { " ▸ " } else { "   " };
+            let label_style = if focused {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                "(empty)".to_string()
+                Style::default().fg(Color::Cyan)
+            };
+            let val_style = if focused {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            lines.push(Line::raw(""));
+            lines.push(Line::from(vec![
+                Span::styled(indicator, label_style),
+                Span::styled("Instructions", label_style),
+            ]));
+            let instr_text = if app.agent_form_instructions.is_empty() {
+                if focused { "(type here...)" } else { "(empty)" }
+            } else {
+                &app.agent_form_instructions
+            };
+            // Show first few lines of the instructions
+            for line_text in instr_text.lines().take(6) {
+                lines.push(Line::styled(format!("   {}", line_text), val_style));
             }
-        } else {
-            value.to_string()
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(indicator, label_style),
-            Span::styled(format!("{:<18}", label), label_style),
-            Span::raw(" "),
-            Span::styled(display_val, val_style),
-        ]));
+            if instr_text.lines().count() > 6 {
+                lines.push(Line::styled("   ...", val_style));
+            }
+            lines.push(Line::styled(
+                "   (║ text will wrap in the terminal)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        2 => {
+            // Tools — comma-separated
+            render_tab_field(&mut lines, app, 3, "Tools (csv)", &app.agent_form_tools_str);
+            lines.push(Line::styled(
+                "   Available: get_project_info, get_feature_content, insert_scenario, ...",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        3 => {
+            // Skills — comma-separated directories
+            render_tab_field(
+                &mut lines,
+                app,
+                4,
+                "Skills dirs (csv)",
+                &app.agent_form_skills_str,
+            );
+            lines.push(Line::styled(
+                "   Paths relative to project root, e.g. .teshi/skills",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        4 => {
+            // Model — model_ref
+            render_tab_field(&mut lines, app, 5, "Model ref", &app.agent_form_model_ref);
+            lines.push(Line::styled(
+                "   Leave empty to use the active model profile",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        _ => {}
     }
 
+    // ── Footer ──
+    lines.push(Line::raw(""));
     let footer = Line::styled(
-        "Save [Enter]  Cancel [Esc]",
+        "← → tabs · Tab/↑↓ field · Enter save · Esc cancel",
         Style::default().fg(Color::DarkGray),
     )
     .alignment(Alignment::Center);
@@ -3695,6 +3766,47 @@ fn render_agent_profile_form(frame: &mut Frame<'_>, app: &App, title: &str, area
 
     let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
     frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+}
+
+/// Helper to render a single form field row (label + value + focus highlight).
+fn render_tab_field(
+    lines: &mut Vec<Line<'static>>,
+    app: &App,
+    focus_idx: usize,
+    label: &str,
+    value: &str,
+) {
+    let focused = app.agent_form_focus == focus_idx;
+    let indicator = if focused { " ▸ " } else { "   " };
+    let label_style = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+    let val_style = if focused {
+        Style::default().bg(Color::DarkGray).fg(Color::White)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let display_val = if value.is_empty() {
+        if focused {
+            "(type here...)".to_string()
+        } else {
+            "(empty)".to_string()
+        }
+    } else {
+        value.to_string()
+    };
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(indicator, label_style),
+        Span::styled(format!("{:<18}", label), label_style),
+        Span::raw(" "),
+        Span::styled(display_val, val_style),
+    ]));
 }
 
 #[cfg(test)]
