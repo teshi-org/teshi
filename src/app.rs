@@ -415,7 +415,7 @@ pub struct App {
     pub slash_suggestion_selection: usize,
     /// Whether the AI tab input bar has keyboard focus (Esc toggles this off).
     pub ai_input_focused: bool,
-    quit_pending_confirm: bool,
+    pub quit_pending_confirm: bool,
     /// Temporary one-shot status message (e.g. "AI applied filter: @smoke").
     pub status_message: Option<String>,
     /// When the status message should be cleared (3-second lifespan).
@@ -520,6 +520,18 @@ pub enum ClickableRegion {
     /// Preview panel area — reserved for click-to-focus.
     #[allow(dead_code)]
     PreviewPanel,
+    /// Quit confirmation "Yes" button.
+    QuitConfirmYes {
+        row_y: u16,
+        col_x: u16,
+        col_right: u16,
+    },
+    /// Quit confirmation "No" button.
+    QuitConfirmNo {
+        row_y: u16,
+        col_x: u16,
+        col_right: u16,
+    },
 }
 
 impl App {
@@ -1024,6 +1036,15 @@ impl App {
                 .to_vec(),
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
+            agent_panel_mode: AgentPanelMode::List,
+            agent_form_editing_id: None,
+            agent_form_focus: 0,
+            agent_form_name: String::new(),
+            agent_form_description: String::new(),
+            agent_form_instructions: String::new(),
+            agent_form_tools_str: String::new(),
+            agent_form_skills_str: String::new(),
+            agent_form_model_ref: String::new(),
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
@@ -3496,56 +3517,296 @@ impl App {
             }
         }
 
-        // Agent profile selection panel intercept
-        if self.agent_profile_panel_active {
+        // Quit confirmation panel intercept (highest priority after prompts)
+        if self.quit_pending_confirm {
             return match action {
-                Action::AgentPanelUp => {
-                    if self.agent_profile_panel_selection > 0 {
-                        self.agent_profile_panel_selection -= 1;
-                    }
-                    self.quit_pending_confirm = false;
+                Action::Quit => {
+                    self.should_quit = true;
                     Ok(())
                 }
-                Action::AgentPanelDown => {
-                    if self.agent_profile_panel_selection + 1 < self.agent_profiles.len() {
-                        self.agent_profile_panel_selection += 1;
-                    }
-                    self.quit_pending_confirm = false;
-                    Ok(())
-                }
-                Action::AgentPanelSelect => {
-                    let selected_idx = self.agent_profile_panel_selection;
-                    let profile_clone = self.agent_profiles.get(selected_idx).cloned();
-                    if let Some(profile) = profile_clone {
-                        let agent = self.agent_mut();
-                        agent.profile_id = Some(profile.id.clone());
-                        let _ = agent;
-                        // If profile has model_ref, auto-activate that model
-                        if let Some(model_id) = &profile.model_ref {
-                            let model_profile_clone = self
-                                .model_profiles
-                                .iter()
-                                .find(|m| m.id == *model_id)
-                                .cloned();
-                            if let Some(mp) = model_profile_clone {
-                                self.activate_model_profile(&mp);
-                            }
-                        }
-                        // Reload skills from the new profile's dirs
-                        self.reload_skills_for_profile();
-                        self.status = format!("Switched to agent: {}", profile.name);
-                    }
-                    self.agent_profile_panel_active = false;
-                    self.quit_pending_confirm = false;
-                    Ok(())
-                }
-                Action::ClearInputState | Action::AgentPanelClose => {
-                    self.agent_profile_panel_active = false;
+                Action::ClearInputState => {
                     self.quit_pending_confirm = false;
                     Ok(())
                 }
                 _ => Ok(()),
             };
+        }
+
+        // Agent profile selection panel intercept
+        if self.agent_profile_panel_active {
+            if self.agent_panel_mode == AgentPanelMode::Adding
+                || self.agent_panel_mode == AgentPanelMode::Editing
+            {
+                // ── Form mode ──
+                return match action {
+                    Action::AgentPanelFormCancel => {
+                        self.agent_panel_mode = AgentPanelMode::List;
+                        self.status = "Agent profiles: a add · e edit · d delete · ↑↓ select · Enter apply · Esc close".to_string();
+                        self.quit_pending_confirm = false;
+                        Ok(())
+                    }
+                    Action::AgentPanelFormNext => {
+                        let max = 5usize;
+                        if self.agent_form_focus < max {
+                            self.agent_form_focus += 1;
+                        }
+                        self.quit_pending_confirm = false;
+                        Ok(())
+                    }
+                    Action::AgentPanelFormPrev => {
+                        if self.agent_form_focus > 0 {
+                            self.agent_form_focus -= 1;
+                        }
+                        self.quit_pending_confirm = false;
+                        Ok(())
+                    }
+                    Action::AgentPanelFormInsert(ch) => {
+                        let field = match self.agent_form_focus {
+                            0 => &mut self.agent_form_name,
+                            1 => &mut self.agent_form_description,
+                            2 => &mut self.agent_form_instructions,
+                            3 => &mut self.agent_form_tools_str,
+                            4 => &mut self.agent_form_skills_str,
+                            5 => &mut self.agent_form_model_ref,
+                            _ => return Ok(()),
+                        };
+                        field.push(ch);
+                        self.quit_pending_confirm = false;
+                        Ok(())
+                    }
+                    Action::AgentPanelFormBackspace => {
+                        let field = match self.agent_form_focus {
+                            0 => &mut self.agent_form_name,
+                            1 => &mut self.agent_form_description,
+                            2 => &mut self.agent_form_instructions,
+                            3 => &mut self.agent_form_tools_str,
+                            4 => &mut self.agent_form_skills_str,
+                            5 => &mut self.agent_form_model_ref,
+                            _ => return Ok(()),
+                        };
+                        field.pop();
+                        self.quit_pending_confirm = false;
+                        Ok(())
+                    }
+                    Action::AgentPanelFormSubmit => {
+                        let name = self.agent_form_name.trim().to_string();
+                        if name.is_empty() {
+                            self.status = "Name is required.".to_string();
+                            self.quit_pending_confirm = false;
+                            return Ok(());
+                        }
+
+                        let is_editing = self.agent_form_editing_id.is_some();
+
+                        let profile = if let Some(ref edit_id) = self.agent_form_editing_id {
+                            let mut p = match self
+                                .agent_profiles
+                                .iter()
+                                .find(|p| p.id == *edit_id)
+                                .cloned()
+                            {
+                                Some(p) => p,
+                                None => {
+                                    self.status = "Profile not found for editing.".to_string();
+                                    self.quit_pending_confirm = false;
+                                    return Ok(());
+                                }
+                            };
+                            p.name = name;
+                            p.description = self.agent_form_description.trim().to_string();
+                            p.instructions = self.agent_form_instructions.to_string();
+                            p.tools = self
+                                .agent_form_tools_str
+                                .split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            p.skills_dirs = self
+                                .agent_form_skills_str
+                                .split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            p.model_ref = {
+                                let m = self.agent_form_model_ref.trim().to_string();
+                                if m.is_empty() { None } else { Some(m) }
+                            };
+                            p
+                        } else {
+                            let mut p = crate::agent::profile::AgentProfile::new(&name);
+                            p.description = self.agent_form_description.trim().to_string();
+                            p.instructions = self.agent_form_instructions.to_string();
+                            p.tools = self
+                                .agent_form_tools_str
+                                .split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            p.skills_dirs = self
+                                .agent_form_skills_str
+                                .split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            p.model_ref = {
+                                let m = self.agent_form_model_ref.trim().to_string();
+                                if m.is_empty() { None } else { Some(m) }
+                            };
+                            p
+                        };
+
+                        if let Err(e) = profile.save_to_disk() {
+                            self.status = format!("Failed to save profile: {e}");
+                            self.quit_pending_confirm = false;
+                            return Ok(());
+                        }
+
+                        if is_editing {
+                            self.status = format!("Updated agent profile: {}", profile.name);
+                        } else {
+                            self.status = format!("Added agent profile: {}", profile.name);
+                        }
+
+                        self.agent_profiles =
+                            crate::agent::profile::AgentProfileRegistry::load_all(Some(
+                                self.find_project_dir(),
+                            ))
+                            .list()
+                            .to_vec();
+                        self.agent_panel_mode = AgentPanelMode::List;
+                        self.agent_form_editing_id = None;
+                        self.agent_profile_panel_selection = 0;
+                        self.quit_pending_confirm = false;
+                        Ok(())
+                    }
+                    _ => Ok(()),
+                };
+            } else {
+                // ── List mode ──
+                return match action {
+                    Action::AgentPanelUp => {
+                        if self.agent_profile_panel_selection > 0 {
+                            self.agent_profile_panel_selection -= 1;
+                        }
+                        self.quit_pending_confirm = false;
+                        Ok(())
+                    }
+                    Action::AgentPanelDown => {
+                        if self.agent_profile_panel_selection + 1 < self.agent_profiles.len() {
+                            self.agent_profile_panel_selection += 1;
+                        }
+                        self.quit_pending_confirm = false;
+                        Ok(())
+                    }
+                    Action::AgentPanelSelect => {
+                        let selected_idx = self.agent_profile_panel_selection;
+                        let profile_clone = self.agent_profiles.get(selected_idx).cloned();
+                        if let Some(profile) = profile_clone {
+                            let agent = self.agent_mut();
+                            agent.profile_id = Some(profile.id.clone());
+                            let _ = agent;
+                            if let Some(model_id) = &profile.model_ref {
+                                let model_profile_clone = self
+                                    .model_profiles
+                                    .iter()
+                                    .find(|m| m.id == *model_id)
+                                    .cloned();
+                                if let Some(mp) = model_profile_clone {
+                                    self.activate_model_profile(&mp);
+                                }
+                            }
+                            self.reload_skills_for_profile();
+                            self.status = format!("Switched to agent: {}", profile.name);
+                        }
+                        self.agent_profile_panel_active = false;
+                        self.quit_pending_confirm = false;
+                        Ok(())
+                    }
+                    Action::AgentPanelAdd => {
+                        self.agent_form_editing_id = None;
+                        self.agent_panel_mode = AgentPanelMode::Adding;
+                        self.agent_form_focus = 0;
+                        self.agent_form_name.clear();
+                        self.agent_form_description.clear();
+                        self.agent_form_instructions.clear();
+                        self.agent_form_tools_str.clear();
+                        self.agent_form_skills_str.clear();
+                        self.agent_form_model_ref.clear();
+                        self.status = "Fill in the fields and press Enter to save.".to_string();
+                        self.quit_pending_confirm = false;
+                        Ok(())
+                    }
+                    Action::AgentPanelEdit => {
+                        if let Some(profile) = self
+                            .agent_profiles
+                            .get(self.agent_profile_panel_selection)
+                            .cloned()
+                        {
+                            if profile.id == "default" {
+                                self.status =
+                                    "Cannot edit the built-in default profile.".to_string();
+                                self.quit_pending_confirm = false;
+                                return Ok(());
+                            }
+                            self.agent_form_editing_id = Some(profile.id.clone());
+                            self.agent_panel_mode = AgentPanelMode::Editing;
+                            self.agent_form_focus = 0;
+                            self.agent_form_name = profile.name;
+                            self.agent_form_description = profile.description;
+                            self.agent_form_instructions = profile.instructions;
+                            self.agent_form_tools_str = profile.tools.join(", ");
+                            self.agent_form_skills_str = profile.skills_dirs.join(", ");
+                            self.agent_form_model_ref = profile.model_ref.unwrap_or_default();
+                            self.status = "Edit the fields and press Enter to save.".to_string();
+                        }
+                        self.quit_pending_confirm = false;
+                        Ok(())
+                    }
+                    Action::AgentPanelDelete => {
+                        if let Some(profile) = self
+                            .agent_profiles
+                            .get(self.agent_profile_panel_selection)
+                            .cloned()
+                        {
+                            if profile.id == "default" {
+                                self.status =
+                                    "Cannot delete the built-in default profile.".to_string();
+                                self.quit_pending_confirm = false;
+                                return Ok(());
+                            }
+                            let name = profile.name.clone();
+                            if let Err(e) = profile.delete_from_disk() {
+                                self.status = format!("Failed to delete profile: {e}");
+                            } else {
+                                self.agent_profiles =
+                                    crate::agent::profile::AgentProfileRegistry::load_all(Some(
+                                        self.find_project_dir(),
+                                    ))
+                                    .list()
+                                    .to_vec();
+                                if self.agent_profile_panel_selection >= self.agent_profiles.len() {
+                                    self.agent_profile_panel_selection =
+                                        self.agent_profiles.len().saturating_sub(1);
+                                }
+                                if self.agent().profile_id.as_deref() == Some(&profile.id) {
+                                    self.agent_mut().profile_id = Some("default".to_string());
+                                    self.reload_skills_for_profile();
+                                }
+                                self.status = format!("Deleted profile: {name}");
+                            }
+                        }
+                        self.quit_pending_confirm = false;
+                        Ok(())
+                    }
+                    Action::ClearInputState | Action::AgentPanelClose => {
+                        self.agent_profile_panel_active = false;
+                        self.agent_panel_mode = AgentPanelMode::List;
+                        self.quit_pending_confirm = false;
+                        Ok(())
+                    }
+                    _ => Ok(()),
+                };
+            }
         }
 
         // Approval mode selection panel intercept
@@ -4374,7 +4635,7 @@ impl App {
                             })
                             .unwrap_or(0);
                         self.status =
-                            "Agent profiles: ↑↓ select · Enter apply · Esc close".to_string();
+                            "Agent profiles: a add · e edit · d delete · ↑↓ select · Enter apply · Esc close".to_string();
                         return Ok(());
                     }
                     self.status = "Unknown slash command. Try /new, /exit, /resume, /copy, /models, /sessions, /approval, /agent".to_string();
@@ -4752,7 +5013,16 @@ impl App {
             Action::AgentPanelUp
             | Action::AgentPanelDown
             | Action::AgentPanelSelect
-            | Action::AgentPanelClose => {}
+            | Action::AgentPanelClose
+            | Action::AgentPanelAdd
+            | Action::AgentPanelEdit
+            | Action::AgentPanelDelete
+            | Action::AgentPanelFormNext
+            | Action::AgentPanelFormPrev
+            | Action::AgentPanelFormInsert(_)
+            | Action::AgentPanelFormBackspace
+            | Action::AgentPanelFormSubmit
+            | Action::AgentPanelFormCancel => {}
         }
         self.clamp_cursor();
         Ok(())
@@ -4779,8 +5049,7 @@ impl App {
     }
 
     fn quit(&mut self) {
-        if self.dirty && !self.quit_pending_confirm {
-            self.status = "Unsaved changes. Press q or Ctrl+C again to quit.".to_string();
+        if !self.quit_pending_confirm {
             self.quit_pending_confirm = true;
             return;
         }
@@ -5396,6 +5665,20 @@ impl App {
                         return Some(region);
                     }
                 }
+                ClickableRegion::QuitConfirmYes {
+                    row_y,
+                    col_x,
+                    col_right,
+                }
+                | ClickableRegion::QuitConfirmNo {
+                    row_y,
+                    col_x,
+                    col_right,
+                } => {
+                    if *row_y == pos.y && pos.x >= *col_x && pos.x < *col_right {
+                        return Some(region);
+                    }
+                }
             }
         }
         None
@@ -5465,6 +5748,12 @@ impl App {
                 }
             }
             ClickableRegion::EditorPanel | ClickableRegion::PreviewPanel => {}
+            ClickableRegion::QuitConfirmYes { .. } => {
+                self.should_quit = true;
+            }
+            ClickableRegion::QuitConfirmNo { .. } => {
+                self.quit_pending_confirm = false;
+            }
         }
         Ok(())
     }
@@ -6083,8 +6372,8 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
-        AgentThread, App, BddFocusSlot, ColumnFocus, MainTab, MindMapFocus, ModelPanelMode,
-        ViewStage, current_step_keyword_index, replace_step_keyword_line,
+        AgentPanelMode, AgentThread, App, BddFocusSlot, ColumnFocus, MainTab, MindMapFocus,
+        ModelPanelMode, ViewStage, current_step_keyword_index, replace_step_keyword_line,
     };
     use crate::bdd_nav::step_edit_start_col;
     use crate::editor_buffer::EditorBuffer;
@@ -6563,6 +6852,15 @@ mod tests {
                 .to_vec(),
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
+            agent_panel_mode: AgentPanelMode::List,
+            agent_form_editing_id: None,
+            agent_form_focus: 0,
+            agent_form_name: String::new(),
+            agent_form_description: String::new(),
+            agent_form_instructions: String::new(),
+            agent_form_tools_str: String::new(),
+            agent_form_skills_str: String::new(),
+            agent_form_model_ref: String::new(),
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
@@ -6720,6 +7018,15 @@ Feature: B
                 .to_vec(),
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
+            agent_panel_mode: AgentPanelMode::List,
+            agent_form_editing_id: None,
+            agent_form_focus: 0,
+            agent_form_name: String::new(),
+            agent_form_description: String::new(),
+            agent_form_instructions: String::new(),
+            agent_form_tools_str: String::new(),
+            agent_form_skills_str: String::new(),
+            agent_form_model_ref: String::new(),
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,

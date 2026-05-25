@@ -221,6 +221,9 @@ fn main() -> Result<()> {
                             scenario_dropdown_open: app.scenario_dropdown_open,
                             approval_panel_active: app.approval_panel_active,
                             agent_profile_panel_active: app.agent_profile_panel_active,
+                            agent_panel_adding: app.agent_panel_mode == app::AgentPanelMode::Adding
+                                || app.agent_panel_mode == app::AgentPanelMode::Editing,
+                            quit_pending_confirm: app.quit_pending_confirm,
                         },
                     ) {
                         app.handle_action(action)?;

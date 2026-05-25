@@ -35,6 +35,10 @@ pub struct KeyContext {
     pub approval_panel_active: bool,
     /// Whether the agent profile selection panel is open.
     pub agent_profile_panel_active: bool,
+    /// Whether the agent panel is in adding/editing form mode (vs list mode).
+    pub agent_panel_adding: bool,
+    /// Whether the quit confirmation panel is open.
+    pub quit_pending_confirm: bool,
 }
 
 /// High-level editor command derived from keyboard input.
@@ -252,6 +256,24 @@ pub enum Action {
     AgentPanelSelect,
     /// Close the agent profile selection panel.
     AgentPanelClose,
+    /// Switch to "Add agent" form mode.
+    AgentPanelAdd,
+    /// Edit the currently selected agent profile.
+    AgentPanelEdit,
+    /// Delete the currently selected agent profile.
+    AgentPanelDelete,
+    /// Focus the next form field (Tab).
+    AgentPanelFormNext,
+    /// Focus the previous form field (Shift+Tab).
+    AgentPanelFormPrev,
+    /// Insert a character into the currently focused form field.
+    AgentPanelFormInsert(char),
+    /// Delete the character before the cursor in the focused form field.
+    AgentPanelFormBackspace,
+    /// Submit the form and create the profile.
+    AgentPanelFormSubmit,
+    /// Cancel the form and return to the list.
+    AgentPanelFormCancel,
 }
 
 impl Action {
@@ -299,19 +321,57 @@ impl Action {
             };
         }
 
-        // Agent profile selection panel intercepts keys while open
-        if context.agent_profile_panel_active {
+        // Quit confirmation panel intercept
+        if context.quit_pending_confirm {
             return match (event.code, event.modifiers) {
-                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                    Some(Self::AgentPanelUp)
-                }
-                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                    Some(Self::AgentPanelDown)
-                }
-                (KeyCode::Enter, _) => Some(Self::AgentPanelSelect),
-                (KeyCode::Esc, _) => Some(Self::AgentPanelClose),
+                (KeyCode::Char('q'), KeyModifiers::NONE)
+                | (KeyCode::Char('y'), KeyModifiers::NONE)
+                | (KeyCode::Enter, _) => Some(Self::Quit),
+                (KeyCode::Char('n'), KeyModifiers::NONE)
+                | (KeyCode::Char('N'), KeyModifiers::SHIFT)
+                | (KeyCode::Esc, _) => Some(Self::ClearInputState),
                 _ => None,
             };
+        }
+
+        // Agent profile selection panel intercepts keys while open
+        if context.agent_profile_panel_active {
+            if context.agent_panel_adding {
+                // ── Adding/editing form mode ──
+                return match (event.code, event.modifiers) {
+                    (KeyCode::Esc, _) => Some(Self::AgentPanelFormCancel),
+                    (KeyCode::Tab, _) => Some(Self::AgentPanelFormNext),
+                    (KeyCode::BackTab, _) => Some(Self::AgentPanelFormPrev),
+                    (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                        Some(Self::AgentPanelFormPrev)
+                    }
+                    (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                        Some(Self::AgentPanelFormNext)
+                    }
+                    (KeyCode::Enter, _) => Some(Self::AgentPanelFormSubmit),
+                    (KeyCode::Backspace, _) => Some(Self::AgentPanelFormBackspace),
+                    (KeyCode::Char(ch), _) if !ch.is_control() => {
+                        Some(Self::AgentPanelFormInsert(ch))
+                    }
+                    _ => None,
+                };
+            } else {
+                // ── List mode ──
+                return match (event.code, event.modifiers) {
+                    (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                        Some(Self::AgentPanelUp)
+                    }
+                    (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                        Some(Self::AgentPanelDown)
+                    }
+                    (KeyCode::Enter, _) => Some(Self::AgentPanelSelect),
+                    (KeyCode::Esc, _) => Some(Self::AgentPanelClose),
+                    (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::AgentPanelAdd),
+                    (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Self::AgentPanelEdit),
+                    (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Self::AgentPanelDelete),
+                    _ => None,
+                };
+            }
         }
 
         // Approval mode selection panel intercepts keys while open
@@ -763,6 +823,8 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            agent_panel_adding: false,
+            quit_pending_confirm: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -795,6 +857,8 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            agent_panel_adding: false,
+            quit_pending_confirm: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -827,6 +891,8 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            agent_panel_adding: false,
+            quit_pending_confirm: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -869,6 +935,8 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            agent_panel_adding: false,
+            quit_pending_confirm: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -911,6 +979,8 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            agent_panel_adding: false,
+            quit_pending_confirm: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
@@ -961,6 +1031,8 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            agent_panel_adding: false,
+            quit_pending_confirm: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
@@ -993,6 +1065,8 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            agent_panel_adding: false,
+            quit_pending_confirm: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
@@ -1025,6 +1099,8 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            agent_panel_adding: false,
+            quit_pending_confirm: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), context),
@@ -1081,6 +1157,8 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            agent_panel_adding: false,
+            quit_pending_confirm: false,
         };
         let copy_context = KeyContext {
             pending_char: Some('y'),
@@ -1130,6 +1208,8 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            agent_panel_adding: false,
+            quit_pending_confirm: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),

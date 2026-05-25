@@ -308,6 +308,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         render_session_panel(frame, app, frame.area());
     }
 
+    if app.quit_pending_confirm {
+        render_quit_panel(frame, app, frame.area());
+    }
+
     if app.approval_panel_active {
         render_approval_panel(frame, app, frame.area());
     }
@@ -3344,15 +3348,97 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Text::from(visible)), inner);
 }
 
+/// Render the quit confirmation popup panel.
+fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let panel_w = area.width.min(40);
+    let panel_h = 7;
+    let panel_x = (area.width.saturating_sub(panel_w)) / 2;
+    let panel_y = (area.height.saturating_sub(panel_h)) / 2;
+    let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
+
+    frame.render_widget(Clear, panel_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Quit Teshi? ")
+        .border_style(Style::default().fg(Color::Red));
+    let inner = block.inner(panel_area);
+    frame.render_widget(block, panel_area);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Message
+    lines.push(Line::styled(
+        " Are you sure you want to quit?",
+        Style::default().fg(Color::White),
+    ));
+    lines.push(Line::raw(""));
+
+    // Button row: [ Yes ]   [ No ]
+    let btn_yes_x = inner.x + 2;
+    let btn_no_x = inner.x + inner.width.saturating_sub(8);
+    let btn_row = inner.y + 3;
+
+    // Check hover states
+    let yes_hovered = app
+        .mouse_position
+        .is_some_and(|(mx, my)| my == btn_row && mx >= btn_yes_x && mx < btn_yes_x + 6);
+    let no_hovered = app
+        .mouse_position
+        .is_some_and(|(mx, my)| my == btn_row && mx >= btn_no_x && mx < btn_no_x + 6);
+
+    // Register clickable regions
+    app.clickable_regions.push(ClickableRegion::QuitConfirmYes {
+        row_y: btn_row,
+        col_x: btn_yes_x,
+        col_right: btn_yes_x + 6,
+    });
+    app.clickable_regions.push(ClickableRegion::QuitConfirmNo {
+        row_y: btn_row,
+        col_x: btn_no_x,
+        col_right: btn_no_x + 6,
+    });
+
+    let yes_style = if yes_hovered {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Red)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    };
+    let no_style = if no_hovered {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    let btn_line = Line::from(vec![
+        Span::raw("  "),
+        Span::styled(" [Yes] ", yes_style),
+        Span::raw("     "),
+        Span::styled(" [No] ", no_style),
+    ]);
+    lines.push(btn_line);
+
+    let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
+    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+}
+
 /// Render the approval mode selection popup panel.
 fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     use crate::agent::approval::ApprovalMode;
 
     let modes = ApprovalMode::ALL;
     let panel_w = area.width.min(56);
-    // Layout: top border + 3 items × (title + desc) + separator line + hint + bottom border
+    // Layout: top border + 3 items × (title + desc) + separator line + bottom border
     let item_rows: u16 = (modes.len() * 2 + 1) as u16; // +1 for separator
-    let panel_h = item_rows + 4; // +4 for borders + hint line + padding
+    let panel_h = item_rows + 3; // +3 for borders + padding
     let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
     let panel_y = area.y + (area.height.saturating_sub(panel_h)) / 2;
     let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
@@ -3425,21 +3511,26 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
     }
 
-    // Navigation hint
-    lines.push(Line::styled(
-        format!(
-            " {}↓ select  Enter confirm  Esc cancel ",
-            std::char::from_u32(0x2191).unwrap_or('^')
-        ),
-        Style::default().fg(Color::DarkGray),
-    ));
-
     let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
     frame.render_widget(Paragraph::new(Text::from(visible)), inner);
 }
 
 /// Render the agent profile selection popup panel.
 fn render_agent_profile_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    use crate::app::AgentPanelMode;
+
+    match app.agent_panel_mode {
+        AgentPanelMode::List => render_agent_profile_list(frame, app, area),
+        AgentPanelMode::Adding => {
+            render_agent_profile_form(frame, app, " Add Agent Profile ", area)
+        }
+        AgentPanelMode::Editing => {
+            render_agent_profile_form(frame, app, " Edit Agent Profile ", area)
+        }
+    }
+}
+
+fn render_agent_profile_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let profiles = &app.agent_profiles;
     let panel_w = area.width.min(56);
     let item_rows: u16 = profiles.len() as u16;
@@ -3503,13 +3594,81 @@ fn render_agent_profile_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     // Navigation hint
     lines.push(Line::styled(
-        format!(
-            " {} {}",
-            std::char::from_u32(0x2191).unwrap_or('^'),
-            "↓ select  Enter apply  Esc close"
-        ),
+        "a add · e edit · d delete · ↑↓ select · Enter apply · Esc close",
         Style::default().fg(Color::DarkGray),
     ));
+
+    let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
+    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+}
+
+fn render_agent_profile_form(frame: &mut Frame<'_>, app: &App, title: &str, area: Rect) {
+    let panel_w = area.width.min(64);
+    let panel_h = 20u16.min(area.height.saturating_sub(4));
+    let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
+    let panel_y = area.y + (area.height.saturating_sub(panel_h)) / 2;
+    let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
+
+    frame.render_widget(Clear, panel_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(panel_area);
+    frame.render_widget(block, panel_area);
+
+    let fields: [(&str, &str); 6] = [
+        ("Name", &app.agent_form_name),
+        ("Description", &app.agent_form_description),
+        ("Instructions", &app.agent_form_instructions),
+        ("Tools (csv)", &app.agent_form_tools_str),
+        ("Skills dirs (csv)", &app.agent_form_skills_str),
+        ("Model ref", &app.agent_form_model_ref),
+    ];
+
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    lines.push(Line::raw(""));
+
+    for (i, (label, value)) in fields.iter().enumerate() {
+        let focused = i == app.agent_form_focus;
+        let indicator = if focused { " ▸ " } else { "   " };
+        let label_style = if focused {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        let val_style = if focused {
+            Style::default().bg(Color::DarkGray).fg(Color::White)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let display_val = if value.is_empty() {
+            if focused {
+                "(type here...)".to_string()
+            } else {
+                "(empty)".to_string()
+            }
+        } else {
+            value.to_string()
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(indicator, label_style),
+            Span::styled(format!("{:<18}", label), label_style),
+            Span::raw(" "),
+            Span::styled(display_val, val_style),
+        ]));
+    }
+
+    let footer = Line::styled(
+        "Save [Enter]  Cancel [Esc]",
+        Style::default().fg(Color::DarkGray),
+    )
+    .alignment(Alignment::Center);
+    lines.push(footer);
 
     let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
     frame.render_widget(Paragraph::new(Text::from(visible)), inner);
