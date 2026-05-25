@@ -4846,6 +4846,9 @@ impl App {
                     let (name, _) = filtered[self.slash_suggestion_selection];
                     self.slash_suggestion_active = false;
                     self.slash_suggestion_selection = 0;
+                    // Clear the input (cmd is about to execute); "copy" will override below
+                    self.agent_mut().input.clear();
+                    self.agent_mut().input_cursor = 0;
                     // Execute the command directly
                     return match *name {
                         "new" => self.cmd_new(),
@@ -4866,6 +4869,26 @@ impl App {
                                     .position(|m| *m == self.approval_mode)
                                     .unwrap_or(0);
                             self.status = "Approval mode".to_string();
+                            Ok(())
+                        }
+                        "agent" => {
+                            self.agent_profiles =
+                                crate::agent::profile::AgentProfileRegistry::load_all(Some(
+                                    self.find_project_dir(),
+                                ))
+                                .list()
+                                .to_vec();
+                            self.agent_profile_panel_active = true;
+                            self.agent_profile_panel_selection = self
+                                .agent_profiles
+                                .iter()
+                                .position(|p| {
+                                    Some(p.id.as_str()) == self.agent().profile_id.as_deref()
+                                        || (self.agent().profile_id.is_none() && p.id == "default")
+                                })
+                                .unwrap_or(0);
+                            self.status =
+                                "Agent profiles: a add · e edit · d delete · ↑↓ select · Enter apply · Esc close".to_string();
                             Ok(())
                         }
                         _ => Ok(()),
