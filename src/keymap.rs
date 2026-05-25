@@ -330,6 +330,12 @@ impl Action {
                 (KeyCode::Char('n'), KeyModifiers::NONE)
                 | (KeyCode::Char('N'), KeyModifiers::SHIFT)
                 | (KeyCode::Esc, _) => Some(Self::ClearInputState),
+                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                    Some(Self::MoveLeft)
+                }
+                (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                    Some(Self::MoveRight)
+                }
                 _ => None,
             };
         }

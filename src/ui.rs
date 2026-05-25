@@ -3378,7 +3378,7 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     lines.push(Line::raw(""));
 
     // Symmetric button row: "  [Yes]    [No]  " (20 chars)
-    let btn_row = inner.y + 3;
+    let btn_row = inner.y + 2;
     let btn_sep = "    "; // 4 chars gap
     // Total: "  " + btn_text + btn_sep + btn_text + "  " = 2+6+4+6+2 = 20
     let btn_line_total = 20usize;
@@ -3386,13 +3386,17 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let col_yes_start = inner.x + btn_left_pad as u16 + 2;
     let col_no_start = col_yes_start + 6 + 4; // after Yes + separator
 
-    // Check hover states
+    // Check hover states and keyboard focus
     let yes_hovered = app
         .mouse_position
         .is_some_and(|(mx, my)| my == btn_row && mx >= col_yes_start && mx < col_yes_start + 6);
     let no_hovered = app
         .mouse_position
         .is_some_and(|(mx, my)| my == btn_row && mx >= col_no_start && mx < col_no_start + 6);
+
+    // Keyboard selection always shows a focused button (mouse hover overrides)
+    let yes_focused = app.quit_panel_selection == 0;
+    let no_focused = app.quit_panel_selection == 1;
 
     // Register clickable regions
     app.clickable_regions.push(ClickableRegion::QuitConfirmYes {
@@ -3411,12 +3415,22 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .fg(Color::Black)
             .bg(Color::Red)
             .add_modifier(Modifier::BOLD)
+    } else if yes_focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
     };
     let no_style = if no_hovered {
         Style::default()
             .fg(Color::Black)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
+    } else if no_focused {
+        Style::default()
+            .fg(Color::Yellow)
             .bg(Color::DarkGray)
             .add_modifier(Modifier::BOLD)
     } else {

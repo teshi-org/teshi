@@ -416,6 +416,8 @@ pub struct App {
     /// Whether the AI tab input bar has keyboard focus (Esc toggles this off).
     pub ai_input_focused: bool,
     pub quit_pending_confirm: bool,
+    /// Which button is focused in quit confirm panel: 0 = Yes, 1 = No.
+    pub quit_panel_selection: usize,
     /// Temporary one-shot status message (e.g. "AI applied filter: @smoke").
     pub status_message: Option<String>,
     /// When the status message should be cleared (3-second lifespan).
@@ -697,6 +699,7 @@ impl App {
             slash_suggestion_selection: 0,
             ai_input_focused: true,
             quit_pending_confirm: false,
+            quit_panel_selection: 0,
             status_message: None,
             status_message_deadline: None,
             config,
@@ -855,6 +858,7 @@ impl App {
             scenario_dropdown_open: false,
             scenario_dropdown_selection: 0,
             quit_pending_confirm: false,
+            quit_panel_selection: 0,
             status_message: None,
             status_message_deadline: None,
             config,
@@ -1008,6 +1012,7 @@ impl App {
             scenario_dropdown_open: false,
             scenario_dropdown_selection: 0,
             quit_pending_confirm: false,
+            quit_panel_selection: 0,
             status_message: None,
             status_message_deadline: None,
             config,
@@ -3526,6 +3531,14 @@ impl App {
                 }
                 Action::ClearInputState => {
                     self.quit_pending_confirm = false;
+                    Ok(())
+                }
+                Action::MoveLeft => {
+                    self.quit_panel_selection = 0;
+                    Ok(())
+                }
+                Action::MoveRight => {
+                    self.quit_panel_selection = 1;
                     Ok(())
                 }
                 _ => Ok(()),
@@ -6828,6 +6841,7 @@ mod tests {
             slash_suggestion_selection: 0,
             ai_input_focused: true,
             quit_pending_confirm: false,
+            quit_panel_selection: 0,
             status_message: None,
             status_message_deadline: None,
             config: crate::config::load_config().unwrap(),
@@ -6994,6 +7008,7 @@ Feature: B
             slash_suggestion_selection: 0,
             ai_input_focused: true,
             quit_pending_confirm: false,
+            quit_panel_selection: 0,
             status_message: None,
             status_message_deadline: None,
             config: crate::config::load_config().unwrap(),
