@@ -3365,38 +3365,46 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let inner = block.inner(panel_area);
     frame.render_widget(block, panel_area);
 
+    let inner_w = inner.width as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Message
+    // Centered message
+    let msg = "Are you sure you want to quit?";
+    let msg_pad = (inner_w.saturating_sub(msg.len())) / 2;
     lines.push(Line::styled(
-        " Are you sure you want to quit?",
+        format!("{}{}", " ".repeat(msg_pad), msg),
         Style::default().fg(Color::White),
     ));
     lines.push(Line::raw(""));
 
-    // Button row: [ Yes ]   [ No ]
-    let btn_yes_x = inner.x + 2;
-    let btn_no_x = inner.x + inner.width.saturating_sub(8);
+    // Symmetric button row: "  [Yes]    [No]  " (20 chars)
     let btn_row = inner.y + 3;
+    let btn_text = " [Yes] "; // 6 chars
+    let btn_sep = "    "; // 4 chars gap
+    // Total: "  " + btn_text + btn_sep + btn_text + "  " = 2+6+4+6+2 = 20
+    let btn_line_total = 20usize;
+    let btn_left_pad = (inner_w.saturating_sub(btn_line_total)) / 2;
+    let col_yes_start = inner.x + btn_left_pad as u16 + 2;
+    let col_no_start = col_yes_start + 6 + 4; // after Yes + separator
 
     // Check hover states
     let yes_hovered = app
         .mouse_position
-        .is_some_and(|(mx, my)| my == btn_row && mx >= btn_yes_x && mx < btn_yes_x + 6);
+        .is_some_and(|(mx, my)| my == btn_row && mx >= col_yes_start && mx < col_yes_start + 6);
     let no_hovered = app
         .mouse_position
-        .is_some_and(|(mx, my)| my == btn_row && mx >= btn_no_x && mx < btn_no_x + 6);
+        .is_some_and(|(mx, my)| my == btn_row && mx >= col_no_start && mx < col_no_start + 6);
 
     // Register clickable regions
     app.clickable_regions.push(ClickableRegion::QuitConfirmYes {
         row_y: btn_row,
-        col_x: btn_yes_x,
-        col_right: btn_yes_x + 6,
+        col_x: col_yes_start,
+        col_right: col_yes_start + 6,
     });
     app.clickable_regions.push(ClickableRegion::QuitConfirmNo {
         row_y: btn_row,
-        col_x: btn_no_x,
-        col_right: btn_no_x + 6,
+        col_x: col_no_start,
+        col_right: col_no_start + 6,
     });
 
     let yes_style = if yes_hovered {
@@ -3419,10 +3427,12 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     };
 
     let btn_line = Line::from(vec![
+        Span::raw(" ".repeat(btn_left_pad)),
         Span::raw("  "),
         Span::styled(" [Yes] ", yes_style),
-        Span::raw("     "),
+        Span::raw(btn_sep),
         Span::styled(" [No] ", no_style),
+        Span::raw("  "),
     ]);
     lines.push(btn_line);
 
