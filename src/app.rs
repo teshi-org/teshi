@@ -3434,6 +3434,7 @@ impl App {
                 self.mindmap_index.apply_highlight_categories(id);
             }
         }
+        self.tree_follow_editor();
         self.quit_pending_confirm = false;
     }
 
@@ -3479,6 +3480,7 @@ impl App {
         if let Some(id) = mindmap::selected_node_id(&self.tree_state) {
             self.mindmap_index.apply_highlight_categories(id);
         }
+        self.tree_follow_editor();
         self.quit_pending_confirm = false;
     }
 
@@ -3717,18 +3719,7 @@ impl App {
                         self.quit_pending_confirm = false;
                         Ok(())
                     }
-                    Action::AgentPanelTabPrev => {
-                        self.agent_config_tab = self.agent_config_tab.saturating_sub(1);
-                        self.quit_pending_confirm = false;
-                        Ok(())
-                    }
-                    Action::AgentPanelTabNext => {
-                        if self.agent_config_tab < 4 {
-                            self.agent_config_tab += 1;
-                        }
-                        self.quit_pending_confirm = false;
-                        Ok(())
-                    }
+
                     _ => Ok(()),
                 };
             } else {
@@ -5067,9 +5058,7 @@ impl App {
             | Action::AgentPanelFormInsert(_)
             | Action::AgentPanelFormBackspace
             | Action::AgentPanelFormSubmit
-            | Action::AgentPanelFormCancel
-            | Action::AgentPanelTabPrev
-            | Action::AgentPanelTabNext => {}
+            | Action::AgentPanelFormCancel => {}
         }
         self.clamp_cursor();
         Ok(())
