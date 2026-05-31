@@ -1,0 +1,33 @@
+[package]
+name = "teshi-desktop"
+version = "0.1.0"
+description = "teshi desktop recorder and runner shell"
+authors = ["teshi-org"]
+edition = "2021"
+publish = false
+
+[lib]
+name = "teshi_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1"
+dirs = "6"
+notify = "7.0"
+portable-pty = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+teshi-gherkin = { path = "../../crates/teshi-gherkin" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "time"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Threading"] }

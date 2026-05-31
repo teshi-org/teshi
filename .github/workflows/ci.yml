@@ -44,3 +44,36 @@ jobs:
 
       - name: Build doc
         run: cargo doc --locked --no-deps --document-private-items
+
+  desktop:
+    name: teshi-desktop build
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: desktop
+        run: npm run build
+
+      - name: Build teshi-desktop (no bundle)
+        working-directory: desktop
+        run: npx tauri build --no-bundle

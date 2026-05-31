@@ -4008,10 +4008,7 @@ fn agent_profile_tab_tools(lines: &mut Vec<Line<'static>>, app: &App, width: usi
         .map(|t| t.name)
         .collect();
     let joined = tool_names.join(", ");
-    let hint = truncate_str_to_width(
-        &format!("Available: {}", joined),
-        width.saturating_sub(4),
-    );
+    let hint = truncate_str_to_width(&format!("Available: {}", joined), width.saturating_sub(4));
     lines.push(Line::styled(
         format!("   {}", hint),
         Style::default().fg(Color::DarkGray),

@@ -31,9 +31,25 @@ teshi.toml
 # If this repository is a library and you explicitly want to ignore it, uncomment:
 # Cargo.lock
 
-# Added by cargo
+# --- teshi-desktop (Tauri + Vite) ---
+desktop/node_modules/
+desktop/dist/
+
+# --- Python virtual environments (project under test / local dev) ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# --- Node / frontend tooling (repo-wide) ---
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Environment files ---
+.env
+.env.*
 
 # Keep wix/ tracked so MSI customization is reproducible in CI
 # wix/
-
-/target

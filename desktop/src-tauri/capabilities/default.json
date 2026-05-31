@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/schema/2/capability.json",
+  "identifier": "default",
+  "description": "Default capability for teshi-desktop",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "dialog:default"
+  ]
+}

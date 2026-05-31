@@ -1,28 +1,13 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
-use crate::gherkin_lang::{GherkinLanguage, StepKeywordType, StructuralType};
-
-/// Display width reserved for the step keyword gutter (after leading indent).
-pub(crate) const STEP_KEYWORD_COL_WIDTH: usize = 6;
-
-/// Count leading whitespace characters (not bytes) before the first non-whitespace.
-pub(crate) fn leading_whitespace_chars(line: &str) -> usize {
-    line.chars().take_while(|c| c.is_whitespace()).count()
-}
-
-/// Extra spaces to insert before the keyword so the gutter is `STEP_KEYWORD_COL_WIDTH` wide.
-///
-/// Padding before the keyword right-aligns keyword glyphs (e.g. 当 vs 那么) so step body
-/// text starts on the same display column.
-pub(crate) fn step_keyword_gutter_pad(keyword: &str) -> usize {
-    STEP_KEYWORD_COL_WIDTH.saturating_sub(keyword.width())
-}
+use teshi_gherkin::gherkin_lang::GherkinLanguage;
+use teshi_gherkin::highlight::{HighlightKind, highlight_line_spans};
+pub use teshi_gherkin::highlight::{
+    STEP_KEYWORD_COL_WIDTH, StepHighlightState, leading_whitespace_chars, step_keyword_gutter_pad,
+};
 
 /// Styled gutter span used by Explore Steps and the BDD Editor: pad spaces + keyword in one span.
-///
-/// Returns the span and the pad column count (0 when the keyword already fills the gutter).
 pub(crate) fn step_keyword_gutter_styled_span(
     keyword: &str,
     style: Style,
@@ -36,43 +21,6 @@ pub(crate) fn step_keyword_gutter_styled_span(
     (Span::styled(text, style), pad)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StepMajor {
-    Given,
-    When,
-    Then,
-}
-
-impl StepMajor {
-    fn color(self) -> Color {
-        match self {
-            StepMajor::Given => Color::Blue,
-            StepMajor::When => Color::Yellow,
-            StepMajor::Then => Color::Green,
-        }
-    }
-}
-
-impl From<StepKeywordType> for StepMajor {
-    fn from(t: StepKeywordType) -> Self {
-        match t {
-            StepKeywordType::Given => StepMajor::Given,
-            StepKeywordType::When => StepMajor::When,
-            StepKeywordType::Then => StepMajor::Then,
-            StepKeywordType::And | StepKeywordType::But => {
-                // Fallback; callers that pass And/But should handle separately
-                StepMajor::Given
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct StepHighlightState {
-    pub in_doc_string: bool,
-    pub last_major: Option<StepMajor>,
-}
-
 /// Applies Gherkin-oriented foreground highlighting for one buffer line.
 #[cfg(test)]
 pub fn highlight_line(
@@ -80,12 +28,9 @@ pub fn highlight_line(
     in_doc_string: bool,
     lang: &GherkinLanguage,
 ) -> (Line<'static>, bool) {
-    let mut state = StepHighlightState {
-        in_doc_string,
-        last_major: None,
-    };
-    let line = highlight_line_with_state(line, &mut state, lang);
-    (line, state.in_doc_string)
+    let mut state = StepHighlightState::with_doc_string(in_doc_string);
+    let rendered = highlight_line_with_state(line, &mut state, lang);
+    (rendered, state.in_doc_string)
 }
 
 pub fn highlight_line_with_state(
@@ -93,125 +38,28 @@ pub fn highlight_line_with_state(
     state: &mut StepHighlightState,
     lang: &GherkinLanguage,
 ) -> Line<'static> {
-    let default = Style::default();
-    let comment = Style::default().fg(Color::DarkGray);
-    // Bright foreground so structural headers stay readable on dark terminal themes.
-    let header = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-    let _step_default = Style::default().fg(Color::Magenta);
-    let tag = Style::default().fg(Color::Yellow);
-    let string = Style::default().fg(Color::Green);
-    let meta = Style::default().fg(Color::Blue);
-
-    let trimmed = line.trim_start();
-    let is_doc_marker = trimmed.starts_with("\"\"\"");
-
-    if is_doc_marker {
-        state.in_doc_string = !state.in_doc_string;
-        return Line::from(vec![Span::styled(line.to_string(), meta)]);
-    }
-    if state.in_doc_string {
-        return Line::from(vec![Span::styled(line.to_string(), meta)]);
-    }
-    if trimmed.starts_with('#') {
-        return Line::from(vec![Span::styled(line.to_string(), comment)]);
-    }
-    if trimmed.starts_with('|') {
-        return Line::from(vec![Span::styled(line.to_string(), meta)]);
-    }
-    if trimmed.starts_with('@') {
-        let spans = line
-            .split_whitespace()
-            .map(|part| {
-                let style = if part.starts_with('@') { tag } else { default };
-                Span::styled(part.to_string(), style)
-            })
-            .collect::<Vec<_>>();
-        return Line::from(spans);
-    }
-
-    // Reset major step type on scenario/feature boundaries
-    if let Some((_kw, st)) = lang.match_structural_prefix(trimmed)
-        && matches!(
-            st,
-            StructuralType::Feature
-                | StructuralType::Scenario
-                | StructuralType::ScenarioOutline
-                | StructuralType::Background
-        )
-    {
-        state.last_major = None;
-    }
-
-    // Structural header highlighting
-    if let Some((matched, _st)) = lang.match_structural_prefix(trimmed) {
-        let leading = leading_whitespace_chars(line);
-        let mut spans = Vec::new();
-        if leading > 0 {
-            spans.push(Span::raw(line.chars().take(leading).collect::<String>()));
-        }
-        let kw_text = matched.to_string();
-        let rest: String = trimmed.chars().skip(matched.chars().count()).collect();
-        spans.push(Span::styled(kw_text, header));
-        spans.push(Span::raw(rest.to_string()));
-        return Line::from(spans);
-    }
-
-    // Step keyword highlighting
-    if let Some((matched, kw_type)) = lang.match_step_prefix(trimmed) {
-        let leading = leading_whitespace_chars(line);
-        let mut spans = Vec::new();
-        if leading > 0 {
-            spans.push(Span::raw(line.chars().take(leading).collect::<String>()));
-        }
-        let rest: String = trimmed.chars().skip(matched.chars().count()).collect();
-
-        let step_style = match kw_type {
-            StepKeywordType::Given => {
-                state.last_major = Some(StepMajor::Given);
-                Style::default().fg(StepMajor::Given.color())
-            }
-            StepKeywordType::When => {
-                state.last_major = Some(StepMajor::When);
-                Style::default().fg(StepMajor::When.color())
-            }
-            StepKeywordType::Then => {
-                state.last_major = Some(StepMajor::Then);
-                Style::default().fg(StepMajor::Then.color())
-            }
-            StepKeywordType::And | StepKeywordType::But => {
-                if let Some(major) = state.last_major {
-                    Style::default().fg(major.color())
-                } else {
-                    Style::default().fg(Color::Gray)
-                }
-            }
-        };
-
-        let (kw_span, _) = step_keyword_gutter_styled_span(matched, step_style);
-        spans.push(kw_span);
-        spans.push(Span::raw(rest));
-        return Line::from(spans);
-    }
-
-    let mut spans = Vec::new();
-    let mut chars = line.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '"' {
-            let mut buf = String::from("\"");
-            for c in chars.by_ref() {
-                buf.push(c);
-                if c == '"' {
-                    break;
-                }
-            }
-            spans.push(Span::styled(buf, string));
-        } else {
-            spans.push(Span::styled(ch.to_string(), default));
-        }
-    }
+    let spans: Vec<Span<'static>> = highlight_line_spans(line, state, lang)
+        .into_iter()
+        .map(|span| Span::styled(span.text, kind_to_style(span.kind)))
+        .collect();
     Line::from(spans)
+}
+
+fn kind_to_style(kind: HighlightKind) -> Style {
+    match kind {
+        HighlightKind::Default => Style::default(),
+        HighlightKind::Comment => Style::default().fg(Color::DarkGray),
+        HighlightKind::Header => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        HighlightKind::Tag => Style::default().fg(Color::Yellow),
+        HighlightKind::Given => Style::default().fg(Color::Blue),
+        HighlightKind::When => Style::default().fg(Color::Yellow),
+        HighlightKind::Then => Style::default().fg(Color::Green),
+        HighlightKind::AndBut => Style::default().fg(Color::Gray),
+        HighlightKind::String => Style::default().fg(Color::Green),
+        HighlightKind::Meta | HighlightKind::DocString => Style::default().fg(Color::Blue),
+    }
 }
 
 #[cfg(test)]
@@ -296,8 +144,8 @@ mod tests {
         assert_eq!(keyword_fg(&line, "And"), Some(Color::Gray));
     }
 
-    /// Display column where the styled gutter span ends (keyword right edge in the gutter).
     fn gutter_keyword_end_col(line: &Line<'_>) -> usize {
+        use unicode_width::UnicodeWidthStr;
         let mut col = 0usize;
         for span in &line.spans {
             if span.style.fg.is_some() {
