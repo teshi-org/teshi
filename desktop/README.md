@@ -37,9 +37,12 @@ cargo tauri dev --manifest-path desktop/src-tauri/Cargo.toml
 
 ## Layout
 
+- **Toolbar:** Open project, recent projects, browser controls; switches to a minimal bar in browser focus mode
 - **Panel 1 (left):** Structured Gherkin render for selected `.feature` files
 - **Panel 2 (center):** Playwright Chromium JPEG stream (1920×1080 viewport), started manually
 - **Panel 3 (right):** Lazy file tree + terminal (tab switch)
+- **Bottom dock:** Collapsible tab bar (Output, Logs) — placeholder content in Phase 1; collapsed by default
+- **Browser focus:** Use **Focus** in the browser panel header to hide side panels and expand the browser; **Exit Focus** in the minimal toolbar restores the three-column layout
 
 ## CLI
 

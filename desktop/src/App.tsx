@@ -8,6 +8,7 @@ import { WelcomeScreen } from "./panels/WelcomeScreen";
 import { GherkinPanel } from "./panels/GherkinPanel";
 import { BrowserPanel } from "./panels/BrowserPanel";
 import { FileTreeTerminalPanel } from "./panels/FileTreeTerminalPanel";
+import { BottomDock } from "./panels/BottomDock";
 import type { BrowserError, FeatureRenderPayload } from "./types";
 
 /** Ask before stopping browser/terminal; uses JS dialog to avoid Rust blocking_show deadlocks. */
@@ -174,67 +175,115 @@ function AppShell() {
     );
   }
 
+  const browserFocus = state.layoutMode === "browserFocus";
+
+  const browserControls = (
+    <>
+      {!state.browserRunning ? (
+        <button type="button" onClick={() => void startBrowser()}>
+          Start Browser
+        </button>
+      ) : (
+        <button type="button" onClick={() => void stopBrowser()}>
+          Stop Browser
+        </button>
+      )}
+      <span
+        className={`status-dot ${state.browserRunning ? "on" : "off"}`}
+        title={state.browserRunning ? "Browser running" : "Browser stopped"}
+      />
+    </>
+  );
+
   return (
     <div className="app-shell">
-      <header className="toolbar">
-        <button type="button" onClick={() => void pickProject()}>
-          Open Project
-        </button>
-        <select
-          value=""
-          onChange={(e) => {
-            if (e.target.value) void openProjectPath(e.target.value);
-          }}
-        >
-          <option value="">Recent…</option>
-          {state.recentProjects.map((p) => (
-            <option key={p} value={p}>
-              {p}
-            </option>
-          ))}
-        </select>
-        <span className="project-path">{state.projectRoot}</span>
-        <div className="toolbar-spacer" />
-        {!state.browserRunning ? (
-          <button type="button" onClick={() => void startBrowser()}>
-            Start Browser
-          </button>
+      <header
+        className={`toolbar${browserFocus ? " toolbar--minimal" : ""}`}
+      >
+        {browserFocus ? (
+          <>
+            <button
+              type="button"
+              onClick={() =>
+                dispatch({ type: "SET_LAYOUT_MODE", mode: "normal" })
+              }
+            >
+              Exit Focus
+            </button>
+            <div className="toolbar-spacer" />
+            {browserControls}
+          </>
         ) : (
-          <button type="button" onClick={() => void stopBrowser()}>
-            Stop Browser
-          </button>
+          <>
+            <button type="button" onClick={() => void pickProject()}>
+              Open Project
+            </button>
+            <select
+              value=""
+              onChange={(e) => {
+                if (e.target.value) void openProjectPath(e.target.value);
+              }}
+            >
+              <option value="">Recent…</option>
+              {state.recentProjects.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+            <span className="project-path">{state.projectRoot}</span>
+            <div className="toolbar-spacer" />
+            {browserControls}
+          </>
         )}
-        <span
-          className={`status-dot ${state.browserRunning ? "on" : "off"}`}
-          title={state.browserRunning ? "Browser running" : "Browser stopped"}
-        />
       </header>
-      <main className="layout">
-        <GherkinPanel
-          relativePath={state.featurePayload?.relative_path ?? null}
-          payload={state.featurePayload}
-          selectedScenarioLine={state.selectedScenarioLine}
-          selectedStepLine={state.selectedStepLine}
-          onSelectScenario={(line) =>
-            dispatch({ type: "SELECT_SCENARIO", line })
-          }
-          onSelectStep={(line) => dispatch({ type: "SELECT_STEP", line })}
+      <div className="workspace">
+        <main
+          className={`layout${browserFocus ? " layout--browser-focus" : ""}`}
+        >
+          {!browserFocus && (
+            <GherkinPanel
+              relativePath={state.featurePayload?.relative_path ?? null}
+              payload={state.featurePayload}
+              selectedScenarioLine={state.selectedScenarioLine}
+              selectedStepLine={state.selectedStepLine}
+              onSelectScenario={(line) =>
+                dispatch({ type: "SELECT_SCENARIO", line })
+              }
+              onSelectStep={(line) => dispatch({ type: "SELECT_STEP", line })}
+            />
+          )}
+          <BrowserPanel
+            wsUrl={state.browserWsUrl}
+            running={state.browserRunning}
+            error={browserError}
+            hint={browserHint}
+            focusMode={browserFocus}
+            onStart={() => void startBrowser()}
+            onStop={() => void stopBrowser()}
+            onToggleFocus={() =>
+              dispatch({
+                type: "SET_LAYOUT_MODE",
+                mode: browserFocus ? "normal" : "browserFocus",
+              })
+            }
+          />
+          {!browserFocus && (
+            <FileTreeTerminalPanel
+              projectRoot={state.projectRoot}
+              tab={state.rightTab}
+              onTabChange={(tab) => dispatch({ type: "SET_TAB", tab })}
+              onOpenFeature={(path) => void openFeature(path)}
+            />
+          )}
+        </main>
+        <BottomDock
+          expanded={state.dockExpanded}
+          activeTab={state.dockActiveTab}
+          onToggle={() => dispatch({ type: "TOGGLE_DOCK" })}
+          onTabChange={(tab) => dispatch({ type: "SET_DOCK_TAB", tab })}
         />
-        <BrowserPanel
-          wsUrl={state.browserWsUrl}
-          running={state.browserRunning}
-          error={browserError}
-          hint={browserHint}
-          onStart={() => void startBrowser()}
-          onStop={() => void stopBrowser()}
-        />
-        <FileTreeTerminalPanel
-          projectRoot={state.projectRoot}
-          tab={state.rightTab}
-          onTabChange={(tab) => dispatch({ type: "SET_TAB", tab })}
-          onOpenFeature={(path) => void openFeature(path)}
-        />
-      </main>
+      </div>
       <Toaster theme="dark" />
     </div>
   );

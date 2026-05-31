@@ -5,8 +5,10 @@ interface Props {
   running: boolean;
   error: string | null;
   hint: string | null;
+  focusMode: boolean;
   onStart: () => void;
   onStop: () => void;
+  onToggleFocus: () => void;
 }
 
 /** Prefix scheme when the user omits http(s):// */
@@ -24,8 +26,10 @@ export function BrowserPanel({
   running,
   error,
   hint,
+  focusMode,
   onStart,
   onStop,
+  onToggleFocus,
 }: Props) {
   const imgRef = useRef<HTMLImageElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -90,9 +94,21 @@ export function BrowserPanel({
 
   return (
     <section className="panel browser-panel">
-      <header className="panel-header">
-        Browser {running ? "• live" : "• stopped"}
-        {running && <span className="fps-label">{fps} fps</span>}
+      <header className="panel-header panel-header--browser">
+        <span>
+          Browser {running ? "• live" : "• stopped"}
+          {running && <span className="fps-label">{fps} fps</span>}
+        </span>
+        {!focusMode && (
+          <button
+            type="button"
+            className="panel-header-action"
+            onClick={onToggleFocus}
+            title="Expand browser to full workspace"
+          >
+            Focus
+          </button>
+        )}
       </header>
       <div className="panel-body browser-body">
         {!running && !error && (
