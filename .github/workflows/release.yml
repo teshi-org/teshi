@@ -222,7 +222,8 @@ jobs:
             cd dist
             cp ../artifacts/teshi-msi/*.msi .
 
-            desktop_msi=$(find ../artifacts/teshi-desktop-windows -maxdepth 1 -name '*.msi' -print -quit)
+            # upload-artifact strips to target/release/, so MSI lives under bundle/msi/
+            desktop_msi=$(find ../artifacts/teshi-desktop-windows -type f -name '*.msi' -print -quit)
             if [[ -z "${desktop_msi}" ]]; then
               echo "Missing teshi-desktop MSI artifact." >&2
               exit 1
