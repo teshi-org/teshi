@@ -49,10 +49,6 @@ jobs:
 
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            desktop/src-tauri -> desktop/src-tauri/target
 
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }} --bin teshi
@@ -70,8 +66,7 @@ jobs:
         working-directory: desktop
         run: |
           npm ci
-          npm run build
-          npx tauri build
+          npx tauri build --bundles msi
 
       - name: Install WiX Toolset
         if: matrix.target == 'x86_64-pc-windows-msvc'
@@ -132,8 +127,8 @@ jobs:
         with:
           name: teshi-desktop-windows
           path: |
-            desktop/src-tauri/target/release/teshi-desktop.exe
-            desktop/src-tauri/target/release/bundle/msi/*.msi
+            target/release/teshi-desktop.exe
+            target/release/bundle/msi/*.msi
           if-no-files-found: error
 
   publish:
@@ -256,6 +251,7 @@ jobs:
     name: Submit WinGet manifest
     runs-on: windows-latest
     needs: publish
+    if: ${{ secrets.WINGET_TOKEN != '' }}
 
     steps:
       - name: Ensure release tag format
@@ -278,10 +274,6 @@ jobs:
         env:
           WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINGET_TOKEN)) {
-            throw "Missing WINGET_TOKEN secret."
-          }
-
           $tag = "${{ github.ref_name }}"
           if ("${{ github.event_name }}" -eq "workflow_dispatch") {
             $tag = "${{ github.event.inputs.release_tag }}"
