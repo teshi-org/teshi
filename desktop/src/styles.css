@@ -54,24 +54,30 @@ button:hover {
 }
 
 .app-chrome {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
   align-items: center;
-  justify-content: space-between;
   height: 36px;
   min-height: 36px;
-  padding: 0 8px;
+  padding: 0 0 0 8px;
   background: #1e1e1e;
   border-bottom: 1px solid #333;
   user-select: none;
   flex-shrink: 0;
 }
 
-.app-chrome-left {
+.app-chrome-drag {
+  -webkit-app-region: drag;
+  min-width: 0;
+  height: 100%;
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-width: 0;
-  flex: 1;
+  padding-left: 4px;
+}
+
+.app-chrome-no-drag,
+.app-chrome-no-drag button {
+  -webkit-app-region: no-drag;
 }
 
 .app-chrome-menus {

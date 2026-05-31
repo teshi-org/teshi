@@ -59,69 +59,92 @@ export function AppChrome({
     [desktop],
   );
 
+  const handleTitlebarMouseDown = useCallback(
+    async (e: React.MouseEvent<HTMLDivElement>) => {
+      if (!desktop || e.button !== 0) {
+        return;
+      }
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      const win = getCurrentWindow();
+      if (e.detail === 2) {
+        await win.toggleMaximize();
+      } else {
+        await win.startDragging();
+      }
+    },
+    [desktop],
+  );
+
   const title = projectRoot
     ? projectRoot.replace(/^.*[/\\]/, "") || projectRoot
     : "teshi";
 
   return (
-    <header className="app-chrome" data-tauri-drag-region>
-      <div className="app-chrome-left" ref={menuRef}>
-        <div className="app-chrome-menus">
-          <button
-            type="button"
-            className="app-chrome-menu-trigger"
-            onClick={() => {
-              setFileOpen((v) => !v);
-              setRecentOpen(false);
-            }}
-          >
-            File
-          </button>
-          {fileOpen && (
-            <div className="app-chrome-dropdown">
-              <button type="button" onClick={() => {
+    <header className="app-chrome">
+      <div className="app-chrome-menus app-chrome-no-drag" ref={menuRef}>
+        <button
+          type="button"
+          className="app-chrome-menu-trigger"
+          onClick={() => {
+            setFileOpen((v) => !v);
+            setRecentOpen(false);
+          }}
+        >
+          File
+        </button>
+        {fileOpen && (
+          <div className="app-chrome-dropdown">
+            <button
+              type="button"
+              onClick={() => {
                 setFileOpen(false);
                 onOpenProject();
-              }}>
-                Open Project…
-              </button>
-              <button
-                type="button"
-                className={recentProjects.length === 0 ? "disabled" : ""}
-                disabled={recentProjects.length === 0}
-                onClick={() => {
-                  setRecentOpen((v) => !v);
-                }}
-              >
-                Open Recent ▸
-              </button>
-              {recentOpen && recentProjects.length > 0 && (
-                <div className="app-chrome-submenu">
-                  {recentProjects.map((path) => (
-                    <button
-                      key={path}
-                      type="button"
-                      title={path}
-                      onClick={() => {
-                        setFileOpen(false);
-                        setRecentOpen(false);
-                        onOpenRecent(path);
-                      }}
-                    >
-                      {path}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+              }}
+            >
+              Open Project…
+            </button>
+            <button
+              type="button"
+              className={recentProjects.length === 0 ? "disabled" : ""}
+              disabled={recentProjects.length === 0}
+              onClick={() => {
+                setRecentOpen((v) => !v);
+              }}
+            >
+              Open Recent ▸
+            </button>
+            {recentOpen && recentProjects.length > 0 && (
+              <div className="app-chrome-submenu">
+                {recentProjects.map((path) => (
+                  <button
+                    key={path}
+                    type="button"
+                    title={path}
+                    onClick={() => {
+                      setFileOpen(false);
+                      setRecentOpen(false);
+                      onOpenRecent(path);
+                    }}
+                  >
+                    {path}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+      <div
+        className="app-chrome-drag"
+        data-tauri-drag-region
+        onMouseDown={desktop ? (e) => void handleTitlebarMouseDown(e) : undefined}
+      >
         <span className="app-chrome-title" title={projectRoot ?? undefined}>
           {title}
         </span>
       </div>
       {desktop && (
-        <div className="app-chrome-controls">
+        <div className="app-chrome-controls app-chrome-no-drag">
           <button
             type="button"
             className="app-chrome-winbtn"
