@@ -219,7 +219,6 @@ function AppShell() {
   const chromeProps = {
     projectRoot: state.projectRoot,
     recentProjects: state.recentProjects,
-    hidden: browserFullscreen,
     onOpenProject: () => void pickProject(),
     onOpenRecent: (path: string) => void openProjectPathWithFeedback(path),
   };

@@ -213,6 +213,17 @@ button:hover {
   z-index: 1;
 }
 
+.resize-handle::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: #333;
+  pointer-events: none;
+}
+
 .resize-handle:hover,
 .resize-handle[data-resize-handle-active] {
   background: rgba(37, 99, 235, 0.35);

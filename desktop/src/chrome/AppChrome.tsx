@@ -4,7 +4,6 @@ import { isTauriHost } from "../platform";
 interface Props {
   projectRoot: string | null;
   recentProjects: string[];
-  hidden?: boolean;
   onOpenProject: () => void;
   onOpenRecent: (path: string) => void;
 }
@@ -12,7 +11,6 @@ interface Props {
 export function AppChrome({
   projectRoot,
   recentProjects,
-  hidden,
   onOpenProject,
   onOpenRecent,
 }: Props) {
@@ -60,10 +58,6 @@ export function AppChrome({
     },
     [desktop],
   );
-
-  if (hidden) {
-    return null;
-  }
 
   const title = projectRoot
     ? projectRoot.replace(/^.*[/\\]/, "") || projectRoot
