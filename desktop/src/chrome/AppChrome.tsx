@@ -77,7 +77,7 @@ export function AppChrome({
 
   const title = projectRoot
     ? projectRoot.replace(/^.*[/\\]/, "") || projectRoot
-    : "teshi";
+    : "Teshi";
 
   return (
     <header className="app-chrome">
