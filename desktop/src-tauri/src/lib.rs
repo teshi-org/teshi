@@ -76,9 +76,10 @@ pub fn run() {
                 .map_err(|e| e.to_string())?;
 
             let handle = app.handle().clone();
-            let host: HostEventCallback = Arc::new(move |name: &str, payload: serde_json::Value| {
-                let _ = handle.emit(name, payload);
-            });
+            let host: HostEventCallback =
+                Arc::new(move |name: &str, payload: serde_json::Value| {
+                    let _ = handle.emit(name, payload);
+                });
 
             let rt = TeshiRuntime::new(
                 RuntimeConfig {

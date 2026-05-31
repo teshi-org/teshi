@@ -55,10 +55,7 @@ pub struct TeshiRuntime {
 
 impl TeshiRuntime {
     /// Builds a runtime with the given config and optional host event forwarding.
-    pub fn new(
-        config: RuntimeConfig,
-        host: Option<HostEventCallback>,
-    ) -> Arc<Self> {
+    pub fn new(config: RuntimeConfig, host: Option<HostEventCallback>) -> Arc<Self> {
         Arc::new(Self {
             project: ProjectState::new(),
             sidecar: SidecarState::new(),
