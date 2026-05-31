@@ -76,6 +76,21 @@ async function syncTerminalSize(
   await getRuntime().resizeTerminal(cols, rows);
 }
 
+async function ensureShellSpawned(
+  fit: import("@xterm/addon-fit").FitAddon,
+  term: import("@xterm/xterm").Terminal,
+  shellSpawnedRef: { current: boolean },
+): Promise<void> {
+  fit.fit();
+  const { cols, rows } = normalizeTerminalSize(term.cols, term.rows);
+  if (!shellSpawnedRef.current) {
+    await getRuntime().spawnTerminal(cols, rows);
+    shellSpawnedRef.current = true;
+  } else {
+    await syncTerminalSize(fit, term);
+  }
+}
+
 function waitForLayout(): Promise<void> {
   return new Promise((resolve) => {
     requestAnimationFrame(() => resolve());
@@ -219,7 +234,9 @@ export function FileTreeTerminalPanel({
 
       resizeObserver = new ResizeObserver(() => {
         if (!fit || !term) return;
-        void syncTerminalSize(fit, term);
+        void ensureShellSpawned(fit, term, shellSpawnedRef).catch((err) => {
+          console.error("terminal resize/spawn failed", err);
+        });
       });
       resizeObserver.observe(terminalRef.current);
     })();
@@ -242,15 +259,7 @@ export function FileTreeTerminalPanel({
     void (async () => {
       try {
         await waitForLayout();
-        fit.fit();
-        const { cols, rows } = normalizeTerminalSize(term.cols, term.rows);
-
-        if (!shellSpawnedRef.current) {
-          await getRuntime().spawnTerminal(cols, rows);
-          shellSpawnedRef.current = true;
-        } else {
-          await syncTerminalSize(fit, term);
-        }
+        await ensureShellSpawned(fit, term, shellSpawnedRef);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         toast.error(`Terminal failed: ${message}`);
@@ -267,7 +276,9 @@ export function FileTreeTerminalPanel({
     if (!fit || !term) return;
 
     requestAnimationFrame(() => {
-      void syncTerminalSize(fit, term);
+      void ensureShellSpawned(fit, term, shellSpawnedRef).catch((err) => {
+        console.error("terminal refit/spawn failed", err);
+      });
     });
   }, [layoutHidden, layoutCollapsed, tab, terminalReady]);
 

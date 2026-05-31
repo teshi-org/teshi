@@ -90,11 +90,7 @@ fn normalized_pty_size(cols: u16, rows: u16) -> PtySize {
 ///
 /// `cols` and `rows` must match the xterm viewport so ConPTY/PSReadLine render
 /// the prompt at the correct width on first paint.
-pub async fn spawn_terminal(
-    rt: Arc<TeshiRuntime>,
-    cols: u16,
-    rows: u16,
-) -> Result<(), String> {
+pub async fn spawn_terminal(rt: Arc<TeshiRuntime>, cols: u16, rows: u16) -> Result<(), String> {
     let project_root = rt
         .project
         .root
@@ -108,9 +104,7 @@ pub async fn spawn_terminal(
 
     let pty_size = normalized_pty_size(cols, rows);
     let pty_system = NativePtySystem::default();
-    let pair = pty_system
-        .openpty(pty_size)
-        .map_err(|e| e.to_string())?;
+    let pair = pty_system.openpty(pty_size).map_err(|e| e.to_string())?;
 
     let cwd = shell_cwd(&project_root);
     let mut last_err = String::from("no shell available");
@@ -177,30 +171,25 @@ fn shell_cwd(project_root: &Path) -> PathBuf {
     dunce::simplified(project_root).to_path_buf()
 }
 
-/// PSReadLine inline predictions misalign in web-based emulators; ListView is safer.
-const PSREADLINE_EMBEDDED_INIT: &str =
-    "try { Set-PSReadLineOption -PredictionViewStyle ListView } catch { }";
+/// Disable PSReadLine history predictions in the embedded panel; ListView/Inline both
+/// clutter the small xterm viewport and Inline misaligns in web-based emulators.
+/// Re-apply after `$PROFILE` so user dotfiles cannot re-enable predictions.
+const PSREADLINE_EMBEDDED_INIT: &str = concat!(
+    "try { Set-PSReadLineOption -PredictionSource None } catch { }; ",
+    "if (Test-Path $PROFILE) { . $PROFILE }; ",
+    "try { Set-PSReadLineOption -PredictionSource None } catch { }"
+);
 
 fn shell_commands() -> Vec<CommandBuilder> {
     if cfg!(windows) {
         vec![
             shell_command(
                 "pwsh.exe",
-                &[
-                    "-NoLogo",
-                    "-NoExit",
-                    "-Command",
-                    PSREADLINE_EMBEDDED_INIT,
-                ],
+                &["-NoLogo", "-NoExit", "-Command", PSREADLINE_EMBEDDED_INIT],
             ),
             shell_command(
                 "powershell.exe",
-                &[
-                    "-NoLogo",
-                    "-NoExit",
-                    "-Command",
-                    PSREADLINE_EMBEDDED_INIT,
-                ],
+                &["-NoLogo", "-NoExit", "-Command", PSREADLINE_EMBEDDED_INIT],
             ),
             shell_command("cmd.exe", &[]),
         ]
