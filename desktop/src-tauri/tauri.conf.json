@@ -28,7 +28,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": "msi",
+    "icon": [
+      "icons/icon.ico"
+    ],
     "resources": {
       "resources/*": "resources/"
     }
