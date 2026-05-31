@@ -11,8 +11,6 @@ import { BottomDock } from "./panels/BottomDock";
 import type { BrowserError, FeatureRenderPayload } from "./types";
 import type { ActiveStep, PendingLocator } from "./locatorTypes";
 
-const runtime = getRuntime();
-
 function AppShell() {
   const { state, dispatch } = useProject();
   const [browserError, setBrowserError] = useState<string | null>(null);
@@ -20,6 +18,7 @@ function AppShell() {
 
   const openProjectPath = useCallback(
     async (path: string) => {
+      const runtime = getRuntime();
       const ok = await runtime.confirmStopRuntimeIfBusy();
       if (!ok) return;
       await runtime.teardownRuntime();
@@ -42,25 +41,48 @@ function AppShell() {
     [dispatch],
   );
 
+  const openProjectPathWithFeedback = useCallback(
+    async (path: string) => {
+      try {
+        await openProjectPath(path);
+      } catch (e) {
+        console.error("open project failed", e);
+        toast.error(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [openProjectPath],
+  );
+
   const pickProject = useCallback(async () => {
-    const picked = await runtime.openProjectDir();
-    if (picked) {
-      await openProjectPath(picked);
+    try {
+      const picked = await getRuntime().openProjectDir();
+      if (picked) {
+        await openProjectPathWithFeedback(picked);
+      }
+    } catch (e) {
+      console.error("pick project folder failed", e);
+      toast.error(e instanceof Error ? e.message : String(e));
     }
-  }, [openProjectPath]);
+  }, [openProjectPathWithFeedback]);
 
   useEffect(() => {
+    const runtime = getRuntime();
     void runtime.finalizeMainWindow?.().catch((err) => {
       console.error("finalize window geometry failed", err);
     });
 
-    void runtime.getRecentProjects().then((paths) => {
-      dispatch({ type: "SET_RECENT", paths });
-    });
+    void runtime
+      .getRecentProjects()
+      .then((paths) => {
+        dispatch({ type: "SET_RECENT", paths });
+      })
+      .catch((err) => {
+        console.error("load recent projects failed", err);
+      });
 
     const unsubs: Array<() => void> = [];
     void runtime.onEvent<string>("open-project-cli", (path) => {
-      void openProjectPath(path);
+      void openProjectPathWithFeedback(path);
     }).then((u) => unsubs.push(u));
     void runtime.onEvent<string[]>("recent-loaded", (paths) => {
       dispatch({ type: "SET_RECENT", paths });
@@ -123,7 +145,7 @@ function AppShell() {
       unlistenClose?.();
       unsubs.forEach((u) => u());
     };
-  }, [dispatch, openProjectPath]);
+  }, [dispatch, openProjectPathWithFeedback]);
 
   const syncActiveStep = useCallback(
     async (stepLine: number) => {
@@ -131,7 +153,7 @@ function AppShell() {
         return;
       }
       try {
-        const active = await runtime.syncActiveStep(
+        const active = await getRuntime().syncActiveStep(
           state.selectedFeaturePath,
           stepLine,
         );
@@ -145,7 +167,7 @@ function AppShell() {
   );
 
   const openFeature = async (path: string) => {
-    const payload = await runtime.renderFeature(path);
+    const payload = await getRuntime().renderFeature(path);
     dispatch({ type: "SET_FEATURE", path, payload });
   };
 
@@ -153,7 +175,7 @@ function AppShell() {
     setBrowserError(null);
     setBrowserHint(null);
     try {
-      const result = await runtime.startBrowserSidecar();
+      const result = await getRuntime().startBrowserSidecar();
       dispatch({
         type: "SET_BROWSER",
         wsUrl: result.ws_url,
@@ -175,7 +197,7 @@ function AppShell() {
   };
 
   const stopBrowser = async () => {
-    await runtime.stopBrowserSidecar();
+    await getRuntime().stopBrowserSidecar();
     dispatch({ type: "SET_BROWSER", wsUrl: null, running: false });
   };
 
@@ -199,7 +221,7 @@ function AppShell() {
     recentProjects: state.recentProjects,
     hidden: browserFullscreen,
     onOpenProject: () => void pickProject(),
-    onOpenRecent: (path: string) => void openProjectPath(path),
+    onOpenRecent: (path: string) => void openProjectPathWithFeedback(path),
   };
 
   if (!state.projectRoot) {
@@ -209,7 +231,7 @@ function AppShell() {
         <WelcomeScreen
           recentProjects={state.recentProjects}
           onOpenProject={() => void pickProject()}
-          onOpenRecent={(path) => void openProjectPath(path)}
+          onOpenRecent={(path) => void openProjectPathWithFeedback(path)}
         />
         <Toaster theme="dark" />
       </div>

@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { getRuntime } from "../platform";
-
-const runtime = getRuntime();
 import type { ActiveStep, PendingLocator } from "../locatorTypes";
 
 interface Props {
@@ -40,7 +38,7 @@ export function LocatorPanel({
   const onAccept = useCallback(async () => {
     if (!pending) return;
     try {
-      await runtime.confirmLocator(
+      await getRuntime().confirmLocator(
         selectedRank,
         editMode ? editedValue : null,
       );
@@ -53,7 +51,7 @@ export function LocatorPanel({
 
   const onReject = useCallback(async () => {
     try {
-      await runtime.rejectLocator();
+      await getRuntime().rejectLocator();
       toast.message("Locator proposal rejected");
       onPendingChange(null);
     } catch (e) {

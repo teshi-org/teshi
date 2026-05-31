@@ -25,7 +25,16 @@ export const tauriRuntime: TeshiRuntimeApi = {
   },
 
   async openProjectDir() {
-    return invoke<string | null>("open_project_dir");
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const picked = await open({
+      directory: true,
+      multiple: false,
+      title: "Open Project",
+    });
+    if (picked === null) {
+      return null;
+    }
+    return Array.isArray(picked) ? (picked[0] ?? null) : picked;
   },
 
   async getPendingLocator() {
@@ -87,17 +96,7 @@ export const tauriRuntime: TeshiRuntimeApi = {
   },
 
   async confirmStopRuntimeIfBusy() {
-    const allowed = await invoke<boolean>("check_project_switch_allowed");
-    if (allowed) {
-      return true;
-    }
-    const { ask } = await import("@tauri-apps/plugin-dialog");
-    return (
-      (await ask("Browser/Terminal is running. Continuing will stop them.", {
-        title: "Confirm",
-        kind: "warning",
-      })) ?? false
-    );
+    return invoke<boolean>("confirm_teardown");
   },
 
   async finalizeMainWindow() {

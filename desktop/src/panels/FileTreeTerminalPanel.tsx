@@ -2,8 +2,6 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { getRuntime } from "../platform";
 import type { DirEntry } from "../types";
-
-const runtime = getRuntime();
 import { PanelCollapseButton } from "./PanelCollapseButton";
 
 interface TreeNode extends DirEntry {
@@ -67,7 +65,7 @@ async function syncTerminalSize(
   const cols = term.cols;
   const rows = term.rows;
   if (cols > 0 && rows > 0) {
-    await runtime.resizeTerminal(cols, rows);
+    await getRuntime().resizeTerminal(cols, rows);
   }
 }
 
@@ -89,7 +87,7 @@ export function FileTreeTerminalPanel({
   const [terminalReady, setTerminalReady] = useState(false);
 
   const loadChildren = useCallback(async (path: string) => {
-    return runtime.listDir(path);
+    return getRuntime().listDir(path);
   }, []);
 
   useEffect(() => {
@@ -168,17 +166,17 @@ export function FileTreeTerminalPanel({
       fitRef.current = fit;
       setTerminalReady(true);
 
-      unlistenOutput = await runtime.onEvent<string>("terminal-output", (payload) => {
+      unlistenOutput = await getRuntime().onEvent<string>("terminal-output", (payload) => {
         term?.write(decodeTerminalChunk(payload));
       });
-      unlistenExit = await runtime.onEvent("terminal-exit", () => {
+      unlistenExit = await getRuntime().onEvent("terminal-exit", () => {
         shellSpawnedRef.current = false;
         term?.writeln("\r\n\x1b[33mShell exited.\x1b[0m");
       });
       if (disposed) return;
 
       term.onData((data) => {
-        void runtime.writeTerminal(data);
+        void getRuntime().writeTerminal(data);
       });
 
       if (disposed || !terminalRef.current || !fit || !term) return;
@@ -200,7 +198,7 @@ export function FileTreeTerminalPanel({
       fitRef.current = null;
       shellSpawnedRef.current = false;
       setTerminalReady(false);
-      void runtime.stopTerminal().catch((err) => {
+      void getRuntime().stopTerminal().catch((err) => {
         console.error("stop_terminal failed", err);
       });
     };
@@ -216,7 +214,7 @@ export function FileTreeTerminalPanel({
     void (async () => {
       try {
         if (!shellSpawnedRef.current) {
-          await runtime.spawnTerminal();
+          await getRuntime().spawnTerminal();
           shellSpawnedRef.current = true;
         }
         await syncTerminalSize(fit, term);
