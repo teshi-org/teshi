@@ -89,13 +89,41 @@ pub fn render_feature(
     let feature = parse_feature(content, file_path.clone());
     let structured = build_structured_blocks(&feature);
 
+    // 解析器对错误较宽松，这里补一个最小校验：缺少 Feature 头视为解析失败，
+    // UI 据此显示错误条并回退到 raw 文本视图。
+    let error = detect_feature_error(content, &feature);
+
     FeatureRenderPayload {
         path: file_path,
         relative_path,
-        structured,
+        // 解析失败时不展示半成品的结构化块，让前端只渲染 raw 回退。
+        structured: if error.is_some() {
+            Vec::new()
+        } else {
+            structured
+        },
         raw_lines,
-        error: None,
+        error,
     }
+}
+
+/// 对解析结果做最小有效性校验，返回需要在 UI 上提示的错误。
+fn detect_feature_error(content: &str, feature: &BddFeature) -> Option<RenderError> {
+    if !feature.name.trim().is_empty() {
+        return None;
+    }
+    // 定位首个非空、非注释行作为错误行号，方便前端高亮。
+    let line_number = content
+        .lines()
+        .position(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.is_empty() && !trimmed.starts_with('#')
+        })
+        .map(|i| i + 1);
+    Some(RenderError {
+        message: "Missing Feature header.".to_string(),
+        line_number,
+    })
 }
 
 fn detect_language(content: &str) -> String {

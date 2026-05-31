@@ -81,12 +81,20 @@ pub async fn open_project(
 
 #[tauri::command]
 pub fn list_dir(path: String, state: State<'_, ProjectState>) -> Result<Vec<DirEntry>, String> {
-    let dir = PathBuf::from(&path);
-    let root = state.root.lock().unwrap().clone();
-    if let Some(ref project_root) = root {
-        if !dir.starts_with(project_root) && dir != *project_root {
-            return Err("path outside project root".into());
-        }
+    let project_root = state
+        .root
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "no project open".to_string())?;
+
+    // 先 canonicalize 再做包含校验，避免通过 `..` 等相对路径逃逸项目根目录。
+    let dir = PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let root = project_root.canonicalize().map_err(|e| e.to_string())?;
+    if !dir.starts_with(&root) {
+        return Err("path outside project root".into());
     }
     if !dir.is_dir() {
         return Err("not a directory".into());

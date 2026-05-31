@@ -8,6 +8,25 @@ use serde::{Deserialize, Serialize};
 
 const RECENT_MAX: usize = 10;
 
+/// Minimum window size; must stay in sync with `tauri.conf.json` `minWidth` / `minHeight`.
+pub const MIN_WINDOW_WIDTH: u32 = 1280;
+/// Minimum window height; must stay in sync with `tauri.conf.json` `minHeight`.
+pub const MIN_WINDOW_HEIGHT: u32 = 720;
+
+/// Default window size when no valid persisted size exists.
+pub const DEFAULT_WINDOW_WIDTH: u32 = 1600;
+/// Default window height when no valid persisted size exists.
+pub const DEFAULT_WINDOW_HEIGHT: u32 = 900;
+
+/// Returns `(width, height)` only when both dimensions meet the configured minimum.
+pub fn validated_window_size(width: u32, height: u32) -> Option<(u32, u32)> {
+    if width >= MIN_WINDOW_WIDTH && height >= MIN_WINDOW_HEIGHT {
+        Some((width, height))
+    } else {
+        None
+    }
+}
+
 /// Persisted window and UI preferences.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -101,4 +120,27 @@ pub fn open_dialog_default_dir() -> Option<PathBuf> {
         }
     }
     dirs::home_dir()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validated_window_size_rejects_zero_and_sub_minimum() {
+        assert!(validated_window_size(0, 0).is_none());
+        assert!(validated_window_size(1600, 0).is_none());
+        assert!(validated_window_size(0, 900).is_none());
+        assert!(validated_window_size(MIN_WINDOW_WIDTH - 1, MIN_WINDOW_HEIGHT).is_none());
+        assert!(validated_window_size(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT - 1).is_none());
+    }
+
+    #[test]
+    fn validated_window_size_accepts_minimum_and_above() {
+        assert_eq!(
+            validated_window_size(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT),
+            Some((MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT))
+        );
+        assert_eq!(validated_window_size(1920, 1080), Some((1920, 1080)));
+    }
 }

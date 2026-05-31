@@ -10,6 +10,21 @@ import { BrowserPanel } from "./panels/BrowserPanel";
 import { FileTreeTerminalPanel } from "./panels/FileTreeTerminalPanel";
 import type { BrowserError, FeatureRenderPayload } from "./types";
 
+/** Ask before stopping browser/terminal; uses JS dialog to avoid Rust blocking_show deadlocks. */
+async function confirmStopRuntimeIfBusy(): Promise<boolean> {
+  const allowed = await invoke<boolean>("check_project_switch_allowed");
+  if (allowed) {
+    return true;
+  }
+  const { ask } = await import("@tauri-apps/plugin-dialog");
+  return (
+    (await ask("Browser/Terminal is running. Continuing will stop them.", {
+      title: "Confirm",
+      kind: "warning",
+    })) ?? false
+  );
+}
+
 function AppShell() {
   const { state, dispatch } = useProject();
   const [browserError, setBrowserError] = useState<string | null>(null);
@@ -17,10 +32,13 @@ function AppShell() {
 
   const openProjectPath = useCallback(
     async (path: string) => {
-      const ok = await invoke<boolean>("confirm_teardown");
+      const ok = await confirmStopRuntimeIfBusy();
       if (!ok) return;
       await invoke("teardown_runtime");
       await invoke("open_project", { path });
+      // open_project 已写入 recent.json，这里重新拉取以刷新下拉列表。
+      const recent = await invoke<string[]>("get_recent_projects_cmd");
+      dispatch({ type: "SET_RECENT", paths: recent });
       dispatch({ type: "SET_PROJECT", root: path });
       setBrowserError(null);
       setBrowserHint(null);
@@ -60,18 +78,56 @@ function AppShell() {
     };
     window.addEventListener("keydown", onKey);
 
-    void getCurrentWindow().onCloseRequested(async (event) => {
-      const ok = await invoke<boolean>("confirm_teardown");
-      if (!ok) {
+    // Hold the native close until teardown finishes. Do not call Rust blocking_show()
+    // from this handler — it can deadlock on Windows during WM_CLOSE.
+    let unlistenClose: (() => void) | undefined;
+    let closing = false;
+    void (async () => {
+      unlistenClose = await getCurrentWindow().onCloseRequested(async (event) => {
+        if (closing) {
+          return;
+        }
         event.preventDefault();
-        return;
-      }
-      await invoke("teardown_runtime");
-    });
+        closing = true;
+        try {
+          const ok = await confirmStopRuntimeIfBusy();
+          if (!ok) {
+            closing = false;
+            return;
+          }
+          await invoke("teardown_runtime");
+        } catch (err) {
+          console.error("shutdown before close failed", err);
+        }
+        await getCurrentWindow().destroy();
+      });
+    })();
+
+    // Debounce window resize persistence; skip invalid sizes from startup/minimize glitches.
+    const MIN_WINDOW_WIDTH = 1280;
+    const MIN_WINDOW_HEIGHT = 720;
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    void getCurrentWindow()
+      .onResized(async ({ payload }) => {
+        const factor = await getCurrentWindow().scaleFactor();
+        const logical = payload.toLogical(factor);
+        const width = Math.round(logical.width);
+        const height = Math.round(logical.height);
+        if (width < MIN_WINDOW_WIDTH || height < MIN_WINDOW_HEIGHT) {
+          return;
+        }
+        if (resizeTimer) clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+          void invoke("save_window_settings", { width, height });
+        }, 500);
+      })
+      .then((u) => unsubs.push(u));
 
     return () => {
+      unlistenClose?.();
       unsubs.forEach((u) => u());
       window.removeEventListener("keydown", onKey);
+      if (resizeTimer) clearTimeout(resizeTimer);
     };
   }, [dispatch, openProjectPath, pickProject]);
 

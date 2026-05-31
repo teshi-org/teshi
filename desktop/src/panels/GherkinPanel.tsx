@@ -14,6 +14,19 @@ const kindClass: Record<string, string> = {
   doc_string: "hl-doc",
 };
 
+// keyword_kind 来自后端 StepKeywordType（Given/When/Then/And/But），据此做语法着色。
+const stepKeywordClass: Record<string, string> = {
+  Given: "hl-given",
+  When: "hl-when",
+  Then: "hl-then",
+  And: "hl-and",
+  But: "hl-and",
+};
+
+function stepClassFor(keywordKind: string): string {
+  return stepKeywordClass[keywordKind] ?? "hl-default";
+}
+
 function SpanLine({ spans }: { spans: HighlightSpan[] }) {
   return (
     <>
@@ -75,7 +88,9 @@ export function GherkinPanel({
                     <h3>Background</h3>
                     {block.steps.map((step) => (
                       <div key={step.line_number} className="step-line">
-                        <span className="hl-given">{step.keyword}</span>{" "}
+                        <span className={stepClassFor(step.keyword_kind)}>
+                          {step.keyword}
+                        </span>{" "}
                         {step.text}
                       </div>
                     ))}
@@ -113,7 +128,10 @@ export function GherkinPanel({
                           onSelectStep(step.line_number);
                         }}
                       >
-                        <span className="hl-when">{step.keyword}</span> {step.text}
+                        <span className={stepClassFor(step.keyword_kind)}>
+                          {step.keyword}
+                        </span>{" "}
+                        {step.text}
                       </div>
                     ))}
                   </div>

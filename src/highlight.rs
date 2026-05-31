@@ -4,8 +4,11 @@ use ratatui::text::{Line, Span};
 use teshi_gherkin::gherkin_lang::GherkinLanguage;
 use teshi_gherkin::highlight::{HighlightKind, highlight_line_spans};
 pub use teshi_gherkin::highlight::{
-    STEP_KEYWORD_COL_WIDTH, StepHighlightState, leading_whitespace_chars, step_keyword_gutter_pad,
+    StepHighlightState, leading_whitespace_chars, step_keyword_gutter_pad,
 };
+// STEP_KEYWORD_COL_WIDTH 仅被对齐相关的测试使用，仅在测试构建中 re-export，避免发布构建出现 unused import。
+#[cfg(test)]
+pub use teshi_gherkin::highlight::STEP_KEYWORD_COL_WIDTH;
 
 /// Styled gutter span used by Explore Steps and the BDD Editor: pad spaces + keyword in one span.
 pub(crate) fn step_keyword_gutter_styled_span(
@@ -145,7 +148,6 @@ mod tests {
     }
 
     fn gutter_keyword_end_col(line: &Line<'_>) -> usize {
-        use unicode_width::UnicodeWidthStr;
         let mut col = 0usize;
         for span in &line.spans {
             if span.style.fg.is_some() {

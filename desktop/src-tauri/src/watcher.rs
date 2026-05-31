@@ -1,6 +1,6 @@
 //! File change watcher for the active `.feature` file.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -22,9 +22,9 @@ impl FileWatcherState {
         }
     }
 
-    pub fn watch(&self, path: &PathBuf, app: AppHandle) -> Result<()> {
+    pub fn watch(&self, path: &Path, app: AppHandle) -> Result<()> {
         self.clear()?;
-        let path_clone = path.clone();
+        let path_clone = path.to_path_buf();
         let mut watcher = RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
                 if res.is_ok() {

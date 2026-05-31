@@ -23,9 +23,14 @@ class BrowserSession:
         self.page = await context.new_page()
         await self.page.goto("about:blank")
 
+    def current_url(self) -> str:
+        if self.page is None:
+            return "about:blank"
+        return self.page.url
+
     async def navigate(self, url: str) -> None:
         if self.page is not None:
-            await self.page.goto(url)
+            await self.page.goto(url, wait_until="domcontentloaded")
 
     async def screenshot_jpeg_b64(self) -> str:
         if self.page is None:
@@ -58,7 +63,13 @@ async def run_server(host: str, port: int) -> None:
         while True:
             if clients:
                 frame = await session.screenshot_jpeg_b64()
-                payload = json.dumps({"type": "frame", "data": frame})
+                payload = json.dumps(
+                    {
+                        "type": "frame",
+                        "data": frame,
+                        "url": session.current_url(),
+                    }
+                )
                 dead = []
                 for ws in clients:
                     try:

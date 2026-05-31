@@ -7,7 +7,10 @@ mod watcher;
 
 use tauri::{Emitter, Manager};
 
-use crate::app_data::{get_recent_projects, load_settings, save_settings};
+use crate::app_data::{
+    get_recent_projects, load_settings, save_settings, validated_window_size,
+    DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH,
+};
 use crate::gherkin_cmd::render_feature_cmd;
 use crate::project::{
     check_project_switch_allowed, get_project_root, list_dir, open_project, set_browser_active,
@@ -61,6 +64,16 @@ pub fn run() {
             save_window_settings,
         ])
         .setup(|app| {
+            // Restore persisted window size; ignore corrupt/zero values from early resize events.
+            if let Some(window) = app.get_webview_window("main") {
+                let size = load_settings()
+                    .ok()
+                    .and_then(|settings| {
+                        validated_window_size(settings.window_width?, settings.window_height?)
+                    })
+                    .unwrap_or((DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT));
+                let _ = window.set_size(tauri::LogicalSize::new(size.0 as f64, size.1 as f64));
+            }
             if let Ok(recent) = get_recent_projects() {
                 let _ = app.emit("recent-loaded", recent);
             }
@@ -71,11 +84,27 @@ pub fn run() {
 }
 
 fn init_logging() {
-    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
+    // 日志滚动写入 %APPDATA%/teshi-desktop/logs/，解析数据目录失败时回退到系统临时目录。
+    let log_dir = crate::app_data::app_data_dir()
+        .map(|p| p.join("logs"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("teshi-desktop-logs"));
+    let file_appender = tracing_appender::rolling::daily(log_dir, "teshi-desktop.log");
+    let (writer, guard) = tracing_appender::non_blocking(file_appender);
+    // non-blocking writer 的 guard 必须存活至进程结束，否则缓冲日志会丢失。
+    Box::leak(Box::new(guard));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .with_writer(writer)
+        .with_ansi(false)
+        .try_init();
 }
 
 #[tauri::command]
 fn save_window_settings(width: u32, height: u32) -> Result<(), String> {
+    let Some((width, height)) = validated_window_size(width, height) else {
+        // Ignore transient zero-size resize events during startup or minimize.
+        return Ok(());
+    };
     let mut settings = load_settings().map_err(|e| e.to_string())?;
     settings.window_width = Some(width);
     settings.window_height = Some(height);

@@ -28,7 +28,16 @@ impl SidecarState {
     pub async fn stop(&self) -> Result<()> {
         if let Some(mut child) = self.child.lock().unwrap().take() {
             let _ = child.kill();
-            let _ = child.wait();
+            // Bound wait so window close does not hang on a stuck Playwright process.
+            use std::time::{Duration, Instant};
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                    Err(_) => break,
+                }
+            }
         }
         *self.ws_url.lock().unwrap() = None;
         Ok(())
@@ -97,19 +106,20 @@ pub async fn start_browser_sidecar(
         hint: Some("Create .venv and run: pip install -r python/requirements.txt".into()),
     })?;
 
+    // sidecar 运行时同时依赖 playwright 与 websockets，启动前一并检测以避免子进程秒退。
     let check = Command::new(&python)
-        .args(["-c", "import playwright"])
+        .args(["-c", "import playwright, websockets"])
         .output()
         .map_err(|e| BrowserError {
             message: format!("Failed to run Python: {e}"),
             hint: Some(format!(
-                "{} -m pip install playwright websockets",
+                "{} -m pip install -r python/requirements.txt",
                 python.display()
             )),
         })?;
     if !check.status.success() {
         return Err(BrowserError {
-            message: "Playwright is not installed in the project venv.".into(),
+            message: "Playwright/websockets are not installed in the project venv.".into(),
             hint: Some(format!(
                 "{} -m pip install -r python/requirements.txt",
                 python.display()
@@ -139,7 +149,7 @@ pub async fn start_browser_sidecar(
         hint: None,
     })?;
 
-    let child = Command::new(&python)
+    let mut child = Command::new(&python)
         .arg(&script)
         .args(["--host", "127.0.0.1", "--port", &port.to_string()])
         .stdout(Stdio::null())
@@ -149,6 +159,14 @@ pub async fn start_browser_sidecar(
             message: format!("Failed to start browser sidecar: {e}"),
             hint: None,
         })?;
+
+    // 轮询 WebSocket 端口直到就绪；若子进程提前退出或超时，kill 后返回错误，
+    // 避免在 sidecar 实际不可用时仍把 browser_active 置为 true。
+    if let Err(err) = wait_until_ready(&mut child, port) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(err);
+    }
 
     *sidecar.child.lock().unwrap() = Some(child);
     let ws_url = format!("ws://127.0.0.1:{port}");
@@ -162,6 +180,37 @@ pub async fn start_browser_sidecar(
         })?;
 
     Ok(BrowserStartResult { ws_url })
+}
+
+/// 在超时时间内轮询 sidecar 的监听端口，确认其已就绪。
+fn wait_until_ready(child: &mut Child, port: u16) -> Result<(), BrowserError> {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::{Duration, Instant};
+
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    let deadline = Instant::now() + Duration::from_secs(20);
+
+    loop {
+        // 子进程已退出说明启动失败（依赖缺失、Chromium 未安装等）。
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(BrowserError {
+                message: format!("Browser sidecar exited during startup (status: {status})."),
+                hint: Some(
+                    "Check that Playwright Chromium is installed and the venv is valid.".into(),
+                ),
+            });
+        }
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(BrowserError {
+                message: "Browser sidecar did not become ready in time.".into(),
+                hint: Some("The Playwright service failed to open its WebSocket port.".into()),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 #[tauri::command]
