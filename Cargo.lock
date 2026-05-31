@@ -4983,6 +4983,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "clap",
  "dirs",
  "dunce",
  "notify",

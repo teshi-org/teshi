@@ -300,8 +300,10 @@ Used primarily for AI chat message rendering.
 
 Subcommands:
 
-- `teshi [path]` — open directory or `.feature` file
-- `teshi run [--feature] [--scenario] [--runner-cmd] [--runner-cwd]` — run BDD tests
+- `teshi [PATH]` — TUI; no PATH scans current directory for `.feature` files
+- `teshi web [--project]` — browser GUI (loopback HTTP)
+- `teshi desktop [--project]` — spawn native `teshi-desktop`
+- `teshi run [PATH] [--scenario] [--runner-cmd] [--runner-cwd]` — headless BDD runs
 - `teshi auth login [--provider]` — interactive credential entry
 - `teshi auth list` — show stored providers
 - `teshi auth remove <provider>` — delete credentials

@@ -148,35 +148,21 @@ fn main() -> Result<()> {
             let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
             return rt.block_on(teshi_web::run(options));
         }
+        Some(cli::Command::Desktop { project, path }) => {
+            return cli::desktop::spawn_desktop(project.as_deref(), path.as_deref());
+        }
         Some(cli::Command::Run {
-            feature,
+            path,
             scenario,
             runner_cmd,
             runner_arg,
             runner_cwd,
+            feature,
         }) => {
-            let mut args: Vec<String> = Vec::new();
-            if let Some(f) = feature {
-                args.push("--feature".into());
-                args.push(f);
-            }
-            if let Some(s) = scenario {
-                args.push("--scenario".into());
-                args.push(s);
-            }
-            if let Some(c) = runner_cmd {
-                args.push("--runner-cmd".into());
-                args.push(c);
-            }
-            for a in runner_arg.unwrap_or_default() {
-                args.push("--runner-arg".into());
-                args.push(a);
-            }
-            if let Some(cwd) = runner_cwd {
-                args.push("--runner-cwd".into());
-                args.push(cwd);
-            }
-            return runner::run_cli(&args);
+            let opts = cli::Command::run_options(
+                path, scenario, runner_cmd, runner_arg, runner_cwd, feature,
+            );
+            return runner::run_with_options(opts);
         }
         None => {}
     }

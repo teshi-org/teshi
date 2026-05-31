@@ -1,15 +1,26 @@
 pub mod auth;
+pub mod desktop;
+
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "teshi", version, about = "Terminal-first mindmap editor")]
+#[command(
+    name = "teshi",
+    version,
+    about = "Terminal-first BDD editor with AI assistance",
+    long_about = "Terminal UI: `teshi` or `teshi path/` (default: scan current directory).\n\
+                  Browser GUI: `teshi web [--project PATH]`.\n\
+                  Native locator workflow: `teshi desktop [--project PATH]`.\n\
+                  Headless CI runs: `teshi run [PATH] [--scenario NAME]`."
+)]
 pub struct Cli {
-    /// Subcommands (auth, run)
+    /// Subcommands (auth, web, desktop, run)
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// File paths or directories for TUI mode
+    /// File paths or directories for TUI mode (default: current directory)
     #[arg(value_name = "PATH")]
     pub paths: Vec<String>,
 }
@@ -21,28 +32,40 @@ pub enum Command {
         #[command(subcommand)]
         action: AuthCommand,
     },
-    /// Run the BDD desktop UI in a local browser (loopback HTTP server)
+    /// Browser GUI via loopback HTTP server (same UI as desktop, no Tauri install)
     Web {
         #[command(flatten)]
         options: teshi_web::WebOptions,
     },
-    /// Run test features in CLI mode
-    Run {
-        /// Path to a .feature file
+    /// Native desktop shell (Chrome extension locator, embedded terminal)
+    Desktop {
+        /// Project directory to open on startup
         #[arg(long)]
-        feature: Option<String>,
+        project: Option<String>,
+        /// Project directory (shortcut for `--project`)
+        #[arg(value_name = "PATH")]
+        path: Option<String>,
+    },
+    /// Run BDD features headlessly (CI / scripts; streams NDJSON runner events)
+    Run {
+        /// Feature file or project directory (default: current directory)
+        #[arg(value_name = "PATH")]
+        path: Option<String>,
         /// Specific scenario name to run
         #[arg(long)]
         scenario: Option<String>,
         /// Runner binary / command
         #[arg(long)]
         runner_cmd: Option<String>,
-        /// Runner additional arguments (space-separated)
+        /// Runner additional arguments (repeatable)
         #[arg(long)]
         runner_arg: Option<Vec<String>>,
         /// Runner working directory
         #[arg(long)]
         runner_cwd: Option<String>,
+        /// Deprecated alias for positional `PATH`
+        #[arg(long, hide = true)]
+        feature: Option<String>,
     },
 }
 
@@ -65,4 +88,25 @@ pub enum AuthCommand {
     Status,
     /// Migrate API keys from environment variables to secure storage
     Migrate,
+}
+
+impl Command {
+    /// Builds run options from the `run` subcommand, resolving deprecated flags.
+    pub fn run_options(
+        path: Option<String>,
+        scenario: Option<String>,
+        runner_cmd: Option<String>,
+        runner_arg: Option<Vec<String>>,
+        runner_cwd: Option<String>,
+        feature: Option<String>,
+    ) -> crate::runner::RunCliOptions {
+        let path = path.or(feature).map(PathBuf::from);
+        crate::runner::RunCliOptions {
+            path,
+            scenario,
+            runner_cmd,
+            runner_args: runner_arg.unwrap_or_default(),
+            runner_cwd: runner_cwd.map(PathBuf::from),
+        }
+    }
 }

@@ -592,7 +592,12 @@ impl App {
     /// Builds the editor state from parsed CLI arguments.
     pub fn from_cli(cli: &crate::cli::Cli) -> Result<Self> {
         let config = crate::config::load_config()?;
-        let paths: Vec<PathBuf> = cli.paths.iter().map(PathBuf::from).collect();
+        // No positional paths means scan the current directory (same as `teshi .`).
+        let paths: Vec<PathBuf> = if cli.paths.is_empty() {
+            vec![std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))]
+        } else {
+            cli.paths.iter().map(PathBuf::from).collect()
+        };
 
         let feature_file = paths
             .iter()

@@ -5,14 +5,25 @@ Terminal-first BDD editor with AI assistance, mind-map navigation, and external 
 ## Quick Start
 
 ```bash
-cargo run -- path/to/features/          # open a directory of .feature files
-cargo run -- path/to/file.feature       # open a single feature file
-cargo run -- run path/to/file.feature   # run BDD tests (NDJSON-based runner)
+cargo run                              # TUI: scan current directory for .feature files
+cargo run -- path/to/features/         # open a directory of .feature files
+cargo run -- path/to/file.feature      # open a single feature file
+cargo run -- web --project path/       # browser GUI (loopback HTTP server)
+cargo run -- desktop --project path/   # native desktop shell (locator workflow)
+cargo run -- run path/to/file.feature  # headless BDD test run (NDJSON runner)
 ```
 
-No arguments opens an empty buffer.
+No `.feature` files in the current directory opens an empty project buffer.
 
 ### CLI Commands
+
+| Use case | Command |
+|----------|---------|
+| Terminal editing + AI | `teshi` / `teshi path/` |
+| Browser GUI (lightweight) | `teshi web [--project PATH]` |
+| Native desktop (Chrome locator) | `teshi desktop [--project PATH]` or `teshi-desktop [--project PATH]` |
+| Headless CI runs | `teshi run [PATH] [--scenario NAME]` |
+| Credentials | `teshi auth login \| list \| remove \| status \| migrate` |
 
 ```bash
 teshi auth login [--provider <name>]   # Store an API key for a provider
@@ -20,7 +31,9 @@ teshi auth list                        # Show stored providers (keys masked)
 teshi auth remove <provider>           # Delete stored credentials
 teshi auth status                      # Show config and credential status
 teshi auth migrate                     # Migrate API keys from env vars to auth.json
-teshi run --feature <path> ...         # Run BDD tests (NDJSON-based runner)
+teshi run [path] [--scenario NAME]     # Run BDD tests (default path: current directory)
+teshi web [--project PATH]             # Browser GUI via loopback server
+teshi desktop [--project PATH]         # Launch native desktop shell
 ```
 
 ## Tabs

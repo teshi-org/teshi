@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
 dunce = "1"
 dirs = "6"
 notify = "7.0"

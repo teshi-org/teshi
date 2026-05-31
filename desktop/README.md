@@ -46,7 +46,13 @@ cargo run -- web --project C:\path\to\bdd-project
 
 Optional flags: `--port 1421`, `--no-open`, `--dist path/to/desktop/dist`.
 
-The browser UI uses the same React app as the Tauri shell; open a project via **File > Open Project** (path prompt) or `--project`.
+The browser UI uses the same React app as the Tauri shell; open a project via **File > Open Project** or `--project`.
+
+Equivalent via main CLI wrapper:
+
+```bash
+teshi web --project C:\path\to\bdd-project
+```
 
 ## Layout
 
@@ -71,14 +77,16 @@ Runtime context files under `.teshi/` (except tracked skills) are gitignored loc
 ## CLI
 
 ```bash
-teshi-desktop
-teshi-desktop --project C:\path\to\project
+teshi-desktop [--project PATH]
+teshi-desktop PATH                    # positional shortcut for --project
+teshi desktop [--project PATH]        # spawn via main teshi binary
 ```
 
-Single-instance: a second launch focuses the existing window and can pass `--project`.
+Single-instance: a second launch focuses the existing window and opens the given project path.
 
 ## App data
 
 - `%APPDATA%\teshi-desktop\recent.json` — recent projects (max 10)
 - `%APPDATA%\teshi-desktop\settings.json` — window size and dialog defaults
 - `%APPDATA%\teshi-desktop\logs\` — application logs
+- Browser **localStorage** key `teshi.workspaceLayouts.v1` — per-project three-column panel sizes and side-panel collapse state (not in `settings.json`)

@@ -2,22 +2,52 @@
 
 ## Commands
 
-### Open files
+### Open files (TUI)
 
 ```bash
-teshi                              # empty buffer
+teshi                              # scan current directory for .feature files
 teshi path/to/features/            # open directory of .feature files
 teshi path/to/file.feature         # open single .feature file
 ```
 
-### Run tests
+If no `.feature` files are found, the TUI opens an empty project buffer.
+
+### Browser GUI (`teshi web`)
+
+Same React UI as desktop, served over loopback HTTP (no Tauri install required):
 
 ```bash
-teshi run path/to/file.feature                    # run all scenarios
-teshi run --feature "Login" file.feature           # filter by feature name
-teshi run --scenario "Successful login" file.feature # filter by scenario name
-teshi run --runner-cmd "behat" --runner-cwd /app  # override runner
+teshi web [--project PATH] [--port 1421] [--no-open] [--dist PATH]
 ```
+
+Build the frontend first: `cd desktop && npm run build`.
+
+### Native desktop (`teshi desktop` / `teshi-desktop`)
+
+Chrome extension locator workflow and embedded terminal:
+
+```bash
+teshi desktop [--project PATH]
+teshi desktop path/to/project          # positional shortcut
+teshi-desktop --project path/to/project
+teshi-desktop path/to/project
+```
+
+Development: `cargo tauri dev --manifest-path desktop/src-tauri/Cargo.toml`.
+
+### Run tests (headless)
+
+For CI and scripts; streams NDJSON runner events to stdout:
+
+```bash
+teshi run                              # all scenarios under current directory
+teshi run path/to/file.feature         # all scenarios in one file
+teshi run path/to/project/             # all scenarios in a directory tree
+teshi run --scenario "Successful login" path/to/file.feature
+teshi run --runner-cmd "behat" --runner-cwd /app path/
+```
+
+Configure the runner in `teshi.toml` (see below). CLI flags override file and env settings.
 
 ### Auth management
 
@@ -40,6 +70,7 @@ teshi auth migrate                  # import from env vars (TESHI_OPENAI_API_KEY
 |-------|------|
 | Global | `~/.teshi/config.toml` |
 | Project | `./.teshi/config.toml` |
+| Runner | `./teshi.toml` (working directory) |
 
 ### Format (TOML)
 
@@ -51,7 +82,7 @@ default_provider = "deepseek"
 [providers.deepseek]
 base_url = "https://api.deepseek.com"
 model = "deepseek-chat"
-api_key = "${auth:deepseek}"   # resolves from ~/.config/teshi/auth.json
+api_key = "${auth:deepseek}"   # resolves from ~/.teshi/auth.json
 
 [providers.openai]
 base_url = "https://api.openai.com/v1"
@@ -64,9 +95,10 @@ base_url = "http://localhost:11434/v1"
 model = "llama3"
 api_key = "ollama"              # Ollama doesn't need a real key
 
-# Runner configuration
+# Runner configuration (teshi.toml)
 [runner]
-command = "teshi-runner"
+cmd = "teshi-runner"
+args = ["--bin", "runner"]
 cwd = "."
 
 # LLM settings
@@ -77,10 +109,10 @@ temperature = 0.7
 
 ### Placeholders
 
-- `${auth:provider}` — loads API key from `~/.config/teshi/auth.json`
+- `${auth:provider}` — loads API key from `~/.teshi/auth.json`
 - `${env:VAR}` — loads from environment variable
 
-API keys should **never** be written directly in `teshi.toml`. Use `teshi auth login` or `${env:VAR}` instead.
+API keys should **never** be written directly in config files. Use `teshi auth login` or `${env:VAR}` instead.
 
 ---
 
@@ -92,15 +124,18 @@ API keys should **never** be written directly in `teshi.toml`. Use `teshi auth l
 | `TESHI_LLM_API_KEY` | LLM API key |
 | `TESHI_LLM_BASE_URL` | LLM API base URL |
 | `TESHI_LLM_MODEL` | LLM model name |
-| `TESHI_RUNNER_CMD` | Default test runner command |
-| `TESHI_RUNNER_CWD` | Default test runner working directory |
+| `TESHI_RUNNER_CMD` | Override runner command (after `teshi.toml`) |
+| `TESHI_RUNNER_ARGS` | Override runner args (space-separated) |
+| `TESHI_RUNNER_CWD` | Override runner working directory |
 | `TESHI_OPENAI_API_KEY` | Legacy (migrated by `teshi auth migrate`) |
+
+Precedence for runner settings: `teshi.toml` → environment variables → CLI flags.
 
 ---
 
 ## Auth storage
 
-Credentials are stored in `~/.config/teshi/auth.json` with `0600` permissions:
+Credentials are stored in `~/.teshi/auth.json` with `0600` permissions:
 
 ```json
 {

@@ -358,19 +358,18 @@ fn parse_error(value: Option<&serde_json::Value>) -> RunError {
 }
 
 pub struct RunCliOptions {
-    pub feature: Option<PathBuf>,
+    pub path: Option<PathBuf>,
     pub scenario: Option<String>,
     pub runner_cmd: Option<String>,
     pub runner_args: Vec<String>,
     pub runner_cwd: Option<PathBuf>,
 }
 
-pub fn run_cli(args: &[String]) -> Result<()> {
-    let opts = parse_run_args(args);
+/// Runs BDD scenarios headlessly using the configured NDJSON runner.
+pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
     let feature_path = opts
-        .feature
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("--feature is required for run"))?;
+        .path
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let config = load_runner_config(Some(RunnerCliOverride {
         cmd: opts.runner_cmd,
         args: opts.runner_args,
@@ -393,54 +392,6 @@ pub fn run_cli(args: &[String]) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn parse_run_args(args: &[String]) -> RunCliOptions {
-    let mut opts = RunCliOptions {
-        feature: None,
-        scenario: None,
-        runner_cmd: None,
-        runner_args: Vec::new(),
-        runner_cwd: None,
-    };
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--feature" => {
-                if let Some(v) = args.get(i + 1) {
-                    opts.feature = Some(PathBuf::from(v));
-                    i += 1;
-                }
-            }
-            "--scenario" => {
-                if let Some(v) = args.get(i + 1) {
-                    opts.scenario = Some(v.to_string());
-                    i += 1;
-                }
-            }
-            "--runner-cmd" => {
-                if let Some(v) = args.get(i + 1) {
-                    opts.runner_cmd = Some(v.to_string());
-                    i += 1;
-                }
-            }
-            "--runner-arg" => {
-                if let Some(v) = args.get(i + 1) {
-                    opts.runner_args.push(v.to_string());
-                    i += 1;
-                }
-            }
-            "--runner-cwd" => {
-                if let Some(v) = args.get(i + 1) {
-                    opts.runner_cwd = Some(PathBuf::from(v));
-                    i += 1;
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    opts
 }
 
 fn build_cases_from_path(path: &Path, scenario_filter: Option<&str>) -> Result<Vec<RunCase>> {

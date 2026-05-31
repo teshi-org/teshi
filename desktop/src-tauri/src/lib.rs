@@ -1,11 +1,16 @@
+mod cli;
 mod commands;
 mod window_state;
 
 use std::sync::Arc;
 
+use clap::Parser;
 use tauri::{Emitter, Manager};
-use teshi_runtime::{HostEventCallback, RuntimeConfig, TeshiRuntime};
+use teshi_runtime::{
+    open_project as runtime_open_project, HostEventCallback, RuntimeConfig, TeshiRuntime,
+};
 
+use crate::cli::DesktopCli;
 use crate::commands::{
     abandon_pending_locator_cmd, check_project_switch_allowed_cmd, confirm_locator_cmd,
     confirm_teardown, get_active_step_cmd, get_pending_locator_cmd, get_project_root,
@@ -22,6 +27,9 @@ use crate::window_state::{
 pub fn run() {
     init_logging();
 
+    let desktop_cli = DesktopCli::parse();
+    let initial_project = desktop_cli.project_path();
+
     tauri::Builder::default()
         .plugin(
             tauri_plugin_window_state::Builder::new()
@@ -30,8 +38,8 @@ pub fn run() {
         )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            if let Some(path) = argv.iter().skip(1).find(|a| !a.starts_with('-')) {
-                let _ = app.emit("open-project-cli", path.clone());
+            if let Some(path) = DesktopCli::project_from_argv(&argv) {
+                let _ = app.emit("open-project-cli", path);
             }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_focus();
@@ -66,7 +74,7 @@ pub fn run() {
             set_terminal_active_cmd,
             finalize_main_window_cmd,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let script = app
                 .path()
                 .resolve(
@@ -89,6 +97,17 @@ pub fn run() {
             );
             rt.emit_initial_recent();
             app.manage(rt);
+
+            if let Some(path) = initial_project {
+                let rt = app.state::<Arc<TeshiRuntime>>().inner().clone();
+                let path_str = path.to_string_lossy().into_owned();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = runtime_open_project(rt, path_str).await {
+                        tracing::error!("open project from CLI: {e}");
+                    }
+                });
+            }
+
             Ok(())
         })
         .run(tauri::generate_context!())
