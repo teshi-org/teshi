@@ -251,7 +251,6 @@ jobs:
     name: Submit WinGet manifest
     runs-on: windows-latest
     needs: publish
-    if: ${{ secrets.WINGET_TOKEN != '' }}
 
     steps:
       - name: Ensure release tag format
@@ -274,6 +273,11 @@ jobs:
         env:
           WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINGET_TOKEN)) {
+            Write-Host "Skipping WinGet submission: WINGET_TOKEN not configured."
+            exit 0
+          }
+
           $tag = "${{ github.ref_name }}"
           if ("${{ github.event_name }}" -eq "workflow_dispatch") {
             $tag = "${{ github.event.inputs.release_tag }}"
