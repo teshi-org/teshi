@@ -25,7 +25,6 @@ function AppShell() {
       await runtime.openProject(path);
       const recent = await runtime.getRecentProjects();
       dispatch({ type: "SET_RECENT", paths: recent });
-      dispatch({ type: "SET_PROJECT", root: path });
       setBrowserError(null);
       setBrowserHint(null);
       dispatch({ type: "SET_BROWSER", wsUrl: null, running: false, mode: null });
@@ -86,6 +85,9 @@ function AppShell() {
     }).then((u) => unsubs.push(u));
     void runtime.onEvent<string[]>("recent-loaded", (paths) => {
       dispatch({ type: "SET_RECENT", paths });
+    }).then((u) => unsubs.push(u));
+    void runtime.onEvent<string>("project-changed", (canonicalRoot) => {
+      dispatch({ type: "SET_PROJECT", root: canonicalRoot });
     }).then((u) => unsubs.push(u));
     void runtime
       .onEvent<PendingLocator | null>("pending-locator-changed", (pending) => {

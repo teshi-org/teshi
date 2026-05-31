@@ -2,6 +2,10 @@
 
 Connects your **active Chrome tab** to [teshi-desktop](../../desktop/README.md) for BDD locator recording with real login sessions.
 
+## Icons
+
+Toolbar and store icons are PNGs under `icons/`, generated from the same asset as teshi-desktop (`desktop/src-tauri/icons/icon.ico`). After updating the desktop icon, regenerate sizes (16 / 32 / 48 / 128) and reload the extension in Chrome.
+
 ## Install (developer / unpacked)
 
 1. Open Chrome and go to `chrome://extensions`.

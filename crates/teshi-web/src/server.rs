@@ -19,8 +19,7 @@ use teshi_runtime::{
     get_recent_projects, list_dir, open_project, reject_locator, render_feature, resize_terminal,
     spawn_terminal, start_browser_sidecar, stop_browser_sidecar, sync_active_step,
     teardown_runtime, write_terminal, ActiveStep, BrowserError, BrowserMode, BrowserStartResult,
-    DirEntry,
-    PendingLocator, RuntimeEvent, TeshiRuntime,
+    DirEntry, PendingLocator, RuntimeEvent, TeshiRuntime,
 };
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;

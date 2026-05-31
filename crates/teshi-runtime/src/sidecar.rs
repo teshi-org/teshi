@@ -238,10 +238,7 @@ pub async fn start_browser_sidecar(
     if mode == BrowserMode::Embedded {
         cmd.args(["--cdp-port", &cdp_port.to_string()]);
     } else {
-        cmd.args([
-            "--discovery-port",
-            &CHROME_DISCOVERY_PORT.to_string(),
-        ]);
+        cmd.args(["--discovery-port", &CHROME_DISCOVERY_PORT.to_string()]);
     }
 
     let mut child = cmd
@@ -270,8 +267,10 @@ pub async fn start_browser_sidecar(
     *rt.sidecar.mode.lock().unwrap() = Some(mode);
     *rt.project.browser_active.lock().unwrap() = true;
 
-    rt.events
-        .emit("browser-started", serde_json::json!({ "ws_url": ws_url, "mode": mode.as_str() }));
+    rt.events.emit(
+        "browser-started",
+        serde_json::json!({ "ws_url": ws_url, "mode": mode.as_str() }),
+    );
 
     let cdp_endpoint_path = project_root
         .join(".teshi")
