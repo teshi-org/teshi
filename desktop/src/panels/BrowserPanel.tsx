@@ -16,6 +16,49 @@ interface Props {
   onToggleFullscreen: () => void;
 }
 
+const SOURCE_WIDTH = 1920;
+const SOURCE_HEIGHT = 1080;
+const SOURCE_ASPECT = SOURCE_WIDTH / SOURCE_HEIGHT;
+const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4];
+const DEFAULT_ZOOM = 1;
+
+interface FitSize {
+  fitW: number;
+  fitH: number;
+}
+
+function computeFitSize(containerW: number, containerH: number): FitSize {
+  if (containerW <= 0 || containerH <= 0) {
+    return { fitW: 0, fitH: 0 };
+  }
+  const containerAspect = containerW / containerH;
+  if (containerAspect > SOURCE_ASPECT) {
+    const fitH = containerH;
+    return { fitW: fitH * SOURCE_ASPECT, fitH };
+  }
+  const fitW = containerW;
+  return { fitW, fitH: fitW / SOURCE_ASPECT };
+}
+
+function closestZoomIndex(zoom: number): number {
+  let bestIdx = 0;
+  let bestDiff = Infinity;
+  for (let i = 0; i < ZOOM_STEPS.length; i += 1) {
+    const diff = Math.abs(ZOOM_STEPS[i] - zoom);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
+}
+
+function stepZoomLevel(current: number, direction: 1 | -1): number {
+  const idx = closestZoomIndex(current);
+  const nextIdx = Math.max(0, Math.min(ZOOM_STEPS.length - 1, idx + direction));
+  return ZOOM_STEPS[nextIdx];
+}
+
 function FullscreenIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
@@ -63,12 +106,31 @@ export function BrowserPanel({
   onToggleFullscreen,
 }: Props) {
   const imgRef = useRef<HTMLImageElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const addressFocusedRef = useRef(false);
+  const dragRef = useRef<{
+    active: boolean;
+    startX: number;
+    startY: number;
+    scrollLeft: number;
+    scrollTop: number;
+  } | null>(null);
   const [fps, setFps] = useState(0);
   const framesRef = useRef(0);
   const [pageUrl, setPageUrl] = useState("about:blank");
   const [addressInput, setAddressInput] = useState("about:blank");
+  const [zoom, setZoom] = useState(DEFAULT_ZOOM);
+  const [fitSize, setFitSize] = useState<FitSize>({ fitW: 0, fitH: 0 });
+  const [dragging, setDragging] = useState(false);
+
+  const stepZoom = useCallback((direction: 1 | -1) => {
+    setZoom((current) => stepZoomLevel(current, direction));
+  }, []);
+
+  const resetZoom = useCallback(() => {
+    setZoom(DEFAULT_ZOOM);
+  }, []);
 
   const navigateTo = useCallback((raw: string) => {
     const url = normalizeUrl(raw);
@@ -78,6 +140,66 @@ export function BrowserPanel({
     socketRef.current.send(JSON.stringify({ cmd: "navigate", url }));
     setAddressInput(url);
   }, []);
+
+  useEffect(() => {
+    if (!running) {
+      setZoom(DEFAULT_ZOOM);
+    }
+  }, [running]);
+
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap || !running) return;
+
+    const updateFit = () => {
+      setFitSize(computeFitSize(wrap.clientWidth, wrap.clientHeight));
+    };
+
+    updateFit();
+    const observer = new ResizeObserver(updateFit);
+    observer.observe(wrap);
+    return () => observer.disconnect();
+  }, [running, fullscreen]);
+
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap || !running) return;
+
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      stepZoom(e.deltaY < 0 ? 1 : -1);
+    };
+
+    wrap.addEventListener("wheel", onWheel, { passive: false });
+    return () => wrap.removeEventListener("wheel", onWheel);
+  }, [running, stepZoom]);
+
+  useEffect(() => {
+    if (!dragging) return;
+
+    const onMouseMove = (e: MouseEvent) => {
+      const drag = dragRef.current;
+      const wrap = wrapRef.current;
+      if (!drag?.active || !wrap) return;
+      wrap.scrollLeft = drag.scrollLeft - (e.clientX - drag.startX);
+      wrap.scrollTop = drag.scrollTop - (e.clientY - drag.startY);
+    };
+
+    const endDrag = () => {
+      if (dragRef.current) {
+        dragRef.current.active = false;
+      }
+      setDragging(false);
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", endDrag);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", endDrag);
+    };
+  }, [dragging]);
 
   useEffect(() => {
     if (!wsUrl || !running) {
@@ -122,6 +244,43 @@ export function BrowserPanel({
       navigateTo(addressInput);
     }
   };
+
+  const onViewportKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!e.ctrlKey) return;
+    if (e.key === "=" || e.key === "+") {
+      e.preventDefault();
+      e.stopPropagation();
+      stepZoom(1);
+    } else if (e.key === "-") {
+      e.preventDefault();
+      e.stopPropagation();
+      stepZoom(-1);
+    } else if (e.key === "0") {
+      e.preventDefault();
+      e.stopPropagation();
+      resetZoom();
+    }
+  };
+
+  const onViewportMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || zoom <= 1) return;
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    e.preventDefault();
+    wrap.focus();
+    dragRef.current = {
+      active: true,
+      startX: e.clientX,
+      startY: e.clientY,
+      scrollLeft: wrap.scrollLeft,
+      scrollTop: wrap.scrollTop,
+    };
+    setDragging(true);
+  };
+
+  const displayW = fitSize.fitW * zoom;
+  const displayH = fitSize.fitH * zoom;
+  const zoomPercent = Math.round(zoom * 100);
 
   return (
     <section className="panel browser-panel">
@@ -217,9 +376,63 @@ export function BrowserPanel({
               <button type="submit" className="browser-go-btn">
                 Go
               </button>
+              <div className="browser-zoom-controls">
+                <button
+                  type="button"
+                  className="browser-zoom-btn"
+                  onClick={() => stepZoom(-1)}
+                  disabled={zoom <= ZOOM_STEPS[0]}
+                  aria-label="Zoom out"
+                  title="Zoom out (Ctrl+-)"
+                >
+                  −
+                </button>
+                <button
+                  type="button"
+                  className="browser-zoom-label"
+                  onClick={resetZoom}
+                  aria-live="polite"
+                  title="Reset zoom (Ctrl+0)"
+                >
+                  {zoomPercent}%
+                </button>
+                <button
+                  type="button"
+                  className="browser-zoom-btn"
+                  onClick={() => stepZoom(1)}
+                  disabled={zoom >= ZOOM_STEPS[ZOOM_STEPS.length - 1]}
+                  aria-label="Zoom in"
+                  title="Zoom in (Ctrl+=)"
+                >
+                  +
+                </button>
+                <button
+                  type="button"
+                  className="browser-zoom-fit-btn"
+                  onClick={resetZoom}
+                  title="Fit to panel (Ctrl+0)"
+                >
+                  Fit
+                </button>
+              </div>
             </form>
-            <div className="browser-frame-wrap">
-              <img ref={imgRef} alt="Browser stream" className="browser-frame" />
+            <div
+              ref={wrapRef}
+              className={`browser-frame-wrap${dragging ? " browser-frame-wrap--dragging" : ""}${zoom > 1 ? " browser-frame-wrap--pannable" : ""}`}
+              tabIndex={0}
+              onKeyDown={onViewportKeyDown}
+              onMouseDown={onViewportMouseDown}
+              onClick={() => wrapRef.current?.focus()}
+              aria-label="Browser stream viewport"
+            >
+              {fitSize.fitW > 0 && fitSize.fitH > 0 && (
+                <div
+                  className="browser-frame-scaler"
+                  style={{ width: displayW, height: displayH }}
+                >
+                  <img ref={imgRef} alt="Browser stream" className="browser-frame" />
+                </div>
+              )}
             </div>
           </div>
         )}

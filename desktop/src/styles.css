@@ -507,20 +507,94 @@ button:hover {
   padding: 6px 14px;
 }
 
+.browser-zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.browser-zoom-btn,
+.browser-zoom-fit-btn {
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid #3f3f46;
+  border-radius: 4px;
+  background: #18181b;
+  color: #e4e4e7;
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.browser-zoom-btn:hover:not(:disabled),
+.browser-zoom-fit-btn:hover {
+  background: #27272a;
+  border-color: #52525b;
+}
+
+.browser-zoom-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.browser-zoom-label {
+  min-width: 44px;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: #a1a1aa;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.browser-zoom-label:hover {
+  color: #e4e4e7;
+  background: #27272a;
+  border-color: #3f3f46;
+}
+
+.browser-zoom-fit-btn {
+  font-size: 0.75rem;
+  padding: 0 8px;
+}
+
 .browser-frame-wrap {
   flex: 1;
   min-height: 0;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
+  align-items: safe center;
+  justify-content: safe center;
+  overflow: auto;
+  outline: none;
+}
+
+.browser-frame-wrap:focus-visible {
+  outline: 1px solid #52525b;
+  outline-offset: -1px;
+}
+
+.browser-frame-wrap--pannable {
+  cursor: grab;
+}
+
+.browser-frame-wrap--dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.browser-frame-scaler {
+  flex-shrink: 0;
 }
 
 .browser-frame {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  aspect-ratio: 16 / 9;
+  display: block;
+  width: 100%;
+  height: 100%;
   background: #000;
 }
 
