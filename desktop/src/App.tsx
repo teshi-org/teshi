@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
 import { Toaster, toast } from "sonner";
 import { ProjectProvider, useProject } from "./context/ProjectContext";
 import { WelcomeScreen } from "./panels/WelcomeScreen";
@@ -65,6 +66,10 @@ function AppShell() {
   }, [openProjectPath]);
 
   useEffect(() => {
+    void invoke("finalize_main_window_cmd").catch((err) => {
+      console.error("finalize window geometry failed", err);
+    });
+
     void invoke<string[]>("get_recent_projects_cmd").then((paths) => {
       dispatch({ type: "SET_RECENT", paths });
     });
@@ -119,35 +124,24 @@ function AppShell() {
         } catch (err) {
           console.error("shutdown before close failed", err);
         }
+        try {
+          await saveWindowState(
+            StateFlags.SIZE |
+              StateFlags.MAXIMIZED |
+              StateFlags.FULLSCREEN |
+              StateFlags.VISIBLE,
+          );
+        } catch (err) {
+          console.error("save window state failed", err);
+        }
         await getCurrentWindow().destroy();
       });
     })();
-
-    // Debounce window resize persistence; skip invalid sizes from startup/minimize glitches.
-    const MIN_WINDOW_WIDTH = 1280;
-    const MIN_WINDOW_HEIGHT = 720;
-    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
-    void getCurrentWindow()
-      .onResized(async ({ payload }) => {
-        const factor = await getCurrentWindow().scaleFactor();
-        const logical = payload.toLogical(factor);
-        const width = Math.round(logical.width);
-        const height = Math.round(logical.height);
-        if (width < MIN_WINDOW_WIDTH || height < MIN_WINDOW_HEIGHT) {
-          return;
-        }
-        if (resizeTimer) clearTimeout(resizeTimer);
-        resizeTimer = setTimeout(() => {
-          void invoke("save_window_settings", { width, height });
-        }, 500);
-      })
-      .then((u) => unsubs.push(u));
 
     return () => {
       unlistenClose?.();
       unsubs.forEach((u) => u());
       window.removeEventListener("keydown", onKey);
-      if (resizeTimer) clearTimeout(resizeTimer);
     };
   }, [dispatch, openProjectPath, pickProject]);
 
