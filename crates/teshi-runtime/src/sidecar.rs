@@ -10,10 +10,33 @@ use serde::Serialize;
 
 use crate::TeshiRuntime;
 
+/// Browser session backend started by the sidecar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BrowserMode {
+    /// Headless Playwright Chromium with JPEG stream.
+    Embedded,
+    /// User Chrome via teshi-bridge extension.
+    Chrome,
+}
+
+impl BrowserMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            BrowserMode::Embedded => "embedded",
+            BrowserMode::Chrome => "chrome",
+        }
+    }
+}
+
+/// Fixed HTTP discovery port for chrome mode (`GET /v1/bridge`).
+pub const CHROME_DISCOVERY_PORT: u16 = 17373;
+
 /// Holds the browser sidecar child process and WebSocket URL.
 pub struct SidecarState {
     child: Mutex<Option<Child>>,
     ws_url: Mutex<Option<String>>,
+    mode: Mutex<Option<BrowserMode>>,
 }
 
 impl Default for SidecarState {
@@ -28,6 +51,7 @@ impl SidecarState {
         Self {
             child: Mutex::new(None),
             ws_url: Mutex::new(None),
+            mode: Mutex::new(None),
         }
     }
 
@@ -46,12 +70,18 @@ impl SidecarState {
             }
         }
         *self.ws_url.lock().unwrap() = None;
+        *self.mode.lock().unwrap() = None;
         Ok(())
     }
 
     /// Returns the browser sidecar WebSocket URL when the sidecar is running.
     pub fn browser_ws_url(&self) -> Option<String> {
         self.ws_url.lock().unwrap().clone()
+    }
+
+    /// Returns the active browser backend mode, if any.
+    pub fn browser_mode(&self) -> Option<BrowserMode> {
+        *self.mode.lock().unwrap()
     }
 }
 
@@ -60,6 +90,7 @@ impl SidecarState {
 pub struct BrowserStartResult {
     pub ws_url: String,
     pub cdp_endpoint_path: String,
+    pub mode: String,
 }
 
 /// User-facing browser startup failure.
@@ -114,9 +145,10 @@ fn pick_port() -> Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
-/// Starts the Playwright browser sidecar for the open project.
+/// Starts the browser sidecar for the open project in the given mode.
 pub async fn start_browser_sidecar(
     rt: Arc<TeshiRuntime>,
+    mode: BrowserMode,
 ) -> Result<BrowserStartResult, BrowserError> {
     rt.sidecar.stop().await.ok();
 
@@ -156,17 +188,19 @@ pub async fn start_browser_sidecar(
         });
     }
 
-    let chromium_check = Command::new(&python)
-        .args(["-c", "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop()"])
-        .output();
-    if chromium_check.is_err() || !chromium_check.as_ref().unwrap().status.success() {
-        return Err(BrowserError {
-            message: "Chromium browser is not installed for Playwright.".into(),
-            hint: Some(format!(
-                "{} -m playwright install chromium",
-                python.display()
-            )),
-        });
+    if mode == BrowserMode::Embedded {
+        let chromium_check = Command::new(&python)
+            .args(["-c", "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop()"])
+            .output();
+        if chromium_check.is_err() || !chromium_check.as_ref().unwrap().status.success() {
+            return Err(BrowserError {
+                message: "Chromium browser is not installed for Playwright.".into(),
+                hint: Some(format!(
+                    "{} -m playwright install chromium",
+                    python.display()
+                )),
+            });
+        }
     }
 
     let script = &rt.browser_service_script;
@@ -181,23 +215,36 @@ pub async fn start_browser_sidecar(
         message: e.to_string(),
         hint: None,
     })?;
-    let cdp_port = pick_port().map_err(|e| BrowserError {
-        message: e.to_string(),
-        hint: None,
-    })?;
+    let cdp_port = if mode == BrowserMode::Embedded {
+        pick_port().map_err(|e| BrowserError {
+            message: e.to_string(),
+            hint: None,
+        })?
+    } else {
+        0
+    };
 
-    let mut child = Command::new(&python)
-        .arg(script)
-        .args([
-            "--host",
-            "127.0.0.1",
-            "--port",
-            &port.to_string(),
-            "--cdp-port",
-            &cdp_port.to_string(),
-            "--project-root",
-            &project_root.to_string_lossy(),
-        ])
+    let mut cmd = Command::new(&python);
+    cmd.arg(script).args([
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &port.to_string(),
+        "--mode",
+        mode.as_str(),
+        "--project-root",
+        &project_root.to_string_lossy(),
+    ]);
+    if mode == BrowserMode::Embedded {
+        cmd.args(["--cdp-port", &cdp_port.to_string()]);
+    } else {
+        cmd.args([
+            "--discovery-port",
+            &CHROME_DISCOVERY_PORT.to_string(),
+        ]);
+    }
+
+    let mut child = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -206,7 +253,12 @@ pub async fn start_browser_sidecar(
             hint: None,
         })?;
 
-    if let Err(err) = wait_until_ready(&mut child, port) {
+    let ready = if mode == BrowserMode::Chrome {
+        wait_until_chrome_ready(&mut child, port, CHROME_DISCOVERY_PORT)
+    } else {
+        wait_until_ready(&mut child, port)
+    };
+    if let Err(err) = ready {
         let _ = child.kill();
         let _ = child.wait();
         return Err(err);
@@ -215,9 +267,11 @@ pub async fn start_browser_sidecar(
     *rt.sidecar.child.lock().unwrap() = Some(child);
     let ws_url = format!("ws://127.0.0.1:{port}");
     *rt.sidecar.ws_url.lock().unwrap() = Some(ws_url.clone());
+    *rt.sidecar.mode.lock().unwrap() = Some(mode);
     *rt.project.browser_active.lock().unwrap() = true;
 
-    rt.events.emit("browser-started", ws_url.clone());
+    rt.events
+        .emit("browser-started", serde_json::json!({ "ws_url": ws_url, "mode": mode.as_str() }));
 
     let cdp_endpoint_path = project_root
         .join(".teshi")
@@ -228,7 +282,81 @@ pub async fn start_browser_sidecar(
     Ok(BrowserStartResult {
         ws_url,
         cdp_endpoint_path,
+        mode: mode.as_str().to_string(),
     })
+}
+
+fn wait_until_chrome_ready(
+    child: &mut Child,
+    ws_port: u16,
+    discovery_port: u16,
+) -> Result<(), BrowserError> {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::{Duration, Instant};
+
+    let ws_addr: SocketAddr = ([127, 0, 0, 1], ws_port).into();
+    let deadline = Instant::now() + Duration::from_secs(20);
+
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(BrowserError {
+                message: format!("Browser sidecar exited during startup (status: {status})."),
+                hint: Some(
+                    "Check that the Python venv is valid and port 17373 is not in use.".into(),
+                ),
+            });
+        }
+        let ws_up = TcpStream::connect_timeout(&ws_addr, Duration::from_millis(400)).is_ok();
+        let discovery_ok = fetch_discovery_bridge(discovery_port).is_ok();
+        if ws_up && discovery_ok {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(BrowserError {
+                message: "Chrome bridge did not become ready in time.".into(),
+                hint: Some(
+                    "Load extension/teshi-bridge in Chrome, activate your target tab, then retry."
+                        .into(),
+                ),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn fetch_discovery_bridge(discovery_port: u16) -> Result<(), BrowserError> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let mut stream = TcpStream::connect_timeout(
+        &([127, 0, 0, 1], discovery_port).into(),
+        Duration::from_millis(500),
+    )
+    .map_err(|e| BrowserError {
+        message: e.to_string(),
+        hint: None,
+    })?;
+    stream
+        .write_all(b"GET /v1/bridge HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .map_err(|e| BrowserError {
+            message: e.to_string(),
+            hint: None,
+        })?;
+    let mut buf = [0u8; 512];
+    let n = stream.read(&mut buf).map_err(|e| BrowserError {
+        message: e.to_string(),
+        hint: None,
+    })?;
+    let text = String::from_utf8_lossy(&buf[..n]);
+    if text.contains("200 OK") && text.contains("ws_url") {
+        Ok(())
+    } else {
+        Err(BrowserError {
+            message: "discovery endpoint did not return bridge info".into(),
+            hint: None,
+        })
+    }
 }
 
 fn wait_until_ready(child: &mut Child, port: u16) -> Result<(), BrowserError> {

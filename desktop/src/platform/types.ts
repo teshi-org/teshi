@@ -12,7 +12,9 @@ export interface TeshiRuntimeApi {
   getActiveStep(): Promise<ActiveStep | null>;
   syncActiveStep(featurePath: string, stepLine: number): Promise<ActiveStep>;
   renderFeature(path: string): Promise<FeatureRenderPayload>;
-  startBrowserSidecar(): Promise<{ ws_url: string }>;
+  startBrowserSidecar(
+    mode: "embedded" | "chrome",
+  ): Promise<{ ws_url: string; mode: string; cdp_endpoint_path?: string }>;
   stopBrowserSidecar(): Promise<void>;
   listDir(path: string): Promise<import("../types").DirEntry[]>;
   spawnTerminal(cols: number, rows: number): Promise<void>;

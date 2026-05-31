@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { PanelCollapseButton } from "./PanelCollapseButton";
 
+const CHROME_DISCOVERY_URL = "http://127.0.0.1:17373/v1/bridge";
+
+interface ChromeBridgeInfo {
+  page_url?: string;
+  title?: string;
+  extension_connected?: boolean;
+}
+
 interface Props {
   wsUrl: string | null;
   running: boolean;
+  mode: "embedded" | "chrome" | null;
   error: string | null;
   hint: string | null;
   fullscreen: boolean;
@@ -11,7 +20,8 @@ interface Props {
   filesCollapsed?: boolean;
   onToggleGherkin?: () => void;
   onToggleFiles?: () => void;
-  onStart: () => void;
+  onConnectChrome: () => void;
+  onStartEmbedded: () => void;
   onStop: () => void;
   onToggleFullscreen: () => void;
 }
@@ -101,6 +111,7 @@ function normalizeUrl(raw: string): string {
 export function BrowserPanel({
   wsUrl,
   running,
+  mode,
   error,
   hint,
   fullscreen,
@@ -108,10 +119,13 @@ export function BrowserPanel({
   filesCollapsed = false,
   onToggleGherkin,
   onToggleFiles,
-  onStart,
+  onConnectChrome,
+  onStartEmbedded,
   onStop,
   onToggleFullscreen,
 }: Props) {
+  const isEmbedded = running && mode === "embedded";
+  const isChrome = running && mode === "chrome";
   const imgRef = useRef<HTMLImageElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const scalerRef = useRef<HTMLDivElement>(null);
@@ -137,6 +151,7 @@ export function BrowserPanel({
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
   const [fitSize, setFitSize] = useState<FitSize>({ fitW: 0, fitH: 0 });
   const [dragging, setDragging] = useState(false);
+  const [chromeInfo, setChromeInfo] = useState<ChromeBridgeInfo | null>(null);
 
   const getZoomAnchorPoint = useCallback((): { x: number; y: number } => {
     const wrap = wrapRef.current;
@@ -194,14 +209,34 @@ export function BrowserPanel({
   }, []);
 
   useEffect(() => {
-    if (!running) {
+    if (!isEmbedded) {
       setZoom(DEFAULT_ZOOM);
     }
-  }, [running]);
+  }, [isEmbedded]);
+
+  useEffect(() => {
+    if (!isChrome) {
+      setChromeInfo(null);
+      return;
+    }
+    const poll = async () => {
+      try {
+        const res = await fetch(CHROME_DISCOVERY_URL);
+        if (!res.ok) return;
+        const data = (await res.json()) as ChromeBridgeInfo;
+        setChromeInfo(data);
+      } catch {
+        setChromeInfo(null);
+      }
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), 2000);
+    return () => clearInterval(timer);
+  }, [isChrome]);
 
   useEffect(() => {
     const wrap = wrapRef.current;
-    if (!wrap || !running) return;
+    if (!wrap || !isEmbedded) return;
 
     const updateFit = () => {
       setFitSize(computeFitSize(wrap.clientWidth, wrap.clientHeight));
@@ -211,7 +246,7 @@ export function BrowserPanel({
     const observer = new ResizeObserver(updateFit);
     observer.observe(wrap);
     return () => observer.disconnect();
-  }, [running, fullscreen]);
+  }, [isEmbedded, fullscreen]);
 
   useLayoutEffect(() => {
     const anchor = zoomAnchorRef.current;
@@ -232,7 +267,7 @@ export function BrowserPanel({
 
   useEffect(() => {
     const wrap = wrapRef.current;
-    if (!wrap || !running) return;
+    if (!wrap || !isEmbedded) return;
 
     const onWheel = (e: WheelEvent) => {
       if (!e.ctrlKey) return;
@@ -242,7 +277,7 @@ export function BrowserPanel({
 
     wrap.addEventListener("wheel", onWheel, { passive: false });
     return () => wrap.removeEventListener("wheel", onWheel);
-  }, [running, zoomAtPoint]);
+  }, [isEmbedded, zoomAtPoint]);
 
   useEffect(() => {
     if (!dragging) return;
@@ -305,7 +340,7 @@ export function BrowserPanel({
       socketRef.current = null;
       clearInterval(timer);
     };
-  }, [wsUrl, running]);
+  }, [wsUrl, isEmbedded]);
 
   const onAddressKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
@@ -372,21 +407,33 @@ export function BrowserPanel({
         )}
         <span className="panel-header-title">
           Browser {running ? "• live" : "• stopped"}
-          {running && <span className="fps-label">{fps} fps</span>}
+          {running && mode && (
+            <span className="browser-mode-label"> ({mode})</span>
+          )}
+          {isEmbedded && <span className="fps-label">{fps} fps</span>}
         </span>
         <div className="panel-header-actions">
           {!running ? (
-            <button type="button" className="panel-header-btn" onClick={onStart}>
-              Start Browser
-            </button>
+            <>
+              <button
+                type="button"
+                className="panel-header-btn panel-header-btn--primary"
+                onClick={onConnectChrome}
+              >
+                Connect Chrome
+              </button>
+              <button type="button" className="panel-header-btn" onClick={onStartEmbedded}>
+                Start Embedded
+              </button>
+            </>
           ) : (
             <button type="button" className="panel-header-btn" onClick={onStop}>
-              Stop Browser
+              Disconnect
             </button>
           )}
           <span
             className={`status-dot ${running ? "on" : "off"}`}
-            title={running ? "Browser running" : "Browser stopped"}
+            title={running ? `Browser running (${mode ?? "unknown"})` : "Browser stopped"}
           />
           <button
             type="button"
@@ -410,7 +457,14 @@ export function BrowserPanel({
       <div className="panel-body browser-body">
         {!running && !error && (
           <div className="browser-placeholder">
-            <p>Use Start Browser in the panel header to launch Playwright Chromium (1920×1080).</p>
+            <p>
+              <strong>Connect Chrome</strong> — record locators on your logged-in tab (load{" "}
+              <code>extension/teshi-bridge</code> in Chrome first).
+            </p>
+            <p>
+              <strong>Start Embedded</strong> — headless Playwright preview (1920×1080) for
+              local/staging URLs.
+            </p>
           </div>
         )}
         {error && (
@@ -419,7 +473,55 @@ export function BrowserPanel({
             {hint && <code>{hint}</code>}
           </div>
         )}
-        {running && (
+        {isChrome && (
+          <div className="browser-chrome-status">
+            <p>
+              Extension:{" "}
+              {chromeInfo?.extension_connected ? (
+                <strong className="browser-chrome-ok">connected</strong>
+              ) : (
+                <strong className="browser-chrome-warn">waiting…</strong>
+              )}
+            </p>
+            <p className="browser-chrome-url">
+              Active tab: {chromeInfo?.page_url ?? "—"}
+            </p>
+            {!chromeInfo?.extension_connected && (
+              <p className="browser-chrome-stale">
+                No heartbeat from the extension (stale after ~8s). Reload teshi-bridge on{" "}
+                <code>chrome://extensions</code>, keep this Chrome tab focused, and ensure
+                Connect Chrome is active in teshi.
+              </p>
+            )}
+            {chromeInfo?.title && (
+              <p className="browser-chrome-meta">{chromeInfo.title}</p>
+            )}
+            {!chromeInfo?.extension_connected && (
+              <ol className="browser-chrome-hints browser-chrome-setup">
+                <li>
+                  In <strong>Google Chrome</strong> (not only inside teshi), open{" "}
+                  <code>chrome://extensions</code> → enable <strong>Developer mode</strong> →{" "}
+                  <strong>Load unpacked</strong> → select{" "}
+                  <code>extension/teshi-bridge</code> in the teshi repo.
+                </li>
+                <li>
+                  Open your <strong>app under test</strong> in a normal Chrome tab (e.g. the
+                  site you log into).
+                </li>
+                <li>
+                  Click the <strong>teshi-bridge</strong> puzzle icon → <strong>Connect to teshi</strong>{" "}
+                  (wakes the extension after Connect Chrome here).
+                </li>
+                <li>Extension badge should show <strong>OK</strong> when linked.</li>
+              </ol>
+            )}
+            <ul className="browser-chrome-hints">
+              <li>Switch tabs in Chrome before snapshot; only the active tab is used.</li>
+              <li>Close DevTools on the target tab if attach fails.</li>
+            </ul>
+          </div>
+        )}
+        {isEmbedded && (
           <div className="browser-viewport">
             <form
               className="browser-address-bar"

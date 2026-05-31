@@ -13,6 +13,7 @@ use teshi_runtime::{
     reject_locator, render_feature as runtime_render_feature, resize_terminal as runtime_resize,
     set_browser_active, set_terminal_active, spawn_terminal as runtime_spawn_terminal,
     start_browser_sidecar as runtime_start_browser, stop_browser_sidecar as runtime_stop_browser,
+    BrowserMode,
     stop_terminal as runtime_stop_terminal, sync_active_step, teardown_runtime as runtime_teardown,
     write_terminal as runtime_write_terminal, ActiveStep, BrowserError, BrowserStartResult,
     DirEntry, PendingLocator, TeshiRuntime,
@@ -91,8 +92,13 @@ pub async fn abandon_pending_locator_cmd(rt: State<'_, Arc<TeshiRuntime>>) -> Re
 #[tauri::command]
 pub async fn start_browser_sidecar(
     rt: State<'_, Arc<TeshiRuntime>>,
+    mode: String,
 ) -> Result<BrowserStartResult, BrowserError> {
-    runtime_start_browser(Arc::clone(&rt)).await
+    let mode = match mode.as_str() {
+        "chrome" => BrowserMode::Chrome,
+        _ => BrowserMode::Embedded,
+    };
+    runtime_start_browser(Arc::clone(&rt), mode).await
 }
 
 #[tauri::command]

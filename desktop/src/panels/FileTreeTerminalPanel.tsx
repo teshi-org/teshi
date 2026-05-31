@@ -191,7 +191,17 @@ export function FileTreeTerminalPanel({
       if (xtermRef.current && fitRef.current) {
         await waitForLayout();
         if (disposed) return;
-        void syncTerminalSize(fitRef.current, xtermRef.current);
+        try {
+          await ensureShellSpawned(
+            fitRef.current,
+            xtermRef.current,
+            shellSpawnedRef,
+          );
+          await syncTerminalSize(fitRef.current, xtermRef.current);
+          xtermRef.current.focus();
+        } catch (err) {
+          console.error("terminal respawn on tab switch failed", err);
+        }
         return;
       }
 
@@ -227,7 +237,25 @@ export function FileTreeTerminalPanel({
       if (disposed) return;
 
       term.onData((data) => {
-        void getRuntime().writeTerminal(data);
+        void getRuntime()
+          .writeTerminal(data)
+          .catch((err) => {
+            const message = err instanceof Error ? err.message : String(err);
+            const fitNow = fitRef.current;
+            const termNow = xtermRef.current;
+            if (!shellSpawnedRef.current && fitNow && termNow) {
+              void ensureShellSpawned(fitNow, termNow, shellSpawnedRef)
+                .then(() => getRuntime().writeTerminal(data))
+                .catch((retryErr) => {
+                  toast.error(
+                    retryErr instanceof Error ? retryErr.message : String(retryErr),
+                  );
+                });
+              return;
+            }
+            toast.error(message);
+            termNow?.writeln(`\r\n\x1b[33m${message}\x1b[0m`);
+          });
       });
 
       if (disposed || !terminalRef.current || !fit || !term) return;
@@ -282,6 +310,42 @@ export function FileTreeTerminalPanel({
     });
   }, [layoutHidden, layoutCollapsed, tab, terminalReady]);
 
+  // Focus xterm when the user selects the Terminal tab (keystrokes otherwise go nowhere).
+  useEffect(() => {
+    if (tab !== "terminal" || !terminalReady) return;
+    const term = xtermRef.current;
+    if (!term) return;
+    requestAnimationFrame(() => {
+      term.focus();
+    });
+  }, [tab, terminalReady]);
+
+  const focusTerminal = useCallback(() => {
+    xtermRef.current?.focus();
+  }, []);
+
+  const restartShell = useCallback(async () => {
+    const fit = fitRef.current;
+    const term = xtermRef.current;
+    if (!fit || !term) {
+      toast.error("Terminal not ready yet");
+      return;
+    }
+    try {
+      await getRuntime().stopTerminal();
+      shellSpawnedRef.current = false;
+      term.clear();
+      await waitForLayout();
+      await ensureShellSpawned(fit, term, shellSpawnedRef);
+      term.focus();
+      toast.success("Shell restarted");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast.error(`Restart failed: ${message}`);
+      term.writeln(`\r\n\x1b[31m${message}\x1b[0m`);
+    }
+  }, []);
+
   return (
     <section
       className={`panel side-panel${layoutHidden ? " panel--layout-hidden" : ""}`}
@@ -301,6 +365,16 @@ export function FileTreeTerminalPanel({
         >
           Terminal
         </button>
+        {tab === "terminal" && (
+          <button
+            type="button"
+            className="terminal-restart-btn"
+            title="Restart shell if input stops working"
+            onClick={() => void restartShell()}
+          >
+            Restart shell
+          </button>
+        )}
         {showCollapseButton && onToggleCollapse && (
           <PanelCollapseButton
             side="right"
@@ -320,6 +394,8 @@ export function FileTreeTerminalPanel({
           ref={terminalRef}
           className="terminal-host"
           hidden={tab !== "terminal"}
+          onMouseDown={focusTerminal}
+          role="presentation"
         />
       </div>
     </section>

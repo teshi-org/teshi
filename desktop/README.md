@@ -52,7 +52,7 @@ The browser UI uses the same React app as the Tauri shell; open a project via **
 
 - **App chrome:** **File > Open Project…** (`Ctrl+O`) and **Open Recent** in the custom title bar (frameless window on desktop)
 - **Panel 1 (left):** Structured Gherkin render for selected `.feature` files
-- **Panel 2 (center):** Playwright Chromium JPEG stream (1920×1080 viewport); **Start Browser** / **Stop Browser** in the panel header
+- **Panel 2 (center):** **Connect Chrome** (logged-in tab via `extension/teshi-bridge`) or **Start Embedded** (headless Playwright JPEG stream, 1920×1080); **Disconnect** when connected
 - **Panel 3 (right):** Lazy file tree + terminal (tab switch)
 - **Bottom dock:** Locator confirmation (linked to selected Gherkin step), plus Output/Logs placeholders; expanded by default on Locator tab
 - **Browser fullscreen:** Click the fullscreen icon in the browser panel header to hide side panels and bottom dock; click the exit-fullscreen icon or press **Escape** to restore the layout
@@ -61,7 +61,7 @@ The browser UI uses the same React app as the Tauri shell; open a project via **
 
 1. Open a project and select a `.feature` file.
 2. Click a Gherkin **step** in the left panel (writes `.teshi/active-step.json`).
-3. **Start Browser** (writes `.teshi/cdp-endpoint.json` with CDP endpoint).
+3. **Connect Chrome** or **Start Embedded** (writes `.teshi/cdp-endpoint.json` with `mode` and `ws_url`). For Chrome, load the unpacked extension first — see `extension/teshi-bridge/README.md`.
 4. In the embedded terminal, run a Cursor agent and invoke the **bdd-locator** skill (`.teshi/skills/bdd-locator/SKILL.md`).
 5. The agent writes `.teshi/pending-locator.json` and highlights the target element via CDP overlay.
 6. Confirm or reject the proposal in the **Locator** bottom panel; accepted locators are saved to `{feature}.locators.md`.

@@ -9,6 +9,7 @@ import { GherkinPanel } from "./GherkinPanel";
 import { BrowserPanel } from "./BrowserPanel";
 import { FileTreeTerminalPanel } from "./FileTreeTerminalPanel";
 import type { FeatureRenderPayload } from "../types";
+import type { BrowserSessionMode } from "../context/projectState";
 
 interface Props {
   browserFullscreen: boolean;
@@ -18,12 +19,14 @@ interface Props {
   selectedStepLine: number | null;
   browserWsUrl: string | null;
   browserRunning: boolean;
+  browserMode: BrowserSessionMode | null;
   browserError: string | null;
   browserHint: string | null;
   rightTab: "files" | "terminal";
   onSelectScenario: (line: number) => void;
   onSelectStep: (line: number) => void;
-  onStartBrowser: () => void;
+  onConnectChrome: () => void;
+  onStartEmbedded: () => void;
   onStopBrowser: () => void;
   onToggleBrowserFullscreen: () => void;
   onRightTabChange: (tab: "files" | "terminal") => void;
@@ -38,12 +41,14 @@ export function ResizableWorkspace({
   selectedStepLine,
   browserWsUrl,
   browserRunning,
+  browserMode,
   browserError,
   browserHint,
   rightTab,
   onSelectScenario,
   onSelectStep,
-  onStartBrowser,
+  onConnectChrome,
+  onStartEmbedded,
   onStopBrowser,
   onToggleBrowserFullscreen,
   onRightTabChange,
@@ -116,6 +121,7 @@ export function ResizableWorkspace({
     <BrowserPanel
       wsUrl={browserWsUrl}
       running={browserRunning}
+      mode={browserMode}
       error={browserError}
       hint={browserHint}
       fullscreen={browserFullscreen}
@@ -123,7 +129,8 @@ export function ResizableWorkspace({
       filesCollapsed={filesCollapsed}
       onToggleGherkin={toggleGherkin}
       onToggleFiles={toggleFiles}
-      onStart={onStartBrowser}
+      onConnectChrome={onConnectChrome}
+      onStartEmbedded={onStartEmbedded}
       onStop={onStopBrowser}
       onToggleFullscreen={onToggleBrowserFullscreen}
     />

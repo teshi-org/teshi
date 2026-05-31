@@ -1,4 +1,4 @@
-"""Playwright browser screenshot stream sidecar for teshi-desktop."""
+"""Browser bridge for teshi-desktop: embedded Playwright or Chrome extension."""
 
 from __future__ import annotations
 
@@ -7,13 +7,29 @@ import asyncio
 import base64
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
 
-from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+DEFAULT_DISCOVERY_PORT = 17373
+# Extension is considered connected if heartbeat POST was received within this window.
+HEARTBEAT_TTL_SEC = 8.0
 
+
+def paths_equal(got: str, expected: Path) -> bool:
+    """Compare project roots (case-insensitive on Windows)."""
+    if not got or not str(got).strip():
+        return True
+    try:
+        a = Path(got).resolve()
+        b = expected.resolve()
+        if a == b:
+            return True
+        return str(a).casefold() == str(b).casefold()
+    except OSError:
+        return False
 
 HIGHLIGHT_CONFIG = {
     "showInfo": True,
@@ -24,17 +40,95 @@ HIGHLIGHT_CONFIG = {
     "borderColor": {"r": 37, "g": 99, "b": 235, "a": 0.9},
 }
 
+INTERACTIVE_SELECTOR = (
+    "button, [role='button'], input, input[type='submit'], select, "
+    "a[href], [role='link'], textarea"
+)
 
-class BrowserSession:
+INTERACTIVE_EVAL = f"""() => {{
+  const elements = Array.from(document.querySelectorAll({json.dumps(INTERACTIVE_SELECTOR)}));
+  return elements.slice(0, 60).map(el => ({{
+    tag: el.tagName.toLowerCase(),
+    text: (el.innerText || el.value || el.getAttribute('aria-label') || '').trim().slice(0, 120),
+    id: el.id || null,
+    testId: el.getAttribute('data-testid'),
+    role: el.getAttribute('role'),
+    classes: el.className || null,
+  }}));
+}}"""
+
+
+def normalize_snapshot(
+    url: str,
+    title: str,
+    accessibility_tree: Any,
+    interactive_elements: list[Any],
+) -> dict[str, Any]:
+    """Shared response shape for embedded and chrome modes."""
+    return {
+        "ok": True,
+        "url": url,
+        "title": title,
+        "accessibility_tree": accessibility_tree,
+        "interactive_elements": interactive_elements,
+    }
+
+
+def write_cdp_endpoint_file(
+    project_root: Path,
+    *,
+    mode: str,
+    ws_url: str,
+    page_url: str,
+    discovery_port: int | None = None,
+    cdp_http_url: str | None = None,
+    extension_connected: bool = False,
+) -> None:
+    teshi_dir = project_root / ".teshi"
+    teshi_dir.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "mode": mode,
+        "ws_url": ws_url,
+        "page_url": page_url,
+        "bridge": "python",
+        "extension_connected": extension_connected,
+    }
+    if mode == "embedded":
+        payload["viewport"] = {"width": 1920, "height": 1080}
+        if cdp_http_url:
+            payload["http_url"] = cdp_http_url
+    if mode == "chrome" and discovery_port is not None:
+        payload["discovery_url"] = f"http://127.0.0.1:{discovery_port}/v1/bridge"
+    (teshi_dir / "cdp-endpoint.json").write_text(
+        json.dumps(payload, indent=2),
+        encoding="utf-8",
+    )
+
+
+def fetch_playwright_cdp_endpoint(cdp_port: int) -> dict[str, Any]:
+    url = f"http://127.0.0.1:{cdp_port}/json/version"
+    with urllib.request.urlopen(url, timeout=5) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    return {
+        "ws_url": payload.get("webSocketDebuggerUrl", ""),
+        "http_url": f"http://127.0.0.1:{cdp_port}",
+    }
+
+
+# --- Embedded (Playwright) backend ---
+
+
+class EmbeddedSession:
     def __init__(self) -> None:
-        self.page: Page | None = None
-        self.browser: Browser | None = None
-        self.context: BrowserContext | None = None
+        self.page = None
+        self.browser = None
+        self.context = None
         self.playwright = None
         self.cdp_session = None
-        self._highlighted_node_id: int | None = None
 
     async def start(self, cdp_port: int) -> None:
+        from playwright.async_api import async_playwright
+
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(
             headless=True,
@@ -66,7 +160,6 @@ class BrowserSession:
         if self.cdp_session is None:
             return
         await self.cdp_session.send("Overlay.hideHighlight", {})
-        self._highlighted_node_id = None
 
     async def highlight_selector(self, selector: str) -> dict[str, Any]:
         if self.page is None or self.cdp_session is None:
@@ -106,7 +199,6 @@ class BrowserSession:
             "Overlay.highlightNode",
             {"highlightConfig": HIGHLIGHT_CONFIG, "nodeId": node_id},
         )
-        self._highlighted_node_id = node_id
         box = await locator.bounding_box()
         return {
             "ok": True,
@@ -123,56 +215,16 @@ class BrowserSession:
         url = self.page.url
         try:
             tree = await self.page.accessibility.snapshot(interesting_only=False)
-        except Exception as exc:  # noqa: BLE001 - surface to agent as structured error
+        except Exception as exc:  # noqa: BLE001
             tree = {"error": str(exc)}
 
-        buttons = await self.page.eval_on_selector_all(
-            "button, [role='button'], input[type='submit'], a[role='button']",
-            """elements => elements.slice(0, 40).map(el => ({
-                tag: el.tagName.toLowerCase(),
-                text: (el.innerText || el.value || el.getAttribute('aria-label') || '').trim().slice(0, 120),
-                id: el.id || null,
-                testId: el.getAttribute('data-testid'),
-                role: el.getAttribute('role'),
-                classes: el.className || null,
-            }))""",
-        )
-        return {
-            "ok": True,
-            "url": url,
-            "title": title,
-            "accessibility_tree": tree,
-            "interactive_elements": buttons,
-        }
+        buttons = await self.page.evaluate(INTERACTIVE_EVAL)
+        return normalize_snapshot(url, title, tree, buttons)
 
 
-def fetch_cdp_endpoint(cdp_port: int) -> dict[str, Any]:
-    url = f"http://127.0.0.1:{cdp_port}/json/version"
-    with urllib.request.urlopen(url, timeout=5) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    return {
-        "ws_url": payload.get("webSocketDebuggerUrl", ""),
-        "http_url": f"http://127.0.0.1:{cdp_port}",
-    }
-
-
-def write_cdp_endpoint_file(
-    project_root: Path,
-    cdp_port: int,
-    page_url: str,
-) -> None:
-    teshi_dir = project_root / ".teshi"
-    teshi_dir.mkdir(parents=True, exist_ok=True)
-    endpoint = fetch_cdp_endpoint(cdp_port)
-    endpoint["page_url"] = page_url
-    endpoint["viewport"] = {"width": 1920, "height": 1080}
-    (teshi_dir / "cdp-endpoint.json").write_text(
-        json.dumps(endpoint, indent=2),
-        encoding="utf-8",
-    )
-
-
-async def handle_command(session: BrowserSession, data: dict[str, Any]) -> dict[str, Any]:
+async def handle_embedded_command(
+    session: EmbeddedSession, data: dict[str, Any]
+) -> dict[str, Any]:
     cmd = data.get("cmd")
     request_id = data.get("request_id")
 
@@ -200,7 +252,7 @@ async def handle_command(session: BrowserSession, data: dict[str, Any]) -> dict[
     }
 
 
-async def run_server(
+async def run_embedded(
     host: str,
     port: int,
     cdp_port: int,
@@ -208,17 +260,26 @@ async def run_server(
 ) -> None:
     import websockets
 
-    session = BrowserSession()
+    session = EmbeddedSession()
     await session.start(cdp_port)
+    cdp_meta: dict[str, Any] = {}
     if project_root is not None:
         try:
-            write_cdp_endpoint_file(project_root, cdp_port, session.current_url())
+            cdp_meta = fetch_playwright_cdp_endpoint(cdp_port)
+            write_cdp_endpoint_file(
+                project_root,
+                mode="embedded",
+                ws_url=f"ws://{host}:{port}",
+                page_url=session.current_url(),
+                cdp_http_url=cdp_meta.get("http_url"),
+                extension_connected=False,
+            )
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             print(f"warning: failed to write cdp-endpoint.json: {exc}", file=sys.stderr)
 
     clients: set[Any] = set()
 
-    async def handler(websocket):
+    async def handler(websocket: Any) -> None:
         clients.add(websocket)
         try:
             async for message in websocket:
@@ -227,8 +288,20 @@ async def run_server(
                 except json.JSONDecodeError:
                     continue
                 if "cmd" in data:
-                    reply = await handle_command(session, data)
+                    reply = await handle_embedded_command(session, data)
                     await websocket.send(json.dumps(reply))
+                    if (
+                        project_root is not None
+                        and data.get("cmd") == "navigate"
+                        and reply.get("ok")
+                    ):
+                        write_cdp_endpoint_file(
+                            project_root,
+                            mode="embedded",
+                            ws_url=f"ws://{host}:{port}",
+                            page_url=session.current_url(),
+                            cdp_http_url=cdp_meta.get("http_url"),
+                        )
         finally:
             clients.discard(websocket)
 
@@ -254,18 +327,240 @@ async def run_server(
             await asyncio.sleep(0.125)
 
 
+# --- Chrome extension backend ---
+
+
+class ChromeBridge:
+    """Chrome mode: extension talks HTTP heartbeat; agents use WebSocket."""
+
+    def __init__(
+        self,
+        project_root: Path,
+        ws_url: str,
+        discovery_port: int,
+    ) -> None:
+        self.project_root = project_root.resolve()
+        self.ws_url = ws_url
+        self.discovery_port = discovery_port
+        self.page_url = ""
+        self.page_title = ""
+        self.last_heartbeat = 0.0
+        self._cmd_queue: list[dict[str, Any]] = []
+        self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+
+    def extension_alive(self) -> bool:
+        return (time.monotonic() - self.last_heartbeat) < HEARTBEAT_TTL_SEC
+
+    def bridge_info(self) -> dict[str, Any]:
+        return {
+            "ws_url": self.ws_url,
+            "project_root": str(self.project_root),
+            "mode": "chrome",
+            "transport": "http-heartbeat",
+            "extension_connected": self.extension_alive(),
+            "page_url": self.page_url,
+            "title": self.page_title,
+        }
+
+    def write_endpoint(self) -> None:
+        write_cdp_endpoint_file(
+            self.project_root,
+            mode="chrome",
+            ws_url=self.ws_url,
+            page_url=self.page_url or "about:blank",
+            discovery_port=self.discovery_port,
+            extension_connected=self.extension_alive(),
+        )
+
+    async def handle_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
+        got = str(payload.get("project_root", ""))
+        if not paths_equal(got, self.project_root):
+            return {
+                "ok": False,
+                "error": f"project_root mismatch: expected {self.project_root}",
+            }
+        self.last_heartbeat = time.monotonic()
+        self.page_url = str(payload.get("url", self.page_url))
+        self.page_title = str(payload.get("title", self.page_title))
+        self.write_endpoint()
+        pending_cmd = self._cmd_queue.pop(0) if self._cmd_queue else None
+        return {"ok": True, "cmd": pending_cmd}
+
+    async def handle_extension_response(self, payload: dict[str, Any]) -> dict[str, Any]:
+        request_id = payload.get("request_id")
+        if request_id:
+            fut = self._pending.pop(str(request_id), None)
+            if fut and not fut.done():
+                fut.set_result(payload)
+            if payload.get("cmd") == "get_page_snapshot" and payload.get("ok"):
+                self.page_url = str(payload.get("url", self.page_url))
+                self.page_title = str(payload.get("title", self.page_title))
+                self.write_endpoint()
+        return {"ok": True}
+
+    async def forward_command(self, data: dict[str, Any]) -> dict[str, Any]:
+        request_id = str(data.get("request_id") or "")
+        if not self.extension_alive():
+            return {
+                "type": "response",
+                "request_id": request_id,
+                "ok": False,
+                "error": (
+                    "Chrome extension not connected (no heartbeat). Keep the "
+                    "feedback.enhook.com tab active in Chrome and ensure "
+                    "teshi-bridge is loaded — it polls every second while the bridge runs."
+                ),
+            }
+
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._pending[request_id] = fut
+        self._cmd_queue.append(
+            {
+                "type": "cmd",
+                "request_id": request_id,
+                "cmd": data.get("cmd"),
+                "selector": data.get("selector"),
+                "url": data.get("url"),
+            }
+        )
+        try:
+            return await asyncio.wait_for(fut, timeout=45.0)
+        except asyncio.TimeoutError:
+            self._pending.pop(request_id, None)
+            self._cmd_queue = [c for c in self._cmd_queue if c.get("request_id") != request_id]
+            return {
+                "type": "response",
+                "request_id": request_id,
+                "ok": False,
+                "error": "extension did not respond in time (heartbeat may have stalled)",
+            }
+
+
+def _http_response(status: int, body: bytes, content_type: str = "application/json") -> bytes:
+    reason = "OK" if status == 200 else "Not Found"
+    header = (
+        f"HTTP/1.1 {status} {reason}\r\n"
+        f"Content-Type: {content_type}\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Content-Type\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    ).encode("ascii")
+    return header + body
+
+
+async def _read_http_request(
+    reader: asyncio.StreamReader,
+) -> tuple[str, dict[str, str], bytes]:
+    request_line = (await reader.readline()).decode("utf-8", errors="ignore").strip()
+    headers: dict[str, str] = {}
+    while True:
+        line = await reader.readline()
+        if line in (b"\r\n", b"\n", b""):
+            break
+        decoded = line.decode("utf-8", errors="ignore").strip()
+        if ":" in decoded:
+            key, value = decoded.split(":", 1)
+            headers[key.strip().lower()] = value.strip()
+    length = int(headers.get("content-length", "0") or "0")
+    body = await reader.read(length) if length > 0 else b""
+    return request_line, headers, body
+
+
+async def run_http_discovery(
+    bridge: ChromeBridge, host: str, discovery_port: int
+) -> None:
+    async def handle_client(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        try:
+            request_line, _headers, body = await _read_http_request(reader)
+            parts = request_line.split()
+            method = parts[0].upper() if parts else ""
+            path = parts[1] if len(parts) > 1 else ""
+
+            if method == "OPTIONS":
+                writer.write(_http_response(200, b""))
+            elif method == "GET" and path == "/v1/bridge":
+                payload = json.dumps(bridge.bridge_info()).encode("utf-8")
+                writer.write(_http_response(200, payload))
+            elif method == "POST" and path == "/v1/bridge/heartbeat":
+                data = json.loads(body.decode("utf-8") or "{}")
+                result = await bridge.handle_heartbeat(data)
+                writer.write(_http_response(200, json.dumps(result).encode("utf-8")))
+            elif method == "POST" and path == "/v1/bridge/response":
+                data = json.loads(body.decode("utf-8") or "{}")
+                result = await bridge.handle_extension_response(data)
+                writer.write(_http_response(200, json.dumps(result).encode("utf-8")))
+            else:
+                writer.write(_http_response(404, b"{}"))
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(handle_client, host, discovery_port)
+    async with server:
+        await server.serve_forever()
+
+
+async def run_chrome(
+    host: str,
+    port: int,
+    discovery_port: int,
+    project_root: Path,
+) -> None:
+    import websockets
+
+    ws_url = f"ws://{host}:{port}"
+    bridge = ChromeBridge(project_root, ws_url, discovery_port)
+    bridge.write_endpoint()
+
+    http_task = asyncio.create_task(run_http_discovery(bridge, host, discovery_port))
+
+    async def handler(websocket: Any) -> None:
+        async for message in websocket:
+            try:
+                data = json.loads(message)
+            except json.JSONDecodeError:
+                continue
+            if "cmd" in data:
+                reply = await bridge.forward_command(data)
+                await websocket.send(json.dumps(reply))
+
+    async with websockets.serve(handler, host, port):
+        await asyncio.gather(http_task, asyncio.Future())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--cdp-port", type=int, required=True)
+    parser.add_argument("--mode", choices=("embedded", "chrome"), default="embedded")
+    parser.add_argument("--cdp-port", type=int, default=0)
+    parser.add_argument("--discovery-port", type=int, default=DEFAULT_DISCOVERY_PORT)
     parser.add_argument("--project-root", default="")
     args = parser.parse_args()
     project_root = Path(args.project_root) if args.project_root else None
+
     try:
-        asyncio.run(
-            run_server(args.host, args.port, args.cdp_port, project_root)
-        )
+        if args.mode == "chrome":
+            if project_root is None:
+                print("chrome mode requires --project-root", file=sys.stderr)
+                sys.exit(1)
+            asyncio.run(
+                run_chrome(args.host, args.port, args.discovery_port, project_root)
+            )
+        else:
+            if args.cdp_port <= 0:
+                print("embedded mode requires --cdp-port", file=sys.stderr)
+                sys.exit(1)
+            asyncio.run(
+                run_embedded(args.host, args.port, args.cdp_port, project_root)
+            )
     except KeyboardInterrupt:
         sys.exit(0)
 

@@ -18,7 +18,8 @@ use teshi_runtime::{
     check_project_switch_allowed, confirm_locator, get_active_step, get_pending_locator,
     get_recent_projects, list_dir, open_project, reject_locator, render_feature, resize_terminal,
     spawn_terminal, start_browser_sidecar, stop_browser_sidecar, sync_active_step,
-    teardown_runtime, write_terminal, ActiveStep, BrowserError, BrowserStartResult, DirEntry,
+    teardown_runtime, write_terminal, ActiveStep, BrowserError, BrowserMode, BrowserStartResult,
+    DirEntry,
     PendingLocator, RuntimeEvent, TeshiRuntime,
 };
 use tower_http::cors::{Any, CorsLayer};
@@ -192,10 +193,20 @@ async fn api_reject_locator(State(rt): State<SharedRuntime>) -> Result<StatusCod
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+struct BrowserStartBody {
+    mode: Option<String>,
+}
+
 async fn api_browser_start(
     State(rt): State<SharedRuntime>,
+    Json(body): Json<BrowserStartBody>,
 ) -> Result<Json<BrowserStartResult>, ApiError> {
-    start_browser_sidecar(rt)
+    let mode = match body.mode.as_deref() {
+        Some("chrome") => BrowserMode::Chrome,
+        _ => BrowserMode::Embedded,
+    };
+    start_browser_sidecar(rt, mode)
         .await
         .map(Json)
         .map_err(ApiError::from)

@@ -3,6 +3,7 @@ import type { ActiveStep, PendingLocator } from "../locatorTypes";
 
 export type LayoutMode = "normal" | "browserFullscreen";
 export type DockTab = "locator" | "output" | "logs";
+export type BrowserSessionMode = "embedded" | "chrome";
 
 export interface ProjectState {
   projectRoot: string | null;
@@ -15,6 +16,7 @@ export interface ProjectState {
   recentProjects: string[];
   browserWsUrl: string | null;
   browserRunning: boolean;
+  browserMode: BrowserSessionMode | null;
   rightTab: "files" | "terminal";
   layoutMode: LayoutMode;
   dockExpanded: boolean;
@@ -30,7 +32,12 @@ export type ProjectAction =
   | { type: "SELECT_STEP"; line: number | null }
   | { type: "SET_ACTIVE_STEP"; step: ActiveStep | null }
   | { type: "SET_PENDING_LOCATOR"; pending: PendingLocator | null }
-  | { type: "SET_BROWSER"; wsUrl: string | null; running: boolean }
+  | {
+      type: "SET_BROWSER";
+      wsUrl: string | null;
+      running: boolean;
+      mode: BrowserSessionMode | null;
+    }
   | { type: "SET_TAB"; tab: "files" | "terminal" }
   | { type: "SET_LAYOUT_MODE"; mode: LayoutMode }
   | { type: "TOGGLE_DOCK" }
@@ -49,6 +56,7 @@ export const initialProjectState: ProjectState = {
   recentProjects: [],
   browserWsUrl: null,
   browserRunning: false,
+  browserMode: null,
   rightTab: "files",
   layoutMode: "normal",
   dockExpanded: false,
@@ -97,6 +105,7 @@ export function projectReducer(
         ...state,
         browserWsUrl: action.wsUrl,
         browserRunning: action.running,
+        browserMode: action.mode,
       };
     case "SET_TAB":
       return { ...state, rightTab: action.tab };

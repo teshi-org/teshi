@@ -158,12 +158,16 @@ pub async fn spawn_terminal(rt: Arc<TeshiRuntime>, cols: u16, rows: u16) -> Resu
 
 /// Writes bytes to the PTY stdin.
 pub fn write_terminal(rt: &TeshiRuntime, data: String) -> Result<(), String> {
-    if let Some(writer) = rt.terminal.writer.lock().unwrap().as_mut() {
-        writer
-            .write_all(data.as_bytes())
-            .map_err(|e| e.to_string())?;
-        writer.flush().map_err(|e| e.to_string())?;
-    }
+    let mut guard = rt.terminal.writer.lock().unwrap();
+    let Some(writer) = guard.as_mut() else {
+        return Err(
+            "terminal shell is not running; switch to the Terminal tab or click inside it to start the shell".into(),
+        );
+    };
+    writer
+        .write_all(data.as_bytes())
+        .map_err(|e| e.to_string())?;
+    writer.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
 

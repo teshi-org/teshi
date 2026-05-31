@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>teshi-bridge</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 12px;
+        min-width: 260px;
+        font-size: 13px;
+      }
+      button {
+        width: 100%;
+        padding: 8px;
+        cursor: pointer;
+      }
+      p {
+        color: #444;
+        line-height: 1.4;
+      }
+      #status {
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <p id="status">Checking bridge…</p>
+    <button type="button" id="connect">Connect to teshi</button>
+    <p>Open your app tab in Chrome, then click Connect in teshi-desktop.</p>
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -8,3 +8,4 @@ Terminal-first BDD editor with AI assistance, mind-map navigation, and external 
 - [Module Reference](modules.md) — Detailed breakdown of every source module
 - [CLI & Configuration](cli-usage.md) — Commands, flags, and config file reference
 - [Development Guide](development.md) — Building, testing, contributing, and code conventions
+- [Browser Modes](browser-modes.md) — Connect Chrome vs Embedded for BDD locator recording

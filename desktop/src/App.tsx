@@ -28,7 +28,7 @@ function AppShell() {
       dispatch({ type: "SET_PROJECT", root: path });
       setBrowserError(null);
       setBrowserHint(null);
-      dispatch({ type: "SET_BROWSER", wsUrl: null, running: false });
+      dispatch({ type: "SET_BROWSER", wsUrl: null, running: false, mode: null });
       dispatch({ type: "SET_ACTIVE_STEP", step: null });
       dispatch({ type: "SET_PENDING_LOCATOR", pending: null });
       void runtime.getPendingLocator().then((pending) => {
@@ -171,15 +171,17 @@ function AppShell() {
     dispatch({ type: "SET_FEATURE", path, payload });
   };
 
-  const startBrowser = async () => {
+  const startBrowserMode = async (mode: "embedded" | "chrome") => {
     setBrowserError(null);
     setBrowserHint(null);
     try {
-      const result = await getRuntime().startBrowserSidecar();
+      const result = await getRuntime().startBrowserSidecar(mode);
+      const sessionMode = result.mode === "chrome" ? "chrome" : "embedded";
       dispatch({
         type: "SET_BROWSER",
         wsUrl: result.ws_url,
         running: true,
+        mode: sessionMode,
       });
     } catch (e) {
       let err = e as BrowserError;
@@ -192,13 +194,13 @@ function AppShell() {
       }
       setBrowserError(err.message ?? String(e));
       setBrowserHint(err.hint ?? null);
-      dispatch({ type: "SET_BROWSER", wsUrl: null, running: false });
+      dispatch({ type: "SET_BROWSER", wsUrl: null, running: false, mode: null });
     }
   };
 
   const stopBrowser = async () => {
     await getRuntime().stopBrowserSidecar();
-    dispatch({ type: "SET_BROWSER", wsUrl: null, running: false });
+    dispatch({ type: "SET_BROWSER", wsUrl: null, running: false, mode: null });
   };
 
   const browserFullscreen = state.layoutMode === "browserFullscreen";
@@ -249,6 +251,7 @@ function AppShell() {
           selectedStepLine={state.selectedStepLine}
           browserWsUrl={state.browserWsUrl}
           browserRunning={state.browserRunning}
+          browserMode={state.browserMode}
           browserError={browserError}
           browserHint={browserHint}
           rightTab={state.rightTab}
@@ -261,7 +264,8 @@ function AppShell() {
               void syncActiveStep(line);
             }
           }}
-          onStartBrowser={() => void startBrowser()}
+          onConnectChrome={() => void startBrowserMode("chrome")}
+          onStartEmbedded={() => void startBrowserMode("embedded")}
           onStopBrowser={() => void stopBrowser()}
           onToggleBrowserFullscreen={() =>
             dispatch({

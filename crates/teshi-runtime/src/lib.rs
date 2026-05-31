@@ -27,7 +27,7 @@ pub use project::{
 };
 pub use sidecar::{
     get_recent_projects, send_sidecar_command, start_browser_sidecar, stop_browser_sidecar,
-    BrowserError, BrowserStartResult, SidecarState,
+    BrowserError, BrowserMode, BrowserStartResult, SidecarState, CHROME_DISCOVERY_PORT,
 };
 pub use terminal::{resize_terminal, spawn_terminal, stop_terminal, write_terminal, TerminalState};
 pub use watcher::FileWatcherState;

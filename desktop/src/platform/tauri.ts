@@ -56,8 +56,11 @@ export const tauriRuntime: TeshiRuntimeApi = {
     return invoke<FeatureRenderPayload>("render_feature_cmd", { path });
   },
 
-  async startBrowserSidecar() {
-    return invoke<{ ws_url: string }>("start_browser_sidecar");
+  async startBrowserSidecar(mode: "embedded" | "chrome") {
+    return invoke<{ ws_url: string; mode: string; cdp_endpoint_path: string }>(
+      "start_browser_sidecar",
+      { mode },
+    );
   },
 
   async stopBrowserSidecar() {
