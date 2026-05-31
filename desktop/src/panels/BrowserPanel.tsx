@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { PanelCollapseButton } from "./PanelCollapseButton";
 
 interface Props {
@@ -59,6 +59,13 @@ function stepZoomLevel(current: number, direction: 1 | -1): number {
   return ZOOM_STEPS[nextIdx];
 }
 
+interface ZoomAnchor {
+  clientX: number;
+  clientY: number;
+  relX: number;
+  relY: number;
+}
+
 function FullscreenIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
@@ -107,8 +114,15 @@ export function BrowserPanel({
 }: Props) {
   const imgRef = useRef<HTMLImageElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const scalerRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const addressFocusedRef = useRef(false);
+  const lastMouseRef = useRef<{ x: number; y: number; inside: boolean }>({
+    x: 0,
+    y: 0,
+    inside: false,
+  });
+  const zoomAnchorRef = useRef<ZoomAnchor | null>(null);
   const dragRef = useRef<{
     active: boolean;
     startX: number;
@@ -124,12 +138,50 @@ export function BrowserPanel({
   const [fitSize, setFitSize] = useState<FitSize>({ fitW: 0, fitH: 0 });
   const [dragging, setDragging] = useState(false);
 
-  const stepZoom = useCallback((direction: 1 | -1) => {
+  const getZoomAnchorPoint = useCallback((): { x: number; y: number } => {
+    const wrap = wrapRef.current;
+    if (!wrap) {
+      return { x: 0, y: 0 };
+    }
+    const rect = wrap.getBoundingClientRect();
+    if (lastMouseRef.current.inside) {
+      return { x: lastMouseRef.current.x, y: lastMouseRef.current.y };
+    }
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  }, []);
+
+  const zoomAtPoint = useCallback((direction: 1 | -1, clientX: number, clientY: number) => {
+    const scaler = scalerRef.current;
+    if (!scaler) return;
+
+    const scalerRect = scaler.getBoundingClientRect();
+    if (scalerRect.width <= 0 || scalerRect.height <= 0) return;
+
+    zoomAnchorRef.current = {
+      clientX,
+      clientY,
+      relX: (clientX - scalerRect.left) / scalerRect.width,
+      relY: (clientY - scalerRect.top) / scalerRect.height,
+    };
     setZoom((current) => stepZoomLevel(current, direction));
   }, []);
 
+  const stepZoom = useCallback(
+    (direction: 1 | -1) => {
+      const { x, y } = getZoomAnchorPoint();
+      zoomAtPoint(direction, x, y);
+    },
+    [getZoomAnchorPoint, zoomAtPoint],
+  );
+
   const resetZoom = useCallback(() => {
+    zoomAnchorRef.current = null;
     setZoom(DEFAULT_ZOOM);
+    const wrap = wrapRef.current;
+    if (wrap) {
+      wrap.scrollLeft = 0;
+      wrap.scrollTop = 0;
+    }
   }, []);
 
   const navigateTo = useCallback((raw: string) => {
@@ -161,6 +213,23 @@ export function BrowserPanel({
     return () => observer.disconnect();
   }, [running, fullscreen]);
 
+  useLayoutEffect(() => {
+    const anchor = zoomAnchorRef.current;
+    if (!anchor) return;
+    zoomAnchorRef.current = null;
+
+    const wrap = wrapRef.current;
+    const scaler = scalerRef.current;
+    if (!wrap || !scaler) return;
+
+    const scalerRect = scaler.getBoundingClientRect();
+    const currentPointX = scalerRect.left + anchor.relX * scalerRect.width;
+    const currentPointY = scalerRect.top + anchor.relY * scalerRect.height;
+
+    wrap.scrollLeft -= anchor.clientX - currentPointX;
+    wrap.scrollTop -= anchor.clientY - currentPointY;
+  }, [zoom, fitSize]);
+
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap || !running) return;
@@ -168,12 +237,12 @@ export function BrowserPanel({
     const onWheel = (e: WheelEvent) => {
       if (!e.ctrlKey) return;
       e.preventDefault();
-      stepZoom(e.deltaY < 0 ? 1 : -1);
+      zoomAtPoint(e.deltaY < 0 ? 1 : -1, e.clientX, e.clientY);
     };
 
     wrap.addEventListener("wheel", onWheel, { passive: false });
     return () => wrap.removeEventListener("wheel", onWheel);
-  }, [running, stepZoom]);
+  }, [running, zoomAtPoint]);
 
   useEffect(() => {
     if (!dragging) return;
@@ -260,6 +329,14 @@ export function BrowserPanel({
       e.stopPropagation();
       resetZoom();
     }
+  };
+
+  const onViewportMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    lastMouseRef.current = { x: e.clientX, y: e.clientY, inside: true };
+  };
+
+  const onViewportMouseLeave = () => {
+    lastMouseRef.current.inside = false;
   };
 
   const onViewportMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -421,12 +498,15 @@ export function BrowserPanel({
               className={`browser-frame-wrap${dragging ? " browser-frame-wrap--dragging" : ""}${zoom > 1 ? " browser-frame-wrap--pannable" : ""}`}
               tabIndex={0}
               onKeyDown={onViewportKeyDown}
+              onMouseMove={onViewportMouseMove}
+              onMouseLeave={onViewportMouseLeave}
               onMouseDown={onViewportMouseDown}
               onClick={() => wrapRef.current?.focus()}
               aria-label="Browser stream viewport"
             >
               {fitSize.fitW > 0 && fitSize.fitH > 0 && (
                 <div
+                  ref={scalerRef}
                   className="browser-frame-scaler"
                   style={{ width: displayW, height: displayH }}
                 >
