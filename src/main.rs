@@ -24,7 +24,7 @@ use std::io;
 use std::io::Write;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::Command;
 use crossterm::cursor::{Hide, Show};
@@ -143,6 +143,10 @@ fn main() -> Result<()> {
     match cli_args.command {
         Some(cli::Command::Auth { action }) => {
             return cli::auth::handle_auth_command(&action);
+        }
+        Some(cli::Command::Web { options }) => {
+            let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+            return rt.block_on(teshi_web::run(options));
         }
         Some(cli::Command::Run {
             feature,

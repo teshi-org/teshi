@@ -28,6 +28,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
 teshi-gherkin = { path = "../../crates/teshi-gherkin" }
+teshi-runtime = { path = "../../crates/teshi-runtime" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "time"] }
 tracing = "0.1"
 tracing-appender = "0.2"

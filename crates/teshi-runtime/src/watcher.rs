@@ -6,33 +6,38 @@ use std::time::Duration;
 
 use anyhow::Result;
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
-use tauri::{AppHandle, Manager};
 
-use crate::gherkin_cmd::emit_feature_refresh;
-use crate::project::ProjectState;
+use crate::events::RuntimeEvents;
+use crate::gherkin::emit_feature_refresh;
 
+/// Watches a single feature file for external edits.
 pub struct FileWatcherState {
     watcher: Mutex<Option<RecommendedWatcher>>,
 }
 
+impl Default for FileWatcherState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FileWatcherState {
+    /// Creates an empty file watcher holder.
     pub fn new() -> Self {
         Self {
             watcher: Mutex::new(None),
         }
     }
 
-    pub fn watch(&self, path: &Path, app: AppHandle) -> Result<()> {
+    /// Watches `path` and emits `feature-refreshed` on change.
+    pub fn watch(&self, path: &Path, project_root: &Path, events: RuntimeEvents) -> Result<()> {
         self.clear()?;
         let path_clone = path.to_path_buf();
+        let root = project_root.to_path_buf();
         let mut watcher = RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
                 if res.is_ok() {
-                    if let Some(root_state) = app.try_state::<ProjectState>() {
-                        if let Some(project_root) = root_state.root.lock().unwrap().clone() {
-                            emit_feature_refresh(&app, &path_clone, &project_root);
-                        }
-                    }
+                    emit_feature_refresh(&events, &path_clone, &root);
                 }
             },
             Config::default().with_poll_interval(Duration::from_millis(300)),
@@ -42,6 +47,7 @@ impl FileWatcherState {
         Ok(())
     }
 
+    /// Stops watching the current feature file.
     pub fn clear(&self) -> Result<()> {
         *self.watcher.lock().unwrap() = None;
         Ok(())

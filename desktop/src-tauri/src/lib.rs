@@ -1,33 +1,19 @@
-mod app_data;
-mod gherkin_cmd;
-mod locator;
-mod menu;
-mod project;
-mod sidecar;
-mod terminal;
-mod watcher;
+mod commands;
 mod window_state;
 
-use tauri::{Emitter, Manager};
+use std::sync::Arc;
 
-use crate::app_data::get_recent_projects;
-use crate::gherkin_cmd::render_feature_cmd;
-use crate::locator::{
-    abandon_pending_locator_cmd, confirm_locator_cmd, get_active_step_cmd, get_pending_locator_cmd,
-    reject_locator_cmd, sync_active_step_cmd, LocatorWatcherState,
+use tauri::{Emitter, Manager};
+use teshi_runtime::{HostEventCallback, RuntimeConfig, TeshiRuntime};
+
+use crate::commands::{
+    abandon_pending_locator_cmd, check_project_switch_allowed_cmd, confirm_locator_cmd,
+    confirm_teardown, get_active_step_cmd, get_pending_locator_cmd, get_project_root,
+    get_recent_projects_cmd, list_dir, open_project, open_project_dir, reject_locator_cmd,
+    render_feature_cmd, resize_terminal, set_browser_active_cmd, set_terminal_active_cmd,
+    spawn_terminal, start_browser_sidecar, stop_browser_sidecar, stop_terminal,
+    sync_active_step_cmd, teardown_runtime, write_terminal,
 };
-use crate::project::{
-    check_project_switch_allowed, get_project_root, list_dir, open_project, set_browser_active,
-    set_terminal_active, teardown_runtime, ProjectState,
-};
-use crate::sidecar::{
-    confirm_teardown, get_recent_projects_cmd, open_project_dir, start_browser_sidecar,
-    stop_browser_sidecar, SidecarState,
-};
-use crate::terminal::{
-    resize_terminal, spawn_terminal, stop_terminal, write_terminal, TerminalState,
-};
-use crate::watcher::FileWatcherState;
 use crate::window_state::{
     take_legacy_window_size_from_settings, PendingLegacyWindowSize, PERSISTED_STATE_FLAGS,
 };
@@ -51,11 +37,6 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
-        .manage(ProjectState::new())
-        .manage(SidecarState::new())
-        .manage(TerminalState::new())
-        .manage(FileWatcherState::new())
-        .manage(LocatorWatcherState::new())
         .manage(PendingLegacyWindowSize(std::sync::Mutex::new(
             take_legacy_window_size_from_settings().ok().flatten(),
         )))
@@ -78,27 +59,35 @@ pub fn run() {
             stop_terminal,
             resize_terminal,
             write_terminal,
-            check_project_switch_allowed,
+            check_project_switch_allowed_cmd,
             confirm_teardown,
             teardown_runtime,
-            set_browser_active,
-            set_terminal_active,
+            set_browser_active_cmd,
+            set_terminal_active_cmd,
             finalize_main_window_cmd,
         ])
         .setup(|app| {
-            if let Ok(recent) = get_recent_projects() {
-                let _ = app.emit("recent-loaded", recent);
-            }
+            let script = app
+                .path()
+                .resolve(
+                    "resources/browser_service.py",
+                    tauri::path::BaseDirectory::Resource,
+                )
+                .map_err(|e| e.to_string())?;
+
             let handle = app.handle().clone();
-            if let Ok(menu) = menu::build_app_menu(
-                &handle,
-                &get_recent_projects().unwrap_or_default(),
-            ) {
-                let _ = app.set_menu(menu);
-            }
-            app.on_menu_event(move |app_handle, event| {
-                menu::handle_menu_event(app_handle, event.id().0.as_str());
+            let host: HostEventCallback = Arc::new(move |name: &str, payload: serde_json::Value| {
+                let _ = handle.emit(name, payload);
             });
+
+            let rt = TeshiRuntime::new(
+                RuntimeConfig {
+                    browser_service_script: script,
+                },
+                Some(host),
+            );
+            rt.emit_initial_recent();
+            app.manage(rt);
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -106,13 +95,11 @@ pub fn run() {
 }
 
 fn init_logging() {
-    // 日志滚动写入 %APPDATA%/teshi-desktop/logs/，解析数据目录失败时回退到系统临时目录。
-    let log_dir = crate::app_data::app_data_dir()
+    let log_dir = teshi_runtime::app_data_dir()
         .map(|p| p.join("logs"))
         .unwrap_or_else(|_| std::env::temp_dir().join("teshi-desktop-logs"));
     let file_appender = tracing_appender::rolling::daily(log_dir, "teshi-desktop.log");
     let (writer, guard) = tracing_appender::non_blocking(file_appender);
-    // non-blocking writer 的 guard 必须存活至进程结束，否则缓冲日志会丢失。
     Box::leak(Box::new(guard));
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")

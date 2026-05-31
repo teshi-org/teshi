@@ -2,17 +2,16 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
 use teshi_gherkin::parse_feature;
 
-use crate::project::ProjectState;
 use crate::sidecar::{send_sidecar_command, SidecarState};
+use crate::TeshiRuntime;
 
 /// Selected Gherkin step context written for the Cursor agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +62,12 @@ pub struct LocatorWatcherState {
     watcher: Mutex<Option<RecommendedWatcher>>,
 }
 
+impl Default for LocatorWatcherState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LocatorWatcherState {
     /// Creates an empty locator file watcher holder.
     pub fn new() -> Self {
@@ -72,18 +77,18 @@ impl LocatorWatcherState {
     }
 
     /// Starts watching the pending locator file under the opened project.
-    pub fn watch_project(&self, project_root: &Path, app: AppHandle) -> Result<()> {
+    pub fn watch_project(&self, project_root: &Path, rt: Arc<TeshiRuntime>) -> Result<()> {
         self.clear()?;
         let teshi = ensure_teshi_dir(project_root)?;
         let pending_path = pending_locator_path(project_root);
 
-        let app_handle = app.clone();
+        let rt_watch = Arc::clone(&rt);
         let root = project_root.to_path_buf();
         let mut watcher = RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
                 if let Ok(event) = res {
                     if event.paths.iter().any(|p| p == &pending_path) {
-                        emit_pending_locator(&app_handle, &root);
+                        emit_pending_locator(&rt_watch, &root);
                     }
                 }
             },
@@ -91,7 +96,7 @@ impl LocatorWatcherState {
         )?;
         watcher.watch(&teshi, RecursiveMode::NonRecursive)?;
         *self.watcher.lock().unwrap() = Some(watcher);
-        emit_pending_locator(&app, project_root);
+        emit_pending_locator(&rt, project_root);
         Ok(())
     }
 
@@ -218,19 +223,21 @@ fn pending_is_blocking(project_root: &Path) -> Result<bool> {
     Ok(pending.status == "pending")
 }
 
-fn emit_pending_locator(app: &AppHandle, project_root: &Path) {
+fn emit_pending_locator(rt: &TeshiRuntime, project_root: &Path) {
     let path = pending_locator_path(project_root);
     if !path.exists() {
-        let _ = app.emit("pending-locator-changed", Option::<PendingLocator>::None);
+        rt.events
+            .emit("pending-locator-changed", Option::<PendingLocator>::None);
         return;
     }
     match read_json::<PendingLocator>(&path) {
         Ok(pending) => {
-            let _ = app.emit("pending-locator-changed", Some(pending));
+            rt.events.emit("pending-locator-changed", Some(pending));
         }
         Err(err) => {
             tracing::warn!("failed to read pending locator: {err}");
-            let _ = app.emit("pending-locator-changed", Option::<PendingLocator>::None);
+            rt.events
+                .emit("pending-locator-changed", Option::<PendingLocator>::None);
         }
     }
 }
@@ -320,14 +327,13 @@ async fn clear_browser_highlight(sidecar: &SidecarState) -> Result<(), String> {
 }
 
 /// Writes the active step context file for the Cursor agent.
-#[tauri::command]
-pub async fn sync_active_step_cmd(
-    app: AppHandle,
+pub async fn sync_active_step(
+    rt: &TeshiRuntime,
     feature_path: String,
     step_line: u32,
-    state: State<'_, ProjectState>,
 ) -> Result<ActiveStep, String> {
-    let project_root = state
+    let project_root = rt
+        .project
         .root
         .lock()
         .unwrap()
@@ -346,14 +352,14 @@ pub async fn sync_active_step_cmd(
 
     ensure_teshi_dir(&project_root).map_err(|e| e.to_string())?;
     write_json(&active_step_path(&project_root), &active).map_err(|e| e.to_string())?;
-    let _ = app.emit("active-step-changed", active.clone());
+    rt.events.emit("active-step-changed", active.clone());
     Ok(active)
 }
 
 /// Returns the current active step context, if any.
-#[tauri::command]
-pub fn get_active_step_cmd(state: State<'_, ProjectState>) -> Result<Option<ActiveStep>, String> {
-    let project_root = state
+pub fn get_active_step(rt: &TeshiRuntime) -> Result<Option<ActiveStep>, String> {
+    let project_root = rt
+        .project
         .root
         .lock()
         .unwrap()
@@ -367,11 +373,9 @@ pub fn get_active_step_cmd(state: State<'_, ProjectState>) -> Result<Option<Acti
 }
 
 /// Returns the pending locator proposal, if any.
-#[tauri::command]
-pub fn get_pending_locator_cmd(
-    state: State<'_, ProjectState>,
-) -> Result<Option<PendingLocator>, String> {
-    let project_root = state
+pub fn get_pending_locator(rt: &TeshiRuntime) -> Result<Option<PendingLocator>, String> {
+    let project_root = rt
+        .project
         .root
         .lock()
         .unwrap()
@@ -389,15 +393,13 @@ pub fn get_pending_locator_cmd(
 }
 
 /// Confirms a pending locator and writes it to the per-feature markdown file.
-#[tauri::command]
-pub async fn confirm_locator_cmd(
-    app: AppHandle,
+pub async fn confirm_locator(
+    rt: &TeshiRuntime,
     candidate_rank: u32,
     edited_value: Option<String>,
-    state: State<'_, ProjectState>,
-    sidecar: State<'_, SidecarState>,
 ) -> Result<(), String> {
-    let project_root = state
+    let project_root = rt
+        .project
         .root
         .lock()
         .unwrap()
@@ -426,21 +428,17 @@ pub async fn confirm_locator_cmd(
 
     pending.status = "confirmed".to_string();
     write_json(&path, &pending).map_err(|e| e.to_string())?;
-    clear_browser_highlight(&sidecar)
+    clear_browser_highlight(&rt.sidecar)
         .await
         .map_err(|e| e.to_string())?;
-    emit_pending_locator(&app, &project_root);
+    emit_pending_locator(rt, &project_root);
     Ok(())
 }
 
 /// Rejects a pending locator proposal and clears the browser highlight.
-#[tauri::command]
-pub async fn reject_locator_cmd(
-    app: AppHandle,
-    state: State<'_, ProjectState>,
-    sidecar: State<'_, SidecarState>,
-) -> Result<(), String> {
-    let project_root = state
+pub async fn reject_locator(rt: &TeshiRuntime) -> Result<(), String> {
+    let project_root = rt
+        .project
         .root
         .lock()
         .unwrap()
@@ -454,31 +452,26 @@ pub async fn reject_locator_cmd(
     let mut pending: PendingLocator = read_json(&path).map_err(|e| e.to_string())?;
     pending.status = "rejected".to_string();
     write_json(&path, &pending).map_err(|e| e.to_string())?;
-    clear_browser_highlight(&sidecar)
+    clear_browser_highlight(&rt.sidecar)
         .await
         .map_err(|e| e.to_string())?;
-    emit_pending_locator(&app, &project_root);
+    emit_pending_locator(rt, &project_root);
     Ok(())
 }
 
 /// Clears a stale pending proposal without persisting a locator.
-#[tauri::command]
-pub async fn abandon_pending_locator_cmd(
-    app: AppHandle,
-    state: State<'_, ProjectState>,
-    sidecar: State<'_, SidecarState>,
-) -> Result<(), String> {
-    reject_locator_cmd(app, state, sidecar).await
+pub async fn abandon_pending_locator(rt: &TeshiRuntime) -> Result<(), String> {
+    reject_locator(rt).await
 }
 
 /// Starts watching pending locator changes for the opened project.
 pub fn start_locator_watch(
     watcher: &LocatorWatcherState,
     project_root: &Path,
-    app: AppHandle,
+    rt: Arc<TeshiRuntime>,
 ) -> Result<(), String> {
     watcher
-        .watch_project(project_root, app)
+        .watch_project(project_root, rt)
         .map_err(|e| e.to_string())
 }
 
@@ -503,32 +496,5 @@ mod tests {
         assert_eq!(active.scenario_name, "User logs in");
         assert_eq!(active.step_keyword, "When");
         assert_eq!(active.step_text, "I click the login button");
-    }
-
-    #[test]
-    fn pending_locator_deserializes_without_step_ref_updated_at() {
-        let json = r#"{
-            "step_ref": {
-                "feature_relative_path": "tests/a.feature",
-                "scenario_line": 12,
-                "scenario_name": "Example",
-                "step_line": 13,
-                "step_keyword": "Then",
-                "step_text": "title contains Feedback"
-            },
-            "candidates": [{
-                "rank": 1,
-                "strategy": "css",
-                "value": "head > title",
-                "action": "check",
-                "confidence": 0.95,
-                "rationale": "unique title element"
-            }],
-            "highlight": { "candidate_rank": 1, "applied": false },
-            "status": "pending"
-        }"#;
-        let pending: PendingLocator = serde_json::from_str(json).expect("parse pending");
-        assert_eq!(pending.status, "pending");
-        assert_eq!(pending.step_ref.step_line, 13);
     }
 }

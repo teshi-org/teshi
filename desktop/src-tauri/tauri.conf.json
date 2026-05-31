@@ -18,7 +18,8 @@
         "minWidth": 1280,
         "minHeight": 720,
         "label": "main",
-        "visible": false
+        "visible": false,
+        "decorations": false
       }
     ],
     "security": {

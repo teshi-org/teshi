@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import { getRuntime } from "../platform";
 import type { DirEntry } from "../types";
+
+const runtime = getRuntime();
+import { PanelCollapseButton } from "./PanelCollapseButton";
 
 interface TreeNode extends DirEntry {
   expanded?: boolean;
@@ -16,6 +19,10 @@ interface Props {
   onOpenFeature: (path: string) => void;
   /** Hide the panel during browser focus mode without unmounting. */
   layoutHidden?: boolean;
+  /** Panel width collapsed to zero via the resize handle or chevron. */
+  layoutCollapsed?: boolean;
+  showCollapseButton?: boolean;
+  onToggleCollapse?: () => void;
 }
 
 /** VS Code–style dark palette so ANSI SGR colors render correctly in xterm.js. */
@@ -60,7 +67,7 @@ async function syncTerminalSize(
   const cols = term.cols;
   const rows = term.rows;
   if (cols > 0 && rows > 0) {
-    await invoke("resize_terminal", { cols, rows });
+    await runtime.resizeTerminal(cols, rows);
   }
 }
 
@@ -70,6 +77,9 @@ export function FileTreeTerminalPanel({
   onTabChange,
   onOpenFeature,
   layoutHidden = false,
+  layoutCollapsed = false,
+  showCollapseButton = false,
+  onToggleCollapse,
 }: Props) {
   const [rootNode, setRootNode] = useState<TreeNode | null>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -79,7 +89,7 @@ export function FileTreeTerminalPanel({
   const [terminalReady, setTerminalReady] = useState(false);
 
   const loadChildren = useCallback(async (path: string) => {
-    return invoke<DirEntry[]>("list_dir", { path });
+    return runtime.listDir(path);
   }, []);
 
   useEffect(() => {
@@ -138,7 +148,6 @@ export function FileTreeTerminalPanel({
       const { Terminal } = await import("@xterm/xterm");
       const { FitAddon } = await import("@xterm/addon-fit");
       await import("@xterm/xterm/css/xterm.css");
-      const { listen } = await import("@tauri-apps/api/event");
       if (disposed) return;
 
       await new Promise<void>((resolve) => {
@@ -159,17 +168,17 @@ export function FileTreeTerminalPanel({
       fitRef.current = fit;
       setTerminalReady(true);
 
-      unlistenOutput = await listen<string>("terminal-output", (event) => {
-        term?.write(decodeTerminalChunk(event.payload));
+      unlistenOutput = await runtime.onEvent<string>("terminal-output", (payload) => {
+        term?.write(decodeTerminalChunk(payload));
       });
-      unlistenExit = await listen("terminal-exit", () => {
+      unlistenExit = await runtime.onEvent("terminal-exit", () => {
         shellSpawnedRef.current = false;
         term?.writeln("\r\n\x1b[33mShell exited.\x1b[0m");
       });
       if (disposed) return;
 
       term.onData((data) => {
-        void invoke("write_terminal", { data });
+        void runtime.writeTerminal(data);
       });
 
       if (disposed || !terminalRef.current || !fit || !term) return;
@@ -191,7 +200,7 @@ export function FileTreeTerminalPanel({
       fitRef.current = null;
       shellSpawnedRef.current = false;
       setTerminalReady(false);
-      void invoke("stop_terminal").catch((err) => {
+      void runtime.stopTerminal().catch((err) => {
         console.error("stop_terminal failed", err);
       });
     };
@@ -207,7 +216,7 @@ export function FileTreeTerminalPanel({
     void (async () => {
       try {
         if (!shellSpawnedRef.current) {
-          await invoke("spawn_terminal");
+          await runtime.spawnTerminal();
           shellSpawnedRef.current = true;
         }
         await syncTerminalSize(fit, term);
@@ -219,9 +228,9 @@ export function FileTreeTerminalPanel({
     })();
   }, [tab, terminalReady, projectRoot]);
 
-  // Refit xterm when the panel becomes visible again after browser focus mode.
+  // Refit xterm when the panel becomes visible again after browser focus or collapse.
   useEffect(() => {
-    if (layoutHidden || !terminalReady) return;
+    if (layoutHidden || layoutCollapsed || !terminalReady) return;
     const fit = fitRef.current;
     const term = xtermRef.current;
     if (!fit || !term) return;
@@ -229,7 +238,7 @@ export function FileTreeTerminalPanel({
     requestAnimationFrame(() => {
       void syncTerminalSize(fit, term);
     });
-  }, [layoutHidden, terminalReady]);
+  }, [layoutHidden, layoutCollapsed, terminalReady]);
 
   return (
     <section
@@ -250,6 +259,14 @@ export function FileTreeTerminalPanel({
         >
           Terminal
         </button>
+        {showCollapseButton && onToggleCollapse && (
+          <PanelCollapseButton
+            side="right"
+            collapsed={false}
+            panelLabel="Files"
+            onToggle={onToggleCollapse}
+          />
+        )}
       </header>
       <div className={`panel-body${tab === "terminal" ? " panel-body--terminal" : ""}`}>
         {rootNode && (

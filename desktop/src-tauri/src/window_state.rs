@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use tauri::{LogicalSize, WebviewWindow};
 
-use crate::app_data::{
+use teshi_runtime::{
     load_settings, save_settings, validated_window_size, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH,
 };
 

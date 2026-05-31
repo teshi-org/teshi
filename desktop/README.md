@@ -35,9 +35,22 @@ Or from the repo root:
 cargo tauri dev --manifest-path desktop/src-tauri/Cargo.toml
 ```
 
+## Web UI (`teshi web`)
+
+Build the frontend, then start the loopback server from the repo root:
+
+```bash
+cd desktop && npm run build && cd ..
+cargo run -- web --project C:\path\to\bdd-project
+```
+
+Optional flags: `--port 1421`, `--no-open`, `--dist path/to/desktop/dist`.
+
+The browser UI uses the same React app as the Tauri shell; open a project via **File > Open Project** (path prompt) or `--project`.
+
 ## Layout
 
-- **File menu (native):** **File > Open Project…** (`Ctrl+O`) and **File > Open Recent** with dynamic recent projects
+- **App chrome:** **File > Open Project…** (`Ctrl+O`) and **Open Recent** in the custom title bar (frameless window on desktop)
 - **Panel 1 (left):** Structured Gherkin render for selected `.feature` files
 - **Panel 2 (center):** Playwright Chromium JPEG stream (1920×1080 viewport); **Start Browser** / **Stop Browser** in the panel header
 - **Panel 3 (right):** Lazy file tree + terminal (tab switch)

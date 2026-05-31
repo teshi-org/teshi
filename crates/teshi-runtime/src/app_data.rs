@@ -22,7 +22,7 @@ pub fn validated_window_size(width: u32, height: u32) -> Option<(u32, u32)> {
     }
 }
 
-/// Persisted UI preferences (window geometry is handled by the window-state plugin).
+/// Persisted UI preferences (window geometry is handled by the window-state plugin on desktop).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppSettings {
     /// Legacy window width migrated to the window-state plugin on first launch.

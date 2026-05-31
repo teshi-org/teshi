@@ -14,7 +14,13 @@ publish = false
 eula = false
 
 [workspace]
-members = [".", "crates/teshi-gherkin", "desktop/src-tauri"]
+members = [
+    ".",
+    "crates/teshi-gherkin",
+    "crates/teshi-runtime",
+    "crates/teshi-web",
+    "desktop/src-tauri",
+]
 exclude = ["runner"]
 
 [dependencies]
@@ -29,12 +35,13 @@ ropey = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 teshi-gherkin = { path = "crates/teshi-gherkin" }
+teshi-web = { path = "crates/teshi-web" }
 toml = "0.8"
 tui-tree-widget = "0.23"
 unicode-width = "0.2"
 futures = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["stream", "rustls", "json"] }
-tokio = { version = "1", features = ["rt", "macros", "time"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "rt-multi-thread"] }
 
 [build-dependencies]
 winres = "0.1"

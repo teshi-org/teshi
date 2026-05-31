@@ -1,16 +1,13 @@
 //! Project open, directory listing, and teardown coordination.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
 
 use crate::app_data::{add_recent_project, remember_project_parent};
-use crate::locator::{start_locator_watch, LocatorWatcherState};
-use crate::sidecar::SidecarState;
-use crate::terminal::TerminalState;
-use crate::watcher::FileWatcherState;
+use crate::locator::start_locator_watch;
+use crate::TeshiRuntime;
 
 /// Shared runtime state for the opened project.
 pub struct ProjectState {
@@ -19,7 +16,14 @@ pub struct ProjectState {
     pub terminal_active: Mutex<bool>,
 }
 
+impl Default for ProjectState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProjectState {
+    /// Creates an empty project holder.
     pub fn new() -> Self {
         Self {
             root: Mutex::new(None),
@@ -28,6 +32,7 @@ impl ProjectState {
         }
     }
 
+    /// Returns true when browser or terminal is still running.
     pub fn is_busy(&self) -> bool {
         *self.browser_active.lock().unwrap() || *self.terminal_active.lock().unwrap()
     }
@@ -42,21 +47,13 @@ pub struct DirEntry {
     pub is_feature: bool,
 }
 
-#[tauri::command]
-pub async fn check_project_switch_allowed(state: State<'_, ProjectState>) -> Result<bool, String> {
-    Ok(!state.is_busy())
+/// Returns whether project switch/teardown is allowed without confirmation.
+pub fn check_project_switch_allowed(rt: &TeshiRuntime) -> bool {
+    !rt.project.is_busy()
 }
 
-#[tauri::command]
-pub async fn open_project(
-    app: AppHandle,
-    path: String,
-    state: State<'_, ProjectState>,
-    sidecar: State<'_, SidecarState>,
-    terminal: State<'_, TerminalState>,
-    watcher: State<'_, FileWatcherState>,
-    locator_watcher: State<'_, LocatorWatcherState>,
-) -> Result<(), String> {
+/// Opens a project directory and resets runtime subsystems.
+pub async fn open_project(rt: Arc<TeshiRuntime>, path: String) -> Result<(), String> {
     let path_buf = PathBuf::from(&path);
     if !path_buf.is_dir() {
         return Err(format!("not a directory: {path}"));
@@ -65,36 +62,35 @@ pub async fn open_project(
         .canonicalize()
         .map_err(|e| format!("invalid project path: {e}"))?;
 
-    sidecar.stop().await.map_err(|e| e.to_string())?;
-    terminal.stop().map_err(|e| e.to_string())?;
-    watcher.clear().map_err(|e| e.to_string())?;
-    locator_watcher.clear().map_err(|e| e.to_string())?;
+    rt.sidecar.stop().await.map_err(|e| e.to_string())?;
+    rt.terminal.stop().map_err(|e| e.to_string())?;
+    rt.watcher.clear().map_err(|e| e.to_string())?;
+    rt.locator_watcher.clear().map_err(|e| e.to_string())?;
 
-    *state.root.lock().unwrap() = Some(canonical.clone());
-    *state.browser_active.lock().unwrap() = false;
-    *state.terminal_active.lock().unwrap() = false;
+    *rt.project.root.lock().unwrap() = Some(canonical.clone());
+    *rt.project.browser_active.lock().unwrap() = false;
+    *rt.project.terminal_active.lock().unwrap() = false;
 
     remember_project_parent(&canonical).map_err(|e| e.to_string())?;
-    add_recent_project(&canonical).map_err(|e| e.to_string())?;
+    let recent = add_recent_project(&canonical).map_err(|e| e.to_string())?;
 
-    let _ = crate::menu::rebuild_app_menu(&app);
-
-    app.emit("project-changed", canonical.to_string_lossy().to_string())
-        .map_err(|e| e.to_string())?;
-    start_locator_watch(&locator_watcher, &canonical, app)?;
+    rt.events.emit("recent-loaded", recent);
+    rt.events
+        .emit("project-changed", canonical.to_string_lossy().to_string());
+    start_locator_watch(&rt.locator_watcher, &canonical, Arc::clone(&rt))?;
     Ok(())
 }
 
-#[tauri::command]
-pub fn list_dir(path: String, state: State<'_, ProjectState>) -> Result<Vec<DirEntry>, String> {
-    let project_root = state
+/// Lists directory entries under the open project root.
+pub fn list_dir(rt: &TeshiRuntime, path: String) -> Result<Vec<DirEntry>, String> {
+    let project_root = rt
+        .project
         .root
         .lock()
         .unwrap()
         .clone()
         .ok_or_else(|| "no project open".to_string())?;
 
-    // 先 canonicalize 再做包含校验，避免通过 `..` 等相对路径逃逸项目根目录。
     let dir = PathBuf::from(&path)
         .canonicalize()
         .map_err(|e| e.to_string())?;
@@ -128,9 +124,9 @@ pub fn list_dir(path: String, state: State<'_, ProjectState>) -> Result<Vec<DirE
     Ok(entries)
 }
 
-#[tauri::command]
-pub fn get_project_root(state: State<'_, ProjectState>) -> Option<String> {
-    state
+/// Returns the canonical project root path when a project is open.
+pub fn get_project_root(rt: &TeshiRuntime) -> Option<String> {
+    rt.project
         .root
         .lock()
         .unwrap()
@@ -138,29 +134,23 @@ pub fn get_project_root(state: State<'_, ProjectState>) -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
-#[tauri::command]
-pub fn set_browser_active(active: bool, state: State<'_, ProjectState>) {
-    *state.browser_active.lock().unwrap() = active;
+/// Sets whether the browser sidecar is considered active.
+pub fn set_browser_active(rt: &TeshiRuntime, active: bool) {
+    *rt.project.browser_active.lock().unwrap() = active;
 }
 
-#[tauri::command]
-pub fn set_terminal_active(active: bool, state: State<'_, ProjectState>) {
-    *state.terminal_active.lock().unwrap() = active;
+/// Sets whether the embedded terminal session is considered active.
+pub fn set_terminal_active(rt: &TeshiRuntime, active: bool) {
+    *rt.project.terminal_active.lock().unwrap() = active;
 }
 
-#[tauri::command]
-pub async fn teardown_runtime(
-    sidecar: State<'_, SidecarState>,
-    terminal: State<'_, TerminalState>,
-    watcher: State<'_, FileWatcherState>,
-    locator_watcher: State<'_, LocatorWatcherState>,
-    state: State<'_, ProjectState>,
-) -> Result<(), String> {
-    sidecar.stop().await.map_err(|e| e.to_string())?;
-    terminal.stop().map_err(|e| e.to_string())?;
-    watcher.clear().map_err(|e| e.to_string())?;
-    locator_watcher.clear().map_err(|e| e.to_string())?;
-    *state.browser_active.lock().unwrap() = false;
-    *state.terminal_active.lock().unwrap() = false;
+/// Stops browser, terminal, and file watchers without clearing the project root.
+pub async fn teardown_runtime(rt: &TeshiRuntime) -> Result<(), String> {
+    rt.sidecar.stop().await.map_err(|e| e.to_string())?;
+    rt.terminal.stop().map_err(|e| e.to_string())?;
+    rt.watcher.clear().map_err(|e| e.to_string())?;
+    rt.locator_watcher.clear().map_err(|e| e.to_string())?;
+    *rt.project.browser_active.lock().unwrap() = false;
+    *rt.project.terminal_active.lock().unwrap() = false;
     Ok(())
 }

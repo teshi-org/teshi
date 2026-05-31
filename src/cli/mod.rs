@@ -21,6 +21,11 @@ pub enum Command {
         #[command(subcommand)]
         action: AuthCommand,
     },
+    /// Run the BDD desktop UI in a local browser (loopback HTTP server)
+    Web {
+        #[command(flatten)]
+        options: teshi_web::WebOptions,
+    },
     /// Run test features in CLI mode
     Run {
         /// Path to a .feature file

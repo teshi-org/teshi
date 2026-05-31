@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import { getRuntime } from "../platform";
+
+const runtime = getRuntime();
 import type { ActiveStep, PendingLocator } from "../locatorTypes";
 
 interface Props {
@@ -38,10 +40,10 @@ export function LocatorPanel({
   const onAccept = useCallback(async () => {
     if (!pending) return;
     try {
-      await invoke("confirm_locator_cmd", {
-        candidateRank: selectedRank,
-        editedValue: editMode ? editedValue : null,
-      });
+      await runtime.confirmLocator(
+        selectedRank,
+        editMode ? editedValue : null,
+      );
       toast.success("Locator saved to .locators.md");
       onPendingChange(null);
     } catch (e) {
@@ -51,7 +53,7 @@ export function LocatorPanel({
 
   const onReject = useCallback(async () => {
     try {
-      await invoke("reject_locator_cmd");
+      await runtime.rejectLocator();
       toast.message("Locator proposal rejected");
       onPendingChange(null);
     } catch (e) {

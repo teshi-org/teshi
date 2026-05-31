@@ -1,0 +1,110 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+
+import type { FeatureRenderPayload } from "../types";
+import type { ActiveStep, PendingLocator } from "../locatorTypes";
+import type { DirEntry } from "../types";
+import type { TeshiRuntimeApi } from "./types";
+
+/** Tauri desktop host using `invoke` and `listen`. */
+export const tauriRuntime: TeshiRuntimeApi = {
+  async checkProjectSwitchAllowed() {
+    return invoke<boolean>("check_project_switch_allowed_cmd");
+  },
+
+  async teardownRuntime() {
+    await invoke("teardown_runtime");
+  },
+
+  async openProject(path: string) {
+    await invoke("open_project", { path });
+  },
+
+  async getRecentProjects() {
+    return invoke<string[]>("get_recent_projects_cmd");
+  },
+
+  async openProjectDir() {
+    return invoke<string | null>("open_project_dir");
+  },
+
+  async getPendingLocator() {
+    return invoke<PendingLocator | null>("get_pending_locator_cmd");
+  },
+
+  async getActiveStep() {
+    return invoke<ActiveStep | null>("get_active_step_cmd");
+  },
+
+  async syncActiveStep(featurePath: string, stepLine: number) {
+    return invoke<ActiveStep>("sync_active_step_cmd", {
+      featurePath,
+      stepLine,
+    });
+  },
+
+  async renderFeature(path: string) {
+    return invoke<FeatureRenderPayload>("render_feature_cmd", { path });
+  },
+
+  async startBrowserSidecar() {
+    return invoke<{ ws_url: string }>("start_browser_sidecar");
+  },
+
+  async stopBrowserSidecar() {
+    await invoke("stop_browser_sidecar");
+  },
+
+  async listDir(path: string) {
+    return invoke<DirEntry[]>("list_dir", { path });
+  },
+
+  async spawnTerminal() {
+    await invoke("spawn_terminal");
+  },
+
+  async stopTerminal() {
+    await invoke("stop_terminal");
+  },
+
+  async resizeTerminal(cols: number, rows: number) {
+    await invoke("resize_terminal", { cols, rows });
+  },
+
+  async writeTerminal(data: string) {
+    await invoke("write_terminal", { data });
+  },
+
+  async confirmLocator(candidateRank: number, editedValue: string | null) {
+    await invoke("confirm_locator_cmd", {
+      candidateRank,
+      editedValue,
+    });
+  },
+
+  async rejectLocator() {
+    await invoke("reject_locator_cmd");
+  },
+
+  async confirmStopRuntimeIfBusy() {
+    const allowed = await invoke<boolean>("check_project_switch_allowed");
+    if (allowed) {
+      return true;
+    }
+    const { ask } = await import("@tauri-apps/plugin-dialog");
+    return (
+      (await ask("Browser/Terminal is running. Continuing will stop them.", {
+        title: "Confirm",
+        kind: "warning",
+      })) ?? false
+    );
+  },
+
+  async finalizeMainWindow() {
+    await invoke("finalize_main_window_cmd");
+  },
+
+  async onEvent<T>(event: string, handler: (payload: T) => void) {
+    return listen<T>(event, (e) => handler(e.payload));
+  },
+};

@@ -32,7 +32,8 @@ button:hover {
 }
 
 .welcome {
-  min-height: 100vh;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -47,6 +48,120 @@ button:hover {
 
 .app-shell {
   height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.app-chrome {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 36px;
+  min-height: 36px;
+  padding: 0 8px;
+  background: #1e1e1e;
+  border-bottom: 1px solid #333;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.app-chrome-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+.app-chrome-menus {
+  position: relative;
+}
+
+.app-chrome-menu-trigger {
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+.app-chrome-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 100;
+  min-width: 200px;
+  background: #252526;
+  border: 1px solid #454545;
+  border-radius: 4px;
+  padding: 4px 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-chrome-dropdown button {
+  text-align: left;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+.app-chrome-dropdown button:hover:not(:disabled) {
+  background: #094771;
+}
+
+.app-chrome-dropdown button.disabled,
+.app-chrome-dropdown button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.app-chrome-submenu {
+  border-top: 1px solid #454545;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.app-chrome-submenu button {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-chrome-title {
+  font-size: 12px;
+  color: #999;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-chrome-controls {
+  display: flex;
+  flex-shrink: 0;
+}
+
+.app-chrome-winbtn {
+  width: 46px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  font-size: 12px;
+}
+
+.app-chrome-winbtn:hover {
+  background: #3a3a3a;
+}
+
+.app-chrome-winbtn-close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
+.workspace {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -103,6 +218,11 @@ button:hover {
   background: rgba(37, 99, 235, 0.35);
 }
 
+.resize-handle--hidden {
+  display: none;
+  pointer-events: none;
+}
+
 .workspace {
   flex: 1;
   display: flex;
@@ -130,9 +250,50 @@ button:hover {
   color: #aaa;
 }
 
+.panel-header--with-collapse {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 36px;
+}
+
+.panel-header-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.panel-collapse-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #ccc;
+}
+
+.panel-collapse-btn:hover {
+  background: #333;
+  border-color: #444;
+  color: #fff;
+  filter: none;
+}
+
 .panel-header.tabs {
   display: flex;
+  align-items: center;
   gap: 4px;
+}
+
+.panel-header.tabs .panel-collapse-btn {
+  margin-left: auto;
 }
 
 .panel-header.tabs button {
@@ -148,8 +309,13 @@ button:hover {
 .panel-header--browser {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
+  min-height: 36px;
+}
+
+.panel-header--browser .panel-header-title {
+  flex: 1;
+  min-width: 0;
 }
 
 .panel-header-actions {
