@@ -42,11 +42,43 @@ impl SidecarState {
         *self.ws_url.lock().unwrap() = None;
         Ok(())
     }
+
+    /// Returns the browser sidecar WebSocket URL when the sidecar is running.
+    pub fn browser_ws_url(&self) -> Option<String> {
+        self.ws_url.lock().unwrap().clone()
+    }
 }
 
 #[derive(Debug, Serialize)]
 pub struct BrowserStartResult {
     pub ws_url: String,
+    pub cdp_endpoint_path: String,
+}
+
+/// Sends a one-shot command to the browser sidecar WebSocket and waits for a response.
+pub fn send_sidecar_command(
+    ws_url: &str,
+    command: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use tungstenite::{connect, Message};
+
+    let (mut socket, _) = connect(ws_url).map_err(|e| e.to_string())?;
+    socket
+        .send(Message::Text(command.to_string()))
+        .map_err(|e| e.to_string())?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        let message = socket.read().map_err(|e| e.to_string())?;
+        if let Message::Text(text) = message {
+            let payload: serde_json::Value =
+                serde_json::from_str(&text).map_err(|e| e.to_string())?;
+            if payload.get("type") == Some(&serde_json::Value::String("response".into())) {
+                return Ok(payload);
+            }
+        }
+    }
+    Err("browser sidecar did not respond in time".into())
 }
 
 #[derive(Debug, Serialize)]
@@ -148,10 +180,23 @@ pub async fn start_browser_sidecar(
         message: e.to_string(),
         hint: None,
     })?;
+    let cdp_port = pick_port().map_err(|e| BrowserError {
+        message: e.to_string(),
+        hint: None,
+    })?;
 
     let mut child = Command::new(&python)
         .arg(&script)
-        .args(["--host", "127.0.0.1", "--port", &port.to_string()])
+        .args([
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--cdp-port",
+            &cdp_port.to_string(),
+            "--project-root",
+            &project_root.to_string_lossy(),
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -179,7 +224,16 @@ pub async fn start_browser_sidecar(
             hint: None,
         })?;
 
-    Ok(BrowserStartResult { ws_url })
+    let cdp_endpoint_path = project_root
+        .join(".teshi")
+        .join("cdp-endpoint.json")
+        .to_string_lossy()
+        .into_owned();
+
+    Ok(BrowserStartResult {
+        ws_url,
+        cdp_endpoint_path,
+    })
 }
 
 /// 在超时时间内轮询 sidecar 的监听端口，确认其已就绪。

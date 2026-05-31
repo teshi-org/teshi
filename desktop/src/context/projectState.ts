@@ -1,7 +1,8 @@
 import type { FeatureRenderPayload } from "../types";
+import type { ActiveStep, PendingLocator } from "../locatorTypes";
 
 export type LayoutMode = "normal" | "browserFocus";
-export type DockTab = "output" | "logs";
+export type DockTab = "locator" | "output" | "logs";
 
 export interface ProjectState {
   projectRoot: string | null;
@@ -9,6 +10,8 @@ export interface ProjectState {
   featurePayload: FeatureRenderPayload | null;
   selectedScenarioLine: number | null;
   selectedStepLine: number | null;
+  activeStep: ActiveStep | null;
+  pendingLocator: PendingLocator | null;
   recentProjects: string[];
   browserWsUrl: string | null;
   browserRunning: boolean;
@@ -25,6 +28,8 @@ export type ProjectAction =
   | { type: "REFRESH_FEATURE"; payload: FeatureRenderPayload }
   | { type: "SELECT_SCENARIO"; line: number | null }
   | { type: "SELECT_STEP"; line: number | null }
+  | { type: "SET_ACTIVE_STEP"; step: ActiveStep | null }
+  | { type: "SET_PENDING_LOCATOR"; pending: PendingLocator | null }
   | { type: "SET_BROWSER"; wsUrl: string | null; running: boolean }
   | { type: "SET_TAB"; tab: "files" | "terminal" }
   | { type: "SET_LAYOUT_MODE"; mode: LayoutMode }
@@ -38,13 +43,15 @@ export const initialProjectState: ProjectState = {
   featurePayload: null,
   selectedScenarioLine: null,
   selectedStepLine: null,
+  activeStep: null,
+  pendingLocator: null,
   recentProjects: [],
   browserWsUrl: null,
   browserRunning: false,
   rightTab: "files",
   layoutMode: "normal",
-  dockExpanded: false,
-  dockActiveTab: "output",
+  dockExpanded: true,
+  dockActiveTab: "locator",
 };
 
 export function projectReducer(
@@ -67,6 +74,8 @@ export function projectReducer(
         featurePayload: action.payload,
         selectedScenarioLine: null,
         selectedStepLine: null,
+        activeStep: null,
+        pendingLocator: null,
       };
     case "REFRESH_FEATURE":
       return { ...state, featurePayload: action.payload };
@@ -78,6 +87,10 @@ export function projectReducer(
       };
     case "SELECT_STEP":
       return { ...state, selectedStepLine: action.line };
+    case "SET_ACTIVE_STEP":
+      return { ...state, activeStep: action.step };
+    case "SET_PENDING_LOCATOR":
+      return { ...state, pendingLocator: action.pending };
     case "SET_BROWSER":
       return {
         ...state,

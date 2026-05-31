@@ -1,5 +1,6 @@
 mod app_data;
 mod gherkin_cmd;
+mod locator;
 mod project;
 mod sidecar;
 mod terminal;
@@ -12,6 +13,10 @@ use crate::app_data::{
     DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH,
 };
 use crate::gherkin_cmd::render_feature_cmd;
+use crate::locator::{
+    abandon_pending_locator_cmd, confirm_locator_cmd, get_active_step_cmd, get_pending_locator_cmd,
+    reject_locator_cmd, sync_active_step_cmd, LocatorWatcherState,
+};
 use crate::project::{
     check_project_switch_allowed, get_project_root, list_dir, open_project, set_browser_active,
     set_terminal_active, teardown_runtime, ProjectState,
@@ -43,6 +48,7 @@ pub fn run() {
         .manage(SidecarState::new())
         .manage(TerminalState::new())
         .manage(FileWatcherState::new())
+        .manage(LocatorWatcherState::new())
         .invoke_handler(tauri::generate_handler![
             open_project_dir,
             open_project,
@@ -50,6 +56,12 @@ pub fn run() {
             list_dir,
             get_project_root,
             render_feature_cmd,
+            sync_active_step_cmd,
+            get_active_step_cmd,
+            get_pending_locator_cmd,
+            confirm_locator_cmd,
+            reject_locator_cmd,
+            abandon_pending_locator_cmd,
             start_browser_sidecar,
             stop_browser_sidecar,
             spawn_terminal,

@@ -425,3 +425,80 @@ code {
   padding: 4px 8px;
   border-radius: 4px;
 }
+
+.locator-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.locator-step-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.locator-meta {
+  color: #888;
+  font-size: 0.85rem;
+}
+
+.locator-warning {
+  background: #713f12;
+  color: #fef3c7;
+  padding: 8px;
+  border-radius: 4px;
+}
+
+.locator-candidates {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.locator-candidate {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.locator-candidate-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.locator-candidate-title {
+  color: #93c5fd;
+  font-size: 0.85rem;
+}
+
+.locator-rationale {
+  color: #888;
+  font-size: 0.85rem;
+}
+
+.locator-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.locator-edit input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid #3f3f46;
+  border-radius: 4px;
+  background: #18181b;
+  color: #e4e4e7;
+  font-family: Consolas, monospace;
+}
+
+.locator-actions {
+  display: flex;
+  gap: 8px;
+}

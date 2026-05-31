@@ -1,18 +1,32 @@
 import type { DockTab } from "../context/projectState";
+import type { ActiveStep, PendingLocator } from "../locatorTypes";
+import { LocatorPanel } from "./LocatorPanel";
 
 interface Props {
   expanded: boolean;
   activeTab: DockTab;
+  activeStep: ActiveStep | null;
+  pendingLocator: PendingLocator | null;
   onToggle: () => void;
   onTabChange: (tab: DockTab) => void;
+  onPendingChange: (pending: PendingLocator | null) => void;
 }
 
 const TABS: { id: DockTab; label: string }[] = [
+  { id: "locator", label: "Locator" },
   { id: "output", label: "Output" },
   { id: "logs", label: "Logs" },
 ];
 
-export function BottomDock({ expanded, activeTab, onToggle, onTabChange }: Props) {
+export function BottomDock({
+  expanded,
+  activeTab,
+  activeStep,
+  pendingLocator,
+  onToggle,
+  onTabChange,
+  onPendingChange,
+}: Props) {
   return (
     <section
       className={`bottom-dock${expanded ? " bottom-dock--expanded" : " bottom-dock--collapsed"}`}
@@ -27,6 +41,7 @@ export function BottomDock({ expanded, activeTab, onToggle, onTabChange }: Props
             onClick={() => onTabChange(id)}
           >
             {label}
+            {id === "locator" && pendingLocator?.status === "pending" ? " •" : ""}
           </button>
         ))}
         <div className="bottom-dock-tabs-spacer" />
@@ -42,7 +57,19 @@ export function BottomDock({ expanded, activeTab, onToggle, onTabChange }: Props
       </header>
       {expanded && (
         <div className="bottom-dock-body">
-          <p className="placeholder">Coming soon.</p>
+          {activeTab === "locator" && (
+            <LocatorPanel
+              activeStep={activeStep}
+              pending={pendingLocator}
+              onPendingChange={onPendingChange}
+            />
+          )}
+          {activeTab === "output" && (
+            <p className="placeholder">Runner output will appear here.</p>
+          )}
+          {activeTab === "logs" && (
+            <p className="placeholder">Application logs are written under AppData.</p>
+          )}
         </div>
       )}
     </section>

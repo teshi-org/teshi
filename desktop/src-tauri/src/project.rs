@@ -7,6 +7,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::app_data::{add_recent_project, remember_project_parent};
+use crate::locator::{start_locator_watch, LocatorWatcherState};
 use crate::sidecar::SidecarState;
 use crate::terminal::TerminalState;
 use crate::watcher::FileWatcherState;
@@ -54,6 +55,7 @@ pub async fn open_project(
     sidecar: State<'_, SidecarState>,
     terminal: State<'_, TerminalState>,
     watcher: State<'_, FileWatcherState>,
+    locator_watcher: State<'_, LocatorWatcherState>,
 ) -> Result<(), String> {
     let path_buf = PathBuf::from(&path);
     if !path_buf.is_dir() {
@@ -66,6 +68,7 @@ pub async fn open_project(
     sidecar.stop().await.map_err(|e| e.to_string())?;
     terminal.stop().map_err(|e| e.to_string())?;
     watcher.clear().map_err(|e| e.to_string())?;
+    locator_watcher.clear().map_err(|e| e.to_string())?;
 
     *state.root.lock().unwrap() = Some(canonical.clone());
     *state.browser_active.lock().unwrap() = false;
@@ -76,6 +79,7 @@ pub async fn open_project(
 
     app.emit("project-changed", canonical.to_string_lossy().to_string())
         .map_err(|e| e.to_string())?;
+    start_locator_watch(&locator_watcher, &canonical, app)?;
     Ok(())
 }
 
@@ -147,11 +151,13 @@ pub async fn teardown_runtime(
     sidecar: State<'_, SidecarState>,
     terminal: State<'_, TerminalState>,
     watcher: State<'_, FileWatcherState>,
+    locator_watcher: State<'_, LocatorWatcherState>,
     state: State<'_, ProjectState>,
 ) -> Result<(), String> {
     sidecar.stop().await.map_err(|e| e.to_string())?;
     terminal.stop().map_err(|e| e.to_string())?;
     watcher.clear().map_err(|e| e.to_string())?;
+    locator_watcher.clear().map_err(|e| e.to_string())?;
     *state.browser_active.lock().unwrap() = false;
     *state.terminal_active.lock().unwrap() = false;
     Ok(())

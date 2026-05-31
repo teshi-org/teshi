@@ -41,8 +41,19 @@ cargo tauri dev --manifest-path desktop/src-tauri/Cargo.toml
 - **Panel 1 (left):** Structured Gherkin render for selected `.feature` files
 - **Panel 2 (center):** Playwright Chromium JPEG stream (1920×1080 viewport), started manually
 - **Panel 3 (right):** Lazy file tree + terminal (tab switch)
-- **Bottom dock:** Collapsible tab bar (Output, Logs) — placeholder content in Phase 1; collapsed by default
+- **Bottom dock:** Locator confirmation (linked to selected Gherkin step), plus Output/Logs placeholders; expanded by default on Locator tab
 - **Browser focus:** Use **Focus** in the browser panel header to hide side panels and expand the browser; **Exit Focus** in the minimal toolbar restores the three-column layout
+
+## BDD locator workflow
+
+1. Open a project and select a `.feature` file.
+2. Click a Gherkin **step** in the left panel (writes `.teshi/active-step.json`).
+3. **Start Browser** (writes `.teshi/cdp-endpoint.json` with CDP endpoint).
+4. In the embedded terminal, run a Cursor agent and invoke the **bdd-locator** skill (`.teshi/skills/bdd-locator/SKILL.md`).
+5. The agent writes `.teshi/pending-locator.json` and highlights the target element via CDP overlay.
+6. Confirm or reject the proposal in the **Locator** bottom panel; accepted locators are saved to `{feature}.locators.md`.
+
+Runtime context files under `.teshi/` (except tracked skills) are gitignored local state.
 
 ## CLI
 

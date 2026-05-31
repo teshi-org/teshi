@@ -10,6 +10,7 @@ import { BrowserPanel } from "./panels/BrowserPanel";
 import { FileTreeTerminalPanel } from "./panels/FileTreeTerminalPanel";
 import { BottomDock } from "./panels/BottomDock";
 import type { BrowserError, FeatureRenderPayload } from "./types";
+import type { ActiveStep, PendingLocator } from "./locatorTypes";
 
 /** Ask before stopping browser/terminal; uses JS dialog to avoid Rust blocking_show deadlocks. */
 async function confirmStopRuntimeIfBusy(): Promise<boolean> {
@@ -44,6 +45,14 @@ function AppShell() {
       setBrowserError(null);
       setBrowserHint(null);
       dispatch({ type: "SET_BROWSER", wsUrl: null, running: false });
+      dispatch({ type: "SET_ACTIVE_STEP", step: null });
+      dispatch({ type: "SET_PENDING_LOCATOR", pending: null });
+      void invoke<PendingLocator | null>("get_pending_locator_cmd").then((pending) => {
+        dispatch({ type: "SET_PENDING_LOCATOR", pending });
+      });
+      void invoke<ActiveStep | null>("get_active_step_cmd").then((step) => {
+        dispatch({ type: "SET_ACTIVE_STEP", step });
+      });
     },
     [dispatch],
   );
@@ -66,6 +75,16 @@ function AppShell() {
     }).then((u) => unsubs.push(u));
     void listen<string[]>("recent-loaded", (event) => {
       dispatch({ type: "SET_RECENT", paths: event.payload });
+    }).then((u) => unsubs.push(u));
+    void listen<PendingLocator | null>("pending-locator-changed", (event) => {
+      dispatch({ type: "SET_PENDING_LOCATOR", pending: event.payload ?? null });
+      if (event.payload?.status === "pending") {
+        toast.info("Locator proposal ready for review");
+        dispatch({ type: "SET_DOCK_TAB", tab: "locator" });
+      }
+    }).then((u) => unsubs.push(u));
+    void listen<ActiveStep>("active-step-changed", (event) => {
+      dispatch({ type: "SET_ACTIVE_STEP", step: event.payload });
     }).then((u) => unsubs.push(u));
     void listen<FeatureRenderPayload>("feature-refreshed", (event) => {
       dispatch({ type: "REFRESH_FEATURE", payload: event.payload });
@@ -131,6 +150,25 @@ function AppShell() {
       if (resizeTimer) clearTimeout(resizeTimer);
     };
   }, [dispatch, openProjectPath, pickProject]);
+
+  const syncActiveStep = useCallback(
+    async (stepLine: number) => {
+      if (!state.selectedFeaturePath) {
+        return;
+      }
+      try {
+        const active = await invoke<ActiveStep>("sync_active_step_cmd", {
+          featurePath: state.selectedFeaturePath,
+          stepLine,
+        });
+        dispatch({ type: "SET_ACTIVE_STEP", step: active });
+        dispatch({ type: "SET_DOCK_TAB", tab: "locator" });
+      } catch (e) {
+        toast.error(String(e));
+      }
+    },
+    [dispatch, state.selectedFeaturePath],
+  );
 
   const openFeature = async (path: string) => {
     const payload = await invoke<FeatureRenderPayload>("render_feature_cmd", {
@@ -250,7 +288,12 @@ function AppShell() {
               onSelectScenario={(line) =>
                 dispatch({ type: "SELECT_SCENARIO", line })
               }
-              onSelectStep={(line) => dispatch({ type: "SELECT_STEP", line })}
+              onSelectStep={(line) => {
+                dispatch({ type: "SELECT_STEP", line });
+                if (line !== null) {
+                  void syncActiveStep(line);
+                }
+              }}
             />
           )}
           <BrowserPanel
@@ -280,8 +323,13 @@ function AppShell() {
         <BottomDock
           expanded={state.dockExpanded}
           activeTab={state.dockActiveTab}
+          activeStep={state.activeStep}
+          pendingLocator={state.pendingLocator}
           onToggle={() => dispatch({ type: "TOGGLE_DOCK" })}
           onTabChange={(tab) => dispatch({ type: "SET_DOCK_TAB", tab })}
+          onPendingChange={(pending) =>
+            dispatch({ type: "SET_PENDING_LOCATOR", pending })
+          }
         />
       </div>
       <Toaster theme="dark" />
