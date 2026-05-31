@@ -16,6 +16,40 @@ interface Props {
   onOpenFeature: (path: string) => void;
 }
 
+/** VS Code–style dark palette so ANSI SGR colors render correctly in xterm.js. */
+const TERMINAL_THEME = {
+  background: "#1e1e1e",
+  foreground: "#cccccc",
+  cursor: "#ffffff",
+  // Avoid pure #000000: ConPTY maps it to "default" and strips TUI background colors.
+  black: "#0c0c0c",
+  red: "#cd3131",
+  green: "#0dbc79",
+  yellow: "#e5e510",
+  blue: "#2472c8",
+  magenta: "#bc3fbc",
+  cyan: "#11a8cd",
+  white: "#e5e5e5",
+  brightBlack: "#666666",
+  brightRed: "#f14c4c",
+  brightGreen: "#23d18b",
+  brightYellow: "#f5f543",
+  brightBlue: "#3b8eea",
+  brightMagenta: "#d670d6",
+  brightCyan: "#29b8db",
+  brightWhite: "#e5e5e5",
+} as const;
+
+/** Decode base64 PTY chunks from Rust without corrupting ANSI/truecolor bytes. */
+function decodeTerminalChunk(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
 async function syncTerminalSize(
   fit: import("@xterm/addon-fit").FitAddon,
   term: import("@xterm/xterm").Terminal,
@@ -109,8 +143,9 @@ export function FileTreeTerminalPanel({
       if (disposed || !terminalRef.current) return;
 
       term = new Terminal({
-        theme: { background: "#1e1e1e", foreground: "#d4d4d4" },
-        fontFamily: "Consolas, monospace",
+        theme: TERMINAL_THEME,
+        fontFamily: "Consolas, 'Cascadia Mono', monospace",
+        cursorBlink: true,
       });
       fit = new FitAddon();
       term.loadAddon(fit);
@@ -119,7 +154,7 @@ export function FileTreeTerminalPanel({
       xtermRef.current = term;
 
       unlistenOutput = await listen<string>("terminal-output", (event) => {
-        term?.write(event.payload);
+        term?.write(decodeTerminalChunk(event.payload));
       });
       unlistenExit = await listen("terminal-exit", () => {
         term?.writeln("\r\n\x1b[33mShell exited.\x1b[0m");
@@ -179,7 +214,7 @@ export function FileTreeTerminalPanel({
           Terminal
         </button>
       </header>
-      <div className="panel-body">
+      <div className={`panel-body${tab === "terminal" ? " panel-body--terminal" : ""}`}>
         {tab === "files" && rootNode && (
           <ul className="file-tree">{renderTree(rootNode, onClickEntry)}</ul>
         )}

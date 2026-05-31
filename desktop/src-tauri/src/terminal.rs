@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::Result;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -112,6 +113,7 @@ pub async fn spawn_terminal(
     let mut child = None;
     for mut cmd in shell_commands() {
         cmd.cwd(cwd.to_string_lossy().to_string());
+        apply_terminal_env(&mut cmd);
         if let Some(venv) = find_venv(&project_root) {
             cmd.env("VIRTUAL_ENV", venv.to_string_lossy().to_string());
         }
@@ -148,8 +150,9 @@ pub async fn spawn_terminal(
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let text = String::from_utf8_lossy(&buf[..n]).into_owned();
-                    let _ = app_handle.emit("terminal-output", text);
+                    // Base64 keeps PTY bytes intact through Tauri JSON IPC (truecolor SGR, etc.).
+                    let payload = BASE64.encode(&buf[..n]);
+                    let _ = app_handle.emit("terminal-output", payload);
                 }
                 Err(_) => break,
             }
@@ -202,6 +205,21 @@ fn shell_command(program: &str, args: &[&str]) -> CommandBuilder {
     cmd
 }
 
+/// Env vars that tell shells and CLI tools to emit ANSI color over ConPTY/xterm.
+fn apply_terminal_env(cmd: &mut CommandBuilder) {
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("CLICOLOR", "1");
+    cmd.env("CLICOLOR_FORCE", "1");
+    cmd.env("FORCE_COLOR", "1");
+    cmd.env_remove("NO_COLOR");
+    cmd.env_remove("TERM_PROGRAM");
+    if cfg!(windows) {
+        // .NET console apps (including PowerShell) may suppress ANSI without this hint.
+        cmd.env("DOTNET_SYSTEM_CONSOLE_ALLOW_ANSI_COLOR_REDIRECTION", "1");
+    }
+}
+
 fn find_venv(project_root: &Path) -> Option<PathBuf> {
     for name in [".venv", "venv"] {
         let dir = project_root.join(name);
@@ -210,4 +228,73 @@ fn find_venv(project_root: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use portable_pty::PtySystem;
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+
+    /// Probes whether a TUI child emits SGR color sequences through our PTY setup.
+    #[test]
+    fn pty_child_emits_sgr_color_sequences() {
+        let chrys = std::env::var("CHRYS_BIN")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|p| p.is_file())
+            .or_else(|| dirs::home_dir().map(|h| h.join(".local/bin/chrys.exe")))
+            .filter(|p| p.is_file());
+
+        let Some(chrys) = chrys else {
+            eprintln!("skip: chrys binary not found");
+            return;
+        };
+
+        let pty_system = NativePtySystem::default();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+
+        let mut cmd = CommandBuilder::new(chrys.to_string_lossy().to_string());
+        apply_terminal_env(&mut cmd);
+        let child = pair.slave.spawn_command(cmd).expect("spawn chrys");
+        drop(child);
+
+        let mut reader = pair.master.try_clone_reader().expect("clone reader");
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            let n = reader.read(&mut chunk).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.len() > 64 * 1024 {
+                break;
+            }
+        }
+
+        let text = String::from_utf8_lossy(&buf);
+        let counts = [
+            ("38;2", text.matches("\x1b[38;2;").count()),
+            ("38;5", text.matches("\x1b[38;5;").count()),
+            ("48;2", text.matches("\x1b[48;2;").count()),
+            ("48;5", text.matches("\x1b[48;5;").count()),
+            ("16-fg", text.matches("\x1b[3").count()),
+        ];
+        eprintln!("captured {} bytes, color counts: {counts:?}", buf.len());
+        if let Some(idx) = text.find("\x1b[38;") {
+            eprintln!("color sample: {:?}", &text[idx..idx.saturating_add(40)]);
+        }
+        let has_color = counts[0].1 + counts[1].1 + counts[2].1 + counts[3].1 > 0;
+        assert!(has_color, "expected chrys to emit ANSI color SGR sequences");
+    }
 }
