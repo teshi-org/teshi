@@ -5,21 +5,23 @@ Terminal-first BDD editor with AI assistance, mind-map navigation, and external 
 ## Quick Start
 
 ```bash
-cargo run                              # TUI: scan current directory for .feature files
-cargo run -- path/to/features/         # open a directory of .feature files
+cargo run                              # TUI: empty buffer (no directory scan)
+cargo run -- .                         # TUI: recursively scan current directory
+cargo run -- path/to/features/         # TUI: scan one level under path/
+cargo run -- path/to/features/ -R      # TUI: recursively scan path/ and subdirs
 cargo run -- path/to/file.feature      # open a single feature file
 cargo run -- web --project path/       # browser GUI (loopback HTTP server)
 cargo run -- desktop --project path/   # native desktop shell (locator workflow)
 cargo run -- run path/to/file.feature  # headless BDD test run (NDJSON runner)
 ```
 
-No `.feature` files in the current directory opens an empty project buffer.
+Bare `teshi` opens an empty project buffer with no filesystem scan. Use `teshi .` to load the current directory tree, or `teshi path/` for a single-level scan (`--recursive` / `-R` for subdirectories).
 
 ### CLI Commands
 
 | Use case | Command |
 |----------|---------|
-| Terminal editing + AI | `teshi` / `teshi path/` |
+| Terminal editing + AI | `teshi` (empty) / `teshi .` (recursive cwd) / `teshi path/` (one level) / `teshi path/ --recursive` |
 | Browser GUI (lightweight) | `teshi web [--project PATH]` |
 | Native desktop (Chrome locator) | `teshi desktop [--project PATH]` or `teshi-desktop [--project PATH]` |
 | Headless CI runs | `teshi run [PATH] [--scenario NAME]` |
@@ -34,6 +36,21 @@ teshi auth migrate                     # Migrate API keys from env vars to auth.
 teshi run [path] [--scenario NAME]     # Run BDD tests (default path: current directory)
 teshi web [--project PATH]             # Browser GUI via loopback server
 teshi desktop [--project PATH]         # Launch native desktop shell
+```
+
+### Windows install
+
+| Asset | Contents |
+|-------|----------|
+| `teshi-vX.Y.Z-x64.msi` / WinGet | Full package: `teshi.exe`, `teshi-desktop.exe`, and web UI assets (`teshi web` + `teshi desktop` work after install) |
+| `teshi-vX.Y.Z-x86_64-pc-windows-msvc.zip` | Portable full bundle (same layout as MSI, no installer) |
+| `teshi-desktop-vX.Y.Z-x64.msi` | Tauri desktop shell only (optional if you already use the full MSI) |
+| `teshi-bridge-vX.Y.Z.zip` | Chrome extension for locator recording (load unpacked) |
+
+```powershell
+winget install teshi-org.teshi
+teshi web
+teshi desktop
 ```
 
 ## Tabs

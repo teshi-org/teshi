@@ -553,6 +553,17 @@ pub enum ClickableRegion {
     },
 }
 
+/// True when the path denotes "." (e.g. `.`, `./`, `././.`).
+fn is_dot_directory(path: &Path) -> bool {
+    path.components()
+        .all(|c| matches!(c, std::path::Component::CurDir))
+}
+
+/// Whether a TUI directory open should recurse into subdirectories.
+fn directory_scan_recursive(path: &Path, cli_recursive: bool) -> bool {
+    cli_recursive || is_dot_directory(path)
+}
+
 impl App {
     fn capture_disk_stamps(project: &BddProject) -> Vec<Option<FileStamp>> {
         project
@@ -564,17 +575,22 @@ impl App {
 
     /// Builds the editor state from process arguments.
     ///
-    /// Accepts a directory path (recursive `.feature` scan) or a single file path.
-    /// When both a directory and a `.feature` file path are given (e.g.
-    /// `cargo run -- . path/to/demo.feature`), the specific file takes priority.
+    /// Accepts a directory path or a single file path. Directory scans follow the
+    /// same rules as [`Self::from_cli`]: `.` is recursive; other directories are
+    /// shallow unless `--recursive` is present.
     #[allow(dead_code)]
     pub fn from_args() -> Result<Self> {
         let config = crate::config::load_config()?;
+        let recursive_flag = std::env::args().any(|a| a == "--recursive" || a == "-R");
         let paths: Vec<PathBuf> = std::env::args()
             .skip(1)
             .filter(|arg| !arg.starts_with('-'))
             .map(PathBuf::from)
             .collect();
+
+        if paths.is_empty() {
+            return Ok(Self::empty(config));
+        }
 
         let feature_file = paths
             .iter()
@@ -584,7 +600,7 @@ impl App {
         }
 
         match paths.iter().find(|p| p.is_dir()) {
-            Some(p) => Self::from_directory(p, config),
+            Some(p) => Self::from_directory(p, config, directory_scan_recursive(p, recursive_flag)),
             None => Ok(Self::empty(config)),
         }
     }
@@ -592,12 +608,11 @@ impl App {
     /// Builds the editor state from parsed CLI arguments.
     pub fn from_cli(cli: &crate::cli::Cli) -> Result<Self> {
         let config = crate::config::load_config()?;
-        // No positional paths means scan the current directory (same as `teshi .`).
-        let paths: Vec<PathBuf> = if cli.paths.is_empty() {
-            vec![std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))]
-        } else {
-            cli.paths.iter().map(PathBuf::from).collect()
-        };
+        if cli.paths.is_empty() {
+            return Ok(Self::empty(config));
+        }
+
+        let paths: Vec<PathBuf> = cli.paths.iter().map(PathBuf::from).collect();
 
         let feature_file = paths
             .iter()
@@ -607,13 +622,17 @@ impl App {
         }
 
         match paths.iter().find(|p| p.is_dir()) {
-            Some(p) => Self::from_directory(p, config),
+            Some(p) => Self::from_directory(p, config, directory_scan_recursive(p, cli.recursive)),
             None => Ok(Self::empty(config)),
         }
     }
 
-    fn from_directory(dir: &Path, config: AppConfig) -> Result<Self> {
-        let project = gherkin::parse_project(dir);
+    fn from_directory(dir: &Path, config: AppConfig, recursive: bool) -> Result<Self> {
+        let project = if recursive {
+            gherkin::parse_project(dir)
+        } else {
+            gherkin::parse_project_shallow(dir)
+        };
         let step_index = StepIndex::build(&project);
         let mindmap_index = mindmap::build_index(&project);
         let disk_stamps = Self::capture_disk_stamps(&project);

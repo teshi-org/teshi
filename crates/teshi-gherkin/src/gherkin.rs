@@ -328,10 +328,23 @@ fn parse_feature_with_lang(
     }
 }
 
-/// Parses an entire directory of `.feature` files into a `BddProject`.
+/// Parses a directory tree of `.feature` files into a `BddProject` (recursive scan).
 pub fn parse_project(root_dir: &std::path::Path) -> BddProject {
+    parse_project_with_depth(root_dir, true)
+}
+
+/// Parses only direct `.feature` files in `root_dir` (non-recursive scan).
+pub fn parse_project_shallow(root_dir: &std::path::Path) -> BddProject {
+    parse_project_with_depth(root_dir, false)
+}
+
+fn parse_project_with_depth(root_dir: &std::path::Path, recursive: bool) -> BddProject {
     let mut feature_paths: Vec<PathBuf> = Vec::new();
-    collect_feature_files(root_dir, &mut feature_paths);
+    if recursive {
+        collect_feature_files(root_dir, &mut feature_paths);
+    } else {
+        collect_feature_files_shallow(root_dir, &mut feature_paths);
+    }
     feature_paths.sort();
 
     let features: Vec<BddFeature> = feature_paths
@@ -345,6 +358,20 @@ pub fn parse_project(root_dir: &std::path::Path) -> BddProject {
     BddProject {
         root_dir: root_dir.to_path_buf(),
         features,
+    }
+}
+
+fn collect_feature_files_shallow(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+    entries.sort_by_key(|e| e.path());
+    for entry in entries {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "feature") {
+            out.push(path);
+        }
     }
 }
 
@@ -798,5 +825,37 @@ Feature: With Rule
 ";
         let f = parse_feature(chinese, PathBuf::from("zh.feature"));
         assert_eq!(f.language, "zh-CN");
+    }
+
+    #[test]
+    fn parse_project_shallow_skips_nested_features() {
+        let root = std::env::temp_dir().join(format!("teshi_shallow_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).expect("create subdir");
+        std::fs::write(
+            root.join("a.feature"),
+            "Feature: A\n  Scenario: s\n    Given x",
+        )
+        .expect("write a.feature");
+        std::fs::write(
+            root.join("sub/b.feature"),
+            "Feature: B\n  Scenario: s\n    Given x",
+        )
+        .expect("write b.feature");
+
+        let shallow = parse_project_shallow(&root);
+        assert_eq!(shallow.features.len(), 1);
+        assert!(
+            shallow.features[0]
+                .file_path
+                .file_name()
+                .is_some_and(|n| n == "a.feature"),
+            "shallow scan should only include top-level features"
+        );
+
+        let recursive = parse_project(&root);
+        assert_eq!(recursive.features.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
