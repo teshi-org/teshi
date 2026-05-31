@@ -33,6 +33,18 @@ async function apiFetch<T>(
 let eventsSocket: WebSocket | null = null;
 const eventHandlers = new Map<string, Set<(payload: unknown) => void>>();
 
+/** Serializes PTY stdin/resize HTTP calls so keystrokes cannot reorder (breaks TUI redraw). */
+let terminalIoChain: Promise<void> = Promise.resolve();
+
+function enqueueTerminalIo<T>(fn: () => Promise<T>): Promise<T> {
+  const run = terminalIoChain.then(fn);
+  terminalIoChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 function ensureEventsSocket(): WebSocket {
   if (eventsSocket && eventsSocket.readyState === WebSocket.OPEN) {
     return eventsSocket;
@@ -40,6 +52,11 @@ function ensureEventsSocket(): WebSocket {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const url = `${proto}//${window.location.host}${API}/events`;
   eventsSocket = new WebSocket(url);
+  eventsSocket.onclose = () => {
+    if (eventsSocket?.url === url) {
+      eventsSocket = null;
+    }
+  };
   eventsSocket.onmessage = (msg) => {
     try {
       const { event, payload } = JSON.parse(msg.data as string) as {
@@ -130,17 +147,21 @@ export const webRuntime: TeshiRuntimeApi = {
   },
 
   async resizeTerminal(cols: number, rows: number) {
-    await apiFetch<void>("/terminal/resize", {
-      method: "POST",
-      body: JSON.stringify({ cols, rows }),
-    });
+    return enqueueTerminalIo(() =>
+      apiFetch<void>("/terminal/resize", {
+        method: "POST",
+        body: JSON.stringify({ cols, rows }),
+      }),
+    );
   },
 
   async writeTerminal(data: string) {
-    await apiFetch<void>("/terminal/write", {
-      method: "POST",
-      body: JSON.stringify({ data }),
-    });
+    return enqueueTerminalIo(() =>
+      apiFetch<void>("/terminal/write", {
+        method: "POST",
+        body: JSON.stringify({ data }),
+      }),
+    );
   },
 
   async confirmLocator(candidateRank: number, editedValue: string | null) {

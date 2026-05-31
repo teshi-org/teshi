@@ -1,4 +1,5 @@
 import type { HighlightSpan } from "../types";
+import { PanelCollapseButton } from "./PanelCollapseButton";
 
 const kindClass: Record<string, string> = {
   default: "hl-default",
@@ -48,6 +49,8 @@ interface Props {
   onSelectStep: (line: number) => void;
   /** Hide the panel during browser focus mode without unmounting. */
   layoutHidden?: boolean;
+  showCollapseButton?: boolean;
+  onToggleCollapse?: () => void;
 }
 
 export function GherkinPanel({
@@ -58,13 +61,25 @@ export function GherkinPanel({
   onSelectScenario,
   onSelectStep,
   layoutHidden = false,
+  showCollapseButton = false,
+  onToggleCollapse,
 }: Props) {
   return (
     <section
       className={`panel gherkin-panel${layoutHidden ? " panel--layout-hidden" : ""}`}
     >
-      <header className="panel-header">
-        Gherkin{relativePath ? `: ${relativePath}` : ""}
+      <header className="panel-header panel-header--with-collapse">
+        {showCollapseButton && onToggleCollapse && (
+          <PanelCollapseButton
+            side="left"
+            collapsed={false}
+            panelLabel="Gherkin"
+            onToggle={onToggleCollapse}
+          />
+        )}
+        <span className="panel-header-title">
+          Gherkin{relativePath ? `: ${relativePath}` : ""}
+        </span>
       </header>
       <div className="panel-body">
         {!payload && (

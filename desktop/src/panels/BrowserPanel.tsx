@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { PanelCollapseButton } from "./PanelCollapseButton";
 
 interface Props {
   wsUrl: string | null;
@@ -6,6 +7,10 @@ interface Props {
   error: string | null;
   hint: string | null;
   fullscreen: boolean;
+  gherkinCollapsed?: boolean;
+  filesCollapsed?: boolean;
+  onToggleGherkin?: () => void;
+  onToggleFiles?: () => void;
   onStart: () => void;
   onStop: () => void;
   onToggleFullscreen: () => void;
@@ -49,6 +54,10 @@ export function BrowserPanel({
   error,
   hint,
   fullscreen,
+  gherkinCollapsed = false,
+  filesCollapsed = false,
+  onToggleGherkin,
+  onToggleFiles,
   onStart,
   onStop,
   onToggleFullscreen,
@@ -117,7 +126,15 @@ export function BrowserPanel({
   return (
     <section className="panel browser-panel">
       <header className="panel-header panel-header--browser">
-        <span>
+        {!fullscreen && gherkinCollapsed && onToggleGherkin && (
+          <PanelCollapseButton
+            side="left"
+            collapsed
+            panelLabel="Gherkin"
+            onToggle={onToggleGherkin}
+          />
+        )}
+        <span className="panel-header-title">
           Browser {running ? "• live" : "• stopped"}
           {running && <span className="fps-label">{fps} fps</span>}
         </span>
@@ -145,6 +162,14 @@ export function BrowserPanel({
             {fullscreen ? <ExitFullscreenIcon /> : <FullscreenIcon />}
           </button>
         </div>
+        {!fullscreen && filesCollapsed && onToggleFiles && (
+          <PanelCollapseButton
+            side="right"
+            collapsed
+            panelLabel="Files"
+            onToggle={onToggleFiles}
+          />
+        )}
       </header>
       <div className="panel-body browser-body">
         {!running && !error && (

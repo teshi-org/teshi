@@ -563,9 +563,18 @@ button:hover {
   overflow: hidden;
 }
 
-.file-tree[hidden],
-.terminal-host[hidden] {
+.file-tree[hidden] {
   display: none;
+}
+
+/* Keep terminal in layout when Files tab is active so xterm can measure size on switch. */
+.terminal-host[hidden] {
+  visibility: hidden;
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  pointer-events: none;
 }
 
 .terminal-host {

@@ -81,7 +81,9 @@ async fn handle_events_socket(rt: SharedRuntime, mut socket: WebSocket) {
                             break;
                         }
                     }
-                    Err(_) => break,
+                    // Slow clients may skip bursts (e.g. PTY flood); stay connected.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
             incoming = socket.recv() => {
