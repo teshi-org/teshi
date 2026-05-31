@@ -4,13 +4,11 @@ mod project;
 mod sidecar;
 mod terminal;
 mod watcher;
+mod window_state;
 
 use tauri::{Emitter, Manager};
 
-use crate::app_data::{
-    get_recent_projects, load_settings, save_settings, validated_window_size,
-    DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH,
-};
+use crate::app_data::get_recent_projects;
 use crate::gherkin_cmd::render_feature_cmd;
 use crate::project::{
     check_project_switch_allowed, get_project_root, list_dir, open_project, set_browser_active,
@@ -24,12 +22,20 @@ use crate::terminal::{
     resize_terminal, spawn_terminal, stop_terminal, write_terminal, TerminalState,
 };
 use crate::watcher::FileWatcherState;
+use crate::window_state::{
+    take_legacy_window_size_from_settings, PendingLegacyWindowSize, PERSISTED_STATE_FLAGS,
+};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_logging();
 
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(PERSISTED_STATE_FLAGS)
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             if let Some(path) = argv.iter().skip(1).find(|a| !a.starts_with('-')) {
@@ -43,6 +49,9 @@ pub fn run() {
         .manage(SidecarState::new())
         .manage(TerminalState::new())
         .manage(FileWatcherState::new())
+        .manage(PendingLegacyWindowSize(std::sync::Mutex::new(
+            take_legacy_window_size_from_settings().ok().flatten(),
+        )))
         .invoke_handler(tauri::generate_handler![
             open_project_dir,
             open_project,
@@ -61,19 +70,9 @@ pub fn run() {
             teardown_runtime,
             set_browser_active,
             set_terminal_active,
-            save_window_settings,
+            finalize_main_window_cmd,
         ])
         .setup(|app| {
-            // Restore persisted window size; ignore corrupt/zero values from early resize events.
-            if let Some(window) = app.get_webview_window("main") {
-                let size = load_settings()
-                    .ok()
-                    .and_then(|settings| {
-                        validated_window_size(settings.window_width?, settings.window_height?)
-                    })
-                    .unwrap_or((DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT));
-                let _ = window.set_size(tauri::LogicalSize::new(size.0 as f64, size.1 as f64));
-            }
             if let Ok(recent) = get_recent_projects() {
                 let _ = app.emit("recent-loaded", recent);
             }
@@ -99,15 +98,11 @@ fn init_logging() {
         .try_init();
 }
 
+/// Post-restore hook: legacy migration, work-area clamp, and center for windowed mode.
 #[tauri::command]
-fn save_window_settings(width: u32, height: u32) -> Result<(), String> {
-    let Some((width, height)) = validated_window_size(width, height) else {
-        // Ignore transient zero-size resize events during startup or minimize.
-        return Ok(());
-    };
-    let mut settings = load_settings().map_err(|e| e.to_string())?;
-    settings.window_width = Some(width);
-    settings.window_height = Some(height);
-    save_settings(&settings).map_err(|e| e.to_string())?;
-    Ok(())
+fn finalize_main_window_cmd(
+    window: tauri::WebviewWindow,
+    pending: tauri::State<'_, PendingLegacyWindowSize>,
+) -> Result<(), String> {
+    crate::window_state::finalize_main_window(&window, &pending).map_err(|e| e.to_string())
 }

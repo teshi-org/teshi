@@ -13,11 +13,6 @@ pub const MIN_WINDOW_WIDTH: u32 = 1280;
 /// Minimum window height; must stay in sync with `tauri.conf.json` `minHeight`.
 pub const MIN_WINDOW_HEIGHT: u32 = 720;
 
-/// Default window size when no valid persisted size exists.
-pub const DEFAULT_WINDOW_WIDTH: u32 = 1600;
-/// Default window height when no valid persisted size exists.
-pub const DEFAULT_WINDOW_HEIGHT: u32 = 900;
-
 /// Returns `(width, height)` only when both dimensions meet the configured minimum.
 pub fn validated_window_size(width: u32, height: u32) -> Option<(u32, u32)> {
     if width >= MIN_WINDOW_WIDTH && height >= MIN_WINDOW_HEIGHT {
@@ -27,10 +22,14 @@ pub fn validated_window_size(width: u32, height: u32) -> Option<(u32, u32)> {
     }
 }
 
-/// Persisted window and UI preferences.
+/// Persisted UI preferences (window geometry is handled by the window-state plugin).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppSettings {
+    /// Legacy window width migrated to the window-state plugin on first launch.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub window_width: Option<u32>,
+    /// Legacy window height migrated to the window-state plugin on first launch.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub window_height: Option<u32>,
     pub last_project_parent: Option<String>,
 }
