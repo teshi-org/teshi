@@ -94,15 +94,41 @@ jobs:
             cargo wix init --package teshi
           }
 
+          $stagingRoot = "staging/msi-root"
+          $binDir = Join-Path $stagingRoot "bin"
+          $webDir = Join-Path $stagingRoot "share/web"
+          New-Item -ItemType Directory -Force -Path $binDir, $webDir | Out-Null
+
           $builtExe = "target/${{ matrix.target }}/release/teshi.exe"
-          $wixExe = "target/release/teshi.exe"
+          $desktopExe = "target/release/teshi-desktop.exe"
           if (-not (Test-Path $builtExe)) {
             throw "Missing built binary at $builtExe"
           }
-          New-Item -ItemType Directory -Force -Path "target/release" | Out-Null
-          Copy-Item $builtExe $wixExe -Force
+          if (-not (Test-Path $desktopExe)) {
+            throw "Missing built binary at $desktopExe"
+          }
+          if (-not (Test-Path "desktop/dist")) {
+            throw "Missing frontend dist at desktop/dist"
+          }
 
-          cargo wix --package teshi --no-build --nocapture --output "target/wix/teshi-$tag-x64.msi"
+          Copy-Item $builtExe (Join-Path $binDir "teshi.exe") -Force
+          Copy-Item $desktopExe (Join-Path $binDir "teshi-desktop.exe") -Force
+          Copy-Item -Path "desktop/dist/*" -Destination $webDir -Recurse -Force
+
+          $heat = Join-Path $env:WIX "bin/heat.exe"
+          if (-not (Test-Path $heat)) {
+            throw "Missing heat.exe at $heat"
+          }
+
+          & $heat dir $webDir `
+            -out wix/web-files.wxs `
+            -gg -sfrag -srd `
+            -dr ShareWebDir `
+            -cg WebFiles
+
+          cargo wix --package teshi --nocapture `
+            --define StagingRoot=$stagingRoot `
+            --output "target/wix/teshi-$tag-x64.msi"
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -129,6 +155,14 @@ jobs:
           path: |
             target/release/teshi-desktop.exe
             target/release/bundle/msi/*.msi
+          if-no-files-found: error
+
+      - name: Upload web dist artifact
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: teshi-web-dist
+          path: desktop/dist
           if-no-files-found: error
 
   publish:
@@ -197,6 +231,8 @@ jobs:
 
             if [[ "${target}" == *"windows"* ]]; then
               cp "artifacts/teshi-desktop-windows/teshi-desktop.exe" "${stage_dir}/"
+              mkdir -p "${stage_dir}/share/web"
+              cp -r artifacts/teshi-web-dist/. "${stage_dir}/share/web/"
             fi
 
             if [[ "${target}" != *"windows"* ]]; then

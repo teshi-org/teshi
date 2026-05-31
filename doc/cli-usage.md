@@ -20,7 +20,8 @@ Same React UI as desktop, served over loopback HTTP (no Tauri install required):
 teshi web [--project PATH] [--port 1421] [--no-open] [--dist PATH]
 ```
 
-Build the frontend first: `cd desktop && npm run build`.
+On Windows, the full MSI and release zip bundle web assets under `share/web/` next to `teshi.exe`.
+For development from source, build the frontend first: `cd desktop && npm run build`.
 
 ### Native desktop (`teshi desktop` / `teshi-desktop`)
 
@@ -32,6 +33,9 @@ teshi desktop path/to/project          # positional shortcut
 teshi-desktop --project path/to/project
 teshi-desktop path/to/project
 ```
+
+After installing the full Windows MSI (`teshi-vX.Y.Z-x64.msi`) or release zip, `teshi-desktop.exe` is installed next to `teshi.exe`.
+The separate `teshi-desktop-vX.Y.Z-x64.msi` installs only the Tauri shell.
 
 Development: `cargo tauri dev --manifest-path desktop/src-tauri/Cargo.toml`.
 

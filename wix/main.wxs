@@ -56,6 +56,10 @@
     <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
 <?endif ?>
 
+<?ifndef StagingRoot ?>
+    <?define StagingRoot = "staging\msi-root" ?>
+<?endif ?>
+
 <Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
 
     <Product
@@ -69,7 +73,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='Terminal-first mindmap editor for structured notes and navigation.'
+            Description='Terminal-first mindmap editor with CLI, web UI, and desktop shell.'
             Manufacturer='teshi-org'
             InstallerVersion='450'
             Languages='1033'
@@ -118,9 +122,20 @@
                                 Id='exe0'
                                 Name='teshi.exe'
                                 DiskId='1'
-                                Source='$(var.CargoTargetBinDir)\teshi.exe'
+                                Source='$(var.StagingRoot)\bin\teshi.exe'
                                 KeyPath='yes'/>
                         </Component>
+                        <Component Id='binary1' Guid='*'>
+                            <File
+                                Id='exe1'
+                                Name='teshi-desktop.exe'
+                                DiskId='1'
+                                Source='$(var.StagingRoot)\bin\teshi-desktop.exe'
+                                KeyPath='yes'/>
+                        </Component>
+                    </Directory>
+                    <Directory Id='Share' Name='share'>
+                        <Directory Id='ShareWebDir' Name='web'/>
                     </Directory>
                 </Directory>
             </Directory>
@@ -142,6 +157,8 @@
             <ComponentRef Id='License'/>
             
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='binary1'/>
+            <ComponentGroupRef Id='WebFiles'/>
 
             <Feature
                 Id='Environment'
@@ -216,5 +233,7 @@
         <!--<WixVariable Id='WixUIDialogBmp' Value='wix\Dialog.bmp'/>-->
 
     </Product>
+
+    <?include web-files.wxs ?>
 
 </Wix>

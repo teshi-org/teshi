@@ -4953,7 +4953,7 @@ dependencies = [
 
 [[package]]
 name = "teshi"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4978,7 +4978,7 @@ dependencies = [
 
 [[package]]
 name = "teshi-desktop"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

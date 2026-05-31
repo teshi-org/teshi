@@ -54,15 +54,10 @@ pub async fn run(opts: WebOptions) -> Result<()> {
 
     let dist = opts
         .dist
-        .or_else(|| {
-            [
-                PathBuf::from("desktop/dist"),
-                PathBuf::from("../desktop/dist"),
-            ]
-            .into_iter()
-            .find(|candidate| candidate.is_dir())
-        })
-        .context("frontend dist not found; run `npm run build` in desktop/ or pass --dist")?;
+        .or_else(resolve_web_dist)
+        .context(
+            "frontend dist not found; install the full Windows MSI, run `npm run build` in desktop/, or pass --dist",
+        )?;
 
     let addr = SocketAddr::from(([127, 0, 0, 1], opts.port));
     let url = format!("http://{addr}");
@@ -76,4 +71,27 @@ pub async fn run(opts: WebOptions) -> Result<()> {
     info!("teshi web listening on {url}");
     server.await??;
     Ok(())
+}
+
+/// Resolves bundled or development frontend assets for `teshi web`.
+fn resolve_web_dist() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            for candidate in [
+                exe_dir.join("share").join("web"),
+                exe_dir.join("../share/web"),
+            ] {
+                if candidate.is_dir() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    [
+        PathBuf::from("desktop/dist"),
+        PathBuf::from("../desktop/dist"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_dir())
 }

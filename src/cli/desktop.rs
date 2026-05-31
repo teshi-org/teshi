@@ -34,23 +34,37 @@ pub fn spawn_desktop(project: Option<&str>, path: Option<&str>) -> Result<()> {
 
 /// Resolves `teshi-desktop` next to the current executable, then on `PATH`.
 fn resolve_desktop_binary() -> Result<PathBuf> {
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let name = if cfg!(windows) {
-            "teshi-desktop.exe"
-        } else {
-            "teshi-desktop"
-        };
-        let sibling = dir.join(name);
-        if sibling.is_file() {
-            return Ok(sibling);
-        }
-    }
-
-    Ok(PathBuf::from(if cfg!(windows) {
+    let name = if cfg!(windows) {
         "teshi-desktop.exe"
     } else {
         "teshi-desktop"
-    }))
+    };
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join(name);
+            if sibling.is_file() {
+                return Ok(sibling);
+            }
+
+            if is_full_install_layout(dir) {
+                bail!(
+                    "`{name}` not found next to `{}`. Reinstall the full MSI or install the separate teshi-desktop MSI.",
+                    exe.display()
+                );
+            }
+        }
+    }
+
+    Ok(PathBuf::from(name))
+}
+
+/// Detects the Windows MSI layout where web assets live under `../share/web`.
+fn is_full_install_layout(exe_dir: &std::path::Path) -> bool {
+    [
+        exe_dir.join("share").join("web"),
+        exe_dir.join("../share/web"),
+    ]
+    .into_iter()
+    .any(|path| path.is_dir())
 }
