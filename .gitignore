@@ -40,6 +40,9 @@ teshi.toml
 desktop/node_modules/
 desktop/dist/
 
+# Local release packaging output (binaries, archives, checksums)
+release-pack/
+
 # --- Python virtual environments (project under test / local dev) ---
 .venv/
 venv/
