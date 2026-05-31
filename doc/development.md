@@ -105,9 +105,66 @@ src/
 
 ## Release workflow
 
-- GitHub Actions workflow: `.github/workflows/release.yml`
-- Winget manifest auto-update: `.github/workflows/winget.yml`
-- Windows installer: `wix/` directory (WiX Toolset)
+Full-stack releases publish the CLI, Windows desktop app, and Chrome extension under a single `vX.Y.Z` tag. All component versions (`Cargo.toml`, `desktop/src-tauri`, `extension/teshi-bridge/manifest.json`) must match before tagging.
+
+### Release assets
+
+| Asset | Platform | Contents |
+|-------|----------|----------|
+| `teshi-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` | Linux x64 | `teshi` + README + LICENSE |
+| `teshi-vX.Y.Z-aarch64-apple-darwin.tar.gz` | macOS ARM | `teshi` + README + LICENSE |
+| `teshi-vX.Y.Z-x86_64-pc-windows-msvc.zip` | Windows x64 | `teshi.exe` + `teshi-desktop.exe` + README + LICENSE |
+| `teshi-vX.Y.Z-x64.msi` | Windows x64 | CLI WiX installer (cargo-wix) |
+| `teshi-desktop-vX.Y.Z-x64.msi` | Windows x64 | Tauri desktop installer |
+| `teshi-bridge-vX.Y.Z.zip` | All | Chrome extension (load unpacked) |
+| `SHA256SUMS` | All | Checksums for every archive above |
+
+Workflow: [`.github/workflows/release.yml`](../.github/workflows/release.yml)
+
+WinGet submission (CLI MSI only) runs automatically when `WINGET_TOKEN` is configured. Legacy standalone workflow: [`.github/workflows/winget.yml`](../.github/workflows/winget.yml).
+
+Windows installer sources: `wix/` (CLI MSI via WiX Toolset), Tauri bundle (desktop MSI).
+
+### Publishing with GitHub CLI
+
+**Option A — push a tag (recommended):**
+
+```powershell
+# Confirm CI is green
+gh run list --workflow=ci.yml --limit 3
+
+# Local quality gates (match CI)
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all --locked
+
+# Tag and push (triggers release workflow)
+git tag v0.2.2
+git push origin v0.2.2
+
+# Watch the release build
+gh run list --workflow=release.yml --limit 1
+gh run watch
+
+# Verify published assets
+gh release view v0.2.2
+gh release download v0.2.2 --dir ./release-check
+```
+
+**Option B — re-run for an existing tag:**
+
+```powershell
+gh workflow run release.yml -f release_tag=v0.2.2
+gh run list --workflow=release.yml --limit 1
+gh run watch
+```
+
+### Post-release checks
+
+- `gh release view vX.Y.Z` lists 7 assets (2 tar.gz, 1 win zip, 2 msi, 1 bridge zip, SHA256SUMS)
+- Windows zip: both `teshi.exe` and `teshi-desktop.exe` in the same folder; `teshi desktop` works without PATH setup
+- Extension zip loads in `chrome://extensions` via **Load unpacked**
+- `SHA256SUMS` verifies with `sha256sum -c SHA256SUMS` (Linux) or equivalent on other platforms
 
 ## Debugging
 

@@ -49,9 +49,29 @@ jobs:
 
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            desktop/src-tauri -> desktop/src-tauri/target
 
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }} --bin teshi
+
+      - name: Setup Node
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Build teshi-desktop
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        working-directory: desktop
+        run: |
+          npm ci
+          npm run build
+          npx tauri build
 
       - name: Install WiX Toolset
         if: matrix.target == 'x86_64-pc-windows-msvc'
@@ -104,6 +124,16 @@ jobs:
         with:
           name: teshi-msi
           path: target/wix/teshi-*-x64.msi
+          if-no-files-found: error
+
+      - name: Upload desktop artifact
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: teshi-desktop-windows
+          path: |
+            desktop/src-tauri/target/release/teshi-desktop.exe
+            desktop/src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: error
 
   publish:
@@ -170,6 +200,10 @@ jobs:
             cp "${artifact_dir}/${binary_name}" "${stage_dir}/"
             cp README.md LICENSE "${stage_dir}/"
 
+            if [[ "${target}" == *"windows"* ]]; then
+              cp "artifacts/teshi-desktop-windows/teshi-desktop.exe" "${stage_dir}/"
+            fi
+
             if [[ "${target}" != *"windows"* ]]; then
               chmod +x "${stage_dir}/teshi"
             fi
@@ -185,8 +219,20 @@ jobs:
           done
 
           (
+            cd extension/teshi-bridge
+            zip -r "../../dist/teshi-bridge-${version}.zip" .
+          )
+
+          (
             cd dist
             cp ../artifacts/teshi-msi/*.msi .
+
+            desktop_msi=$(find ../artifacts/teshi-desktop-windows -maxdepth 1 -name '*.msi' -print -quit)
+            if [[ -z "${desktop_msi}" ]]; then
+              echo "Missing teshi-desktop MSI artifact." >&2
+              exit 1
+            fi
+            cp "${desktop_msi}" "teshi-desktop-${version}-x64.msi"
 
             find . -maxdepth 1 \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.msi" \) \
               -exec sha256sum {} + \
