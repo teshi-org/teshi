@@ -76,8 +76,25 @@ pub fn resize_terminal(rt: &TeshiRuntime, cols: u16, rows: u16) -> Result<(), St
     Ok(())
 }
 
+/// Normalizes viewport dimensions from the frontend (xterm FitAddon).
+fn normalized_pty_size(cols: u16, rows: u16) -> PtySize {
+    PtySize {
+        cols: cols.max(2),
+        rows: rows.max(2),
+        pixel_width: 0,
+        pixel_height: 0,
+    }
+}
+
 /// Spawns an interactive shell in the opened project directory.
-pub async fn spawn_terminal(rt: Arc<TeshiRuntime>) -> Result<(), String> {
+///
+/// `cols` and `rows` must match the xterm viewport so ConPTY/PSReadLine render
+/// the prompt at the correct width on first paint.
+pub async fn spawn_terminal(
+    rt: Arc<TeshiRuntime>,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
     let project_root = rt
         .project
         .root
@@ -89,14 +106,10 @@ pub async fn spawn_terminal(rt: Arc<TeshiRuntime>) -> Result<(), String> {
     rt.terminal.stop().map_err(|e| e.to_string())?;
     *rt.project.terminal_active.lock().unwrap() = false;
 
+    let pty_size = normalized_pty_size(cols, rows);
     let pty_system = NativePtySystem::default();
     let pair = pty_system
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
+        .openpty(pty_size)
         .map_err(|e| e.to_string())?;
 
     let cwd = shell_cwd(&project_root);
@@ -127,11 +140,6 @@ pub async fn spawn_terminal(rt: Arc<TeshiRuntime>) -> Result<(), String> {
     *rt.terminal.writer.lock().unwrap() = Some(writer);
     *rt.terminal.child.lock().unwrap() = Some(child);
     *rt.project.terminal_active.lock().unwrap() = true;
-
-    if let Some(writer) = rt.terminal.writer.lock().unwrap().as_mut() {
-        let _ = writer.write_all(b"\r");
-        let _ = writer.flush();
-    }
 
     let rt_reader = Arc::clone(&rt);
     std::thread::spawn(move || {
@@ -169,11 +177,31 @@ fn shell_cwd(project_root: &Path) -> PathBuf {
     dunce::simplified(project_root).to_path_buf()
 }
 
+/// PSReadLine inline predictions misalign in web-based emulators; ListView is safer.
+const PSREADLINE_EMBEDDED_INIT: &str =
+    "try { Set-PSReadLineOption -PredictionViewStyle ListView } catch { }";
+
 fn shell_commands() -> Vec<CommandBuilder> {
     if cfg!(windows) {
         vec![
-            shell_command("pwsh.exe", &["-NoLogo"]),
-            shell_command("powershell.exe", &["-NoLogo"]),
+            shell_command(
+                "pwsh.exe",
+                &[
+                    "-NoLogo",
+                    "-NoExit",
+                    "-Command",
+                    PSREADLINE_EMBEDDED_INIT,
+                ],
+            ),
+            shell_command(
+                "powershell.exe",
+                &[
+                    "-NoLogo",
+                    "-NoExit",
+                    "-Command",
+                    PSREADLINE_EMBEDDED_INIT,
+                ],
+            ),
             shell_command("cmd.exe", &[]),
         ]
     } else {
@@ -195,6 +223,7 @@ fn apply_terminal_env(cmd: &mut CommandBuilder) {
     cmd.env("CLICOLOR", "1");
     cmd.env("CLICOLOR_FORCE", "1");
     cmd.env("FORCE_COLOR", "1");
+    cmd.env("TESHI_EMBEDDED_TERMINAL", "1");
     cmd.env_remove("NO_COLOR");
     cmd.env_remove("TERM_PROGRAM");
     if cfg!(windows) {

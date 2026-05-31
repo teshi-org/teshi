@@ -68,8 +68,8 @@ export const tauriRuntime: TeshiRuntimeApi = {
     return invoke<DirEntry[]>("list_dir", { path });
   },
 
-  async spawnTerminal() {
-    await invoke("spawn_terminal");
+  async spawnTerminal(cols: number, rows: number) {
+    await invoke("spawn_terminal", { cols, rows });
   },
 
   async stopTerminal() {

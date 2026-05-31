@@ -47,6 +47,9 @@ const TERMINAL_THEME = {
   brightWhite: "#e5e5e5",
 } as const;
 
+const TERMINAL_MIN_COLS = 2;
+const TERMINAL_MIN_ROWS = 2;
+
 /** Decode base64 PTY chunks from Rust without corrupting ANSI/truecolor bytes. */
 function decodeTerminalChunk(base64: string): Uint8Array {
   const binary = atob(base64);
@@ -57,16 +60,26 @@ function decodeTerminalChunk(base64: string): Uint8Array {
   return bytes;
 }
 
+function normalizeTerminalSize(cols: number, rows: number): { cols: number; rows: number } {
+  return {
+    cols: Math.max(cols, TERMINAL_MIN_COLS),
+    rows: Math.max(rows, TERMINAL_MIN_ROWS),
+  };
+}
+
 async function syncTerminalSize(
   fit: import("@xterm/addon-fit").FitAddon,
   term: import("@xterm/xterm").Terminal,
 ): Promise<void> {
   fit.fit();
-  const cols = term.cols;
-  const rows = term.rows;
-  if (cols > 0 && rows > 0) {
-    await getRuntime().resizeTerminal(cols, rows);
-  }
+  const { cols, rows } = normalizeTerminalSize(term.cols, term.rows);
+  await getRuntime().resizeTerminal(cols, rows);
+}
+
+function waitForLayout(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => resolve());
+  });
 }
 
 export function FileTreeTerminalPanel({
@@ -134,7 +147,24 @@ export function FileTreeTerminalPanel({
     toast.info(`Selected: ${node.name} (not a feature file)`);
   };
 
+  // Tear down the PTY and xterm when the project changes or the panel unmounts.
   useEffect(() => {
+    return () => {
+      xtermRef.current?.dispose();
+      xtermRef.current = null;
+      fitRef.current = null;
+      shellSpawnedRef.current = false;
+      setTerminalReady(false);
+      void getRuntime().stopTerminal().catch((err) => {
+        console.error("stop_terminal failed", err);
+      });
+    };
+  }, [projectRoot]);
+
+  // Lazy-init xterm only after the Terminal tab is visible (correct FitAddon measure).
+  useEffect(() => {
+    if (tab !== "terminal") return;
+
     let disposed = false;
     let unlistenOutput: (() => void) | null = null;
     let unlistenExit: (() => void) | null = null;
@@ -143,20 +173,26 @@ export function FileTreeTerminalPanel({
     let fit: import("@xterm/addon-fit").FitAddon | null = null;
 
     void (async () => {
+      if (xtermRef.current && fitRef.current) {
+        await waitForLayout();
+        if (disposed) return;
+        void syncTerminalSize(fitRef.current, xtermRef.current);
+        return;
+      }
+
       const { Terminal } = await import("@xterm/xterm");
       const { FitAddon } = await import("@xterm/addon-fit");
       await import("@xterm/xterm/css/xterm.css");
       if (disposed) return;
 
-      await new Promise<void>((resolve) => {
-        requestAnimationFrame(() => resolve());
-      });
+      await waitForLayout();
       if (disposed || !terminalRef.current) return;
 
       term = new Terminal({
         theme: TERMINAL_THEME,
         fontFamily: "Consolas, 'Cascadia Mono', monospace",
         cursorBlink: true,
+        windowsMode: true,
       });
       fit = new FitAddon();
       term.loadAddon(fit);
@@ -193,18 +229,10 @@ export function FileTreeTerminalPanel({
       resizeObserver?.disconnect();
       unlistenOutput?.();
       unlistenExit?.();
-      term?.dispose();
-      xtermRef.current = null;
-      fitRef.current = null;
-      shellSpawnedRef.current = false;
-      setTerminalReady(false);
-      void getRuntime().stopTerminal().catch((err) => {
-        console.error("stop_terminal failed", err);
-      });
     };
-  }, [projectRoot]);
+  }, [tab, projectRoot]);
 
-  // Spawn the PTY on first Terminal visit; keep session alive when switching tabs.
+  // Fit, then spawn the PTY at matching cols/rows so the first prompt aligns.
   useEffect(() => {
     if (tab !== "terminal" || !terminalReady) return;
     const fit = fitRef.current;
@@ -213,11 +241,16 @@ export function FileTreeTerminalPanel({
 
     void (async () => {
       try {
+        await waitForLayout();
+        fit.fit();
+        const { cols, rows } = normalizeTerminalSize(term.cols, term.rows);
+
         if (!shellSpawnedRef.current) {
-          await getRuntime().spawnTerminal();
+          await getRuntime().spawnTerminal(cols, rows);
           shellSpawnedRef.current = true;
+        } else {
+          await syncTerminalSize(fit, term);
         }
-        await syncTerminalSize(fit, term);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         toast.error(`Terminal failed: ${message}`);
@@ -228,7 +261,7 @@ export function FileTreeTerminalPanel({
 
   // Refit xterm when the panel becomes visible again after browser focus or collapse.
   useEffect(() => {
-    if (layoutHidden || layoutCollapsed || !terminalReady) return;
+    if (layoutHidden || layoutCollapsed || tab !== "terminal" || !terminalReady) return;
     const fit = fitRef.current;
     const term = xtermRef.current;
     if (!fit || !term) return;
@@ -236,7 +269,7 @@ export function FileTreeTerminalPanel({
     requestAnimationFrame(() => {
       void syncTerminalSize(fit, term);
     });
-  }, [layoutHidden, layoutCollapsed, terminalReady]);
+  }, [layoutHidden, layoutCollapsed, tab, terminalReady]);
 
   return (
     <section

@@ -206,8 +206,17 @@ async fn api_browser_stop(State(rt): State<SharedRuntime>) -> Result<StatusCode,
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn api_terminal_spawn(State(rt): State<SharedRuntime>) -> Result<StatusCode, ApiError> {
-    spawn_terminal(rt).await?;
+#[derive(Deserialize)]
+struct SpawnBody {
+    cols: u16,
+    rows: u16,
+}
+
+async fn api_terminal_spawn(
+    State(rt): State<SharedRuntime>,
+    Json(body): Json<SpawnBody>,
+) -> Result<StatusCode, ApiError> {
+    spawn_terminal(rt, body.cols, body.rows).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

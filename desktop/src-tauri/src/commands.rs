@@ -101,8 +101,12 @@ pub async fn stop_browser_sidecar(rt: State<'_, Arc<TeshiRuntime>>) -> Result<()
 }
 
 #[tauri::command]
-pub async fn spawn_terminal(rt: State<'_, Arc<TeshiRuntime>>) -> Result<(), String> {
-    runtime_spawn_terminal(Arc::clone(&rt)).await
+pub async fn spawn_terminal(
+    rt: State<'_, Arc<TeshiRuntime>>,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    runtime_spawn_terminal(Arc::clone(&rt), cols, rows).await
 }
 
 #[tauri::command]

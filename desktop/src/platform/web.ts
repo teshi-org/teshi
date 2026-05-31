@@ -138,8 +138,13 @@ export const webRuntime: TeshiRuntimeApi = {
     return apiFetch<DirEntry[]>(`/fs/list?${q}`);
   },
 
-  async spawnTerminal() {
-    await apiFetch<void>("/terminal/spawn", { method: "POST" });
+  async spawnTerminal(cols: number, rows: number) {
+    return enqueueTerminalIo(() =>
+      apiFetch<void>("/terminal/spawn", {
+        method: "POST",
+        body: JSON.stringify({ cols, rows }),
+      }),
+    );
   },
 
   async stopTerminal() {

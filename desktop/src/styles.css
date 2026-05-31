@@ -651,8 +651,7 @@ button:hover {
 .terminal-host[hidden] {
   visibility: hidden;
   position: absolute;
-  width: 0;
-  height: 0;
+  inset: 0;
   overflow: hidden;
   pointer-events: none;
 }

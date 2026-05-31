@@ -15,7 +15,7 @@ export interface TeshiRuntimeApi {
   startBrowserSidecar(): Promise<{ ws_url: string }>;
   stopBrowserSidecar(): Promise<void>;
   listDir(path: string): Promise<import("../types").DirEntry[]>;
-  spawnTerminal(): Promise<void>;
+  spawnTerminal(cols: number, rows: number): Promise<void>;
   stopTerminal(): Promise<void>;
   resizeTerminal(cols: number, rows: number): Promise<void>;
   writeTerminal(data: string): Promise<void>;
