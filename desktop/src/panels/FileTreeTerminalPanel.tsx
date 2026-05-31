@@ -71,6 +71,9 @@ export function FileTreeTerminalPanel({
   const [rootNode, setRootNode] = useState<TreeNode | null>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<import("@xterm/xterm").Terminal | null>(null);
+  const fitRef = useRef<import("@xterm/addon-fit").FitAddon | null>(null);
+  const shellSpawnedRef = useRef(false);
+  const [terminalReady, setTerminalReady] = useState(false);
 
   const loadChildren = useCallback(async (path: string) => {
     return invoke<DirEntry[]>("list_dir", { path });
@@ -121,8 +124,6 @@ export function FileTreeTerminalPanel({
   };
 
   useEffect(() => {
-    if (tab !== "terminal" || xtermRef.current) return;
-
     let disposed = false;
     let unlistenOutput: (() => void) | null = null;
     let unlistenExit: (() => void) | null = null;
@@ -152,11 +153,14 @@ export function FileTreeTerminalPanel({
       term.open(terminalRef.current);
       fit.fit();
       xtermRef.current = term;
+      fitRef.current = fit;
+      setTerminalReady(true);
 
       unlistenOutput = await listen<string>("terminal-output", (event) => {
         term?.write(decodeTerminalChunk(event.payload));
       });
       unlistenExit = await listen("terminal-exit", () => {
+        shellSpawnedRef.current = false;
         term?.writeln("\r\n\x1b[33mShell exited.\x1b[0m");
       });
       if (disposed) return;
@@ -164,15 +168,6 @@ export function FileTreeTerminalPanel({
       term.onData((data) => {
         void invoke("write_terminal", { data });
       });
-
-      try {
-        await invoke("spawn_terminal");
-        await syncTerminalSize(fit, term);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        toast.error(`Terminal failed: ${message}`);
-        term.writeln(`\r\n\x1b[31mFailed to start shell: ${message}\x1b[0m`);
-      }
 
       if (disposed || !terminalRef.current || !fit || !term) return;
 
@@ -190,11 +185,36 @@ export function FileTreeTerminalPanel({
       unlistenExit?.();
       term?.dispose();
       xtermRef.current = null;
+      fitRef.current = null;
+      shellSpawnedRef.current = false;
+      setTerminalReady(false);
       void invoke("stop_terminal").catch((err) => {
         console.error("stop_terminal failed", err);
       });
     };
-  }, [tab]);
+  }, [projectRoot]);
+
+  // Spawn the PTY on first Terminal visit; keep session alive when switching tabs.
+  useEffect(() => {
+    if (tab !== "terminal" || !terminalReady) return;
+    const fit = fitRef.current;
+    const term = xtermRef.current;
+    if (!fit || !term) return;
+
+    void (async () => {
+      try {
+        if (!shellSpawnedRef.current) {
+          await invoke("spawn_terminal");
+          shellSpawnedRef.current = true;
+        }
+        await syncTerminalSize(fit, term);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        toast.error(`Terminal failed: ${message}`);
+        term.writeln(`\r\n\x1b[31mFailed to start shell: ${message}\x1b[0m`);
+      }
+    })();
+  }, [tab, terminalReady, projectRoot]);
 
   return (
     <section className="panel side-panel">
@@ -215,10 +235,16 @@ export function FileTreeTerminalPanel({
         </button>
       </header>
       <div className={`panel-body${tab === "terminal" ? " panel-body--terminal" : ""}`}>
-        {tab === "files" && rootNode && (
-          <ul className="file-tree">{renderTree(rootNode, onClickEntry)}</ul>
+        {rootNode && (
+          <ul className="file-tree" hidden={tab !== "files"}>
+            {renderTree(rootNode, onClickEntry)}
+          </ul>
         )}
-        {tab === "terminal" && <div ref={terminalRef} className="terminal-host" />}
+        <div
+          ref={terminalRef}
+          className="terminal-host"
+          hidden={tab !== "terminal"}
+        />
       </div>
     </section>
   );

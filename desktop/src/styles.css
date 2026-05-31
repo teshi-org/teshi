@@ -322,6 +322,11 @@ button:hover {
   overflow: hidden;
 }
 
+.file-tree[hidden],
+.terminal-host[hidden] {
+  display: none;
+}
+
 .terminal-host {
   width: 100%;
   height: 100%;
