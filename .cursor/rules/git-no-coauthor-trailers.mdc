@@ -1,0 +1,29 @@
+---
+description: Do not add Co-authored-by trailers to git commits (always apply)
+alwaysApply: true
+---
+
+# Git commit co-author policy
+
+Do not add `Co-authored-by` trailers to commit messages in this repository unless the user explicitly names a human co-author.
+
+## Prohibited by default
+
+- Never append Cursor's automatic trailer:
+  - `Co-authored-by: Cursor <cursoragent@cursor.com>`
+- Never add generic bot or agent co-authors (Cursor, Copilot, Claude, etc.).
+- Do not add co-author lines "for attribution" when the agent helped write the change.
+
+## When creating or amending commits
+
+- Commit messages must contain only the subject, optional body, and nothing else unless the user requests a specific co-author.
+- Before running `git commit` or `git commit --amend`, verify the message has no `Co-authored-by` lines.
+- If a draft message includes a co-author trailer, remove it before committing.
+
+## Why
+
+GitHub counts co-authors as repository contributors. Unwanted trailers add bot accounts (for example, "cursor agent") to the public Contributors graph.
+
+## Allowed exception
+
+Add a `Co-authored-by` line only when the user explicitly provides a real person's name and email for shared authorship.
