@@ -17,7 +17,9 @@ use crate::sidecar::{
     confirm_teardown, get_recent_projects_cmd, open_project_dir, start_browser_sidecar,
     stop_browser_sidecar, SidecarState,
 };
-use crate::terminal::{spawn_terminal, write_terminal, TerminalState};
+use crate::terminal::{
+    resize_terminal, spawn_terminal, stop_terminal, write_terminal, TerminalState,
+};
 use crate::watcher::FileWatcherState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -48,6 +50,8 @@ pub fn run() {
             start_browser_sidecar,
             stop_browser_sidecar,
             spawn_terminal,
+            stop_terminal,
+            resize_terminal,
             write_terminal,
             check_project_switch_allowed,
             confirm_teardown,

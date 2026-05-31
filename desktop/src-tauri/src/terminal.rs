@@ -1,47 +1,91 @@
 //! PTY-backed terminal for Panel3.
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::Result;
-use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
-use tauri::{AppHandle, Emitter, State};
+use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::project::ProjectState;
 
+/// Shared PTY session state for the embedded terminal panel.
 pub struct TerminalState {
+    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     child: Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>,
 }
 
 impl TerminalState {
+    /// Creates an empty terminal session holder.
     pub fn new() -> Self {
         Self {
+            master: Mutex::new(None),
             writer: Mutex::new(None),
             child: Mutex::new(None),
         }
     }
 
+    /// Kills the shell and drops PTY handles so a fresh session can be spawned.
     pub fn stop(&self) -> Result<()> {
+        *self.master.lock().unwrap() = None;
         *self.writer.lock().unwrap() = None;
         if let Some(mut child) = self.child.lock().unwrap().take() {
             let _ = child.kill();
         }
         Ok(())
     }
+
+    fn clear_after_exit(&self) {
+        *self.master.lock().unwrap() = None;
+        *self.writer.lock().unwrap() = None;
+        *self.child.lock().unwrap() = None;
+    }
 }
 
+/// Stops the PTY session and clears the project busy flag.
+#[tauri::command]
+pub fn stop_terminal(
+    state: State<'_, ProjectState>,
+    terminal: State<'_, TerminalState>,
+) -> Result<(), String> {
+    terminal.stop().map_err(|e| e.to_string())?;
+    *state.terminal_active.lock().unwrap() = false;
+    Ok(())
+}
+
+/// Resizes the PTY to match the xterm viewport.
+#[tauri::command]
+pub fn resize_terminal(
+    cols: u16,
+    rows: u16,
+    terminal: State<'_, TerminalState>,
+) -> Result<(), String> {
+    if cols == 0 || rows == 0 {
+        return Ok(());
+    }
+    let master = terminal.master.lock().unwrap();
+    if let Some(master) = master.as_ref() {
+        master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Spawns an interactive shell in the opened project directory.
 #[tauri::command]
 pub async fn spawn_terminal(
     app: AppHandle,
     state: State<'_, ProjectState>,
     terminal: State<'_, TerminalState>,
 ) -> Result<(), String> {
-    if terminal.writer.lock().unwrap().is_some() {
-        return Ok(());
-    }
-
     let project_root = state
         .root
         .lock()
@@ -49,7 +93,9 @@ pub async fn spawn_terminal(
         .clone()
         .ok_or_else(|| "no project open".to_string())?;
 
+    // Always rebuild so a dead reader thread cannot leave a zombie "running" session.
     terminal.stop().map_err(|e| e.to_string())?;
+    *state.terminal_active.lock().unwrap() = false;
 
     let pty_system = NativePtySystem::default();
     let pair = pty_system
@@ -61,26 +107,39 @@ pub async fn spawn_terminal(
         })
         .map_err(|e| e.to_string())?;
 
-    let shell = if cfg!(windows) {
-        "powershell.exe"
-    } else {
-        "bash"
-    };
-    let mut cmd = CommandBuilder::new(shell);
-    cmd.cwd(project_root.to_string_lossy().to_string());
-
-    if let Some(venv) = find_venv(&project_root) {
-        cmd.env("VIRTUAL_ENV", venv.to_string_lossy().to_string());
+    let cwd = shell_cwd(&project_root);
+    let mut last_err = String::from("no shell available");
+    let mut child = None;
+    for mut cmd in shell_commands() {
+        cmd.cwd(cwd.to_string_lossy().to_string());
+        if let Some(venv) = find_venv(&project_root) {
+            cmd.env("VIRTUAL_ENV", venv.to_string_lossy().to_string());
+        }
+        match pair.slave.spawn_command(cmd) {
+            Ok(spawned) => {
+                child = Some(spawned);
+                break;
+            }
+            Err(err) => {
+                last_err = err.to_string();
+            }
+        }
     }
-
-    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    let child = child.ok_or(last_err)?;
 
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
 
+    *terminal.master.lock().unwrap() = Some(pair.master);
     *terminal.writer.lock().unwrap() = Some(writer);
     *terminal.child.lock().unwrap() = Some(child);
     *state.terminal_active.lock().unwrap() = true;
+
+    // Nudge interactive shells to emit an initial prompt in ConPTY.
+    if let Some(writer) = terminal.writer.lock().unwrap().as_mut() {
+        let _ = writer.write_all(b"\r");
+        let _ = writer.flush();
+    }
 
     let app_handle = app.clone();
     std::thread::spawn(move || {
@@ -94,6 +153,13 @@ pub async fn spawn_terminal(
                 }
                 Err(_) => break,
             }
+        }
+        let _ = app_handle.emit("terminal-exit", ());
+        if let Some(terminal_state) = app_handle.try_state::<TerminalState>() {
+            terminal_state.clear_after_exit();
+        }
+        if let Some(project_state) = app_handle.try_state::<ProjectState>() {
+            *project_state.terminal_active.lock().unwrap() = false;
         }
     });
 
@@ -111,7 +177,32 @@ pub fn write_terminal(data: String, terminal: State<'_, TerminalState>) -> Resul
     Ok(())
 }
 
-fn find_venv(project_root: &PathBuf) -> Option<PathBuf> {
+/// Strips Windows extended-path prefixes so CreateProcess/shell cwd is reliable.
+fn shell_cwd(project_root: &Path) -> PathBuf {
+    dunce::simplified(project_root).to_path_buf()
+}
+
+fn shell_commands() -> Vec<CommandBuilder> {
+    if cfg!(windows) {
+        vec![
+            shell_command("pwsh.exe", &["-NoLogo"]),
+            shell_command("powershell.exe", &["-NoLogo"]),
+            shell_command("cmd.exe", &[]),
+        ]
+    } else {
+        vec![shell_command("bash", &[])]
+    }
+}
+
+fn shell_command(program: &str, args: &[&str]) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new(program);
+    for arg in args {
+        cmd.arg(*arg);
+    }
+    cmd
+}
+
+fn find_venv(project_root: &Path) -> Option<PathBuf> {
     for name in [".venv", "venv"] {
         let dir = project_root.join(name);
         if dir.is_dir() {

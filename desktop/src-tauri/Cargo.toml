@@ -15,6 +15,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 anyhow = "1"
+dunce = "1"
 dirs = "6"
 notify = "7.0"
 portable-pty = "0.8"
