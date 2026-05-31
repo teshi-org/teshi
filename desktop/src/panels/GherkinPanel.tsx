@@ -46,6 +46,8 @@ interface Props {
   selectedStepLine: number | null;
   onSelectScenario: (line: number) => void;
   onSelectStep: (line: number) => void;
+  /** Hide the panel during browser focus mode without unmounting. */
+  layoutHidden?: boolean;
 }
 
 export function GherkinPanel({
@@ -55,9 +57,12 @@ export function GherkinPanel({
   selectedStepLine,
   onSelectScenario,
   onSelectStep,
+  layoutHidden = false,
 }: Props) {
   return (
-    <section className="panel gherkin-panel">
+    <section
+      className={`panel gherkin-panel${layoutHidden ? " panel--layout-hidden" : ""}`}
+    >
       <header className="panel-header">
         Gherkin{relativePath ? `: ${relativePath}` : ""}
       </header>

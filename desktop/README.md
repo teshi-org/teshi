@@ -37,12 +37,12 @@ cargo tauri dev --manifest-path desktop/src-tauri/Cargo.toml
 
 ## Layout
 
-- **Toolbar:** Open project, recent projects, browser controls; switches to a minimal bar in browser focus mode
+- **File menu (native):** **File > Open Project…** (`Ctrl+O`) and **File > Open Recent** with dynamic recent projects
 - **Panel 1 (left):** Structured Gherkin render for selected `.feature` files
-- **Panel 2 (center):** Playwright Chromium JPEG stream (1920×1080 viewport), started manually
+- **Panel 2 (center):** Playwright Chromium JPEG stream (1920×1080 viewport); **Start Browser** / **Stop Browser** in the panel header
 - **Panel 3 (right):** Lazy file tree + terminal (tab switch)
 - **Bottom dock:** Locator confirmation (linked to selected Gherkin step), plus Output/Logs placeholders; expanded by default on Locator tab
-- **Browser focus:** Use **Focus** in the browser panel header to hide side panels and expand the browser; **Exit Focus** in the minimal toolbar restores the three-column layout
+- **Browser fullscreen:** Click the fullscreen icon in the browser panel header to hide side panels and bottom dock; click the exit-fullscreen icon or press **Escape** to restore the layout
 
 ## BDD locator workflow
 

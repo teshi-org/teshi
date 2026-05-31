@@ -1,6 +1,7 @@
 mod app_data;
 mod gherkin_cmd;
 mod locator;
+mod menu;
 mod project;
 mod sidecar;
 mod terminal;
@@ -88,6 +89,16 @@ pub fn run() {
             if let Ok(recent) = get_recent_projects() {
                 let _ = app.emit("recent-loaded", recent);
             }
+            let handle = app.handle().clone();
+            if let Ok(menu) = menu::build_app_menu(
+                &handle,
+                &get_recent_projects().unwrap_or_default(),
+            ) {
+                let _ = app.set_menu(menu);
+            }
+            app.on_menu_event(move |app_handle, event| {
+                menu::handle_menu_event(app_handle, event.id().0.as_str());
+            });
             Ok(())
         })
         .run(tauri::generate_context!())

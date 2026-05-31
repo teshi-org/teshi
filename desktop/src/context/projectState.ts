@@ -1,7 +1,7 @@
 import type { FeatureRenderPayload } from "../types";
 import type { ActiveStep, PendingLocator } from "../locatorTypes";
 
-export type LayoutMode = "normal" | "browserFocus";
+export type LayoutMode = "normal" | "browserFullscreen";
 export type DockTab = "locator" | "output" | "logs";
 
 export interface ProjectState {
@@ -35,6 +35,7 @@ export type ProjectAction =
   | { type: "SET_LAYOUT_MODE"; mode: LayoutMode }
   | { type: "TOGGLE_DOCK" }
   | { type: "SET_DOCK_TAB"; tab: DockTab }
+  | { type: "SET_DOCK_EXPANDED"; expanded: boolean }
   | { type: "CLOSE_PROJECT" };
 
 export const initialProjectState: ProjectState = {
@@ -50,7 +51,7 @@ export const initialProjectState: ProjectState = {
   browserRunning: false,
   rightTab: "files",
   layoutMode: "normal",
-  dockExpanded: true,
+  dockExpanded: false,
   dockActiveTab: "locator",
 };
 
@@ -104,11 +105,9 @@ export function projectReducer(
     case "TOGGLE_DOCK":
       return { ...state, dockExpanded: !state.dockExpanded };
     case "SET_DOCK_TAB":
-      return {
-        ...state,
-        dockActiveTab: action.tab,
-        dockExpanded: true,
-      };
+      return { ...state, dockActiveTab: action.tab };
+    case "SET_DOCK_EXPANDED":
+      return { ...state, dockExpanded: action.expanded };
     case "CLOSE_PROJECT":
       return { ...initialProjectState, recentProjects: state.recentProjects };
     default:

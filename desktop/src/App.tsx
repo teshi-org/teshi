@@ -6,9 +6,7 @@ import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
 import { Toaster, toast } from "sonner";
 import { ProjectProvider, useProject } from "./context/ProjectContext";
 import { WelcomeScreen } from "./panels/WelcomeScreen";
-import { GherkinPanel } from "./panels/GherkinPanel";
-import { BrowserPanel } from "./panels/BrowserPanel";
-import { FileTreeTerminalPanel } from "./panels/FileTreeTerminalPanel";
+import { ResizableWorkspace } from "./panels/ResizableWorkspace";
 import { BottomDock } from "./panels/BottomDock";
 import type { BrowserError, FeatureRenderPayload } from "./types";
 import type { ActiveStep, PendingLocator } from "./locatorTypes";
@@ -86,6 +84,7 @@ function AppShell() {
       if (event.payload?.status === "pending") {
         toast.info("Locator proposal ready for review");
         dispatch({ type: "SET_DOCK_TAB", tab: "locator" });
+        dispatch({ type: "SET_DOCK_EXPANDED", expanded: true });
       }
     }).then((u) => unsubs.push(u));
     void listen<ActiveStep>("active-step-changed", (event) => {
@@ -94,14 +93,12 @@ function AppShell() {
     void listen<FeatureRenderPayload>("feature-refreshed", (event) => {
       dispatch({ type: "REFRESH_FEATURE", payload: event.payload });
     }).then((u) => unsubs.push(u));
-
-    const onKey = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key.toLowerCase() === "o") {
-        e.preventDefault();
-        void pickProject();
-      }
-    };
-    window.addEventListener("keydown", onKey);
+    void listen("menu-open-project", () => {
+      void pickProject();
+    }).then((u) => unsubs.push(u));
+    void listen<string>("menu-open-recent", (event) => {
+      void openProjectPath(event.payload);
+    }).then((u) => unsubs.push(u));
 
     // Hold the native close until teardown finishes. Do not call Rust blocking_show()
     // from this handler — it can deadlock on Windows during WM_CLOSE.
@@ -141,7 +138,6 @@ function AppShell() {
     return () => {
       unlistenClose?.();
       unsubs.forEach((u) => u());
-      window.removeEventListener("keydown", onKey);
     };
   }, [dispatch, openProjectPath, pickProject]);
 
@@ -194,6 +190,21 @@ function AppShell() {
     dispatch({ type: "SET_BROWSER", wsUrl: null, running: false });
   };
 
+  const browserFullscreen = state.layoutMode === "browserFullscreen";
+
+  useEffect(() => {
+    if (!state.projectRoot || !browserFullscreen) return;
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        dispatch({ type: "SET_LAYOUT_MODE", mode: "normal" });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [state.projectRoot, browserFullscreen, dispatch]);
+
   if (!state.projectRoot) {
     return (
       <>
@@ -207,124 +218,53 @@ function AppShell() {
     );
   }
 
-  const browserFocus = state.layoutMode === "browserFocus";
-
-  const browserControls = (
-    <>
-      {!state.browserRunning ? (
-        <button type="button" onClick={() => void startBrowser()}>
-          Start Browser
-        </button>
-      ) : (
-        <button type="button" onClick={() => void stopBrowser()}>
-          Stop Browser
-        </button>
-      )}
-      <span
-        className={`status-dot ${state.browserRunning ? "on" : "off"}`}
-        title={state.browserRunning ? "Browser running" : "Browser stopped"}
-      />
-    </>
-  );
-
   return (
     <div className="app-shell">
-      <header
-        className={`toolbar${browserFocus ? " toolbar--minimal" : ""}`}
-      >
-        {browserFocus ? (
-          <>
-            <button
-              type="button"
-              onClick={() =>
-                dispatch({ type: "SET_LAYOUT_MODE", mode: "normal" })
-              }
-            >
-              Exit Focus
-            </button>
-            <div className="toolbar-spacer" />
-            {browserControls}
-          </>
-        ) : (
-          <>
-            <button type="button" onClick={() => void pickProject()}>
-              Open Project
-            </button>
-            <select
-              value=""
-              onChange={(e) => {
-                if (e.target.value) void openProjectPath(e.target.value);
-              }}
-            >
-              <option value="">Recent…</option>
-              {state.recentProjects.map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-            </select>
-            <span className="project-path">{state.projectRoot}</span>
-            <div className="toolbar-spacer" />
-            {browserControls}
-          </>
-        )}
-      </header>
       <div className="workspace">
-        <main
-          className={`layout${browserFocus ? " layout--browser-focus" : ""}`}
-        >
-          {!browserFocus && (
-            <GherkinPanel
-              relativePath={state.featurePayload?.relative_path ?? null}
-              payload={state.featurePayload}
-              selectedScenarioLine={state.selectedScenarioLine}
-              selectedStepLine={state.selectedStepLine}
-              onSelectScenario={(line) =>
-                dispatch({ type: "SELECT_SCENARIO", line })
-              }
-              onSelectStep={(line) => {
-                dispatch({ type: "SELECT_STEP", line });
-                if (line !== null) {
-                  void syncActiveStep(line);
-                }
-              }}
-            />
-          )}
-          <BrowserPanel
-            wsUrl={state.browserWsUrl}
-            running={state.browserRunning}
-            error={browserError}
-            hint={browserHint}
-            focusMode={browserFocus}
-            onStart={() => void startBrowser()}
-            onStop={() => void stopBrowser()}
-            onToggleFocus={() =>
-              dispatch({
-                type: "SET_LAYOUT_MODE",
-                mode: browserFocus ? "normal" : "browserFocus",
-              })
+        <ResizableWorkspace
+          browserFullscreen={browserFullscreen}
+          projectRoot={state.projectRoot}
+          featurePayload={state.featurePayload}
+          selectedScenarioLine={state.selectedScenarioLine}
+          selectedStepLine={state.selectedStepLine}
+          browserWsUrl={state.browserWsUrl}
+          browserRunning={state.browserRunning}
+          browserError={browserError}
+          browserHint={browserHint}
+          rightTab={state.rightTab}
+          onSelectScenario={(line) =>
+            dispatch({ type: "SELECT_SCENARIO", line })
+          }
+          onSelectStep={(line) => {
+            dispatch({ type: "SELECT_STEP", line });
+            if (line !== null) {
+              void syncActiveStep(line);
+            }
+          }}
+          onStartBrowser={() => void startBrowser()}
+          onStopBrowser={() => void stopBrowser()}
+          onToggleBrowserFullscreen={() =>
+            dispatch({
+              type: "SET_LAYOUT_MODE",
+              mode: browserFullscreen ? "normal" : "browserFullscreen",
+            })
+          }
+          onRightTabChange={(tab) => dispatch({ type: "SET_TAB", tab })}
+          onOpenFeature={(path) => void openFeature(path)}
+        />
+        {!browserFullscreen && (
+          <BottomDock
+            expanded={state.dockExpanded}
+            activeTab={state.dockActiveTab}
+            activeStep={state.activeStep}
+            pendingLocator={state.pendingLocator}
+            onToggle={() => dispatch({ type: "TOGGLE_DOCK" })}
+            onTabChange={(tab) => dispatch({ type: "SET_DOCK_TAB", tab })}
+            onPendingChange={(pending) =>
+              dispatch({ type: "SET_PENDING_LOCATOR", pending })
             }
           />
-          {!browserFocus && (
-            <FileTreeTerminalPanel
-              projectRoot={state.projectRoot}
-              tab={state.rightTab}
-              onTabChange={(tab) => dispatch({ type: "SET_TAB", tab })}
-              onOpenFeature={(path) => void openFeature(path)}
-            />
-          )}
-        </main>
-        <BottomDock
-          expanded={state.dockExpanded}
-          activeTab={state.dockActiveTab}
-          activeStep={state.activeStep}
-          pendingLocator={state.pendingLocator}
-          onToggle={() => dispatch({ type: "TOGGLE_DOCK" })}
-          onTabChange={(tab) => dispatch({ type: "SET_DOCK_TAB", tab })}
-          onPendingChange={(pending) =>
-            dispatch({ type: "SET_PENDING_LOCATOR", pending })
-          }
-        />
+        )}
       </div>
       <Toaster theme="dark" />
     </div>

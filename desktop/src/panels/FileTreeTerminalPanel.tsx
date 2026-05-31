@@ -14,6 +14,8 @@ interface Props {
   tab: "files" | "terminal";
   onTabChange: (tab: "files" | "terminal") => void;
   onOpenFeature: (path: string) => void;
+  /** Hide the panel during browser focus mode without unmounting. */
+  layoutHidden?: boolean;
 }
 
 /** VS Code–style dark palette so ANSI SGR colors render correctly in xterm.js. */
@@ -67,6 +69,7 @@ export function FileTreeTerminalPanel({
   tab,
   onTabChange,
   onOpenFeature,
+  layoutHidden = false,
 }: Props) {
   const [rootNode, setRootNode] = useState<TreeNode | null>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -216,8 +219,22 @@ export function FileTreeTerminalPanel({
     })();
   }, [tab, terminalReady, projectRoot]);
 
+  // Refit xterm when the panel becomes visible again after browser focus mode.
+  useEffect(() => {
+    if (layoutHidden || !terminalReady) return;
+    const fit = fitRef.current;
+    const term = xtermRef.current;
+    if (!fit || !term) return;
+
+    requestAnimationFrame(() => {
+      void syncTerminalSize(fit, term);
+    });
+  }, [layoutHidden, terminalReady]);
+
   return (
-    <section className="panel side-panel">
+    <section
+      className={`panel side-panel${layoutHidden ? " panel--layout-hidden" : ""}`}
+    >
       <header className="panel-header tabs">
         <button
           type="button"

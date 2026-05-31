@@ -77,6 +77,8 @@ pub async fn open_project(
     remember_project_parent(&canonical).map_err(|e| e.to_string())?;
     add_recent_project(&canonical).map_err(|e| e.to_string())?;
 
+    let _ = crate::menu::rebuild_app_menu(&app);
+
     app.emit("project-changed", canonical.to_string_lossy().to_string())
         .map_err(|e| e.to_string())?;
     start_locator_watch(&locator_watcher, &canonical, app)?;
