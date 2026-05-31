@@ -52,9 +52,9 @@ export function formatRecentProjectEntry(path: string): RecentProjectEntry {
 /** Keyboard hint for the Open Project action on the welcome screen. */
 export function formatOpenProjectShortcut(): string {
   if (typeof navigator !== "undefined") {
-    const platform =
-      navigator.userAgentData?.platform ?? navigator.platform ?? "";
-    if (/mac/i.test(platform)) {
+    const platform = navigator.platform ?? "";
+    const userAgent = navigator.userAgent ?? "";
+    if (/mac/i.test(platform) || /mac/i.test(userAgent)) {
       return "⌘O";
     }
   }
