@@ -21,8 +21,7 @@ teshi-desktop supports two browser backends for BDD locator recording. Both expo
 
 - **Extension control plane**: HTTP `POST /v1/bridge/heartbeat` (~1.5 s) for `project_root`, tabs, and queued `cmd` objects. Small replies go to `POST /v1/bridge/response`.
 - **Extension preview data plane**: WebSocket `extension_frame_ws_url` from `GET /v1/bridge` (same host/port as agent `ws_url`, path `/extension/frames`). Binary **TSH1** packets: magic + JSON meta (`tab_id`, `url`, `seq`) + raw JPEG. The bridge base64-encodes once in a thread pool and broadcasts `{"type":"frame","data":"..."}` to teshi-desktop (same agent WebSocket protocol as before).
-- **Preview capture**: CDP `Page.startScreencast` at **~10 fps** (JPEG quality **70**, fit inside **1920×1080**, no upscaling). Locator commands pause screencast briefly, then resume.
-- **Fallback**: If screencast is unavailable, the extension may POST raw JPEG to `POST /v1/bridge/frame` (no JSON base64). Large JSON frames on `/v1/bridge/response` are deprecated.
+- **Preview capture**: CDP `Page.startScreencast` only (JPEG quality **70**, fit inside **1920×1080**, no upscaling). Frames are sent when the page repaints (scroll, animation, etc.); a static page keeps the last frame and the panel may show **Preview idle**. Locator commands pause screencast briefly, then resume. If screencast cannot start, the extension reports `frame_error` (no HTTP capture fallback). Large JSON frames on `/v1/bridge/response` are deprecated.
 - **Agent ↔ bridge**: WebSocket (`ws_url` in `.teshi/cdp-endpoint.json`).
 - **Desktop**: starts/stops the Python process; polls discovery; `POST /v1/bridge/activate_tab` to switch Chrome tabs.
 
@@ -42,9 +41,9 @@ Use your **daily Chrome** with real login sessions (SSO, cookies).
 
 While waiting for the extension, the panel shows setup steps only (no stream). Once connected, the panel shows:
 
-- A **tab strip** for tabs in the **current Chrome window** (title + favicon). The active tab is highlighted. Click another debuggable tab to activate it in Chrome; the **~10 fps** preview follows the active http(s) tab.
+- A **tab strip** for tabs in the **current Chrome window** (title + favicon). The active tab is highlighted. Click another debuggable tab to activate it in Chrome; the screencast preview updates on the active http(s) tab when the page repaints.
 - Read-only active-tab URL, **Refresh** to restart the stream, and zoom controls (in-panel **Go** is not available in chrome mode).
-- If the stream stalls, the panel shows an error (check the active tab is http(s), not `chrome://`; reload the extension and **Connect Chrome** again).
+- If preview is **idle**, interact in Chrome to refresh. If the stream is **disconnected** or shows `frame_error`, check the active tab is http(s), reload the extension, and **Connect Chrome** again.
 
 `chrome://` and extension pages appear in the strip but are not selectable (not CDP-debuggable).
 

@@ -5,7 +5,6 @@
 const DISCOVERY_URL = "http://127.0.0.1:17373/v1/bridge";
 const HEARTBEAT_URL = "http://127.0.0.1:17373/v1/bridge/heartbeat";
 const RESPONSE_URL = "http://127.0.0.1:17373/v1/bridge/response";
-const FRAME_UPLOAD_URL = "http://127.0.0.1:17373/v1/bridge/frame";
 /** Metadata heartbeat (tabs, URL) — no screenshot. */
 const HEARTBEAT_MS = 1500;
 /** Target ~10 fps via screencastFrameAck throttling. */
@@ -52,10 +51,6 @@ let streamSessionTabId = null;
 let streamSeq = 0;
 let lastScreencastPublishAt = 0;
 let screencastListenerRegistered = false;
-/** When true, send raw JPEG via POST /v1/bridge/frame instead of WebSocket. */
-let streamUseHttpFallback = false;
-/** @type {ReturnType<typeof setInterval> | null} */
-let httpFallbackIntervalId = null;
 
 function isTabDebuggable(url) {
   if (!url) {
@@ -154,13 +149,6 @@ function closeStreamWebSocket() {
   }
 }
 
-function clearHttpFallbackInterval() {
-  if (httpFallbackIntervalId !== null) {
-    clearInterval(httpFallbackIntervalId);
-    httpFallbackIntervalId = null;
-  }
-}
-
 async function refreshExtensionFrameWsUrl() {
   try {
     const res = await fetch(DISCOVERY_URL);
@@ -244,36 +232,17 @@ async function connectStreamWebSocket() {
   });
 }
 
-async function postFrameHttpFallback(jpegBytes, tabId, url) {
-  const u = new URL(FRAME_UPLOAD_URL);
-  u.searchParams.set("project_root", cachedProjectRoot);
-  u.searchParams.set("tab_id", String(tabId));
-  u.searchParams.set("url", url);
-  const res = await fetch(u.toString(), {
-    method: "POST",
-    headers: { "Content-Type": "image/jpeg" },
-    body: jpegBytes,
-  });
-  if (!res.ok) {
-    throw new Error(`frame upload HTTP ${res.status}`);
-  }
-}
-
 async function publishScreencastFrame(jpegBytes, tabId, url) {
   const meta = {
     tab_id: tabId,
     url,
     seq: (streamSeq += 1),
   };
-  if (streamUseHttpFallback) {
-    await postFrameHttpFallback(jpegBytes, tabId, url);
-    return;
-  }
   if (streamWs?.readyState === WebSocket.OPEN) {
     streamWs.send(encodeTsh1Frame(meta, jpegBytes));
     return;
   }
-  await postFrameHttpFallback(jpegBytes, tabId, url);
+  void connectStreamWebSocket();
 }
 
 async function handleScreencastFrame(params, tabId) {
@@ -338,9 +307,7 @@ function ensureScreencastDebuggerListener() {
 
 async function stopStreamSession() {
   screencastActive = false;
-  clearHttpFallbackInterval();
   closeStreamWebSocket();
-  streamUseHttpFallback = false;
   if (streamSessionTabId !== null) {
     try {
       await chrome.debugger.sendCommand(
@@ -354,50 +321,6 @@ async function stopStreamSession() {
   }
   streamSessionTabId = null;
   lastScreencastPublishAt = 0;
-}
-
-async function runHttpFallbackTick(tabId) {
-  if (!screencastActive || streamPaused || streamSessionTabId !== tabId) {
-    return;
-  }
-  const now = Date.now();
-  if (now - lastScreencastPublishAt < SCREENCAST_MIN_INTERVAL_MS) {
-    return;
-  }
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    await ensureStreamDebugger(tab);
-    const result = await chrome.debugger.sendCommand(
-      { tabId },
-      "Page.captureScreenshot",
-      {
-        format: "jpeg",
-        quality: STREAM_JPEG_QUALITY,
-        fromSurface: true,
-      },
-    );
-    const raw = result?.data;
-    if (!raw) {
-      return;
-    }
-    lastScreencastPublishAt = now;
-    const jpegBytes = base64ToBytes(raw);
-    await publishScreencastFrame(jpegBytes, tabId, tab.url ?? "");
-  } catch (err) {
-    await postFrameErrorDebounced(captureErrorMessage(err));
-  }
-}
-
-async function startHttpFallbackSession(tab) {
-  streamUseHttpFallback = true;
-  screencastActive = true;
-  streamSessionTabId = tab.id;
-  await ensureStreamDebugger(tab);
-  clearHttpFallbackInterval();
-  httpFallbackIntervalId = setInterval(() => {
-    void runHttpFallbackTick(tab.id);
-  }, SCREENCAST_MIN_INTERVAL_MS);
-  void runHttpFallbackTick(tab.id);
 }
 
 async function startStreamSession(options = {}) {
@@ -425,12 +348,7 @@ async function startStreamSession(options = {}) {
     );
     return;
   }
-  if (
-    screencastActive &&
-    streamSessionTabId === tab.id &&
-    !options.force &&
-    !streamUseHttpFallback
-  ) {
+  if (screencastActive && streamSessionTabId === tab.id && !options.force) {
     await connectStreamWebSocket();
     return;
   }
@@ -446,20 +364,9 @@ async function startStreamSession(options = {}) {
     });
     screencastActive = true;
     streamSessionTabId = tab.id;
-    streamUseHttpFallback = false;
     await connectStreamWebSocket();
   } catch (err) {
-    const msg = captureErrorMessage(err);
-    try {
-      await startHttpFallbackSession(tab);
-      await postFrameErrorDebounced(
-        `Screencast unavailable (${msg}); using HTTP frame fallback.`,
-      );
-    } catch (fallbackErr) {
-      await postFrameErrorDebounced(
-        `Preview failed: ${msg}. ${captureErrorMessage(fallbackErr)}`,
-      );
-    }
+    await postFrameErrorDebounced(captureErrorMessage(err));
   }
 }
 
@@ -476,7 +383,6 @@ async function pauseScreencast() {
   } catch {
     // ignore
   }
-  clearHttpFallbackInterval();
   closeStreamWebSocket();
 }
 
@@ -802,9 +708,7 @@ async function ensureStreamForActiveTab() {
     return;
   }
   if (screencastActive && streamSessionTabId === tab.id) {
-    if (!streamUseHttpFallback) {
-      await connectStreamWebSocket();
-    }
+    await connectStreamWebSocket();
     return;
   }
   await startStreamSession({ tabId: tab.id });
@@ -964,7 +868,6 @@ chrome.debugger.onDetach.addListener((source) => {
     screencastActive = false;
     streamSessionTabId = null;
     closeStreamWebSocket();
-    clearHttpFallbackInterval();
   }
 });
 

@@ -525,32 +525,6 @@ class ChromeBridge:
         self._apply_frame_state(frame_out)
         self._schedule_frame_broadcast(frame_out)
 
-    async def handle_frame_upload_http(
-        self,
-        project_root: str,
-        tab_id: str | None,
-        url: str,
-        body: bytes,
-    ) -> dict[str, Any]:
-        if not paths_equal(project_root, self.project_root):
-            return {
-                "ok": False,
-                "error": f"project_root mismatch: expected {self.project_root}",
-            }
-        if not body:
-            return {"ok": False, "error": "empty frame body"}
-        meta: dict[str, Any] = {"url": url}
-        if tab_id is not None:
-            try:
-                meta["tab_id"] = int(tab_id)
-            except (TypeError, ValueError):
-                pass
-        frame_out = await asyncio.to_thread(build_frame_out_sync, meta, body)
-        self.last_heartbeat = time.monotonic()
-        self._apply_frame_state(frame_out)
-        self._schedule_frame_broadcast(frame_out)
-        return {"ok": True}
-
     async def handle_extension_response(self, payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("type") == "frame_error":
             self.last_frame_error = str(payload.get("error", "screenshot failed"))
@@ -568,7 +542,7 @@ class ChromeBridge:
                 self._deprecated_json_frame_warned = True
                 print(
                     "warning: JSON frame on POST /v1/bridge/response is deprecated; "
-                    "use extension WebSocket screencast or POST /v1/bridge/frame",
+                    "use extension WebSocket screencast (/extension/frames)",
                     file=sys.stderr,
                 )
             data_field = payload.get("data", "")
@@ -745,20 +719,6 @@ async def run_http_discovery(
                 else:
                     data = json.loads(text)
                 result = await bridge.handle_extension_response(data)
-                writer.write(_http_response(200, json.dumps(result).encode("utf-8")))
-            elif method == "POST" and path.split("?", 1)[0] == "/v1/bridge/frame":
-                parsed = urlparse(path)
-                query = parse_qs(parsed.query)
-                project_root = _headers.get("x-project-root") or (
-                    query.get("project_root", [""])[0]
-                )
-                tab_id = _headers.get("x-tab-id") or (
-                    query.get("tab_id", [None])[0]
-                )
-                page_url = _headers.get("x-url") or (query.get("url", [""])[0])
-                result = await bridge.handle_frame_upload_http(
-                    project_root, tab_id, page_url, body
-                )
                 writer.write(_http_response(200, json.dumps(result).encode("utf-8")))
             elif method == "POST" and path == "/v1/bridge/activate_tab":
                 data = json.loads(body.decode("utf-8") or "{}")

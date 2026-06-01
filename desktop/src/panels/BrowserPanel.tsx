@@ -26,8 +26,10 @@ interface ChromeBridgeInfo {
   project_root?: string;
 }
 
-/** Chrome screencast ~10 fps; Embedded Playwright ~8 fps. */
-const CHROME_STREAM_STALL_MS = 1000;
+/** Chrome screencast is repaint-driven; idle hint after no new frames. */
+const CHROME_PREVIEW_IDLE_MS = 1500;
+/** No preview frames at all while extension heartbeats (likely WS/screencast issue). */
+const CHROME_STREAM_DISCONNECTED_MS = 5000;
 const EMBEDDED_STREAM_STALL_MS = 4000;
 
 interface Props {
@@ -229,15 +231,21 @@ export function BrowserPanel({
     return () => clearInterval(timer);
   }, [isChrome, chromeConnected]);
 
+  const chromeHasPreviewFrame = Boolean(frameSrc) || lastFrameAt > 0;
+
   const streamStalled = (() => {
     void streamHealthTick;
-    const stallMs = isChrome ? CHROME_STREAM_STALL_MS : EMBEDDED_STREAM_STALL_MS;
     if (isChrome && !chromeConnected) {
       return false;
     }
     if (!isChrome && !wsUrl) {
       return false;
     }
+    const stallMs = isChrome
+      ? chromeHasPreviewFrame
+        ? CHROME_PREVIEW_IDLE_MS
+        : CHROME_STREAM_DISCONNECTED_MS
+      : EMBEDDED_STREAM_STALL_MS;
     if (lastFrameAt > 0) {
       return Date.now() - lastFrameAt > stallMs;
     }
@@ -247,6 +255,22 @@ export function BrowserPanel({
     }
     return false;
   })();
+
+  const chromePreviewIdle =
+    isChrome &&
+    chromeConnected &&
+    streamStalled &&
+    chromeHasPreviewFrame &&
+    !streamError &&
+    !showStreamLoading;
+
+  const chromeStreamDisconnected =
+    isChrome &&
+    chromeConnected &&
+    streamStalled &&
+    !chromeHasPreviewFrame &&
+    !streamError &&
+    !showStreamLoading;
 
   useEffect(() => {
     activatingTabIdRef.current = activatingTabId;
@@ -976,15 +1000,17 @@ export function BrowserPanel({
                       )}
                   </p>
                 )}
-                {isChrome &&
-                  streamStalled &&
-                  !streamError &&
-                  !showStreamLoading && (
-                    <p className="browser-stream-stalled" role="status">
-                      Extension stream disconnected — reload teshi-bridge and Connect Chrome
-                      again.
-                    </p>
-                  )}
+                {chromePreviewIdle && (
+                  <p className="browser-stream-idle" role="status">
+                    Preview idle — interact in Chrome to refresh.
+                  </p>
+                )}
+                {chromeStreamDisconnected && (
+                  <p className="browser-stream-stalled" role="status">
+                    Extension stream disconnected — reload teshi-bridge and Connect Chrome
+                    again.
+                  </p>
+                )}
                 {showStreamLoading && (
                   <p className="browser-stream-loading" role="status">
                     Updating screenshot…

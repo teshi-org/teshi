@@ -583,6 +583,24 @@ body,
   border: 1px solid rgba(248, 113, 113, 0.35);
 }
 
+.browser-stream-idle {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  z-index: 2;
+  transform: translateX(-50%);
+  margin: 0;
+  max-width: min(420px, 90%);
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  color: #a1a1aa;
+  background: rgba(24, 24, 27, 0.75);
+  border-radius: 6px;
+  border: 1px solid rgba(113, 113, 122, 0.35);
+  text-align: center;
+  pointer-events: none;
+}
+
 .browser-stream-error {
   position: absolute;
   top: 8px;
