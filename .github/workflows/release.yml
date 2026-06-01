@@ -75,7 +75,7 @@ jobs:
 
       - name: Install cargo-wix
         if: matrix.target == 'x86_64-pc-windows-msvc'
-        run: cargo install cargo-wix --locked
+        run: cargo install cargo-wix --locked --version 0.3.9
 
       - name: Build MSI installer
         if: matrix.target == 'x86_64-pc-windows-msvc'
@@ -126,9 +126,10 @@ jobs:
             -dr ShareWebDir `
             -cg WebFiles
 
+          # cargo-wix 0.3.x: pass WiX preprocessor defines via candle (-d), not --define
           cargo wix --package teshi --nocapture `
-            --define StagingRoot=$stagingRoot `
-            --output "target/wix/teshi-$tag-x64.msi"
+            -C -dStagingRoot=$stagingRoot `
+            -o "target/wix/teshi-$tag-x64.msi"
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
