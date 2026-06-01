@@ -126,11 +126,20 @@ jobs:
             -dr ShareWebDir `
             -cg WebFiles
 
-          # heat writes <Wix>; <?include?> in main.wxs requires <Include> as the document root
+          # heat generates wix/web-files.wxs with a <Wix> root; instead of relying on
+          # <?include?> (fragile across cargo-wix/heat versions), inject the <Fragment>
+          # directly into wix/main.wxs and remove web-files.wxs to avoid duplicate candle inputs.
           $webWxs = Get-Content wix/web-files.wxs -Raw
-          $webWxs = $webWxs -replace '<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">', '<Include xmlns="http://schemas.microsoft.com/wix/2006/wi">'
-          $webWxs = $webWxs -replace '</Wix>', '</Include>'
-          Set-Content -Path wix/web-files.wxs -Value $webWxs -NoNewline
+          $fragment = [regex]::Match($webWxs, '<Fragment\b[\s\S]*?</Fragment>').Value
+          if ([string]::IsNullOrWhiteSpace($fragment)) {
+            throw "Failed to extract <Fragment> from wix/web-files.wxs"
+          }
+
+          $mainWxs = Get-Content wix/main.wxs -Raw
+          $mainWxs = $mainWxs -replace '\s*<\?include\s+web-files\.wxs\s+\?>\s*', "`n$fragment`n"
+          Set-Content -Path wix/main.wxs -Value $mainWxs -NoNewline
+
+          Remove-Item -Force wix/web-files.wxs
 
           # cargo-wix 0.3.x: pass WiX preprocessor defines via candle (-d), not --define
           cargo wix --package teshi --nocapture --no-build `
