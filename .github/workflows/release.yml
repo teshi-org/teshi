@@ -159,11 +159,23 @@ jobs:
             -cg BridgeFiles `
             -var var.BridgeRoot
 
-          # cargo-wix 0.3.x: pass WiX preprocessor defines via candle (-d), not --define
+          # Add defaults to heat-generated files so they work in any compilation order
+          $defaultBlock = @"
+<?ifndef WebRoot ?>
+    <?define WebRoot = "staging\msi-root\share\web" ?>
+<?endif ?>
+<?ifndef BridgeRoot ?>
+    <?define BridgeRoot = "staging\msi-root\share\teshi-bridge" ?>
+<?endif ?>
+
+"@
+          foreach ($f in @("wix/web-files.wxs", "wix/bridge-files.wxs")) {
+              $content = Get-Content $f -Raw
+              Set-Content $f -Value ($defaultBlock + $content) -NoNewline
+          }
+
+          # cargo-wix reads includes order and variable defaults from [package.metadata.wix] in Cargo.toml
           cargo wix --package teshi --nocapture --no-build `
-            -C -dStagingRoot=$stagingRoot `
-            -C -dWebRoot=$webDir `
-            -C -dBridgeRoot=$bridgeDir `
             -o "target/wix/teshi-$tag-x64.msi"
 
       - name: Upload binary artifact

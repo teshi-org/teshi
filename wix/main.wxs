@@ -59,6 +59,12 @@
 <?ifndef StagingRoot ?>
     <?define StagingRoot = "staging\msi-root" ?>
 <?endif ?>
+<?ifndef WebRoot ?>
+    <?define WebRoot = "$(var.StagingRoot)\share\web" ?>
+<?endif ?>
+<?ifndef BridgeRoot ?>
+    <?define BridgeRoot = "$(var.StagingRoot)\share\teshi-bridge" ?>
+<?endif ?>
 
 <Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
 

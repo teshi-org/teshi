@@ -12,6 +12,7 @@ publish = false
 
 [package.metadata.wix]
 eula = false
+include = ["wix/main.wxs", "wix/bridge-files.wxs", "wix/web-files.wxs"]
 
 [workspace]
 members = [

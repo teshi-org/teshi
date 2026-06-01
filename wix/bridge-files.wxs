@@ -1,4 +1,10 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
+<?ifndef WebRoot ?>
+    <?define WebRoot = "staging\msi-root\share\web" ?>
+<?endif ?>
+<?ifndef BridgeRoot ?>
+    <?define BridgeRoot = "staging\msi-root\share\teshi-bridge" ?>
+<?endif ?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
     <Fragment>
         <DirectoryRef Id="ShareTeshiBridgeDir">

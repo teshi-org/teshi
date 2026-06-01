@@ -193,7 +193,8 @@ fn find_listener_pid(port: u16) -> Option<u32> {
             .args(["-ti", &format!("tcp:{port}")])
             .output()
             .ok()?;
-        let pid = String::from_utf8_lossy(&output.stdout).trim();
+        let lossy = String::from_utf8_lossy(&output.stdout);
+        let pid = lossy.trim();
         pid.parse().ok()
     }
 }
