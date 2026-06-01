@@ -1,5 +1,5 @@
 import type { FeatureRenderPayload } from "../types";
-import type { ActiveStep, PendingLocator } from "../locatorTypes";
+import type { ActiveStep, PendingLocator, StepBindingStatus } from "../locatorTypes";
 
 /** Platform-agnostic runtime API (Tauri invoke or `teshi web` HTTP). */
 export interface TeshiRuntimeApi {
@@ -9,6 +9,7 @@ export interface TeshiRuntimeApi {
   getRecentProjects(): Promise<string[]>;
   openProjectDir(): Promise<string | null>;
   getPendingLocator(): Promise<PendingLocator | null>;
+  getStepBindingStatuses(featurePath: string): Promise<StepBindingStatus[]>;
   getActiveStep(): Promise<ActiveStep | null>;
   syncActiveStep(featurePath: string, stepLine: number): Promise<ActiveStep>;
   renderFeature(path: string): Promise<FeatureRenderPayload>;
@@ -21,6 +22,7 @@ export interface TeshiRuntimeApi {
   stopTerminal(): Promise<void>;
   resizeTerminal(cols: number, rows: number): Promise<void>;
   writeTerminal(data: string): Promise<void>;
+  highlightLocator(selector: string): Promise<void>;
   confirmLocator(candidateRank: number, editedValue: string | null): Promise<void>;
   rejectLocator(): Promise<void>;
   confirmStopRuntimeIfBusy(): Promise<boolean>;

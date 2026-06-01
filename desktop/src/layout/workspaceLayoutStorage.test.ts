@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_DOCK_LAYOUT,
   DEFAULT_PANEL_LAYOUT,
+  dockLayoutFromGroupLayout,
   loadWorkspaceLayout,
   normalizeProjectKey,
   panelLayoutFromGroupLayout,
   saveWorkspaceLayout,
+  validateDockLayout,
   validatePanelLayout,
   WORKSPACE_LAYOUTS_MAX_ENTRIES,
   WORKSPACE_LAYOUTS_STORAGE_KEY,
@@ -46,11 +49,31 @@ describe("validatePanelLayout", () => {
   });
 });
 
+describe("validateDockLayout", () => {
+  it("accepts layouts summing to 100", () => {
+    expect(validateDockLayout(DEFAULT_DOCK_LAYOUT)).toBe(true);
+  });
+
+  it("rejects invalid sums and out-of-range values", () => {
+    expect(validateDockLayout({ main: 20, dock: 20 })).toBe(false);
+    expect(validateDockLayout({ main: 0, dock: 100 })).toBe(false);
+  });
+});
+
 describe("panelLayoutFromGroupLayout", () => {
   it("extracts panel ids from group layout", () => {
     expect(
       panelLayoutFromGroupLayout({ gherkin: 30, browser: 45, files: 25 }),
     ).toEqual(DEFAULT_PANEL_LAYOUT);
+  });
+});
+
+describe("dockLayoutFromGroupLayout", () => {
+  it("extracts dock ids from group layout", () => {
+    expect(dockLayoutFromGroupLayout({ main: 72, dock: 28 })).toEqual({
+      main: 72,
+      dock: 28,
+    });
   });
 });
 
@@ -62,8 +85,11 @@ describe("load and save", () => {
       root,
       {
         layout: { gherkin: 25, browser: 50, files: 25 },
+        dockLayout: { main: 70, dock: 30 },
         gherkinCollapsed: true,
         filesCollapsed: false,
+        dockExpanded: true,
+        dockActiveTab: "logs",
       },
       backend,
     );
@@ -71,8 +97,72 @@ describe("load and save", () => {
     expect(loaded).toEqual({
       version: 1,
       layout: { gherkin: 25, browser: 50, files: 25 },
+      dockLayout: { main: 70, dock: 30 },
       gherkinCollapsed: true,
       filesCollapsed: false,
+      dockExpanded: true,
+      dockActiveTab: "logs",
+    });
+  });
+
+  it("loads old entries with default dock fields", () => {
+    const backend = createMemoryBackend();
+    const root = "/tmp/proj";
+    const key = normalizeProjectKey(root);
+    backend.setItem(
+      WORKSPACE_LAYOUTS_STORAGE_KEY,
+      JSON.stringify({
+        [key]: {
+          version: 1,
+          layout: DEFAULT_PANEL_LAYOUT,
+          gherkinCollapsed: false,
+          filesCollapsed: true,
+          lastUsed: 1,
+        },
+      }),
+    );
+
+    expect(loadWorkspaceLayout(root, backend)).toEqual({
+      version: 1,
+      layout: DEFAULT_PANEL_LAYOUT,
+      dockLayout: DEFAULT_DOCK_LAYOUT,
+      gherkinCollapsed: false,
+      filesCollapsed: true,
+      dockExpanded: false,
+      dockActiveTab: "locator",
+    });
+  });
+
+  it("preserves horizontal layout when only dock state changes", () => {
+    const backend = createMemoryBackend();
+    const root = "/tmp/proj";
+    saveWorkspaceLayout(
+      root,
+      {
+        layout: { gherkin: 20, browser: 55, files: 25 },
+        gherkinCollapsed: true,
+        filesCollapsed: false,
+      },
+      backend,
+    );
+    saveWorkspaceLayout(
+      root,
+      {
+        dockLayout: { main: 80, dock: 20 },
+        dockExpanded: true,
+        dockActiveTab: "output",
+      },
+      backend,
+    );
+
+    expect(loadWorkspaceLayout(root, backend)).toEqual({
+      version: 1,
+      layout: { gherkin: 20, browser: 55, files: 25 },
+      dockLayout: { main: 80, dock: 20 },
+      gherkinCollapsed: true,
+      filesCollapsed: false,
+      dockExpanded: true,
+      dockActiveTab: "output",
     });
   });
 

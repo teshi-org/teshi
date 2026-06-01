@@ -26,3 +26,10 @@ export interface PendingLocator {
   };
   status: string;
 }
+
+export interface StepBindingStatus {
+  step_line: number;
+  step_text_normalized: string;
+  status: "confirmed" | "pending" | string;
+  source: "binding" | "pending" | "script" | string;
+}

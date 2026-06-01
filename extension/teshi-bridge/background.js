@@ -451,11 +451,55 @@ async function collectInteractiveElements(tabId) {
   return result?.value ?? [];
 }
 
+/** Cap AX payload size for heartbeat/CLI responses on heavy SPAs. */
+const MAX_AX_NODES = 800;
+const MAX_AX_JSON_BYTES = 512 * 1024;
+
+/**
+ * Truncate Accessibility.getFullAXTree nodes while preserving agent-usable structure.
+ *
+ * @param {unknown} tree
+ * @returns {unknown}
+ */
+function truncateAccessibilityTree(tree) {
+  if (!tree || typeof tree !== "object") {
+    return tree;
+  }
+  const nodes = /** @type {Record<string, unknown>} */ (tree).nodes;
+  if (!Array.isArray(nodes)) {
+    return tree;
+  }
+  if (nodes.length <= MAX_AX_NODES) {
+    let encoded = JSON.stringify(tree);
+    if (encoded.length <= MAX_AX_JSON_BYTES) {
+      return tree;
+    }
+  }
+  const truncatedNodes = nodes.slice(0, MAX_AX_NODES);
+  const out = {
+    .../** @type {Record<string, unknown>} */ (tree),
+    nodes: truncatedNodes,
+    truncated: true,
+    node_count: nodes.length,
+    node_limit: MAX_AX_NODES,
+  };
+  let encoded = JSON.stringify(out);
+  if (encoded.length > MAX_AX_JSON_BYTES) {
+    out.nodes = truncatedNodes.slice(0, Math.floor(MAX_AX_NODES / 2));
+    encoded = JSON.stringify(out);
+    out.truncated = true;
+    out.json_bytes = encoded.length;
+    out.json_byte_limit = MAX_AX_JSON_BYTES;
+  }
+  return out;
+}
+
 async function getPageSnapshot() {
   const tab = await attachActiveTab();
   let accessibility_tree;
   try {
-    accessibility_tree = await cdp(tab.id, "Accessibility.getFullAXTree", {});
+    const raw = await cdp(tab.id, "Accessibility.getFullAXTree", {});
+    accessibility_tree = truncateAccessibilityTree(raw);
   } catch (err) {
     accessibility_tree = { error: String(err) };
   }
@@ -505,6 +549,144 @@ async function clearHighlight() {
     // ignore
   }
   return { ok: true };
+}
+
+function isExplicitNavigableUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return ["http:", "https:", "file:"].includes(parsed.protocol);
+  } catch {
+    return false;
+  }
+}
+
+async function navigateToUrl(url, timeoutMs = 15000) {
+  if (!url || !isExplicitNavigableUrl(url)) {
+    return {
+      ok: false,
+      error: "navigate requires an explicit http(s) or file URL",
+      code: "invalid_url",
+    };
+  }
+  const tab = await getActiveTab();
+  if (!tab?.id) {
+    return { ok: false, error: "no active tab in the current window", code: "no_active_tab" };
+  }
+  await detachIfNeeded();
+  const startedAt = Date.now();
+  await chrome.tabs.update(tab.id, { url, active: true });
+  const active = await waitForTabReady(tab.id, timeoutMs);
+  return {
+    ok: true,
+    tab_id: tab.id,
+    url: active.url ?? url,
+    title: active.title ?? "",
+    elapsed_ms: Date.now() - startedAt,
+    debug_log: {
+      event: "extension_navigate",
+      tab_id: tab.id,
+      requested_url: url,
+      final_url: active.url ?? url,
+    },
+  };
+}
+
+async function executeLocator({ selector, action, value, timeoutMs = 5000 }) {
+  if (!selector) {
+    return { ok: false, error: "selector is required", code: "invalid_selector" };
+  }
+  const allowed = new Set([
+    "click",
+    "fill",
+    "assert_visible",
+    "assert_text",
+    "select",
+    "press_key",
+  ]);
+  if (!allowed.has(action)) {
+    return {
+      ok: false,
+      error: `unsupported action: ${action}`,
+      code: "unsupported_action",
+    };
+  }
+  if (["fill", "assert_text", "select", "press_key"].includes(action) && value == null) {
+    return {
+      ok: false,
+      error: `value is required for ${action}`,
+      code: "missing_value",
+    };
+  }
+
+  const tab = await attachActiveTab();
+  const expression = `(() => {
+    const selector = ${JSON.stringify(selector)};
+    const action = ${JSON.stringify(action)};
+    const value = ${JSON.stringify(value ?? "")};
+    const timeoutMs = ${Number(timeoutMs) || 5000};
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const visible = (el) => {
+      if (!el) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.visibility !== "hidden" &&
+        style.display !== "none" &&
+        Number(style.opacity || "1") > 0 &&
+        rect.width > 0 &&
+        rect.height > 0;
+    };
+    const deadline = Date.now() + timeoutMs;
+    return (async () => {
+      let el = null;
+      while (Date.now() < deadline) {
+        el = document.querySelector(selector);
+        if (visible(el)) break;
+        await sleep(100);
+      }
+      if (!el) {
+        return { ok: false, error: "element not found", code: "element_not_found" };
+      }
+      if (!visible(el)) {
+        return { ok: false, error: "element not visible before timeout", code: "not_visible" };
+      }
+      el.scrollIntoView({ block: "center", inline: "center" });
+      if (action === "click") {
+        el.click();
+      } else if (action === "fill") {
+        el.focus();
+        el.value = value;
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      } else if (action === "assert_visible") {
+        return { ok: true };
+      } else if (action === "assert_text") {
+        const text = (el.innerText || el.textContent || el.value || "").trim();
+        if (!text.includes(value)) {
+          return { ok: false, error: "text assertion failed", code: "assert_text_failed", actual: text };
+        }
+      } else if (action === "select") {
+        el.value = value;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      } else if (action === "press_key") {
+        el.focus();
+        for (const type of ["keydown", "keyup"]) {
+          el.dispatchEvent(new KeyboardEvent(type, { key: value, bubbles: true }));
+        }
+      }
+      return { ok: true };
+    })();
+  })()`;
+  const { result } = await cdp(tab.id, "Runtime.evaluate", {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  return {
+    selector,
+    action,
+    ...(result?.value ?? { ok: false, error: "execute result missing", code: "execute_failed" }),
+  };
 }
 
 async function waitForTabReady(tabId, timeoutMs = 3500) {
@@ -619,6 +801,8 @@ const COMMANDS_PAUSING_STREAM = new Set([
   "get_page_snapshot",
   "highlight_selector",
   "clear_highlight",
+  "execute_locator",
+  "navigate",
 ]);
 
 async function handleCmd(msg) {
@@ -636,16 +820,23 @@ async function handleCmd(msg) {
       body = await highlightSelector(selector);
     } else if (cmd === "clear_highlight") {
       body = await clearHighlight();
+    } else if (cmd === "execute_locator") {
+      body = await executeLocator({
+        selector,
+        action: msg.action,
+        value: msg.value,
+        timeoutMs: msg.timeout_ms,
+      });
     } else if (cmd === "activate_tab") {
       body = await activateTab(tabId);
       if (body.ok) {
         streamSessionTabId = body.tab_id;
       }
     } else if (cmd === "navigate") {
-      body = {
-        ok: false,
-        error: "navigate is not supported in chrome mode; change URL in Chrome",
-      };
+      body = await navigateToUrl(msg.url, msg.timeout_ms);
+      if (body.ok) {
+        streamSessionTabId = body.tab_id;
+      }
     } else {
       body = { ok: false, error: `unknown cmd: ${cmd}` };
     }
@@ -659,7 +850,7 @@ async function handleCmd(msg) {
     if (pausesStream) {
       streamPaused = false;
       await resumeScreencast();
-    } else if (cmd === "activate_tab" && body?.ok) {
+    } else if ((cmd === "activate_tab" || cmd === "navigate") && body?.ok) {
       await startStreamSession({ tabId: body.tab_id, force: true });
     }
   }

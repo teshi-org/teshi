@@ -13,17 +13,33 @@ export const DEFAULT_PANEL_LAYOUT = {
   files: 25,
 } as const;
 
+/** Default vertical percentages for the main workspace and bottom dock. */
+export const DEFAULT_DOCK_LAYOUT = {
+  main: 75,
+  dock: 25,
+} as const;
+
 export type WorkspacePanelLayout = {
   gherkin: number;
   browser: number;
   files: number;
 };
 
+export type WorkspaceDockLayout = {
+  main: number;
+  dock: number;
+};
+
+export type WorkspaceDockTab = "locator" | "output" | "logs";
+
 export type WorkspaceLayoutState = {
   version: 1;
   layout: WorkspacePanelLayout;
+  dockLayout: WorkspaceDockLayout;
   gherkinCollapsed: boolean;
   filesCollapsed: boolean;
+  dockExpanded: boolean;
+  dockActiveTab: WorkspaceDockTab;
   lastUsed: number;
 };
 
@@ -77,6 +93,19 @@ export function validatePanelLayout(layout: WorkspacePanelLayout): boolean {
   return Math.abs(sum - 100) <= LAYOUT_SUM_TOLERANCE;
 }
 
+/** Returns true when the main/dock sizes are positive and sum to ~100%. */
+export function validateDockLayout(layout: WorkspaceDockLayout): boolean {
+  const values = [layout.main, layout.dock];
+  if (
+    values.some(
+      (v) => typeof v !== "number" || !Number.isFinite(v) || v <= 0 || v > 100,
+    )
+  ) {
+    return false;
+  }
+  return Math.abs(layout.main + layout.dock - 100) <= LAYOUT_SUM_TOLERANCE;
+}
+
 /** Extracts the main workspace panel layout from a react-resizable-panels layout map. */
 export function panelLayoutFromGroupLayout(
   layout: Layout,
@@ -93,6 +122,23 @@ export function panelLayoutFromGroupLayout(
   }
   const candidate = { gherkin, browser, files };
   return validatePanelLayout(candidate) ? candidate : null;
+}
+
+/** Extracts the vertical workspace/dock layout from a react-resizable-panels map. */
+export function dockLayoutFromGroupLayout(
+  layout: Layout,
+): WorkspaceDockLayout | null {
+  const main = layout.main;
+  const dock = layout.dock;
+  if (typeof main !== "number" || typeof dock !== "number") {
+    return null;
+  }
+  const candidate = { main, dock };
+  return validateDockLayout(candidate) ? candidate : null;
+}
+
+function readDockTab(value: unknown): WorkspaceDockTab {
+  return value === "output" || value === "logs" ? value : "locator";
 }
 
 function parseStoredMap(raw: string): StoredMap {
@@ -118,11 +164,18 @@ function readEntry(entry: unknown): WorkspaceLayoutState | null {
   if (!validatePanelLayout(e.layout)) {
     return null;
   }
+  const dockLayout =
+    e.dockLayout && validateDockLayout(e.dockLayout)
+      ? e.dockLayout
+      : { ...DEFAULT_DOCK_LAYOUT };
   return {
     version: 1,
     layout: e.layout,
+    dockLayout,
     gherkinCollapsed: Boolean(e.gherkinCollapsed),
     filesCollapsed: Boolean(e.filesCollapsed),
+    dockExpanded: Boolean(e.dockExpanded),
+    dockActiveTab: readDockTab(e.dockActiveTab),
     lastUsed:
       typeof e.lastUsed === "number" && Number.isFinite(e.lastUsed)
         ? e.lastUsed
@@ -176,8 +229,11 @@ export function loadWorkspaceLayout(
   return {
     version: 1,
     layout: entry.layout,
+    dockLayout: entry.dockLayout,
     gherkinCollapsed: entry.gherkinCollapsed,
     filesCollapsed: entry.filesCollapsed,
+    dockExpanded: entry.dockExpanded,
+    dockActiveTab: entry.dockActiveTab,
   };
 }
 
@@ -186,15 +242,16 @@ export function loadWorkspaceLayout(
  */
 export function saveWorkspaceLayout(
   projectRoot: string,
-  state: Omit<WorkspaceLayoutState, "lastUsed" | "version"> & {
-    layout: WorkspacePanelLayout;
-  },
+  state: Partial<Omit<WorkspaceLayoutState, "lastUsed" | "version">>,
   backend: LayoutStorageBackend | null = defaultBackend(),
 ): void {
   if (!backend) {
     return;
   }
-  if (!validatePanelLayout(state.layout)) {
+  if (state.layout && !validatePanelLayout(state.layout)) {
+    return;
+  }
+  if (state.dockLayout && !validateDockLayout(state.dockLayout)) {
     return;
   }
   const key = normalizeProjectKey(projectRoot);
@@ -207,11 +264,28 @@ export function saveWorkspaceLayout(
   } catch {
     return;
   }
+  const existing = readEntry(map[key]);
+  const base: Omit<WorkspaceLayoutState, "version" | "lastUsed"> = existing
+    ? {
+        layout: existing.layout,
+        dockLayout: existing.dockLayout,
+        gherkinCollapsed: existing.gherkinCollapsed,
+        filesCollapsed: existing.filesCollapsed,
+        dockExpanded: existing.dockExpanded,
+        dockActiveTab: existing.dockActiveTab,
+      }
+    : {
+        layout: { ...DEFAULT_PANEL_LAYOUT },
+        dockLayout: { ...DEFAULT_DOCK_LAYOUT },
+        gherkinCollapsed: false,
+        filesCollapsed: false,
+        dockExpanded: false,
+        dockActiveTab: "locator",
+      };
   map[key] = {
     version: 1,
-    layout: state.layout,
-    gherkinCollapsed: state.gherkinCollapsed,
-    filesCollapsed: state.filesCollapsed,
+    ...base,
+    ...state,
     lastUsed: Date.now(),
   };
   map = pruneMap(map);
@@ -229,4 +303,13 @@ export function defaultLayoutForProject(projectRoot: string): Layout {
     return { ...saved.layout };
   }
   return { ...DEFAULT_PANEL_LAYOUT };
+}
+
+/** Vertical layout map for the workspace/dock `Group` `defaultLayout`. */
+export function defaultDockLayoutForProject(projectRoot: string): Layout {
+  const saved = loadWorkspaceLayout(projectRoot);
+  if (saved) {
+    return { ...saved.dockLayout };
+  }
+  return { ...DEFAULT_DOCK_LAYOUT };
 }

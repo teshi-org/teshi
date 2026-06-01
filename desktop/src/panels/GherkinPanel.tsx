@@ -1,4 +1,5 @@
 import type { HighlightSpan } from "../types";
+import type { StepBindingStatus } from "../locatorTypes";
 import { PanelCollapseButton } from "./PanelCollapseButton";
 
 const kindClass: Record<string, string> = {
@@ -40,9 +41,17 @@ function SpanLine({ spans }: { spans: HighlightSpan[] }) {
   );
 }
 
+function StepStatusBadge({ status }: { status?: StepBindingStatus }) {
+  const value = status?.status ?? "unbound";
+  const label =
+    value === "confirmed" ? "bound" : value === "pending" ? "pending" : "unbound";
+  return <span className={`step-binding-badge step-binding-badge--${value}`}>{label}</span>;
+}
+
 interface Props {
   relativePath: string | null;
   payload: import("../types").FeatureRenderPayload | null;
+  stepBindingStatuses: Record<number, StepBindingStatus>;
   selectedScenarioLine: number | null;
   selectedStepLine: number | null;
   onSelectScenario: (line: number) => void;
@@ -56,6 +65,7 @@ interface Props {
 export function GherkinPanel({
   relativePath,
   payload,
+  stepBindingStatuses,
   selectedScenarioLine,
   selectedStepLine,
   onSelectScenario,
@@ -107,11 +117,18 @@ export function GherkinPanel({
                   <div key={idx} className="background-block">
                     <h3>Background</h3>
                     {block.steps.map((step) => (
-                      <div key={step.line_number} className="step-line">
+                      <div
+                        key={step.line_number}
+                        className={`step-line ${
+                          selectedStepLine === step.line_number ? "selected" : ""
+                        }`}
+                        onClick={() => onSelectStep(step.line_number)}
+                      >
                         <span className={stepClassFor(step.keyword_kind)}>
                           {step.keyword}
                         </span>{" "}
                         {step.text}
+                        <StepStatusBadge status={stepBindingStatuses[step.line_number]} />
                       </div>
                     ))}
                   </div>
@@ -152,6 +169,7 @@ export function GherkinPanel({
                           {step.keyword}
                         </span>{" "}
                         {step.text}
+                        <StepStatusBadge status={stepBindingStatuses[step.line_number]} />
                       </div>
                     ))}
                   </div>

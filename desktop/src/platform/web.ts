@@ -1,5 +1,5 @@
 import type { FeatureRenderPayload } from "../types";
-import type { ActiveStep, PendingLocator } from "../locatorTypes";
+import type { ActiveStep, PendingLocator, StepBindingStatus } from "../locatorTypes";
 import type { DirEntry } from "../types";
 import type { TeshiRuntimeApi } from "./types";
 
@@ -107,6 +107,11 @@ export const webRuntime: TeshiRuntimeApi = {
     return apiFetch<PendingLocator | null>("/locator/pending");
   },
 
+  async getStepBindingStatuses(featurePath: string) {
+    const q = new URLSearchParams({ feature_path: featurePath });
+    return apiFetch<StepBindingStatus[]>(`/steps/statuses?${q}`);
+  },
+
   async getActiveStep() {
     return apiFetch<ActiveStep | null>("/locator/active-step");
   },
@@ -170,6 +175,13 @@ export const webRuntime: TeshiRuntimeApi = {
         body: JSON.stringify({ data }),
       }),
     );
+  },
+
+  async highlightLocator(selector: string) {
+    await apiFetch<void>("/locator/highlight", {
+      method: "POST",
+      body: JSON.stringify({ selector }),
+    });
   },
 
   async confirmLocator(candidateRank: number, editedValue: string | null) {

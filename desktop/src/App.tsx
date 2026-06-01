@@ -1,6 +1,14 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
+import {
+  Group,
+  Panel,
+  Separator,
+  useGroupRef,
+  usePanelRef,
+  type Layout,
+} from "react-resizable-panels";
 import { Toaster, toast } from "sonner";
 import { AppChrome } from "./chrome/AppChrome";
 import { ProjectProvider, useProject } from "./context/ProjectContext";
@@ -8,13 +16,42 @@ import { getRuntime, isTauriHost } from "./platform";
 import { WelcomeScreen } from "./panels/WelcomeScreen";
 import { ResizableWorkspace } from "./panels/ResizableWorkspace";
 import { BottomDock } from "./panels/BottomDock";
+import {
+  defaultDockLayoutForProject,
+  dockLayoutFromGroupLayout,
+  loadWorkspaceLayout,
+  saveWorkspaceLayout,
+} from "./layout/workspaceLayoutStorage";
 import type { BrowserError, FeatureRenderPayload } from "./types";
 import type { ActiveStep, PendingLocator } from "./locatorTypes";
+
+const SAVE_DEBOUNCE_MS = 150;
 
 function AppShell() {
   const { state, dispatch } = useProject();
   const [browserError, setBrowserError] = useState<string | null>(null);
   const [browserHint, setBrowserHint] = useState<string | null>(null);
+  const selectedFeatureRelativePath = state.featurePayload?.relative_path ?? null;
+  const browserFullscreen = state.layoutMode === "browserFullscreen";
+  const dockGroupRef = useGroupRef();
+  const dockPanelRef = usePanelRef();
+  const dockSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const skipNextDockPersistRef = useRef(false);
+  const dockExpandedRef = useRef(state.dockExpanded);
+  const dockActiveTabRef = useRef(state.dockActiveTab);
+
+  const refreshStepStatuses = useCallback(
+    async (featurePath: string | null) => {
+      if (!featurePath) return;
+      try {
+        const statuses = await getRuntime().getStepBindingStatuses(featurePath);
+        dispatch({ type: "SET_STEP_BINDING_STATUSES", statuses });
+      } catch (err) {
+        console.error("load step binding statuses failed", err);
+      }
+    },
+    [dispatch],
+  );
 
   const openProjectPath = useCallback(
     async (path: string) => {
@@ -64,6 +101,102 @@ function AppShell() {
     }
   }, [openProjectPathWithFeedback]);
 
+  const defaultDockLayout = useMemo(
+    () =>
+      state.projectRoot
+        ? defaultDockLayoutForProject(state.projectRoot)
+        : { main: 75, dock: 25 },
+    [state.projectRoot],
+  );
+
+  useEffect(() => {
+    dockExpandedRef.current = state.dockExpanded;
+  }, [state.dockExpanded]);
+
+  useEffect(() => {
+    dockActiveTabRef.current = state.dockActiveTab;
+  }, [state.dockActiveTab]);
+
+  useEffect(() => {
+    if (!state.projectRoot) {
+      return;
+    }
+    const saved = loadWorkspaceLayout(state.projectRoot);
+    skipNextDockPersistRef.current = true;
+    dispatch({
+      type: "RESTORE_DOCK",
+      expanded: saved?.dockExpanded ?? false,
+      activeTab: saved?.dockActiveTab ?? "locator",
+    });
+  }, [dispatch, state.projectRoot]);
+
+  useEffect(() => {
+    if (!state.projectRoot || browserFullscreen) {
+      return;
+    }
+    requestAnimationFrame(() => {
+      if (state.dockExpanded) {
+        dockPanelRef.current?.expand();
+      } else {
+        dockPanelRef.current?.collapse();
+      }
+    });
+  }, [browserFullscreen, dockPanelRef, state.dockExpanded, state.projectRoot]);
+
+  useEffect(() => {
+    if (!state.projectRoot) {
+      return;
+    }
+    if (skipNextDockPersistRef.current) {
+      skipNextDockPersistRef.current = false;
+      return;
+    }
+    saveWorkspaceLayout(state.projectRoot, {
+      dockExpanded: state.dockExpanded,
+      dockActiveTab: state.dockActiveTab,
+    });
+  }, [state.dockActiveTab, state.dockExpanded, state.projectRoot]);
+
+  const persistDockLayout = useCallback(
+    (layout: Layout) => {
+      if (!state.projectRoot) {
+        return;
+      }
+      const dockLayout = dockLayoutFromGroupLayout(layout);
+      if (!dockLayout) {
+        return;
+      }
+      saveWorkspaceLayout(state.projectRoot, {
+        dockLayout,
+        dockExpanded: dockExpandedRef.current,
+        dockActiveTab: dockActiveTabRef.current,
+      });
+    },
+    [state.projectRoot],
+  );
+
+  const scheduleDockPersist = useCallback(
+    (layout: Layout) => {
+      if (dockSaveTimerRef.current) {
+        clearTimeout(dockSaveTimerRef.current);
+      }
+      dockSaveTimerRef.current = setTimeout(() => {
+        persistDockLayout(layout);
+        dockSaveTimerRef.current = null;
+      }, SAVE_DEBOUNCE_MS);
+    },
+    [persistDockLayout],
+  );
+
+  useEffect(
+    () => () => {
+      if (dockSaveTimerRef.current) {
+        clearTimeout(dockSaveTimerRef.current);
+      }
+    },
+    [],
+  );
+
   useEffect(() => {
     const runtime = getRuntime();
     void runtime.finalizeMainWindow?.().catch((err) => {
@@ -92,6 +225,9 @@ function AppShell() {
     void runtime
       .onEvent<PendingLocator | null>("pending-locator-changed", (pending) => {
         dispatch({ type: "SET_PENDING_LOCATOR", pending: pending ?? null });
+        void refreshStepStatuses(
+          pending?.step_ref.feature_relative_path ?? selectedFeatureRelativePath,
+        );
         if (pending?.status === "pending") {
           toast.info("Locator proposal ready for review");
           dispatch({ type: "SET_DOCK_TAB", tab: "locator" });
@@ -105,6 +241,7 @@ function AppShell() {
     void runtime
       .onEvent<FeatureRenderPayload>("feature-refreshed", (payload) => {
         dispatch({ type: "REFRESH_FEATURE", payload });
+        void refreshStepStatuses(payload.relative_path);
       })
       .then((u) => unsubs.push(u));
 
@@ -147,7 +284,7 @@ function AppShell() {
       unlistenClose?.();
       unsubs.forEach((u) => u());
     };
-  }, [dispatch, openProjectPathWithFeedback]);
+  }, [dispatch, openProjectPathWithFeedback, refreshStepStatuses, selectedFeatureRelativePath]);
 
   const syncActiveStep = useCallback(
     async (stepLine: number) => {
@@ -171,6 +308,7 @@ function AppShell() {
   const openFeature = async (path: string) => {
     const payload = await getRuntime().renderFeature(path);
     dispatch({ type: "SET_FEATURE", path, payload });
+    void refreshStepStatuses(payload.relative_path);
   };
 
   const startBrowserMode = async (mode: "embedded" | "chrome") => {
@@ -204,8 +342,6 @@ function AppShell() {
     await getRuntime().stopBrowserSidecar();
     dispatch({ type: "SET_BROWSER", wsUrl: null, running: false, mode: null });
   };
-
-  const browserFullscreen = state.layoutMode === "browserFullscreen";
 
   useEffect(() => {
     if (!state.projectRoot || !browserFullscreen) return;
@@ -241,57 +377,83 @@ function AppShell() {
     );
   }
 
+  const workspacePanel = (
+    <ResizableWorkspace
+      browserFullscreen={browserFullscreen}
+      projectRoot={state.projectRoot}
+      featurePayload={state.featurePayload}
+      stepBindingStatuses={state.stepBindingStatuses}
+      selectedScenarioLine={state.selectedScenarioLine}
+      selectedStepLine={state.selectedStepLine}
+      browserWsUrl={state.browserWsUrl}
+      browserRunning={state.browserRunning}
+      browserMode={state.browserMode}
+      browserError={browserError}
+      browserHint={browserHint}
+      rightTab={state.rightTab}
+      onSelectScenario={(line) => dispatch({ type: "SELECT_SCENARIO", line })}
+      onSelectStep={(line) => {
+        dispatch({ type: "SELECT_STEP", line });
+        if (line !== null) {
+          void syncActiveStep(line);
+        }
+      }}
+      onConnectChrome={() => void startBrowserMode("chrome")}
+      onStartEmbedded={() => void startBrowserMode("embedded")}
+      onStopBrowser={() => void stopBrowser()}
+      onToggleBrowserFullscreen={() =>
+        dispatch({
+          type: "SET_LAYOUT_MODE",
+          mode: browserFullscreen ? "normal" : "browserFullscreen",
+        })
+      }
+      onRightTabChange={(tab) => dispatch({ type: "SET_TAB", tab })}
+      onOpenFeature={(path) => void openFeature(path)}
+    />
+  );
+
   return (
     <div className="app-shell">
       <AppChrome {...chromeProps} />
-      <div className="workspace">
-        <ResizableWorkspace
-          browserFullscreen={browserFullscreen}
-          projectRoot={state.projectRoot}
-          featurePayload={state.featurePayload}
-          selectedScenarioLine={state.selectedScenarioLine}
-          selectedStepLine={state.selectedStepLine}
-          browserWsUrl={state.browserWsUrl}
-          browserRunning={state.browserRunning}
-          browserMode={state.browserMode}
-          browserError={browserError}
-          browserHint={browserHint}
-          rightTab={state.rightTab}
-          onSelectScenario={(line) =>
-            dispatch({ type: "SELECT_SCENARIO", line })
-          }
-          onSelectStep={(line) => {
-            dispatch({ type: "SELECT_STEP", line });
-            if (line !== null) {
-              void syncActiveStep(line);
-            }
-          }}
-          onConnectChrome={() => void startBrowserMode("chrome")}
-          onStartEmbedded={() => void startBrowserMode("embedded")}
-          onStopBrowser={() => void stopBrowser()}
-          onToggleBrowserFullscreen={() =>
-            dispatch({
-              type: "SET_LAYOUT_MODE",
-              mode: browserFullscreen ? "normal" : "browserFullscreen",
-            })
-          }
-          onRightTabChange={(tab) => dispatch({ type: "SET_TAB", tab })}
-          onOpenFeature={(path) => void openFeature(path)}
-        />
-        {!browserFullscreen && (
-          <BottomDock
-            expanded={state.dockExpanded}
-            activeTab={state.dockActiveTab}
-            activeStep={state.activeStep}
-            pendingLocator={state.pendingLocator}
-            onToggle={() => dispatch({ type: "TOGGLE_DOCK" })}
-            onTabChange={(tab) => dispatch({ type: "SET_DOCK_TAB", tab })}
-            onPendingChange={(pending) =>
-              dispatch({ type: "SET_PENDING_LOCATOR", pending })
-            }
-          />
-        )}
-      </div>
+      {browserFullscreen ? (
+        <div className="workspace">{workspacePanel}</div>
+      ) : (
+        <Group
+          key={state.projectRoot}
+          id="teshi-workspace-dock-layout"
+          orientation="vertical"
+          className="workspace"
+          groupRef={dockGroupRef}
+          defaultLayout={defaultDockLayout}
+          onLayoutChanged={scheduleDockPersist}
+        >
+          <Panel id="main" defaultSize={defaultDockLayout.main} minSize={200}>
+            {workspacePanel}
+          </Panel>
+          <Separator className="resize-handle resize-handle--horizontal" />
+          <Panel
+            id="dock"
+            collapsible
+            collapsedSize="33px"
+            panelRef={dockPanelRef}
+            defaultSize={defaultDockLayout.dock}
+            minSize={120}
+          >
+            <BottomDock
+              expanded={state.dockExpanded}
+              activeTab={state.dockActiveTab}
+              activeStep={state.activeStep}
+              pendingLocator={state.pendingLocator}
+              onToggle={() => dispatch({ type: "TOGGLE_DOCK" })}
+              onTabChange={(tab) => dispatch({ type: "SET_DOCK_TAB", tab })}
+              onPendingChange={(pending) => {
+                dispatch({ type: "SET_PENDING_LOCATOR", pending });
+                void refreshStepStatuses(selectedFeatureRelativePath);
+              }}
+            />
+          </Panel>
+        </Group>
+      )}
       <Toaster theme="dark" />
     </div>
   );

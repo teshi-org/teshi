@@ -164,6 +164,12 @@ fn main() -> Result<()> {
             );
             return runner::run_with_options(opts);
         }
+        Some(cli::Command::Steps { action }) => {
+            return cli::steps::handle_steps_command(&action);
+        }
+        Some(cli::Command::Browser { action }) => {
+            return cli::browser::handle_browser_command(&action);
+        }
         None => {}
     }
 

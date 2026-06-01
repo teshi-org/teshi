@@ -15,10 +15,10 @@ use crate::cli::DesktopCli;
 use crate::commands::{
     abandon_pending_locator_cmd, check_project_switch_allowed_cmd, confirm_locator_cmd,
     confirm_teardown, get_active_step_cmd, get_pending_locator_cmd, get_project_root,
-    get_recent_projects_cmd, list_dir, open_project, open_project_dir, reject_locator_cmd,
-    render_feature_cmd, resize_terminal, set_browser_active_cmd, set_terminal_active_cmd,
-    spawn_terminal, start_browser_sidecar, stop_browser_sidecar, stop_terminal,
-    sync_active_step_cmd, teardown_runtime, write_terminal,
+    get_recent_projects_cmd, get_step_binding_statuses_cmd, highlight_locator_cmd, list_dir,
+    open_project, open_project_dir, reject_locator_cmd, render_feature_cmd, resize_terminal,
+    set_browser_active_cmd, set_terminal_active_cmd, spawn_terminal, start_browser_sidecar,
+    stop_browser_sidecar, stop_terminal, sync_active_step_cmd, teardown_runtime, write_terminal,
 };
 use crate::window_state::{
     take_legacy_window_size_from_settings, PendingLegacyWindowSize, PERSISTED_STATE_FLAGS,
@@ -59,8 +59,10 @@ pub fn run() {
             sync_active_step_cmd,
             get_active_step_cmd,
             get_pending_locator_cmd,
+            get_step_binding_statuses_cmd,
             confirm_locator_cmd,
             reject_locator_cmd,
+            highlight_locator_cmd,
             abandon_pending_locator_cmd,
             start_browser_sidecar,
             stop_browser_sidecar,

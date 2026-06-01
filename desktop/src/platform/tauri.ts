@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import type { FeatureRenderPayload } from "../types";
-import type { ActiveStep, PendingLocator } from "../locatorTypes";
+import type { ActiveStep, PendingLocator, StepBindingStatus } from "../locatorTypes";
 import type { DirEntry } from "../types";
 import type { TeshiRuntimeApi } from "./types";
 
@@ -39,6 +39,12 @@ export const tauriRuntime: TeshiRuntimeApi = {
 
   async getPendingLocator() {
     return invoke<PendingLocator | null>("get_pending_locator_cmd");
+  },
+
+  async getStepBindingStatuses(featurePath: string) {
+    return invoke<StepBindingStatus[]>("get_step_binding_statuses_cmd", {
+      featurePath,
+    });
   },
 
   async getActiveStep() {
@@ -85,6 +91,10 @@ export const tauriRuntime: TeshiRuntimeApi = {
 
   async writeTerminal(data: string) {
     await invoke("write_terminal", { data });
+  },
+
+  async highlightLocator(selector: string) {
+    await invoke("highlight_locator_cmd", { selector });
   },
 
   async confirmLocator(candidateRank: number, editedValue: string | null) {

@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import base64
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -19,6 +20,29 @@ DEFAULT_DISCOVERY_PORT = 17373
 HEARTBEAT_TTL_SEC = 8.0
 EXTENSION_FRAME_WS_PATH = "/extension/frames"
 FRAME_MAGIC = b"TSH1"
+
+
+def debug_enabled() -> bool:
+    """Return true when verbose browser bridge diagnostics should be persisted."""
+    return bool(str(os.environ.get("TESHI_BROWSER_DEBUG", "")).strip())
+
+
+def debug_log(project_root: Path | None, event: str, payload: dict[str, Any]) -> None:
+    """Append one JSONL diagnostic record under `.teshi/logs` when enabled."""
+    if project_root is None or not debug_enabled():
+        return
+    try:
+        log_dir = project_root / ".teshi" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": time.time(),
+            "event": event,
+            **payload,
+        }
+        with (log_dir / "browser-bridge.log").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        return
 
 
 def paths_equal(got: str, expected: Path) -> bool:
@@ -59,6 +83,15 @@ INTERACTIVE_EVAL = f"""() => {{
     classes: el.className || null,
   }}));
 }}"""
+
+EXECUTE_ACTIONS = {
+    "click",
+    "fill",
+    "assert_visible",
+    "assert_text",
+    "select",
+    "press_key",
+}
 
 
 def normalize_snapshot(
@@ -246,6 +279,59 @@ class EmbeddedSession:
             "bounding_box": box,
         }
 
+    async def execute_locator(
+        self,
+        selector: str,
+        action: str,
+        value: str | None = None,
+        timeout_ms: int = 5000,
+    ) -> dict[str, Any]:
+        if self.page is None:
+            return {"ok": False, "error": "browser not ready", "code": "browser_not_ready"}
+        if not selector:
+            return {"ok": False, "error": "selector is required", "code": "invalid_selector"}
+        if action not in EXECUTE_ACTIONS:
+            return {
+                "ok": False,
+                "error": f"unsupported action: {action}",
+                "code": "unsupported_action",
+            }
+        if action in {"fill", "assert_text", "select", "press_key"} and value is None:
+            return {
+                "ok": False,
+                "error": f"value is required for {action}",
+                "code": "missing_value",
+            }
+
+        locator = self.page.locator(selector).first()
+        try:
+            await locator.wait_for(state="visible", timeout=timeout_ms)
+            if action == "click":
+                await locator.click(timeout=timeout_ms)
+            elif action == "fill":
+                await locator.fill(value or "", timeout=timeout_ms)
+            elif action == "assert_visible":
+                pass
+            elif action == "assert_text":
+                text = await locator.inner_text(timeout=timeout_ms)
+                if (value or "") not in text:
+                    return {
+                        "ok": False,
+                        "error": "text assertion failed",
+                        "code": "assert_text_failed",
+                        "actual": text,
+                    }
+            elif action == "select":
+                await locator.select_option(value or "", timeout=timeout_ms)
+            elif action == "press_key":
+                await locator.press(value or "", timeout=timeout_ms)
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc)
+            code = "timeout" if "Timeout" in message else "execute_failed"
+            return {"ok": False, "error": message, "code": code}
+
+        return {"ok": True, "selector": selector, "action": action}
+
     async def get_page_snapshot(self) -> dict[str, Any]:
         if self.page is None:
             return {"ok": False, "error": "browser not ready"}
@@ -269,7 +355,13 @@ async def handle_embedded_command(
 
     if cmd == "navigate":
         await session.navigate(data.get("url", "about:blank"))
-        return {"type": "response", "request_id": request_id, "ok": True}
+        return {
+            "type": "response",
+            "request_id": request_id,
+            "cmd": "navigate",
+            "ok": True,
+            "url": session.current_url(),
+        }
 
     if cmd == "highlight_selector":
         result = await session.highlight_selector(data.get("selector", ""))
@@ -282,6 +374,15 @@ async def handle_embedded_command(
     if cmd == "get_page_snapshot":
         snapshot = await session.get_page_snapshot()
         return {"type": "response", "request_id": request_id, **snapshot}
+
+    if cmd == "execute_locator":
+        result = await session.execute_locator(
+            str(data.get("selector", "")),
+            str(data.get("action", "")),
+            data.get("value"),
+            int(data.get("timeout_ms", 5000) or 5000),
+        )
+        return {"type": "response", "request_id": request_id, **result}
 
     return {
         "type": "response",
@@ -327,7 +428,26 @@ async def run_embedded(
                 except json.JSONDecodeError:
                     continue
                 if "cmd" in data:
+                    debug_log(
+                        project_root,
+                        "embedded_command_start",
+                        {
+                            "cmd": data.get("cmd"),
+                            "request_id": data.get("request_id"),
+                            "url": data.get("url"),
+                        },
+                    )
                     reply = await handle_embedded_command(session, data)
+                    debug_log(
+                        project_root,
+                        "embedded_command_end",
+                        {
+                            "cmd": data.get("cmd"),
+                            "request_id": data.get("request_id"),
+                            "ok": reply.get("ok"),
+                            "error": reply.get("error"),
+                        },
+                    )
                     await websocket.send(json.dumps(reply))
                     if (
                         project_root is not None
@@ -432,6 +552,9 @@ class ChromeBridge:
             extension_connected=self.extension_alive(),
             extension_frame_ws_url=self.extension_frame_ws_url,
         )
+
+    def debug_log(self, event: str, payload: dict[str, Any]) -> None:
+        debug_log(self.project_root, event, payload)
 
     async def handle_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
         got = str(payload.get("project_root", ""))
@@ -570,10 +693,24 @@ class ChromeBridge:
             fut = self._pending.pop(str(request_id), None)
             if fut and not fut.done():
                 fut.set_result(payload)
-            if payload.get("cmd") == "get_page_snapshot" and payload.get("ok"):
+            if payload.get("cmd") in {
+                "get_page_snapshot",
+                "navigate",
+                "activate_tab",
+            } and payload.get("ok"):
                 self.page_url = str(payload.get("url", self.page_url))
                 self.page_title = str(payload.get("title", self.page_title))
                 self.write_endpoint()
+            self.debug_log(
+                "extension_response",
+                {
+                    "cmd": payload.get("cmd"),
+                    "request_id": request_id,
+                    "ok": payload.get("ok"),
+                    "url": payload.get("url"),
+                    "error": payload.get("error"),
+                },
+            )
         return {"ok": True}
 
     def queue_command_front(self, cmd: str, **fields: Any) -> str:
@@ -620,7 +757,25 @@ class ChromeBridge:
 
     async def forward_command(self, data: dict[str, Any]) -> dict[str, Any]:
         request_id = str(data.get("request_id") or "")
+        started = time.monotonic()
+        self.debug_log(
+            "chrome_command_start",
+            {
+                "cmd": data.get("cmd"),
+                "request_id": request_id,
+                "selector": data.get("selector"),
+                "url": data.get("url"),
+            },
+        )
         if not self.extension_alive():
+            self.debug_log(
+                "chrome_command_error",
+                {
+                    "cmd": data.get("cmd"),
+                    "request_id": request_id,
+                    "error": "extension_not_connected",
+                },
+            )
             return {
                 "type": "response",
                 "request_id": request_id,
@@ -642,14 +797,40 @@ class ChromeBridge:
             "selector": data.get("selector"),
             "url": data.get("url"),
         }
+        for field in ("action", "value", "timeout_ms"):
+            if data.get(field) is not None:
+                queued[field] = data.get(field)
         if data.get("tab_id") is not None:
             queued["tab_id"] = data.get("tab_id")
-        self._cmd_queue.append(queued)
+        cmd_name = str(data.get("cmd") or "")
+        if cmd_name in ("get_page_snapshot", "highlight_selector"):
+            self._cmd_queue.insert(0, queued)
+        else:
+            self._cmd_queue.append(queued)
         try:
-            return await asyncio.wait_for(fut, timeout=45.0)
+            result = await asyncio.wait_for(fut, timeout=45.0)
+            self.debug_log(
+                "chrome_command_end",
+                {
+                    "cmd": data.get("cmd"),
+                    "request_id": request_id,
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                    "ok": result.get("ok"),
+                    "error": result.get("error"),
+                },
+            )
+            return result
         except asyncio.TimeoutError:
             self._pending.pop(request_id, None)
             self._cmd_queue = [c for c in self._cmd_queue if c.get("request_id") != request_id]
+            self.debug_log(
+                "chrome_command_timeout",
+                {
+                    "cmd": data.get("cmd"),
+                    "request_id": request_id,
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                },
+            )
             return {
                 "type": "response",
                 "request_id": request_id,

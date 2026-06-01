@@ -976,13 +976,11 @@ export function BrowserPanel({
             >
               <div
                 ref={scalerRef}
-                className="browser-frame-scaler"
+                className={`browser-frame-scaler${zoom > 1 ? " browser-frame-scaler--zoomed" : ""}`}
                 style={
-                  isChrome
-                    ? { width: "100%", height: "100%" }
-                    : fitSize.fitW > 0 && fitSize.fitH > 0
-                      ? { width: displayW, height: displayH }
-                      : { width: "100%", height: "100%" }
+                  fitSize.fitW > 0 && fitSize.fitH > 0
+                    ? { width: displayW, height: displayH }
+                    : { width: "100%", height: "100%" }
                 }
               >
                 {streamError && (

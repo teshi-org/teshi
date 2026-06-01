@@ -9,13 +9,14 @@ use teshi_gherkin::FeatureRenderPayload;
 use teshi_runtime::{
     abandon_pending_locator, check_project_switch_allowed, confirm_locator, get_active_step,
     get_pending_locator, get_project_root as runtime_project_root, get_recent_projects,
-    list_dir as runtime_list_dir, open_dialog_default_dir, open_project as runtime_open_project,
-    reject_locator, render_feature as runtime_render_feature, resize_terminal as runtime_resize,
-    set_browser_active, set_terminal_active, spawn_terminal as runtime_spawn_terminal,
-    start_browser_sidecar as runtime_start_browser, stop_browser_sidecar as runtime_stop_browser,
+    highlight_locator, list_dir as runtime_list_dir, open_dialog_default_dir,
+    open_project as runtime_open_project, reject_locator, render_feature as runtime_render_feature,
+    resize_terminal as runtime_resize, set_browser_active, set_terminal_active,
+    spawn_terminal as runtime_spawn_terminal, start_browser_sidecar as runtime_start_browser,
+    step_binding_statuses, stop_browser_sidecar as runtime_stop_browser,
     stop_terminal as runtime_stop_terminal, sync_active_step, teardown_runtime as runtime_teardown,
     write_terminal as runtime_write_terminal, ActiveStep, BrowserError, BrowserMode,
-    BrowserStartResult, DirEntry, PendingLocator, TeshiRuntime,
+    BrowserStartResult, DirEntry, PendingLocator, StepBindingStatus, TeshiRuntime,
 };
 
 #[tauri::command]
@@ -70,6 +71,21 @@ pub fn get_pending_locator_cmd(
 }
 
 #[tauri::command]
+pub fn get_step_binding_statuses_cmd(
+    rt: State<'_, Arc<TeshiRuntime>>,
+    feature_path: String,
+) -> Result<Vec<StepBindingStatus>, String> {
+    let project_root = rt
+        .project
+        .root
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "no project open".to_string())?;
+    step_binding_statuses(&project_root, &feature_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn confirm_locator_cmd(
     rt: State<'_, Arc<TeshiRuntime>>,
     candidate_rank: u32,
@@ -81,6 +97,14 @@ pub async fn confirm_locator_cmd(
 #[tauri::command]
 pub async fn reject_locator_cmd(rt: State<'_, Arc<TeshiRuntime>>) -> Result<(), String> {
     reject_locator(&rt).await
+}
+
+#[tauri::command]
+pub async fn highlight_locator_cmd(
+    rt: State<'_, Arc<TeshiRuntime>>,
+    selector: String,
+) -> Result<(), String> {
+    highlight_locator(&rt, selector).await
 }
 
 #[tauri::command]

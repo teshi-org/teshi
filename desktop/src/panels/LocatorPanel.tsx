@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { getRuntime } from "../platform";
 import type { ActiveStep, PendingLocator } from "../locatorTypes";
@@ -17,6 +17,16 @@ export function LocatorPanel({
   const [selectedRank, setSelectedRank] = useState<number>(1);
   const [editedValue, setEditedValue] = useState("");
   const [editMode, setEditMode] = useState(false);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(
+    () => () => {
+      if (highlightTimerRef.current) {
+        clearTimeout(highlightTimerRef.current);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     if (pending?.candidates.length) {
@@ -35,6 +45,21 @@ export function LocatorPanel({
     (pending.step_ref.step_line !== activeStep.step_line ||
       pending.step_ref.feature_relative_path !== activeStep.feature_relative_path);
 
+  const scheduleHighlight = useCallback((selector: string) => {
+    if (highlightTimerRef.current) {
+      clearTimeout(highlightTimerRef.current);
+    }
+    highlightTimerRef.current = setTimeout(() => {
+      highlightTimerRef.current = null;
+      void getRuntime()
+        .highlightLocator(selector)
+        .catch((e) => {
+          console.warn("highlight locator failed", e);
+          toast.error(String(e));
+        });
+    }, 150);
+  }, []);
+
   const onAccept = useCallback(async () => {
     if (!pending) return;
     try {
@@ -42,7 +67,7 @@ export function LocatorPanel({
         selectedRank,
         editMode ? editedValue : null,
       );
-      toast.success("Locator saved to .locators.md");
+      toast.success("Locator saved to step-bindings");
       onPendingChange(null);
     } catch (e) {
       toast.error(String(e));
@@ -106,6 +131,7 @@ export function LocatorPanel({
                     onChange={() => {
                       setSelectedRank(candidate.rank);
                       setEditedValue(candidate.value);
+                      scheduleHighlight(candidate.value);
                     }}
                   />
                   <span className="locator-candidate-body">
@@ -135,7 +161,7 @@ export function LocatorPanel({
 
           <div className="locator-actions">
             <button type="button" className="primary" onClick={() => void onAccept()}>
-              Accept
+              Confirm
             </button>
             <button type="button" onClick={() => setEditMode((v) => !v)}>
               {editMode ? "Cancel Edit" : "Edit"}

@@ -16,10 +16,11 @@ use serde_json::json;
 use teshi_gherkin::FeatureRenderPayload;
 use teshi_runtime::{
     check_project_switch_allowed, confirm_locator, get_active_step, get_pending_locator,
-    get_recent_projects, list_dir, open_project, reject_locator, render_feature, resize_terminal,
-    spawn_terminal, start_browser_sidecar, stop_browser_sidecar, sync_active_step,
-    teardown_runtime, write_terminal, ActiveStep, BrowserError, BrowserMode, BrowserStartResult,
-    DirEntry, PendingLocator, RuntimeEvent, TeshiRuntime,
+    get_recent_projects, highlight_locator, list_dir, open_project, reject_locator, render_feature,
+    resize_terminal, spawn_terminal, start_browser_sidecar, step_binding_statuses,
+    stop_browser_sidecar, sync_active_step, teardown_runtime, write_terminal, ActiveStep,
+    BrowserError, BrowserMode, BrowserStartResult, DirEntry, PendingLocator, RuntimeEvent,
+    StepBindingStatus, TeshiRuntime,
 };
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
@@ -44,8 +45,10 @@ pub async fn run_server(addr: SocketAddr, rt: SharedRuntime, dist: PathBuf) -> R
         .route("/api/v1/locator/sync-step", post(api_sync_step))
         .route("/api/v1/locator/active-step", get(api_active_step))
         .route("/api/v1/locator/pending", get(api_pending_locator))
+        .route("/api/v1/steps/statuses", get(api_step_statuses))
         .route("/api/v1/locator/confirm", post(api_confirm_locator))
         .route("/api/v1/locator/reject", post(api_reject_locator))
+        .route("/api/v1/locator/highlight", post(api_highlight_locator))
         .route("/api/v1/browser/start", post(api_browser_start))
         .route("/api/v1/browser/stop", post(api_browser_stop))
         .route("/api/v1/terminal/spawn", post(api_terminal_spawn))
@@ -173,6 +176,27 @@ async fn api_pending_locator(
 }
 
 #[derive(Deserialize)]
+struct StepStatusesQuery {
+    feature_path: String,
+}
+
+async fn api_step_statuses(
+    State(rt): State<SharedRuntime>,
+    Query(q): Query<StepStatusesQuery>,
+) -> Result<Json<Vec<StepBindingStatus>>, ApiError> {
+    let project_root = rt
+        .project
+        .root
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "no project open".to_string())?;
+    Ok(Json(
+        step_binding_statuses(&project_root, &q.feature_path).map_err(|e| e.to_string())?,
+    ))
+}
+
+#[derive(Deserialize)]
 struct ConfirmBody {
     candidate_rank: u32,
     #[serde(default)]
@@ -189,6 +213,19 @@ async fn api_confirm_locator(
 
 async fn api_reject_locator(State(rt): State<SharedRuntime>) -> Result<StatusCode, ApiError> {
     reject_locator(&rt).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct HighlightLocatorBody {
+    selector: String,
+}
+
+async fn api_highlight_locator(
+    State(rt): State<SharedRuntime>,
+    Json(body): Json<HighlightLocatorBody>,
+) -> Result<StatusCode, ApiError> {
+    highlight_locator(&rt, body.selector).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

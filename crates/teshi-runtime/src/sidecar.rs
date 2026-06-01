@@ -110,9 +110,20 @@ pub struct BrowserError {
 }
 
 /// Sends a one-shot command to the browser sidecar WebSocket and waits for a response.
+///
+/// Uses a 10-second read deadline when `timeout` is omitted.
 pub fn send_sidecar_command(
     ws_url: &str,
     command: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    send_sidecar_command_with_timeout(ws_url, command, std::time::Duration::from_secs(10))
+}
+
+/// Sends a one-shot command and waits up to `timeout` for a typed `response` message.
+pub fn send_sidecar_command_with_timeout(
+    ws_url: &str,
+    command: serde_json::Value,
+    timeout: std::time::Duration,
 ) -> Result<serde_json::Value, String> {
     use tungstenite::{connect, Message};
 
@@ -121,7 +132,7 @@ pub fn send_sidecar_command(
         .send(Message::Text(command.to_string()))
         .map_err(|e| e.to_string())?;
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
         let message = socket.read().map_err(|e| e.to_string())?;
         if let Message::Text(text) = message {
@@ -132,7 +143,10 @@ pub fn send_sidecar_command(
             }
         }
     }
-    Err("browser sidecar did not respond in time".into())
+    let secs = timeout.as_secs();
+    Err(format!(
+        "browser sidecar did not respond within {secs}s (CLI timeout; check extension heartbeat if using Connect Chrome)"
+    ))
 }
 
 use crate::venv::{
