@@ -115,7 +115,6 @@ Full-stack releases publish the CLI, Windows desktop app, and Chrome extension u
 | `teshi-vX.Y.Z-aarch64-apple-darwin.tar.gz` | macOS ARM | `teshi` + README + LICENSE |
 | `teshi-vX.Y.Z-x86_64-pc-windows-msvc.zip` | Windows x64 | `teshi.exe` + `teshi-desktop.exe` + `share/web/` + README + LICENSE |
 | `teshi-vX.Y.Z-x64.msi` | Windows x64 | Full WiX installer: CLI + desktop + web UI under `Program Files\teshi` |
-| `teshi-desktop-vX.Y.Z-x64.msi` | Windows x64 | Tauri desktop installer |
 | `teshi-bridge-vX.Y.Z.zip` | All | Chrome extension (load unpacked) |
 | `SHA256SUMS` | All | Checksums for every archive above |
 
@@ -123,7 +122,7 @@ Workflow: [`.github/workflows/release.yml`](../.github/workflows/release.yml)
 
 WinGet submission (CLI MSI only) runs automatically when `WINGET_TOKEN` is configured. Legacy standalone workflow: [`.github/workflows/winget.yml`](../.github/workflows/winget.yml).
 
-Windows installer sources: `wix/` (CLI MSI via WiX Toolset), Tauri bundle (desktop MSI).
+Windows installer source: `wix/` (WiX Toolset).
 
 Local full MSI build (Windows, matches CI): install [WiX Toolset](https://wixtoolset.org/) and `cargo install cargo-wix --locked --version 0.3.9`, stage `staging/msi-root/bin`, `share/web`, and `share/teshi-bridge`, run `heat` on both trees into `wix/web-files.wxs` and `wix/bridge-files.wxs`, then:
 
@@ -169,7 +168,7 @@ gh run watch
 
 ### Post-release checks
 
-- `gh release view vX.Y.Z` lists 7 assets (2 tar.gz, 1 win zip, 2 msi, 1 bridge zip, SHA256SUMS)
+- `gh release view vX.Y.Z` lists 6 assets (2 tar.gz, 1 win zip, 1 msi, 1 bridge zip, SHA256SUMS)
 - Windows zip / MSI: `teshi web` and `teshi desktop` work without a separate frontend build
 - Extension zip loads in `chrome://extensions` via **Load unpacked**
 - `SHA256SUMS` verifies with `sha256sum -c SHA256SUMS` (Linux) or equivalent on other platforms

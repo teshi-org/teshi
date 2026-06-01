@@ -35,7 +35,6 @@ teshi-desktop path/to/project
 ```
 
 After installing the full Windows MSI (`teshi-vX.Y.Z-x64.msi`) or release zip, `teshi-desktop.exe` is installed next to `teshi.exe`.
-The separate `teshi-desktop-vX.Y.Z-x64.msi` installs only the Tauri shell.
 
 Development: `cargo tauri dev --manifest-path desktop/src-tauri/Cargo.toml`.
 
