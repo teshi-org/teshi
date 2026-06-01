@@ -262,15 +262,25 @@ mod tests {
     }
 
     fn home_python_name() -> &'static str {
-        if cfg!(windows) { "python.exe" } else { "python" }
+        if cfg!(windows) {
+            "python.exe"
+        } else {
+            "python"
+        }
     }
 
     #[test]
     fn resolve_uv_venv_uses_home_python_and_site_packages() {
         let dir = tempdir().unwrap();
-        let scripts = dir.path().join(if cfg!(windows) { "Scripts" } else { "bin" });
+        let scripts = dir
+            .path()
+            .join(if cfg!(windows) { "Scripts" } else { "bin" });
         fs::create_dir_all(&scripts).unwrap();
-        let shim = scripts.join(if cfg!(windows) { "python.exe" } else { "python" });
+        let shim = scripts.join(if cfg!(windows) {
+            "python.exe"
+        } else {
+            "python"
+        });
         fs::write(&shim, "").unwrap();
 
         let site = dir.path().join("Lib").join("site-packages");
@@ -310,9 +320,15 @@ mod tests {
     #[test]
     fn standard_venv_uses_shim_without_site_packages() {
         let dir = tempdir().unwrap();
-        let scripts = dir.path().join(if cfg!(windows) { "Scripts" } else { "bin" });
+        let scripts = dir
+            .path()
+            .join(if cfg!(windows) { "Scripts" } else { "bin" });
         fs::create_dir_all(&scripts).unwrap();
-        let shim = scripts.join(if cfg!(windows) { "python.exe" } else { "python" });
+        let shim = scripts.join(if cfg!(windows) {
+            "python.exe"
+        } else {
+            "python"
+        });
         fs::write(&shim, "").unwrap();
         fs::write(
             dir.path().join("pyvenv.cfg"),
