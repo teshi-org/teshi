@@ -37,8 +37,10 @@ Use your **daily Chrome** with real login sessions (SSO, cookies).
 1. Install the unpacked extension from `C:\Program Files\teshi\share\teshi-bridge` (or `extension/teshi-bridge` in repo for development; see [extension README](../extension/teshi-bridge/README.md)).
 2. Open the app under test in Chrome and select the target **tab**.
 3. In teshi-desktop, click **Connect Chrome** in the Browser panel.
-4. Wait until the panel shows **extension: connected**.
+4. Wait until the live stream appears (extension connected; check the status dot tooltip if needed).
 5. Select a Gherkin step and run the **bdd-locator** skill in the agent terminal.
+
+While waiting for the extension, the panel shows setup steps only (no stream). Once connected, the panel matches **Start Embedded** layout: full-height JPEG stream, read-only active-tab URL, and the same zoom controls. Navigate by changing tabs or URLs in Chrome (in-panel Go is not available in chrome mode).
 
 Discovery: `http://127.0.0.1:17373/v1/bridge`  
 `cdp-endpoint.json` includes `"mode": "chrome"`.

@@ -84,9 +84,9 @@ pub fn default_browser_service_script() -> PathBuf {
     let mut candidates = vec![];
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            candidates.push(exe_dir.join("resources").join("browser_service.py"));
             candidates.push(exe_dir.join("share").join("browser_service.py"));
             candidates.push(exe_dir.join("..").join("share").join("browser_service.py"));
+            candidates.push(exe_dir.join("resources").join("browser_service.py"));
         }
     }
     candidates.extend([

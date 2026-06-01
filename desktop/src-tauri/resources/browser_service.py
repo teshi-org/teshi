@@ -390,6 +390,8 @@ class ChromeBridge:
 
     async def handle_extension_response(self, payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("type") == "frame":
+            # CDP screenshot posts also imply the extension is alive.
+            self.last_heartbeat = time.monotonic()
             self.page_url = str(payload.get("url", self.page_url))
             self.page_title = str(payload.get("title", self.page_title))
             self.write_endpoint()

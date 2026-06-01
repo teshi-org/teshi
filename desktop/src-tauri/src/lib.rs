@@ -111,15 +111,8 @@ pub fn run() {
 
 fn resolve_browser_service_script(app: &mut tauri::App) -> Result<PathBuf, String> {
     let mut candidates = Vec::new();
-    let resource_path = app
-        .path()
-        .resolve(
-            "resources/browser_service.py",
-            tauri::path::BaseDirectory::Resource,
-        )
-        .map_err(|e| e.to_string())?;
-    candidates.push(resource_path);
 
+    // Installed MSI layout: share/ next to bin/ (prefer over missing bin/resources/).
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             candidates.push(exe_dir.join("share").join("browser_service.py"));
@@ -128,6 +121,15 @@ fn resolve_browser_service_script(app: &mut tauri::App) -> Result<PathBuf, Strin
             }
         }
     }
+
+    let resource_path = app
+        .path()
+        .resolve(
+            "resources/browser_service.py",
+            tauri::path::BaseDirectory::Resource,
+        )
+        .map_err(|e| e.to_string())?;
+    candidates.push(resource_path);
 
     for path in candidates {
         if path.is_file() {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { PanelCollapseButton } from "./PanelCollapseButton";
 
+// Use localhost so Tauri CSP connect-src allows discovery polling from the webview.
 const CHROME_DISCOVERY_URL = "http://127.0.0.1:17373/v1/bridge";
 
 interface ChromeBridgeInfo {
@@ -152,6 +153,11 @@ export function BrowserPanel({
   const [fitSize, setFitSize] = useState<FitSize>({ fitW: 0, fitH: 0 });
   const [dragging, setDragging] = useState(false);
   const [chromeInfo, setChromeInfo] = useState<ChromeBridgeInfo | null>(null);
+  const [chromePollError, setChromePollError] = useState<string | null>(null);
+
+  const chromeConnected = isChrome && Boolean(chromeInfo?.extension_connected);
+  const showChromeWaiting = isChrome && !chromeConnected;
+  const showViewport = isEmbedded || chromeConnected;
 
   const getZoomAnchorPoint = useCallback((): { x: number; y: number } => {
     const wrap = wrapRef.current;
@@ -209,24 +215,38 @@ export function BrowserPanel({
   }, []);
 
   useEffect(() => {
-    if (!isEmbedded) {
+    if (!showViewport) {
       setZoom(DEFAULT_ZOOM);
     }
-  }, [isEmbedded]);
+  }, [showViewport]);
 
   useEffect(() => {
     if (!isChrome) {
       setChromeInfo(null);
+      setChromePollError(null);
       return;
     }
     const poll = async () => {
       try {
         const res = await fetch(CHROME_DISCOVERY_URL);
-        if (!res.ok) return;
+        if (!res.ok) {
+          setChromePollError(`Bridge discovery failed (${res.status})`);
+          return;
+        }
         const data = (await res.json()) as ChromeBridgeInfo;
         setChromeInfo(data);
+        setChromePollError(null);
+        if (data.extension_connected && typeof data.page_url === "string" && data.page_url) {
+          setPageUrl(data.page_url);
+          if (!addressFocusedRef.current) {
+            setAddressInput(data.page_url);
+          }
+        }
       } catch {
         setChromeInfo(null);
+        setChromePollError(
+          "Cannot reach local bridge (127.0.0.1:17373). Reinstall the latest MSI and click Connect Chrome again.",
+        );
       }
     };
     void poll();
@@ -236,7 +256,7 @@ export function BrowserPanel({
 
   useEffect(() => {
     const wrap = wrapRef.current;
-    if (!wrap || !isEmbedded) return;
+    if (!wrap || !showViewport) return;
 
     const updateFit = () => {
       setFitSize(computeFitSize(wrap.clientWidth, wrap.clientHeight));
@@ -246,7 +266,7 @@ export function BrowserPanel({
     const observer = new ResizeObserver(updateFit);
     observer.observe(wrap);
     return () => observer.disconnect();
-  }, [isEmbedded, fullscreen]);
+  }, [showViewport, fullscreen]);
 
   useLayoutEffect(() => {
     const anchor = zoomAnchorRef.current;
@@ -267,7 +287,7 @@ export function BrowserPanel({
 
   useEffect(() => {
     const wrap = wrapRef.current;
-    if (!wrap || !isEmbedded) return;
+    if (!wrap || !showViewport) return;
 
     const onWheel = (e: WheelEvent) => {
       if (!e.ctrlKey) return;
@@ -277,7 +297,7 @@ export function BrowserPanel({
 
     wrap.addEventListener("wheel", onWheel, { passive: false });
     return () => wrap.removeEventListener("wheel", onWheel);
-  }, [isEmbedded, zoomAtPoint]);
+  }, [showViewport, zoomAtPoint]);
 
   useEffect(() => {
     if (!dragging) return;
@@ -340,7 +360,7 @@ export function BrowserPanel({
       socketRef.current = null;
       clearInterval(timer);
     };
-  }, [wsUrl, isEmbedded]);
+  }, [wsUrl, running]);
 
   const onAddressKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
@@ -394,6 +414,54 @@ export function BrowserPanel({
   const displayH = fitSize.fitH * zoom;
   const zoomPercent = Math.round(zoom * 100);
 
+  const statusTitle = running
+    ? isChrome
+      ? `Browser running (chrome, extension ${chromeConnected ? "connected" : "waiting"})`
+      : `Browser running (${mode ?? "unknown"})`
+    : "Browser stopped";
+
+  const zoomControls = (
+    <div className="browser-zoom-controls">
+      <button
+        type="button"
+        className="browser-zoom-btn"
+        onClick={() => stepZoom(-1)}
+        disabled={zoom <= ZOOM_STEPS[0]}
+        aria-label="Zoom out"
+        title="Zoom out (Ctrl+-)"
+      >
+        −
+      </button>
+      <button
+        type="button"
+        className="browser-zoom-label"
+        onClick={resetZoom}
+        aria-live="polite"
+        title="Reset zoom (Ctrl+0)"
+      >
+        {zoomPercent}%
+      </button>
+      <button
+        type="button"
+        className="browser-zoom-btn"
+        onClick={() => stepZoom(1)}
+        disabled={zoom >= ZOOM_STEPS[ZOOM_STEPS.length - 1]}
+        aria-label="Zoom in"
+        title="Zoom in (Ctrl+=)"
+      >
+        +
+      </button>
+      <button
+        type="button"
+        className="browser-zoom-fit-btn"
+        onClick={resetZoom}
+        title="Fit to panel (Ctrl+0)"
+      >
+        Fit
+      </button>
+    </div>
+  );
+
   return (
     <section className="panel browser-panel">
       <header className="panel-header panel-header--browser">
@@ -410,7 +478,7 @@ export function BrowserPanel({
           {running && mode && (
             <span className="browser-mode-label"> ({mode})</span>
           )}
-          {isEmbedded && <span className="fps-label">{fps} fps</span>}
+          {showViewport && <span className="fps-label">{fps} fps</span>}
         </span>
         <div className="panel-header-actions">
           {!running ? (
@@ -433,7 +501,7 @@ export function BrowserPanel({
           )}
           <span
             className={`status-dot ${running ? "on" : "off"}`}
-            title={running ? `Browser running (${mode ?? "unknown"})` : "Browser stopped"}
+            title={statusTitle}
           />
           <button
             type="button"
@@ -473,128 +541,98 @@ export function BrowserPanel({
             {hint && <code>{hint}</code>}
           </div>
         )}
-        {isChrome && (
-          <div className="browser-chrome-status">
+        {showChromeWaiting && (
+          <div className="browser-chrome-status browser-placeholder">
+            {chromePollError && (
+              <p className="browser-chrome-stale">{chromePollError}</p>
+            )}
             <p>
-              Extension:{" "}
-              {chromeInfo?.extension_connected ? (
-                <strong className="browser-chrome-ok">connected</strong>
-              ) : (
-                <strong className="browser-chrome-warn">waiting…</strong>
-              )}
+              Extension: <strong className="browser-chrome-warn">waiting…</strong>
             </p>
-            <p className="browser-chrome-url">
-              Active tab: {chromeInfo?.page_url ?? "—"}
+            <p className="browser-chrome-stale">
+              No heartbeat from the extension (stale after ~8s). Reload teshi-bridge on{" "}
+              <code>chrome://extensions</code>, keep this Chrome tab focused, and ensure
+              Connect Chrome is active in teshi.
             </p>
-            {!chromeInfo?.extension_connected && (
-              <p className="browser-chrome-stale">
-                No heartbeat from the extension (stale after ~8s). Reload teshi-bridge on{" "}
-                <code>chrome://extensions</code>, keep this Chrome tab focused, and ensure
-                Connect Chrome is active in teshi.
-              </p>
-            )}
-            {chromeInfo?.title && (
-              <p className="browser-chrome-meta">{chromeInfo.title}</p>
-            )}
-            {!chromeInfo?.extension_connected && (
-              <ol className="browser-chrome-hints browser-chrome-setup">
-                <li>
-                  In <strong>Google Chrome</strong> (not only inside teshi), open{" "}
-                  <code>chrome://extensions</code> → enable <strong>Developer mode</strong> →{" "}
-                  <strong>Load unpacked</strong> → select{" "}
-                  <code>C:\Program Files\teshi\share\teshi-bridge</code>.
-                </li>
-                <li>
-                  Open your <strong>app under test</strong> in a normal Chrome tab (e.g. the
-                  site you log into).
-                </li>
-                <li>
-                  Click the <strong>teshi-bridge</strong> puzzle icon → <strong>Connect to teshi</strong>{" "}
-                  (wakes the extension after Connect Chrome here).
-                </li>
-                <li>Extension badge should show <strong>OK</strong> when linked.</li>
-              </ol>
-            )}
+            <ol className="browser-chrome-hints browser-chrome-setup">
+              <li>
+                In <strong>Google Chrome</strong> (not only inside teshi), open{" "}
+                <code>chrome://extensions</code> → enable <strong>Developer mode</strong> →{" "}
+                <strong>Load unpacked</strong> → select{" "}
+                <code>C:\Program Files\teshi\share\teshi-bridge</code>.
+              </li>
+              <li>
+                Open your <strong>app under test</strong> in a normal Chrome tab (e.g. the
+                site you log into).
+              </li>
+              <li>
+                Click the <strong>teshi-bridge</strong> puzzle icon →{" "}
+                <strong>Connect to teshi</strong> (wakes the extension after Connect Chrome here).
+              </li>
+              <li>Extension badge should show <strong>OK</strong> when linked.</li>
+            </ol>
             <ul className="browser-chrome-hints">
               <li>Switch tabs in Chrome before snapshot; only the active tab is used.</li>
               <li>Close DevTools on the target tab if attach fails.</li>
             </ul>
           </div>
         )}
-        {isEmbedded && (
+        {showViewport && (
           <div className="browser-viewport">
-            <form
-              className="browser-address-bar"
-              onSubmit={(e) => {
-                e.preventDefault();
-                navigateTo(addressInput);
-              }}
-            >
-              <label className="visually-hidden" htmlFor="browser-address">
-                Address
-              </label>
-              <input
-                id="browser-address"
-                type="text"
-                className="browser-address-input"
-                value={addressInput}
-                onChange={(e) => setAddressInput(e.target.value)}
-                onFocus={() => {
-                  addressFocusedRef.current = true;
+            {isEmbedded ? (
+              <form
+                className="browser-address-bar"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  navigateTo(addressInput);
                 }}
-                onBlur={() => {
-                  addressFocusedRef.current = false;
-                  setAddressInput(pageUrl);
-                }}
-                onKeyDown={onAddressKeyDown}
-                spellCheck={false}
-                autoComplete="off"
-                placeholder="Enter URL"
-                title={pageUrl}
-              />
-              <button type="submit" className="browser-go-btn">
-                Go
-              </button>
-              <div className="browser-zoom-controls">
-                <button
-                  type="button"
-                  className="browser-zoom-btn"
-                  onClick={() => stepZoom(-1)}
-                  disabled={zoom <= ZOOM_STEPS[0]}
-                  aria-label="Zoom out"
-                  title="Zoom out (Ctrl+-)"
-                >
-                  −
+              >
+                <label className="visually-hidden" htmlFor="browser-address">
+                  Address
+                </label>
+                <input
+                  id="browser-address"
+                  type="text"
+                  className="browser-address-input"
+                  value={addressInput}
+                  onChange={(e) => setAddressInput(e.target.value)}
+                  onFocus={() => {
+                    addressFocusedRef.current = true;
+                  }}
+                  onBlur={() => {
+                    addressFocusedRef.current = false;
+                    setAddressInput(pageUrl);
+                  }}
+                  onKeyDown={onAddressKeyDown}
+                  spellCheck={false}
+                  autoComplete="off"
+                  placeholder="Enter URL"
+                  title={pageUrl}
+                />
+                <button type="submit" className="browser-go-btn">
+                  Go
                 </button>
-                <button
-                  type="button"
-                  className="browser-zoom-label"
-                  onClick={resetZoom}
-                  aria-live="polite"
-                  title="Reset zoom (Ctrl+0)"
-                >
-                  {zoomPercent}%
-                </button>
-                <button
-                  type="button"
-                  className="browser-zoom-btn"
-                  onClick={() => stepZoom(1)}
-                  disabled={zoom >= ZOOM_STEPS[ZOOM_STEPS.length - 1]}
-                  aria-label="Zoom in"
-                  title="Zoom in (Ctrl+=)"
-                >
-                  +
-                </button>
-                <button
-                  type="button"
-                  className="browser-zoom-fit-btn"
-                  onClick={resetZoom}
-                  title="Fit to panel (Ctrl+0)"
-                >
-                  Fit
-                </button>
+                {zoomControls}
+              </form>
+            ) : (
+              <div className="browser-address-bar">
+                <label className="visually-hidden" htmlFor="browser-address-chrome">
+                  Active tab URL
+                </label>
+                <input
+                  id="browser-address-chrome"
+                  type="text"
+                  className="browser-address-input"
+                  readOnly
+                  value={pageUrl}
+                  spellCheck={false}
+                  autoComplete="off"
+                  placeholder="Active Chrome tab URL"
+                  title={pageUrl}
+                />
+                {zoomControls}
               </div>
-            </form>
+            )}
             <div
               ref={wrapRef}
               className={`browser-frame-wrap${dragging ? " browser-frame-wrap--dragging" : ""}${zoom > 1 ? " browser-frame-wrap--pannable" : ""}`}

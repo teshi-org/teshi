@@ -600,9 +600,15 @@ body,
 }
 
 .browser-body:has(.browser-viewport) {
+  flex-direction: column;
   align-items: stretch;
   justify-content: flex-start;
   padding: 8px 12px;
+}
+
+.browser-body:has(.browser-placeholder.browser-chrome-status) {
+  align-items: center;
+  justify-content: center;
 }
 
 .browser-placeholder,
@@ -615,6 +621,7 @@ body,
 }
 
 .browser-viewport {
+  flex: 1;
   width: 100%;
   height: 100%;
   display: flex;
@@ -646,6 +653,15 @@ body,
 .browser-address-input:focus {
   outline: none;
   border-color: #52525b;
+}
+
+.browser-address-input:read-only {
+  color: #a1a1aa;
+  cursor: default;
+}
+
+.browser-address-input:read-only:focus {
+  border-color: #3f3f46;
 }
 
 .browser-go-btn {
