@@ -111,7 +111,7 @@ pub async fn spawn_terminal(rt: Arc<TeshiRuntime>, cols: u16, rows: u16) -> Resu
     let mut child = None;
     for mut cmd in shell_commands() {
         cmd.cwd(cwd.to_string_lossy().to_string());
-        apply_terminal_env(&mut cmd);
+        apply_terminal_env(&mut cmd, rt.embedded_terminal_teshi_cli());
         // Do not inject VIRTUAL_ENV here: it breaks `uv pip` on Windows (os error 448) when uv
         // inspects `.venv\Scripts\python.exe`. Users activate the venv in the shell if needed.
         match pair.slave.spawn_command(cmd) {
@@ -209,7 +209,7 @@ fn shell_command(program: &str, args: &[&str]) -> CommandBuilder {
     cmd
 }
 
-fn apply_terminal_env(cmd: &mut CommandBuilder) {
+fn apply_terminal_env(cmd: &mut CommandBuilder, teshi_cli: Option<&Path>) {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("CLICOLOR", "1");
@@ -218,6 +218,9 @@ fn apply_terminal_env(cmd: &mut CommandBuilder) {
     cmd.env("TESHI_EMBEDDED_TERMINAL", "1");
     cmd.env_remove("NO_COLOR");
     cmd.env_remove("TERM_PROGRAM");
+    if let Some(path) = teshi_cli {
+        cmd.env("TESHI_CLI", path.to_string_lossy().into_owned());
+    }
     if cfg!(windows) {
         cmd.env("DOTNET_SYSTEM_CONSOLE_ALLOW_ANSI_COLOR_REDIRECTION", "1");
     }

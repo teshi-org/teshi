@@ -67,6 +67,8 @@ pub struct TeshiRuntime {
     pub locator_watcher: LocatorWatcherState,
     pub events: RuntimeEvents,
     pub browser_service_script: PathBuf,
+    /// Optional `teshi` CLI path injected into the embedded terminal as `TESHI_CLI`.
+    embedded_terminal_teshi_cli: Option<PathBuf>,
 }
 
 impl TeshiRuntime {
@@ -80,7 +82,13 @@ impl TeshiRuntime {
             locator_watcher: LocatorWatcherState::new(),
             events: RuntimeEvents::new(host),
             browser_service_script: config.browser_service_script,
+            embedded_terminal_teshi_cli: resolve_embedded_terminal_teshi_cli(),
         })
+    }
+
+    /// Returns the `teshi` CLI path injected into embedded terminal sessions, if any.
+    pub fn embedded_terminal_teshi_cli(&self) -> Option<&std::path::Path> {
+        self.embedded_terminal_teshi_cli.as_deref()
     }
 
     /// Emits initial `recent-loaded` if recent projects exist on disk.
@@ -117,4 +125,88 @@ pub fn default_browser_service_script() -> PathBuf {
         }
     }
     candidates[0].clone()
+}
+
+/// Resolves the `teshi` CLI binary for embedded terminal agents (`TESHI_CLI`).
+///
+/// Resolution order:
+/// 1. Host `TESHI_CLI` when already set and non-empty
+/// 2. Sibling `teshi` / `teshi.exe` next to the running host executable (dev `target/debug` or MSI `bin/`)
+/// 3. The host executable itself when it is named `teshi` (e.g. `cargo run -- web`)
+pub fn resolve_embedded_terminal_teshi_cli() -> Option<PathBuf> {
+    if let Ok(existing) = std::env::var("TESHI_CLI") {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+
+    let exe = std::env::current_exe().ok()?;
+    embedded_teshi_cli_from_host_exe(&exe)
+}
+
+fn embedded_teshi_cli_from_host_exe(host_exe: &std::path::Path) -> Option<PathBuf> {
+    if let Some(stem) = host_exe.file_stem().and_then(|s| s.to_str()) {
+        if stem == "teshi" && host_exe.is_file() {
+            return Some(dunce::simplified(host_exe).to_path_buf());
+        }
+    }
+
+    let exe_dir = host_exe.parent()?;
+    for name in embedded_teshi_cli_sibling_names() {
+        let candidate = exe_dir.join(name);
+        if candidate.is_file() {
+            return Some(dunce::simplified(&candidate).to_path_buf());
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn embedded_teshi_cli_sibling_names() -> &'static [&'static str] {
+    &["teshi.exe", "teshi"]
+}
+
+#[cfg(not(windows))]
+fn embedded_teshi_cli_sibling_names() -> &'static [&'static str] {
+    &["teshi"]
+}
+
+#[cfg(test)]
+mod embedded_cli_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn embedded_cli_from_host_exe_uses_sibling_teshi() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let desktop = root.join("teshi-desktop.exe");
+        let cli = root.join("teshi.exe");
+        fs::write(&desktop, b"").unwrap();
+        fs::write(&cli, b"").unwrap();
+
+        let resolved = embedded_teshi_cli_from_host_exe(&desktop).unwrap();
+        assert_eq!(resolved, dunce::simplified(&cli));
+    }
+
+    #[test]
+    fn embedded_cli_from_host_exe_uses_teshi_web_host() {
+        let dir = TempDir::new().unwrap();
+        let cli = dir.path().join("teshi.exe");
+        fs::write(&cli, b"").unwrap();
+
+        let resolved = embedded_teshi_cli_from_host_exe(&cli).unwrap();
+        assert_eq!(resolved, dunce::simplified(&cli));
+    }
+
+    #[test]
+    fn embedded_cli_from_host_exe_missing_sibling_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let desktop = dir.path().join("teshi-desktop.exe");
+        fs::write(&desktop, b"").unwrap();
+
+        assert!(embedded_teshi_cli_from_host_exe(&desktop).is_none());
+    }
 }

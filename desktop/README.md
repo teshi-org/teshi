@@ -47,6 +47,15 @@ Or from the repo root:
 cargo tauri dev --manifest-path desktop/src-tauri/Cargo.toml
 ```
 
+When `target/debug/teshi.exe` sits next to `teshi-desktop.exe` (typical `cargo tauri dev` layout), the embedded terminal sets `TESHI_CLI` to that binary so agent skills use your dev build instead of an older PATH install. `npm run dev` (via Tauri's `beforeDevCommand`) runs `predev` first to rebuild the CLI so its version matches the repo. Override with `TESHI_CLI` in the environment before launching desktop.
+
+If `TESHI_CLI --version` still looks stale, restart desktop (so the terminal respawns) and confirm:
+
+```powershell
+echo $env:TESHI_CLI
+& $env:TESHI_CLI --version
+```
+
 ## Web UI (`teshi web`)
 
 Build the frontend, then start the loopback server from the repo root:
