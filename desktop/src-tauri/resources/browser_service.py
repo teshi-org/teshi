@@ -11,11 +11,14 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from typing import Any
 
 DEFAULT_DISCOVERY_PORT = 17373
 # Extension is considered connected if heartbeat POST was received within this window.
 HEARTBEAT_TTL_SEC = 8.0
+EXTENSION_FRAME_WS_PATH = "/extension/frames"
+FRAME_MAGIC = b"TSH1"
 
 
 def paths_equal(got: str, expected: Path) -> bool:
@@ -83,6 +86,7 @@ def write_cdp_endpoint_file(
     discovery_port: int | None = None,
     cdp_http_url: str | None = None,
     extension_connected: bool = False,
+    extension_frame_ws_url: str | None = None,
 ) -> None:
     teshi_dir = project_root / ".teshi"
     teshi_dir.mkdir(parents=True, exist_ok=True)
@@ -99,10 +103,45 @@ def write_cdp_endpoint_file(
             payload["http_url"] = cdp_http_url
     if mode == "chrome" and discovery_port is not None:
         payload["discovery_url"] = f"http://127.0.0.1:{discovery_port}/v1/bridge"
+    if extension_frame_ws_url:
+        payload["extension_frame_ws_url"] = extension_frame_ws_url
     (teshi_dir / "cdp-endpoint.json").write_text(
         json.dumps(payload, indent=2),
         encoding="utf-8",
     )
+
+
+def parse_tsh1_frame(data: bytes) -> tuple[dict[str, Any], bytes] | None:
+    """Parse extension binary frame: magic TSH1 + meta_len + meta JSON + JPEG."""
+    if len(data) < 8 or data[:4] != FRAME_MAGIC:
+        return None
+    meta_len = int.from_bytes(data[4:8], "little")
+    end_meta = 8 + meta_len
+    if len(data) < end_meta:
+        return None
+    try:
+        meta = json.loads(data[8:end_meta].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    return meta, data[end_meta:]
+
+
+def build_frame_out_sync(meta: dict[str, Any], jpeg: bytes) -> dict[str, Any]:
+    """Build desktop WebSocket frame payload (base64 JPEG) off the event loop."""
+    frame_out: dict[str, Any] = {
+        "type": "frame",
+        "data": base64.b64encode(jpeg).decode("ascii"),
+        "url": str(meta.get("url", "")),
+    }
+    raw_tab = meta.get("tab_id")
+    if raw_tab is not None:
+        try:
+            frame_out["tab_id"] = int(raw_tab)
+        except (TypeError, ValueError):
+            pass
+    return frame_out
 
 
 def fetch_playwright_cdp_endpoint(cdp_port: int) -> dict[str, Any]:
@@ -338,34 +377,49 @@ class ChromeBridge:
         project_root: Path,
         ws_url: str,
         discovery_port: int,
+        extension_frame_ws_url: str,
         frame_callback: Any | None = None,
+        event_callback: Any | None = None,
     ) -> None:
         self.project_root = project_root.resolve()
         self.ws_url = ws_url
         self.discovery_port = discovery_port
+        self.extension_frame_ws_url = extension_frame_ws_url
         self.page_url = ""
         self.page_title = ""
         self.active_tab_id: int | None = None
         self.tabs: list[dict[str, Any]] = []
+        self.last_frame_error = ""
+        self._last_frame: dict[str, Any] | None = None
+        self.last_frame_at: float | None = None
         self.last_heartbeat = 0.0
         self._cmd_queue: list[dict[str, Any]] = []
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._pending_stream_restart = False
         self._frame_callback = frame_callback
+        self._event_callback = event_callback
+        self._deprecated_json_frame_warned = False
 
     def extension_alive(self) -> bool:
         return (time.monotonic() - self.last_heartbeat) < HEARTBEAT_TTL_SEC
 
     def bridge_info(self) -> dict[str, Any]:
+        last_frame_age_ms: int | None = None
+        if self.last_frame_at is not None:
+            last_frame_age_ms = int((time.monotonic() - self.last_frame_at) * 1000)
         return {
             "ws_url": self.ws_url,
+            "extension_frame_ws_url": self.extension_frame_ws_url,
             "project_root": str(self.project_root),
             "mode": "chrome",
-            "transport": "http-heartbeat",
+            "transport": "http-heartbeat+ws-screencast",
             "extension_connected": self.extension_alive(),
             "page_url": self.page_url,
             "title": self.page_title,
             "active_tab_id": self.active_tab_id,
             "tabs": self.tabs,
+            "last_frame_error": self.last_frame_error,
+            "last_frame_age_ms": last_frame_age_ms,
         }
 
     def write_endpoint(self) -> None:
@@ -376,6 +430,7 @@ class ChromeBridge:
             page_url=self.page_url or "about:blank",
             discovery_port=self.discovery_port,
             extension_connected=self.extension_alive(),
+            extension_frame_ws_url=self.extension_frame_ws_url,
         )
 
     async def handle_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -397,32 +452,143 @@ class ChromeBridge:
         raw_tabs = payload.get("tabs")
         if isinstance(raw_tabs, list):
             self.tabs = raw_tabs
+        frame_error = payload.get("frame_error")
+        if isinstance(frame_error, str) and frame_error.strip():
+            self.last_frame_error = frame_error.strip()
         self.write_endpoint()
         pending_cmd = self._cmd_queue.pop(0) if self._cmd_queue else None
-        return {"ok": True, "cmd": pending_cmd}
+        stream_restart = self._pending_stream_restart
+        self._pending_stream_restart = False
+        return {
+            "ok": True,
+            "cmd": pending_cmd,
+            "stream_restart": stream_restart,
+            # Legacy alias for older extension builds.
+            "force_capture": stream_restart,
+        }
+
+    def _apply_frame_state(self, frame_out: dict[str, Any]) -> None:
+        """Update bridge metadata and cache the latest frame (sync, HTTP-fast)."""
+        if frame_out.get("url"):
+            self.page_url = str(frame_out["url"])
+        raw_tab = frame_out.get("tab_id")
+        if raw_tab is not None:
+            try:
+                self.active_tab_id = int(raw_tab)
+            except (TypeError, ValueError):
+                pass
+        self._last_frame = frame_out
+        self.last_frame_at = time.monotonic()
+        self.last_frame_error = ""
+        self.write_endpoint()
+
+    async def _emit_frame(self, frame_out: dict[str, Any]) -> None:
+        self._apply_frame_state(frame_out)
+        if self._frame_callback is not None:
+            await self._frame_callback(frame_out)
+
+    def _schedule_frame_broadcast(self, frame_out: dict[str, Any]) -> None:
+        """Push frames to desktop WebSocket clients without blocking HTTP /response."""
+        if self._frame_callback is None:
+            return
+        asyncio.create_task(self._frame_callback(frame_out))
+
+    async def _emit_stream_event(self, event: dict[str, Any]) -> None:
+        if self._event_callback is not None:
+            await self._event_callback(event)
+
+    def _schedule_stream_event(self, event: dict[str, Any]) -> None:
+        if self._event_callback is None:
+            return
+        asyncio.create_task(self._emit_stream_event(event))
+
+    def validate_stream_hello(self, payload: dict[str, Any]) -> dict[str, Any]:
+        got = str(payload.get("project_root", ""))
+        if not paths_equal(got, self.project_root):
+            return {
+                "type": "stream_hello_ack",
+                "ok": False,
+                "error": f"project_root mismatch: expected {self.project_root}",
+            }
+        self.last_heartbeat = time.monotonic()
+        return {"type": "stream_hello_ack", "ok": True}
+
+    async def handle_extension_binary(self, data: bytes) -> None:
+        parsed = parse_tsh1_frame(data)
+        if parsed is None:
+            return
+        meta, jpeg = parsed
+        if not jpeg:
+            return
+        frame_out = await asyncio.to_thread(build_frame_out_sync, meta, jpeg)
+        self.last_heartbeat = time.monotonic()
+        self._apply_frame_state(frame_out)
+        self._schedule_frame_broadcast(frame_out)
+
+    async def handle_frame_upload_http(
+        self,
+        project_root: str,
+        tab_id: str | None,
+        url: str,
+        body: bytes,
+    ) -> dict[str, Any]:
+        if not paths_equal(project_root, self.project_root):
+            return {
+                "ok": False,
+                "error": f"project_root mismatch: expected {self.project_root}",
+            }
+        if not body:
+            return {"ok": False, "error": "empty frame body"}
+        meta: dict[str, Any] = {"url": url}
+        if tab_id is not None:
+            try:
+                meta["tab_id"] = int(tab_id)
+            except (TypeError, ValueError):
+                pass
+        frame_out = await asyncio.to_thread(build_frame_out_sync, meta, body)
+        self.last_heartbeat = time.monotonic()
+        self._apply_frame_state(frame_out)
+        self._schedule_frame_broadcast(frame_out)
+        return {"ok": True}
 
     async def handle_extension_response(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("type") == "frame_error":
+            self.last_frame_error = str(payload.get("error", "screenshot failed"))
+            self.write_endpoint()
+            self._schedule_stream_event(
+                {
+                    "type": "frame_error",
+                    "error": self.last_frame_error,
+                }
+            )
+            return {"ok": True}
+
         if payload.get("type") == "frame":
-            # CDP screenshot posts also imply the extension is alive.
+            if not self._deprecated_json_frame_warned:
+                self._deprecated_json_frame_warned = True
+                print(
+                    "warning: JSON frame on POST /v1/bridge/response is deprecated; "
+                    "use extension WebSocket screencast or POST /v1/bridge/frame",
+                    file=sys.stderr,
+                )
+            data_field = payload.get("data", "")
+            if isinstance(data_field, str) and len(data_field) > 4096:
+                return {"ok": True, "deprecated": True, "ignored": True}
             self.last_heartbeat = time.monotonic()
-            self.page_url = str(payload.get("url", self.page_url))
             self.page_title = str(payload.get("title", self.page_title))
+            frame_out = {
+                "type": "frame",
+                "data": data_field,
+                "url": str(payload.get("url", self.page_url)),
+            }
             raw_tab = payload.get("tab_id")
             if raw_tab is not None:
                 try:
-                    self.active_tab_id = int(raw_tab)
+                    frame_out["tab_id"] = int(raw_tab)
                 except (TypeError, ValueError):
                     pass
-            self.write_endpoint()
-            if self._frame_callback is not None:
-                frame_out: dict[str, Any] = {
-                    "type": "frame",
-                    "data": payload.get("data", ""),
-                    "url": self.page_url,
-                }
-                if self.active_tab_id is not None:
-                    frame_out["tab_id"] = self.active_tab_id
-                await self._frame_callback(frame_out)
+            self._apply_frame_state(frame_out)
+            self._schedule_frame_broadcast(frame_out)
             return {"ok": True}
 
         request_id = payload.get("request_id")
@@ -434,6 +600,48 @@ class ChromeBridge:
                 self.page_url = str(payload.get("url", self.page_url))
                 self.page_title = str(payload.get("title", self.page_title))
                 self.write_endpoint()
+        return {"ok": True}
+
+    def queue_command_front(self, cmd: str, **fields: Any) -> str:
+        """Enqueue a command for the next extension heartbeat (front of queue)."""
+        request_id = str(fields.pop("request_id", f"cmd-{time.monotonic()}"))
+        entry: dict[str, Any] = {
+            "type": "cmd",
+            "request_id": request_id,
+            "cmd": cmd,
+        }
+        entry.update(fields)
+        self._cmd_queue.insert(0, entry)
+        return request_id
+
+    async def handle_activate_tab_http(self, payload: dict[str, Any]) -> dict[str, Any]:
+        got = str(payload.get("project_root", ""))
+        if not paths_equal(got, self.project_root):
+            return {
+                "ok": False,
+                "error": f"project_root mismatch: expected {self.project_root}",
+            }
+        raw_tab = payload.get("tab_id")
+        if raw_tab is None:
+            return {"ok": False, "error": "tab_id is required"}
+        try:
+            tab_id = int(raw_tab)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "tab_id must be an integer"}
+        self.active_tab_id = tab_id
+        self.write_endpoint()
+        self.queue_command_front("activate_tab", tab_id=tab_id)
+        self._pending_stream_restart = True
+        return {"ok": True}
+
+    async def handle_capture_now_http(self, payload: dict[str, Any]) -> dict[str, Any]:
+        got = str(payload.get("project_root", ""))
+        if not paths_equal(got, self.project_root):
+            return {
+                "ok": False,
+                "error": f"project_root mismatch: expected {self.project_root}",
+            }
+        self._pending_stream_restart = True
         return {"ok": True}
 
     async def forward_command(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -483,7 +691,7 @@ def _http_response(status: int, body: bytes, content_type: str = "application/js
         f"Content-Type: {content_type}\r\n"
         "Access-Control-Allow-Origin: *\r\n"
         "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-        "Access-Control-Allow-Headers: Content-Type\r\n"
+        "Access-Control-Allow-Headers: Content-Type, X-Project-Root, X-Tab-Id, X-Url\r\n"
         f"Content-Length: {len(body)}\r\n"
         "Connection: close\r\n"
         "\r\n"
@@ -531,8 +739,34 @@ async def run_http_discovery(
                 result = await bridge.handle_heartbeat(data)
                 writer.write(_http_response(200, json.dumps(result).encode("utf-8")))
             elif method == "POST" and path == "/v1/bridge/response":
-                data = json.loads(body.decode("utf-8") or "{}")
+                text = body.decode("utf-8") or "{}"
+                if len(body) > 65536:
+                    data = await asyncio.to_thread(json.loads, text)
+                else:
+                    data = json.loads(text)
                 result = await bridge.handle_extension_response(data)
+                writer.write(_http_response(200, json.dumps(result).encode("utf-8")))
+            elif method == "POST" and path.split("?", 1)[0] == "/v1/bridge/frame":
+                parsed = urlparse(path)
+                query = parse_qs(parsed.query)
+                project_root = _headers.get("x-project-root") or (
+                    query.get("project_root", [""])[0]
+                )
+                tab_id = _headers.get("x-tab-id") or (
+                    query.get("tab_id", [None])[0]
+                )
+                page_url = _headers.get("x-url") or (query.get("url", [""])[0])
+                result = await bridge.handle_frame_upload_http(
+                    project_root, tab_id, page_url, body
+                )
+                writer.write(_http_response(200, json.dumps(result).encode("utf-8")))
+            elif method == "POST" and path == "/v1/bridge/activate_tab":
+                data = json.loads(body.decode("utf-8") or "{}")
+                result = await bridge.handle_activate_tab_http(data)
+                writer.write(_http_response(200, json.dumps(result).encode("utf-8")))
+            elif method == "POST" and path == "/v1/bridge/capture_now":
+                data = json.loads(body.decode("utf-8") or "{}")
+                result = await bridge.handle_capture_now_http(data)
                 writer.write(_http_response(200, json.dumps(result).encode("utf-8")))
             else:
                 writer.write(_http_response(404, b"{}"))
@@ -546,6 +780,13 @@ async def run_http_discovery(
         await server.serve_forever()
 
 
+def _websocket_path(websocket: Any) -> str:
+    request = getattr(websocket, "request", None)
+    if request is not None:
+        return str(getattr(request, "path", "/") or "/")
+    return str(getattr(websocket, "path", "/") or "/")
+
+
 async def run_chrome(
     host: str,
     port: int,
@@ -555,33 +796,95 @@ async def run_chrome(
     import websockets
 
     ws_url = f"ws://{host}:{port}"
+    extension_frame_ws_url = f"ws://{host}:{port}{EXTENSION_FRAME_WS_PATH}"
     clients: set[Any] = set()
 
-    async def broadcast_frame(frame_payload: dict[str, Any]) -> None:
+    async def broadcast_ws_message(message: dict[str, Any]) -> None:
         if not clients:
             return
-        payload = json.dumps(frame_payload)
+        payload = json.dumps(message)
         dead: list[Any] = []
-        for ws in clients:
+
+        async def send_one(ws: Any) -> None:
             try:
                 await ws.send(payload)
             except Exception:
                 dead.append(ws)
+
+        await asyncio.gather(*(send_one(ws) for ws in list(clients)))
         for ws in dead:
             clients.discard(ws)
 
-    bridge = ChromeBridge(project_root, ws_url, discovery_port, frame_callback=broadcast_frame)
+    async def broadcast_frame(frame_payload: dict[str, Any]) -> None:
+        await broadcast_ws_message(frame_payload)
+
+    bridge = ChromeBridge(
+        project_root,
+        ws_url,
+        discovery_port,
+        extension_frame_ws_url,
+        frame_callback=broadcast_frame,
+        event_callback=broadcast_ws_message,
+    )
     bridge.write_endpoint()
 
     http_task = asyncio.create_task(run_http_discovery(bridge, host, discovery_port))
 
-    async def handler(websocket: Any) -> None:
+    async def handle_extension_websocket(websocket: Any) -> None:
+        stream_authenticated = False
+        try:
+            async for message in websocket:
+                if isinstance(message, str):
+                    try:
+                        data = json.loads(message)
+                    except json.JSONDecodeError:
+                        continue
+                    if data.get("type") == "stream_hello":
+                        ack = bridge.validate_stream_hello(data)
+                        stream_authenticated = bool(ack.get("ok"))
+                        await websocket.send(json.dumps(ack))
+                    elif data.get("type") == "frame_error":
+                        bridge.last_frame_error = str(
+                            data.get("error", "extension stream error")
+                        )
+                        bridge.write_endpoint()
+                        bridge._schedule_stream_event(
+                            {
+                                "type": "frame_error",
+                                "error": bridge.last_frame_error,
+                            }
+                        )
+                elif isinstance(message, bytes) and stream_authenticated:
+                    await bridge.handle_extension_binary(message)
+        except Exception as exc:  # noqa: BLE001
+            print(f"extension frame websocket closed: {exc}", file=sys.stderr)
+
+    async def handle_desktop_websocket(websocket: Any) -> None:
         clients.add(websocket)
+        if bridge._last_frame is not None:
+            try:
+                await websocket.send(json.dumps(bridge._last_frame))
+            except Exception:
+                clients.discard(websocket)
         try:
             async for message in websocket:
                 try:
                     data = json.loads(message)
                 except json.JSONDecodeError:
+                    continue
+                if data.get("type") == "frame" and data.get("data"):
+                    frame_out: dict[str, Any] = {
+                        "type": "frame",
+                        "data": data.get("data", ""),
+                        "url": str(data.get("url", bridge.page_url)),
+                    }
+                    raw_tab = data.get("tab_id")
+                    if raw_tab is not None:
+                        try:
+                            frame_out["tab_id"] = int(raw_tab)
+                        except (TypeError, ValueError):
+                            pass
+                    await bridge._emit_frame(frame_out)
                     continue
                 if "cmd" in data:
                     reply = await bridge.forward_command(data)
@@ -589,7 +892,14 @@ async def run_chrome(
         finally:
             clients.discard(websocket)
 
-    async with websockets.serve(handler, host, port):
+    async def connection_handler(websocket: Any) -> None:
+        path = _websocket_path(websocket)
+        if path == EXTENSION_FRAME_WS_PATH:
+            await handle_extension_websocket(websocket)
+            return
+        await handle_desktop_websocket(websocket)
+
+    async with websockets.serve(connection_handler, host, port):
         await asyncio.gather(http_task, asyncio.Future())
 
 

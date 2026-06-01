@@ -3,6 +3,8 @@ import { PanelCollapseButton } from "./PanelCollapseButton";
 
 // Use localhost so Tauri CSP connect-src allows discovery polling from the webview.
 const CHROME_DISCOVERY_URL = "http://127.0.0.1:17373/v1/bridge";
+const CHROME_ACTIVATE_TAB_URL = "http://127.0.0.1:17373/v1/bridge/activate_tab";
+const CHROME_CAPTURE_NOW_URL = "http://127.0.0.1:17373/v1/bridge/capture_now";
 
 interface ChromeWindowTab {
   id: number;
@@ -19,7 +21,14 @@ interface ChromeBridgeInfo {
   extension_connected?: boolean;
   active_tab_id?: number | null;
   tabs?: ChromeWindowTab[];
+  last_frame_error?: string;
+  last_frame_age_ms?: number | null;
+  project_root?: string;
 }
+
+/** Chrome screencast ~10 fps; Embedded Playwright ~8 fps. */
+const CHROME_STREAM_STALL_MS = 1000;
+const EMBEDDED_STREAM_STALL_MS = 4000;
 
 interface Props {
   wsUrl: string | null;
@@ -57,12 +66,16 @@ function effectiveSourceSize(
   source: SourceSize,
   containerW: number,
   containerH: number,
+  chromeMode: boolean,
 ): SourceSize {
   if (source.width > 0 && source.height > 0) {
     return source;
   }
   if (containerW > 0 && containerH > 0) {
     return { width: containerW, height: containerH };
+  }
+  if (chromeMode) {
+    return { width: 4, height: 3 };
   }
   return { width: EMBEDDED_SOURCE_WIDTH, height: EMBEDDED_SOURCE_HEIGHT };
 }
@@ -71,11 +84,12 @@ function computeFitSize(
   containerW: number,
   containerH: number,
   source: SourceSize,
+  chromeMode: boolean,
 ): FitSize {
   if (containerW <= 0 || containerH <= 0) {
     return { fitW: 0, fitH: 0 };
   }
-  const resolved = effectiveSourceSize(source, containerW, containerH);
+  const resolved = effectiveSourceSize(source, containerW, containerH, chromeMode);
   const sourceAspect = resolved.width / resolved.height;
   const containerAspect = containerW / containerH;
   if (containerAspect > sourceAspect) {
@@ -194,11 +208,53 @@ export function BrowserPanel({
   const [chromeInfo, setChromeInfo] = useState<ChromeBridgeInfo | null>(null);
   const [chromePollError, setChromePollError] = useState<string | null>(null);
   const [activatingTabId, setActivatingTabId] = useState<number | null>(null);
-  const expectedFrameTabIdRef = useRef<number | null>(null);
+  const [frameSrc, setFrameSrc] = useState<string | null>(null);
+  const [streamError, setStreamError] = useState<string | null>(null);
+  const [lastFrameAt, setLastFrameAt] = useState(0);
+  const [streamHealthTick, setStreamHealthTick] = useState(0);
+  const lastStreamTabIdRef = useRef<number | null>(null);
+  const activatingTabIdRef = useRef<number | null>(null);
+  const chromeActiveTabIdRef = useRef<number | null>(null);
+  const activateGraceUntilRef = useRef(0);
 
   const chromeConnected = isChrome && Boolean(chromeInfo?.extension_connected);
   const showChromeWaiting = isChrome && !chromeConnected;
   const showViewport = isEmbedded || chromeConnected;
+  const showStreamLoading = isChrome && activatingTabId !== null;
+  useEffect(() => {
+    if (!isChrome || !chromeConnected) {
+      return;
+    }
+    const timer = setInterval(() => setStreamHealthTick((t) => t + 1), 1000);
+    return () => clearInterval(timer);
+  }, [isChrome, chromeConnected]);
+
+  const streamStalled = (() => {
+    void streamHealthTick;
+    const stallMs = isChrome ? CHROME_STREAM_STALL_MS : EMBEDDED_STREAM_STALL_MS;
+    if (isChrome && !chromeConnected) {
+      return false;
+    }
+    if (!isChrome && !wsUrl) {
+      return false;
+    }
+    if (lastFrameAt > 0) {
+      return Date.now() - lastFrameAt > stallMs;
+    }
+    if (isChrome) {
+      const age = chromeInfo?.last_frame_age_ms;
+      return age == null || age > stallMs;
+    }
+    return false;
+  })();
+
+  useEffect(() => {
+    activatingTabIdRef.current = activatingTabId;
+  }, [activatingTabId]);
+
+  useEffect(() => {
+    chromeActiveTabIdRef.current = chromeInfo?.active_tab_id ?? null;
+  }, [chromeInfo?.active_tab_id]);
 
   const getZoomAnchorPoint = useCallback((): { x: number; y: number } => {
     const wrap = wrapRef.current;
@@ -255,21 +311,61 @@ export function BrowserPanel({
     setAddressInput(url);
   }, []);
 
-  const activateChromeTab = useCallback((tabId: number) => {
-    const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
+  const requestChromeCapture = useCallback(async (projectRoot: string) => {
+    const res = await fetch(CHROME_CAPTURE_NOW_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project_root: projectRoot }),
+    });
+    if (!res.ok) {
+      throw new Error(`Capture request failed (HTTP ${res.status})`);
+    }
+  }, []);
+
+  const activateChromeTab = useCallback(
+    async (tabId: number) => {
+      const projectRoot = chromeInfo?.project_root;
+      if (!projectRoot) {
+        return;
+      }
+      setActivatingTabId(tabId);
+      activateGraceUntilRef.current = Date.now() + 8000;
+      setStreamError(null);
+      try {
+        const res = await fetch(CHROME_ACTIVATE_TAB_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ project_root: projectRoot, tab_id: tabId }),
+        });
+        if (!res.ok) {
+          setStreamError(`Could not request tab activation (HTTP ${res.status})`);
+          return;
+        }
+        await requestChromeCapture(projectRoot);
+        window.setTimeout(() => {
+          void requestChromeCapture(projectRoot).catch(() => {
+            /* retry once if the extension heartbeat was busy */
+          });
+        }, 1600);
+      } catch (err) {
+        setStreamError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [chromeInfo?.project_root, requestChromeCapture],
+  );
+
+  const refreshChromeStream = useCallback(async () => {
+    const projectRoot = chromeInfo?.project_root;
+    if (!projectRoot) {
       return;
     }
-    expectedFrameTabIdRef.current = tabId;
-    setActivatingTabId(tabId);
-    socket.send(
-      JSON.stringify({
-        cmd: "activate_tab",
-        request_id: `activate-${tabId}-${Date.now()}`,
-        tab_id: tabId,
-      }),
-    );
-  }, []);
+    setStreamError(null);
+    try {
+      await requestChromeCapture(projectRoot);
+    } catch (err) {
+      setStreamError(err instanceof Error ? err.message : String(err));
+    }
+  }, [chromeInfo?.project_root, requestChromeCapture]);
 
   useEffect(() => {
     if (!showViewport) {
@@ -295,7 +391,6 @@ export function BrowserPanel({
       setChromeInfo(null);
       setChromePollError(null);
       setActivatingTabId(null);
-      expectedFrameTabIdRef.current = null;
       return;
     }
     const poll = async () => {
@@ -327,28 +422,30 @@ export function BrowserPanel({
   }, [isChrome]);
 
   useEffect(() => {
-    if (activatingTabId === null) {
+    if (!isChrome) {
       return;
     }
-    if (chromeInfo?.active_tab_id === activatingTabId) {
+    const active = chromeInfo?.active_tab_id;
+    if (active != null && activatingTabId === active) {
       setActivatingTabId(null);
-      expectedFrameTabIdRef.current = null;
     }
-  }, [chromeInfo?.active_tab_id, activatingTabId]);
+  }, [isChrome, chromeInfo?.active_tab_id, activatingTabId]);
 
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap || !showViewport) return;
 
     const updateFit = () => {
-      setFitSize(computeFitSize(wrap.clientWidth, wrap.clientHeight, sourceSize));
+      setFitSize(
+        computeFitSize(wrap.clientWidth, wrap.clientHeight, sourceSize, isChrome),
+      );
     };
 
     updateFit();
     const observer = new ResizeObserver(updateFit);
     observer.observe(wrap);
     return () => observer.disconnect();
-  }, [showViewport, fullscreen, sourceSize]);
+  }, [showViewport, fullscreen, sourceSize, isChrome]);
 
   useLayoutEffect(() => {
     const anchor = zoomAnchorRef.current;
@@ -407,42 +504,66 @@ export function BrowserPanel({
     };
   }, [dragging]);
 
+  const applyFrameMessage = useCallback((msg: Record<string, unknown>) => {
+    if (msg.type !== "frame" || typeof msg.data !== "string" || !msg.data) {
+      return;
+    }
+    const frameTabId =
+      typeof msg.tab_id === "number" ? msg.tab_id : Number(msg.tab_id);
+    if (Number.isFinite(frameTabId)) {
+      lastStreamTabIdRef.current = frameTabId;
+      const pending = activatingTabIdRef.current;
+      const active = chromeActiveTabIdRef.current;
+      if (pending === frameTabId || active === frameTabId) {
+        setActivatingTabId(null);
+      }
+    }
+    const src = `data:image/jpeg;base64,${msg.data}`;
+    setLastFrameAt(Date.now());
+    setStreamError(null);
+    const preload = new Image();
+    preload.onload = () => {
+      if (preload.naturalWidth > 0 && preload.naturalHeight > 0) {
+        setSourceSize({ width: preload.naturalWidth, height: preload.naturalHeight });
+      }
+      setFrameSrc(src);
+    };
+    preload.onerror = () => {
+      setFrameSrc(src);
+    };
+    preload.src = src;
+    framesRef.current += 1;
+    if (typeof msg.url === "string" && msg.url) {
+      setPageUrl(msg.url);
+      if (!addressFocusedRef.current) {
+        setAddressInput(msg.url);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     if (!wsUrl || !running) {
       socketRef.current = null;
       setPageUrl("about:blank");
       setAddressInput("about:blank");
+      setFrameSrc(null);
+      setStreamError(null);
+      setLastFrameAt(0);
       return;
     }
     const socket = new WebSocket(wsUrl);
     socketRef.current = socket;
     socket.onmessage = (event) => {
       try {
-        const msg = JSON.parse(event.data as string);
-        if (msg.type === "frame" && imgRef.current) {
-          const frameTabId =
-            typeof msg.tab_id === "number" ? msg.tab_id : Number(msg.tab_id);
-          const expected = expectedFrameTabIdRef.current;
-          if (
-            expected !== null &&
-            Number.isFinite(frameTabId) &&
-            frameTabId !== expected
-          ) {
-            return;
-          }
-          if (expected !== null && Number.isFinite(frameTabId) && frameTabId === expected) {
-            expectedFrameTabIdRef.current = null;
-            setActivatingTabId(null);
-          }
-          imgRef.current.src = `data:image/jpeg;base64,${msg.data}`;
-          framesRef.current += 1;
-          if (typeof msg.url === "string" && msg.url) {
-            setPageUrl(msg.url);
-            if (!addressFocusedRef.current) {
-              setAddressInput(msg.url);
-            }
-          }
+        const msg = JSON.parse(event.data as string) as Record<string, unknown>;
+        if (msg.type === "frame_error") {
+          const raw =
+            typeof msg.error === "string" ? msg.error : "Screenshot stream failed";
+          const err = raw.replace(/^(Error:\s*)+/i, "").trim();
+          setStreamError(err);
+          return;
         }
+        applyFrameMessage(msg);
       } catch {
         /* ignore malformed frames */
       }
@@ -456,22 +577,29 @@ export function BrowserPanel({
       socketRef.current = null;
       clearInterval(timer);
     };
-  }, [wsUrl, running]);
+  }, [wsUrl, running, applyFrameMessage]);
+
+  useEffect(() => {
+    if (!isChrome || !chromeInfo?.extension_connected) {
+      return;
+    }
+    if (Date.now() < activateGraceUntilRef.current) {
+      return;
+    }
+    const err = chromeInfo.last_frame_error?.trim();
+    if (err) {
+      setStreamError(err);
+    } else if (!activatingTabId) {
+      setStreamError(null);
+    }
+  }, [isChrome, chromeInfo?.extension_connected, chromeInfo?.last_frame_error, activatingTabId]);
 
   const onFrameLoad = useCallback(() => {
     const img = imgRef.current;
     if (!img || img.naturalWidth <= 0 || img.naturalHeight <= 0) {
       return;
     }
-    setSourceSize((current) => {
-      if (
-        current.width === img.naturalWidth &&
-        current.height === img.naturalHeight
-      ) {
-        return current;
-      }
-      return { width: img.naturalWidth, height: img.naturalHeight };
-    });
+    setSourceSize({ width: img.naturalWidth, height: img.naturalHeight });
   }, []);
 
   const onAddressKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -761,7 +889,7 @@ export function BrowserPanel({
                           }
                           onClick={() => {
                             if (debuggable && !isActive) {
-                              activateChromeTab(tab.id);
+                              void activateChromeTab(tab.id);
                             }
                           }}
                         >
@@ -799,13 +927,21 @@ export function BrowserPanel({
                     placeholder="Active Chrome tab URL"
                     title={pageUrl}
                   />
+                  <button
+                    type="button"
+                    className="browser-go-btn"
+                    onClick={() => void refreshChromeStream()}
+                    title="Request an immediate preview frame"
+                  >
+                    Refresh
+                  </button>
                   {zoomControls}
                 </div>
               </>
             )}
             <div
               ref={wrapRef}
-              className={`browser-frame-wrap${dragging ? " browser-frame-wrap--dragging" : ""}${zoom > 1 ? " browser-frame-wrap--pannable" : ""}`}
+              className={`browser-frame-wrap${isChrome ? " browser-frame-wrap--chrome" : ""}${dragging ? " browser-frame-wrap--dragging" : ""}${zoom > 1 ? " browser-frame-wrap--pannable" : ""}`}
               tabIndex={0}
               onKeyDown={onViewportKeyDown}
               onMouseMove={onViewportMouseMove}
@@ -818,15 +954,56 @@ export function BrowserPanel({
                 ref={scalerRef}
                 className="browser-frame-scaler"
                 style={
-                  fitSize.fitW > 0 && fitSize.fitH > 0
-                    ? { width: displayW, height: displayH }
-                    : { width: "100%", height: "100%" }
+                  isChrome
+                    ? { width: "100%", height: "100%" }
+                    : fitSize.fitW > 0 && fitSize.fitH > 0
+                      ? { width: displayW, height: displayH }
+                      : { width: "100%", height: "100%" }
                 }
               >
+                {streamError && (
+                  <p className="browser-stream-error" role="status">
+                    Preview stream: {streamError}
+                    {isChrome &&
+                      (streamError.includes("Failed to fetch") ||
+                        streamError.toLowerCase().includes("stream")) && (
+                        <>
+                          {" "}
+                          — Reload teshi-bridge, Disconnect/Connect Chrome in teshi. Discovery
+                          uses port 17373; preview frames use the extension WebSocket from GET
+                          /v1/bridge (extension_frame_ws_url).
+                        </>
+                      )}
+                  </p>
+                )}
+                {isChrome &&
+                  streamStalled &&
+                  !streamError &&
+                  !showStreamLoading && (
+                    <p className="browser-stream-stalled" role="status">
+                      Extension stream disconnected — reload teshi-bridge and Connect Chrome
+                      again.
+                    </p>
+                  )}
+                {showStreamLoading && (
+                  <p className="browser-stream-loading" role="status">
+                    Updating screenshot…
+                  </p>
+                )}
+                {streamStalled && !showStreamLoading && (streamError || !isChrome) && (
+                  <p className="browser-stream-stalled" role="status">
+                    Stream stalled — use an http(s) tab in Chrome (not chrome://).{" "}
+                    {chromeInfo?.last_frame_error?.trim() ||
+                      streamError ||
+                      "Click Refresh to retry."}
+                  </p>
+                )}
                 <img
                   ref={imgRef}
-                  alt="Browser stream"
+                  src={frameSrc ?? undefined}
+                  alt=""
                   className="browser-frame"
+                  style={{ display: frameSrc ? "block" : "none" }}
                   onLoad={onFrameLoad}
                 />
               </div>

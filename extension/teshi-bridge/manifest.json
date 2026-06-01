@@ -8,7 +8,11 @@
     "http://127.0.0.1/*",
     "http://localhost/*",
     "http://127.0.0.1:17373/*",
-    "http://127.0.0.1:17373/*"
+    "http://localhost:17373/*",
+    "ws://127.0.0.1/*",
+    "ws://localhost/*",
+    "http://*/*",
+    "https://*/*"
   ],
   "icons": {
     "16": "icons/icon16.png",
