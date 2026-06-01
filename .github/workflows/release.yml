@@ -10,6 +10,14 @@ on:
         description: "Release tag to publish (for example: v0.1.0)"
         required: true
         type: string
+      run_scope:
+        description: "Workflow scope: full release or windows-only retry"
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - windows-only
 
 concurrency:
   group: release-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
@@ -25,6 +33,7 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_scope != 'windows-only' || matrix.target == 'x86_64-pc-windows-msvc' }}
     strategy:
       fail-fast: false
       matrix:
@@ -73,8 +82,16 @@ jobs:
         shell: pwsh
         run: choco install wixtoolset --no-progress -y
 
-      - name: Install cargo-wix
+      - name: Cache cargo-wix binary
+        id: cache_cargo_wix
         if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-wix.exe
+          key: ${{ runner.os }}-cargo-wix-0.3.9
+
+      - name: Install cargo-wix
+        if: matrix.target == 'x86_64-pc-windows-msvc' && steps.cache_cargo_wix.outputs.cache-hit != 'true'
         run: cargo install cargo-wix --locked --version 0.3.9
 
       - name: Build MSI installer
@@ -124,26 +141,13 @@ jobs:
             -out wix/web-files.wxs `
             -gg -sfrag -srd `
             -dr ShareWebDir `
-            -cg WebFiles
-
-          # heat generates wix/web-files.wxs with a <Wix> root; instead of relying on
-          # <?include?> (fragile across cargo-wix/heat versions), inject the <Fragment>
-          # directly into wix/main.wxs and remove web-files.wxs to avoid duplicate candle inputs.
-          $webWxs = Get-Content wix/web-files.wxs -Raw
-          $fragment = [regex]::Match($webWxs, '<Fragment\b[\s\S]*?</Fragment>').Value
-          if ([string]::IsNullOrWhiteSpace($fragment)) {
-            throw "Failed to extract <Fragment> from wix/web-files.wxs"
-          }
-
-          $mainWxs = Get-Content wix/main.wxs -Raw
-          $mainWxs = $mainWxs -replace '\s*<\?include\s+web-files\.wxs\s+\?>\s*', "`n$fragment`n"
-          Set-Content -Path wix/main.wxs -Value $mainWxs -NoNewline
-
-          Remove-Item -Force wix/web-files.wxs
+            -cg WebFiles `
+            -var var.WebRoot
 
           # cargo-wix 0.3.x: pass WiX preprocessor defines via candle (-d), not --define
           cargo wix --package teshi --nocapture --no-build `
             -C -dStagingRoot=$stagingRoot `
+            -C -dWebRoot=$webDir `
             -o "target/wix/teshi-$tag-x64.msi"
 
       - name: Upload binary artifact
@@ -185,6 +189,7 @@ jobs:
     name: Publish Release Assets
     runs-on: ubuntu-latest
     needs: build
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_scope != 'windows-only' }}
 
     steps:
       - name: Checkout
@@ -304,6 +309,7 @@ jobs:
     name: Submit WinGet manifest
     runs-on: windows-latest
     needs: publish
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_scope != 'windows-only' }}
 
     steps:
       - name: Ensure release tag format
