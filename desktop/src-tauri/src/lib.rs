@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod window_state;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -75,13 +76,7 @@ pub fn run() {
             finalize_main_window_cmd,
         ])
         .setup(move |app| {
-            let script = app
-                .path()
-                .resolve(
-                    "resources/browser_service.py",
-                    tauri::path::BaseDirectory::Resource,
-                )
-                .map_err(|e| e.to_string())?;
+            let script = resolve_browser_service_script(app)?;
 
             let handle = app.handle().clone();
             let host: HostEventCallback =
@@ -112,6 +107,35 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running teshi-desktop");
+}
+
+fn resolve_browser_service_script(app: &mut tauri::App) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+    let resource_path = app
+        .path()
+        .resolve(
+            "resources/browser_service.py",
+            tauri::path::BaseDirectory::Resource,
+        )
+        .map_err(|e| e.to_string())?;
+    candidates.push(resource_path);
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("share").join("browser_service.py"));
+            if let Some(parent) = exe_dir.parent() {
+                candidates.push(parent.join("share").join("browser_service.py"));
+            }
+        }
+    }
+
+    for path in candidates {
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+
+    Err("browser_service.py not found in resources/ or share/".to_string())
 }
 
 fn init_logging() {
