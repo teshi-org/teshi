@@ -1,6 +1,6 @@
 # Browser modes (teshi-desktop)
 
-teshi-desktop supports two browser backends for BDD locator recording. Both expose the same WebSocket commands (`get_page_snapshot`, `highlight_selector`, `clear_highlight`) and write `.teshi/cdp-endpoint.json` for agents.
+teshi-desktop supports two browser backends for BDD locator recording. Both expose the same WebSocket commands (`get_page_snapshot`, `highlight_selector`, `clear_highlight`; Chrome mode also supports `activate_tab`) and write `.teshi/cdp-endpoint.json` for agents.
 
 ## How Chrome mode communicates
 
@@ -25,8 +25,8 @@ teshi-desktop supports two browser backends for BDD locator recording. Both expo
 
 - **Extension ↔ bridge**: HTTP only (`/v1/bridge/heartbeat`, `/v1/bridge/response`). No WebSocket from the extension (MV3-safe). CDP screenshots are captured in the extension and forwarded as frame payloads over `/v1/bridge/response`.
 - **Agent ↔ bridge**: WebSocket (`ws_url` in `.teshi/cdp-endpoint.json`).
-- **Extension ↔ page**: Chrome `debugger` API (CDP) on the **active tab** only.
-- **Desktop**: starts/stops the Python process; does not talk to the extension directly.
+- **Extension ↔ page**: Chrome `debugger` API (CDP) on the **active tab** only (one JPEG stream at a time).
+- **Desktop**: starts/stops the Python process; polls discovery for tab metadata; sends `activate_tab` over the agent WebSocket to switch Chrome tabs.
 
 The popup **Connect to teshi** button sends one heartbeat immediately and refreshes status text. The green **OK** badge means the last heartbeat succeeded.
 
@@ -40,9 +40,14 @@ Use your **daily Chrome** with real login sessions (SSO, cookies).
 4. Wait until the live stream appears (extension connected; check the status dot tooltip if needed).
 5. Select a Gherkin step and run the **bdd-locator** skill in the agent terminal.
 
-While waiting for the extension, the panel shows setup steps only (no stream). Once connected, the panel matches **Start Embedded** layout: full-height JPEG stream, read-only active-tab URL, and the same zoom controls. Navigate by changing tabs or URLs in Chrome (in-panel Go is not available in chrome mode).
+While waiting for the extension, the panel shows setup steps only (no stream). Once connected, the panel shows:
 
-Discovery: `http://127.0.0.1:17373/v1/bridge`  
+- A **tab strip** for tabs in the **current Chrome window** (title + favicon). The active tab is highlighted. Click another debuggable tab to activate it in Chrome and continue the single screenshot stream.
+- Read-only active-tab URL and the same zoom controls as embedded mode (in-panel **Go** is not available in chrome mode).
+
+`chrome://` and extension pages appear in the strip but are not selectable (not CDP-debuggable).
+
+Discovery: `GET http://127.0.0.1:17373/v1/bridge` returns `tabs`, `active_tab_id`, `page_url`, and `extension_connected`.  
 `cdp-endpoint.json` includes `"mode": "chrome"`.
 
 ## Start Embedded (preview / CI alignment)

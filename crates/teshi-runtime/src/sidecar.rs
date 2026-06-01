@@ -1,11 +1,13 @@
 //! Python Playwright sidecar management.
 
+use std::io::Read;
 use std::net::TcpListener;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -61,9 +63,9 @@ impl SidecarState {
 
     /// Stops the sidecar process if running.
     pub async fn stop(&self) -> Result<()> {
+        let mode = *self.mode.lock().unwrap();
         if let Some(mut child) = self.child.lock().unwrap().take() {
             let _ = child.kill();
-            use std::time::{Duration, Instant};
             let deadline = Instant::now() + Duration::from_secs(3);
             while Instant::now() < deadline {
                 match child.try_wait() {
@@ -73,6 +75,13 @@ impl SidecarState {
                 }
             }
         }
+
+        // Release orphaned chrome discovery listeners after crashes or untracked sidecars.
+        if mode == Some(BrowserMode::Chrome) || port_is_open(CHROME_DISCOVERY_PORT) {
+            let _ = kill_listener_on_port(CHROME_DISCOVERY_PORT);
+            let _ = wait_for_port_release(CHROME_DISCOVERY_PORT, Duration::from_secs(2));
+        }
+
         *self.ws_url.lock().unwrap() = None;
         *self.mode.lock().unwrap() = None;
         Ok(())
@@ -134,8 +143,6 @@ pub fn send_sidecar_command(
 struct ProjectVenv {
     root: PathBuf,
     python_exe: PathBuf,
-    /// Interpreter used for subprocesses (`pythonw.exe` on Windows when present).
-    python: PathBuf,
 }
 
 fn resolve_project_venv(project_root: &Path) -> Option<ProjectVenv> {
@@ -149,22 +156,7 @@ fn resolve_project_venv(project_root: &Path) -> Option<ProjectVenv> {
         if !python_exe.is_file() {
             continue;
         }
-        #[cfg(windows)]
-        let python = {
-            let pythonw = root.join("Scripts/pythonw.exe");
-            if pythonw.is_file() {
-                pythonw
-            } else {
-                python_exe.clone()
-            }
-        };
-        #[cfg(not(windows))]
-        let python = python_exe.clone();
-        return Some(ProjectVenv {
-            root,
-            python_exe,
-            python,
-        });
+        return Some(ProjectVenv { root, python_exe });
     }
     None
 }
@@ -177,12 +169,9 @@ fn python_check_command(venv: &ProjectVenv) -> Command {
     cmd
 }
 
-/// Build a Python subprocess for the long-running sidecar (`pythonw.exe` on Windows when present).
+/// Build a Python subprocess for the long-running sidecar (`python.exe`; `CREATE_NO_WINDOW` avoids a console flash).
 fn python_sidecar_command(venv: &ProjectVenv) -> Command {
-    let mut cmd = Command::new(&venv.python);
-    apply_windows_no_window(&mut cmd);
-    apply_venv_isolation(&mut cmd, venv);
-    cmd
+    python_check_command(venv)
 }
 
 fn check_failure_detail(check: &std::process::Output) -> String {
@@ -242,6 +231,216 @@ fn apply_windows_no_window(_cmd: &mut Command) {}
 fn pick_port() -> Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0").context("bind ephemeral port")?;
     Ok(listener.local_addr()?.port())
+}
+
+/// True when something accepts TCP connections on the loopback port.
+fn port_is_open(port: u16) -> bool {
+    use std::net::{SocketAddr, TcpStream};
+
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+}
+
+fn wait_for_port_release(port: u16, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !port_is_open(port) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    !port_is_open(port)
+}
+
+/// PID of the process listening on `127.0.0.1:port`, if discoverable.
+fn find_listener_pid(port: u16) -> Option<u32> {
+    #[cfg(windows)]
+    {
+        let output = Command::new("netstat").args(["-ano"]).output().ok()?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let needle = format!("127.0.0.1:{port}");
+        for line in text.lines() {
+            if line.contains(&needle) && line.contains("LISTENING") {
+                if let Some(pid) = line.split_whitespace().last() {
+                    if let Ok(pid) = pid.parse::<u32>() {
+                        return Some(pid);
+                    }
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(windows))]
+    {
+        let output = Command::new("lsof")
+            .args(["-ti", &format!("tcp:{port}")])
+            .output()
+            .ok()?;
+        let pid = String::from_utf8_lossy(&output.stdout).trim();
+        pid.parse().ok()
+    }
+}
+
+/// Stops the process bound to the discovery port (orphaned `browser_service.py`).
+fn kill_listener_on_port(port: u16) -> Result<(), String> {
+    let Some(pid) = find_listener_pid(port) else {
+        return Ok(());
+    };
+    #[cfg(windows)]
+    {
+        let status = Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("taskkill failed for PID {pid} (port {port})"))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let status = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("kill failed for PID {pid} (port {port})"))
+        }
+    }
+}
+
+fn normalize_project_root(path: &Path) -> PathBuf {
+    dunce::simplified(path)
+        .canonicalize()
+        .unwrap_or_else(|_| dunce::simplified(path).to_path_buf())
+}
+
+fn project_roots_match(expected: &Path, got: &str) -> bool {
+    if got.trim().is_empty() {
+        return false;
+    }
+    let got_path = Path::new(got);
+    let a = normalize_project_root(expected);
+    let b = normalize_project_root(got_path);
+    if a == b {
+        return true;
+    }
+    #[cfg(windows)]
+    return a
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&b.to_string_lossy());
+    #[cfg(not(windows))]
+    false
+}
+
+/// Parsed `GET /v1/bridge` payload for chrome mode reuse.
+struct ChromeBridgeDiscovery {
+    ws_url: String,
+    project_root: String,
+}
+
+fn fetch_chrome_bridge_discovery(port: u16) -> Result<ChromeBridgeDiscovery, BrowserError> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let mut stream =
+        TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(500))
+            .map_err(|e| BrowserError {
+                message: format!("discovery port {port} is not reachable: {e}"),
+                hint: None,
+            })?;
+    stream
+        .write_all(b"GET /v1/bridge HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .map_err(|e| BrowserError {
+            message: e.to_string(),
+            hint: None,
+        })?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).map_err(|e| BrowserError {
+        message: e.to_string(),
+        hint: None,
+    })?;
+    let text = String::from_utf8_lossy(&buf);
+    if !text.contains("200 OK") {
+        return Err(BrowserError {
+            message: "discovery endpoint did not return bridge info".into(),
+            hint: None,
+        });
+    }
+    let body = text
+        .split("\r\n\r\n")
+        .nth(1)
+        .or_else(|| text.split("\n\n").nth(1))
+        .unwrap_or("")
+        .trim();
+    let payload: serde_json::Value = serde_json::from_str(body).map_err(|e| BrowserError {
+        message: format!("invalid discovery JSON: {e}"),
+        hint: None,
+    })?;
+    let ws_url = payload
+        .get("ws_url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| BrowserError {
+            message: "discovery response missing ws_url".into(),
+            hint: None,
+        })?;
+    let project_root = payload
+        .get("project_root")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if payload.get("mode").and_then(|v| v.as_str()) != Some("chrome") {
+        return Err(BrowserError {
+            message: "discovery port is not serving chrome bridge mode".into(),
+            hint: None,
+        });
+    }
+    Ok(ChromeBridgeDiscovery {
+        ws_url: ws_url.to_string(),
+        project_root,
+    })
+}
+
+fn read_child_stderr(child: &mut Child) -> String {
+    if let Some(mut stderr) = child.stderr.take() {
+        let mut buf = Vec::new();
+        if stderr.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+            return String::from_utf8_lossy(&buf).trim().to_string();
+        }
+    }
+    String::new()
+}
+
+/// Frees port 17373 or reuses an existing bridge for the same project.
+fn prepare_chrome_discovery(project_root: &Path) -> Result<Option<String>, BrowserError> {
+    if !port_is_open(CHROME_DISCOVERY_PORT) {
+        return Ok(None);
+    }
+
+    if let Ok(bridge) = fetch_chrome_bridge_discovery(CHROME_DISCOVERY_PORT) {
+        if project_roots_match(project_root, &bridge.project_root) {
+            return Ok(Some(bridge.ws_url));
+        }
+    }
+
+    kill_listener_on_port(CHROME_DISCOVERY_PORT).map_err(|e| BrowserError {
+        message: format!("Port {CHROME_DISCOVERY_PORT} is in use and could not be released: {e}"),
+        hint: Some("Close other teshi instances or run: netstat -ano | findstr :17373".into()),
+    })?;
+    if !wait_for_port_release(CHROME_DISCOVERY_PORT, Duration::from_secs(3)) {
+        return Err(BrowserError {
+            message: format!("Port {CHROME_DISCOVERY_PORT} is still in use after cleanup."),
+            hint: Some(
+                "End the orphaned python.exe on port 17373, then click Connect Chrome again."
+                    .into(),
+            ),
+        });
+    }
+    Ok(None)
 }
 
 /// Starts the browser sidecar for the open project in the given mode.
@@ -344,6 +543,28 @@ pub async fn start_browser_sidecar(
         0
     };
 
+    if mode == BrowserMode::Chrome {
+        if let Some(ws_url) = prepare_chrome_discovery(&project_root)? {
+            *rt.sidecar.ws_url.lock().unwrap() = Some(ws_url.clone());
+            *rt.sidecar.mode.lock().unwrap() = Some(mode);
+            *rt.project.browser_active.lock().unwrap() = true;
+            rt.events.emit(
+                "browser-started",
+                serde_json::json!({ "ws_url": ws_url, "mode": mode.as_str() }),
+            );
+            let cdp_endpoint_path = project_root
+                .join(".teshi")
+                .join("cdp-endpoint.json")
+                .to_string_lossy()
+                .into_owned();
+            return Ok(BrowserStartResult {
+                ws_url,
+                cdp_endpoint_path,
+                mode: mode.as_str().to_string(),
+            });
+        }
+    }
+
     let mut cmd = python_sidecar_command(&venv);
     cmd.arg(script).args([
         "--host",
@@ -362,7 +583,7 @@ pub async fn start_browser_sidecar(
     }
     let mut child = cmd
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| BrowserError {
             message: format!("Failed to start browser sidecar: {e}"),
@@ -417,10 +638,16 @@ fn wait_until_chrome_ready(
 
     loop {
         if let Ok(Some(status)) = child.try_wait() {
+            let detail = read_child_stderr(child);
+            let message = if detail.is_empty() {
+                format!("Browser sidecar exited during startup (status: {status}).")
+            } else {
+                format!("Browser sidecar exited during startup (status: {status}): {detail}")
+            };
             return Err(BrowserError {
-                message: format!("Browser sidecar exited during startup (status: {status})."),
+                message,
                 hint: Some(
-                    "Check that the Python venv is valid and port 17373 is not in use.".into(),
+                    "If port 17373 is in use, click Disconnect then Connect Chrome again.".into(),
                 ),
             });
         }
@@ -486,8 +713,14 @@ fn wait_until_ready(child: &mut Child, port: u16) -> Result<(), BrowserError> {
 
     loop {
         if let Ok(Some(status)) = child.try_wait() {
+            let detail = read_child_stderr(child);
+            let message = if detail.is_empty() {
+                format!("Browser sidecar exited during startup (status: {status}).")
+            } else {
+                format!("Browser sidecar exited during startup (status: {status}): {detail}")
+            };
             return Err(BrowserError {
-                message: format!("Browser sidecar exited during startup (status: {status})."),
+                message,
                 hint: Some(
                     "Check that Playwright Chromium is installed and the venv is valid.".into(),
                 ),

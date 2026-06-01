@@ -42,6 +42,10 @@ desktop/dist/
 
 # Local release packaging output (binaries, archives, checksums)
 release-pack/
+dist/
+
+# Local MSI staging tree (heat/cargo-wix; CI regenerates wix/*.wxs from this)
+staging/
 
 # --- Python virtual environments (project under test / local dev) ---
 .venv/

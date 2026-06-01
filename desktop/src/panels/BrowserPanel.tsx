@@ -4,10 +4,21 @@ import { PanelCollapseButton } from "./PanelCollapseButton";
 // Use localhost so Tauri CSP connect-src allows discovery polling from the webview.
 const CHROME_DISCOVERY_URL = "http://127.0.0.1:17373/v1/bridge";
 
+interface ChromeWindowTab {
+  id: number;
+  title: string;
+  url: string;
+  active: boolean;
+  favIconUrl?: string;
+  debuggable?: boolean;
+}
+
 interface ChromeBridgeInfo {
   page_url?: string;
   title?: string;
   extension_connected?: boolean;
+  active_tab_id?: number | null;
+  tabs?: ChromeWindowTab[];
 }
 
 interface Props {
@@ -27,28 +38,52 @@ interface Props {
   onToggleFullscreen: () => void;
 }
 
-const SOURCE_WIDTH = 1920;
-const SOURCE_HEIGHT = 1080;
-const SOURCE_ASPECT = SOURCE_WIDTH / SOURCE_HEIGHT;
+const EMBEDDED_SOURCE_WIDTH = 1920;
+const EMBEDDED_SOURCE_HEIGHT = 1080;
 const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4];
 const DEFAULT_ZOOM = 1;
+
+interface SourceSize {
+  width: number;
+  height: number;
+}
 
 interface FitSize {
   fitW: number;
   fitH: number;
 }
 
-function computeFitSize(containerW: number, containerH: number): FitSize {
+function effectiveSourceSize(
+  source: SourceSize,
+  containerW: number,
+  containerH: number,
+): SourceSize {
+  if (source.width > 0 && source.height > 0) {
+    return source;
+  }
+  if (containerW > 0 && containerH > 0) {
+    return { width: containerW, height: containerH };
+  }
+  return { width: EMBEDDED_SOURCE_WIDTH, height: EMBEDDED_SOURCE_HEIGHT };
+}
+
+function computeFitSize(
+  containerW: number,
+  containerH: number,
+  source: SourceSize,
+): FitSize {
   if (containerW <= 0 || containerH <= 0) {
     return { fitW: 0, fitH: 0 };
   }
+  const resolved = effectiveSourceSize(source, containerW, containerH);
+  const sourceAspect = resolved.width / resolved.height;
   const containerAspect = containerW / containerH;
-  if (containerAspect > SOURCE_ASPECT) {
+  if (containerAspect > sourceAspect) {
     const fitH = containerH;
-    return { fitW: fitH * SOURCE_ASPECT, fitH };
+    return { fitW: fitH * sourceAspect, fitH };
   }
   const fitW = containerW;
-  return { fitW, fitH: fitW / SOURCE_ASPECT };
+  return { fitW, fitH: fitW / sourceAspect };
 }
 
 function closestZoomIndex(zoom: number): number {
@@ -150,10 +185,16 @@ export function BrowserPanel({
   const [pageUrl, setPageUrl] = useState("about:blank");
   const [addressInput, setAddressInput] = useState("about:blank");
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
+  const [sourceSize, setSourceSize] = useState<SourceSize>({
+    width: EMBEDDED_SOURCE_WIDTH,
+    height: EMBEDDED_SOURCE_HEIGHT,
+  });
   const [fitSize, setFitSize] = useState<FitSize>({ fitW: 0, fitH: 0 });
   const [dragging, setDragging] = useState(false);
   const [chromeInfo, setChromeInfo] = useState<ChromeBridgeInfo | null>(null);
   const [chromePollError, setChromePollError] = useState<string | null>(null);
+  const [activatingTabId, setActivatingTabId] = useState<number | null>(null);
+  const expectedFrameTabIdRef = useRef<number | null>(null);
 
   const chromeConnected = isChrome && Boolean(chromeInfo?.extension_connected);
   const showChromeWaiting = isChrome && !chromeConnected;
@@ -214,6 +255,22 @@ export function BrowserPanel({
     setAddressInput(url);
   }, []);
 
+  const activateChromeTab = useCallback((tabId: number) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    expectedFrameTabIdRef.current = tabId;
+    setActivatingTabId(tabId);
+    socket.send(
+      JSON.stringify({
+        cmd: "activate_tab",
+        request_id: `activate-${tabId}-${Date.now()}`,
+        tab_id: tabId,
+      }),
+    );
+  }, []);
+
   useEffect(() => {
     if (!showViewport) {
       setZoom(DEFAULT_ZOOM);
@@ -221,9 +278,24 @@ export function BrowserPanel({
   }, [showViewport]);
 
   useEffect(() => {
+    if (isEmbedded) {
+      setSourceSize({
+        width: EMBEDDED_SOURCE_WIDTH,
+        height: EMBEDDED_SOURCE_HEIGHT,
+      });
+      return;
+    }
+    if (isChrome) {
+      setSourceSize({ width: 0, height: 0 });
+    }
+  }, [isEmbedded, isChrome, wsUrl]);
+
+  useEffect(() => {
     if (!isChrome) {
       setChromeInfo(null);
       setChromePollError(null);
+      setActivatingTabId(null);
+      expectedFrameTabIdRef.current = null;
       return;
     }
     const poll = async () => {
@@ -255,18 +327,28 @@ export function BrowserPanel({
   }, [isChrome]);
 
   useEffect(() => {
+    if (activatingTabId === null) {
+      return;
+    }
+    if (chromeInfo?.active_tab_id === activatingTabId) {
+      setActivatingTabId(null);
+      expectedFrameTabIdRef.current = null;
+    }
+  }, [chromeInfo?.active_tab_id, activatingTabId]);
+
+  useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap || !showViewport) return;
 
     const updateFit = () => {
-      setFitSize(computeFitSize(wrap.clientWidth, wrap.clientHeight));
+      setFitSize(computeFitSize(wrap.clientWidth, wrap.clientHeight, sourceSize));
     };
 
     updateFit();
     const observer = new ResizeObserver(updateFit);
     observer.observe(wrap);
     return () => observer.disconnect();
-  }, [showViewport, fullscreen]);
+  }, [showViewport, fullscreen, sourceSize]);
 
   useLayoutEffect(() => {
     const anchor = zoomAnchorRef.current;
@@ -338,6 +420,20 @@ export function BrowserPanel({
       try {
         const msg = JSON.parse(event.data as string);
         if (msg.type === "frame" && imgRef.current) {
+          const frameTabId =
+            typeof msg.tab_id === "number" ? msg.tab_id : Number(msg.tab_id);
+          const expected = expectedFrameTabIdRef.current;
+          if (
+            expected !== null &&
+            Number.isFinite(frameTabId) &&
+            frameTabId !== expected
+          ) {
+            return;
+          }
+          if (expected !== null && Number.isFinite(frameTabId) && frameTabId === expected) {
+            expectedFrameTabIdRef.current = null;
+            setActivatingTabId(null);
+          }
           imgRef.current.src = `data:image/jpeg;base64,${msg.data}`;
           framesRef.current += 1;
           if (typeof msg.url === "string" && msg.url) {
@@ -361,6 +457,22 @@ export function BrowserPanel({
       clearInterval(timer);
     };
   }, [wsUrl, running]);
+
+  const onFrameLoad = useCallback(() => {
+    const img = imgRef.current;
+    if (!img || img.naturalWidth <= 0 || img.naturalHeight <= 0) {
+      return;
+    }
+    setSourceSize((current) => {
+      if (
+        current.width === img.naturalWidth &&
+        current.height === img.naturalHeight
+      ) {
+        return current;
+      }
+      return { width: img.naturalWidth, height: img.naturalHeight };
+    });
+  }, []);
 
   const onAddressKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
@@ -413,6 +525,10 @@ export function BrowserPanel({
   const displayW = fitSize.fitW * zoom;
   const displayH = fitSize.fitH * zoom;
   const zoomPercent = Math.round(zoom * 100);
+
+  const chromeTabs = chromeInfo?.tabs ?? [];
+  const chromeActiveTabId =
+    activatingTabId ?? chromeInfo?.active_tab_id ?? null;
 
   const statusTitle = running
     ? isChrome
@@ -572,7 +688,9 @@ export function BrowserPanel({
               <li>Extension badge should show <strong>OK</strong> when linked.</li>
             </ol>
             <ul className="browser-chrome-hints">
-              <li>Switch tabs in Chrome before snapshot; only the active tab is used.</li>
+              <li>
+                After connecting, use the tab strip in the Browser panel or switch tabs in Chrome.
+              </li>
               <li>Close DevTools on the target tab if attach fails.</li>
             </ul>
           </div>
@@ -615,23 +733,75 @@ export function BrowserPanel({
                 {zoomControls}
               </form>
             ) : (
-              <div className="browser-address-bar">
-                <label className="visually-hidden" htmlFor="browser-address-chrome">
-                  Active tab URL
-                </label>
-                <input
-                  id="browser-address-chrome"
-                  type="text"
-                  className="browser-address-input"
-                  readOnly
-                  value={pageUrl}
-                  spellCheck={false}
-                  autoComplete="off"
-                  placeholder="Active Chrome tab URL"
-                  title={pageUrl}
-                />
-                {zoomControls}
-              </div>
+              <>
+                {chromeTabs.length > 0 && (
+                  <div
+                    className="browser-chrome-tabstrip"
+                    role="tablist"
+                    aria-label="Chrome window tabs"
+                  >
+                    {activatingTabId !== null && (
+                      <span className="browser-chrome-tabstrip-status">Switching tab…</span>
+                    )}
+                    {chromeTabs.map((tab) => {
+                      const isActive = chromeActiveTabId === tab.id;
+                      const debuggable = tab.debuggable !== false;
+                      return (
+                        <button
+                          key={tab.id}
+                          type="button"
+                          role="tab"
+                          aria-selected={isActive}
+                          className={`browser-chrome-tab${isActive ? " browser-chrome-tab--active" : ""}${!debuggable ? " browser-chrome-tab--disabled" : ""}`}
+                          disabled={!debuggable || isActive}
+                          title={
+                            debuggable
+                              ? tab.url || tab.title
+                              : "This page cannot be debugged (e.g. chrome://)"
+                          }
+                          onClick={() => {
+                            if (debuggable && !isActive) {
+                              activateChromeTab(tab.id);
+                            }
+                          }}
+                        >
+                          {tab.favIconUrl ? (
+                            <img
+                              className="browser-chrome-tab-favicon"
+                              src={tab.favIconUrl}
+                              alt=""
+                              width={14}
+                              height={14}
+                            />
+                          ) : (
+                            <span className="browser-chrome-tab-favicon-placeholder" />
+                          )}
+                          <span className="browser-chrome-tab-title">
+                            {tab.title || "Untitled"}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                <div className="browser-address-bar">
+                  <label className="visually-hidden" htmlFor="browser-address-chrome">
+                    Active tab URL
+                  </label>
+                  <input
+                    id="browser-address-chrome"
+                    type="text"
+                    className="browser-address-input"
+                    readOnly
+                    value={pageUrl}
+                    spellCheck={false}
+                    autoComplete="off"
+                    placeholder="Active Chrome tab URL"
+                    title={pageUrl}
+                  />
+                  {zoomControls}
+                </div>
+              </>
             )}
             <div
               ref={wrapRef}
@@ -644,15 +814,22 @@ export function BrowserPanel({
               onClick={() => wrapRef.current?.focus()}
               aria-label="Browser stream viewport"
             >
-              {fitSize.fitW > 0 && fitSize.fitH > 0 && (
-                <div
-                  ref={scalerRef}
-                  className="browser-frame-scaler"
-                  style={{ width: displayW, height: displayH }}
-                >
-                  <img ref={imgRef} alt="Browser stream" className="browser-frame" />
-                </div>
-              )}
+              <div
+                ref={scalerRef}
+                className="browser-frame-scaler"
+                style={
+                  fitSize.fitW > 0 && fitSize.fitH > 0
+                    ? { width: displayW, height: displayH }
+                    : { width: "100%", height: "100%" }
+                }
+              >
+                <img
+                  ref={imgRef}
+                  alt="Browser stream"
+                  className="browser-frame"
+                  onLoad={onFrameLoad}
+                />
+              </div>
             </div>
           </div>
         )}

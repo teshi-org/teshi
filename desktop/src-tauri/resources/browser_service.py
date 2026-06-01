@@ -345,6 +345,8 @@ class ChromeBridge:
         self.discovery_port = discovery_port
         self.page_url = ""
         self.page_title = ""
+        self.active_tab_id: int | None = None
+        self.tabs: list[dict[str, Any]] = []
         self.last_heartbeat = 0.0
         self._cmd_queue: list[dict[str, Any]] = []
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
@@ -362,6 +364,8 @@ class ChromeBridge:
             "extension_connected": self.extension_alive(),
             "page_url": self.page_url,
             "title": self.page_title,
+            "active_tab_id": self.active_tab_id,
+            "tabs": self.tabs,
         }
 
     def write_endpoint(self) -> None:
@@ -384,6 +388,15 @@ class ChromeBridge:
         self.last_heartbeat = time.monotonic()
         self.page_url = str(payload.get("url", self.page_url))
         self.page_title = str(payload.get("title", self.page_title))
+        raw_active = payload.get("active_tab_id")
+        if raw_active is not None:
+            try:
+                self.active_tab_id = int(raw_active)
+            except (TypeError, ValueError):
+                pass
+        raw_tabs = payload.get("tabs")
+        if isinstance(raw_tabs, list):
+            self.tabs = raw_tabs
         self.write_endpoint()
         pending_cmd = self._cmd_queue.pop(0) if self._cmd_queue else None
         return {"ok": True, "cmd": pending_cmd}
@@ -394,15 +407,22 @@ class ChromeBridge:
             self.last_heartbeat = time.monotonic()
             self.page_url = str(payload.get("url", self.page_url))
             self.page_title = str(payload.get("title", self.page_title))
+            raw_tab = payload.get("tab_id")
+            if raw_tab is not None:
+                try:
+                    self.active_tab_id = int(raw_tab)
+                except (TypeError, ValueError):
+                    pass
             self.write_endpoint()
             if self._frame_callback is not None:
-                await self._frame_callback(
-                    {
-                        "type": "frame",
-                        "data": payload.get("data", ""),
-                        "url": self.page_url,
-                    }
-                )
+                frame_out: dict[str, Any] = {
+                    "type": "frame",
+                    "data": payload.get("data", ""),
+                    "url": self.page_url,
+                }
+                if self.active_tab_id is not None:
+                    frame_out["tab_id"] = self.active_tab_id
+                await self._frame_callback(frame_out)
             return {"ok": True}
 
         request_id = payload.get("request_id")
@@ -433,15 +453,16 @@ class ChromeBridge:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._pending[request_id] = fut
-        self._cmd_queue.append(
-            {
-                "type": "cmd",
-                "request_id": request_id,
-                "cmd": data.get("cmd"),
-                "selector": data.get("selector"),
-                "url": data.get("url"),
-            }
-        )
+        queued: dict[str, Any] = {
+            "type": "cmd",
+            "request_id": request_id,
+            "cmd": data.get("cmd"),
+            "selector": data.get("selector"),
+            "url": data.get("url"),
+        }
+        if data.get("tab_id") is not None:
+            queued["tab_id"] = data.get("tab_id")
+        self._cmd_queue.append(queued)
         try:
             return await asyncio.wait_for(fut, timeout=45.0)
         except asyncio.TimeoutError:

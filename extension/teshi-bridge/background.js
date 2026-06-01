@@ -22,9 +22,43 @@ let attachedTabId = null;
 let cachedProjectRoot = "";
 let heartbeatRunning = false;
 
+/** Whether CDP attach is supported for this tab URL. */
+function isTabDebuggable(url) {
+  if (!url) {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === "http:" ||
+      parsed.protocol === "https:" ||
+      parsed.protocol === "file:"
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function getActiveTab() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   return tabs[0] ?? null;
+}
+
+/** Tab metadata for the current window (heartbeat + discovery). */
+async function listWindowTabs() {
+  const tabs = await chrome.tabs.query({ currentWindow: true });
+  const active = tabs.find((t) => t.active);
+  return {
+    active_tab_id: active?.id ?? null,
+    tabs: tabs.map((t) => ({
+      id: t.id,
+      title: (t.title || t.url || "Untitled").slice(0, 200),
+      url: t.url ?? "",
+      active: Boolean(t.active),
+      favIconUrl: t.favIconUrl ?? "",
+      debuggable: isTabDebuggable(t.url),
+    })),
+  };
 }
 
 async function detachIfNeeded() {
@@ -43,6 +77,11 @@ async function attachActiveTab() {
   const tab = await getActiveTab();
   if (!tab?.id) {
     throw new Error("no active tab in the current window");
+  }
+  if (!isTabDebuggable(tab.url)) {
+    throw new Error(
+      "active tab cannot be debugged (use an http(s) page, not chrome://)",
+    );
   }
   if (attachedTabId === tab.id) {
     return tab;
@@ -92,6 +131,7 @@ async function getPageSnapshot() {
     ok: true,
     url: tab.url ?? "",
     title: tab.title ?? "",
+    tab_id: tab.id,
     accessibility_tree,
     interactive_elements,
   };
@@ -134,6 +174,31 @@ async function clearHighlight() {
   return { ok: true };
 }
 
+async function activateTab(tabId) {
+  const id = Number(tabId);
+  if (!Number.isFinite(id) || id <= 0) {
+    return { ok: false, error: "tab_id is required" };
+  }
+  const existing = await chrome.tabs.get(id).catch(() => null);
+  if (!existing) {
+    return { ok: false, error: `tab not found: ${id}` };
+  }
+  if (!isTabDebuggable(existing.url)) {
+    return {
+      ok: false,
+      error: "tab cannot be debugged (chrome:// and extension pages are not supported)",
+    };
+  }
+  await chrome.tabs.update(id, { active: true });
+  const tab = await attachActiveTab();
+  return {
+    ok: true,
+    tab_id: tab.id,
+    url: tab.url ?? "",
+    title: tab.title ?? "",
+  };
+}
+
 async function captureFrame() {
   const tab = await attachActiveTab();
   const shot = await cdp(tab.id, "Page.captureScreenshot", {
@@ -147,11 +212,12 @@ async function captureFrame() {
     data: shot?.data ?? "",
     url: tab.url ?? "",
     title: tab.title ?? "",
+    tab_id: tab.id,
   };
 }
 
 async function handleCmd(msg) {
-  const { cmd, request_id: requestId, selector } = msg;
+  const { cmd, request_id: requestId, selector, tab_id: tabId } = msg;
   let body;
   try {
     if (cmd === "get_page_snapshot") {
@@ -160,6 +226,8 @@ async function handleCmd(msg) {
       body = await highlightSelector(selector);
     } else if (cmd === "clear_highlight") {
       body = await clearHighlight();
+    } else if (cmd === "activate_tab") {
+      body = await activateTab(tabId);
     } else if (cmd === "navigate") {
       body = {
         ok: false,
@@ -209,6 +277,7 @@ async function heartbeatOnce() {
     return;
   }
   const tab = await getActiveTab();
+  const windowTabs = await listWindowTabs();
   let res;
   try {
     res = await fetch(HEARTBEAT_URL, {
@@ -218,6 +287,8 @@ async function heartbeatOnce() {
         project_root: projectRoot,
         url: tab?.url ?? "",
         title: tab?.title ?? "",
+        active_tab_id: windowTabs.active_tab_id,
+        tabs: windowTabs.tabs,
       }),
     });
   } catch {
@@ -308,9 +379,15 @@ chrome.tabs.onActivated.addListener(() => {
   void heartbeatLoop();
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
   if (tab.active && changeInfo.url) {
     void heartbeatLoop();
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabId === attachedTabId) {
+    attachedTabId = null;
   }
 });
 
