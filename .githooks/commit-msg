@@ -7,10 +7,18 @@ COMMIT_MSG_FILE="$1"
 SUBJECT=$(head -n 1 "$COMMIT_MSG_FILE")
 
 # ── 1. Conventional Commits format ──────────────────────────────────
-if ! echo "$SUBJECT" | grep -qE '^(feat|fix|chore|docs|refactor|test): '; then
+# Types:
+#   feat     → net-new capability (minor bump)
+#   fix      → bug fix (patch bump)
+#   refactor → enhancement of existing feature (patch bump)
+#   perf     → performance improvement (patch bump)
+#   chore    → build/config/tooling
+#   docs     → documentation
+#   test     → test changes
+if ! echo "$SUBJECT" | grep -qE '^(feat|fix|chore|docs|refactor|test|perf|style|ci|build): '; then
     echo "✘ Commit message must follow Conventional Commits format:"
     echo "   <type>: <imperative summary>"
-    echo "   Types: feat, fix, chore, docs, refactor, test"
+    echo "   Types: feat, fix, refactor, perf, chore, docs, test, style, ci, build"
     echo "   Got:  $SUBJECT"
     exit 1
 fi

@@ -43,9 +43,9 @@ VERSION_FILES: list[tuple[str, re.Pattern, str]] = [
 
 BREAKING_PATTERN = re.compile(r'!\s*:|BREAKING CHANGE', re.IGNORECASE)
 FEAT_PATTERN = re.compile(r'^(feat|feature)', re.IGNORECASE)
-FIX_PATTERN = re.compile(r'^(fix|perf|security)', re.IGNORECASE)
+FIX_PATTERN = re.compile(r'^(fix|perf|security|refactor)', re.IGNORECASE)
 IGNORE_PATTERN = re.compile(
-    r'^(docs|style|test|chore|ci|build|refactor)', re.IGNORECASE,
+    r'^(docs|style|test|chore|ci|build)', re.IGNORECASE,
 )
 
 
