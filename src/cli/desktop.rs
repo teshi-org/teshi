@@ -40,20 +40,22 @@ fn resolve_desktop_binary() -> Result<PathBuf> {
         "teshi-desktop"
     };
 
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let sibling = dir.join(name);
-            if sibling.is_file() {
-                return Ok(sibling);
-            }
+    let Ok(exe) = std::env::current_exe() else {
+        return Ok(PathBuf::from(name));
+    };
+    let Some(dir) = exe.parent() else {
+        return Ok(PathBuf::from(name));
+    };
+    let sibling = dir.join(name);
+    if sibling.is_file() {
+        return Ok(sibling);
+    }
 
-            if is_full_install_layout(dir) {
-                bail!(
-                    "`{name}` not found next to `{}`. Reinstall the full MSI or install the separate teshi-desktop MSI.",
-                    exe.display()
-                );
-            }
-        }
+    if is_full_install_layout(dir) {
+        bail!(
+            "`{name}` not found next to `{}`. Reinstall the full MSI or install the separate teshi-desktop MSI.",
+            exe.display()
+        );
     }
 
     Ok(PathBuf::from(name))
