@@ -234,4 +234,6 @@
 
     </Product>
 
+    <?include web-files.wxs ?>
+
 </Wix>
