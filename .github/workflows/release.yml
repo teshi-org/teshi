@@ -160,15 +160,22 @@ jobs:
             -var var.BridgeRoot
 
           # Add defaults to heat-generated files so they work in any compilation order
-          $defaultBlock = '<?ifndef WebRoot ?>' + "`n" +
-            '    <?define WebRoot = "staging\msi-root\share\web" ?>' + "`n" +
+          $defaultBlock = "`n" +
+            '<?ifndef WebRoot ?>' + "`n" +
+            "`t`t" + '<?define WebRoot = "staging\msi-root\share\web" ?>' + "`n" +
             '<?endif ?>' + "`n" +
             '<?ifndef BridgeRoot ?>' + "`n" +
-            '    <?define BridgeRoot = "staging\msi-root\share\teshi-bridge" ?>' + "`n" +
+            "`t`t" + '<?define BridgeRoot = "staging\msi-root\share\teshi-bridge" ?>' + "`n" +
             '<?endif ?>' + "`n"
           foreach ($f in @("wix/web-files.wxs", "wix/bridge-files.wxs")) {
               $content = Get-Content $f -Raw
-              Set-Content $f -Value ($defaultBlock + $content) -NoNewline
+              # Insert defaults after the XML declaration (always first line)
+              $newline = "`n"
+              $idx = $content.IndexOf($newline)
+              if ($idx -ge 0) {
+                  $content = $content.Substring(0, $idx) + $defaultBlock + $content.Substring($idx)
+              }
+              Set-Content $f -Value $content -NoNewline
           }
 
           # cargo-wix reads includes order and variable defaults from [package.metadata.wix] in Cargo.toml
