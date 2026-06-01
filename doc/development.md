@@ -125,11 +125,10 @@ WinGet submission (CLI MSI only) runs automatically when `WINGET_TOKEN` is confi
 
 Windows installer sources: `wix/` (CLI MSI via WiX Toolset), Tauri bundle (desktop MSI).
 
-Local full MSI build (Windows, matches CI): install [WiX Toolset](https://wixtoolset.org/) and `cargo install cargo-wix --locked --version 0.3.9`, stage `staging/msi-root/bin` and `share/web`, run `heat` on the web tree into `wix/web-files.wxs`, then:
+Local full MSI build (Windows, matches CI): install [WiX Toolset](https://wixtoolset.org/) and `cargo install cargo-wix --locked --version 0.3.9`, stage `staging/msi-root/bin`, `share/web`, and `share/teshi-bridge`, run `heat` on both trees into `wix/web-files.wxs` and `wix/bridge-files.wxs`, then:
 
 ```powershell
-# After heat, rewrite <Wix> to <Include> in web-files.wxs (see release workflow)
-cargo wix --package teshi --nocapture --no-build -C -dStagingRoot=staging/msi-root -o target/wix/teshi-local-x64.msi
+cargo wix --package teshi --nocapture --no-build -C -dStagingRoot=staging/msi-root -C -dWebRoot=staging/msi-root/share/web -C -dBridgeRoot=staging/msi-root/share/teshi-bridge -o target/wix/teshi-local-x64.msi
 ```
 
 cargo-wix 0.3.x no longer accepts `--define`; pass WiX preprocessor variables with `-C -dName=value` (candle).

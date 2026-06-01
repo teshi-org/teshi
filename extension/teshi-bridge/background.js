@@ -50,7 +50,7 @@ async function attachActiveTab() {
   await detachIfNeeded();
   await chrome.debugger.attach({ tabId: tab.id }, "1.3");
   attachedTabId = tab.id;
-  for (const domain of ["Accessibility", "DOM", "Runtime", "Overlay"]) {
+  for (const domain of ["Accessibility", "DOM", "Runtime", "Overlay", "Page"]) {
     await chrome.debugger.sendCommand({ tabId: tab.id }, `${domain}.enable`, {});
   }
   return tab;
@@ -134,6 +134,22 @@ async function clearHighlight() {
   return { ok: true };
 }
 
+async function captureFrame() {
+  const tab = await attachActiveTab();
+  const shot = await cdp(tab.id, "Page.captureScreenshot", {
+    format: "jpeg",
+    quality: 65,
+  });
+  return {
+    type: "frame",
+    ok: true,
+    cmd: "frame_stream",
+    data: shot?.data ?? "",
+    url: tab.url ?? "",
+    title: tab.title ?? "",
+  };
+}
+
 async function handleCmd(msg) {
   const { cmd, request_id: requestId, selector } = msg;
   let body;
@@ -210,6 +226,7 @@ async function heartbeatOnce() {
   }
   if (!res.ok) {
     setBadge(false);
+    cachedProjectRoot = "";
     return;
   }
   let data;
@@ -221,9 +238,21 @@ async function heartbeatOnce() {
   }
   if (!data.ok) {
     setBadge(false);
+    // Recovery for project switches: refresh discovery metadata on next tick.
+    cachedProjectRoot = "";
     return;
   }
   setBadge(true);
+  try {
+    const frame = await captureFrame();
+    await fetch(RESPONSE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(frame),
+    });
+  } catch {
+    // Frame streaming is best-effort; heartbeat should still keep connection alive.
+  }
   if (data.cmd) {
     const reply = await handleCmd(data.cmd);
     await fetch(RESPONSE_URL, {

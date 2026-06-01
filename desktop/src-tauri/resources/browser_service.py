@@ -338,6 +338,7 @@ class ChromeBridge:
         project_root: Path,
         ws_url: str,
         discovery_port: int,
+        frame_callback: Any | None = None,
     ) -> None:
         self.project_root = project_root.resolve()
         self.ws_url = ws_url
@@ -347,6 +348,7 @@ class ChromeBridge:
         self.last_heartbeat = 0.0
         self._cmd_queue: list[dict[str, Any]] = []
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._frame_callback = frame_callback
 
     def extension_alive(self) -> bool:
         return (time.monotonic() - self.last_heartbeat) < HEARTBEAT_TTL_SEC
@@ -387,6 +389,20 @@ class ChromeBridge:
         return {"ok": True, "cmd": pending_cmd}
 
     async def handle_extension_response(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("type") == "frame":
+            self.page_url = str(payload.get("url", self.page_url))
+            self.page_title = str(payload.get("title", self.page_title))
+            self.write_endpoint()
+            if self._frame_callback is not None:
+                await self._frame_callback(
+                    {
+                        "type": "frame",
+                        "data": payload.get("data", ""),
+                        "url": self.page_url,
+                    }
+                )
+            return {"ok": True}
+
         request_id = payload.get("request_id")
         if request_id:
             fut = self._pending.pop(str(request_id), None)
@@ -516,20 +532,39 @@ async def run_chrome(
     import websockets
 
     ws_url = f"ws://{host}:{port}"
-    bridge = ChromeBridge(project_root, ws_url, discovery_port)
+    clients: set[Any] = set()
+
+    async def broadcast_frame(frame_payload: dict[str, Any]) -> None:
+        if not clients:
+            return
+        payload = json.dumps(frame_payload)
+        dead: list[Any] = []
+        for ws in clients:
+            try:
+                await ws.send(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            clients.discard(ws)
+
+    bridge = ChromeBridge(project_root, ws_url, discovery_port, frame_callback=broadcast_frame)
     bridge.write_endpoint()
 
     http_task = asyncio.create_task(run_http_discovery(bridge, host, discovery_port))
 
     async def handler(websocket: Any) -> None:
-        async for message in websocket:
-            try:
-                data = json.loads(message)
-            except json.JSONDecodeError:
-                continue
-            if "cmd" in data:
-                reply = await bridge.forward_command(data)
-                await websocket.send(json.dumps(reply))
+        clients.add(websocket)
+        try:
+            async for message in websocket:
+                try:
+                    data = json.loads(message)
+                except json.JSONDecodeError:
+                    continue
+                if "cmd" in data:
+                    reply = await bridge.forward_command(data)
+                    await websocket.send(json.dumps(reply))
+        finally:
+            clients.discard(websocket)
 
     async with websockets.serve(handler, host, port):
         await asyncio.gather(http_task, asyncio.Future())

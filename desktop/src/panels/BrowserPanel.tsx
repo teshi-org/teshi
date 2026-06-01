@@ -458,8 +458,8 @@ export function BrowserPanel({
         {!running && !error && (
           <div className="browser-placeholder">
             <p>
-              <strong>Connect Chrome</strong> — record locators on your logged-in tab (load{" "}
-              <code>extension/teshi-bridge</code> in Chrome first).
+              <strong>Connect Chrome</strong> — record locators on your logged-in tab (load the
+              unpacked extension from <code>C:\Program Files\teshi\share\teshi-bridge</code> first).
             </p>
             <p>
               <strong>Start Embedded</strong> — headless Playwright preview (1920×1080) for
@@ -502,7 +502,7 @@ export function BrowserPanel({
                   In <strong>Google Chrome</strong> (not only inside teshi), open{" "}
                   <code>chrome://extensions</code> → enable <strong>Developer mode</strong> →{" "}
                   <strong>Load unpacked</strong> → select{" "}
-                  <code>extension/teshi-bridge</code> in the teshi repo.
+                  <code>C:\Program Files\teshi\share\teshi-bridge</code>.
                 </li>
                 <li>
                   Open your <strong>app under test</strong> in a normal Chrome tab (e.g. the

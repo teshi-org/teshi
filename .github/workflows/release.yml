@@ -112,8 +112,10 @@ jobs:
 
           $stagingRoot = "staging/msi-root"
           $binDir = Join-Path $stagingRoot "bin"
+          $shareDir = Join-Path $stagingRoot "share"
           $webDir = Join-Path $stagingRoot "share/web"
-          New-Item -ItemType Directory -Force -Path $binDir, $webDir | Out-Null
+          $bridgeDir = Join-Path $stagingRoot "share/teshi-bridge"
+          New-Item -ItemType Directory -Force -Path $binDir, $webDir, $bridgeDir | Out-Null
 
           $builtExe = "target/${{ matrix.target }}/release/teshi.exe"
           $desktopExe = "target/release/teshi-desktop.exe"
@@ -129,11 +131,15 @@ jobs:
           if (-not (Test-Path "desktop/src-tauri/resources/browser_service.py")) {
             throw "Missing browser service script at desktop/src-tauri/resources/browser_service.py"
           }
+          if (-not (Test-Path "extension/teshi-bridge/manifest.json")) {
+            throw "Missing extension manifest at extension/teshi-bridge/manifest.json"
+          }
 
           Copy-Item $builtExe (Join-Path $binDir "teshi.exe") -Force
           Copy-Item $desktopExe (Join-Path $binDir "teshi-desktop.exe") -Force
-          Copy-Item "desktop/src-tauri/resources/browser_service.py" (Join-Path $stagingRoot "share/browser_service.py") -Force
+          Copy-Item "desktop/src-tauri/resources/browser_service.py" (Join-Path $shareDir "browser_service.py") -Force
           Copy-Item -Path "desktop/dist/*" -Destination $webDir -Recurse -Force
+          Copy-Item -Path "extension/teshi-bridge/*" -Destination $bridgeDir -Recurse -Force
 
           $heat = Join-Path $env:WIX "bin/heat.exe"
           if (-not (Test-Path $heat)) {
@@ -146,11 +152,18 @@ jobs:
             -dr ShareWebDir `
             -cg WebFiles `
             -var var.WebRoot
+          & $heat dir $bridgeDir `
+            -out wix/bridge-files.wxs `
+            -gg -sfrag -srd `
+            -dr ShareTeshiBridgeDir `
+            -cg BridgeFiles `
+            -var var.BridgeRoot
 
           # cargo-wix 0.3.x: pass WiX preprocessor defines via candle (-d), not --define
           cargo wix --package teshi --nocapture --no-build `
             -C -dStagingRoot=$stagingRoot `
             -C -dWebRoot=$webDir `
+            -C -dBridgeRoot=$bridgeDir `
             -o "target/wix/teshi-$tag-x64.msi"
 
       - name: Upload binary artifact
@@ -255,8 +268,10 @@ jobs:
 
             if [[ "${target}" == *"windows"* ]]; then
               cp "artifacts/teshi-desktop-windows/teshi-desktop.exe" "${stage_dir}/"
+              mkdir -p "${stage_dir}/share/teshi-bridge"
               mkdir -p "${stage_dir}/share/web"
               cp "desktop/src-tauri/resources/browser_service.py" "${stage_dir}/share/browser_service.py"
+              cp -r extension/teshi-bridge/. "${stage_dir}/share/teshi-bridge/"
               cp -r artifacts/teshi-web-dist/. "${stage_dir}/share/web/"
             fi
 

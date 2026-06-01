@@ -4,6 +4,8 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -31,6 +33,8 @@ impl BrowserMode {
 
 /// Fixed HTTP discovery port for chrome mode (`GET /v1/bridge`).
 pub const CHROME_DISCOVERY_PORT: u16 = 17373;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Holds the browser sidecar child process and WebSocket URL.
 pub struct SidecarState {
@@ -240,6 +244,8 @@ pub async fn start_browser_sidecar(
     } else {
         cmd.args(["--discovery-port", &CHROME_DISCOVERY_PORT.to_string()]);
     }
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
 
     let mut child = cmd
         .stdout(Stdio::null())
@@ -314,7 +320,7 @@ fn wait_until_chrome_ready(
             return Err(BrowserError {
                 message: "Chrome bridge did not become ready in time.".into(),
                 hint: Some(
-                    "Load extension/teshi-bridge in Chrome, activate your target tab, then retry."
+                    "Load unpacked extension from C:\\Program Files\\teshi\\share\\teshi-bridge in Chrome, activate your target tab, then retry."
                         .into(),
                 ),
             });

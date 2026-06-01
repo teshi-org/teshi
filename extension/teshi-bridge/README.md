@@ -6,11 +6,13 @@ Connects your **active Chrome tab** to [teshi-desktop](../../desktop/README.md) 
 
 Toolbar and store icons are PNGs under `icons/`, generated from the same asset as teshi-desktop (`desktop/src-tauri/icons/icon.ico`). After updating the desktop icon, regenerate sizes (16 / 32 / 48 / 128) and reload the extension in Chrome.
 
-## Install (developer / unpacked)
+## Install (unpacked)
 
 1. Open Chrome and go to `chrome://extensions`.
 2. Enable **Developer mode** (top right).
-3. Click **Load unpacked** and select this directory: `extension/teshi-bridge`.
+3. Click **Load unpacked** and select:
+   - Installed MSI path (recommended): `C:\Program Files\teshi\share\teshi-bridge`
+   - Repo path (development): `extension/teshi-bridge`
 4. Pin the extension if you want to see when it is active (optional).
 
 ## Use with teshi-desktop

@@ -23,7 +23,7 @@ teshi-desktop supports two browser backends for BDD locator recording. Both expo
 └─────────────────┘     writes .teshi/cdp-endpoint.json
 ```
 
-- **Extension ↔ bridge**: HTTP only (`/v1/bridge/heartbeat`, `/v1/bridge/response`). No WebSocket from the extension (MV3-safe).
+- **Extension ↔ bridge**: HTTP only (`/v1/bridge/heartbeat`, `/v1/bridge/response`). No WebSocket from the extension (MV3-safe). CDP screenshots are captured in the extension and forwarded as frame payloads over `/v1/bridge/response`.
 - **Agent ↔ bridge**: WebSocket (`ws_url` in `.teshi/cdp-endpoint.json`).
 - **Extension ↔ page**: Chrome `debugger` API (CDP) on the **active tab** only.
 - **Desktop**: starts/stops the Python process; does not talk to the extension directly.
@@ -34,7 +34,7 @@ The popup **Connect to teshi** button sends one heartbeat immediately and refres
 
 Use your **daily Chrome** with real login sessions (SSO, cookies).
 
-1. Install the unpacked extension from `extension/teshi-bridge` (see [extension README](../extension/teshi-bridge/README.md)).
+1. Install the unpacked extension from `C:\Program Files\teshi\share\teshi-bridge` (or `extension/teshi-bridge` in repo for development; see [extension README](../extension/teshi-bridge/README.md)).
 2. Open the app under test in Chrome and select the target **tab**.
 3. In teshi-desktop, click **Connect Chrome** in the Browser panel.
 4. Wait until the panel shows **extension: connected**.

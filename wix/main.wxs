@@ -90,6 +90,9 @@
         <Property Id='DiskPrompt' Value='teshi Installation'/>
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
+            <Directory Id='ProgramMenuFolder'>
+                <Directory Id='ProgramMenuDir' Name='teshi'/>
+            </Directory>
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
                 <Directory Id='APPLICATIONFOLDER' Name='teshi'>
                     <!--
@@ -133,6 +136,25 @@
                                 Source='$(var.StagingRoot)\bin\teshi-desktop.exe'
                                 KeyPath='yes'/>
                         </Component>
+                        <Component Id='StartMenuShortcut' Guid='*'>
+                            <Shortcut
+                                Id='TeshiDesktopStartMenuShortcut'
+                                Directory='ProgramMenuDir'
+                                Name='Teshi Desktop'
+                                Description='Launch teshi desktop application'
+                                Target='[Bin]teshi-desktop.exe'
+                                WorkingDirectory='APPLICATIONFOLDER'
+                                Advertise='no'
+                                Icon='ProductICO'/>
+                            <RemoveFolder Id='ProgramMenuDir' Directory='ProgramMenuDir' On='uninstall'/>
+                            <RegistryValue
+                                Root='HKCU'
+                                Key='Software\teshi-org\teshi'
+                                Name='start-menu-shortcut'
+                                Type='integer'
+                                Value='1'
+                                KeyPath='yes'/>
+                        </Component>
                     </Directory>
                     <Directory Id='Share' Name='share'>
                         <Component Id='BrowserServiceScript' Guid='*'>
@@ -143,6 +165,7 @@
                                 Source='$(var.StagingRoot)\share\browser_service.py'
                                 KeyPath='yes'/>
                         </Component>
+                        <Directory Id='ShareTeshiBridgeDir' Name='teshi-bridge'/>
                         <Directory Id='ShareWebDir' Name='web'/>
                     </Directory>
                 </Directory>
@@ -166,7 +189,9 @@
             
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='binary1'/>
+            <ComponentRef Id='StartMenuShortcut'/>
             <ComponentRef Id='BrowserServiceScript'/>
+            <ComponentGroupRef Id='BridgeFiles'/>
             <ComponentGroupRef Id='WebFiles'/>
 
             <Feature
