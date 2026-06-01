@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Generated during release CI via heat.exe. This stub keeps local WiX builds working
-  before staging assets are prepared.
+  Generated during release CI via heat.exe (Fragment wxs, linked with cargo wix -I).
+  This stub keeps local WiX builds working before staging assets are prepared.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Fragment>
