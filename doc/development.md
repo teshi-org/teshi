@@ -105,7 +105,42 @@ src/
 
 ## Release workflow
 
-Full-stack releases publish the CLI, Windows desktop app, and Chrome extension under a single `vX.Y.Z` tag. All component versions (`Cargo.toml`, `desktop/src-tauri`, `extension/teshi-bridge/manifest.json`) must match before tagging.
+Full-stack releases publish the CLI, Windows desktop app, and Chrome extension under a single `vX.Y.Z` tag. All component versions must match before tagging.
+
+### Quick start (recommended)
+
+```bash
+# Dry-run: see what version would be released
+python scripts/release.py
+
+# Apply version bumps to all component files
+python scripts/release.py --apply
+
+# Apply, commit, and tag (full automation)
+python scripts/release.py --tag
+```
+
+Then push to trigger the CI release workflow:
+
+```bash
+git push origin main && git push origin vX.Y.Z
+```
+
+### Manual release
+
+If you prefer to do it step by step:
+
+1. **Analyze commits** since last tag to determine bump type
+2. **Update version** in all 5 component files (must match):
+   - `Cargo.toml` (root)
+   - `desktop/src-tauri/Cargo.toml`
+   - `desktop/package.json`
+   - `desktop/src-tauri/tauri.conf.json`
+   - `extension/teshi-bridge/manifest.json`
+3. **Commit and tag**: `git commit -m "chore: bump version to vX.Y.Z"` then `git tag vX.Y.Z`
+4. **Push**: `git push origin main && git push origin vX.Y.Z`
+
+The pre-commit hook (`.githooks/pre-commit`) will verify version consistency across all files.
 
 ### Release assets
 

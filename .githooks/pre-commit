@@ -56,6 +56,47 @@ else
     echo -e "${GREEN}   - OK ($CARGO_VERSION)${NC}"
 fi
 
+# ---- 2d. Version sync across all component files ----------------------------
+echo ":: Component version sync check ..."
+MISMATCH=false
+VERSION_FILES=(
+  "Cargo.toml:^version = "
+  "desktop/src-tauri/Cargo.toml:^version = "
+  "desktop/package.json:\"version\": "
+  "desktop/src-tauri/tauri.conf.json:\"version\": "
+  "extension/teshi-bridge/manifest.json:\"version\": "
+)
+for entry in "${VERSION_FILES[@]}"; do
+    FILE="${entry%%:*}"
+    PATTERN="${entry#*:}"
+    FOUND=$(grep -m1 "$PATTERN" "$FILE" 2>/dev/null | tr -d '\r' | sed 's/.*"\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/' | sed 's/.*= "\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/')
+    if [ -n "$FOUND" ]; then
+        echo "   $FILE  →  $FOUND"
+    fi
+done
+# Compare all extracted versions
+VALS=()
+for entry in "${VERSION_FILES[@]}"; do
+    FILE="${entry%%:*}"
+    PATTERN="${entry#*:}"
+    FOUND=$(grep -m1 "$PATTERN" "$FILE" 2>/dev/null | tr -d '\r' | sed 's/.*"\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/' | sed 's/.*= "\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/')
+    VALS+=("$FOUND")
+done
+REF="${VALS[0]}"
+for i in "${!VALS[@]}"; do
+    if [ "${VALS[$i]}" != "$REF" ]; then
+        FILE="${VERSION_FILES[$i]%%:*}"
+        echo -e "${RED}   x  $FILE version (${VALS[$i]}) does not match reference ($REF).${NC}"
+        MISMATCH=true
+    fi
+done
+if [ "$MISMATCH" = true ]; then
+    echo -e "${RED}   x  Version mismatch detected. Run 'python scripts/release.py --apply' to sync.${NC}"
+    PASS=false
+else
+    echo -e "${GREEN}   - All components at $REF${NC}"
+fi
+
 # ---- 3. dbg!() in staged .rs files -----------------------------------------
 STAGED_DBG=$(git diff --cached -G'dbg!' -- '*.rs' || true)
 if [ -n "$STAGED_DBG" ]; then
