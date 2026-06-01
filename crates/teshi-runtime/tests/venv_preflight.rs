@@ -4,11 +4,14 @@
 
 use std::path::PathBuf;
 
+use teshi_runtime::python_env::resolve_project_venv;
+
+#[cfg(windows)]
 use teshi_runtime::python_env::{
-    check_failure_detail, is_uv_trampoline_failure, is_uv_trampoline_shim, resolve_project_venv,
-    run_import_preflight,
+    check_failure_detail, is_uv_trampoline_failure, is_uv_trampoline_shim, run_import_preflight,
 };
 
+#[cfg(windows)]
 fn feedback_project() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("TESHI_TEST_PROJECT") {
         let path = PathBuf::from(path);

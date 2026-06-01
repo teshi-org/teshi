@@ -160,15 +160,12 @@ jobs:
             -var var.BridgeRoot
 
           # Add defaults to heat-generated files so they work in any compilation order
-          $defaultBlock = @"
-<?ifndef WebRoot ?>
-    <?define WebRoot = "staging\msi-root\share\web" ?>
-<?endif ?>
-<?ifndef BridgeRoot ?>
-    <?define BridgeRoot = "staging\msi-root\share\teshi-bridge" ?>
-<?endif ?>
-
-"@
+          $defaultBlock = '<?ifndef WebRoot ?>' + "`n" +
+            '    <?define WebRoot = "staging\msi-root\share\web" ?>' + "`n" +
+            '<?endif ?>' + "`n" +
+            '<?ifndef BridgeRoot ?>' + "`n" +
+            '    <?define BridgeRoot = "staging\msi-root\share\teshi-bridge" ?>' + "`n" +
+            '<?endif ?>' + "`n"
           foreach ($f in @("wix/web-files.wxs", "wix/bridge-files.wxs")) {
               $content = Get-Content $f -Raw
               Set-Content $f -Value ($defaultBlock + $content) -NoNewline
