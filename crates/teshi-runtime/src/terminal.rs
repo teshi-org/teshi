@@ -112,9 +112,8 @@ pub async fn spawn_terminal(rt: Arc<TeshiRuntime>, cols: u16, rows: u16) -> Resu
     for mut cmd in shell_commands() {
         cmd.cwd(cwd.to_string_lossy().to_string());
         apply_terminal_env(&mut cmd);
-        if let Some(venv) = find_venv(&project_root) {
-            cmd.env("VIRTUAL_ENV", venv.to_string_lossy().to_string());
-        }
+        // Do not inject VIRTUAL_ENV here: it breaks `uv pip` on Windows (os error 448) when uv
+        // inspects `.venv\Scripts\python.exe`. Users activate the venv in the shell if needed.
         match pair.slave.spawn_command(cmd) {
             Ok(spawned) => {
                 child = Some(spawned);
@@ -222,14 +221,4 @@ fn apply_terminal_env(cmd: &mut CommandBuilder) {
     if cfg!(windows) {
         cmd.env("DOTNET_SYSTEM_CONSOLE_ALLOW_ANSI_COLOR_REDIRECTION", "1");
     }
-}
-
-fn find_venv(project_root: &Path) -> Option<PathBuf> {
-    for name in [".venv", "venv"] {
-        let dir = project_root.join(name);
-        if dir.is_dir() {
-            return Some(dir);
-        }
-    }
-    None
 }

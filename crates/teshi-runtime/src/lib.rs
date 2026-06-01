@@ -7,7 +7,18 @@ mod locator;
 mod project;
 mod sidecar;
 mod terminal;
+mod venv;
 mod watcher;
+
+/// Project Python venv resolution and import preflight (used by sidecar; exposed for tests).
+pub mod python_env {
+    pub use crate::venv::{
+        apply_venv_to_command, build_import_check_command, check_failure_detail,
+        import_check_failed_message, is_missing_module_failure, is_untrusted_mount_failure,
+        is_uv_managed_venv, is_uv_trampoline_failure, is_uv_trampoline_shim, parse_pyvenv_cfg,
+        resolve_project_venv, run_import_preflight, venv_python_failure_hint, ResolvedVenv,
+    };
+}
 
 pub use app_data::{
     app_data_dir, get_recent_projects as load_recent_projects, load_settings,

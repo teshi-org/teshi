@@ -2,8 +2,6 @@
 
 use std::io::Read;
 use std::net::TcpListener;
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -35,8 +33,6 @@ impl BrowserMode {
 
 /// Fixed HTTP discovery port for chrome mode (`GET /v1/bridge`).
 pub const CHROME_DISCOVERY_PORT: u16 = 17373;
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Holds the browser sidecar child process and WebSocket URL.
 pub struct SidecarState {
@@ -139,94 +135,15 @@ pub fn send_sidecar_command(
     Err("browser sidecar did not respond in time".into())
 }
 
-/// Resolved project virtual environment paths for browser sidecar subprocesses.
-struct ProjectVenv {
-    root: PathBuf,
-    python_exe: PathBuf,
+use crate::venv::{
+    build_import_check_command, check_failure_detail, import_check_failed_message,
+    resolve_project_venv, venv_python_failure_hint, ResolvedVenv,
+};
+
+/// Build a Python subprocess for the long-running sidecar (same env as preflight checks).
+fn python_sidecar_command(venv: &ResolvedVenv) -> Command {
+    build_import_check_command(venv)
 }
-
-fn resolve_project_venv(project_root: &Path) -> Option<ProjectVenv> {
-    for name in [".venv", "venv"] {
-        let root = project_root.join(name);
-        let python_exe = root.join(if cfg!(windows) {
-            "Scripts/python.exe"
-        } else {
-            "bin/python"
-        });
-        if !python_exe.is_file() {
-            continue;
-        }
-        return Some(ProjectVenv { root, python_exe });
-    }
-    None
-}
-
-/// Build a Python subprocess for preflight checks (`python.exe` so stdout/stderr pipes work).
-fn python_check_command(venv: &ProjectVenv) -> Command {
-    let mut cmd = Command::new(&venv.python_exe);
-    apply_windows_no_window(&mut cmd);
-    apply_venv_isolation(&mut cmd, venv);
-    cmd
-}
-
-/// Build a Python subprocess for the long-running sidecar (`python.exe`; `CREATE_NO_WINDOW` avoids a console flash).
-fn python_sidecar_command(venv: &ProjectVenv) -> Command {
-    python_check_command(venv)
-}
-
-fn check_failure_detail(check: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&check.stderr);
-    let stderr = stderr.trim();
-    if !stderr.is_empty() {
-        return stderr.to_string();
-    }
-    let stdout = String::from_utf8_lossy(&check.stdout);
-    let stdout = stdout.trim();
-    if !stdout.is_empty() {
-        return stdout.to_string();
-    }
-    format!("exit code {}", check.status.code().unwrap_or(-1))
-}
-
-fn import_check_failed_message(check: &std::process::Output, packages: &str) -> String {
-    format!(
-        "{packages} are not installed in the project venv ({}).",
-        check_failure_detail(check)
-    )
-}
-
-/// Keep browser sidecar imports and Playwright on the project venv, not global Python.
-fn apply_venv_isolation(cmd: &mut Command, venv: &ProjectVenv) {
-    cmd.env("VIRTUAL_ENV", &venv.root);
-    cmd.env_remove("PYTHONHOME");
-    cmd.env_remove("PYTHONPATH");
-    cmd.env_remove("PYTHONUSERBASE");
-
-    let scripts = venv
-        .root
-        .join(if cfg!(windows) { "Scripts" } else { "bin" });
-    if let Some(path) = std::env::var_os("PATH") {
-        cmd.env("PATH", prepend_path_entry(&scripts, &path));
-    } else {
-        cmd.env("PATH", &scripts);
-    }
-}
-
-fn prepend_path_entry(prefix: &Path, existing: &std::ffi::OsStr) -> std::ffi::OsString {
-    let sep = if cfg!(windows) { ";" } else { ":" };
-    let mut path = prefix.as_os_str().to_os_string();
-    path.push(sep);
-    path.push(existing);
-    path
-}
-
-#[cfg(windows)]
-fn apply_windows_no_window(cmd: &mut Command) {
-    cmd.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn apply_windows_no_window(_cmd: &mut Command) {}
 
 fn pick_port() -> Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0").context("bind ephemeral port")?;
@@ -461,9 +378,19 @@ pub async fn start_browser_sidecar(
             hint: None,
         })?;
 
-    let venv = resolve_project_venv(&project_root).ok_or_else(|| BrowserError {
-        message: "Python virtual environment not found in project root.".into(),
-        hint: Some("Create .venv and run: pip install -r python/requirements.txt".into()),
+    let venv = resolve_project_venv(&project_root).ok_or_else(|| {
+        let dot_venv = project_root.join(".venv");
+        let hint = if dot_venv.is_dir() && crate::venv::is_uv_managed_venv(&dot_venv) {
+            "uv managed .venv found but the base Python in pyvenv.cfg is missing. \
+             Run `uv python install`, then `uv pip install websockets`."
+                .into()
+        } else {
+            "Create .venv and run: pip install -r python/requirements.txt".into()
+        };
+        BrowserError {
+            message: "Python virtual environment not found or not runnable.".into(),
+            hint: Some(hint),
+        }
     })?;
 
     let import_snippet = if mode == BrowserMode::Chrome {
@@ -486,7 +413,7 @@ pub async fn start_browser_sidecar(
         )
     };
 
-    let check = python_check_command(&venv)
+    let check = build_import_check_command(&venv)
         .args(["-c", import_snippet])
         .output()
         .map_err(|e| BrowserError {
@@ -494,14 +421,15 @@ pub async fn start_browser_sidecar(
             hint: Some(pip_hint.clone()),
         })?;
     if !check.status.success() {
+        let detail = check_failure_detail(&check);
         return Err(BrowserError {
             message: import_check_failed_message(&check, import_label),
-            hint: Some(pip_hint),
+            hint: Some(venv_python_failure_hint(&detail, &pip_hint, &venv.root)),
         });
     }
 
     if mode == BrowserMode::Embedded {
-        let chromium_check = python_check_command(&venv)
+        let chromium_check = build_import_check_command(&venv)
             .args(["-c", "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop()"])
             .output();
         if chromium_check.is_err() || !chromium_check.as_ref().unwrap().status.success() {

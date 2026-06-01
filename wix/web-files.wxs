@@ -1,10 +1,73 @@
-﻿<?xml version="1.0" encoding="UTF-8"?>
-<!--
-  Generated during release CI via heat.exe. This stub keeps local WiX builds working
-  before staging assets are prepared.
--->
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Fragment>
-    <ComponentGroup Id="WebFiles" />
-  </Fragment>
+    <Fragment>
+        <DirectoryRef Id="ShareWebDir">
+            <Component Id="cmpF3E8630ED39B86EDE4976A1DF3D74354" Guid="{2C94312F-9896-4232-8450-E0BB570F871C}">
+                <File Id="filDACD5EBCBA6969F43A883D8F4BF3D3DF" KeyPath="yes" Source="$(var.WebRoot)\index.html" />
+            </Component>
+            <Directory Id="dirEB054993823F2B2A6A0B5444C6DA65F1" Name="assets">
+                <Component Id="cmp0DCD71F567DC147FFF48962543727230" Guid="{91B240D4-ABF7-4AE3-9B18-92F99EE26E29}">
+                    <File Id="fil53C5FCE1CEA3F785BC80B8F7FFA09084" KeyPath="yes" Source="$(var.WebRoot)\assets\addon-fit-BlxrFPDK.js" />
+                </Component>
+                <Component Id="cmpA3093690DD4BF6D92C8FEB9E92545721" Guid="{D2D0487A-E188-41D1-8E9A-477BC320DA30}">
+                    <File Id="fil5AE8B6D1F9699AC70B1E0161BEC4A729" KeyPath="yes" Source="$(var.WebRoot)\assets\index-BkZdtp9P.js" />
+                </Component>
+                <Component Id="cmp31F663B5FE7FB62746DB9CED26C9BC08" Guid="{BC3B0E48-2C10-475B-9D75-CE4608EFB53B}">
+                    <File Id="filCCD5D6E36A21E44A6D352BF8047F6D1B" KeyPath="yes" Source="$(var.WebRoot)\assets\index-BqglopVz.js" />
+                </Component>
+                <Component Id="cmpA8FB3606162CA867E1859890D00B1EC7" Guid="{23B40459-C403-4F95-9C9D-24E3B7D49992}">
+                    <File Id="fil21E2BC21E42DB48D78E38E2DEE712115" KeyPath="yes" Source="$(var.WebRoot)\assets\index-CGCyeMwG.css" />
+                </Component>
+                <Component Id="cmp47912C21DEDF7A6BF132A4772CDC09FA" Guid="{80FB239C-84FB-4E4F-90F2-BE8C770716E0}">
+                    <File Id="fil5909FDD4D015F9ACFAC0D7BF1EE2CC94" KeyPath="yes" Source="$(var.WebRoot)\assets\index-D1Bq2LLz.js" />
+                </Component>
+                <Component Id="cmpCDDBF8C265626A3F3AB11FE8A423F80C" Guid="{EBE9609B-81D0-4B03-9080-CCA9F36738EF}">
+                    <File Id="fil6A18F80E23B1546CE55578DBFF665AE0" KeyPath="yes" Source="$(var.WebRoot)\assets\index-DGt448j8.js" />
+                </Component>
+                <Component Id="cmpC07096BF28308A19BE0911F3A44D3C58" Guid="{9F4DF239-CE9F-4C69-898A-992F515526B4}">
+                    <File Id="filC309B0471B0D3C9AF10415A0D69247AE" KeyPath="yes" Source="$(var.WebRoot)\assets\index-DoMoZsTt.css" />
+                </Component>
+                <Component Id="cmp4FBB0706F9AC00F123A6C043DAA90AED" Guid="{F6D88540-B94C-44CC-9667-B28946C0E605}">
+                    <File Id="fil25EB9B626FEA06EDF3A392A85932B777" KeyPath="yes" Source="$(var.WebRoot)\assets\index-QGFH79EQ.js" />
+                </Component>
+                <Component Id="cmp1444B406C250D9DB1E8F203D2C59F564" Guid="{328EE5A3-5D4E-4CA8-AFD4-69561C6EE6C2}">
+                    <File Id="fil471F988E30A2DB6D0B9DAA77CE6C6F0E" KeyPath="yes" Source="$(var.WebRoot)\assets\index-X9CLaKtn.css" />
+                </Component>
+                <Component Id="cmpEBC3EFB3D6BD79341700B492ADFA0AC8" Guid="{6F304818-9A53-41E3-8E28-8501E04A26C7}">
+                    <File Id="fil7BA78F1F0D27F4221F6710DF3048DB28" KeyPath="yes" Source="$(var.WebRoot)\assets\index-xB7Ha3rH.js" />
+                </Component>
+                <Component Id="cmp8AD8ECB5EC250C1FBB4B0F01771D2C51" Guid="{208C83C2-0F49-46B2-8990-108B1B4050E1}">
+                    <File Id="fil38B456AB3980E68AD4D7385509417207" KeyPath="yes" Source="$(var.WebRoot)\assets\xterm-BTGVxaYV.js" />
+                </Component>
+                <Component Id="cmp052CEF5036800D88381C48496A94EA25" Guid="{358A64EB-5D90-4025-B3BB-E3F3A2DB52E2}">
+                    <File Id="fil8B8E28A73B7A17B31E9C955C8C07DD29" KeyPath="yes" Source="$(var.WebRoot)\assets\xterm-Cbq8_DHB.js" />
+                </Component>
+                <Component Id="cmp65D582BEAFF6686F601F6EB6FC53DF35" Guid="{84B0FFAC-8642-4EED-8474-B5629803A5B0}">
+                    <File Id="filA67617AF9E51B090447CAFA5E71E9D86" KeyPath="yes" Source="$(var.WebRoot)\assets\xterm-DYP7pi_n.css" />
+                </Component>
+                <Component Id="cmpE211E4CEFC5CD1FA37B0AEAF85EC7790" Guid="{F945B1B5-0397-4F2F-A5E3-CE98B857509A}">
+                    <File Id="fil316DA92E3B3720BC31538EDDCB25DC99" KeyPath="yes" Source="$(var.WebRoot)\assets\xterm-LZoznX6r.css" />
+                </Component>
+            </Directory>
+        </DirectoryRef>
+    </Fragment>
+    <Fragment>
+        <ComponentGroup Id="WebFiles">
+            <ComponentRef Id="cmpF3E8630ED39B86EDE4976A1DF3D74354" />
+            <ComponentRef Id="cmp0DCD71F567DC147FFF48962543727230" />
+            <ComponentRef Id="cmpA3093690DD4BF6D92C8FEB9E92545721" />
+            <ComponentRef Id="cmp31F663B5FE7FB62746DB9CED26C9BC08" />
+            <ComponentRef Id="cmpA8FB3606162CA867E1859890D00B1EC7" />
+            <ComponentRef Id="cmp47912C21DEDF7A6BF132A4772CDC09FA" />
+            <ComponentRef Id="cmpCDDBF8C265626A3F3AB11FE8A423F80C" />
+            <ComponentRef Id="cmpC07096BF28308A19BE0911F3A44D3C58" />
+            <ComponentRef Id="cmp4FBB0706F9AC00F123A6C043DAA90AED" />
+            <ComponentRef Id="cmp1444B406C250D9DB1E8F203D2C59F564" />
+            <ComponentRef Id="cmpEBC3EFB3D6BD79341700B492ADFA0AC8" />
+            <ComponentRef Id="cmp8AD8ECB5EC250C1FBB4B0F01771D2C51" />
+            <ComponentRef Id="cmp052CEF5036800D88381C48496A94EA25" />
+            <ComponentRef Id="cmp65D582BEAFF6686F601F6EB6FC53DF35" />
+            <ComponentRef Id="cmpE211E4CEFC5CD1FA37B0AEAF85EC7790" />
+        </ComponentGroup>
+    </Fragment>
 </Wix>

@@ -18,6 +18,18 @@ python -m venv .venv
 .venv\Scripts\python -m playwright install chromium
 ```
 
+For **Connect Chrome**, the venv must include `websockets` (included in `python/requirements.txt`).
+
+**uv-managed venvs** (`uv venv` / `uv sync`, `pyvenv.cfg` contains `uv = ...`):
+
+```bash
+uv pip install websockets
+# Embedded mode also needs Playwright:
+uv pip install -r python/requirements.txt
+```
+
+teshi runs Connect Chrome using the base Python from `pyvenv.cfg` `home` plus `PYTHONPATH` to `.venv\Lib\site-packages` (it does not execute the uv trampoline in `.venv\Scripts\python.exe`). Run `uv python install` if that base interpreter is missing. Use an external terminal for `uv pip` if the embedded shell reports os error 448.
+
 (`python/requirements.txt` lives at the repo root as a reference manifest.)
 
 ## Development
