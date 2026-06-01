@@ -169,12 +169,41 @@ fn resolve_project_venv(project_root: &Path) -> Option<ProjectVenv> {
     None
 }
 
-/// Build a Python subprocess command with venv isolation applied.
-fn python_command(venv: &ProjectVenv) -> Command {
+/// Build a Python subprocess for preflight checks (`python.exe` so stdout/stderr pipes work).
+fn python_check_command(venv: &ProjectVenv) -> Command {
+    let mut cmd = Command::new(&venv.python_exe);
+    apply_windows_no_window(&mut cmd);
+    apply_venv_isolation(&mut cmd, venv);
+    cmd
+}
+
+/// Build a Python subprocess for the long-running sidecar (`pythonw.exe` on Windows when present).
+fn python_sidecar_command(venv: &ProjectVenv) -> Command {
     let mut cmd = Command::new(&venv.python);
     apply_windows_no_window(&mut cmd);
     apply_venv_isolation(&mut cmd, venv);
     cmd
+}
+
+fn check_failure_detail(check: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&check.stderr);
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        return stderr.to_string();
+    }
+    let stdout = String::from_utf8_lossy(&check.stdout);
+    let stdout = stdout.trim();
+    if !stdout.is_empty() {
+        return stdout.to_string();
+    }
+    format!("exit code {}", check.status.code().unwrap_or(-1))
+}
+
+fn import_check_failed_message(check: &std::process::Output, packages: &str) -> String {
+    format!(
+        "{packages} are not installed in the project venv ({}).",
+        check_failure_detail(check)
+    )
 }
 
 /// Keep browser sidecar imports and Playwright on the project venv, not global Python.
@@ -238,33 +267,54 @@ pub async fn start_browser_sidecar(
         hint: Some("Create .venv and run: pip install -r python/requirements.txt".into()),
     })?;
 
-    let check = python_command(&venv)
-        .args(["-c", "import playwright, websockets"])
+    let import_snippet = if mode == BrowserMode::Chrome {
+        "import websockets"
+    } else {
+        "import playwright, websockets"
+    };
+    let import_label = if mode == BrowserMode::Chrome {
+        "websockets"
+    } else {
+        "Playwright/websockets"
+    };
+
+    let pip_hint = if mode == BrowserMode::Chrome {
+        format!("{} -m pip install websockets", venv.python_exe.display())
+    } else {
+        format!(
+            "{} -m pip install -r python/requirements.txt",
+            venv.python_exe.display()
+        )
+    };
+
+    let check = python_check_command(&venv)
+        .args(["-c", import_snippet])
         .output()
         .map_err(|e| BrowserError {
             message: format!("Failed to run Python: {e}"),
-            hint: Some(format!(
-                "{} -m pip install -r python/requirements.txt",
-                venv.python_exe.display()
-            )),
+            hint: Some(pip_hint.clone()),
         })?;
     if !check.status.success() {
         return Err(BrowserError {
-            message: "Playwright/websockets are not installed in the project venv.".into(),
-            hint: Some(format!(
-                "{} -m pip install -r python/requirements.txt",
-                venv.python_exe.display()
-            )),
+            message: import_check_failed_message(&check, import_label),
+            hint: Some(pip_hint),
         });
     }
 
     if mode == BrowserMode::Embedded {
-        let chromium_check = python_command(&venv)
+        let chromium_check = python_check_command(&venv)
             .args(["-c", "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop()"])
             .output();
         if chromium_check.is_err() || !chromium_check.as_ref().unwrap().status.success() {
+            let message = match &chromium_check {
+                Ok(output) => format!(
+                    "Chromium browser is not installed for Playwright ({}).",
+                    check_failure_detail(output)
+                ),
+                Err(e) => format!("Failed to run Chromium check: {e}"),
+            };
             return Err(BrowserError {
-                message: "Chromium browser is not installed for Playwright.".into(),
+                message,
                 hint: Some(format!(
                     "{} -m playwright install chromium",
                     venv.python_exe.display()
@@ -294,7 +344,7 @@ pub async fn start_browser_sidecar(
         0
     };
 
-    let mut cmd = python_command(&venv);
+    let mut cmd = python_sidecar_command(&venv);
     cmd.arg(script).args([
         "--host",
         "127.0.0.1",
