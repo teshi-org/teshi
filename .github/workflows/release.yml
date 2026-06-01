@@ -127,9 +127,13 @@ jobs:
           if (-not (Test-Path "desktop/dist")) {
             throw "Missing frontend dist at desktop/dist"
           }
+          if (-not (Test-Path "desktop/src-tauri/resources/browser_service.py")) {
+            throw "Missing browser service script at desktop/src-tauri/resources/browser_service.py"
+          }
 
           Copy-Item $builtExe (Join-Path $binDir "teshi.exe") -Force
           Copy-Item $desktopExe (Join-Path $binDir "teshi-desktop.exe") -Force
+          Copy-Item "desktop/src-tauri/resources/browser_service.py" (Join-Path $stagingRoot "share/browser_service.py") -Force
           Copy-Item -Path "desktop/dist/*" -Destination $webDir -Recurse -Force
 
           $heat = Join-Path $env:WIX "bin/heat.exe"
@@ -253,6 +257,7 @@ jobs:
             if [[ "${target}" == *"windows"* ]]; then
               cp "artifacts/teshi-desktop-windows/teshi-desktop.exe" "${stage_dir}/"
               mkdir -p "${stage_dir}/share/web"
+              cp "desktop/src-tauri/resources/browser_service.py" "${stage_dir}/share/browser_service.py"
               cp -r artifacts/teshi-web-dist/. "${stage_dir}/share/web/"
             fi
 

@@ -75,16 +75,26 @@ impl TeshiRuntime {
     }
 }
 
-/// Resolves `browser_service.py` from `TESHI_BROWSER_SERVICE` or common dev paths.
+/// Resolves `browser_service.py` from `TESHI_BROWSER_SERVICE`, installed layouts, or dev paths.
 pub fn default_browser_service_script() -> PathBuf {
     if let Ok(path) = std::env::var("TESHI_BROWSER_SERVICE") {
         return PathBuf::from(path);
     }
-    let candidates = [
+
+    let mut candidates = vec![];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("resources").join("browser_service.py"));
+            candidates.push(exe_dir.join("share").join("browser_service.py"));
+            candidates.push(exe_dir.join("..").join("share").join("browser_service.py"));
+        }
+    }
+    candidates.extend([
         PathBuf::from("desktop/src-tauri/resources/browser_service.py"),
         PathBuf::from("../desktop/src-tauri/resources/browser_service.py"),
         PathBuf::from("../../desktop/src-tauri/resources/browser_service.py"),
-    ];
+    ]);
+
     for path in &candidates {
         if path.is_file() {
             return path.clone();

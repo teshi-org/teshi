@@ -135,6 +135,14 @@
                         </Component>
                     </Directory>
                     <Directory Id='Share' Name='share'>
+                        <Component Id='BrowserServiceScript' Guid='*'>
+                            <File
+                                Id='browserServiceScriptFile'
+                                Name='browser_service.py'
+                                DiskId='1'
+                                Source='$(var.StagingRoot)\share\browser_service.py'
+                                KeyPath='yes'/>
+                        </Component>
                         <Directory Id='ShareWebDir' Name='web'/>
                     </Directory>
                 </Directory>
@@ -158,6 +166,7 @@
             
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='binary1'/>
+            <ComponentRef Id='BrowserServiceScript'/>
             <ComponentGroupRef Id='WebFiles'/>
 
             <Feature
