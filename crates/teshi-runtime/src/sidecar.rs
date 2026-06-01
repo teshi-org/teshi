@@ -1,11 +1,11 @@
 //! Python Playwright sidecar management.
 
 use std::net::TcpListener;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -130,19 +130,85 @@ pub fn send_sidecar_command(
     Err("browser sidecar did not respond in time".into())
 }
 
-fn find_python(project_root: &Path) -> Option<PathBuf> {
-    for venv in [".venv", "venv"] {
-        let python = project_root.join(venv).join(if cfg!(windows) {
+/// Resolved project virtual environment paths for browser sidecar subprocesses.
+struct ProjectVenv {
+    root: PathBuf,
+    python_exe: PathBuf,
+    /// Interpreter used for subprocesses (`pythonw.exe` on Windows when present).
+    python: PathBuf,
+}
+
+fn resolve_project_venv(project_root: &Path) -> Option<ProjectVenv> {
+    for name in [".venv", "venv"] {
+        let root = project_root.join(name);
+        let python_exe = root.join(if cfg!(windows) {
             "Scripts/python.exe"
         } else {
             "bin/python"
         });
-        if python.exists() {
-            return Some(python);
+        if !python_exe.is_file() {
+            continue;
         }
+        #[cfg(windows)]
+        let python = {
+            let pythonw = root.join("Scripts/pythonw.exe");
+            if pythonw.is_file() {
+                pythonw
+            } else {
+                python_exe.clone()
+            }
+        };
+        #[cfg(not(windows))]
+        let python = python_exe.clone();
+        return Some(ProjectVenv {
+            root,
+            python_exe,
+            python,
+        });
     }
     None
 }
+
+/// Build a Python subprocess command with venv isolation applied.
+fn python_command(venv: &ProjectVenv) -> Command {
+    let mut cmd = Command::new(&venv.python);
+    apply_windows_no_window(&mut cmd);
+    apply_venv_isolation(&mut cmd, venv);
+    cmd
+}
+
+/// Keep browser sidecar imports and Playwright on the project venv, not global Python.
+fn apply_venv_isolation(cmd: &mut Command, venv: &ProjectVenv) {
+    cmd.env("VIRTUAL_ENV", &venv.root);
+    cmd.env_remove("PYTHONHOME");
+    cmd.env_remove("PYTHONPATH");
+    cmd.env_remove("PYTHONUSERBASE");
+
+    let scripts = venv
+        .root
+        .join(if cfg!(windows) { "Scripts" } else { "bin" });
+    if let Some(path) = std::env::var_os("PATH") {
+        cmd.env("PATH", prepend_path_entry(&scripts, &path));
+    } else {
+        cmd.env("PATH", &scripts);
+    }
+}
+
+fn prepend_path_entry(prefix: &Path, existing: &std::ffi::OsStr) -> std::ffi::OsString {
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let mut path = prefix.as_os_str().to_os_string();
+    path.push(sep);
+    path.push(existing);
+    path
+}
+
+#[cfg(windows)]
+fn apply_windows_no_window(cmd: &mut Command) {
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn apply_windows_no_window(_cmd: &mut Command) {}
 
 fn pick_port() -> Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0").context("bind ephemeral port")?;
@@ -167,19 +233,19 @@ pub async fn start_browser_sidecar(
             hint: None,
         })?;
 
-    let python = find_python(&project_root).ok_or_else(|| BrowserError {
+    let venv = resolve_project_venv(&project_root).ok_or_else(|| BrowserError {
         message: "Python virtual environment not found in project root.".into(),
         hint: Some("Create .venv and run: pip install -r python/requirements.txt".into()),
     })?;
 
-    let check = Command::new(&python)
+    let check = python_command(&venv)
         .args(["-c", "import playwright, websockets"])
         .output()
         .map_err(|e| BrowserError {
             message: format!("Failed to run Python: {e}"),
             hint: Some(format!(
                 "{} -m pip install -r python/requirements.txt",
-                python.display()
+                venv.python_exe.display()
             )),
         })?;
     if !check.status.success() {
@@ -187,13 +253,13 @@ pub async fn start_browser_sidecar(
             message: "Playwright/websockets are not installed in the project venv.".into(),
             hint: Some(format!(
                 "{} -m pip install -r python/requirements.txt",
-                python.display()
+                venv.python_exe.display()
             )),
         });
     }
 
     if mode == BrowserMode::Embedded {
-        let chromium_check = Command::new(&python)
+        let chromium_check = python_command(&venv)
             .args(["-c", "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop()"])
             .output();
         if chromium_check.is_err() || !chromium_check.as_ref().unwrap().status.success() {
@@ -201,7 +267,7 @@ pub async fn start_browser_sidecar(
                 message: "Chromium browser is not installed for Playwright.".into(),
                 hint: Some(format!(
                     "{} -m playwright install chromium",
-                    python.display()
+                    venv.python_exe.display()
                 )),
             });
         }
@@ -228,7 +294,7 @@ pub async fn start_browser_sidecar(
         0
     };
 
-    let mut cmd = Command::new(&python);
+    let mut cmd = python_command(&venv);
     cmd.arg(script).args([
         "--host",
         "127.0.0.1",
@@ -244,9 +310,6 @@ pub async fn start_browser_sidecar(
     } else {
         cmd.args(["--discovery-port", &CHROME_DISCOVERY_PORT.to_string()]);
     }
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-
     let mut child = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::null())
