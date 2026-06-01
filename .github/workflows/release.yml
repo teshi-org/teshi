@@ -178,7 +178,6 @@ jobs:
               Set-Content $f -Value $content -NoNewline
           }
 
-          # cargo-wix reads includes order and variable defaults from [package.metadata.wix] in Cargo.toml
           cargo wix --package teshi --nocapture --no-build `
             -o "target/wix/teshi-$tag-x64.msi"
 
