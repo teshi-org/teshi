@@ -28,13 +28,14 @@ pub use app_data::{
 pub use events::{HostEventCallback, RuntimeEvent, RuntimeEvents};
 pub use gherkin::{emit_feature_refresh, render_feature};
 pub use locator::{
-    abandon_pending_locator, confirm_locator, confirm_pending_locator, get_active_step,
-    get_pending_locator, highlight_locator, list_step_bindings, normalize_step_text,
-    propose_locator, read_active_step, read_pending, reject_locator, reject_pending_locator,
-    resolve_step_bindings, resolve_step_context, start_locator_watch, step_binding_statuses,
-    sync_active_step, wait_for_step_status, ActiveStep, HighlightInfo, LocatorCandidate,
-    LocatorPrimary, LocatorWatcherState, PendingLocator, StepBinding, StepBindingStatus,
-    StepBindingsFile, StepWaitResult, StepWaitUntil,
+    abandon_pending_locator, confirm_locator, confirm_pending_locator, first_unbound_feature_step,
+    get_active_step, get_pending_locator, highlight_locator, list_feature_step_refs,
+    list_step_bindings, normalize_step_text, propose_locator, read_active_step, read_pending,
+    reject_locator, reject_pending_locator, resolve_step_bindings, resolve_step_context,
+    start_locator_watch, step_binding_statuses, sync_active_step, wait_for_step_status,
+    write_active_step, ActiveStep, FeatureStepRef, HighlightInfo, LocatorCandidate, LocatorPrimary,
+    LocatorWatcherState, PendingLocator, StepBinding, StepBindingStatus, StepBindingsFile,
+    StepWaitResult, StepWaitUntil,
 };
 pub use project::{
     check_project_switch_allowed, get_project_root, list_dir, open_project, set_browser_active,

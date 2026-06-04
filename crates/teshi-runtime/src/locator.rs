@@ -1,6 +1,6 @@
 //! Locator workflow: active-step context, pending proposals, and step-binding persistence.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -654,6 +654,131 @@ pub fn resolve_step_bindings(
         .filter(|step| step.status == "confirmed")
         .filter(|step| until_line.is_none_or(|line| step.step_line <= line))
         .collect())
+}
+
+/// One executable step line in a feature file with binding status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureStepRef {
+    pub step_line: usize,
+    pub step_keyword: String,
+    pub step_text: String,
+    pub scenario_name: String,
+    pub status: String,
+}
+
+/// Writes `.teshi/active-step.json` for CLI and Desktop agents without a full runtime handle.
+///
+/// # Errors
+///
+/// Returns an error when a proposal is pending, the step line is invalid, or the file cannot be written.
+pub fn write_active_step(
+    project_root: &Path,
+    feature_path: &str,
+    step_line: usize,
+) -> Result<ActiveStep> {
+    if pending_is_blocking(project_root)? {
+        anyhow::bail!(
+            "A locator proposal is pending confirmation. Accept or reject it before selecting another step."
+        );
+    }
+    let feature_relative = normalize_feature_relative_path(project_root, feature_path)?;
+    let feature_abs = project_root.join(&feature_relative);
+    let active = resolve_step_context(project_root, &feature_abs, step_line)?;
+    ensure_teshi_dir(project_root)?;
+    write_json(&active_step_path(project_root), &active)?;
+    Ok(active)
+}
+
+fn confirmed_binding_lines(project_root: &Path, feature_relative: &str) -> Result<BTreeSet<usize>> {
+    let bindings = read_step_bindings_file(project_root, feature_relative)?;
+    Ok(bindings
+        .steps
+        .into_iter()
+        .filter(|s| s.status == "confirmed")
+        .map(|s| s.step_line)
+        .collect())
+}
+
+fn collect_feature_steps(
+    content: &str,
+    feature_abs: PathBuf,
+) -> Result<Vec<(usize, String, String, String)>> {
+    let feature = parse_feature(content, feature_abs);
+    let mut out = Vec::new();
+    if let Some(bg) = &feature.background {
+        for step in &bg.steps {
+            out.push((
+                step.line_number,
+                step.keyword.clone(),
+                step.text.clone(),
+                "Background".to_string(),
+            ));
+        }
+    }
+    for scenario in feature
+        .scenarios
+        .iter()
+        .chain(feature.rules.iter().flat_map(|r| r.scenarios.iter()))
+    {
+        for step in &scenario.steps {
+            out.push((
+                step.line_number,
+                step.keyword.clone(),
+                step.text.clone(),
+                scenario.name.clone(),
+            ));
+        }
+    }
+    out.sort_by_key(|(line, _, _, _)| *line);
+    Ok(out)
+}
+
+/// Lists every step line in a feature with binding status (`confirmed`, `pending`, `unbound`).
+///
+/// # Errors
+///
+/// Returns an error when the feature cannot be read or parsed.
+pub fn list_feature_step_refs(
+    project_root: &Path,
+    feature_path: &str,
+) -> Result<Vec<FeatureStepRef>> {
+    let feature_relative = normalize_feature_relative_path(project_root, feature_path)?;
+    let feature_abs = project_root.join(&feature_relative);
+    let content = fs::read_to_string(&feature_abs).context("read feature file")?;
+    let confirmed = confirmed_binding_lines(project_root, &feature_relative)?;
+    let pending_line = read_pending_locator(project_root)?
+        .filter(|p| p.status == "pending" && p.step_ref.feature_relative_path == feature_relative)
+        .map(|p| p.step_ref.step_line);
+    let steps = collect_feature_steps(&content, feature_abs)?;
+    Ok(steps
+        .into_iter()
+        .map(|(step_line, step_keyword, step_text, scenario_name)| {
+            let status = if confirmed.contains(&step_line) {
+                "confirmed".to_string()
+            } else if pending_line == Some(step_line) {
+                "pending".to_string()
+            } else {
+                "unbound".to_string()
+            };
+            FeatureStepRef {
+                step_line,
+                step_keyword,
+                step_text,
+                scenario_name,
+                status,
+            }
+        })
+        .collect())
+}
+
+/// Returns the first unbound step in source order, if any.
+pub fn first_unbound_feature_step(
+    project_root: &Path,
+    feature_path: &str,
+) -> Result<Option<FeatureStepRef>> {
+    Ok(list_feature_step_refs(project_root, feature_path)?
+        .into_iter()
+        .find(|s| s.status == "unbound"))
 }
 
 /// Returns per-step binding statuses for desktop/web badges.

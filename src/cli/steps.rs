@@ -8,19 +8,23 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::json;
 use teshi_runtime::{
     HighlightInfo, LocatorCandidate, PendingLocator, StepWaitUntil, confirm_pending_locator,
-    list_step_bindings, propose_locator, read_active_step, reject_pending_locator,
-    resolve_step_bindings, send_sidecar_command, step_binding_statuses, wait_for_step_status,
+    first_unbound_feature_step, list_feature_step_refs, list_step_bindings, propose_locator,
+    read_active_step, reject_pending_locator, resolve_step_bindings, send_sidecar_command,
+    step_binding_statuses, wait_for_step_status, write_active_step,
 };
 
 use super::{
-    StepsCommand, StepsConfirmArgs, StepsListArgs, StepsProposeArgs, StepsResolveArgs,
-    StepsWaitArgs, WaitUntilArg,
+    StepsCommand, StepsConfirmArgs, StepsFeatureArgs, StepsListArgs, StepsProposeArgs,
+    StepsResolveArgs, StepsSelectArgs, StepsWaitArgs, WaitUntilArg,
 };
 
 /// Handles `teshi steps ...` subcommands.
 pub fn handle_steps_command(action: &StepsCommand) -> Result<()> {
     let project_root = std::env::current_dir().context("resolve current directory")?;
     match action {
+        StepsCommand::Select(args) => select(&project_root, args),
+        StepsCommand::Unbound(args) => unbound(&project_root, args),
+        StepsCommand::NextUnbound(args) => next_unbound(&project_root, args),
         StepsCommand::Propose(args) => propose(&project_root, args),
         StepsCommand::Confirm(args) => confirm(&project_root, args),
         StepsCommand::Reject => reject(&project_root),
@@ -28,6 +32,43 @@ pub fn handle_steps_command(action: &StepsCommand) -> Result<()> {
         StepsCommand::Resolve(args) => resolve(&project_root, args),
         StepsCommand::List(args) => list(&project_root, args),
     }
+}
+
+fn select(project_root: &Path, args: &StepsSelectArgs) -> Result<()> {
+    let active = write_active_step(project_root, &args.feature, args.line)?;
+    println!("{}", serde_json::to_string_pretty(&active)?);
+    Ok(())
+}
+
+fn unbound(project_root: &Path, args: &StepsFeatureArgs) -> Result<()> {
+    let feature = resolve_feature_arg(project_root, args.feature.as_deref())?;
+    let steps: Vec<_> = list_feature_step_refs(project_root, &feature)?
+        .into_iter()
+        .filter(|s| s.status == "unbound")
+        .collect();
+    println!("{}", serde_json::to_string_pretty(&steps)?);
+    Ok(())
+}
+
+fn next_unbound(project_root: &Path, args: &StepsFeatureArgs) -> Result<()> {
+    let feature = resolve_feature_arg(project_root, args.feature.as_deref())?;
+    let Some(step) = first_unbound_feature_step(project_root, &feature)? else {
+        println!(
+            "{}",
+            json!({ "ok": true, "message": "all steps are bound" })
+        );
+        return Ok(());
+    };
+    let active = write_active_step(project_root, &feature, step.step_line)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "ok": true,
+            "selected": step,
+            "active_step": active
+        }))?
+    );
+    Ok(())
 }
 
 fn propose(project_root: &Path, args: &StepsProposeArgs) -> Result<()> {

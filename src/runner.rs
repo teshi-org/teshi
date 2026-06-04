@@ -42,6 +42,9 @@ pub struct RunCase {
     pub feature_path: String,
     pub scenario: String,
     pub line_number: Option<usize>,
+    /// Last Gherkin step line (inclusive) for WinApp replay filtering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub until_line: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -379,10 +382,21 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
     if cases.is_empty() {
         return Err(anyhow::anyhow!("no scenarios found to run"));
     }
+    let mut meta = HashMap::new();
+    meta.insert(
+        "project_root".to_string(),
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .to_string_lossy()
+            .to_string(),
+    );
+    if read_sidecar_mode(&feature_path) == Some("winapp".to_string()) {
+        meta.insert("runner_mode".to_string(), "winapp".to_string());
+    }
     let request = RunRequest {
         command: "run".to_string(),
         cases,
-        meta: HashMap::new(),
+        meta,
     };
     let rx = spawn_runner(config, request)?;
     while let Ok(event) = rx.recv() {
@@ -422,13 +436,29 @@ fn collect_cases(
         {
             continue;
         }
+        let until_line = scenario.steps.last().map(|s| s.line_number);
         cases.push(RunCase {
             id: format!("f{feature_idx}:s{si}"),
             feature_path: feature.file_path.to_string_lossy().to_string(),
             scenario: scenario.name.clone(),
             line_number: Some(scenario.line_number),
+            until_line,
         });
     }
+}
+
+fn read_sidecar_mode(path: &Path) -> Option<String> {
+    let project_root = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()?.to_path_buf()
+    };
+    let endpoint = project_root.join(".teshi").join("cdp-endpoint.json");
+    let text = std::fs::read_to_string(endpoint).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    json.get("mode")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 fn format_event(event: &RunEvent) -> String {

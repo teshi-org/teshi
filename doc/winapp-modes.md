@@ -67,6 +67,24 @@ Selector preference:
 
 Prefer `AutomationId` whenever the app exposes it. Path selectors are last-resort because UI tree layout can shift between releases.
 
+## Bug-to-regression workflow
+
+1. Describe the bug using [bug-report-template.md](bug-report-template.md).
+2. Follow the **bug-to-regression** skill (`.teshi/skills/bug-to-regression/SKILL.md`) to create a `.feature` and bind each step.
+3. Use CLI helpers from the project root:
+
+```bash
+teshi steps unbound --feature features/my_bug.feature
+teshi steps next-unbound --feature features/my_bug.feature
+teshi steps select --feature features/my_bug.feature --line 12
+teshi winapp replay --feature features/my_bug.feature --yes
+teshi export --target behave --feature features/my_bug.feature --out ./tests-e2e
+```
+
+See [winui-automation-ids.md](winui-automation-ids.md) for app-side `AutomationId` conventions.
+
+When `.teshi/cdp-endpoint.json` has `"mode": "winapp"`, `teshi run` forwards scenarios to `teshi winapp replay` via the NDJSON runner.
+
 ## Supported actions
 
 | Action | UIA behavior |

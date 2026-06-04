@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod browser;
 pub mod desktop;
+pub mod export;
 pub mod steps;
 pub mod winapp;
 
@@ -91,10 +92,42 @@ pub enum Command {
         #[command(subcommand)]
         action: WinAppCommand,
     },
+    /// Export confirmed step-bindings to an external test project
+    Export {
+        #[command(flatten)]
+        args: ExportArgs,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    /// Export target (currently `behave` only)
+    #[arg(long, value_enum, default_value = "behave")]
+    pub target: ExportTargetArg,
+    /// Feature path relative to project root
+    #[arg(long)]
+    pub feature: String,
+    /// Output directory for the generated project
+    #[arg(long, short = 'o', default_value = "tests-e2e")]
+    pub out: String,
+    /// Include Page Object modules under `pages/`
+    #[arg(long, default_value_t = true)]
+    pub with_po: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ExportTargetArg {
+    Behave,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum StepsCommand {
+    /// Set the active Gherkin step for locator recording
+    Select(StepsSelectArgs),
+    /// List steps that still need confirmed bindings
+    Unbound(StepsFeatureArgs),
+    /// Select the next unbound step and write active-step.json
+    NextUnbound(StepsFeatureArgs),
     /// Write a pending locator proposal for the selected active step
     Propose(StepsProposeArgs),
     /// Confirm the pending proposal and persist it to step-bindings
@@ -169,6 +202,23 @@ pub struct StepsResolveArgs {
 
 #[derive(Debug, Args)]
 pub struct StepsListArgs {
+    /// Feature path relative to the project root; defaults to active step feature
+    #[arg(long)]
+    pub feature: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct StepsSelectArgs {
+    /// Feature path relative to the project root
+    #[arg(long)]
+    pub feature: String,
+    /// 1-based source line of the Gherkin step
+    #[arg(long)]
+    pub line: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct StepsFeatureArgs {
     /// Feature path relative to the project root; defaults to active step feature
     #[arg(long)]
     pub feature: Option<String>,

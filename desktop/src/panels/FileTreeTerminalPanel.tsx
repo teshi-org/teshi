@@ -80,15 +80,23 @@ async function ensureShellSpawned(
   fit: import("@xterm/addon-fit").FitAddon,
   term: import("@xterm/xterm").Terminal,
   shellSpawnedRef: { current: boolean },
+  shellOpsRef: { current: Promise<void> },
 ): Promise<void> {
-  fit.fit();
-  const { cols, rows } = normalizeTerminalSize(term.cols, term.rows);
-  if (!shellSpawnedRef.current) {
-    await getRuntime().spawnTerminal(cols, rows);
-    shellSpawnedRef.current = true;
-  } else {
-    await syncTerminalSize(fit, term);
-  }
+  const run = shellOpsRef.current.then(async () => {
+    fit.fit();
+    const { cols, rows } = normalizeTerminalSize(term.cols, term.rows);
+    if (!shellSpawnedRef.current) {
+      await getRuntime().spawnTerminal(cols, rows);
+      shellSpawnedRef.current = true;
+    } else {
+      await syncTerminalSize(fit, term);
+    }
+  });
+  shellOpsRef.current = run.then(
+    () => {},
+    () => {},
+  );
+  await run;
 }
 
 function waitForLayout(): Promise<void> {
@@ -112,6 +120,8 @@ export function FileTreeTerminalPanel({
   const xtermRef = useRef<import("@xterm/xterm").Terminal | null>(null);
   const fitRef = useRef<import("@xterm/addon-fit").FitAddon | null>(null);
   const shellSpawnedRef = useRef(false);
+  const shellOpsRef = useRef<Promise<void>>(Promise.resolve());
+  const dataHandlerRegisteredRef = useRef(false);
   const [terminalReady, setTerminalReady] = useState(false);
 
   const loadChildren = useCallback(async (path: string) => {
@@ -169,6 +179,8 @@ export function FileTreeTerminalPanel({
       xtermRef.current = null;
       fitRef.current = null;
       shellSpawnedRef.current = false;
+      shellOpsRef.current = Promise.resolve();
+      dataHandlerRegisteredRef.current = false;
       setTerminalReady(false);
       void getRuntime().stopTerminal().catch((err) => {
         console.error("stop_terminal failed", err);
@@ -176,124 +188,126 @@ export function FileTreeTerminalPanel({
     };
   }, [projectRoot]);
 
-  // Lazy-init xterm only after the Terminal tab is visible (correct FitAddon measure).
+  // Create xterm once the Terminal tab is first opened (FitAddon needs a visible host).
   useEffect(() => {
     if (tab !== "terminal") return;
+    if (xtermRef.current) return;
 
     let disposed = false;
-    let unlistenOutput: (() => void) | null = null;
-    let unlistenExit: (() => void) | null = null;
-    let resizeObserver: ResizeObserver | null = null;
-    let term: import("@xterm/xterm").Terminal | null = null;
-    let fit: import("@xterm/addon-fit").FitAddon | null = null;
 
     void (async () => {
-      if (xtermRef.current && fitRef.current) {
-        await waitForLayout();
-        if (disposed) return;
-        try {
-          await ensureShellSpawned(
-            fitRef.current,
-            xtermRef.current,
-            shellSpawnedRef,
-          );
-          await syncTerminalSize(fitRef.current, xtermRef.current);
-          xtermRef.current.focus();
-        } catch (err) {
-          console.error("terminal respawn on tab switch failed", err);
-        }
-        return;
-      }
-
       const { Terminal } = await import("@xterm/xterm");
       const { FitAddon } = await import("@xterm/addon-fit");
       await import("@xterm/xterm/css/xterm.css");
-      if (disposed) return;
+      if (disposed || xtermRef.current) return;
 
       await waitForLayout();
       if (disposed || !terminalRef.current) return;
 
-      term = new Terminal({
+      const term = new Terminal({
         theme: TERMINAL_THEME,
         fontFamily: "Consolas, 'Cascadia Mono', monospace",
         cursorBlink: true,
         windowsMode: true,
       });
-      fit = new FitAddon();
+      const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(terminalRef.current);
       fit.fit();
       xtermRef.current = term;
       fitRef.current = fit;
       setTerminalReady(true);
-
-      unlistenOutput = await getRuntime().onEvent<string>("terminal-output", (payload) => {
-        term?.write(decodeTerminalChunk(payload));
-      });
-      unlistenExit = await getRuntime().onEvent("terminal-exit", () => {
-        shellSpawnedRef.current = false;
-        term?.writeln("\r\n\x1b[33mShell exited.\x1b[0m");
-      });
-      if (disposed) return;
-
-      term.onData((data) => {
-        void getRuntime()
-          .writeTerminal(data)
-          .catch((err) => {
-            const message = err instanceof Error ? err.message : String(err);
-            const fitNow = fitRef.current;
-            const termNow = xtermRef.current;
-            if (!shellSpawnedRef.current && fitNow && termNow) {
-              void ensureShellSpawned(fitNow, termNow, shellSpawnedRef)
-                .then(() => getRuntime().writeTerminal(data))
-                .catch((retryErr) => {
-                  toast.error(
-                    retryErr instanceof Error ? retryErr.message : String(retryErr),
-                  );
-                });
-              return;
-            }
-            toast.error(message);
-            termNow?.writeln(`\r\n\x1b[33m${message}\x1b[0m`);
-          });
-      });
-
-      if (disposed || !terminalRef.current || !fit || !term) return;
-
-      resizeObserver = new ResizeObserver(() => {
-        if (!fit || !term) return;
-        void ensureShellSpawned(fit, term, shellSpawnedRef).catch((err) => {
-          console.error("terminal resize/spawn failed", err);
-        });
-      });
-      resizeObserver.observe(terminalRef.current);
     })();
 
     return () => {
       disposed = true;
-      resizeObserver?.disconnect();
-      unlistenOutput?.();
-      unlistenExit?.();
     };
   }, [tab, projectRoot]);
 
-  // Fit, then spawn the PTY at matching cols/rows so the first prompt aligns.
+  // Re-attach PTY listeners every time the Terminal tab becomes active. Previously,
+  // switching Files → Terminal dropped terminal-output handlers and left a black screen.
   useEffect(() => {
     if (tab !== "terminal" || !terminalReady) return;
-    const fit = fitRef.current;
+
     const term = xtermRef.current;
-    if (!fit || !term) return;
+    const fit = fitRef.current;
+    if (!term || !fit) return;
+
+    let cancelled = false;
+    let unlistenOutput: (() => void) | null = null;
+    let unlistenExit: (() => void) | null = null;
+    let resizeObserver: ResizeObserver | null = null;
 
     void (async () => {
+      unlistenOutput = await getRuntime().onEvent<string>("terminal-output", (payload) => {
+        xtermRef.current?.write(decodeTerminalChunk(payload));
+      });
+      unlistenExit = await getRuntime().onEvent("terminal-exit", () => {
+        shellSpawnedRef.current = false;
+        xtermRef.current?.writeln("\r\n\x1b[33mShell exited.\x1b[0m");
+      });
+      if (cancelled) {
+        unlistenOutput();
+        unlistenExit();
+        return;
+      }
+
+      if (!dataHandlerRegisteredRef.current) {
+        dataHandlerRegisteredRef.current = true;
+        term.onData((data) => {
+          void getRuntime()
+            .writeTerminal(data)
+            .catch((err) => {
+              const message = err instanceof Error ? err.message : String(err);
+              const fitNow = fitRef.current;
+              const termNow = xtermRef.current;
+              if (!shellSpawnedRef.current && fitNow && termNow) {
+                void ensureShellSpawned(fitNow, termNow, shellSpawnedRef, shellOpsRef)
+                  .then(() => getRuntime().writeTerminal(data))
+                  .catch((retryErr) => {
+                    toast.error(
+                      retryErr instanceof Error ? retryErr.message : String(retryErr),
+                    );
+                  });
+                return;
+              }
+              toast.error(message);
+              termNow?.writeln(`\r\n\x1b[33m${message}\x1b[0m`);
+            });
+        });
+      }
+
+      if (terminalRef.current) {
+        resizeObserver = new ResizeObserver(() => {
+          const fitNow = fitRef.current;
+          const termNow = xtermRef.current;
+          if (!fitNow || !termNow) return;
+          void ensureShellSpawned(fitNow, termNow, shellSpawnedRef, shellOpsRef).catch((err) => {
+            console.error("terminal resize/spawn failed", err);
+          });
+        });
+        resizeObserver.observe(terminalRef.current);
+      }
+
       try {
         await waitForLayout();
-        await ensureShellSpawned(fit, term, shellSpawnedRef);
+        if (cancelled) return;
+        await ensureShellSpawned(fit, term, shellSpawnedRef, shellOpsRef);
+        await syncTerminalSize(fit, term);
+        term.focus();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         toast.error(`Terminal failed: ${message}`);
         term.writeln(`\r\n\x1b[31mFailed to start shell: ${message}\x1b[0m`);
       }
     })();
+
+    return () => {
+      cancelled = true;
+      resizeObserver?.disconnect();
+      unlistenOutput?.();
+      unlistenExit?.();
+    };
   }, [tab, terminalReady, projectRoot]);
 
   // Refit xterm when the panel becomes visible again after browser focus or collapse.
@@ -304,7 +318,7 @@ export function FileTreeTerminalPanel({
     if (!fit || !term) return;
 
     requestAnimationFrame(() => {
-      void ensureShellSpawned(fit, term, shellSpawnedRef).catch((err) => {
+      void ensureShellSpawned(fit, term, shellSpawnedRef, shellOpsRef).catch((err) => {
         console.error("terminal refit/spawn failed", err);
       });
     });
@@ -332,11 +346,13 @@ export function FileTreeTerminalPanel({
       return;
     }
     try {
+      shellOpsRef.current = Promise.resolve();
       await getRuntime().stopTerminal();
       shellSpawnedRef.current = false;
-      term.clear();
+      term.reset();
       await waitForLayout();
-      await ensureShellSpawned(fit, term, shellSpawnedRef);
+      fit.fit();
+      await ensureShellSpawned(fit, term, shellSpawnedRef, shellOpsRef);
       term.focus();
       toast.success("Shell restarted");
     } catch (err) {

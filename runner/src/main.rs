@@ -1,4 +1,6 @@
 use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -9,18 +11,17 @@ use teshi_tui_steps as tui_steps;
 struct RunRequest {
     command: String,
     cases: Vec<RunCase>,
-    #[allow(dead_code)]
     meta: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RunCase {
     id: String,
-    #[allow(dead_code)]
     feature_path: String,
     scenario: String,
     #[allow(dead_code)]
     line_number: Option<usize>,
+    until_line: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,7 +114,14 @@ fn write_event<T: Serialize>(out: &mut impl Write, event: Event<'_, T>) -> io::R
 fn run_request(request: RunRequest) -> Result<()> {
     let mut out = io::BufWriter::new(io::stdout());
     let total = request.cases.len();
-    let mut teshi_bin: Option<std::path::PathBuf> = None;
+    let runner_mode = request.meta.get("runner_mode").map(String::as_str);
+    let project_root = request
+        .meta
+        .get("project_root")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .context("project_root")?;
+    let mut teshi_bin: Option<PathBuf> = None;
 
     write_event(
         &mut out,
@@ -138,6 +146,51 @@ fn run_request(request: RunRequest) -> Result<()> {
                 },
             },
         )?;
+
+        if runner_mode == Some("winapp") {
+            if teshi_bin.is_none() {
+                teshi_bin = Some(locate_teshi_bin().context("locate teshi binary")?);
+            }
+            let bin = teshi_bin.as_ref().context("teshi binary path")?;
+            let start = Instant::now();
+            match run_winapp_case(bin, &project_root, case) {
+                Ok(()) => {
+                    passed = passed.saturating_add(1);
+                    write_event(
+                        &mut out,
+                        Event {
+                            kind: "case_passed",
+                            payload: CasePassed {
+                                case_id: &case.id,
+                                duration_ms: start.elapsed().as_millis() as u64,
+                            },
+                        },
+                    )?;
+                }
+                Err(err) => {
+                    failed = failed.saturating_add(1);
+                    let msg = err.to_string();
+                    let dbg = format!("{err:?}");
+                    let stack = if dbg != msg { Some(dbg) } else { None };
+                    write_event(
+                        &mut out,
+                        Event {
+                            kind: "case_failed",
+                            payload: CaseFailed {
+                                case_id: &case.id,
+                                duration_ms: start.elapsed().as_millis() as u64,
+                                error: RunErrorOut {
+                                    message: msg,
+                                    stack,
+                                    attachments: Vec::new(),
+                                },
+                            },
+                        },
+                    )?;
+                }
+            }
+            continue;
+        }
 
         if tui_steps::is_tui_scenario(&case.scenario) && !tui_steps::tui_e2e_host_supported() {
             skipped = skipped.saturating_add(1);
@@ -228,6 +281,50 @@ fn run_request(request: RunRequest) -> Result<()> {
     Ok(())
 }
 
+fn run_winapp_case(teshi_bin: &Path, project_root: &Path, case: &RunCase) -> Result<()> {
+    let feature_rel = feature_relative_path(project_root, &case.feature_path)?;
+    let mut cmd = Command::new(teshi_bin);
+    cmd.current_dir(project_root)
+        .arg("winapp")
+        .arg("replay")
+        .arg("--feature")
+        .arg(&feature_rel)
+        .arg("--yes");
+    if let Some(until) = case.until_line {
+        cmd.arg("--until-line").arg(until.to_string());
+    }
+    let output = cmd
+        .output()
+        .with_context(|| format!("spawn {} winapp replay", teshi_bin.display()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    anyhow::bail!(
+        "winapp replay failed for scenario {:?}: {stderr}{stdout}",
+        case.scenario
+    );
+}
+
+fn feature_relative_path(project_root: &Path, feature_path: &str) -> Result<String> {
+    let path = Path::new(feature_path);
+    if path.is_absolute() {
+        let canonical = path.canonicalize().context("canonicalize feature")?;
+        let root = project_root
+            .canonicalize()
+            .context("canonicalize project root")?;
+        if !canonical.starts_with(&root) {
+            anyhow::bail!("feature outside project root");
+        }
+        return Ok(canonical
+            .strip_prefix(&root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| canonical.to_string_lossy().replace('\\', "/")));
+    }
+    Ok(feature_path.replace('\\', "/"))
+}
+
 fn locate_teshi_bin() -> Result<std::path::PathBuf> {
     if let Ok(bin) = std::env::var("TESHI_BIN") {
         let path = std::path::PathBuf::from(bin);
@@ -238,6 +335,10 @@ fn locate_teshi_bin() -> Result<std::path::PathBuf> {
     let exe = std::env::current_exe().context("current_exe")?;
     let dir = exe.parent().context("runner exe has no parent directory")?;
     let candidate = dir.join("teshi.exe");
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+    let candidate = dir.join("teshi");
     if candidate.exists() {
         return Ok(candidate);
     }

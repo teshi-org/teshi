@@ -38,7 +38,12 @@ teshi run [path] [--scenario NAME]     # Run BDD tests (default path: current di
 teshi web [--project PATH]             # Browser GUI via loopback server
 teshi desktop [--project PATH]         # Launch native desktop shell
 teshi winapp list-windows              # List visible native windows for UIA attach
+teshi steps select --feature F --line N # Set active step for locator recording (CLI)
+teshi steps unbound --feature F         # List steps missing confirmed bindings
+teshi export --target behave --feature F --out ./tests-e2e  # Generate behave + PO project
 ```
+
+Bug-to-regression workflow: [doc/bug-report-template.md](doc/bug-report-template.md), skills under `.teshi/skills/` (`bug-to-regression`, `winapp-locator`, `winapp-replay`, `behave-export-guide`).
 
 ### Windows install
 

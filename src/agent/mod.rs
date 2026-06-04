@@ -982,6 +982,7 @@ fn execute_run_tests(app: &mut crate::app::App, args_json: &str) -> Result<Strin
                 feature_path: fp.clone(),
                 scenario: scenario.name.clone(),
                 line_number: Some(scenario.line_number),
+                until_line: scenario.steps.last().map(|s| s.line_number),
             });
         }
     }

@@ -173,6 +173,9 @@ fn main() -> Result<()> {
         Some(cli::Command::WinApp { action }) => {
             return cli::winapp::handle_winapp_command(&action);
         }
+        Some(cli::Command::Export { args }) => {
+            return cli::export::handle_export_command(&args);
+        }
         None => {}
     }
 

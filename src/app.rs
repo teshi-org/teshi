@@ -6352,6 +6352,7 @@ fn build_case(
         feature_path: feature.file_path.to_string_lossy().to_string(),
         scenario: scenario.name.clone(),
         line_number: Some(scenario.line_number),
+        until_line: scenario.steps.last().map(|s| s.line_number),
     }
 }
 
