@@ -20,6 +20,8 @@ pub enum BrowserMode {
     Embedded,
     /// User Chrome via teshi-bridge extension.
     Chrome,
+    /// Native Windows apps via UI Automation and window capture.
+    WinApp,
 }
 
 impl BrowserMode {
@@ -27,6 +29,7 @@ impl BrowserMode {
         match self {
             BrowserMode::Embedded => "embedded",
             BrowserMode::Chrome => "chrome",
+            BrowserMode::WinApp => "winapp",
         }
     }
 }
@@ -408,24 +411,28 @@ pub async fn start_browser_sidecar(
         }
     })?;
 
-    let import_snippet = if mode == BrowserMode::Chrome {
-        "import websockets"
-    } else {
-        "import playwright, websockets"
-    };
-    let import_label = if mode == BrowserMode::Chrome {
-        "websockets"
-    } else {
-        "Playwright/websockets"
-    };
-
-    let pip_hint = if mode == BrowserMode::Chrome {
-        format!("{} -m pip install websockets", venv.python_exe.display())
-    } else {
-        format!(
-            "{} -m pip install -r python/requirements.txt",
-            venv.python_exe.display()
-        )
+    let (import_snippet, import_label, pip_hint) = match mode {
+        BrowserMode::Chrome => (
+            "import websockets",
+            "websockets",
+            format!("{} -m pip install websockets", venv.python_exe.display()),
+        ),
+        BrowserMode::Embedded => (
+            "import playwright, websockets",
+            "Playwright/websockets",
+            format!(
+                "{} -m pip install -r python/requirements.txt",
+                venv.python_exe.display()
+            ),
+        ),
+        BrowserMode::WinApp => (
+            "import websockets",
+            "websockets",
+            format!(
+                "{} -m pip install -r python/requirements.txt",
+                venv.python_exe.display()
+            ),
+        ),
     };
 
     let check = build_import_check_command(&venv)
@@ -465,10 +472,19 @@ pub async fn start_browser_sidecar(
         }
     }
 
-    let script = &rt.browser_service_script;
+    let script = if mode == BrowserMode::WinApp {
+        &rt.winapp_service_script
+    } else {
+        &rt.browser_service_script
+    };
     if !script.is_file() {
+        let script_name = if mode == BrowserMode::WinApp {
+            "winapp_service.py"
+        } else {
+            "browser_service.py"
+        };
         return Err(BrowserError {
-            message: format!("browser_service.py not found at {}", script.display()),
+            message: format!("{script_name} not found at {}", script.display()),
             hint: None,
         });
     }
@@ -521,7 +537,7 @@ pub async fn start_browser_sidecar(
     ]);
     if mode == BrowserMode::Embedded {
         cmd.args(["--cdp-port", &cdp_port.to_string()]);
-    } else {
+    } else if mode == BrowserMode::Chrome {
         cmd.args(["--discovery-port", &CHROME_DISCOVERY_PORT.to_string()]);
     }
     let mut child = cmd

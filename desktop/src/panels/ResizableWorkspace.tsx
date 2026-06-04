@@ -36,6 +36,7 @@ interface Props {
   onSelectScenario: (line: number) => void;
   onSelectStep: (line: number) => void;
   onConnectChrome: () => void;
+  onConnectWinApp: () => void;
   onStartEmbedded: () => void;
   onStopBrowser: () => void;
   onToggleBrowserFullscreen: () => void;
@@ -72,6 +73,7 @@ export function ResizableWorkspace({
   onSelectScenario,
   onSelectStep,
   onConnectChrome,
+  onConnectWinApp,
   onStartEmbedded,
   onStopBrowser,
   onToggleBrowserFullscreen,
@@ -253,6 +255,7 @@ export function ResizableWorkspace({
       onToggleGherkin={toggleGherkin}
       onToggleFiles={toggleFiles}
       onConnectChrome={onConnectChrome}
+      onConnectWinApp={onConnectWinApp}
       onStartEmbedded={onStartEmbedded}
       onStop={onStopBrowser}
       onToggleFullscreen={onToggleBrowserFullscreen}

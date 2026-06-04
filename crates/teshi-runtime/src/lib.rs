@@ -56,6 +56,8 @@ use std::sync::Arc;
 pub struct RuntimeConfig {
     /// Absolute path to `browser_service.py`.
     pub browser_service_script: PathBuf,
+    /// Absolute path to `winapp_service.py`.
+    pub winapp_service_script: PathBuf,
 }
 
 /// Central holder for project, terminal, browser sidecar, and event bus state.
@@ -67,6 +69,7 @@ pub struct TeshiRuntime {
     pub locator_watcher: LocatorWatcherState,
     pub events: RuntimeEvents,
     pub browser_service_script: PathBuf,
+    pub winapp_service_script: PathBuf,
     /// Optional `teshi` CLI path injected into the embedded terminal as `TESHI_CLI`.
     embedded_terminal_teshi_cli: Option<PathBuf>,
 }
@@ -82,6 +85,7 @@ impl TeshiRuntime {
             locator_watcher: LocatorWatcherState::new(),
             events: RuntimeEvents::new(host),
             browser_service_script: config.browser_service_script,
+            winapp_service_script: config.winapp_service_script,
             embedded_terminal_teshi_cli: resolve_embedded_terminal_teshi_cli(),
         })
     }
@@ -117,6 +121,34 @@ pub fn default_browser_service_script() -> PathBuf {
         PathBuf::from("desktop/src-tauri/resources/browser_service.py"),
         PathBuf::from("../desktop/src-tauri/resources/browser_service.py"),
         PathBuf::from("../../desktop/src-tauri/resources/browser_service.py"),
+    ]);
+
+    for path in &candidates {
+        if path.is_file() {
+            return path.clone();
+        }
+    }
+    candidates[0].clone()
+}
+
+/// Resolves `winapp_service.py` from `TESHI_WINAPP_SERVICE`, installed layouts, or dev paths.
+pub fn default_winapp_service_script() -> PathBuf {
+    if let Ok(path) = std::env::var("TESHI_WINAPP_SERVICE") {
+        return PathBuf::from(path);
+    }
+
+    let mut candidates = vec![];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("share").join("winapp_service.py"));
+            candidates.push(exe_dir.join("..").join("share").join("winapp_service.py"));
+            candidates.push(exe_dir.join("resources").join("winapp_service.py"));
+        }
+    }
+    candidates.extend([
+        PathBuf::from("desktop/src-tauri/resources/winapp_service.py"),
+        PathBuf::from("../desktop/src-tauri/resources/winapp_service.py"),
+        PathBuf::from("../../desktop/src-tauri/resources/winapp_service.py"),
     ]);
 
     for path in &candidates {

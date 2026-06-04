@@ -1,0 +1,96 @@
+# WinUI3 / Native Windows app mode
+
+teshi can expose a native Windows app to terminal agents through the same sidecar pattern used by browser locator recording.
+
+## How WinApp mode communicates
+
+```text
+┌──────────────────────┐      WebSocket JSON commands       ┌──────────────────────┐
+│  Terminal agent      │ ─────────────────────────────────► │  winapp_service.py   │
+│  teshi winapp ...    │ ◄───────────────────────────────── │  127.0.0.1:<port>   │
+└──────────────────────┘                                    └──────────┬───────────┘
+                                                                         │
+                                                                         │ UI Automation
+                                                                         ▼
+                                                               ┌──────────────────┐
+                                                               │  WinUI3 app      │
+                                                               └──────────────────┘
+                                                                         │
+                                                                         │ JPEG frames
+                                                                         ▼
+                                                               ┌──────────────────┐
+                                                               │ teshi preview    │
+                                                               └──────────────────┘
+```
+
+- **Command plane**: `teshi winapp ...` reads `.teshi/cdp-endpoint.json` and sends JSON commands to the sidecar WebSocket.
+- **Preview plane**: the sidecar captures the attached window and broadcasts `frame` messages with base64 JPEG data, which the existing preview panel renders.
+- **Element plane**: UI Automation (UIA) provides snapshots, highlighting bounds, and executable actions.
+
+## Start WinApp mode
+
+1. Open a BDD project in teshi Desktop/web.
+2. Click **Connect WinUI3 App** in the Target panel.
+3. Select a Gherkin step in the left panel.
+4. In the terminal, run the `winapp-locator` skill.
+
+If no app is attached yet, list visible windows:
+
+```bash
+teshi winapp list-windows
+```
+
+Attach explicitly:
+
+```bash
+teshi winapp attach --hwnd 123456
+teshi winapp attach --title "My App"
+teshi winapp attach --process-name MyApp.exe
+```
+
+Or launch an executable and wait for its first visible window:
+
+```bash
+teshi winapp launch "C:\path\to\MyApp.exe"
+```
+
+## Locator selectors
+
+WinApp mode stores confirmed bindings in `.teshi/step-bindings/{feature}.json` with `strategy: "uia"`.
+
+Selector preference:
+
+1. `uia:automation_id=LoginButton`
+2. `uia:control_type=ButtonControl;name=Log in`
+3. `uia:name=Log in`
+4. `uia:path=0/2/1`
+
+Prefer `AutomationId` whenever the app exposes it. Path selectors are last-resort because UI tree layout can shift between releases.
+
+## Supported actions
+
+| Action | UIA behavior |
+|--------|--------------|
+| `click` | Prefer `InvokePattern`, then UIA click, then center-point click |
+| `fill` | Prefer `ValuePattern.SetValue`, then focus + keyboard input |
+| `assert_visible` | Check that the resolved element has visible bounds |
+| `assert_text` | Compare expected text against `ValuePattern` or `Name` |
+| `select` | Prefer `SelectionItemPattern.Select`, then click |
+| `press_key` | Focus the element and send keys |
+
+## Dependencies
+
+Project venvs should install:
+
+```bash
+pip install -r python/requirements.txt
+```
+
+WinApp mode requires `websockets` to start. UI inspection/actions require `uiautomation` and `comtypes`. The screenshot stream uses Pillow `ImageGrab` with `all_screens=True` so targets on secondary monitors are included in the virtual desktop grab. Windows Graphics Capture remains the preferred future backend for unoccluded WinUI3/DirectX windows.
+
+## Limitations
+
+- Target apps running as administrator may require teshi to run at the same integrity level.
+- Custom-drawn controls may expose little or no UIA metadata; prefer adding stable `AutomationId` values in the app under test.
+- The screenshot path can be affected by occlusion (windows stacked above the target on the same monitor) or protected content.
+- Attach only to the app under test. Agents should not guess between multiple plausible native app windows.

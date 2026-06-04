@@ -8,7 +8,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use teshi_runtime::{default_browser_service_script, open_project, RuntimeConfig, TeshiRuntime};
+use teshi_runtime::{
+    default_browser_service_script, default_winapp_service_script, open_project, RuntimeConfig,
+    TeshiRuntime,
+};
 use tracing::info;
 
 pub use server::run_server;
@@ -38,9 +41,11 @@ pub async fn run(opts: WebOptions) -> Result<()> {
         .ok();
 
     let script = default_browser_service_script();
+    let winapp_script = default_winapp_service_script();
     let rt = TeshiRuntime::new(
         RuntimeConfig {
             browser_service_script: script,
+            winapp_service_script: winapp_script,
         },
         None,
     );

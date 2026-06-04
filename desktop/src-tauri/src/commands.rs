@@ -119,6 +119,7 @@ pub async fn start_browser_sidecar(
 ) -> Result<BrowserStartResult, BrowserError> {
     let mode = match mode.as_str() {
         "chrome" => BrowserMode::Chrome,
+        "winapp" => BrowserMode::WinApp,
         _ => BrowserMode::Embedded,
     };
     runtime_start_browser(Arc::clone(&rt), mode).await

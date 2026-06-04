@@ -35,7 +35,7 @@ const EMBEDDED_STREAM_STALL_MS = 4000;
 interface Props {
   wsUrl: string | null;
   running: boolean;
-  mode: "embedded" | "chrome" | null;
+  mode: "embedded" | "chrome" | "winapp" | null;
   error: string | null;
   hint: string | null;
   fullscreen: boolean;
@@ -44,6 +44,7 @@ interface Props {
   onToggleGherkin?: () => void;
   onToggleFiles?: () => void;
   onConnectChrome: () => void;
+  onConnectWinApp: () => void;
   onStartEmbedded: () => void;
   onStop: () => void;
   onToggleFullscreen: () => void;
@@ -172,12 +173,14 @@ export function BrowserPanel({
   onToggleGherkin,
   onToggleFiles,
   onConnectChrome,
+  onConnectWinApp,
   onStartEmbedded,
   onStop,
   onToggleFullscreen,
 }: Props) {
   const isEmbedded = running && mode === "embedded";
   const isChrome = running && mode === "chrome";
+  const isWinApp = running && mode === "winapp";
   const imgRef = useRef<HTMLImageElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const scalerRef = useRef<HTMLDivElement>(null);
@@ -221,7 +224,7 @@ export function BrowserPanel({
 
   const chromeConnected = isChrome && Boolean(chromeInfo?.extension_connected);
   const showChromeWaiting = isChrome && !chromeConnected;
-  const showViewport = isEmbedded || chromeConnected;
+  const showViewport = isEmbedded || isWinApp || chromeConnected;
   const showStreamLoading = isChrome && activatingTabId !== null;
   useEffect(() => {
     if (!isChrome || !chromeConnected) {
@@ -405,10 +408,10 @@ export function BrowserPanel({
       });
       return;
     }
-    if (isChrome) {
+    if (isChrome || isWinApp) {
       setSourceSize({ width: 0, height: 0 });
     }
-  }, [isEmbedded, isChrome, wsUrl]);
+  }, [isEmbedded, isChrome, isWinApp, wsUrl]);
 
   useEffect(() => {
     if (!isChrome) {
@@ -685,7 +688,9 @@ export function BrowserPanel({
   const statusTitle = running
     ? isChrome
       ? `Browser running (chrome, extension ${chromeConnected ? "connected" : "waiting"})`
-      : `Browser running (${mode ?? "unknown"})`
+      : isWinApp
+        ? "WinUI3 app bridge running"
+        : `Browser running (${mode ?? "unknown"})`
     : "Browser stopped";
 
   const zoomControls = (
@@ -742,7 +747,7 @@ export function BrowserPanel({
           />
         )}
         <span className="panel-header-title">
-          Browser {running ? "• live" : "• stopped"}
+          Target {running ? "• live" : "• stopped"}
           {running && mode && (
             <span className="browser-mode-label"> ({mode})</span>
           )}
@@ -757,6 +762,9 @@ export function BrowserPanel({
                 onClick={onConnectChrome}
               >
                 Connect Chrome
+              </button>
+              <button type="button" className="panel-header-btn" onClick={onConnectWinApp}>
+                Connect WinUI3 App
               </button>
               <button type="button" className="panel-header-btn" onClick={onStartEmbedded}>
                 Start Embedded
@@ -800,6 +808,10 @@ export function BrowserPanel({
             <p>
               <strong>Start Embedded</strong> — headless Playwright preview (1920×1080) for
               local/staging URLs.
+            </p>
+            <p>
+              <strong>Connect WinUI3 App</strong> — attach terminal agents to a native Windows app
+              through UI Automation.
             </p>
           </div>
         )}
@@ -884,7 +896,7 @@ export function BrowserPanel({
                 </button>
                 {zoomControls}
               </form>
-            ) : (
+            ) : isChrome ? (
               <>
                 {chromeTabs.length > 0 && (
                   <div
@@ -962,6 +974,24 @@ export function BrowserPanel({
                   {zoomControls}
                 </div>
               </>
+            ) : (
+              <div className="browser-address-bar">
+                <label className="visually-hidden" htmlFor="browser-address-winapp">
+                  Attached WinUI3 target
+                </label>
+                <input
+                  id="browser-address-winapp"
+                  type="text"
+                  className="browser-address-input"
+                  readOnly
+                  value={pageUrl}
+                  spellCheck={false}
+                  autoComplete="off"
+                  placeholder="Run `teshi winapp attach ...` in the terminal"
+                  title={pageUrl}
+                />
+                {zoomControls}
+              </div>
             )}
             <div
               ref={wrapRef}
@@ -1016,10 +1046,12 @@ export function BrowserPanel({
                 )}
                 {streamStalled && !showStreamLoading && (streamError || !isChrome) && (
                   <p className="browser-stream-stalled" role="status">
-                    Stream stalled — use an http(s) tab in Chrome (not chrome://).{" "}
-                    {chromeInfo?.last_frame_error?.trim() ||
-                      streamError ||
-                      "Click Refresh to retry."}
+                    Stream stalled —{" "}
+                    {isWinApp
+                      ? streamError || "attach to a visible WinUI3 window from the terminal."
+                      : chromeInfo?.last_frame_error?.trim() ||
+                        streamError ||
+                        "use an http(s) tab in Chrome (not chrome://)."}
                   </p>
                 )}
                 <img

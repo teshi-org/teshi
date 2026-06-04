@@ -130,7 +130,7 @@ export const webRuntime: TeshiRuntimeApi = {
     });
   },
 
-  async startBrowserSidecar(mode: "embedded" | "chrome") {
+  async startBrowserSidecar(mode: "embedded" | "chrome" | "winapp") {
     return apiFetch<{ ws_url: string; mode: string }>("/browser/start", {
       method: "POST",
       body: JSON.stringify({ mode }),

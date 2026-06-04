@@ -240,6 +240,7 @@ async fn api_browser_start(
 ) -> Result<Json<BrowserStartResult>, ApiError> {
     let mode = match body.mode.as_deref() {
         Some("chrome") => BrowserMode::Chrome,
+        Some("winapp") => BrowserMode::WinApp,
         _ => BrowserMode::Embedded,
     };
     start_browser_sidecar(rt, mode)

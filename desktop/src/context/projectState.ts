@@ -3,7 +3,7 @@ import type { ActiveStep, PendingLocator, StepBindingStatus } from "../locatorTy
 
 export type LayoutMode = "normal" | "browserFullscreen";
 export type DockTab = "locator" | "output" | "logs";
-export type BrowserSessionMode = "embedded" | "chrome";
+export type BrowserSessionMode = "embedded" | "chrome" | "winapp";
 
 export interface ProjectState {
   projectRoot: string | null;

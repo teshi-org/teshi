@@ -14,7 +14,7 @@ export interface TeshiRuntimeApi {
   syncActiveStep(featurePath: string, stepLine: number): Promise<ActiveStep>;
   renderFeature(path: string): Promise<FeatureRenderPayload>;
   startBrowserSidecar(
-    mode: "embedded" | "chrome",
+    mode: "embedded" | "chrome" | "winapp",
   ): Promise<{ ws_url: string; mode: string; cdp_endpoint_path?: string }>;
   stopBrowserSidecar(): Promise<void>;
   listDir(path: string): Promise<import("../types").DirEntry[]>;

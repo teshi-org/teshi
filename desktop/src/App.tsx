@@ -311,12 +311,15 @@ function AppShell() {
     void refreshStepStatuses(payload.relative_path);
   };
 
-  const startBrowserMode = async (mode: "embedded" | "chrome") => {
+  const startBrowserMode = async (mode: "embedded" | "chrome" | "winapp") => {
     setBrowserError(null);
     setBrowserHint(null);
     try {
       const result = await getRuntime().startBrowserSidecar(mode);
-      const sessionMode = result.mode === "chrome" ? "chrome" : "embedded";
+      const sessionMode =
+        result.mode === "chrome" || result.mode === "winapp"
+          ? result.mode
+          : "embedded";
       dispatch({
         type: "SET_BROWSER",
         wsUrl: result.ws_url,
@@ -399,6 +402,7 @@ function AppShell() {
         }
       }}
       onConnectChrome={() => void startBrowserMode("chrome")}
+      onConnectWinApp={() => void startBrowserMode("winapp")}
       onStartEmbedded={() => void startBrowserMode("embedded")}
       onStopBrowser={() => void stopBrowser()}
       onToggleBrowserFullscreen={() =>

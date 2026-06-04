@@ -13,6 +13,7 @@ cargo run -- path/to/file.feature      # open a single feature file
 cargo run -- web --project path/       # browser GUI (loopback HTTP server)
 cargo run -- desktop --project path/   # native desktop shell (locator workflow)
 cargo run -- run path/to/file.feature  # headless BDD test run (NDJSON runner)
+cargo run -- winapp snapshot           # inspect attached WinUI3/native app UIA tree
 ```
 
 Bare `teshi` opens an empty project buffer with no filesystem scan. Use `teshi .` to load the current directory tree, or `teshi path/` for a single-level scan (`--recursive` / `-R` for subdirectories).
@@ -23,7 +24,7 @@ Bare `teshi` opens an empty project buffer with no filesystem scan. Use `teshi .
 |----------|---------|
 | Terminal editing + AI | `teshi` (empty) / `teshi .` (recursive cwd) / `teshi path/` (one level) / `teshi path/ --recursive` |
 | Browser GUI (lightweight) | `teshi web [--project PATH]` |
-| Native desktop (Chrome locator) | `teshi desktop [--project PATH]` or `teshi-desktop [--project PATH]` |
+| Native desktop (Chrome / WinUI3 locator) | `teshi desktop [--project PATH]` or `teshi-desktop [--project PATH]` |
 | Headless CI runs | `teshi run [PATH] [--scenario NAME]` |
 | Credentials | `teshi auth login \| list \| remove \| status \| migrate` |
 
@@ -36,6 +37,7 @@ teshi auth migrate                     # Migrate API keys from env vars to auth.
 teshi run [path] [--scenario NAME]     # Run BDD tests (default path: current directory)
 teshi web [--project PATH]             # Browser GUI via loopback server
 teshi desktop [--project PATH]         # Launch native desktop shell
+teshi winapp list-windows              # List visible native windows for UIA attach
 ```
 
 ### Windows install
@@ -149,6 +151,12 @@ args = ["run", "--bin", "teshi-runner"]
 ```
 
 Test results stream back as NDJSON lines and are displayed inline in the Explore tab with status colors per scenario and step.
+
+## WinUI3 / Native App Recording
+
+`teshi desktop` can start a WinUI3/native Windows app bridge with **Connect WinUI3 App**. Terminal agents can then use `teshi winapp list-windows`, `teshi winapp attach`, `teshi winapp snapshot`, `teshi winapp highlight`, and `teshi winapp execute` through the tracked `winapp-locator` skill. Confirmed UIA bindings are stored in `.teshi/step-bindings/{feature}.json` with `strategy: "uia"`.
+
+See [WinUI3 / Native Windows app mode](doc/winapp-modes.md) for setup and limitations.
 
 ## Syntax Highlighting
 

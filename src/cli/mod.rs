@@ -2,6 +2,7 @@ pub mod auth;
 pub mod browser;
 pub mod desktop;
 pub mod steps;
+pub mod winapp;
 
 use std::path::PathBuf;
 
@@ -19,7 +20,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
                   Headless CI runs: `teshi run [PATH] [--scenario NAME]`."
 )]
 pub struct Cli {
-    /// Subcommands (auth, web, desktop, run, steps, browser)
+    /// Subcommands (auth, web, desktop, run, steps, browser, winapp)
     #[command(subcommand)]
     pub command: Option<Command>,
 
@@ -83,6 +84,12 @@ pub enum Command {
     Browser {
         #[command(subcommand)]
         action: BrowserCommand,
+    },
+    /// Inspect and execute locators through the WinUI3 bridge
+    #[command(name = "winapp", alias = "win-app")]
+    WinApp {
+        #[command(subcommand)]
+        action: WinAppCommand,
     },
 }
 
@@ -248,6 +255,105 @@ pub struct BrowserReplayArgs {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum WinAppCommand {
+    /// List visible top-level windows for attach
+    ListWindows,
+    /// Attach to an existing WinUI3/native window
+    Attach(WinAppAttachArgs),
+    /// Launch an app and attach to its first visible window
+    Launch(WinAppLaunchArgs),
+    /// Read UI Automation tree and interactive element snapshot
+    Snapshot(WinAppSnapshotArgs),
+    /// Highlight a UIA selector in the attached app
+    Highlight(WinAppSelectorArgs),
+    /// Clear active WinUI3 highlight
+    ClearHighlight,
+    /// Execute one locator action in the attached app
+    Execute(WinAppExecuteArgs),
+    /// Replay confirmed UIA step bindings
+    Replay(WinAppReplayArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WinAppAttachArgs {
+    /// Native top-level window handle
+    #[arg(long)]
+    pub hwnd: Option<u64>,
+    /// Case-insensitive title fragment
+    #[arg(long)]
+    pub title: Option<String>,
+    /// Process identifier owning the target window
+    #[arg(long)]
+    pub pid: Option<u32>,
+    /// Case-insensitive process executable name fragment
+    #[arg(long)]
+    pub process_name: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct WinAppLaunchArgs {
+    /// App executable path
+    pub path: String,
+    /// Optional title fragment to prefer after launch
+    #[arg(long)]
+    pub title: Option<String>,
+    /// Timeout in milliseconds waiting for a visible window
+    #[arg(long, default_value_t = 15000)]
+    pub timeout_ms: u64,
+    /// Arguments passed to the launched process
+    #[arg(last = true)]
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct WinAppSnapshotArgs {
+    /// Timeout in milliseconds waiting for the sidecar response
+    #[arg(long, default_value_t = 60_000)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct WinAppSelectorArgs {
+    /// UIA selector, e.g. uia:automation_id=LoginButton
+    pub selector: String,
+}
+
+#[derive(Debug, Args)]
+pub struct WinAppExecuteArgs {
+    /// UIA selector to execute against
+    #[arg(long)]
+    pub selector: String,
+    /// Action to execute
+    #[arg(long, default_value = "click")]
+    pub action: String,
+    /// Optional input value for fill/assert_text/select/press_key
+    #[arg(long)]
+    pub value_arg: Option<String>,
+    /// Timeout in milliseconds
+    #[arg(long, default_value_t = 5000)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct WinAppReplayArgs {
+    /// Feature path relative to project root; defaults to active step feature
+    #[arg(long)]
+    pub feature: Option<String>,
+    /// Only replay bindings up to this source line
+    #[arg(long)]
+    pub until_line: Option<usize>,
+    /// Print planned actions without executing them
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Replay without prompting between steps
+    #[arg(long)]
+    pub non_interactive: bool,
+    /// Alias for --non-interactive
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(Debug, Subcommand)]
 pub enum AuthCommand {
     /// Store an API key for a provider
     Login {
@@ -343,5 +449,43 @@ mod tests {
             msg.contains("value") || msg.contains("unexpected"),
             "unexpected error: {msg}"
         );
+    }
+
+    #[test]
+    fn winapp_execute_accepts_uia_selector_and_value_arg() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "winapp",
+            "execute",
+            "--selector",
+            "uia:automation_id=SearchBox",
+            "--action",
+            "fill",
+            "--value-arg",
+            "hello",
+        ])
+        .expect("parse winapp execute");
+        let Some(Command::WinApp {
+            action: WinAppCommand::Execute(args),
+        }) = cli.command
+        else {
+            panic!("expected winapp execute subcommand");
+        };
+        assert_eq!(args.selector, "uia:automation_id=SearchBox");
+        assert_eq!(args.action, "fill");
+        assert_eq!(args.value_arg.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn winapp_attach_accepts_title() {
+        let cli = Cli::try_parse_from(["teshi", "winapp", "attach", "--title", "My App"])
+            .expect("parse winapp attach");
+        let Some(Command::WinApp {
+            action: WinAppCommand::Attach(args),
+        }) = cli.command
+        else {
+            panic!("expected winapp attach subcommand");
+        };
+        assert_eq!(args.title.as_deref(), Some("My App"));
     }
 }

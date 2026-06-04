@@ -170,6 +170,9 @@ fn main() -> Result<()> {
         Some(cli::Command::Browser { action }) => {
             return cli::browser::handle_browser_command(&action);
         }
+        Some(cli::Command::WinApp { action }) => {
+            return cli::winapp::handle_winapp_command(&action);
+        }
         None => {}
     }
 

@@ -847,4 +847,36 @@ mod tests {
         assert_eq!(statuses[0].status, "confirmed");
         assert_eq!(statuses[0].step_line, 4);
     }
+
+    #[test]
+    fn upsert_binding_persists_uia_strategy() {
+        let dir = TempDir::new().unwrap();
+        let feature_path = dir.path().join("native.feature");
+        let mut file = fs::File::create(&feature_path).unwrap();
+        writeln!(
+            file,
+            "Feature: Native\n\n  Scenario: User clicks login\n    When I click the login button"
+        )
+        .unwrap();
+
+        let active = resolve_step_context(dir.path(), &feature_path, 4).unwrap();
+        let candidate = LocatorCandidate {
+            rank: 1,
+            strategy: "uia".to_string(),
+            value: "uia:automation_id=LoginButton".to_string(),
+            action: "click".to_string(),
+            value_arg: None,
+            confidence: 0.9,
+            rationale: "unique AutomationId".to_string(),
+        };
+        upsert_binding(dir.path(), &active, &candidate).unwrap();
+
+        let bindings = list_step_bindings(dir.path(), "native.feature").unwrap();
+        assert_eq!(bindings.steps.len(), 1);
+        assert_eq!(bindings.steps[0].primary.strategy, "uia");
+        assert_eq!(
+            bindings.steps[0].primary.value,
+            "uia:automation_id=LoginButton"
+        );
+    }
 }

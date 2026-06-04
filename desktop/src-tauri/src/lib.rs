@@ -78,7 +78,8 @@ pub fn run() {
             finalize_main_window_cmd,
         ])
         .setup(move |app| {
-            let script = resolve_browser_service_script(app)?;
+            let script = resolve_service_script(app, "browser_service.py")?;
+            let winapp_script = resolve_service_script(app, "winapp_service.py")?;
 
             let handle = app.handle().clone();
             let host: HostEventCallback =
@@ -89,6 +90,7 @@ pub fn run() {
             let rt = TeshiRuntime::new(
                 RuntimeConfig {
                     browser_service_script: script,
+                    winapp_service_script: winapp_script,
                 },
                 Some(host),
             );
@@ -111,15 +113,15 @@ pub fn run() {
         .expect("error while running teshi-desktop");
 }
 
-fn resolve_browser_service_script(app: &mut tauri::App) -> Result<PathBuf, String> {
+fn resolve_service_script(app: &mut tauri::App, script_name: &str) -> Result<PathBuf, String> {
     let mut candidates = Vec::new();
 
     // Installed MSI layout: share/ next to bin/ (prefer over missing bin/resources/).
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            candidates.push(exe_dir.join("share").join("browser_service.py"));
+            candidates.push(exe_dir.join("share").join(script_name));
             if let Some(parent) = exe_dir.parent() {
-                candidates.push(parent.join("share").join("browser_service.py"));
+                candidates.push(parent.join("share").join(script_name));
             }
         }
     }
@@ -127,7 +129,7 @@ fn resolve_browser_service_script(app: &mut tauri::App) -> Result<PathBuf, Strin
     let resource_path = app
         .path()
         .resolve(
-            "resources/browser_service.py",
+            format!("resources/{script_name}"),
             tauri::path::BaseDirectory::Resource,
         )
         .map_err(|e| e.to_string())?;
@@ -139,7 +141,7 @@ fn resolve_browser_service_script(app: &mut tauri::App) -> Result<PathBuf, Strin
         }
     }
 
-    Err("browser_service.py not found in resources/ or share/".to_string())
+    Err(format!("{script_name} not found in resources/ or share/"))
 }
 
 fn init_logging() {

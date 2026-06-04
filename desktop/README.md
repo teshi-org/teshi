@@ -79,7 +79,7 @@ teshi web --project C:\path\to\bdd-project
 
 - **App chrome:** **File > Open Project…** (`Ctrl+O`) and **Open Recent** in the custom title bar (frameless window on desktop)
 - **Panel 1 (left):** Structured Gherkin render for selected `.feature` files
-- **Panel 2 (center):** **Connect Chrome** (logged-in tab via unpacked extension from `C:\Program Files\teshi\share\teshi-bridge` or repo `extension/teshi-bridge`) or **Start Embedded** (headless Playwright JPEG stream, 1920×1080); **Disconnect** when connected
+- **Panel 2 (center):** **Connect Chrome** (logged-in tab via unpacked extension from `C:\Program Files\teshi\share\teshi-bridge` or repo `extension/teshi-bridge`), **Connect WinUI3 App** (native Windows app via UI Automation), or **Start Embedded** (headless Playwright JPEG stream, 1920×1080); **Disconnect** when connected
 - **Panel 3 (right):** Lazy file tree + terminal (tab switch)
 - **Bottom dock:** Locator confirmation (linked to selected Gherkin step), plus Output/Logs placeholders; expanded by default on Locator tab
 - **Browser fullscreen:** Click the fullscreen icon in the browser panel header to hide side panels and bottom dock; click the exit-fullscreen icon or press **Escape** to restore the layout
@@ -88,12 +88,14 @@ teshi web --project C:\path\to\bdd-project
 
 1. Open a project and select a `.feature` file.
 2. Click a Gherkin **step** in the left panel (writes `.teshi/active-step.json`).
-3. **Connect Chrome** or **Start Embedded** (writes `.teshi/cdp-endpoint.json` with `mode` and `ws_url`). For Chrome, load the unpacked extension first from `C:\Program Files\teshi\share\teshi-bridge` (or repo path for development) — see `extension/teshi-bridge/README.md`.
-4. In the embedded terminal, run a Cursor agent and invoke the **bdd-locator** skill (`.teshi/skills/bdd-locator/SKILL.md`).
+3. **Connect Chrome**, **Connect WinUI3 App**, or **Start Embedded** (writes `.teshi/cdp-endpoint.json` with `mode` and `ws_url`). For Chrome, load the unpacked extension first from `C:\Program Files\teshi\share\teshi-bridge` (or repo path for development) — see `extension/teshi-bridge/README.md`.
+4. In the embedded terminal, run a Cursor agent and invoke the **bdd-locator** skill (`.teshi/skills/bdd-locator/SKILL.md`) for browsers or **winapp-locator** (`.teshi/skills/winapp-locator/SKILL.md`) for WinUI3/native apps.
 5. The agent writes `.teshi/pending-locator.json` and highlights the target element via CDP overlay.
 6. Confirm or reject the proposal in the **Locator** bottom panel; accepted locators are saved to `{feature}.locators.md`.
 
 Runtime context files under `.teshi/` (except tracked skills) are gitignored local state.
+
+For WinUI3/native app recording, see [WinUI3 / Native Windows app mode](../doc/winapp-modes.md).
 
 ## CLI
 
