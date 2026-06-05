@@ -1,0 +1,33 @@
+
+--- spawn 2026-06-05T23:17:36.916378 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-05T23:21:18.571426 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-05T23:24:10.091049 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-05T23:32:11.778973 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-06T01:09:50.418500 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+[0606/011711.813:ERROR:ui\gfx\win\window_impl.cc:172] Failed to unregister class Chrome_WidgetWin_0. Error = 1411
+
+--- spawn 2026-06-06T01:19:10.295483 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-06T01:21:30.908805 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+[0606/012416.077:ERROR:ui\gfx\win\window_impl.cc:172] Failed to unregister class Chrome_WidgetWin_0. Error = 1411
+
+--- spawn 2026-06-06T01:25:00.298481 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+[0606/012831.641:ERROR:ui\gfx\win\window_impl.cc:172] Failed to unregister class Chrome_WidgetWin_0. Error = 1411
+
+--- spawn 2026-06-06T01:28:53.463041 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-06T01:29:26.686684 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-06T01:32:15.043066 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-06T02:31:45.121674 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-06T02:32:32.187175 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-06T02:34:55.953343 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-06T02:36:05.379108 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---

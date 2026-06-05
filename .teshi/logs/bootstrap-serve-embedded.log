@@ -1,0 +1,102 @@
+
+--- spawn 2026-06-05T23:01:35.904071 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:51765
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-05T23:11:58.630041 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:61440
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-05T23:17:38.872828 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:52968
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-05T23:21:20.533818 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:60543
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-05T23:24:11.981778 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:56452
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-05T23:32:14.999455 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:50590
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-06T01:09:54.085004 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:55174
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-06T01:19:13.845205 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:60789
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-06T01:21:34.194544 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:57481
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-06T01:25:03.596861 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:53277
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-06T01:28:56.717291 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:61769
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-06T01:29:29.958565 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:57177
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-06T01:32:18.286229 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:51979
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-06T02:31:48.419069 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:64709
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-06T02:32:35.512218 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:60419
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-06T02:34:59.139770 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:55292
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-06T02:36:08.629372 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:62066
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop

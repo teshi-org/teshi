@@ -1,0 +1,181 @@
+
+--- spawn 2026-06-05T22:56:03.320611 npm.cmd run tauri dev ---
+
+> teshi-desktop@0.5.0 tauri
+> tauri dev
+
+     Running BeforeDevCommand (`npm run dev`)
+
+> teshi-desktop@0.5.0 predev
+> cargo build -p teshi --manifest-path ../Cargo.toml
+
+   Compiling teshi v0.5.0 (D:\Dev\Rust\teshi)
+error: failed to remove file `D:\Dev\Rust\teshi\target\debug\teshi.exe`
+
+Caused by:
+  拒绝访问。 (os error 5)
+       Error The "beforeDevCommand" terminated with a non-zero status code.
+
+--- spawn 2026-06-05T23:01:13.238922 npm.cmd run tauri dev ---
+
+> teshi-desktop@0.5.0 tauri
+> tauri dev
+
+     Running BeforeDevCommand (`npm run dev`)
+
+> teshi-desktop@0.5.0 predev
+> cargo build -p teshi --manifest-path ../Cargo.toml
+
+   Compiling teshi v0.5.0 (D:\Dev\Rust\teshi)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.21s
+
+> teshi-desktop@0.5.0 dev
+> vite
+
+
+  VITE v6.4.2  ready in 251 ms
+
+  ➜  Local:   http://127.0.0.1:1420/
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+        Info Watching D:\Dev\Rust\teshi\desktop\src-tauri for changes...
+        Info Watching D:\Dev\Rust\teshi\crates\teshi-gherkin for changes...
+        Info Watching D:\Dev\Rust\teshi\crates\teshi-runtime for changes...
+[1m[92m   Compiling[0m teshi-runtime v0.1.0 (D:\Dev\Rust\teshi\crates\teshi-runtime)
+[1m[92m   Compiling[0m teshi-desktop v0.5.0 (D:\Dev\Rust\teshi\desktop\src-tauri)
+[1m[96m    Building[0m [=======================> ] 444/449: teshi-d…[1m[96m    Building[0m [=======================> ] 445/449: teshi-d…[1m[96m    Building[0m [=======================> ] 446/449: teshi-r…[1m[96m    Building[0m [=======================> ] 447/449: teshi-d…[1m[96m    Building[0m [=======================> ] 448/449: teshi-d…                                                            [1m[92m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 14.92s
+[1m[92m     Running[0m `D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe`
+23:08:49 [vite] ws proxy socket error:
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+23:08:49 [vite] ws proxy socket error:
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+23:08:49 [vite] ws proxy socket error:
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+23:08:49 [vite] ws proxy socket error:
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+23:08:49 [vite] ws proxy socket error:
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+23:08:49 [vite] ws proxy socket error:
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+23:08:49 [vite] ws proxy socket error:
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+23:08:49 [vite] ws proxy socket error:
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+23:08:49 [vite] ws proxy socket error:
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+23:08:49 [vite] ws proxy socket error:
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+23:08:49 [vite] ws proxy socket error:
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+23:08:49 [vite] ws proxy socket error:
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+       Error The "beforeDevCommand" terminated with a non-zero status code.
+
+--- spawn 2026-06-05T23:08:51.098609 npm.cmd run tauri dev ---
+
+> teshi-desktop@0.5.0 tauri
+> tauri dev
+
+     Running BeforeDevCommand (`npm run dev`)
+
+> teshi-desktop@0.5.0 predev
+> cargo build -p teshi --manifest-path ../Cargo.toml
+
+   Compiling teshi v0.5.0 (D:\Dev\Rust\teshi)
+error: failed to remove file `D:\Dev\Rust\teshi\target\debug\teshi.exe`
+
+Caused by:
+  拒绝访问。 (os error 5)
+       Error The "beforeDevCommand" terminated with a non-zero status code.
+
+--- spawn 2026-06-05T23:11:47.013574 npm.cmd run tauri dev ---
+
+> teshi-desktop@0.5.0 tauri
+> tauri dev
+
+     Running BeforeDevCommand (`npm run dev`)
+
+> teshi-desktop@0.5.0 predev
+> cargo build -p teshi --manifest-path ../Cargo.toml
+
+   Compiling teshi v0.5.0 (D:\Dev\Rust\teshi)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.11s
+
+> teshi-desktop@0.5.0 dev
+> vite
+
+
+  [32m[1mVITE[22m v6.4.2[39m  [2mready in [0m[1m237[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://127.0.0.1:[1m1420[22m/[39m
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+        Info Watching D:\Dev\Rust\teshi\desktop\src-tauri for changes...
+        Info Watching D:\Dev\Rust\teshi\crates\teshi-gherkin for changes...
+        Info Watching D:\Dev\Rust\teshi\crates\teshi-runtime for changes...
+[1m[92m   Compiling[0m teshi-desktop v0.5.0 (D:\Dev\Rust\teshi\desktop\src-tauri)
+[1m[96m    Building[0m [=======================> ] 447/449: teshi-d…[1m[96m    Building[0m [=======================> ] 448/449: teshi-d…                                                            [1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`dev` profile [unoptimized + debuginfo]]8;;\ target(s) in 5.39s
+[1m[92m     Running[0m `D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe`
+[2m23:14:46[22m [31m[1m[vite][22m[39m [31mws proxy socket error:[39m
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+[2m23:14:46[22m [31m[1m[vite][22m[39m [31mws proxy socket error:[39m
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+[2m23:14:46[22m [31m[1m[vite][22m[39m [31mws proxy socket error:[39m
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+[2m23:14:46[22m [31m[1m[vite][22m[39m [31mws proxy socket error:[39m
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+[2m23:14:46[22m [31m[1m[vite][22m[39m [31mws proxy socket error:[39m
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+[2m23:14:46[22m [31m[1m[vite][22m[39m [31mws proxy socket error:[39m
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+[2m23:14:46[22m [31m[1m[vite][22m[39m [31mws proxy socket error:[39m
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+[2m23:14:46[22m [31m[1m[vite][22m[39m [31mws proxy socket error:[39m
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+[2m23:14:46[22m [31m[1m[vite][22m[39m [31mws proxy socket error:[39m
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+[2m23:14:46[22m [31m[1m[vite][22m[39m [31mws proxy socket error:[39m
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+[2m23:14:46[22m [31m[1m[vite][22m[39m [31mws proxy socket error:[39m
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+[2m23:14:46[22m [31m[1m[vite][22m[39m [31mws proxy socket error:[39m
+Error: read ECONNRESET
+    at TCP.onStreamRead (node:internal/stream_base_commons:216:20)
+
+--- spawn 2026-06-05T23:14:47.223344 npm.cmd run tauri dev ---
+
+> teshi-desktop@0.5.0 tauri
+> tauri dev
+
+     Running BeforeDevCommand (`npm run dev`)
+
+> teshi-desktop@0.5.0 predev
+> cargo build -p teshi --manifest-path ../Cargo.toml
+
+   Compiling teshi v0.5.0 (D:\Dev\Rust\teshi)
+error: failed to remove file `D:\Dev\Rust\teshi\target\debug\teshi.exe`
+
+Caused by:
+  拒绝访问。 (os error 5)
+       Error The "beforeDevCommand" terminated with a non-zero status code.

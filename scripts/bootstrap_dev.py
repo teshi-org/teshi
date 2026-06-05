@@ -1150,8 +1150,13 @@ def _maybe_start_desktop(
     *,
     desktop_started: bool,
 ) -> bool:
-    if desktop_started or cfg.mode != "tauri-dev":
+    if cfg.mode != "tauri-dev":
         return desktop_started
+    if desktop_started:
+        # Check if still alive; restart if killed (e.g. by cargo build)
+        if any(mp.label == "teshi-desktop" and mp.popen.poll() is None for mp in supervisor.processes):
+            return True
+        # dead — fall through to restart
     if any(mp.label == "teshi-desktop" for mp in supervisor.processes):
         return True
     ui_ok, _ = _http_ok(f"http://127.0.0.1:{cfg.ui_port}/", require_200=True)
@@ -1173,8 +1178,12 @@ def _maybe_start_web(
     web_started: bool,
 ) -> bool:
     """Start teshi web after tauri predev + Vite are ready (avoids Windows exe lock)."""
-    if web_started or cfg.mode != "tauri-dev":
+    if cfg.mode != "tauri-dev":
         return web_started
+    if web_started:
+        if any(mp.label == "teshi-web" and mp.popen.poll() is None for mp in supervisor.processes):
+            return True
+        # dead — fall through to restart
     if any(mp.label == "teshi-web" for mp in supervisor.processes):
         return True
     ui_ok, _ = _http_ok(f"http://127.0.0.1:{cfg.ui_port}/", require_200=True)
@@ -1198,8 +1207,12 @@ def _maybe_start_embedded(
     *,
     embedded_started: bool,
 ) -> bool:
-    if embedded_started or not cfg.embedded:
+    if not cfg.embedded:
         return embedded_started
+    if embedded_started:
+        if any(mp.label == "serve-embedded" and mp.popen.poll() is None for mp in supervisor.processes):
+            return True
+        # dead — fall through to restart
     if any(mp.label == "serve-embedded" for mp in supervisor.processes):
         return True
     api_ok, _ = _http_ok(
@@ -1211,7 +1224,7 @@ def _maybe_start_embedded(
     if not (api_ok and ui_ok):
         return False
     if cfg.mode == "tauri-dev" and not any(
-        mp.label == "teshi-web" for mp in supervisor.processes
+        mp.label == "teshi-web" and mp.popen.poll() is None for mp in supervisor.processes
     ):
         return False
     if cfg.mode == "tauri-dev" and not _pids_by_name(cfg.desktop_bin.name):
