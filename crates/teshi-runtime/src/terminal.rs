@@ -164,13 +164,40 @@ pub async fn spawn_terminal(rt: Arc<TeshiRuntime>, cols: u16, rows: u16) -> Resu
 
     // Drain the PTY on a dedicated thread so a slow host emit (Tauri/webview) cannot
     // block ConPTY reads and freeze external TUI agents (e.g. Chrys).
+    // Coalesce rapid chunks (e.g. PSReadLine per-char redraws) into batches.
+    // Flush on idle (no new data for 20ms) or when batch exceeds 4KB.
     let forwarder = std::thread::spawn(move || {
-        for chunk in output_rx {
+        let mut batch: Vec<u8> = Vec::with_capacity(8192);
+        let idle_ms = std::time::Duration::from_millis(20);
+        loop {
+            let chunk = match output_rx.recv_timeout(idle_ms) {
+                Ok(chunk) => chunk,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // Idle timeout — flush accumulated batch
+                    if !batch.is_empty() {
+                        let payload = BASE64.encode(&batch);
+                        rt_forwarder.events.emit("terminal-output", payload);
+                        batch.clear();
+                    }
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    if !batch.is_empty() {
+                        let payload = BASE64.encode(&batch);
+                        rt_forwarder.events.emit("terminal-output", payload);
+                    }
+                    break;
+                }
+            };
             if rt_forwarder.terminal.session_id.load(Ordering::SeqCst) != session_id {
                 break;
             }
-            let payload = BASE64.encode(&chunk);
-            rt_forwarder.events.emit("terminal-output", payload);
+            batch.extend_from_slice(&chunk);
+            if batch.len() >= 4096 {
+                let payload = BASE64.encode(&batch);
+                rt_forwarder.events.emit("terminal-output", payload);
+                batch.clear();
+            }
         }
     });
     *rt.terminal.output_forwarder.lock().unwrap() = Some(forwarder);
@@ -222,13 +249,12 @@ fn shell_cwd(project_root: &Path) -> PathBuf {
     dunce::simplified(project_root).to_path_buf()
 }
 
-/// Disable PSReadLine history predictions in the embedded panel; ListView/Inline both
-/// clutter the small xterm viewport and Inline misaligns in web-based emulators.
-/// Re-apply after `$PROFILE` so user dotfiles cannot re-enable predictions.
-const PSREADLINE_EMBEDDED_INIT: &str = concat!(
-    "try { Set-PSReadLineOption -PredictionSource None } catch { }; ",
+/// Embedded panel init: drop PSReadLine (per-keystroke VT redraws break browser xterm),
+/// then optionally load profile aliases. Profile is loaded last so Remove-Module runs again.
+const EMBEDDED_SHELL_INIT: &str = concat!(
+    "Remove-Module PSReadLine -ErrorAction SilentlyContinue -Force; ",
     "if (Test-Path $PROFILE) { . $PROFILE }; ",
-    "try { Set-PSReadLineOption -PredictionSource None } catch { }"
+    "Remove-Module PSReadLine -ErrorAction SilentlyContinue -Force"
 );
 
 fn shell_commands() -> Vec<CommandBuilder> {
@@ -236,11 +262,23 @@ fn shell_commands() -> Vec<CommandBuilder> {
         vec![
             shell_command(
                 "pwsh.exe",
-                &["-NoLogo", "-NoExit", "-Command", PSREADLINE_EMBEDDED_INIT],
+                &[
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NoExit",
+                    "-Command",
+                    EMBEDDED_SHELL_INIT,
+                ],
             ),
             shell_command(
                 "powershell.exe",
-                &["-NoLogo", "-NoExit", "-Command", PSREADLINE_EMBEDDED_INIT],
+                &[
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NoExit",
+                    "-Command",
+                    EMBEDDED_SHELL_INIT,
+                ],
             ),
             shell_command("cmd.exe", &[]),
         ]

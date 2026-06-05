@@ -6,6 +6,8 @@ import type { ActiveStep, PendingLocator, StepBindingStatus } from "../locatorTy
 import type { DirEntry } from "../types";
 import type { TeshiRuntimeApi } from "./types";
 
+const terminalExclusiveUnsubs = new Map<string, () => void>();
+
 /** Tauri desktop host using `invoke` and `listen`. */
 export const tauriRuntime: TeshiRuntimeApi = {
   async checkProjectSwitchAllowed() {
@@ -125,6 +127,20 @@ export const tauriRuntime: TeshiRuntimeApi = {
   },
 
   async onEvent<T>(event: string, handler: (payload: T) => void) {
-    return listen<T>(event, (e) => handler(e.payload));
+    if (event === "terminal-output" || event === "terminal-exit") {
+      terminalExclusiveUnsubs.get(event)?.();
+      terminalExclusiveUnsubs.delete(event);
+    }
+    const unlisten = await listen<T>(event, (e) => handler(e.payload));
+    const wrapped = () => {
+      unlisten();
+      if (terminalExclusiveUnsubs.get(event) === wrapped) {
+        terminalExclusiveUnsubs.delete(event);
+      }
+    };
+    if (event === "terminal-output" || event === "terminal-exit") {
+      terminalExclusiveUnsubs.set(event, wrapped);
+    }
+    return wrapped;
   },
 };

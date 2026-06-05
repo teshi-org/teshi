@@ -1054,9 +1054,11 @@ export function BrowserPanel({
                     Stream stalled —{" "}
                     {isWinApp
                       ? streamError || "attach to a visible WinUI3 window from the terminal."
-                      : chromeInfo?.last_frame_error?.trim() ||
-                        streamError ||
-                        "use an http(s) tab in Chrome (not chrome://)."}
+                      : isEmbedded
+                        ? streamError || "the embedded browser page may have crashed or is unresponsive."
+                        : chromeInfo?.last_frame_error?.trim() ||
+                          streamError ||
+                          "use an http(s) tab in Chrome (not chrome://)."}
                   </p>
                 )}
                 <img

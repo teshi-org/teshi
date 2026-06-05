@@ -90,6 +90,7 @@ EXECUTE_ACTIONS = {
     "type",
     "assert_visible",
     "assert_text",
+    "assert_text_count",
     "select",
     "press_key",
 }
@@ -302,7 +303,7 @@ class EmbeddedSession:
                 "error": f"unsupported action: {action}",
                 "code": "unsupported_action",
             }
-        if action in {"fill", "assert_text", "select", "press_key", "type"} and value is None:
+        if action in {"fill", "assert_text", "assert_text_count", "select", "press_key", "type"} and value is None:
             return {
                 "ok": False,
                 "error": f"value is required for {action}",
@@ -319,6 +320,10 @@ class EmbeddedSession:
                     await locator.fill(value or "", timeout=timeout_ms)
                 elif action == "type":
                     await locator.click(timeout=timeout_ms)
+                    # Wait for shell to spawn before typing; the Terminal tab
+                    # click triggers async shell spawn which may not complete
+                    # before the action's keyboard input arrives.
+                    await asyncio.sleep(3)
                     await self.page.keyboard.type(value or "")
                     await self.page.keyboard.press("Enter")
                 elif action == "assert_visible":
@@ -331,6 +336,16 @@ class EmbeddedSession:
                             "error": "text assertion failed",
                             "code": "assert_text_failed",
                             "actual": text,
+                        }
+                elif action == "assert_text_count":
+                    text = await locator.inner_text(timeout=timeout_ms)
+                    actual_count = text.count(value or "")
+                    if actual_count != 1:
+                        return {
+                            "ok": False,
+                            "error": f"text '{value}' found {actual_count} times, expected 1",
+                            "code": "assert_text_count_failed",
+                            "actual_count": actual_count,
                         }
                 elif action == "select":
                     await locator.select_option(value or "", timeout=timeout_ms)
@@ -541,7 +556,7 @@ async def run_embedded(
             clients.discard(websocket)
 
     async with websockets.serve(handler, host, port):
-        if no_preview_stream or os.environ.get("TESHI_EMBEDDED_NO_STREAM") == "1":
+        if no_preview_stream:
             # CI/CLI mode: avoid concurrent JPEG screencast with locator commands.
             await asyncio.Future()
         while True:

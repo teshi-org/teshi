@@ -61,6 +61,17 @@ function decodeTerminalChunk(base64: string): Uint8Array {
   return bytes;
 }
 
+/** ConPTY on Windows 11+ (build >= 21376) emits native wrap/erase sequences xterm understands. */
+function embeddedWindowsPty(): import("@xterm/xterm").ITerminalOptions["windowsPty"] | undefined {
+  if (typeof navigator === "undefined") {
+    return undefined;
+  }
+  if (!/Windows|Win32/i.test(navigator.userAgent)) {
+    return undefined;
+  }
+  return { backend: "conpty", buildNumber: 22631 };
+}
+
 function normalizeTerminalSize(cols: number, rows: number): { cols: number; rows: number } {
   return {
     cols: Math.max(cols, TERMINAL_MIN_COLS),
@@ -122,7 +133,7 @@ export function FileTreeTerminalPanel({
   const fitRef = useRef<import("@xterm/addon-fit").FitAddon | null>(null);
   const shellSpawnedRef = useRef(false);
   const shellOpsRef = useRef<Promise<void>>(Promise.resolve());
-  const dataHandlerRegisteredRef = useRef(false);
+  const projectRootRef = useRef(projectRoot);
   const [terminalReady, setTerminalReady] = useState(false);
 
   const loadChildren = useCallback(async (path: string) => {
@@ -182,7 +193,6 @@ export function FileTreeTerminalPanel({
       fitRef.current = null;
       shellSpawnedRef.current = false;
       shellOpsRef.current = Promise.resolve();
-      dataHandlerRegisteredRef.current = false;
       setTerminalReady(false);
       void getRuntime().stopTerminal().catch((err) => {
         console.error("stop_terminal failed", err);
@@ -191,9 +201,19 @@ export function FileTreeTerminalPanel({
   }, [projectRoot]);
 
   // Create xterm once the Terminal tab is first opened (FitAddon needs a visible host).
+  // Re-create when projectRoot changes (the previous xterm was disposed by the
+  // project-root cleanup effect), even if the Terminal tab hasn't been toggled.
   useEffect(() => {
     if (tab !== "terminal") return;
-    if (xtermRef.current) return;
+    if (xtermRef.current && projectRootRef.current === projectRoot) return;
+    projectRootRef.current = projectRoot;
+
+    // Dispose any stale xterm before creating a new one (race: the project-root
+    // cleanup may not have run before the tab change).
+    if (xtermRef.current) {
+      xtermRef.current.dispose();
+      xtermRef.current = null;
+    }
 
     let disposed = false;
 
@@ -206,11 +226,12 @@ export function FileTreeTerminalPanel({
       await waitForLayout();
       if (disposed || !terminalRef.current) return;
 
+      const windowsPty = embeddedWindowsPty();
       const term = new Terminal({
         theme: TERMINAL_THEME,
         fontFamily: "Consolas, 'Cascadia Mono', monospace",
         cursorBlink: true,
-        windowsMode: true,
+        ...(windowsPty ? { windowsPty } : {}),
       });
       const fit = new FitAddon();
       term.loadAddon(fit);
@@ -218,6 +239,31 @@ export function FileTreeTerminalPanel({
       fit.fit();
       xtermRef.current = term;
       fitRef.current = fit;
+
+      term.onData((data) => {
+        void (async () => {
+          try {
+            const fitNow = fitRef.current;
+            const termNow = xtermRef.current;
+            if (!shellSpawnedRef.current && fitNow && termNow) {
+              await ensureShellSpawned(fitNow, termNow, shellSpawnedRef, shellOpsRef);
+            }
+            await getRuntime().writeTerminal(data);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            toast.error(message);
+            xtermRef.current?.writeln(`\r\n\x1b[33m${message}\x1b[0m`);
+          }
+        })();
+      });
+
+      if (disposed) {
+        term.dispose();
+        xtermRef.current = null;
+        fitRef.current = null;
+        return;
+      }
+
       setTerminalReady(true);
     })();
 
@@ -226,8 +272,42 @@ export function FileTreeTerminalPanel({
     };
   }, [tab, projectRoot]);
 
-  // Re-attach PTY listeners every time the Terminal tab becomes active. Previously,
-  // switching Files → Terminal dropped terminal-output handlers and left a black screen.
+  // PTY → xterm bridge. Re-bind whenever the Terminal tab is shown (exclusive runtime
+  // handler prevents duplicate listeners across HMR remounts).
+  useEffect(() => {
+    if (tab !== "terminal" || !terminalReady) return;
+
+    const term = xtermRef.current;
+    if (!term) return;
+
+    let cancelled = false;
+    let unlistenOutput: (() => void) | null = null;
+    let unlistenExit: (() => void) | null = null;
+
+    void (async () => {
+      unlistenOutput = await getRuntime().onEvent<string>("terminal-output", (payload) => {
+        if (cancelled || xtermRef.current !== term) return;
+        term.write(decodeTerminalChunk(payload));
+      });
+      unlistenExit = await getRuntime().onEvent("terminal-exit", () => {
+        if (cancelled || xtermRef.current !== term) return;
+        shellSpawnedRef.current = false;
+        term.writeln("\r\n\x1b[33mShell exited.\x1b[0m");
+      });
+      if (cancelled) {
+        unlistenOutput();
+        unlistenExit();
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      unlistenOutput?.();
+      unlistenExit?.();
+    };
+  }, [tab, terminalReady, projectRoot]);
+
+  // Spawn/refit when the Terminal tab is visible; PTY listeners stay on the xterm instance.
   useEffect(() => {
     if (tab !== "terminal" || !terminalReady) return;
 
@@ -236,61 +316,21 @@ export function FileTreeTerminalPanel({
     if (!term || !fit) return;
 
     let cancelled = false;
-    let unlistenOutput: (() => void) | null = null;
-    let unlistenExit: (() => void) | null = null;
     let resizeObserver: ResizeObserver | null = null;
 
+    if (terminalRef.current) {
+      resizeObserver = new ResizeObserver(() => {
+        const fitNow = fitRef.current;
+        const termNow = xtermRef.current;
+        if (!fitNow || !termNow) return;
+        void ensureShellSpawned(fitNow, termNow, shellSpawnedRef, shellOpsRef).catch((err) => {
+          console.error("terminal resize/spawn failed", err);
+        });
+      });
+      resizeObserver.observe(terminalRef.current);
+    }
+
     void (async () => {
-      unlistenOutput = await getRuntime().onEvent<string>("terminal-output", (payload) => {
-        xtermRef.current?.write(decodeTerminalChunk(payload));
-      });
-      unlistenExit = await getRuntime().onEvent("terminal-exit", () => {
-        shellSpawnedRef.current = false;
-        xtermRef.current?.writeln("\r\n\x1b[33mShell exited.\x1b[0m");
-      });
-      if (cancelled) {
-        unlistenOutput();
-        unlistenExit();
-        return;
-      }
-
-      if (!dataHandlerRegisteredRef.current) {
-        dataHandlerRegisteredRef.current = true;
-        term.onData((data) => {
-          void getRuntime()
-            .writeTerminal(data)
-            .catch((err) => {
-              const message = err instanceof Error ? err.message : String(err);
-              const fitNow = fitRef.current;
-              const termNow = xtermRef.current;
-              if (!shellSpawnedRef.current && fitNow && termNow) {
-                void ensureShellSpawned(fitNow, termNow, shellSpawnedRef, shellOpsRef)
-                  .then(() => getRuntime().writeTerminal(data))
-                  .catch((retryErr) => {
-                    toast.error(
-                      retryErr instanceof Error ? retryErr.message : String(retryErr),
-                    );
-                  });
-                return;
-              }
-              toast.error(message);
-              termNow?.writeln(`\r\n\x1b[33m${message}\x1b[0m`);
-            });
-        });
-      }
-
-      if (terminalRef.current) {
-        resizeObserver = new ResizeObserver(() => {
-          const fitNow = fitRef.current;
-          const termNow = xtermRef.current;
-          if (!fitNow || !termNow) return;
-          void ensureShellSpawned(fitNow, termNow, shellSpawnedRef, shellOpsRef).catch((err) => {
-            console.error("terminal resize/spawn failed", err);
-          });
-        });
-        resizeObserver.observe(terminalRef.current);
-      }
-
       try {
         await waitForLayout();
         if (cancelled) return;
@@ -307,8 +347,6 @@ export function FileTreeTerminalPanel({
     return () => {
       cancelled = true;
       resizeObserver?.disconnect();
-      unlistenOutput?.();
-      unlistenExit?.();
     };
   }, [tab, terminalReady, projectRoot]);
 

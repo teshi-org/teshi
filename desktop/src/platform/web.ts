@@ -32,6 +32,7 @@ async function apiFetch<T>(
 
 let eventsSocket: WebSocket | null = null;
 const eventHandlers = new Map<string, Set<(payload: unknown) => void>>();
+const terminalExclusiveUnsubs = new Map<string, () => void>();
 
 /** Serializes PTY stdin/resize HTTP calls so keystrokes cannot reorder (breaks TUI redraw). */
 let terminalIoChain: Promise<void> = Promise.resolve();
@@ -234,6 +235,12 @@ export const webRuntime: TeshiRuntimeApi = {
 
   async onEvent<T>(event: string, handler: (payload: T) => void) {
     ensureEventsSocket();
+    // Only one PTY output subscriber: Vite HMR can remount the panel without running
+    // prior cleanups, which otherwise duplicates xterm.write and doubles characters.
+    if (event === "terminal-output" || event === "terminal-exit") {
+      terminalExclusiveUnsubs.get(event)?.();
+      terminalExclusiveUnsubs.delete(event);
+    }
     let set = eventHandlers.get(event);
     if (!set) {
       set = new Set();
@@ -241,9 +248,16 @@ export const webRuntime: TeshiRuntimeApi = {
     }
     const wrapper = (payload: unknown) => handler(payload as T);
     set.add(wrapper);
-    return () => {
+    const unlisten = () => {
       set?.delete(wrapper);
+      if (terminalExclusiveUnsubs.get(event) === unlisten) {
+        terminalExclusiveUnsubs.delete(event);
+      }
     };
+    if (event === "terminal-output" || event === "terminal-exit") {
+      terminalExclusiveUnsubs.set(event, unlisten);
+    }
+    return unlisten;
   },
 };
 

@@ -537,7 +537,7 @@ pub async fn start_browser_sidecar(
     ]);
     if mode == BrowserMode::Embedded {
         cmd.args(["--cdp-port", &cdp_port.to_string()]);
-        if std::env::var_os("TESHI_EMBEDDED_NO_STREAM").is_some_and(|v| v == "1") {
+        if rt.embedded_no_preview_stream {
             cmd.arg("--no-preview-stream");
         }
     } else if mode == BrowserMode::Chrome {

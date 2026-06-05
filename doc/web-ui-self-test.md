@@ -14,7 +14,30 @@ Do not confuse them:
 - **Start Embedded** in the Browser panel attaches Playwright to the **SUT** preview stream.
 - `teshi web --no-open` in the terminal starts the **SUT API/runtime** on port 1421.
 
-## Dev workflow (HMR — recommended)
+## One-command bootstrap (recommended)
+
+From the repo root, a single command starts the full dev stack and opens a live status dashboard (version, health, duplicate-instance warnings):
+
+```powershell
+pip install -r scripts/requirements-dev.txt
+python scripts/bootstrap_dev.py --project . --build
+```
+
+Shorthand:
+
+```powershell
+py scripts/bootstrap_dev.py .
+```
+
+The script builds **teshi** + **teshi-desktop**, starts **Vite** (`:1420`), **teshi-desktop**, **teshi web** (`:1421`), and **serve-embedded**. It avoids `npm run tauri dev` predev so Windows does not lock `teshi.exe`. Do **not** run `Stop-Process -Name teshi` before bootstrap; use `--stop-existing` only.
+
+Logs: `.teshi/logs/bootstrap-*.log`
+
+Flags: `--mode separate` (desktop exe + npm instead of tauri dev), `--no-embedded`, `--api-port`, `--ui-port`, `--stop-existing` (stop locked debug binaries before build/start).
+
+See also [`.teshi/skills/web-ui-bootstrap/SKILL.md`](../.teshi/skills/web-ui-bootstrap/SKILL.md).
+
+## Dev workflow (HMR — manual)
 
 | Terminal | Command |
 |----------|---------|

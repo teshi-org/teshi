@@ -1,0 +1,79 @@
+{
+  "feature": "tests/feature/web-ui/terminal_agent_duplication.feature",
+  "steps": [
+    {
+      "step_line": 10,
+      "step_keyword": "Given",
+      "step_text": "已经进入项目页面",
+      "step_text_normalized": "已经进入项目页面",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "url",
+        "value": "http://127.0.0.1:1421/?e2e=1",
+        "action": "navigate",
+        "value_arg": "http://127.0.0.1:1421/?e2e=1"
+      },
+      "confirmed_at": "2026-06-05T09:51:57.373258500+00:00"
+    },
+    {
+      "step_line": 11,
+      "step_keyword": "And",
+      "step_text": "已经打开项目",
+      "step_text_normalized": "已经打开项目",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "api",
+        "value": "D:/Dev/Rust/teshi",
+        "action": "open_project",
+        "value_arg": "D:/Dev/Rust/teshi"
+      },
+      "confirmed_at": "2026-06-05T10:40:27.759502300+00:00"
+    },
+    {
+      "step_line": 12,
+      "step_keyword": "And",
+      "step_text": "已经切换到 Terminal 标签页",
+      "step_text_normalized": "已经切换到 terminal 标签页",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"TerminalTab\"]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-06-05T10:41:56.234142500+00:00"
+    },
+    {
+      "step_line": 14,
+      "step_keyword": "When",
+      "step_text": "我在终端中逐字符输入 \"echo DUP_MARKER_A\"",
+      "step_text_normalized": "我在终端中逐字符输入 \"echo dup_marker_a\"",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": ".xterm-helper-textarea",
+        "action": "type",
+        "value_arg": "echo DUP_MARKER_A"
+      },
+      "confirmed_at": "2026-06-05T07:05:51.275657900+00:00"
+    },
+    {
+      "step_line": 15,
+      "step_keyword": "Then",
+      "step_text": "终端的 DUP_MARKER_A 应只出现一次",
+      "step_text_normalized": "终端的 dup_marker_a 应只出现一次",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": ".xterm-rows",
+        "action": "assert_text_count",
+        "value_arg": "DUP_MARKER_A"
+      },
+      "confirmed_at": "2026-06-05T09:14:40.045613100+00:00"
+    }
+  ]
+}

@@ -99,7 +99,14 @@ For WinUI3/native app recording, see [WinUI3 / Native Windows app mode](../doc/w
 
 ## Self-test (bootstrap teshi web from desktop)
 
-teshi can dogfood its GUI by using **desktop as the IDE** and **teshi web on loopback as the AUT**:
+**One command** (live dashboard, auto-starts desktop + web + Vite + embedded sidecar):
+
+```powershell
+pip install -r scripts/requirements-dev.txt
+python scripts/bootstrap_dev.py --project . --build
+```
+
+**Manual steps** (same stack, three terminals):
 
 1. `teshi desktop --project .`
 2. Terminal 1: `teshi web --port 1421 --no-open --project .`

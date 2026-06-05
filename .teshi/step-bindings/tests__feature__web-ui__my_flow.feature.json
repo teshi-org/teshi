@@ -17,8 +17,8 @@
       "confirmed_at": "2026-06-05T00:00:00.000000000+00:00"
     },
     {
-      "step_line": 11,
-      "step_keyword": "Given",
+      "step_line": 9,
+      "step_keyword": "And",
       "step_text": "用户已打开一个项目文件夹",
       "step_text_normalized": "用户已打开一个项目文件夹",
       "source": "binding",
@@ -32,8 +32,8 @@
       "confirmed_at": "2026-06-05T00:00:00.000000000+00:00"
     },
     {
-      "step_line": 12,
-      "step_keyword": "When",
+      "step_line": 10,
+      "step_keyword": "And",
       "step_text": "用户在终端中进入项目目录",
       "step_text_normalized": "用户在终端中进入项目目录",
       "source": "binding",
@@ -47,9 +47,9 @@
     },
     {
       "step_line": 13,
-      "step_keyword": "And",
-      "step_text": "用户在终端中执行\"touch .e2e-sync-test\"",
-      "step_text_normalized": "用户在终端中执行\"touch .e2e-sync-test\"",
+      "step_keyword": "When",
+      "step_text": "用户在终端中执行\"New-Item .e2e-sync-test -ItemType File\"",
+      "step_text_normalized": "用户在终端中执行\"New-Item .e2e-sync-test -ItemType File\"",
       "source": "binding",
       "status": "confirmed",
       "primary": {

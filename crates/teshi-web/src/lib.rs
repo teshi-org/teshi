@@ -46,6 +46,7 @@ pub async fn run(opts: WebOptions) -> Result<()> {
         RuntimeConfig {
             browser_service_script: script,
             winapp_service_script: winapp_script,
+            embedded_no_preview_stream: false,
         },
         None,
     );

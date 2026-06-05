@@ -94,6 +94,7 @@ pub fn run() {
                 RuntimeConfig {
                     browser_service_script: script,
                     winapp_service_script: winapp_script,
+                    embedded_no_preview_stream: false,
                 },
                 Some(host),
             );

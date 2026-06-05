@@ -318,17 +318,17 @@ async fn serve_embedded_async(args: &BrowserServeEmbeddedArgs) -> Result<()> {
         .with_context(|| format!("canonicalize project {}", project_root.display()))?;
 
     let dev_browser_script = resolve_embedded_browser_service_script(&project_root);
-    // Headless CI: use repo browser_service.py and disable JPEG preview before runtime init.
+    // Headless CI: use repo browser_service.py and disable JPEG preview.
     // SAFETY: set before constructing runtime / spawning the Python sidecar child.
     unsafe {
         std::env::set_var("TESHI_BROWSER_SERVICE", &dev_browser_script);
-        std::env::set_var("TESHI_EMBEDDED_NO_STREAM", "1");
     }
 
     let runtime = TeshiRuntime::new(
         RuntimeConfig {
             browser_service_script: dev_browser_script,
             winapp_service_script: default_winapp_service_script(),
+            embedded_no_preview_stream: true,
         },
         None,
     );

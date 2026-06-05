@@ -62,6 +62,23 @@ pub async fn open_project(rt: Arc<TeshiRuntime>, path: String) -> Result<(), Str
         .canonicalize()
         .map_err(|e| format!("invalid project path: {e}"))?;
 
+    // If opening the same project that's already open, skip stopping
+    // the sidecar and terminal so that in-flight sessions (browser bridge,
+    // terminal PTY) survive the re-open. The e2eOpenProject flow always
+    // calls teardownRuntime before open_project, but replay bindings that
+    // use open_project as a setup step should not kill existing sessions
+    // when the project hasn't changed.
+    {
+        let guard = rt.project.root.lock().unwrap();
+        if guard.as_ref().map(|p| dunce::simplified(p)) == Some(dunce::simplified(&canonical)) {
+            *rt.project.browser_active.lock().unwrap() = false;
+            *rt.project.terminal_active.lock().unwrap() = false;
+            rt.events
+                .emit("project-changed", canonical.to_string_lossy().to_string());
+            return Ok(());
+        }
+    }
+
     rt.sidecar.stop().await.map_err(|e| e.to_string())?;
     rt.terminal.stop().map_err(|e| e.to_string())?;
     rt.watcher.clear().map_err(|e| e.to_string())?;
@@ -146,7 +163,6 @@ pub fn set_terminal_active(rt: &TeshiRuntime, active: bool) {
 
 /// Stops browser, terminal, and file watchers without clearing the project root.
 pub async fn teardown_runtime(rt: &TeshiRuntime) -> Result<(), String> {
-    rt.sidecar.stop().await.map_err(|e| e.to_string())?;
     rt.terminal.stop().map_err(|e| e.to_string())?;
     rt.watcher.clear().map_err(|e| e.to_string())?;
     rt.locator_watcher.clear().map_err(|e| e.to_string())?;

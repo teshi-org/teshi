@@ -64,6 +64,10 @@ pub struct RuntimeConfig {
     pub browser_service_script: PathBuf,
     /// Absolute path to `winapp_service.py`.
     pub winapp_service_script: PathBuf,
+    /// When true, embedded sidecar is started with `--no-preview-stream`
+    /// (no JPEG frame loop). Intended for headless CI / replay only;
+    /// desktop mode always keeps this `false`.
+    pub embedded_no_preview_stream: bool,
 }
 
 /// Central holder for project, terminal, browser sidecar, and event bus state.
@@ -76,6 +80,9 @@ pub struct TeshiRuntime {
     pub events: RuntimeEvents,
     pub browser_service_script: PathBuf,
     pub winapp_service_script: PathBuf,
+    /// Prevents the embedded frame loop (--no-preview-stream).
+    /// Read by `start_browser_sidecar` to decide whether to pass the flag.
+    pub embedded_no_preview_stream: bool,
     /// Optional `teshi` CLI path injected into the embedded terminal as `TESHI_CLI`.
     embedded_terminal_teshi_cli: Option<PathBuf>,
 }
@@ -92,6 +99,7 @@ impl TeshiRuntime {
             events: RuntimeEvents::new(host),
             browser_service_script: config.browser_service_script,
             winapp_service_script: config.winapp_service_script,
+            embedded_no_preview_stream: config.embedded_no_preview_stream,
             embedded_terminal_teshi_cli: resolve_embedded_terminal_teshi_cli(),
         })
     }
