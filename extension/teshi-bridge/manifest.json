@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "teshi-bridge",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Connects your Chrome active tab to teshi-desktop for BDD locator recording.",
   "permissions": ["debugger", "activeTab", "alarms", "tabs"],
   "host_permissions": [
