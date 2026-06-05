@@ -22,21 +22,21 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-VERSION_FILES: list[tuple[str, re.Pattern, str]] = [
-    # (label, regex to find version, replacement pattern with {version})
-    ("Cargo.toml (root)",
+VERSION_FILES: list[tuple[str, str, re.Pattern, str]] = [
+    # (label, file_path, regex, replacement)
+    ("Cargo.toml (root)", "Cargo.toml",
      re.compile(r'^version = "(\d+\.\d+\.\d+)"', re.MULTILINE),
      'version = "{version}"'),
-    ("desktop/src-tauri/Cargo.toml",
+    ("desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.toml",
      re.compile(r'^version = "(\d+\.\d+\.\d+)"', re.MULTILINE),
      'version = "{version}"'),
-    ("desktop/package.json",
+    ("desktop/package.json", "desktop/package.json",
      re.compile(r'"version": "(\d+\.\d+\.\d+)"'),
      '"version": "{version}"'),
-    ("desktop/src-tauri/tauri.conf.json",
+    ("desktop/src-tauri/tauri.conf.json", "desktop/src-tauri/tauri.conf.json",
      re.compile(r'"version": "(\d+\.\d+\.\d+)"'),
      '"version": "{version}"'),
-    ("extension/teshi-bridge/manifest.json",
+    ("extension/teshi-bridge/manifest.json", "extension/teshi-bridge/manifest.json",
      re.compile(r'"version": "(\d+\.\d+\.\d+)"'),
      '"version": "{version}"'),
 ]
@@ -122,8 +122,8 @@ def bump_version(version: str, bump: str) -> str:
 
 def get_current_versions() -> dict[str, str]:
     versions = {}
-    for label, pattern, _ in VERSION_FILES:
-        path = REPO_ROOT / label
+    for label, file_path, pattern, _ in VERSION_FILES:
+        path = REPO_ROOT / file_path
         m = pattern.search(path.read_text(encoding="utf-8"))
         versions[label] = m.group(1) if m else "???"
     return versions
@@ -131,8 +131,8 @@ def get_current_versions() -> dict[str, str]:
 
 def update_version_files(new_version: str, dry_run: bool = True) -> list[str]:
     updated = []
-    for label, pattern, replacement in VERSION_FILES:
-        path = REPO_ROOT / label
+    for label, file_path, pattern, replacement in VERSION_FILES:
+        path = REPO_ROOT / file_path
         text = path.read_text(encoding="utf-8")
         new_text = pattern.sub(replacement.format(version=new_version), text)
         if new_text != text:
@@ -144,7 +144,7 @@ def update_version_files(new_version: str, dry_run: bool = True) -> list[str]:
 
 def git_commit_and_tag(version: str) -> None:
     # Stage all modified version files
-    files = [label for label, _, _ in VERSION_FILES]
+    files = [file_path for _, file_path, _, _ in VERSION_FILES]
     git("add", *files)
     # Also stage Cargo.lock if it changed
     lock = REPO_ROOT / "Cargo.lock"

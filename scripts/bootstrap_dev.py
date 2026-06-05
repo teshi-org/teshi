@@ -16,11 +16,13 @@ from __future__ import annotations
 import argparse
 import atexit
 import json
+import msvcrt
 import os
 import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -341,6 +343,20 @@ def _browser_service_pids_for_parent(parent_pid: int) -> list[int]:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     return pids
+
+
+def _cleanup_orphans(cfg: BootstrapConfig) -> None:
+    """Kill orphan processes that survive supervisor.cleanup() and cause lag."""
+    seen: set[int] = set()
+    for pid in _pids_by_cmdline("browser_service.py"):
+        if pid not in seen:
+            seen.add(pid)
+            _kill_process_tree(pid)
+    for port in (cfg.api_port, cfg.ui_port, 17373):
+        for pid in _pids_listening_on(port):
+            if pid not in seen:
+                seen.add(pid)
+                _kill_process_tree(pid)
 
 
 def _stop_all_browser_services(timeout_secs: float = 10.0) -> None:
@@ -684,16 +700,13 @@ def _probe_sidecar(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> ItemP
         status = ItemStatus.UNHEALTHY
         detail = str(exc)
 
-    if len(browser_pids) > 1:
+    if len(browser_pids) > 2:
         status = ItemStatus.DUPLICATE
-        extra = [p for p in browser_pids if p not in managed_bs]
-        if managed_bs and extra:
-            detail = (
-                f"{len(browser_pids)} browser_service.py "
-                f"(bootstrap keeps {managed_bs[0]}, extra {extra}); {detail}"
-            )
-        else:
-            detail = f"{len(browser_pids)} browser_service.py (expected 1); {detail}"
+        detail = f"{len(browser_pids)} browser_service.py (expected ≤2); {detail}"
+    elif len(browser_pids) == 2:
+        # Two are expected in bootstrap mode: one from serve-embedded, one from teshi-desktop's own Browser panel
+        status = ItemStatus.WARN
+        detail = f"{len(browser_pids)} browser_service.py (serve-embedded + desktop); {detail}"
     elif (
         len(browser_pids) == 1
         and managed_bs
@@ -824,7 +837,7 @@ def _build_table(items: list[ItemProbe]) -> Table:
     return table
 
 
-def _build_header(cfg: BootstrapConfig, items: list[ItemProbe]) -> Text:
+def _build_header(cfg: BootstrapConfig, items: list[ItemProbe], *, shutting_down: bool = False) -> Text:
     dup = any(i.status == ItemStatus.DUPLICATE for i in items)
     warn = any(i.status in (ItemStatus.STALE, ItemStatus.WARN, ItemStatus.UNHEALTHY) for i in items)
     line = (
@@ -833,14 +846,16 @@ def _build_header(cfg: BootstrapConfig, items: list[ItemProbe]) -> Text:
         f"teshi={cfg.teshi_bin.name}"
     )
     header = Text(line + "\n")
-    if dup:
+    if shutting_down:
+        header.append("Shutting down... killing processes one by one\n", style="bold yellow")
+    elif dup:
         header.append("DUPLICATE INSTANCES DETECTED — check Inst/PID columns\n", style="bold red")
     elif warn:
         header.append("Some items need attention (stale/unhealthy)\n", style="yellow")
     else:
         header.append("All monitored items OK\n", style="green")
     header.append(
-        f"Updated {datetime.now().strftime('%H:%M:%S')}  Ctrl+C to stop all\n",
+        f"Updated {datetime.now().strftime('%H:%M:%S')}  {'Quitting...' if shutting_down else 'Press q to quit'}\n",
         style="dim",
     )
     return header
@@ -1293,6 +1308,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def _handle_signal(signum: int, _frame: Any) -> None:
         supervisor.cleanup()
+        _cleanup_orphans(cfg)
         raise SystemExit(0)
 
     signal.signal(signal.SIGINT, _handle_signal)
@@ -1311,31 +1327,69 @@ def main(argv: list[str] | None = None) -> int:
     web_started = cfg.mode != "tauri-dev"
     desktop_started = cfg.mode != "tauri-dev"
 
-    def render() -> Group:
+    # Daemon thread: wait for 'q' key via console API (more reliable than polling kbhit)
+    quit_event = threading.Event()
+
+    def _key_listener() -> None:
+        while not quit_event.is_set():
+            try:
+                ch = msvcrt.getch()
+                if ch.lower() == b"q":
+                    quit_event.set()
+                    break
+            except (OSError, ValueError):
+                break
+
+    threading.Thread(target=_key_listener, daemon=True).start()
+
+    def render(shutting_down: bool = False) -> Group:
         nonlocal embedded_started, web_started, desktop_started
-        desktop_started = _maybe_start_desktop(
-            cfg, supervisor, desktop_started=desktop_started
-        )
-        web_started = _maybe_start_web(
-            cfg, supervisor, web_started=web_started
-        )
-        embedded_started = _maybe_start_embedded(
-            cfg, supervisor, embedded_started=embedded_started
-        )
-        if embedded_started:
-            _reconcile_bootstrap_sidecars(supervisor)
+        if not shutting_down:
+            desktop_started = _maybe_start_desktop(
+                cfg, supervisor, desktop_started=desktop_started
+            )
+            web_started = _maybe_start_web(
+                cfg, supervisor, web_started=web_started
+            )
+            embedded_started = _maybe_start_embedded(
+                cfg, supervisor, embedded_started=embedded_started
+            )
+            if embedded_started:
+                _reconcile_bootstrap_sidecars(supervisor)
         items = registry.collect()
         return Group(
-            _build_header(cfg, items),
+            _build_header(cfg, items, shutting_down=shutting_down),
             _build_table(items),
             _build_spawn_panel(supervisor),
         )
 
     # Show the live dashboard immediately while services start in the background.
+    # Press q to quit and clean up all managed processes.
+    shutting_down = False
+    kill_index = 0
+    killed_orphans = False
+
     with Live(render(), console=console, refresh_per_second=4, screen=False) as live:
-        while True:
-            time.sleep(cfg.refresh_interval)
-            live.update(render())
+        while not (shutting_down and kill_index >= len(supervisor.processes) and killed_orphans):
+            if not shutting_down and quit_event.is_set():
+                shutting_down = True
+                kill_index = 0
+                killed_orphans = False
+
+            if shutting_down:
+                if kill_index < len(supervisor.processes):
+                    mp = supervisor.processes[kill_index]
+                    if mp.popen.poll() is None and mp.popen.pid is not None:
+                        _kill_process_tree(mp.popen.pid)
+                    kill_index += 1
+                elif not killed_orphans:
+                    _cleanup_orphans(cfg)
+                    killed_orphans = True
+
+            time.sleep(0.3)
+            live.update(render(shutting_down=shutting_down))
+    console.print("[green]✓ Bootstrap stopped, all processes cleaned up.[/]")
+    return 0
 
     return 0
 

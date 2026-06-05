@@ -1,7 +1,7 @@
 {
   "name": "teshi-desktop",
   "private": true,
-  "version": "0.5.1",
+  "version": "0.6.0",
   "type": "module",
   "scripts": {
     "predev": "cargo build -p teshi --manifest-path ../Cargo.toml",
