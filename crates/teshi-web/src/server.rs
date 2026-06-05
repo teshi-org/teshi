@@ -17,11 +17,11 @@ use teshi_gherkin::FeatureRenderPayload;
 use teshi_runtime::{
     check_project_switch_allowed, confirm_locator, get_active_step, get_pending_locator,
     get_project_root, get_recent_projects, highlight_locator, list_dir, load_project_settings,
-    open_project,
-    reject_locator, render_feature, resize_terminal, spawn_terminal, start_browser_sidecar,
-    step_binding_statuses, stop_browser_sidecar, sync_active_step, teardown_runtime, unbind_step,
-    write_terminal, ActiveStep, BrowserError, BrowserMode, BrowserStartResult, DirEntry,
-    PendingLocator, ProjectSettings, RuntimeEvent, StepBinding, StepBindingStatus, TeshiRuntime,
+    open_project, reject_locator, render_feature, resize_terminal, spawn_terminal,
+    start_browser_sidecar, step_binding_statuses, stop_browser_sidecar, sync_active_step,
+    teardown_runtime, unbind_step, write_terminal, ActiveStep, BrowserError, BrowserMode,
+    BrowserStartResult, DirEntry, PendingLocator, ProjectSettings, RuntimeEvent, StepBinding,
+    StepBindingStatus, TeshiRuntime,
 };
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
@@ -116,7 +116,8 @@ async fn api_open_project(
     Json(body): Json<OpenProjectBody>,
 ) -> Result<Json<OpenProjectResponse>, ApiError> {
     open_project(Arc::clone(&rt), body.path).await?;
-    let root = get_project_root(&rt).ok_or_else(|| ApiError::internal("project root missing after open"))?;
+    let root = get_project_root(&rt)
+        .ok_or_else(|| ApiError::internal("project root missing after open"))?;
     Ok(Json(OpenProjectResponse { root }))
 }
 
