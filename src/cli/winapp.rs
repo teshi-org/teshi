@@ -119,6 +119,12 @@ fn execute(project_root: &Path, args: &WinAppExecuteArgs) -> Result<()> {
 }
 
 fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
+    if let Some(path) = args.launch.as_deref() {
+        ensure_winapp_attached(project_root, Some(path))?;
+    } else {
+        ensure_winapp_attached(project_root, None)?;
+    }
+
     let feature = match args.feature.as_deref() {
         Some(feature) => feature.replace('\\', "/"),
         None => {
@@ -209,6 +215,39 @@ fn execute_locator(
         }),
         sidecar_timeout,
     )
+}
+
+fn ensure_winapp_attached(project_root: &Path, launch: Option<&str>) -> Result<()> {
+    let target = send_winapp_command(
+        project_root,
+        json!({ "cmd": "get_target", "request_id": "winapp-get-target" }),
+        Duration::from_secs(10),
+    )?;
+    let attached = target
+        .get("target")
+        .and_then(|t| t.get("attached"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if attached {
+        return Ok(());
+    }
+    if let Some(path) = launch {
+        let response = send_winapp_command(
+            project_root,
+            json!({
+                "cmd": "launch_app",
+                "request_id": "winapp-replay-launch",
+                "path": path,
+                "timeout_ms": 15000
+            }),
+            command_timeout_for_ms(15_000),
+        )?;
+        ensure_ok(&response)?;
+        return Ok(());
+    }
+    Err(anyhow!(
+        "no WinUI3 window attached; run `teshi winapp attach ...` or `teshi winapp replay --launch <exe>`"
+    ))
 }
 
 fn send_winapp_command(

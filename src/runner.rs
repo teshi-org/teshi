@@ -390,8 +390,13 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
             .to_string_lossy()
             .to_string(),
     );
-    if read_sidecar_mode(&feature_path) == Some("winapp".to_string()) {
-        meta.insert("runner_mode".to_string(), "winapp".to_string());
+    if let Some(mode) = read_sidecar_mode(&feature_path) {
+        match mode.as_str() {
+            "winapp" | "embedded" | "chrome" => {
+                meta.insert("runner_mode".to_string(), mode);
+            }
+            _ => {}
+        }
     }
     let request = RunRequest {
         command: "run".to_string(),
@@ -448,17 +453,36 @@ fn collect_cases(
 }
 
 fn read_sidecar_mode(path: &Path) -> Option<String> {
-    let project_root = if path.is_dir() {
-        path.to_path_buf()
-    } else {
-        path.parent()?.to_path_buf()
-    };
+    let project_root = resolve_run_project_root(path)?;
     let endpoint = project_root.join(".teshi").join("cdp-endpoint.json");
     let text = std::fs::read_to_string(endpoint).ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
     json.get("mode")
         .and_then(|v| v.as_str())
         .map(str::to_string)
+}
+
+/// Locates the BDD project root for headless runs (cwd or ancestors of the feature path).
+fn resolve_run_project_root(path: &Path) -> Option<PathBuf> {
+    if let Ok(cwd) = std::env::current_dir()
+        && cwd.join(".teshi").join("cdp-endpoint.json").is_file()
+    {
+        return Some(cwd);
+    }
+    let mut dir = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()?.to_path_buf()
+    };
+    loop {
+        if dir.join(".teshi").join("cdp-endpoint.json").is_file() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
 }
 
 fn format_event(event: &RunEvent) -> String {

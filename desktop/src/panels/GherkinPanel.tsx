@@ -77,6 +77,7 @@ export function GherkinPanel({
   return (
     <section
       className={`panel gherkin-panel${layoutHidden ? " panel--layout-hidden" : ""}`}
+      data-testid="GherkinPanel"
     >
       <header className="panel-header panel-header--with-collapse">
         {showCollapseButton && onToggleCollapse && (
@@ -122,6 +123,7 @@ export function GherkinPanel({
                         className={`step-line ${
                           selectedStepLine === step.line_number ? "selected" : ""
                         }`}
+                        data-testid={`GherkinStep-${step.line_number}`}
                         onClick={() => onSelectStep(step.line_number)}
                       >
                         <span className={stepClassFor(step.keyword_kind)}>
@@ -160,6 +162,7 @@ export function GherkinPanel({
                         className={`step-line ${
                           selectedStepLine === step.line_number ? "selected" : ""
                         }`}
+                        data-testid={`GherkinStep-${step.line_number}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           onSelectStep(step.line_number);

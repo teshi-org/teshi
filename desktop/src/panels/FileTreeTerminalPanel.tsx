@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { sanitizePathForTestId } from "../layout/testIdPath";
 import { getRuntime } from "../platform";
 import type { DirEntry } from "../types";
 import { PanelCollapseButton } from "./PanelCollapseButton";
@@ -129,6 +130,7 @@ export function FileTreeTerminalPanel({
   }, []);
 
   useEffect(() => {
+    if (tab !== "files") return;
     loadChildren(projectRoot).then((entries) => {
       setRootNode({
         name: projectRoot.split(/[/\\]/).pop() ?? projectRoot,
@@ -139,7 +141,7 @@ export function FileTreeTerminalPanel({
         children: entries.map((e) => ({ ...e })),
       });
     });
-  }, [projectRoot, loadChildren]);
+  }, [projectRoot, tab, loadChildren]);
 
   const toggleDir = async (node: TreeNode) => {
     if (!node.is_dir) return;
@@ -370,6 +372,7 @@ export function FileTreeTerminalPanel({
         <button
           type="button"
           className={tab === "files" ? "active" : ""}
+          data-testid="FileTreeTab"
           onClick={() => onTabChange("files")}
         >
           Files
@@ -377,6 +380,7 @@ export function FileTreeTerminalPanel({
         <button
           type="button"
           className={tab === "terminal" ? "active" : ""}
+          data-testid="TerminalTab"
           onClick={() => onTabChange("terminal")}
         >
           Terminal
@@ -403,7 +407,7 @@ export function FileTreeTerminalPanel({
       <div className={`panel-body${tab === "terminal" ? " panel-body--terminal" : ""}`}>
         {rootNode && (
           <ul className="file-tree" hidden={tab !== "files"}>
-            {renderTree(rootNode, onClickEntry)}
+            {renderTree(rootNode, onClickEntry, projectRoot)}
           </ul>
         )}
         <div
@@ -418,15 +422,26 @@ export function FileTreeTerminalPanel({
   );
 }
 
+/** Stable `data-testid` suffix for file-tree nodes (relative path from project root). */
+function fileTreeTestId(relativePath: string): string {
+  return sanitizePathForTestId(relativePath);
+}
+
 function renderTree(
   node: TreeNode,
   onClick: (node: TreeNode) => void,
+  projectRoot: string,
 ): React.ReactNode {
+  const relativePath = node.path.startsWith(projectRoot)
+    ? node.path.slice(projectRoot.length).replace(/^[/\\]+/, "")
+    : node.name;
+  const testIdSuffix = fileTreeTestId(relativePath || node.name);
   return (
     <li key={node.path}>
       <button
         type="button"
         className={`tree-item ${node.is_feature ? "feature" : ""}`}
+        data-testid={`FileTreeNode-${testIdSuffix}`}
         onClick={() => onClick(node)}
       >
         {node.is_dir ? (node.expanded ? "▾ " : "▸ ") : ""}
@@ -434,7 +449,7 @@ function renderTree(
         {node.loading ? " …" : ""}
       </button>
       {node.is_dir && node.expanded && node.children && (
-        <ul>{node.children.map((child) => renderTree(child, onClick))}</ul>
+        <ul>{node.children.map((child) => renderTree(child, onClick, projectRoot))}</ul>
       )}
     </li>
   );

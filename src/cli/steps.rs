@@ -10,12 +10,13 @@ use teshi_runtime::{
     HighlightInfo, LocatorCandidate, PendingLocator, StepWaitUntil, confirm_pending_locator,
     first_unbound_feature_step, list_feature_step_refs, list_step_bindings, propose_locator,
     read_active_step, reject_pending_locator, resolve_step_bindings, send_sidecar_command,
-    step_binding_statuses, wait_for_step_status, write_active_step,
+    step_binding_statuses, unbind_step_binding, wait_for_step_status, write_active_step,
 };
 
+use super::locator_verify::locator_verify_satisfied;
 use super::{
     StepsCommand, StepsConfirmArgs, StepsFeatureArgs, StepsListArgs, StepsProposeArgs,
-    StepsResolveArgs, StepsSelectArgs, StepsWaitArgs, WaitUntilArg,
+    StepsResolveArgs, StepsSelectArgs, StepsUnbindArgs, StepsWaitArgs, WaitUntilArg,
 };
 
 /// Handles `teshi steps ...` subcommands.
@@ -31,6 +32,7 @@ pub fn handle_steps_command(action: &StepsCommand) -> Result<()> {
         StepsCommand::Wait(args) => wait(&project_root, args),
         StepsCommand::Resolve(args) => resolve(&project_root, args),
         StepsCommand::List(args) => list(&project_root, args),
+        StepsCommand::Unbind(args) => unbind(&project_root, args),
     }
 }
 
@@ -74,7 +76,33 @@ fn next_unbound(project_root: &Path, args: &StepsFeatureArgs) -> Result<()> {
 fn propose(project_root: &Path, args: &StepsProposeArgs) -> Result<()> {
     let started = Instant::now();
     let active = read_active_step(project_root).context("read .teshi/active-step.json")?;
+    if let Some(expected_line) = args.line {
+        if active.step_line != expected_line {
+            return Err(anyhow!(
+                "active step line {} does not match --line {expected_line}; \
+                 run `teshi steps select --feature '{}' --line {expected_line}`",
+                active.step_line,
+                active.feature_relative_path
+            ));
+        }
+    } else {
+        eprintln!(
+            "steps propose: active step L{} — {}",
+            active.step_line, active.step_text
+        );
+    }
     let value = proposal_value(args)?;
+    if args.action == "exec"
+        && args
+            .value_arg
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err(anyhow!("exec proposals require --value-arg <command>"));
+    }
+    if args.action != "open_project" {
+        locator_verify_satisfied(project_root, active.step_line as u32, &value, &args.action)?;
+    }
     debug_log(
         project_root,
         json!({
@@ -166,6 +194,7 @@ fn reject(project_root: &Path) -> Result<()> {
 
 fn wait(project_root: &Path, args: &StepsWaitArgs) -> Result<()> {
     let started = Instant::now();
+    let timeout_secs = effective_wait_timeout(args);
     let result = wait_for_step_status(
         project_root,
         match args.until {
@@ -173,13 +202,15 @@ fn wait(project_root: &Path, args: &StepsWaitArgs) -> Result<()> {
             WaitUntilArg::Rejected => StepWaitUntil::Rejected,
             WaitUntilArg::Either => StepWaitUntil::Either,
         },
-        Duration::from_secs(args.timeout),
+        Duration::from_secs(timeout_secs),
+        args.auto_confirm,
     )?;
     debug_log(
         project_root,
         json!({
             "event": "steps_wait_end",
             "until": format!("{:?}", args.until),
+            "auto_confirm": args.auto_confirm,
             "elapsed_ms": started.elapsed().as_millis(),
             "status": result.status
         }),
@@ -189,6 +220,39 @@ fn wait(project_root: &Path, args: &StepsWaitArgs) -> Result<()> {
         std::process::exit(2);
     }
     Ok(())
+}
+
+fn unbind(project_root: &Path, args: &StepsUnbindArgs) -> Result<()> {
+    let removed = unbind_step_binding(project_root, &args.feature, args.line)?;
+    match removed {
+        Some(binding) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "ok": true,
+                    "removed": binding
+                }))?
+            );
+        }
+        None => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "ok": true,
+                    "message": format!("no binding at line {}", args.line)
+                }))?
+            );
+        }
+    }
+    Ok(())
+}
+
+fn effective_wait_timeout(args: &StepsWaitArgs) -> u64 {
+    if args.auto_confirm && args.timeout == 120 {
+        60
+    } else {
+        args.timeout
+    }
 }
 
 fn resolve(project_root: &Path, args: &StepsResolveArgs) -> Result<()> {
@@ -223,10 +287,32 @@ fn proposal_value(args: &StepsProposeArgs) -> Result<String> {
                 anyhow!("navigate proposals require --value-arg <url> or --value <url>")
             });
     }
+    if args.action == "open_project" {
+        return args
+            .value_arg
+            .clone()
+            .or_else(|| args.value.clone())
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow!("open_project proposals require --value-arg <absolute project path>")
+            });
+    }
+    if args.action == "exec" {
+        return Ok(args
+            .value
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "exec".to_string()));
+    }
     args.value
         .clone()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow!("{} proposals require --value <selector>", args.action))
+        .ok_or_else(|| {
+            anyhow!(
+                "{} proposals require --value <selector> (open_project uses --value-arg)",
+                args.action
+            )
+        })
 }
 
 fn resolve_feature_arg(project_root: &Path, feature: Option<&str>) -> Result<String> {

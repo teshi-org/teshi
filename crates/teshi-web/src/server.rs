@@ -11,16 +11,17 @@ use axum::http::{header, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use teshi_gherkin::FeatureRenderPayload;
 use teshi_runtime::{
     check_project_switch_allowed, confirm_locator, get_active_step, get_pending_locator,
-    get_recent_projects, highlight_locator, list_dir, open_project, reject_locator, render_feature,
-    resize_terminal, spawn_terminal, start_browser_sidecar, step_binding_statuses,
-    stop_browser_sidecar, sync_active_step, teardown_runtime, write_terminal, ActiveStep,
-    BrowserError, BrowserMode, BrowserStartResult, DirEntry, PendingLocator, RuntimeEvent,
-    StepBindingStatus, TeshiRuntime,
+    get_project_root, get_recent_projects, highlight_locator, list_dir, load_project_settings,
+    open_project,
+    reject_locator, render_feature, resize_terminal, spawn_terminal, start_browser_sidecar,
+    step_binding_statuses, stop_browser_sidecar, sync_active_step, teardown_runtime, unbind_step,
+    write_terminal, ActiveStep, BrowserError, BrowserMode, BrowserStartResult, DirEntry,
+    PendingLocator, ProjectSettings, RuntimeEvent, StepBinding, StepBindingStatus, TeshiRuntime,
 };
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
@@ -46,6 +47,8 @@ pub async fn run_server(addr: SocketAddr, rt: SharedRuntime, dist: PathBuf) -> R
         .route("/api/v1/locator/active-step", get(api_active_step))
         .route("/api/v1/locator/pending", get(api_pending_locator))
         .route("/api/v1/steps/statuses", get(api_step_statuses))
+        .route("/api/v1/steps/unbind", post(api_unbind_step))
+        .route("/api/v1/settings/project", get(api_project_settings))
         .route("/api/v1/locator/confirm", post(api_confirm_locator))
         .route("/api/v1/locator/reject", post(api_reject_locator))
         .route("/api/v1/locator/highlight", post(api_highlight_locator))
@@ -103,12 +106,18 @@ struct OpenProjectBody {
     path: String,
 }
 
+#[derive(Serialize)]
+struct OpenProjectResponse {
+    root: String,
+}
+
 async fn api_open_project(
     State(rt): State<SharedRuntime>,
     Json(body): Json<OpenProjectBody>,
-) -> Result<StatusCode, ApiError> {
-    open_project(rt, body.path).await?;
-    Ok(StatusCode::NO_CONTENT)
+) -> Result<Json<OpenProjectResponse>, ApiError> {
+    open_project(Arc::clone(&rt), body.path).await?;
+    let root = get_project_root(&rt).ok_or_else(|| ApiError::internal("project root missing after open"))?;
+    Ok(Json(OpenProjectResponse { root }))
 }
 
 async fn api_teardown(State(rt): State<SharedRuntime>) -> Result<StatusCode, ApiError> {
@@ -193,6 +202,38 @@ async fn api_step_statuses(
         .ok_or_else(|| "no project open".to_string())?;
     Ok(Json(
         step_binding_statuses(&project_root, &q.feature_path).map_err(|e| e.to_string())?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct UnbindStepBody {
+    feature_path: String,
+    step_line: u32,
+}
+
+async fn api_unbind_step(
+    State(rt): State<SharedRuntime>,
+    Json(body): Json<UnbindStepBody>,
+) -> Result<Json<Option<StepBinding>>, ApiError> {
+    Ok(Json(
+        unbind_step(&rt, body.feature_path, body.step_line)
+            .await
+            .map_err(|e| e.to_string())?,
+    ))
+}
+
+async fn api_project_settings(
+    State(rt): State<SharedRuntime>,
+) -> Result<Json<ProjectSettings>, ApiError> {
+    let project_root = rt
+        .project
+        .root
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "no project open".to_string())?;
+    Ok(Json(
+        load_project_settings(&project_root).map_err(|e| e.to_string())?,
     ))
 }
 
@@ -320,6 +361,15 @@ impl From<BrowserError> for ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: serde_json::to_string(&err).unwrap_or(err.message),
+        }
+    }
+}
+
+impl ApiError {
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
         }
     }
 }

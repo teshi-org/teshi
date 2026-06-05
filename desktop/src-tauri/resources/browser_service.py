@@ -87,6 +87,7 @@ INTERACTIVE_EVAL = f"""() => {{
 EXECUTE_ACTIONS = {
     "click",
     "fill",
+    "type",
     "assert_visible",
     "assert_text",
     "select",
@@ -197,6 +198,7 @@ class EmbeddedSession:
         self.context = None
         self.playwright = None
         self.cdp_session = None
+        self._lock = asyncio.Lock()
 
     async def start(self, cdp_port: int) -> None:
         from playwright.async_api import async_playwright
@@ -219,65 +221,69 @@ class EmbeddedSession:
         return self.page.url
 
     async def navigate(self, url: str) -> None:
-        if self.page is not None:
-            await self.page.goto(url, wait_until="domcontentloaded")
+        async with self._lock:
+            if self.page is not None:
+                await self.page.goto(url, wait_until="domcontentloaded")
 
     async def screenshot_jpeg_b64(self) -> str:
-        if self.page is None:
-            return ""
-        png = await self.page.screenshot(type="jpeg", quality=70)
-        return base64.b64encode(png).decode("ascii")
+        async with self._lock:
+            if self.page is None:
+                return ""
+            png = await self.page.screenshot(type="jpeg", quality=70)
+            return base64.b64encode(png).decode("ascii")
 
     async def clear_highlight(self) -> None:
-        if self.cdp_session is None:
-            return
-        await self.cdp_session.send("Overlay.hideHighlight", {})
+        async with self._lock:
+            if self.cdp_session is None:
+                return
+            await self.cdp_session.send("Overlay.hideHighlight", {})
 
     async def highlight_selector(self, selector: str) -> dict[str, Any]:
-        if self.page is None or self.cdp_session is None:
-            return {"ok": False, "error": "browser not ready"}
+        async with self._lock:
+            if self.page is None or self.cdp_session is None:
+                return {"ok": False, "error": "browser not ready"}
 
-        await self.clear_highlight()
-        locator = self.page.locator(selector)
-        count = await locator.count()
-        if count == 0:
-            return {"ok": False, "error": f"selector matched no elements: {selector}"}
-        if count > 1:
+            await self.cdp_session.send("Overlay.hideHighlight", {})
+            locator = self.page.locator(selector)
+            count = await locator.count()
+            if count == 0:
+                return {"ok": False, "error": f"selector matched no elements: {selector}"}
+            if count > 1:
+                return {
+                    "ok": False,
+                    "error": f"selector matched {count} elements; refine selector",
+                }
+
+            object_result = await self.cdp_session.send(
+                "Runtime.evaluate",
+                {
+                    "expression": f"document.querySelector({json.dumps(selector)})",
+                    "returnByValue": False,
+                },
+            )
+            object_id = object_result.get("result", {}).get("objectId")
+            if not object_id:
+                return {"ok": False, "error": "could not evaluate selector in page context"}
+
+            node_result = await self.cdp_session.send(
+                "DOM.requestNode",
+                {"objectId": object_id},
+            )
+            node_id = node_result.get("nodeId")
+            if not node_id:
+                return {"ok": False, "error": "could not resolve node id"}
+
+            await self.cdp_session.send(
+                "Overlay.highlightNode",
+                {"highlightConfig": HIGHLIGHT_CONFIG, "nodeId": node_id},
+            )
+            box = await locator.bounding_box()
             return {
-                "ok": False,
-                "error": f"selector matched {count} elements; refine selector",
+                "ok": True,
+                "selector": selector,
+                "node_id": node_id,
+                "bounding_box": box,
             }
-
-        object_result = await self.cdp_session.send(
-            "Runtime.evaluate",
-            {
-                "expression": f"document.querySelector({json.dumps(selector)})",
-                "returnByValue": False,
-            },
-        )
-        object_id = object_result.get("result", {}).get("objectId")
-        if not object_id:
-            return {"ok": False, "error": "could not evaluate selector in page context"}
-
-        node_result = await self.cdp_session.send(
-            "DOM.requestNode",
-            {"objectId": object_id},
-        )
-        node_id = node_result.get("nodeId")
-        if not node_id:
-            return {"ok": False, "error": "could not resolve node id"}
-
-        await self.cdp_session.send(
-            "Overlay.highlightNode",
-            {"highlightConfig": HIGHLIGHT_CONFIG, "nodeId": node_id},
-        )
-        box = await locator.bounding_box()
-        return {
-            "ok": True,
-            "selector": selector,
-            "node_id": node_id,
-            "bounding_box": box,
-        }
 
     async def execute_locator(
         self,
@@ -296,55 +302,106 @@ class EmbeddedSession:
                 "error": f"unsupported action: {action}",
                 "code": "unsupported_action",
             }
-        if action in {"fill", "assert_text", "select", "press_key"} and value is None:
+        if action in {"fill", "assert_text", "select", "press_key", "type"} and value is None:
             return {
                 "ok": False,
                 "error": f"value is required for {action}",
                 "code": "missing_value",
             }
 
-        locator = self.page.locator(selector).first()
-        try:
-            await locator.wait_for(state="visible", timeout=timeout_ms)
-            if action == "click":
-                await locator.click(timeout=timeout_ms)
-            elif action == "fill":
-                await locator.fill(value or "", timeout=timeout_ms)
-            elif action == "assert_visible":
-                pass
-            elif action == "assert_text":
-                text = await locator.inner_text(timeout=timeout_ms)
-                if (value or "") not in text:
-                    return {
-                        "ok": False,
-                        "error": "text assertion failed",
-                        "code": "assert_text_failed",
-                        "actual": text,
-                    }
-            elif action == "select":
-                await locator.select_option(value or "", timeout=timeout_ms)
-            elif action == "press_key":
-                await locator.press(value or "", timeout=timeout_ms)
-        except Exception as exc:  # noqa: BLE001
-            message = str(exc)
-            code = "timeout" if "Timeout" in message else "execute_failed"
-            return {"ok": False, "error": message, "code": code}
+        async with self._lock:
+            locator = self.page.locator(selector).first
+            try:
+                await locator.wait_for(state="visible", timeout=timeout_ms)
+                if action == "click":
+                    await locator.click(timeout=timeout_ms)
+                elif action == "fill":
+                    await locator.fill(value or "", timeout=timeout_ms)
+                elif action == "type":
+                    await locator.click(timeout=timeout_ms)
+                    await self.page.keyboard.type(value or "")
+                    await self.page.keyboard.press("Enter")
+                elif action == "assert_visible":
+                    pass
+                elif action == "assert_text":
+                    text = await locator.inner_text(timeout=timeout_ms)
+                    if (value or "") not in text:
+                        return {
+                            "ok": False,
+                            "error": "text assertion failed",
+                            "code": "assert_text_failed",
+                            "actual": text,
+                        }
+                elif action == "select":
+                    await locator.select_option(value or "", timeout=timeout_ms)
+                elif action == "press_key":
+                    await locator.press(value or "", timeout=timeout_ms)
+            except Exception as exc:  # noqa: BLE001
+                message = str(exc)
+                code = "timeout" if "Timeout" in message else "execute_failed"
+                if action == "assert_visible" and "hidden" in message.lower():
+                    message = (
+                        f"{message}; element may be on a hidden panel — "
+                        "switch tabs first (e.g. click FileTreeTab)"
+                    )
+                return {"ok": False, "error": message, "code": code}
 
-        return {"ok": True, "selector": selector, "action": action}
+            return {"ok": True, "selector": selector, "action": action}
+
+    async def open_project_via_api(self, path: str) -> dict[str, Any]:
+        async with self._lock:
+            if self.page is None:
+                return {"ok": False, "error": "browser not ready", "code": "browser_not_ready"}
+            if not path.strip():
+                return {"ok": False, "error": "path is required", "code": "missing_path"}
+            try:
+                result = await self.page.evaluate(
+                    """async (projectPath) => {
+                        if (typeof window.__teshiE2eOpenProject === 'function') {
+                            await window.__teshiE2eOpenProject(projectPath);
+                            return { ok: true };
+                        }
+                        const res = await fetch('/api/v1/projects/open', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ path: projectPath }),
+                        });
+                        if (!res.ok) {
+                            let message = res.statusText;
+                            try {
+                                const body = await res.json();
+                                if (body && body.error) message = body.error;
+                            } catch (_) {}
+                            throw new Error(message);
+                        }
+                        return { ok: true };
+                    }""",
+                    path,
+                )
+                if isinstance(result, dict) and not result.get("ok", True):
+                    return {"ok": False, "error": "open_project evaluate failed", "code": "open_project_failed"}
+                await self.page.wait_for_selector(
+                    '[data-testid="FileTreeTab"], [data-testid="TerminalTab"]',
+                    timeout=15_000,
+                )
+                return {"ok": True, "path": path, "url": self.page.url}
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "error": str(exc), "code": "open_project_failed"}
 
     async def get_page_snapshot(self) -> dict[str, Any]:
-        if self.page is None:
-            return {"ok": False, "error": "browser not ready"}
+        async with self._lock:
+            if self.page is None:
+                return {"ok": False, "error": "browser not ready"}
 
-        title = await self.page.title()
-        url = self.page.url
-        try:
-            tree = await self.page.accessibility.snapshot(interesting_only=False)
-        except Exception as exc:  # noqa: BLE001
-            tree = {"error": str(exc)}
+            title = await self.page.title()
+            url = self.page.url
+            try:
+                tree = await self.page.accessibility.snapshot(interesting_only=False)
+            except Exception as exc:  # noqa: BLE001
+                tree = {"error": str(exc)}
 
-        buttons = await self.page.evaluate(INTERACTIVE_EVAL)
-        return normalize_snapshot(url, title, tree, buttons)
+            buttons = await self.page.evaluate(INTERACTIVE_EVAL)
+            return normalize_snapshot(url, title, tree, buttons)
 
 
 async def handle_embedded_command(
@@ -375,6 +432,10 @@ async def handle_embedded_command(
         snapshot = await session.get_page_snapshot()
         return {"type": "response", "request_id": request_id, **snapshot}
 
+    if cmd == "open_project":
+        result = await session.open_project_via_api(str(data.get("path", "")))
+        return {"type": "response", "request_id": request_id, **result}
+
     if cmd == "execute_locator":
         result = await session.execute_locator(
             str(data.get("selector", "")),
@@ -397,6 +458,8 @@ async def run_embedded(
     port: int,
     cdp_port: int,
     project_root: Path | None,
+    *,
+    no_preview_stream: bool = False,
 ) -> None:
     import websockets
 
@@ -428,22 +491,35 @@ async def run_embedded(
                 except json.JSONDecodeError:
                     continue
                 if "cmd" in data:
+                    request_id = data.get("request_id")
                     debug_log(
                         project_root,
                         "embedded_command_start",
                         {
                             "cmd": data.get("cmd"),
-                            "request_id": data.get("request_id"),
+                            "request_id": request_id,
                             "url": data.get("url"),
                         },
                     )
-                    reply = await handle_embedded_command(session, data)
+                    try:
+                        reply = await handle_embedded_command(session, data)
+                    except Exception as exc:  # noqa: BLE001
+                        print(
+                            f"embedded command failed: {data.get('cmd')}: {exc}",
+                            file=sys.stderr,
+                        )
+                        reply = {
+                            "type": "response",
+                            "request_id": request_id,
+                            "ok": False,
+                            "error": str(exc),
+                        }
                     debug_log(
                         project_root,
                         "embedded_command_end",
                         {
                             "cmd": data.get("cmd"),
-                            "request_id": data.get("request_id"),
+                            "request_id": request_id,
                             "ok": reply.get("ok"),
                             "error": reply.get("error"),
                         },
@@ -465,6 +541,9 @@ async def run_embedded(
             clients.discard(websocket)
 
     async with websockets.serve(handler, host, port):
+        if no_preview_stream or os.environ.get("TESHI_EMBEDDED_NO_STREAM") == "1":
+            # CI/CLI mode: avoid concurrent JPEG screencast with locator commands.
+            await asyncio.Future()
         while True:
             if clients:
                 frame = await session.screenshot_jpeg_b64()
@@ -1052,6 +1131,11 @@ def main() -> None:
     parser.add_argument("--cdp-port", type=int, default=0)
     parser.add_argument("--discovery-port", type=int, default=DEFAULT_DISCOVERY_PORT)
     parser.add_argument("--project-root", default="")
+    parser.add_argument(
+        "--no-preview-stream",
+        action="store_true",
+        help="Disable JPEG preview loop (CI/headless replay)",
+    )
     args = parser.parse_args()
     project_root = Path(args.project_root) if args.project_root else None
 
@@ -1068,7 +1152,13 @@ def main() -> None:
                 print("embedded mode requires --cdp-port", file=sys.stderr)
                 sys.exit(1)
             asyncio.run(
-                run_embedded(args.host, args.port, args.cdp_port, project_root)
+                run_embedded(
+                    args.host,
+                    args.port,
+                    args.cdp_port,
+                    project_root,
+                    no_preview_stream=args.no_preview_stream,
+                )
             )
     except KeyboardInterrupt:
         sys.exit(0)

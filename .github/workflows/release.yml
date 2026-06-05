@@ -131,6 +131,9 @@ jobs:
           if (-not (Test-Path "desktop/src-tauri/resources/browser_service.py")) {
             throw "Missing browser service script at desktop/src-tauri/resources/browser_service.py"
           }
+          if (-not (Test-Path "desktop/src-tauri/resources/winapp_service.py")) {
+            throw "Missing WinApp service script at desktop/src-tauri/resources/winapp_service.py"
+          }
           if (-not (Test-Path "extension/teshi-bridge/manifest.json")) {
             throw "Missing extension manifest at extension/teshi-bridge/manifest.json"
           }
@@ -138,6 +141,7 @@ jobs:
           Copy-Item $builtExe (Join-Path $binDir "teshi.exe") -Force
           Copy-Item $desktopExe (Join-Path $binDir "teshi-desktop.exe") -Force
           Copy-Item "desktop/src-tauri/resources/browser_service.py" (Join-Path $shareDir "browser_service.py") -Force
+          Copy-Item "desktop/src-tauri/resources/winapp_service.py" (Join-Path $shareDir "winapp_service.py") -Force
           Copy-Item -Path "desktop/dist/*" -Destination $webDir -Recurse -Force
           Copy-Item -Path "extension/teshi-bridge/*" -Destination $bridgeDir -Recurse -Force
 
@@ -284,6 +288,7 @@ jobs:
               mkdir -p "${stage_dir}/share/teshi-bridge"
               mkdir -p "${stage_dir}/share/web"
               cp "desktop/src-tauri/resources/browser_service.py" "${stage_dir}/share/browser_service.py"
+              cp "desktop/src-tauri/resources/winapp_service.py" "${stage_dir}/share/winapp_service.py"
               cp -r extension/teshi-bridge/. "${stage_dir}/share/teshi-bridge/"
               cp -r artifacts/teshi-web-dist/. "${stage_dir}/share/web/"
             fi

@@ -1,34 +1,42 @@
-<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <?ifndef WebRoot ?>
-		<?define WebRoot = "staging\msi-root\share\web" ?>
+	<?define WebRoot = "staging\msi-root\share\web" ?>
 <?endif ?>
 <?ifndef BridgeRoot ?>
-		<?define BridgeRoot = "staging\msi-root\share\teshi-bridge" ?>
+	<?define BridgeRoot = "staging\msi-root\share\teshi-bridge" ?>
 <?endif ?>
-
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
     <Fragment>
         <DirectoryRef Id="ShareWebDir">
-            <Component Id="cmpF3E8630ED39B86EDE4976A1DF3D74354" Guid="{17E2F4FD-BB4A-497C-B7FF-7AF80D7C5262}">
+            <Component Id="cmpF3E8630ED39B86EDE4976A1DF3D74354" Guid="{14A8D9F1-4A53-489D-9668-B17BF8FB3782}">
                 <File Id="filDACD5EBCBA6969F43A883D8F4BF3D3DF" KeyPath="yes" Source="$(var.WebRoot)\index.html" />
             </Component>
             <Directory Id="dirEB054993823F2B2A6A0B5444C6DA65F1" Name="assets">
-                <Component Id="cmp0DCD71F567DC147FFF48962543727230" Guid="{C8D4B0D9-B0D7-4D96-B819-3F666C3513AC}">
+                <Component Id="cmp0DCD71F567DC147FFF48962543727230" Guid="{9D4A8B03-230C-4265-A304-B99223764D8C}">
                     <File Id="fil53C5FCE1CEA3F785BC80B8F7FFA09084" KeyPath="yes" Source="$(var.WebRoot)\assets\addon-fit-BlxrFPDK.js" />
                 </Component>
-                <Component Id="cmp98B2575B14A3A8A2348A5E5DF889E7E8" Guid="{46642999-CC4F-4879-8C4C-6057F656F103}">
+                <Component Id="cmp98B2575B14A3A8A2348A5E5DF889E7E8" Guid="{71FB118C-C421-4715-9EEF-E4A54C191024}">
                     <File Id="filD22DF8ACF728C1D7BD6920D77BC59A49" KeyPath="yes" Source="$(var.WebRoot)\assets\index-BeE1yiWN.js" />
                 </Component>
-                <Component Id="cmpEF068AC139D0F65FBB2BADB788A95A04" Guid="{168DC9C2-7D4D-4277-8EB5-48759577102E}">
+                <Component Id="cmpDE517C98FBF2AC4181B27113DD8C6CDF" Guid="{89EDA87E-7AE0-4EEA-ADEA-2403F1C53251}">
+                    <File Id="filECF5A4BA83A04FC2D500046D5AAA28B0" KeyPath="yes" Source="$(var.WebRoot)\assets\index-BgovbiTI.js" />
+                </Component>
+                <Component Id="cmp42727E19310A69A1F874EFFEA3146C6C" Guid="{062631DA-818C-40F0-BFB7-0E55D81677C0}">
+                    <File Id="filC695F036CBB15E4024FB043541B6E272" KeyPath="yes" Source="$(var.WebRoot)\assets\index-clwjjh73.js" />
+                </Component>
+                <Component Id="cmpE13E8385C1BBF4C3EC8C6BC2F6458174" Guid="{C9FA004C-9511-44D1-9971-0303DF3B0B97}">
+                    <File Id="filF40D76288F6E33C3EA61BC2730B51EC8" KeyPath="yes" Source="$(var.WebRoot)\assets\index-D1_h3iZn.css" />
+                </Component>
+                <Component Id="cmpEF068AC139D0F65FBB2BADB788A95A04" Guid="{2224A1F6-76F6-4C3A-9750-CDED313B4C34}">
                     <File Id="filAA58762625276FB2E9DC81F1F877D830" KeyPath="yes" Source="$(var.WebRoot)\assets\index-Dv-CTwOq.css" />
                 </Component>
-                <Component Id="cmp6C7C89D7EB5EA4861E6B570E61574355" Guid="{4BC08B17-6059-44F0-84B7-9168FB73A094}">
+                <Component Id="cmp6C7C89D7EB5EA4861E6B570E61574355" Guid="{FD82320F-61FD-4C1F-881D-5FCAF89D1069}">
                     <File Id="fil15A5E4F5F22EDC4F9D0DD07D076C2BA6" KeyPath="yes" Source="$(var.WebRoot)\assets\index-zpESIMl2.js" />
                 </Component>
-                <Component Id="cmp8AD8ECB5EC250C1FBB4B0F01771D2C51" Guid="{10891861-D5E0-4CAF-B811-F20EFD86D802}">
+                <Component Id="cmp8AD8ECB5EC250C1FBB4B0F01771D2C51" Guid="{DC66011F-16FD-4D94-B78E-FDC41366B829}">
                     <File Id="fil38B456AB3980E68AD4D7385509417207" KeyPath="yes" Source="$(var.WebRoot)\assets\xterm-BTGVxaYV.js" />
                 </Component>
-                <Component Id="cmpE211E4CEFC5CD1FA37B0AEAF85EC7790" Guid="{186C7DCE-4AE1-4299-9B14-C4E1738BA36B}">
+                <Component Id="cmpE211E4CEFC5CD1FA37B0AEAF85EC7790" Guid="{F1AE51AD-DF0D-412C-97CE-2C4F4D02B4A0}">
                     <File Id="fil316DA92E3B3720BC31538EDDCB25DC99" KeyPath="yes" Source="$(var.WebRoot)\assets\xterm-LZoznX6r.css" />
                 </Component>
             </Directory>
@@ -39,6 +47,9 @@
             <ComponentRef Id="cmpF3E8630ED39B86EDE4976A1DF3D74354" />
             <ComponentRef Id="cmp0DCD71F567DC147FFF48962543727230" />
             <ComponentRef Id="cmp98B2575B14A3A8A2348A5E5DF889E7E8" />
+            <ComponentRef Id="cmpDE517C98FBF2AC4181B27113DD8C6CDF" />
+            <ComponentRef Id="cmp42727E19310A69A1F874EFFEA3146C6C" />
+            <ComponentRef Id="cmpE13E8385C1BBF4C3EC8C6BC2F6458174" />
             <ComponentRef Id="cmpEF068AC139D0F65FBB2BADB788A95A04" />
             <ComponentRef Id="cmp6C7C89D7EB5EA4861E6B570E61574355" />
             <ComponentRef Id="cmp8AD8ECB5EC250C1FBB4B0F01771D2C51" />

@@ -2,6 +2,7 @@ import {
   formatOpenProjectShortcut,
   formatRecentProjectEntry,
 } from "../layout/recentProjectDisplay";
+import { welcomeRecentTestId } from "../layout/testIdPath";
 
 const WELCOME_RECENT_LIMIT = 5;
 
@@ -23,7 +24,12 @@ export function WelcomeScreen({
       <div className="welcome-content">
         <p className="welcome-intro">Choose an option below to get started</p>
         <div className="welcome-actions">
-          <button type="button" className="welcome-action" onClick={onOpenProject}>
+          <button
+            type="button"
+            className="welcome-action"
+            data-testid="WelcomeOpenProjectButton"
+            onClick={onOpenProject}
+          >
             <span>Open Project</span>
             <kbd className="welcome-shortcut">{formatOpenProjectShortcut()}</kbd>
           </button>
@@ -39,6 +45,7 @@ export function WelcomeScreen({
                     <button
                       type="button"
                       className="welcome-recent-item"
+                      data-testid={welcomeRecentTestId(path)}
                       onClick={() => onOpenRecent(path)}
                     >
                       <span className="welcome-recent-name">{name}</span>

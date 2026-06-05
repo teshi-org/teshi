@@ -7,18 +7,31 @@ description: Configure and run a teshi-exported behave project for WinUI3 UIA te
 
 Use after `teshi export --target behave` generated a `tests-e2e/` (or custom) directory.
 
+Requires **teshi 0.4.0+** for the export layout and selector formats described below.
+
 ## Layout
 
 ```text
 tests-e2e/
-  features/           # copied .feature files
-  pages/              # Page objects (AutomationId constants)
-  steps/              # @given/@when/@then (Chinese step text as decorators)
-  support/
-    environment.py    # launches APP_EXE via uiautomation
+  behave.ini              # paths = features
+  features/
+    *.feature             # copied feature files
+    environment.py        # UiaDriver + app launch
+    steps/
+      *_steps.py          # @given/@when/@then (step text as decorators)
+  pages/
+    *_page.py             # Page objects (AutomationId constants)
+  support/                # optional legacy; prefer features/environment.py
   .env.example
   requirements.txt
   README.md
+```
+
+Run from `tests-e2e/` with no manual junctions:
+
+```bash
+behave
+behave features/your.feature -n "Scenario name"
 ```
 
 ## Setup (Agent-guided, one time)
@@ -38,9 +51,30 @@ pip install -r requirements.txt
 ## Run locally
 
 ```bash
-behave features/
-behave features/your.feature -n "Scenario name"
+behave --dry-run          # validate step defs without launching app
+behave
 ```
+
+Clear stale bytecode after editing generated step files:
+
+```powershell
+Get-ChildItem -Recurse __pycache__ | Remove-Item -Recurse -Force
+```
+
+## Feature naming (non-ASCII)
+
+Chinese or other non-ASCII feature file names produce a safe `page_module` (e.g. `u5e93_u754c...` or `feature_<hash>`). Prefer English feature file names when you want readable Python module names.
+
+## Selectors in exported tests
+
+`UiaDriver` supports teshi binding formats:
+
+- `uia:automation_id=X`
+- `uia:name=X`
+- `uia:control_type=ButtonControl;name=Log in`
+- `uia:path=0/2/1` (last resort)
+
+`assert_text` uses **exact** UIA `Name` match, not substring. Use `exec` bindings or custom helpers for partial text.
 
 ## CI
 
@@ -51,9 +85,10 @@ behave features/your.feature -n "Scenario name"
 
 ## Updating after UI changes
 
-1. Re-bind changed steps in teshi (winapp-locator).
+1. Re-bind changed steps in teshi (winapp-locator); `steps unbind` wrong bindings first.
 2. Re-run `teshi export --target behave ...` (overwrites generated files).
-3. Commit updated `features/`, `pages/`, `steps/`, and project `.teshi/step-bindings/`.
+3. Clear `__pycache__`, run `behave --dry-run`.
+4. Commit updated `features/`, `pages/`, `steps/`, and project `.teshi/step-bindings/`.
 
 ## Do not
 

@@ -3,6 +3,8 @@ name = "runner"
 version = "0.1.1"
 edition = "2024"
 
+[workspace]
+
 [dependencies]
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

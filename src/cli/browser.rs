@@ -1,23 +1,32 @@
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::json;
 use teshi_runtime::{
-    StepBinding, read_active_step, resolve_step_bindings, send_sidecar_command_with_timeout,
+    BrowserMode, RuntimeConfig, StepBinding, TeshiRuntime, default_browser_service_script,
+    default_winapp_service_script, open_project, read_active_step, resolve_step_bindings,
+    send_sidecar_command_with_timeout, start_browser_sidecar, stop_browser_sidecar,
 };
 
+use super::browser_endpoint::{
+    auto_reconnect_enabled, doctor_endpoint, ensure_sidecar_healthy, read_cdp_endpoint,
+    reconnect_embedded, resolve_browser_project_root,
+};
+use super::locator_verify::{LocatorVerifyRecord, append_locator_verify, verify_record_json};
 use super::{
-    BrowserCommand, BrowserExecuteArgs, BrowserNavigateArgs, BrowserReplayArgs,
-    BrowserSelectorArgs, BrowserSnapshotArgs,
+    BrowserCommand, BrowserExecuteArgs, BrowserNavigateArgs, BrowserReconnectArgs,
+    BrowserReplayArgs, BrowserSelectorArgs, BrowserServeEmbeddedArgs, BrowserSnapshotArgs,
+    BrowserVerifyArgs,
 };
 
 /// Handles `teshi browser ...` subcommands.
 pub fn handle_browser_command(action: &BrowserCommand) -> Result<()> {
-    let project_root = std::env::current_dir().context("resolve current directory")?;
+    let cwd = std::env::current_dir().context("resolve current directory")?;
+    let project_root = resolve_browser_project_root(&cwd).unwrap_or(cwd);
     match action {
         BrowserCommand::Snapshot(args) => snapshot(&project_root, args),
         BrowserCommand::Navigate(args) => navigate(&project_root, args),
@@ -25,7 +34,116 @@ pub fn handle_browser_command(action: &BrowserCommand) -> Result<()> {
         BrowserCommand::ClearHighlight => clear_highlight(&project_root),
         BrowserCommand::Execute(args) => execute(&project_root, args),
         BrowserCommand::Replay(args) => replay(&project_root, args),
+        BrowserCommand::ServeEmbedded(args) => serve_embedded(args),
+        BrowserCommand::Doctor => doctor(&project_root),
+        BrowserCommand::Reconnect(args) => reconnect(&project_root, args),
+        BrowserCommand::Verify(args) => verify(&project_root, args),
     }
+}
+
+fn doctor(project_root: &Path) -> Result<()> {
+    let report = doctor_endpoint(project_root)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    if !report.ok {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn reconnect(project_root: &Path, args: &BrowserReconnectArgs) -> Result<()> {
+    let endpoint = reconnect_embedded(project_root, args.navigate.as_deref(), args.wait_secs)?;
+    let report = doctor_endpoint(project_root)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "ok": report.ok,
+            "ws_url": endpoint.ws_url,
+            "mode": endpoint.mode,
+            "page_url": endpoint.page_url,
+            "doctor": report
+        }))?
+    );
+    if !report.ok {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn verify(project_root: &Path, args: &BrowserVerifyArgs) -> Result<()> {
+    let timeout = command_timeout_for_ms(args.timeout_ms);
+    let highlight = send_browser_command(
+        project_root,
+        json!({
+            "cmd": "highlight_selector",
+            "request_id": "browser-verify-highlight",
+            "selector": args.selector
+        }),
+        Duration::from_secs(20),
+        false,
+    )?;
+    let highlight_ok = highlight.get("ok").and_then(|v| v.as_bool()) == Some(true);
+    let response = if args.action == "open_project" {
+        open_project_via_sidecar(
+            project_root,
+            args.value_arg.as_deref().unwrap_or(&args.selector),
+            timeout,
+            "browser-verify-open-project",
+        )?
+    } else if args.action == "navigate" {
+        let url = args
+            .value_arg
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or(&args.selector);
+        navigate_to_url(
+            project_root,
+            url,
+            args.timeout_ms,
+            timeout,
+            "browser-verify-navigate",
+            false,
+        )?
+    } else {
+        execute_locator(
+            project_root,
+            ExecuteLocatorParams {
+                selector: &args.selector,
+                action: &args.action,
+                value: args.value_arg.as_deref(),
+                timeout_ms: args.timeout_ms,
+                request_id: "browser-verify-execute",
+                health_check: false,
+            },
+            timeout,
+        )?
+    };
+    let execute_ok = response.get("ok").and_then(|v| v.as_bool()) == Some(true);
+    let ok = highlight_ok && execute_ok;
+    let record = LocatorVerifyRecord {
+        ts_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or_default(),
+        step_line: args.step_line,
+        selector: args.selector.clone(),
+        action: args.action.clone(),
+        value_arg: args.value_arg.clone(),
+        ok,
+    };
+    if ok {
+        append_locator_verify(project_root, &record)?;
+    }
+    let mut output = verify_record_json(project_root, &record);
+    if let Some(obj) = output.as_object_mut() {
+        obj.insert("highlight_ok".into(), json!(highlight_ok));
+        obj.insert("execute_ok".into(), json!(execute_ok));
+        obj.insert("response".into(), response);
+    }
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    if !ok {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn navigate(project_root: &Path, args: &BrowserNavigateArgs) -> Result<()> {
@@ -36,6 +154,7 @@ fn navigate(project_root: &Path, args: &BrowserNavigateArgs) -> Result<()> {
         args.timeout_ms,
         timeout,
         "browser-navigate",
+        true,
     )?;
     ensure_ok(&response)?;
     print_json_response(response)
@@ -47,6 +166,7 @@ fn snapshot(project_root: &Path, args: &BrowserSnapshotArgs) -> Result<()> {
         project_root,
         json!({ "cmd": "get_page_snapshot", "request_id": "browser-snapshot" }),
         timeout,
+        true,
     )?;
     print_json_response(response)
 }
@@ -60,6 +180,7 @@ fn highlight(project_root: &Path, args: &BrowserSelectorArgs) -> Result<()> {
             "selector": args.selector
         }),
         Duration::from_secs(20),
+        false,
     )?;
     print_json_response(response)
 }
@@ -69,6 +190,7 @@ fn clear_highlight(project_root: &Path) -> Result<()> {
         project_root,
         json!({ "cmd": "clear_highlight", "request_id": "browser-clear-highlight" }),
         Duration::from_secs(10),
+        false,
     )?;
     print_json_response(response)
 }
@@ -77,12 +199,15 @@ fn execute(project_root: &Path, args: &BrowserExecuteArgs) -> Result<()> {
     let timeout = command_timeout_for_ms(args.timeout_ms);
     let response = execute_locator(
         project_root,
-        &args.selector,
-        &args.action,
-        args.value_arg.as_deref(),
-        args.timeout_ms,
+        ExecuteLocatorParams {
+            selector: &args.selector,
+            action: &args.action,
+            value: args.value_arg.as_deref(),
+            timeout_ms: args.timeout_ms,
+            request_id: "browser-execute",
+            health_check: true,
+        },
         timeout,
-        "browser-execute",
     )?;
     ensure_ok(&response)?;
     print_json_response(response)
@@ -136,17 +261,35 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                 timeout_ms,
                 command_timeout_for_ms(timeout_ms),
                 &format!("browser-replay-{}", idx + 1),
+                true,
+            )?
+        } else if step.primary.action == "open_project" {
+            let path = step
+                .primary
+                .value_arg
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(&step.primary.value);
+            let timeout_ms = 15_000;
+            open_project_via_sidecar(
+                project_root,
+                path,
+                command_timeout_for_ms(timeout_ms),
+                &format!("browser-replay-{}", idx + 1),
             )?
         } else {
             let timeout_ms = 5_000;
             execute_locator(
                 project_root,
-                &step.primary.value,
-                &step.primary.action,
-                step.primary.value_arg.as_deref(),
-                timeout_ms,
+                ExecuteLocatorParams {
+                    selector: &step.primary.value,
+                    action: &step.primary.action,
+                    value: step.primary.value_arg.as_deref(),
+                    timeout_ms,
+                    request_id: &format!("browser-replay-{}", idx + 1),
+                    health_check: true,
+                },
                 command_timeout_for_ms(timeout_ms),
-                &format!("browser-replay-{}", idx + 1),
             )?
         };
         ensure_ok(&response).with_context(|| {
@@ -157,6 +300,87 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+/// Starts the embedded Playwright sidecar and blocks until interrupted (for CI/scripts).
+fn serve_embedded(args: &BrowserServeEmbeddedArgs) -> Result<()> {
+    let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+    rt.block_on(serve_embedded_async(args))
+}
+
+async fn serve_embedded_async(args: &BrowserServeEmbeddedArgs) -> Result<()> {
+    let project_root = match &args.project {
+        Some(path) => path.clone(),
+        None => std::env::current_dir().context("resolve current directory")?,
+    };
+    let project_root = project_root
+        .canonicalize()
+        .with_context(|| format!("canonicalize project {}", project_root.display()))?;
+
+    let dev_browser_script = resolve_embedded_browser_service_script(&project_root);
+    // Headless CI: use repo browser_service.py and disable JPEG preview before runtime init.
+    // SAFETY: set before constructing runtime / spawning the Python sidecar child.
+    unsafe {
+        std::env::set_var("TESHI_BROWSER_SERVICE", &dev_browser_script);
+        std::env::set_var("TESHI_EMBEDDED_NO_STREAM", "1");
+    }
+
+    let runtime = TeshiRuntime::new(
+        RuntimeConfig {
+            browser_service_script: dev_browser_script,
+            winapp_service_script: default_winapp_service_script(),
+        },
+        None,
+    );
+
+    open_project(runtime.clone(), project_root.to_string_lossy().to_string())
+        .await
+        .map_err(|e| anyhow!("open project: {e}"))?;
+
+    let start = start_browser_sidecar(runtime.clone(), BrowserMode::Embedded)
+        .await
+        .map_err(browser_error)?;
+
+    eprintln!("embedded sidecar ws_url={}", start.ws_url);
+    eprintln!("cdp endpoint={}", start.cdp_endpoint_path);
+
+    if let Some(url) = args.navigate.as_deref() {
+        let timeout_ms = 15_000;
+        let response = navigate_to_url(
+            &project_root,
+            url,
+            timeout_ms,
+            command_timeout_for_ms(timeout_ms),
+            "serve-embedded-navigate",
+            false,
+        )?;
+        ensure_ok(&response).with_context(|| format!("navigate to {url}"))?;
+        eprintln!("navigated to {url}");
+    }
+
+    eprintln!("embedded sidecar running; press Ctrl+C to stop");
+    tokio::signal::ctrl_c().await.context("wait for Ctrl+C")?;
+    stop_browser_sidecar(&runtime)
+        .await
+        .map_err(|e| anyhow!("stop sidecar: {e}"))?;
+    Ok(())
+}
+
+fn browser_error(err: teshi_runtime::BrowserError) -> anyhow::Error {
+    if let Some(hint) = err.hint {
+        anyhow!("{} — {hint}", err.message)
+    } else {
+        anyhow!(err.message)
+    }
+}
+
+/// Prefers the repo `browser_service.py` so CI picks up the latest embedded flags.
+fn resolve_embedded_browser_service_script(project_root: &Path) -> PathBuf {
+    let repo_script = project_root.join("desktop/src-tauri/resources/browser_service.py");
+    if repo_script.is_file() {
+        return repo_script;
+    }
+    default_browser_service_script()
 }
 
 fn prompt_continue(step: &StepBinding) -> Result<()> {
@@ -182,6 +406,7 @@ fn navigate_to_url(
     timeout_ms: u64,
     sidecar_timeout: Duration,
     request_id: &str,
+    health_check: bool,
 ) -> Result<serde_json::Value> {
     send_browser_command(
         project_root,
@@ -192,29 +417,55 @@ fn navigate_to_url(
             "timeout_ms": timeout_ms
         }),
         sidecar_timeout,
+        health_check,
     )
 }
 
-fn execute_locator(
+fn open_project_via_sidecar(
     project_root: &Path,
-    selector: &str,
-    action: &str,
-    value: Option<&str>,
-    timeout_ms: u64,
+    path: &str,
     sidecar_timeout: Duration,
     request_id: &str,
 ) -> Result<serde_json::Value> {
     send_browser_command(
         project_root,
         json!({
-            "cmd": "execute_locator",
+            "cmd": "open_project",
             "request_id": request_id,
-            "selector": selector,
-            "action": action,
-            "value": value,
-            "timeout_ms": timeout_ms
+            "path": path
         }),
         sidecar_timeout,
+        true,
+    )
+}
+
+/// Bundles parameters for a single `execute_locator` sidecar command.
+struct ExecuteLocatorParams<'a> {
+    selector: &'a str,
+    action: &'a str,
+    value: Option<&'a str>,
+    timeout_ms: u64,
+    request_id: &'a str,
+    health_check: bool,
+}
+
+fn execute_locator(
+    project_root: &Path,
+    params: ExecuteLocatorParams<'_>,
+    sidecar_timeout: Duration,
+) -> Result<serde_json::Value> {
+    send_browser_command(
+        project_root,
+        json!({
+            "cmd": "execute_locator",
+            "request_id": params.request_id,
+            "selector": params.selector,
+            "action": params.action,
+            "value": params.value,
+            "timeout_ms": params.timeout_ms
+        }),
+        sidecar_timeout,
+        params.health_check,
     )
 }
 
@@ -222,6 +473,7 @@ fn send_browser_command(
     project_root: &Path,
     command: serde_json::Value,
     timeout: Duration,
+    health_check: bool,
 ) -> Result<serde_json::Value> {
     let started = Instant::now();
     let cmd = command
@@ -234,6 +486,10 @@ fn send_browser_command(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    if health_check && auto_reconnect_enabled() {
+        let _ = ensure_sidecar_healthy(project_root);
+    }
+    let endpoint = read_cdp_endpoint(project_root)?;
     debug_log(
         project_root,
         json!({
@@ -241,18 +497,13 @@ fn send_browser_command(
             "cmd": cmd.clone(),
             "request_id": request_id.clone(),
             "command": command.clone(),
-            "timeout_ms": timeout.as_millis()
+            "timeout_ms": timeout.as_millis(),
+            "endpoint_path": endpoint.endpoint_path.display().to_string(),
+            "project_root": endpoint.project_root.display().to_string(),
         }),
     );
-    let endpoint_path = project_root.join(".teshi").join("cdp-endpoint.json");
-    let text = fs::read_to_string(&endpoint_path)
-        .with_context(|| format!("read {}", endpoint_path.display()))?;
-    let endpoint: serde_json::Value = serde_json::from_str(&text).context("parse cdp endpoint")?;
-    let ws_url = endpoint
-        .get("ws_url")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("cdp endpoint missing ws_url"))?;
-    match send_sidecar_command_with_timeout(ws_url, command, timeout).map_err(anyhow::Error::msg) {
+    let ws_url = endpoint.ws_url;
+    match send_sidecar_command_with_timeout(&ws_url, command, timeout).map_err(anyhow::Error::msg) {
         Ok(response) => {
             debug_log(
                 project_root,

@@ -108,6 +108,14 @@ export const tauriRuntime: TeshiRuntimeApi = {
     await invoke("reject_locator_cmd");
   },
 
+  async unbindStep(featurePath: string, stepLine: number) {
+    await invoke("unbind_step_cmd", { featurePath, stepLine });
+  },
+
+  async getProjectSettings() {
+    return invoke<{ locator_auto_confirm_sec: number }>("get_project_settings_cmd");
+  },
+
   async confirmStopRuntimeIfBusy() {
     return invoke<boolean>("confirm_teardown");
   },

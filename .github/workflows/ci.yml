@@ -77,3 +77,32 @@ jobs:
       - name: Build teshi-desktop (no bundle)
         working-directory: desktop
         run: npx tauri build --no-bundle
+
+  web-ui-smoke:
+    name: teshi web UI smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run web UI smoke
+        run: bash scripts/run-web-ui-smoke.sh

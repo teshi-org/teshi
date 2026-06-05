@@ -9,14 +9,16 @@ use teshi_gherkin::FeatureRenderPayload;
 use teshi_runtime::{
     abandon_pending_locator, check_project_switch_allowed, confirm_locator, get_active_step,
     get_pending_locator, get_project_root as runtime_project_root, get_recent_projects,
-    highlight_locator, list_dir as runtime_list_dir, open_dialog_default_dir,
-    open_project as runtime_open_project, reject_locator, render_feature as runtime_render_feature,
-    resize_terminal as runtime_resize, set_browser_active, set_terminal_active,
-    spawn_terminal as runtime_spawn_terminal, start_browser_sidecar as runtime_start_browser,
-    step_binding_statuses, stop_browser_sidecar as runtime_stop_browser,
-    stop_terminal as runtime_stop_terminal, sync_active_step, teardown_runtime as runtime_teardown,
+    highlight_locator, list_dir as runtime_list_dir, load_project_settings,
+    open_dialog_default_dir, open_project as runtime_open_project, reject_locator,
+    render_feature as runtime_render_feature, resize_terminal as runtime_resize,
+    set_browser_active, set_terminal_active, spawn_terminal as runtime_spawn_terminal,
+    start_browser_sidecar as runtime_start_browser, step_binding_statuses,
+    stop_browser_sidecar as runtime_stop_browser, stop_terminal as runtime_stop_terminal,
+    sync_active_step, teardown_runtime as runtime_teardown, unbind_step,
     write_terminal as runtime_write_terminal, ActiveStep, BrowserError, BrowserMode,
-    BrowserStartResult, DirEntry, PendingLocator, StepBindingStatus, TeshiRuntime,
+    BrowserStartResult, DirEntry, PendingLocator, ProjectSettings, StepBinding, StepBindingStatus,
+    TeshiRuntime,
 };
 
 #[tauri::command]
@@ -110,6 +112,29 @@ pub async fn highlight_locator_cmd(
 #[tauri::command]
 pub async fn abandon_pending_locator_cmd(rt: State<'_, Arc<TeshiRuntime>>) -> Result<(), String> {
     abandon_pending_locator(&rt).await
+}
+
+#[tauri::command]
+pub async fn unbind_step_cmd(
+    rt: State<'_, Arc<TeshiRuntime>>,
+    feature_path: String,
+    step_line: u32,
+) -> Result<Option<StepBinding>, String> {
+    unbind_step(&rt, feature_path, step_line).await
+}
+
+#[tauri::command]
+pub fn get_project_settings_cmd(
+    rt: State<'_, Arc<TeshiRuntime>>,
+) -> Result<ProjectSettings, String> {
+    let project_root = rt
+        .project
+        .root
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "no project open".to_string())?;
+    load_project_settings(&project_root).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

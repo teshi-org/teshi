@@ -171,6 +171,14 @@
                                 Source='$(var.StagingRoot)\share\browser_service.py'
                                 KeyPath='yes'/>
                         </Component>
+                        <Component Id='WinAppServiceScript' Guid='*'>
+                            <File
+                                Id='winAppServiceScriptFile'
+                                Name='winapp_service.py'
+                                DiskId='1'
+                                Source='$(var.StagingRoot)\share\winapp_service.py'
+                                KeyPath='yes'/>
+                        </Component>
                         <Directory Id='ShareTeshiBridgeDir' Name='teshi-bridge'/>
                         <Directory Id='ShareWebDir' Name='web'/>
                     </Directory>
@@ -197,6 +205,7 @@
             <ComponentRef Id='binary1'/>
             <ComponentRef Id='StartMenuShortcut'/>
             <ComponentRef Id='BrowserServiceScript'/>
+            <ComponentRef Id='WinAppServiceScript'/>
             <ComponentGroupRef Id='BridgeFiles'/>
             <ComponentGroupRef Id='WebFiles'/>
 

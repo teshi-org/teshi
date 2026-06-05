@@ -1,40 +1,39 @@
-<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <?ifndef WebRoot ?>
-		<?define WebRoot = "staging\msi-root\share\web" ?>
+	<?define WebRoot = "staging\msi-root\share\web" ?>
 <?endif ?>
 <?ifndef BridgeRoot ?>
-		<?define BridgeRoot = "staging\msi-root\share\teshi-bridge" ?>
+	<?define BridgeRoot = "staging\msi-root\share\teshi-bridge" ?>
 <?endif ?>
-
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
     <Fragment>
         <DirectoryRef Id="ShareTeshiBridgeDir">
-            <Component Id="cmp3593E2D7F047771A40EFAAC74E327F6F" Guid="{205BAB26-086C-4994-87A2-5FAC45B18BB6}">
+            <Component Id="cmp3593E2D7F047771A40EFAAC74E327F6F" Guid="{E3F82558-AF2D-4B66-9DD7-B9046A1BBC79}">
                 <File Id="fil9E7BD6F590F66D2A71A1999EE0714569" KeyPath="yes" Source="$(var.BridgeRoot)\background.js" />
             </Component>
-            <Component Id="cmp6A031D0BAB548C7725C3BA00E9E25CEE" Guid="{51D95C0E-9620-4A08-9D08-58AE8DD5DD3E}">
+            <Component Id="cmp6A031D0BAB548C7725C3BA00E9E25CEE" Guid="{0EFEE5CD-36D5-4FA8-B7EB-648BE182AC20}">
                 <File Id="fil15F91A0A344109B88407E4F08A8D8C42" KeyPath="yes" Source="$(var.BridgeRoot)\manifest.json" />
             </Component>
-            <Component Id="cmp0BBE19797BDEEFED19650B0AB38B35B4" Guid="{538FE970-32E1-42AB-8793-369F2E90B8EB}">
+            <Component Id="cmp0BBE19797BDEEFED19650B0AB38B35B4" Guid="{281FAF2A-0AE9-45C7-A8FC-68D8EB8D59FC}">
                 <File Id="filB88904E6F4D12AEA6CA4DB9FFF2E322C" KeyPath="yes" Source="$(var.BridgeRoot)\popup.html" />
             </Component>
-            <Component Id="cmpF50C810D8BEAD7EA35D45F849431B28C" Guid="{94B0A2EA-AF55-44F0-ACED-41E9B5979CCD}">
+            <Component Id="cmpF50C810D8BEAD7EA35D45F849431B28C" Guid="{234388CA-78DC-4AE9-8290-33B67F23D488}">
                 <File Id="filC4293B2FEE5D3736D067599800EF2F09" KeyPath="yes" Source="$(var.BridgeRoot)\popup.js" />
             </Component>
-            <Component Id="cmp3D78DA5B9A92D94F2AB9897A6412C302" Guid="{54309BF9-967E-4DFC-AFB1-ABD6A71D0AD3}">
+            <Component Id="cmp3D78DA5B9A92D94F2AB9897A6412C302" Guid="{88D0410B-216B-4216-B165-A002894301AD}">
                 <File Id="filE132A7ABEA872C6F280D946F372421DB" KeyPath="yes" Source="$(var.BridgeRoot)\README.md" />
             </Component>
             <Directory Id="dirD9F1F601017C3EF5034293140840E9CA" Name="icons">
-                <Component Id="cmp2330E3CCE60084AA568F882CBE3405F7" Guid="{774F5595-7D77-41E0-B521-CDF4126BF035}">
+                <Component Id="cmp2330E3CCE60084AA568F882CBE3405F7" Guid="{5AC3E222-4235-4CA5-BD66-E0ACF4308C05}">
                     <File Id="filF0172CAFEF030F9D60921C7223DED3AD" KeyPath="yes" Source="$(var.BridgeRoot)\icons\icon128.png" />
                 </Component>
-                <Component Id="cmp1DA37FE0AB848B6646ECF9B1AF22E078" Guid="{A6CBDD4E-9E92-4DA0-AB47-3DE93B97049C}">
+                <Component Id="cmp1DA37FE0AB848B6646ECF9B1AF22E078" Guid="{CCA84070-847A-4F97-97BC-0FEA8F2B5AEF}">
                     <File Id="fil6A296B309DBA96BC049EF612186A3BF6" KeyPath="yes" Source="$(var.BridgeRoot)\icons\icon16.png" />
                 </Component>
-                <Component Id="cmpDBE0A95224E55E43C4E55E8115DE24EE" Guid="{4D22B596-D2FF-4E3C-A749-8BBA2B75B4EC}">
+                <Component Id="cmpDBE0A95224E55E43C4E55E8115DE24EE" Guid="{A32774D0-6046-45BB-B172-FF57FA8F64EC}">
                     <File Id="filEE232A17EC57CCBB0ABA2A91EA9AA11B" KeyPath="yes" Source="$(var.BridgeRoot)\icons\icon32.png" />
                 </Component>
-                <Component Id="cmp3A3305E0020451DDC19F637D75690AEE" Guid="{A3403C69-6C34-45AC-8BF9-82B887EE00AA}">
+                <Component Id="cmp3A3305E0020451DDC19F637D75690AEE" Guid="{C00202C0-C02B-4915-8A4D-36ACA890D93A}">
                     <File Id="filB5E13B19A99F2A6E6609590D0537DA2A" KeyPath="yes" Source="$(var.BridgeRoot)\icons\icon48.png" />
                 </Component>
             </Directory>

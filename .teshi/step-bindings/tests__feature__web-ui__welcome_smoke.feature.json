@@ -1,0 +1,33 @@
+{
+  "feature": "tests/feature/web-ui/welcome_smoke.feature",
+  "steps": [
+    {
+      "step_line": 7,
+      "step_keyword": "Given",
+      "step_text": "teshi web is running at http://127.0.0.1:1421",
+      "step_text_normalized": "teshi web is running at http://127.0.0.1:1421",
+      "source": "bootstrap",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "url",
+        "value": "http://127.0.0.1:1421",
+        "action": "navigate"
+      },
+      "confirmed_at": "2026-06-05T00:00:00Z"
+    },
+    {
+      "step_line": 10,
+      "step_keyword": "Then",
+      "step_text": "the Open Project button should be visible",
+      "step_text_normalized": "the open project button should be visible",
+      "source": "bootstrap",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid=\"WelcomeOpenProjectButton\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-05T00:00:00Z"
+    }
+  ]
+}

@@ -192,6 +192,51 @@ fn run_request(request: RunRequest) -> Result<()> {
             continue;
         }
 
+        if runner_mode == Some("embedded") || runner_mode == Some("chrome") {
+            if teshi_bin.is_none() {
+                teshi_bin = Some(locate_teshi_bin().context("locate teshi binary")?);
+            }
+            let bin = teshi_bin.as_ref().context("teshi binary path")?;
+            let start = Instant::now();
+            match run_browser_case(bin, &project_root, case) {
+                Ok(()) => {
+                    passed = passed.saturating_add(1);
+                    write_event(
+                        &mut out,
+                        Event {
+                            kind: "case_passed",
+                            payload: CasePassed {
+                                case_id: &case.id,
+                                duration_ms: start.elapsed().as_millis() as u64,
+                            },
+                        },
+                    )?;
+                }
+                Err(err) => {
+                    failed = failed.saturating_add(1);
+                    let msg = err.to_string();
+                    let dbg = format!("{err:?}");
+                    let stack = if dbg != msg { Some(dbg) } else { None };
+                    write_event(
+                        &mut out,
+                        Event {
+                            kind: "case_failed",
+                            payload: CaseFailed {
+                                case_id: &case.id,
+                                duration_ms: start.elapsed().as_millis() as u64,
+                                error: RunErrorOut {
+                                    message: msg,
+                                    stack,
+                                    attachments: Vec::new(),
+                                },
+                            },
+                        },
+                    )?;
+                }
+            }
+            continue;
+        }
+
         if tui_steps::is_tui_scenario(&case.scenario) && !tui_steps::tui_e2e_host_supported() {
             skipped = skipped.saturating_add(1);
             write_event(
@@ -303,6 +348,33 @@ fn run_winapp_case(teshi_bin: &Path, project_root: &Path, case: &RunCase) -> Res
     let stdout = String::from_utf8_lossy(&output.stdout);
     anyhow::bail!(
         "winapp replay failed for scenario {:?}: {stderr}{stdout}",
+        case.scenario
+    );
+}
+
+fn run_browser_case(teshi_bin: &Path, project_root: &Path, case: &RunCase) -> Result<()> {
+    let feature_rel = feature_relative_path(project_root, &case.feature_path)?;
+    let mut cmd = Command::new(teshi_bin);
+    cmd.current_dir(project_root)
+        .arg("browser")
+        .arg("replay")
+        .arg("--feature")
+        .arg(&feature_rel)
+        .arg("--non-interactive")
+        .arg("--yes");
+    if let Some(until) = case.until_line {
+        cmd.arg("--until-line").arg(until.to_string());
+    }
+    let output = cmd
+        .output()
+        .with_context(|| format!("spawn {} browser replay", teshi_bin.display()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    anyhow::bail!(
+        "browser replay failed for scenario {:?}: {stderr}{stdout}",
         case.scenario
     );
 }

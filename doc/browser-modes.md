@@ -57,7 +57,21 @@ Discovery: `GET http://127.0.0.1:17373/v1/bridge` returns `tabs`, `active_tab_id
 
 Confirmed locators are stored in `.teshi/step-bindings/{feature}.json` and should be committed with the project. The older `{feature}.locators.md` files are deprecated and are no longer written or read by the recording/replay workflow.
 
-`navigate` bindings store the URL and are replayed as first-class setup actions. `execute_locator` supports `click`, `fill`, `assert_visible`, `assert_text`, `select`, and `press_key`. Unknown actions fail with `unsupported_action`; missing values for value-based actions fail with `missing_value`.
+`navigate` bindings store the URL and are replayed as first-class setup actions. `open_project` bindings call the SUT runtime API to open a project folder (no DOM selector). `execute_locator` supports `click`, `fill`, `type`, `assert_visible`, `assert_text`, `select`, and `press_key`. Unknown actions fail with `unsupported_action`; missing values for value-based actions fail with `missing_value`.
+
+Use `type` (not `fill`) for xterm terminal input (`.xterm-helper-textarea`); `type` submits Enter after filling.
+
+### Sidecar health
+
+```bash
+teshi browser doctor      # JSON report: ok, mode, ws_url, page_url, tcp_reachable, snapshot_ok
+teshi browser reconnect   # Spawn detached serve-embedded; refresh cdp-endpoint.json
+teshi browser verify --step-line N --selector <css> --action <action> [--value-arg <text>]
+```
+
+Before snapshot/replay in embedded mode, run `doctor` (or rely on auto-reconnect). After restarting the SUT (`teshi web` or Vite dev), run `reconnect`.
+
+Set `TESHI_BROWSER_AUTO_RECONNECT=0` to disable automatic reconnect. Set `TESHI_LOCATOR_STRICT=1` to require `browser verify` before `steps propose`.
 
 Values are stored in git as part of the binding. Use placeholders such as `${LOGIN_PW}` for secrets and never commit real passwords, tokens, or private customer data.
 
@@ -79,6 +93,14 @@ Only one session runs at a time. Starting Chrome disconnects Embedded and vice v
 
 Use `teshi browser replay --non-interactive` for CI-style browser setup from confirmed step-bindings. Interactive replay remains the default for terminal agents so each step can be reviewed before execution.
 
+For headless CI without the desktop UI, start the embedded sidecar with:
+
+```bash
+teshi browser serve-embedded --navigate http://127.0.0.1:1421
+```
+
+This writes `.teshi/cdp-endpoint.json` and keeps Playwright running until Ctrl+C. Pair with `teshi web --no-open` when testing the teshi web UI (see [web-ui-self-test.md](web-ui-self-test.md)).
+
 ## Diagnostics
 
 Set `TESHI_BROWSER_DEBUG=1` before starting teshi and running agent commands to persist JSONL diagnostics:
@@ -88,4 +110,4 @@ Set `TESHI_BROWSER_DEBUG=1` before starting teshi and running agent commands to 
 
 For snapshot timeouts, reload `teshi-bridge` in `chrome://extensions`, click **Connect Chrome** again, confirm `.teshi/cdp-endpoint.json` has `extension_connected: true`, then rerun `TESHI_BROWSER_DEBUG=1 teshi browser snapshot` and inspect the logs above. Use `teshi browser snapshot --timeout-ms 90000` on heavy pages.
 
-Terminal agents verify locators with `teshi browser execute --selector <css> --action <action>` and `--value-arg <text>` for `fill`, `assert_text`, `select`, and `press_key` (same flags as `teshi steps propose`).
+Terminal agents verify locators with `teshi browser execute --selector <css> --action <action>` and `--value-arg <text>` for `fill`, `type`, `assert_text`, `select`, and `press_key` (same flags as `teshi steps propose`). For RVP audit trail, use `teshi browser verify --step-line N ...` (highlight + execute + append to `.teshi/logs/locator-verify.jsonl`).

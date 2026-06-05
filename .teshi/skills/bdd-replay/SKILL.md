@@ -1,72 +1,83 @@
 ---
 name: bdd-replay
-description: Replay confirmed teshi step-bindings through the browser bridge before recording or debugging later BDD steps
+description: Replay confirmed teshi step-bindings through the browser bridge with health checks before recording or CI validation
 ---
 
 # BDD Replay Skill
 
-Use this skill when the user wants confirmed BDD steps replayed as setup for the currently selected step, or when validating recorded step-bindings.
+Use when replaying confirmed BDD steps as setup for the selected step, or validating recorded bindings end-to-end.
 
 ## Prerequisites
 
-1. A project is open in teshi Desktop/web.
-2. The Browser panel is connected to the intended page.
+1. Project open in teshi Desktop/web.
+2. Browser panel connected to the intended SUT page.
 3. `.teshi/cdp-endpoint.json` exists.
-4. `.teshi/step-bindings/{feature}.json` contains confirmed bindings.
-5. You are working from the project root.
-6. A compatible teshi CLI is available. Prefer `TESHI_CLI` when set; otherwise use `teshi` from PATH.
+4. `.teshi/step-bindings/{feature}.json` has confirmed bindings.
+5. Project root as cwd.
+6. Compatible CLI (`TESHI_CLI` in external terminals).
 
 ## Workflow
 
-0. Resolve the CLI command:
+### Step 0 — Health check (required)
 
 ```bash
 TESHI=${TESHI_CLI:-teshi}
 $TESHI --version
-$TESHI browser replay --help
-$TESHI steps resolve --help
+$TESHI browser doctor || $TESHI browser reconnect
+$TESHI browser doctor   # must succeed before replay
 ```
 
-If any command fails, stop and ask the user to install a newer teshi MSI, fix PATH, or set `TESHI_CLI` to a compatible development binary.
+If the second doctor fails, stop — do not replay on a stale sidecar.
 
-1. Resolve the target sequence:
+### Step 1 — Resolve sequence
 
 ```bash
 $TESHI steps resolve
+# or
+$TESHI steps resolve --until-line <N>
 ```
 
-Use `--until-line N` when replaying setup only up to a selected step.
+### Step 2 — Interactive replay (default)
 
-2. Default to interactive replay. Explain the next action before it runs and wait for the user to agree in chat or terminal. `navigate` bindings are replayed as first-class setup actions:
+Explain the next action; wait for user agreement:
 
 ```bash
 $TESHI browser replay --until-line <line>
 ```
 
-3. Use non-interactive replay only when the user asks for CI-style execution:
+`navigate` and `open_project` bindings replay as first-class setup actions.
+
+### Step 3 — Non-interactive (CI / agent validation)
 
 ```bash
-$TESHI browser replay --non-interactive --until-line <line>
+$TESHI browser replay --non-interactive --yes --until-line <line>
+# full feature:
+$TESHI browser replay --feature tests/feature/web-ui/<name>.feature --non-interactive --yes
 ```
 
-`--yes` is an alias for `--non-interactive`.
-
-4. Use dry run to inspect the planned sequence:
+### Step 4 — Dry run
 
 ```bash
 $TESHI browser replay --dry-run --until-line <line>
 ```
 
-## Failure Handling
+## Failure handling
 
-- If a step is unbound or pending, stop and tell the user to record/confirm it first.
-- If a `navigate` binding fails, stop and report the URL and error.
-- If `execute_locator` fails, stop at that step and report the line, action, selector, and error.
-- In interactive use, you may take a fresh `teshi browser snapshot` and ask the user whether to re-record the failing step with `bdd-locator`.
-- In non-interactive use, do not infer or modify bindings.
+| Symptom | Agent action |
+|---------|--------------|
+| snapshot/replay hang or timeout | doctor → reconnect → retry **once**; still fail → report stale `ws_url` |
+| `Locator.wait_for` timeout | Report line/action/selector; do not edit binding silently — re-record with bdd-locator |
+| navigate / open_project fail | Report URL/path and error; check SUT is running |
+| SPA state wrong after navigate | Background should use `?e2e=1`; open project via `open_project` not recent-path click |
+| assert_visible on hidden element | Click `FileTreeTab` first; confirm prior step left Terminal tab |
+| unbound or pending step | Stop; record/confirm with bdd-locator |
 
-## Do Not
+In interactive mode, you may take a fresh snapshot and ask whether to re-record. In non-interactive mode, **do not** infer or modify bindings.
 
-- Read or write deprecated `.locators.md` files.
+## Do not
+
+- Replay indefinitely when doctor fails.
+- Assume killing/restarting SUT leaves old `cdp-endpoint.json` valid.
+- Read or write deprecated `.locators.md`.
 - Confirm new bindings on behalf of the user.
-- Start or attach another browser tool to the dedicated Chrome recording profile.
+- Attach another automation tool to the dedicated Chrome recording profile.

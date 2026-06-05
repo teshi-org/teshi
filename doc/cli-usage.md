@@ -52,6 +52,54 @@ teshi run --runner-cmd "behat" --runner-cwd /app path/
 
 Configure the runner in `teshi.toml` (see below). CLI flags override file and env settings.
 
+For web UI self-test CI, start the embedded sidecar and replay bindings:
+
+```bash
+teshi browser serve-embedded --navigate http://127.0.0.1:1421
+teshi run tests/feature/web-ui/welcome_smoke.feature
+```
+
+See [web-ui-self-test.md](web-ui-self-test.md) and `scripts/run-web-ui-smoke.sh`.
+
+### Browser sidecar (`teshi browser`)
+
+Commands for locator recording, replay, and sidecar health (see [browser-modes.md](browser-modes.md)):
+
+```bash
+teshi browser doctor              # TCP + snapshot probe; exit 1 if stale
+teshi browser reconnect           # Restart embedded sidecar (refresh cdp-endpoint.json)
+teshi browser snapshot            # Page accessibility tree
+teshi browser navigate <url>      # Navigate active tab
+teshi browser highlight <selector>
+teshi browser execute --selector <css> --action <action> [--value-arg <text>]
+teshi browser verify --step-line N --selector <css> --action <action> [--value-arg <text>]
+teshi browser replay [--until-line N] [--non-interactive] [--yes]
+teshi browser serve-embedded [--navigate <url>]
+```
+
+**Actions** for `execute`, `verify`, and `steps propose --action`:
+
+| Action | Description |
+|--------|-------------|
+| `click` | Click element |
+| `fill` | Fill input (no Enter) |
+| `type` | Fill + Enter (xterm terminal) |
+| `assert_visible` | Element must be visible |
+| `assert_text` | Element text must match `--value-arg` |
+| `select` | Select option |
+| `press_key` | Press key (e.g. `Enter`) |
+| `navigate` | Open URL (`--value-arg` or selector as URL) |
+| `open_project` | POST `/api/v1/projects/open` with `--value-arg` absolute path |
+
+Environment:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `TESHI_BROWSER_AUTO_RECONNECT` | on | Auto reconnect embedded sidecar before browser commands when doctor fails |
+| `TESHI_LOCATOR_STRICT` | off | Require prior `browser verify` log before `steps propose` |
+
+---
+
 ### Auth management
 
 ```bash
@@ -130,9 +178,75 @@ API keys should **never** be written directly in config files. Use `teshi auth l
 | `TESHI_RUNNER_CMD` | Override runner command (after `teshi.toml`) |
 | `TESHI_RUNNER_ARGS` | Override runner args (space-separated) |
 | `TESHI_RUNNER_CWD` | Override runner working directory |
+| `TESHI_CLI` | Absolute path to `teshi` binary (Desktop embedded terminal sets this to the dev build) |
 | `TESHI_OPENAI_API_KEY` | Legacy (migrated by `teshi auth migrate`) |
 
 Precedence for runner settings: `teshi.toml` → environment variables → CLI flags.
+
+---
+
+## Step bindings (`teshi steps`) — 0.4.0+
+
+Manage Gherkin step locators under `.teshi/step-bindings/` and `.teshi/active-step.json`.
+
+```bash
+teshi steps list --feature test/feature/login.feature
+teshi steps unbound --feature test/feature/login.feature
+teshi steps select --feature test/feature/login.feature --line 12
+teshi steps next-unbound --feature test/feature/login.feature   # JSON output
+teshi steps propose --strategy uia --value 'uia:automation_id=Btn' --action click \
+  --confidence 0.9 --rationale '...' [--line 12] [--highlight-applied]
+teshi steps wait --until confirmed --timeout 60 --auto-confirm
+teshi steps confirm | teshi steps reject
+teshi steps unbind --feature test/feature/login.feature --line 12
+teshi steps resolve --feature test/feature/login.feature [--until-line N]
+```
+
+- `--line` on `propose` must match `.teshi/active-step.json` or the command exits 1.
+- `--auto-confirm` on `wait`: after timeout, confirms pending locator (default timeout 60s). On step mismatch, auto-rejects and exits 2.
+- Project setting `.teshi/settings.json`: `{ "locator_auto_confirm_sec": 60 }` (`0` = manual only).
+
+CLI `select` / `next-unbound` updates `active-step.json`; Desktop watches the file and syncs Gherkin highlight.
+
+---
+
+## WinUI automation (`teshi winapp`) — 0.4.0+
+
+Requires **Connect WinUI3 App** in Desktop (or `teshi web`) and `.teshi/cdp-endpoint.json` with `"mode": "winapp"`.
+
+```bash
+teshi winapp list-windows
+teshi winapp attach --hwnd 12345
+teshi winapp attach --title 'My App'
+teshi winapp attach --process-name MyApp.exe
+teshi winapp snapshot
+teshi winapp highlight 'uia:automation_id=LoginButton'
+teshi winapp execute --selector 'uia:automation_id=LoginButton' --action click
+teshi winapp replay --feature test/feature/login.feature [--until-line N] [--yes] [--dry-run] \
+  [--launch 'C:\path\to\App.exe']
+```
+
+`replay` checks that a window is attached before running bindings. Use `attach` or `--launch` when detached.
+
+---
+
+## Export (`teshi export`) — 0.4.0+
+
+Generate standalone test projects from confirmed bindings:
+
+```bash
+teshi export --target behave --feature test/feature/login.feature --out ./tests-e2e
+```
+
+Writes `behave.ini`, `features/`, `features/environment.py`, `features/steps/`, and `pages/`. Run `behave` from the output directory.
+
+---
+
+## Desktop embedded terminal
+
+When using teshi Desktop, the embedded terminal sets `TESHI_CLI` to the bundled or dev `teshi` binary so agents do not pick up an older MSI on `PATH`. External shells must set `TESHI_CLI` explicitly or ensure `teshi --version` is >= 0.4.0.
+
+See [desktop/README.md](../desktop/README.md) for development setup.
 
 ---
 

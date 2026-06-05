@@ -25,6 +25,8 @@ export interface TeshiRuntimeApi {
   highlightLocator(selector: string): Promise<void>;
   confirmLocator(candidateRank: number, editedValue: string | null): Promise<void>;
   rejectLocator(): Promise<void>;
+  unbindStep(featurePath: string, stepLine: number): Promise<void>;
+  getProjectSettings(): Promise<{ locator_auto_confirm_sec: number }>;
   confirmStopRuntimeIfBusy(): Promise<boolean>;
   finalizeMainWindow?(): Promise<void>;
   onEvent<T>(event: string, handler: (payload: T) => void): Promise<() => void>;

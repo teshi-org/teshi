@@ -74,6 +74,11 @@ function ensureEventsSocket(): WebSocket {
   return eventsSocket;
 }
 
+/** Dispatches a host event to local subscribers (fallback when WS is slow or unavailable). */
+function emitLocalEvent(event: string, payload: unknown): void {
+  eventHandlers.get(event)?.forEach((handler) => handler(payload));
+}
+
 /** Loopback HTTP + WebSocket host (`teshi web`). */
 export const webRuntime: TeshiRuntimeApi = {
   async checkProjectSwitchAllowed() {
@@ -85,10 +90,11 @@ export const webRuntime: TeshiRuntimeApi = {
   },
 
   async openProject(path: string) {
-    await apiFetch<void>("/projects/open", {
+    const { root } = await apiFetch<{ root: string }>("/projects/open", {
       method: "POST",
       body: JSON.stringify({ path }),
     });
+    emitLocalEvent("project-changed", root);
   },
 
   async getRecentProjects() {
@@ -198,9 +204,27 @@ export const webRuntime: TeshiRuntimeApi = {
     await apiFetch<void>("/locator/reject", { method: "POST" });
   },
 
+  async unbindStep(featurePath: string, stepLine: number) {
+    await apiFetch<void>("/steps/unbind", {
+      method: "POST",
+      body: JSON.stringify({ feature_path: featurePath, step_line: stepLine }),
+    });
+  },
+
+  async getProjectSettings() {
+    return apiFetch<{ locator_auto_confirm_sec: number }>("/settings/project");
+  },
+
   async confirmStopRuntimeIfBusy() {
+    const e2e =
+      (window as Window & { __TESHI_E2E__?: boolean }).__TESHI_E2E__ === true ||
+      localStorage.getItem("TESHI_AUTO_TEARDOWN") === "1";
     const allowed = await this.checkProjectSwitchAllowed();
     if (allowed) {
+      return true;
+    }
+    if (e2e) {
+      await this.teardownRuntime();
       return true;
     }
     return window.confirm(
@@ -222,3 +246,40 @@ export const webRuntime: TeshiRuntimeApi = {
     };
   },
 };
+
+/**
+ * Full automated project open for E2E (`?e2e=1`) and sidecar `open_project`.
+ * Mirrors App teardown + open without relying solely on the events WebSocket.
+ */
+export async function e2eOpenProject(path: string): Promise<string> {
+  const allowed = await webRuntime.confirmStopRuntimeIfBusy();
+  if (!allowed) {
+    throw new Error("project switch cancelled");
+  }
+  await webRuntime.teardownRuntime();
+  const { root } = await apiFetch<{ root: string }>("/projects/open", {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  });
+  emitLocalEvent("project-changed", root);
+  const recent = await webRuntime.getRecentProjects();
+  emitLocalEvent("recent-loaded", recent);
+  return root;
+}
+
+declare global {
+  interface Window {
+    __teshiE2eOpenProject?: (path: string) => Promise<string>;
+    __teshiE2eWriteTerminal?: (data: string) => Promise<void>;
+  }
+}
+
+window.__teshiE2eOpenProject = e2eOpenProject;
+
+const e2eWriteTerminal = async (data: string): Promise<void> => {
+  await apiFetch<void>("/terminal/write", {
+    method: "POST",
+    body: JSON.stringify({ data }),
+  });
+};
+window.__teshiE2eWriteTerminal = e2eWriteTerminal;

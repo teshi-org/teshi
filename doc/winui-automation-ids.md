@@ -37,6 +37,18 @@ MyButton.AutomationProperties.AutomationId = "LoginButton";
 - [ ] IDs are documented or follow the table prefix convention.
 - [ ] Renaming UI does not rename `AutomationId` unless intentional (update bindings/export).
 
+## List and collection items
+
+WinUI3 list items often expose only generic **Name** text without per-row `AutomationId`. That makes bindings fragile (locale changes, duplicate names, scroll position).
+
+| Approach | When to use |
+|----------|-------------|
+| `AutomationId` per item | Preferred — e.g. `LibraryGameItem_{gameId}` in the app |
+| `uia:control_type=ListItemControl;name=...` | Fixed fixture data only; document the risk in binding rationale |
+| `assert_text` / exact Name | uiautomation **exact** Name match in exported behave tests |
+
+Recommend a PR in the app repo to assign stable IDs to list rows before relying on them in regression tests.
+
 ## teshi workflow
 
 1. Record bindings with [winapp-locator](../.teshi/skills/winapp-locator/SKILL.md).

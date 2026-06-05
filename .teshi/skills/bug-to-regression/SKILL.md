@@ -11,8 +11,24 @@ Use when the user describes a WinUI3 bug and wants a closed loop: **feature → 
 
 1. Project open in teshi Desktop; **Connect WinUI3 App** active.
 2. `.teshi/cdp-endpoint.json` has `"mode": "winapp"`.
-3. teshi CLI available (`TESHI_CLI` or `teshi` on PATH).
-4. User provides a bug report using [doc/bug-report-template.md](../../doc/bug-report-template.md).
+3. User provides a bug report using [doc/bug-report-template.md](../../doc/bug-report-template.md).
+
+### CLI self-check (run first)
+
+External terminals do **not** inherit Desktop `TESHI_CLI`. Always verify the CLI before `winapp` / `steps` / `export`:
+
+```bash
+TESHI="${TESHI_CLI:-teshi}"
+$TESHI --version          # must be >= 0.4.0
+$TESHI winapp --help      # fail → stop; use Desktop embedded terminal or set TESHI_CLI to dev build
+$TESHI steps --help       # 0.3.0 MSI lacks steps/winapp/export — do not guess commands
+```
+
+Prefer the Desktop embedded terminal (sets `TESHI_CLI` to the dev build) or export:
+
+```powershell
+$env:TESHI_CLI = 'D:\Dev\Rust\teshi\target\debug\teshi.exe'
+```
 
 ## Phase 1 — Feature (acceptance spec)
 
@@ -21,36 +37,72 @@ Use when the user describes a WinUI3 bug and wants a closed loop: **feature → 
 3. Create the feature:
    - **TUI**: use `create_feature_file` / `insert_scenario` (user approves with Y).
    - **Desktop terminal only**: output the Gherkin block for the user to save, or edit in the Gherkin panel.
-4. Run `teshi steps list --feature '<path>'` after the file exists.
+4. Run `$TESHI steps list --feature '<path>'` after the file exists.
 
-## Phase 2 — Bind each step
+## Phase 2 — Bind each step (unattended loop)
 
-For **each** step that is not `confirmed`:
+`steps select`, `steps next-unbound`, and `steps unbind` require **teshi 0.4.0+**.
 
-```bash
-TESHI=${TESHI_CLI:-teshi}
-# Optional: focus Desktop on the step without clicking
-$TESHI steps select --feature '<feature>' --line <step_line>
+Before each propose, confirm `.teshi/active-step.json` matches the step you intend (`step_line`, `feature_relative_path`).
 
-# Follow winapp-locator skill
-$TESHI winapp snapshot
-# ... highlight, steps propose, user Confirm in Locator panel ...
-$TESHI steps wait --until either --timeout 120
-```
-
-Shortcut helpers:
+Default unattended binding loop:
 
 ```bash
-# List steps still needing bindings
-$TESHI steps unbound --feature '<feature>'
+TESHI="${TESHI_CLI:-teshi}"
+while true; do
+  NEXT=$($TESHI steps next-unbound --feature '<feature>' 2>/dev/null) || break
+  echo "$NEXT"   # JSON includes step_line — verify against active-step.json
 
-# Select next unbound step (JSON includes step_line)
-$TESHI steps next-unbound --feature '<feature>'
+  $TESHI winapp snapshot
+  # highlight primary candidate, then propose (optional --line guard):
+  $TESHI steps propose \
+    --line <step_line> \
+    --strategy uia \
+    --value 'uia:automation_id=...' \
+    --action click \
+    --confidence 0.9 \
+    --rationale '...' \
+    --highlight-applied
+
+  # Auto-confirm after 60s unless user rejects in Locator panel (locator_auto_confirm_sec in .teshi/settings.json)
+  $TESHI steps wait --until confirmed --timeout 60 --auto-confirm || exit 2
+done
 ```
 
-Repeat until `steps unbound` returns an empty list.
+Remove a wrong binding:
 
-## Phase 3 — Verify
+```bash
+$TESHI steps unbind --feature '<feature>' --line <step_line>
+```
+
+For manual review, omit `--auto-confirm` on `steps wait` and ask the user to Confirm in the Locator panel.
+
+Follow **winapp-locator** for snapshot/highlight/propose details.
+
+## System / process preconditions (non-UI steps)
+
+Keep declarative Gherkin steps. For process checks (e.g. Steam running), bind with:
+
+```bash
+$TESHI steps propose --action exec --value 'system-check' \
+  --value-arg 'Get-Process steam -ErrorAction SilentlyContinue | Select-Object -First 1' \
+  --strategy script --confidence 1.0 --rationale 'Steam must be running'
+```
+
+Or use `assert_visible` with a placeholder selector only when no better option exists; patch generated hooks after export if needed.
+
+## Phase 3 — Verify (preflight + replay)
+
+Before replay:
+
+```bash
+$TESHI winapp list-windows
+$TESHI winapp attach --title 'Enhook'   # or --hwnd / --process-name
+# optional one-shot:
+$TESHI winapp replay --feature '<feature>' --launch 'C:\path\to\App.exe' --yes
+```
+
+**Background** must include **navigation** bindings (e.g. click Library), not only `assert_visible`.
 
 ```bash
 $TESHI winapp replay --feature '<feature>' --yes
@@ -66,12 +118,20 @@ When all bindings are confirmed:
 $TESHI export --target behave --feature '<feature>' --out ./tests-e2e
 ```
 
-Follow **behave-export-guide** for `.env` and `behave` commands.
+After export:
+
+```powershell
+Get-ChildItem -Recurse tests-e2e\__pycache__ | Remove-Item -Recurse -Force
+cd tests-e2e
+behave --dry-run
+```
+
+Follow **behave-export-guide** for `.env` and full `behave` commands.
 
 ## Do not
 
 - Put selectors in the `.feature` file.
-- Skip user Confirm in the Locator panel.
+- Use teshi 0.3.0 MSI commands that do not exist (`winapp`, `steps`, `export`).
 - Run AI locator inference on every CI run (bindings are the source of truth).
 
 ## Related skills

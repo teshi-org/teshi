@@ -91,11 +91,24 @@ teshi web --project C:\path\to\bdd-project
 3. **Connect Chrome**, **Connect WinUI3 App**, or **Start Embedded** (writes `.teshi/cdp-endpoint.json` with `mode` and `ws_url`). For Chrome, load the unpacked extension first from `C:\Program Files\teshi\share\teshi-bridge` (or repo path for development) — see `extension/teshi-bridge/README.md`.
 4. In the embedded terminal, run a Cursor agent and invoke the **bdd-locator** skill (`.teshi/skills/bdd-locator/SKILL.md`) for browsers or **winapp-locator** (`.teshi/skills/winapp-locator/SKILL.md`) for WinUI3/native apps.
 5. The agent writes `.teshi/pending-locator.json` and highlights the target element via CDP overlay.
-6. Confirm or reject the proposal in the **Locator** bottom panel; accepted locators are saved to `{feature}.locators.md`.
+6. Confirm or reject the proposal in the **Locator** bottom panel; accepted locators are saved to `.teshi/step-bindings/{feature}.json`.
 
 Runtime context files under `.teshi/` (except tracked skills) are gitignored local state.
 
 For WinUI3/native app recording, see [WinUI3 / Native Windows app mode](../doc/winapp-modes.md).
+
+## Self-test (bootstrap teshi web from desktop)
+
+teshi can dogfood its GUI by using **desktop as the IDE** and **teshi web on loopback as the AUT**:
+
+1. `teshi desktop --project .`
+2. Terminal 1: `teshi web --port 1421 --no-open --project .`
+3. Terminal 2: `cd desktop && npm run dev` (Vite on 1420)
+4. Browser panel: **Start Embedded** → `http://127.0.0.1:1420/?e2e=1`
+5. Health: `teshi browser doctor` (or `reconnect` if stale)
+6. Full agent workflow: **agent-web-ui-flow** skill; or **bdd-locator** / **bdd-replay** individually
+
+Scenarios live in `tests/feature/web-ui/`. See [doc/web-ui-self-test.md](../doc/web-ui-self-test.md).
 
 ## CLI
 

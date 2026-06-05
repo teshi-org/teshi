@@ -7,9 +7,11 @@ interface Props {
   activeTab: DockTab;
   activeStep: ActiveStep | null;
   pendingLocator: PendingLocator | null;
+  stepBindingStatuses: Record<number, import("../locatorTypes").StepBindingStatus>;
   onToggle: () => void;
   onTabChange: (tab: DockTab) => void;
   onPendingChange: (pending: PendingLocator | null) => void;
+  onBindingChanged: () => void;
 }
 
 const TABS: { id: DockTab; label: string }[] = [
@@ -23,9 +25,11 @@ export function BottomDock({
   activeTab,
   activeStep,
   pendingLocator,
+  stepBindingStatuses,
   onToggle,
   onTabChange,
   onPendingChange,
+  onBindingChanged,
 }: Props) {
   return (
     <section
@@ -61,7 +65,11 @@ export function BottomDock({
             <LocatorPanel
               activeStep={activeStep}
               pending={pendingLocator}
+              stepBindingStatus={
+                activeStep ? stepBindingStatuses[activeStep.step_line] : undefined
+              }
               onPendingChange={onPendingChange}
+              onBindingChanged={onBindingChanged}
             />
           )}
           {activeTab === "output" && (

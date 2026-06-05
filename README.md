@@ -43,7 +43,7 @@ teshi steps unbound --feature F         # List steps missing confirmed bindings
 teshi export --target behave --feature F --out ./tests-e2e  # Generate behave + PO project
 ```
 
-Bug-to-regression workflow: [doc/bug-report-template.md](doc/bug-report-template.md), skills under `.teshi/skills/` (`bug-to-regression`, `winapp-locator`, `winapp-replay`, `behave-export-guide`).
+Bug-to-regression workflow: [doc/bug-report-template.md](doc/bug-report-template.md), skills under `.teshi/skills/` (`agent-web-ui-flow`, `bdd-feature-author`, `bdd-locator`, `bdd-replay`, `web-ui-bootstrap`, `bug-to-regression`, `winapp-locator`, `winapp-replay`, `behave-export-guide`).
 
 ### Windows install
 

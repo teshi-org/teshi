@@ -158,6 +158,10 @@ function normalizeUrl(raw: string): string {
   if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) {
     return trimmed;
   }
+  // Loopback dev servers (Vite, teshi web) are HTTP-only.
+  if (/^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/.*)?$/i.test(trimmed)) {
+    return `http://${trimmed}`;
+  }
   return `https://${trimmed}`;
 }
 
@@ -766,7 +770,7 @@ export function BrowserPanel({
               <button type="button" className="panel-header-btn" onClick={onConnectWinApp}>
                 Connect WinUI3 App
               </button>
-              <button type="button" className="panel-header-btn" onClick={onStartEmbedded}>
+              <button type="button" className="panel-header-btn" data-testid="BrowserStartEmbedded" onClick={onStartEmbedded}>
                 Start Embedded
               </button>
             </>
@@ -876,6 +880,7 @@ export function BrowserPanel({
                   id="browser-address"
                   type="text"
                   className="browser-address-input"
+                  data-testid="BrowserAddressBar"
                   value={addressInput}
                   onChange={(e) => setAddressInput(e.target.value)}
                   onFocus={() => {
@@ -891,7 +896,7 @@ export function BrowserPanel({
                   placeholder="Enter URL"
                   title={pageUrl}
                 />
-                <button type="submit" className="browser-go-btn">
+                <button type="submit" className="browser-go-btn" data-testid="BrowserGo">
                   Go
                 </button>
                 {zoomControls}

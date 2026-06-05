@@ -39,6 +39,8 @@ function AppShell() {
   const skipNextDockPersistRef = useRef(false);
   const dockExpandedRef = useRef(state.dockExpanded);
   const dockActiveTabRef = useRef(state.dockActiveTab);
+  const projectRootRef = useRef(state.projectRoot);
+  const selectedFeatureRelativePathRef = useRef(selectedFeatureRelativePath);
 
   const refreshStepStatuses = useCallback(
     async (featurePath: string | null) => {
@@ -116,6 +118,23 @@ function AppShell() {
   useEffect(() => {
     dockActiveTabRef.current = state.dockActiveTab;
   }, [state.dockActiveTab]);
+
+  useEffect(() => {
+    projectRootRef.current = state.projectRoot;
+  }, [state.projectRoot]);
+
+  useEffect(() => {
+    selectedFeatureRelativePathRef.current = selectedFeatureRelativePath;
+  }, [selectedFeatureRelativePath]);
+
+  const openFeature = useCallback(
+    async (path: string) => {
+      const payload = await getRuntime().renderFeature(path);
+      dispatch({ type: "SET_FEATURE", path, payload });
+      void refreshStepStatuses(payload.relative_path);
+    },
+    [dispatch, refreshStepStatuses],
+  );
 
   useEffect(() => {
     if (!state.projectRoot) {
@@ -235,8 +254,26 @@ function AppShell() {
         }
       })
       .then((u) => unsubs.push(u));
-    void runtime.onEvent<ActiveStep>("active-step-changed", (step) => {
-      dispatch({ type: "SET_ACTIVE_STEP", step });
+    void runtime.onEvent<ActiveStep | null>("active-step-changed", (step) => {
+      dispatch({ type: "SET_ACTIVE_STEP", step: step ?? null });
+      if (!step) {
+        return;
+      }
+      dispatch({ type: "SELECT_SCENARIO", line: step.scenario_line });
+      dispatch({ type: "SELECT_STEP", line: step.step_line });
+      const root = projectRootRef.current;
+      const rel = step.feature_relative_path.replace(/\\/g, "/");
+      if (
+        root &&
+        selectedFeatureRelativePathRef.current !== rel &&
+        state.featurePayload?.relative_path !== rel
+      ) {
+        const abs = `${root.replace(/\\/g, "/").replace(/\/$/, "")}/${rel.replace(/^\.\//, "")}`;
+        void openFeature(abs);
+      }
+      void refreshStepStatuses(step.feature_relative_path);
+      dispatch({ type: "SET_DOCK_TAB", tab: "locator" });
+      dispatch({ type: "SET_DOCK_EXPANDED", expanded: true });
     }).then((u) => unsubs.push(u));
     void runtime
       .onEvent<FeatureRenderPayload>("feature-refreshed", (payload) => {
@@ -284,7 +321,7 @@ function AppShell() {
       unlistenClose?.();
       unsubs.forEach((u) => u());
     };
-  }, [dispatch, openProjectPathWithFeedback, refreshStepStatuses, selectedFeatureRelativePath]);
+  }, [dispatch, openFeature, openProjectPathWithFeedback, refreshStepStatuses, selectedFeatureRelativePath, state.featurePayload?.relative_path]);
 
   const syncActiveStep = useCallback(
     async (stepLine: number) => {
@@ -305,10 +342,8 @@ function AppShell() {
     [dispatch, state.selectedFeaturePath],
   );
 
-  const openFeature = async (path: string) => {
-    const payload = await getRuntime().renderFeature(path);
-    dispatch({ type: "SET_FEATURE", path, payload });
-    void refreshStepStatuses(payload.relative_path);
+  const openFeatureFromTree = async (path: string) => {
+    await openFeature(path);
   };
 
   const startBrowserMode = async (mode: "embedded" | "chrome" | "winapp") => {
@@ -412,7 +447,7 @@ function AppShell() {
         })
       }
       onRightTabChange={(tab) => dispatch({ type: "SET_TAB", tab })}
-      onOpenFeature={(path) => void openFeature(path)}
+      onOpenFeature={(path) => void openFeatureFromTree(path)}
     />
   );
 
@@ -448,10 +483,14 @@ function AppShell() {
               activeTab={state.dockActiveTab}
               activeStep={state.activeStep}
               pendingLocator={state.pendingLocator}
+              stepBindingStatuses={state.stepBindingStatuses}
               onToggle={() => dispatch({ type: "TOGGLE_DOCK" })}
               onTabChange={(tab) => dispatch({ type: "SET_DOCK_TAB", tab })}
               onPendingChange={(pending) => {
                 dispatch({ type: "SET_PENDING_LOCATOR", pending });
+                void refreshStepStatuses(selectedFeatureRelativePath);
+              }}
+              onBindingChanged={() => {
                 void refreshStepStatuses(selectedFeatureRelativePath);
               }}
             />

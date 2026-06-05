@@ -1,183 +1,180 @@
 ---
 name: bdd-locator
-description: Infer DOM locators for the selected Gherkin step, propose them through teshi steps, and wait for Desktop/web confirmation
+description: Infer DOM locators for the selected Gherkin step with RVP verification, propose through teshi steps, and wait for Desktop/web confirmation
 ---
 
 # BDD Locator Skill
 
-Use this skill when the user is recording a new BDD step binding in **teshi Desktop** or **teshi web**.
+Use when recording a BDD step binding in **teshi Desktop** or **teshi web** (browser panel).
 
 ## Prerequisites
 
-1. A project is open in teshi Desktop/web.
-2. A browser session is running in the Browser panel:
-   - **Connect Chrome** for logged-in apps using the dedicated recording Chrome profile with `extension/teshi-bridge` loaded.
-   - **Start Embedded** only for local/staging pages that do not require a real login profile.
-3. `.teshi/cdp-endpoint.json` exists. For non-navigation steps, `page_url` should already match the page under test; explicit URL navigation steps may correct it with `teshi browser navigate`.
-4. The user selected a Gherkin **step** in the left panel (the app writes `.teshi/active-step.json`).
-5. You are working from the project root in the embedded terminal.
-6. A compatible teshi CLI is available. Prefer `TESHI_CLI` when set; otherwise use `teshi` from PATH.
+1. Project open in teshi Desktop/web.
+2. Browser session in the Browser panel (**Connect Chrome** or **Start Embedded**).
+3. `.teshi/cdp-endpoint.json` exists.
+4. User selected a Gherkin **step** (writes `.teshi/active-step.json`).
+5. Working from project root in the embedded terminal.
+6. Compatible CLI: `export TESHI_CLI=...` in **external** terminals (Desktop sets it automatically).
 
-If any prerequisite is missing, stop and tell the user what to do in the Desktop UI first (see [doc/browser-modes.md](../../doc/browser-modes.md)).
-
-## Context Files
-
-| File | Purpose |
-|------|---------|
-| `.teshi/active-step.json` | Selected feature path, scenario, step line, step text |
-| `.teshi/cdp-endpoint.json` | `mode` (`chrome` \| `embedded`), `ws_url`, `page_url`, optional `extension_connected` |
-| `.teshi/pending-locator.json` | Written by `teshi steps propose`; reviewed by Desktop/web |
-| `.teshi/step-bindings/{feature}.json` | Written only after user confirmation; commit this file |
-
-Do **not** write `.locators.md`. It is deprecated and no longer part of the workflow.
-
-## Workflow
-
-### 1. Check CLI and load context
-
-Resolve the CLI command:
+**Before any step:** run health check (RVP R0):
 
 ```bash
 TESHI=${TESHI_CLI:-teshi}
-$TESHI --version
-$TESHI browser navigate --help
-$TESHI steps propose --help
+$TESHI browser doctor || { $TESHI browser reconnect && $TESHI browser doctor; }
 ```
 
-If any command fails, stop and ask the user to install a newer teshi MSI, fix PATH, or set `TESHI_CLI` to a compatible development binary.
+**Hard rule:** never propose after a single snapshot without completing RVP R3–R4.
 
-Read `.teshi/active-step.json` and `.teshi/cdp-endpoint.json`.
+## Context files
 
-Extract:
+| File | Purpose |
+|------|---------|
+| `.teshi/active-step.json` | Selected feature, scenario, step line, step text |
+| `.teshi/cdp-endpoint.json` | `mode`, `ws_url`, `page_url` |
+| `.teshi/pending-locator.json` | Written by `teshi steps propose` |
+| `.teshi/step-bindings/{feature}.json` | Confirmed bindings (commit) |
+| `.teshi/logs/locator-verify.jsonl` | R4–R5 audit log (strict gate) |
 
-- `step_text`, `step_keyword`, `step_line`, `feature_relative_path`
-- `mode`, `ws_url`, `page_url`
-- For `mode: "chrome"`, confirm `extension_connected` is true before browser commands; if false, ask the user to load the extension and retry Connect Chrome.
+Do **not** write `.locators.md`.
 
-### 2. Handle explicit URL navigation steps
+## §2.5 — Open project (web-ui SUT)
 
-If the selected step clearly means opening a URL and contains an explicit `http(s)` or `file` URL, navigate first:
+**Forbidden:** `button:has-text("D:\...")` or any `has-text` with Windows path backslashes.
+
+Preferred — API binding:
 
 ```bash
-$TESHI browser navigate '<url>'
+$TESHI browser verify --step-line 11 --selector '' --action open_project \
+  --value-arg 'D:/Dev/Rust/teshi'
+
+$TESHI steps propose --strategy api --action open_project \
+  --value-arg 'D:/Dev/Rust/teshi' --confidence 1.0 \
+  --rationale '{"evidence":"SUT projects/open API","match_count":1,"execute_ok":true}'
 ```
 
-Then propose the navigation binding:
+Fallback — stable testid (only if `open_project` unavailable):
 
 ```bash
-$TESHI steps propose \
-  --strategy url \
-  --action navigate \
-  --value-arg '<url>' \
-  --confidence 1.0 \
-  --rationale 'Step explicitly opens this URL'
+$TESHI steps propose --strategy testid \
+  --value '[data-testid="WelcomeRecent-D__Dev_Rust_teshi"]' \
+  --action click ...
 ```
 
-Tell the user to confirm or reject the navigation binding in the Locator panel, then wait:
+## §2.6 — Terminal input
+
+xterm steps **must** use `type` (fill + Enter). **Never** propose `fill` on `.xterm-helper-textarea`.
 
 ```bash
-$TESHI steps wait --until either --timeout 120
-```
+$TESHI browser verify --step-line 13 --selector '.xterm-helper-textarea' \
+  --action type --value-arg 'touch README.md'
 
-If the proposal is rejected, stop. Do not automatically re-propose. If the step is not an explicit URL navigation step, continue below.
-
-### 3. Inspect the page
-
-Use the stable CLI wrapper:
-
-Recommended inspection order:
-
-1. `$TESHI browser snapshot`
-2. Match elements to `step_text`
-3. Stable selectors: `data-testid` > `[role=...][name=...]` > unique text > CSS path
-
-```bash
-$TESHI browser snapshot
-$TESHI browser highlight '[data-testid="login-btn"]'
-```
-
-Verify selectors before proposing (use `--value-arg` for fill/assert_text/select/press_key, same as `steps propose`):
-
-```bash
-$TESHI browser execute --selector '[data-testid="login-btn"]' --action click
-$TESHI browser execute --selector 'input[name=email]' --action fill --value-arg 'demo@example.com'
-$TESHI browser execute --selector 'h1' --action assert_text --value-arg 'Welcome'
-```
-
-On slow pages, allow a longer snapshot wait: `$TESHI browser snapshot --timeout-ms 90000`.
-
-### 4. Infer locators
-
-Produce **1–3** candidates ranked by stability and match to `step_text`.
-
-For click steps, set `"action": "click"`. Map keyword intent:
-
-- **When** → interaction (click, fill, select)
-- **Then** → assertion target (visible text, element state)
-
-Each candidate:
-
-```json
-{
-  "rank": 1,
-  "strategy": "css",
-  "value": "[data-testid=\"login-btn\"]",
-  "action": "click",
-  "value_arg": null,
-  "confidence": 0.92,
-  "rationale": "Step mentions login button; unique data-testid on page"
-}
-```
-
-### 5. Highlight the primary candidate
-
-Before writing the proposal, highlight rank **1**:
-
-```bash
-$TESHI browser highlight '<rank-1 selector>'
-```
-
-If highlight fails (e.g. DevTools open on the tab in chrome mode), lower confidence and explain in `rationale`.
-
-### 6. Propose and wait
-
-Write the pending proposal with `teshi steps propose`:
-
-```bash
-$TESHI steps propose \
-  --strategy css \
-  --value '[data-testid="login-btn"]' \
-  --action click \
-  --confidence 0.92 \
-  --rationale 'Step mentions login button; unique data-testid on page' \
+$TESHI steps propose --strategy css --value '.xterm-helper-textarea' \
+  --action type --value-arg 'touch README.md' --confidence 0.95 \
+  --rationale '{"evidence":"xterm helper textarea","match_count":1,"execute_ok":true}' \
   --highlight-applied
 ```
 
-For `fill`, `assert_text`, `select`, and `press_key`, pass `--value-arg`. Sensitive values should be placeholders such as `${LOGIN_PW}`, not real secrets.
+Alternative: split into two Gherkin steps (`fill` + `press_key Enter`) — second choice.
 
-Tell the user to review the highlighted element and click **Confirm** or **Reject** in the Locator panel. Then wait:
+## §3 — Locator Verification Protocol (RVP)
+
+Complete **all** rounds before `teshi steps propose`.
+
+| Round | Name | Required action | On failure |
+|-------|------|-----------------|------------|
+| R0 | Health | `browser doctor` (+ reconnect) | Stop; do not record |
+| R1 | Context | Read `active-step.json` + `cdp-endpoint.json`; URL/tab matches step | Navigate / open_project / switch tab |
+| R2 | Evidence | `browser snapshot` (slow: `--timeout-ms 90000`); cite role/name/testid in reply | Do not guess selector |
+| R3 | Uniqueness | Confirm **match count = 1** per candidate (execute or snapshot tree) | Refine selector |
+| R4 | Execute trial | Same action/value as propose: `browser execute` or `browser verify` | Do not propose |
+| R5 | Highlight | `browser highlight` on rank-1; must succeed | confidence ≤ 0.5 or change selector |
+| R6 | Preflight replay | If feature has prior bindings: `browser replay --until-line N-1 --non-interactive --yes` | Fix earlier steps first |
+
+### R4 example (Then assert file visible)
 
 ```bash
+# Ensure Files tab first if needed
+$TESHI browser execute --selector '[data-testid="FileTreeTab"]' --action click
+
+$TESHI browser verify --step-line 15 \
+  --selector '[data-testid="FileTreeNode-README.md"]' \
+  --action assert_visible
+
+$TESHI browser highlight '[data-testid="FileTreeNode-README.md"]'
+```
+
+### R6 example
+
+```bash
+$TESHI browser replay --until-line 14 --non-interactive --yes
+```
+
+### Rationale JSON (for `--rationale`)
+
+Include: `evidence`, `match_count`, `execute_ok`, `page_url`, optional `assumptions`.
+
+### Confidence rules
+
+- No R4 execute/verify → **forbidden** to propose
+- Highlight fail → confidence ≤ 0.5
+- match_count > 1 → forbidden unless user confirms in writing
+
+### Strict gate
+
+`TESHI_LOCATOR_STRICT=1` requires a matching entry in `.teshi/logs/locator-verify.jsonl` from `teshi browser verify`.
+
+## Explicit URL navigation steps
+
+If step text contains an explicit `http(s)` URL:
+
+```bash
+$TESHI browser navigate '<url>'
+$TESHI steps propose --strategy url --action navigate --value-arg '<url>' \
+  --confidence 1.0 --rationale 'Step explicitly opens this URL'
 $TESHI steps wait --until either --timeout 120
 ```
 
-If wait exits rejected/non-zero, stop and tell the user the step was rejected. Do not automatically re-propose.
+## Infer locators (after R2)
+
+Produce **2–3** candidates with match counts. Only rank-1 passing R3–R4 may be proposed.
+
+Map keyword intent:
+
+- **When/And** → click, type, fill, select, press_key
+- **Then/And** → assert_visible, assert_text
+
+## Propose and wait
+
+```bash
+$TESHI steps propose \
+  --strategy testid \
+  --value '[data-testid="FileTreeNode-README.md"]' \
+  --action assert_visible \
+  --confidence 0.95 \
+  --rationale '{"evidence":"file tree node README.md","match_count":1,"execute_ok":true}' \
+  --highlight-applied
+
+$TESHI steps wait --until either --timeout 120
+```
+
+If rejected, stop — do not auto re-propose.
 
 ## Selector guidelines
 
-- Prefer selectors that match **one** element.
-- Avoid brittle positional selectors (`nth-child`) unless no alternative exists.
-- Quote dynamic text with care; prefer partial text or role-based selectors.
-- If the step is ambiguous, state assumptions in `rationale` and offer multiple candidates.
+- Prefer `[data-testid="..."]` on SUT panels.
+- **Forbidden:** `has-text` with `\` (Windows paths).
+- **Forbidden:** `button:has-text("D:` path fragments.
+- File tree assertion: click `FileTreeTab` if not on Files tab, then `assert_visible` `FileTreeNode-<name>`.
+- One element per selector; avoid brittle `nth-child`.
 
 ## Do not
 
-- Edit `.feature` files or step definitions in this workflow.
-- Write `{stem}.locators.md`.
-- Overwrite `active-step.json` or `cdp-endpoint.json`.
-- Start Embedded when the user needs a logged-in Chrome session (use Connect Chrome instead).
-- Confirm on the user's behalf; visual confirmation belongs to Desktop/web.
+- Edit `.feature` files (use **bdd-feature-author**).
+- Propose without R4 execute matching the binding action.
+- Use `click` in execute but `assert_visible` in propose (action mismatch).
+- Skip R6 when ≥1 confirmed binding exists.
+- Confirm on the user's behalf.
 
-## Example agent summary to user
+## Example summary to user
 
-> I read the selected step "When I click the login button", inspected the page at `/login`, highlighted `[data-testid="login-btn"]`, and proposed it through `teshi steps`. Please confirm or reject it in the Locator panel.
+> Verification L15: R0 ok, snapshot shows README.md node, verify assert_visible ok, highlight ok, replay through L14 ok. Proposed `[data-testid="FileTreeNode-README.md"]`. Please confirm in Locator panel.

@@ -138,11 +138,12 @@ impl LocatorWatcherState {
         }
     }
 
-    /// Starts watching the pending locator file under the opened project.
+    /// Starts watching `.teshi` locator files under the opened project.
     pub fn watch_project(&self, project_root: &Path, rt: Arc<TeshiRuntime>) -> Result<()> {
         self.clear()?;
         let teshi = ensure_teshi_dir(project_root)?;
         let pending_path = pending_locator_path(project_root);
+        let active_path = active_step_path(project_root);
 
         let rt_watch = Arc::clone(&rt);
         let root = project_root.to_path_buf();
@@ -152,6 +153,9 @@ impl LocatorWatcherState {
                     if event.paths.iter().any(|p| p == &pending_path) {
                         emit_pending_locator(&rt_watch, &root);
                     }
+                    if event.paths.iter().any(|p| p == &active_path) {
+                        emit_active_step_from_disk(&rt_watch, &root);
+                    }
                 }
             },
             Config::default().with_poll_interval(std::time::Duration::from_millis(300)),
@@ -159,6 +163,7 @@ impl LocatorWatcherState {
         watcher.watch(&teshi, RecursiveMode::NonRecursive)?;
         *self.watcher.lock().unwrap() = Some(watcher);
         emit_pending_locator(&rt, project_root);
+        emit_active_step_from_disk(&rt, project_root);
         Ok(())
     }
 
@@ -350,6 +355,57 @@ fn emit_pending_locator(rt: &TeshiRuntime, project_root: &Path) {
     }
 }
 
+/// Emits `active-step-changed` when `.teshi/active-step.json` updates (CLI or Desktop).
+fn emit_active_step_from_disk(rt: &TeshiRuntime, project_root: &Path) {
+    let path = active_step_path(project_root);
+    if !path.exists() {
+        rt.events
+            .emit("active-step-changed", Option::<ActiveStep>::None);
+        return;
+    }
+    match read_json::<ActiveStep>(&path) {
+        Ok(active) => {
+            rt.events.emit("active-step-changed", Some(active));
+        }
+        Err(err) => {
+            tracing::warn!("failed to read active step: {err}");
+            rt.events
+                .emit("active-step-changed", Option::<ActiveStep>::None);
+        }
+    }
+}
+
+/// Returns true when the on-disk active step disagrees with a pending proposal's step ref.
+pub fn active_step_mismatch_with_pending(
+    project_root: &Path,
+    pending: &PendingLocator,
+) -> Result<bool> {
+    let path = active_step_path(project_root);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let active: ActiveStep = read_json(&path)?;
+    Ok(
+        active.feature_relative_path != pending.step_ref.feature_relative_path
+            || active.step_line != pending.step_ref.step_line,
+    )
+}
+
+fn ensure_confirm_step_alignment(project_root: &Path, pending: &PendingLocator) -> Result<()> {
+    if active_step_mismatch_with_pending(project_root, pending)? {
+        anyhow::bail!(
+            "active step (line {}) does not match pending proposal (line {}); \
+             run `teshi steps select --line {}` or reject the proposal",
+            read_active_step(project_root)
+                .map(|s| s.step_line.to_string())
+                .unwrap_or_else(|_| "?".to_string()),
+            pending.step_ref.step_line,
+            pending.step_ref.step_line
+        );
+    }
+    Ok(())
+}
+
 fn read_step_bindings_file(
     project_root: &Path,
     feature_relative_path: &str,
@@ -435,6 +491,8 @@ fn confirm_pending_locator_file(
     if pending.status != "pending" {
         anyhow::bail!("no pending locator proposal");
     }
+
+    ensure_confirm_step_alignment(project_root, &pending)?;
 
     let mut candidate = pending
         .candidates
@@ -637,6 +695,26 @@ pub fn list_step_bindings(
     read_step_bindings_file(project_root, feature_relative_path)
 }
 
+/// Removes a confirmed binding for one step line.
+///
+/// # Errors
+///
+/// Returns an error when no binding exists for the line or the file cannot be written.
+pub fn unbind_step_binding(
+    project_root: &Path,
+    feature_relative_path: &str,
+    step_line: usize,
+) -> Result<Option<StepBinding>> {
+    let feature_relative = normalize_feature_relative_path(project_root, feature_relative_path)?;
+    let mut bindings = read_step_bindings_file(project_root, &feature_relative)?;
+    let Some(idx) = bindings.steps.iter().position(|s| s.step_line == step_line) else {
+        return Ok(None);
+    };
+    let removed = bindings.steps.remove(idx);
+    write_step_bindings_file(project_root, &bindings)?;
+    Ok(Some(removed))
+}
+
 /// Resolves confirmed binding steps up to an optional line number.
 ///
 /// # Errors
@@ -827,13 +905,17 @@ pub fn step_binding_statuses(
 
 /// Waits until the pending proposal reaches the requested terminal state.
 ///
+/// When `auto_confirm` is true and the deadline passes with a still-pending proposal,
+/// confirms automatically unless the active step disagrees with the proposal (then rejects).
+///
 /// # Errors
 ///
-/// Returns an error when the wait times out or the status file cannot be read.
+/// Returns an error when the wait times out without auto-confirm, or files cannot be read.
 pub fn wait_for_step_status(
     project_root: &Path,
     until: StepWaitUntil,
     timeout: Duration,
+    auto_confirm: bool,
 ) -> Result<StepWaitResult> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -857,7 +939,30 @@ pub fn wait_for_step_status(
             }
         }
         if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for step proposal");
+            if !auto_confirm {
+                anyhow::bail!("timed out waiting for step proposal");
+            }
+            let Some(pending) = read_pending_locator(project_root)? else {
+                anyhow::bail!("timed out waiting for step proposal");
+            };
+            if pending.status != "pending" {
+                return Ok(StepWaitResult {
+                    status: pending.status.clone(),
+                    reason: pending.status,
+                });
+            }
+            if active_step_mismatch_with_pending(project_root, &pending)? {
+                reject_pending_locator_file(project_root)?;
+                return Ok(StepWaitResult {
+                    status: "rejected".to_string(),
+                    reason: "auto-confirm skipped: active step mismatch".to_string(),
+                });
+            }
+            confirm_pending_locator_file(project_root, 1, None)?;
+            return Ok(StepWaitResult {
+                status: "confirmed".to_string(),
+                reason: "auto-confirmed after timeout".to_string(),
+            });
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -907,6 +1012,22 @@ pub async fn reject_locator(rt: &TeshiRuntime) -> Result<(), String> {
 /// Clears a stale pending proposal without persisting a locator.
 pub async fn abandon_pending_locator(rt: &TeshiRuntime) -> Result<(), String> {
     reject_locator(rt).await
+}
+
+/// Removes a confirmed step binding for the open project.
+pub async fn unbind_step(
+    rt: &TeshiRuntime,
+    feature_path: String,
+    step_line: u32,
+) -> Result<Option<StepBinding>, String> {
+    let project_root = rt
+        .project
+        .root
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "no project open".to_string())?;
+    unbind_step_binding(&project_root, &feature_path, step_line as usize).map_err(|e| e.to_string())
 }
 
 /// Starts watching pending locator changes for the opened project.

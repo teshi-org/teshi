@@ -1,7 +1,9 @@
 pub mod auth;
 pub mod browser;
+pub mod browser_endpoint;
 pub mod desktop;
 pub mod export;
+pub mod locator_verify;
 pub mod steps;
 pub mod winapp;
 
@@ -140,6 +142,8 @@ pub enum StepsCommand {
     Resolve(StepsResolveArgs),
     /// List persisted bindings and pending status for a feature
     List(StepsListArgs),
+    /// Remove a confirmed binding for one step line
+    Unbind(StepsUnbindArgs),
 }
 
 #[derive(Debug, Args)]
@@ -168,6 +172,9 @@ pub struct StepsProposeArgs {
     /// Whether the primary candidate was highlighted successfully
     #[arg(long, default_value_t = false)]
     pub highlight_applied: bool,
+    /// Require active-step.json line to match before proposing
+    #[arg(long)]
+    pub line: Option<usize>,
 }
 
 #[derive(Debug, Args)]
@@ -188,6 +195,9 @@ pub struct StepsWaitArgs {
     /// Timeout in seconds
     #[arg(long, default_value_t = 120)]
     pub timeout: u64,
+    /// On timeout, auto-confirm pending proposal (or reject on step mismatch)
+    #[arg(long)]
+    pub auto_confirm: bool,
 }
 
 #[derive(Debug, Args)]
@@ -209,6 +219,16 @@ pub struct StepsListArgs {
 
 #[derive(Debug, Args)]
 pub struct StepsSelectArgs {
+    /// Feature path relative to the project root
+    #[arg(long)]
+    pub feature: String,
+    /// 1-based source line of the Gherkin step
+    #[arg(long)]
+    pub line: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct StepsUnbindArgs {
     /// Feature path relative to the project root
     #[arg(long)]
     pub feature: String,
@@ -245,6 +265,14 @@ pub enum BrowserCommand {
     Execute(BrowserExecuteArgs),
     /// Replay confirmed step bindings
     Replay(BrowserReplayArgs),
+    /// Start headless Playwright sidecar for CI/scripts (writes `.teshi/cdp-endpoint.json`)
+    ServeEmbedded(BrowserServeEmbeddedArgs),
+    /// Check sidecar health (TCP + snapshot probe)
+    Doctor,
+    /// Restart embedded sidecar and refresh `.teshi/cdp-endpoint.json`
+    Reconnect(BrowserReconnectArgs),
+    /// Highlight + execute a locator and append verification log (RVP R4–R5)
+    Verify(BrowserVerifyArgs),
 }
 
 #[derive(Debug, Args)]
@@ -302,6 +330,45 @@ pub struct BrowserReplayArgs {
     /// Alias for --non-interactive
     #[arg(long)]
     pub yes: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserServeEmbeddedArgs {
+    /// Project directory (default: current working directory)
+    #[arg(long)]
+    pub project: Option<PathBuf>,
+    /// Navigate the embedded browser to this URL after the sidecar starts
+    #[arg(long)]
+    pub navigate: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserReconnectArgs {
+    /// Navigate after reconnect (default: last page_url from cdp-endpoint.json)
+    #[arg(long)]
+    pub navigate: Option<String>,
+    /// Seconds to wait for the new sidecar (default 45)
+    #[arg(long, default_value_t = 45)]
+    pub wait_secs: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserVerifyArgs {
+    /// Step line this verification applies to (for strict propose gate)
+    #[arg(long)]
+    pub step_line: u32,
+    /// CSS selector
+    #[arg(long)]
+    pub selector: String,
+    /// Locator action (must match a future `steps propose --action`)
+    #[arg(long, default_value = "click")]
+    pub action: String,
+    /// Optional value for fill/type/assert_text/select/press_key
+    #[arg(long)]
+    pub value_arg: Option<String>,
+    /// Timeout in milliseconds
+    #[arg(long, default_value_t = 5000)]
+    pub timeout_ms: u64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -401,6 +468,9 @@ pub struct WinAppReplayArgs {
     /// Alias for --non-interactive
     #[arg(long)]
     pub yes: bool,
+    /// Launch this executable and attach before replay (when not already attached)
+    #[arg(long)]
+    pub launch: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
