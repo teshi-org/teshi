@@ -555,7 +555,9 @@ async def run_embedded(
         finally:
             clients.discard(websocket)
 
-    async with websockets.serve(handler, host, port):
+    async with websockets.serve(handler, host, port) as server:
+        actual_port = server.sockets[0].getsockname()[1]
+        print(actual_port, flush=True)
         if no_preview_stream:
             # CI/CLI mode: avoid concurrent JPEG screencast with locator commands.
             await asyncio.Future()
@@ -1134,7 +1136,9 @@ async def run_chrome(
             return
         await handle_desktop_websocket(websocket)
 
-    async with websockets.serve(connection_handler, host, port):
+    async with websockets.serve(connection_handler, host, port) as server:
+        actual_port = server.sockets[0].getsockname()[1]
+        print(actual_port, flush=True)
         await asyncio.gather(http_task, asyncio.Future())
 
 

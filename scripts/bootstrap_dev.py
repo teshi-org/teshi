@@ -267,6 +267,15 @@ def _run_version(binary: Path) -> str | None:
         return None
 
 
+def _binary_build_time(binary: Path) -> str:
+    """Return a short build-time label (e.g. '02:44') or '' if file missing."""
+    try:
+        mtime = binary.stat().st_mtime
+        return datetime.fromtimestamp(mtime).strftime("%H:%M")
+    except OSError:
+        return ""
+
+
 def _newest_mtime(root: Path) -> float:
     latest = 0.0
     if not root.is_dir():
@@ -458,6 +467,7 @@ def _probe_teshi_cli(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> Ite
     binary = cfg.teshi_bin
     repo_v = _read_toml_version(cfg.repo_root / "Cargo.toml")
     run_v = _run_version(binary)
+    build_time = _binary_build_time(binary)
     debug_pids = _pids_running_binary(binary)
     external_installs = _external_teshi_pids(cfg)
 
@@ -502,9 +512,10 @@ def _probe_teshi_cli(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> Ite
 
     managed = [p for p in debug_pids if p in supervisor.managed_pids]
     all_pids = debug_pids + [pid for pid, _ in external_installs]
+    ver = f"{run_v} @{build_time}" if run_v and build_time else (run_v or "—")
     return ItemProbe(
         name="teshi_cli",
-        version=run_v or "—",
+        version=ver,
         status=status,
         pids=all_pids,
         instances=len(all_pids),
@@ -518,6 +529,7 @@ def _probe_teshi_desktop(
 ) -> ItemProbe:
     binary = cfg.desktop_bin
     run_v = _run_version(binary)
+    build_time = _binary_build_time(binary)
     repo_v = _read_toml_version(cfg.repo_root / "desktop" / "src-tauri" / "Cargo.toml")
     debug_pids = _pids_running_binary(binary)
 
@@ -553,9 +565,10 @@ def _probe_teshi_desktop(
         status = ItemStatus.STALE
         detail = f"built {run_v}, repo {repo_v}; tauri dev will rebuild"
 
+    ver = f"{run_v} @{build_time}" if run_v and build_time else (run_v or "—")
     return ItemProbe(
         name="teshi_desktop",
-        version=run_v or "—",
+        version=ver,
         status=status,
         pids=all_pids,
         instances=len(all_pids),
@@ -569,6 +582,8 @@ def _probe_teshi_web(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> Ite
     url = f"{cfg.api_base}/api/v1/settings/recent"
     ok, msg = _http_ok(url)
     run_v = _run_version(cfg.teshi_bin)
+    build_time = _binary_build_time(cfg.teshi_bin)
+    ver = f"{run_v} @{build_time}" if run_v and build_time else (run_v or "—")
 
     status = ItemStatus.STOPPED
     if len(listeners) > 1:
@@ -587,7 +602,7 @@ def _probe_teshi_web(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> Ite
 
     return ItemProbe(
         name="teshi_web",
-        version=run_v or "—",
+        version=ver,
         status=status,
         pids=listeners,
         instances=len(listeners),
@@ -1157,7 +1172,7 @@ def _maybe_start_desktop(
         if any(mp.label == "teshi-desktop" and mp.popen.poll() is None for mp in supervisor.processes):
             return True
         # dead — fall through to restart
-    if any(mp.label == "teshi-desktop" for mp in supervisor.processes):
+    elif any(mp.label == "teshi-desktop" and mp.popen.poll() is None for mp in supervisor.processes):
         return True
     ui_ok, _ = _http_ok(f"http://127.0.0.1:{cfg.ui_port}/", require_200=True)
     if not ui_ok or not cfg.desktop_bin.is_file():
@@ -1184,7 +1199,7 @@ def _maybe_start_web(
         if any(mp.label == "teshi-web" and mp.popen.poll() is None for mp in supervisor.processes):
             return True
         # dead — fall through to restart
-    if any(mp.label == "teshi-web" for mp in supervisor.processes):
+    elif any(mp.label == "teshi-web" and mp.popen.poll() is None for mp in supervisor.processes):
         return True
     ui_ok, _ = _http_ok(f"http://127.0.0.1:{cfg.ui_port}/", require_200=True)
     if not ui_ok:
@@ -1213,7 +1228,7 @@ def _maybe_start_embedded(
         if any(mp.label == "serve-embedded" and mp.popen.poll() is None for mp in supervisor.processes):
             return True
         # dead — fall through to restart
-    if any(mp.label == "serve-embedded" for mp in supervisor.processes):
+    elif any(mp.label == "serve-embedded" and mp.popen.poll() is None for mp in supervisor.processes):
         return True
     api_ok, _ = _http_ok(
         f"{cfg.api_base}/api/v1/settings/recent", require_200=True

@@ -12,6 +12,9 @@ pub struct DesktopCli {
     /// Project directory (shortcut for `--project`)
     #[arg(value_name = "PATH")]
     pub path: Option<PathBuf>,
+    /// Auto-start embedded browser on startup
+    #[arg(long)]
+    pub start_embedded: bool,
 }
 
 impl DesktopCli {

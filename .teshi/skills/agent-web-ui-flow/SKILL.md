@@ -22,10 +22,14 @@ $TESHI --version   # must be >= 0.4.0
 export TESHI_CLI="${TESHI:-teshi}"   # external terminals do not inherit Desktop TESHI_CLI
 ```
 
-1. Open **teshi desktop** with the BDD project.
+1. Open **teshi desktop** with the BDD project:
+   - `teshi desktop --project . --start-embedded` — opens project and auto-starts embedded browser
+   - Or `teshi web --project . --start-embedded` — same UI via browser, also auto-starts embedded browser
+   - Or open manually: `teshi desktop --project .` then click **Start Embedded** in Browser panel.
 2. Start **SUT** per web-ui-bootstrap (dev: `:1420` Vite + `:1421` API).
-3. **Start Embedded** in Browser panel; navigate SUT URL with `?e2e=1`.
-4. Health check:
+3. **Browser panel** connects automatically (with `--start-embedded`) or click **Start Embedded**.
+4. Navigate SUT URL in the address bar (append `?e2e=1` for dev mode).
+5. Health check:
 
 ```bash
 $TESHI browser doctor || { $TESHI browser reconnect && $TESHI browser doctor; }
@@ -59,7 +63,7 @@ For each unbound step:
 - [x] R6 replay --until-line N-1 ok (if prior bindings exist)
 ```
 
-4. `teshi steps propose ...` then `teshi steps wait --until confirmed --timeout 120`
+4. `teshi steps propose ...` then `teshi steps wait --until confirmed --auto-confirm --timeout 120`
 
 Optional strict gate: `TESHI_LOCATOR_STRICT=1` requires prior `teshi browser verify`.
 

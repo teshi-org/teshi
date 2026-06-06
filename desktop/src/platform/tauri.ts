@@ -126,6 +126,10 @@ export const tauriRuntime: TeshiRuntimeApi = {
     await invoke("finalize_main_window_cmd");
   },
 
+  async readTextFile(path: string) {
+    return invoke<string>("read_text_file", { path });
+  },
+
   async onEvent<T>(event: string, handler: (payload: T) => void) {
     if (event === "terminal-output" || event === "terminal-exit") {
       terminalExclusiveUnsubs.get(event)?.();

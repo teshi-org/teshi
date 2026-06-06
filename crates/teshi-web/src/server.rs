@@ -1,5 +1,6 @@
 //! Axum routes mirroring legacy Tauri invoke commands.
 
+use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -58,6 +59,7 @@ pub async fn run_server(addr: SocketAddr, rt: SharedRuntime, dist: PathBuf) -> R
         .route("/api/v1/terminal/stop", post(api_terminal_stop))
         .route("/api/v1/terminal/resize", post(api_terminal_resize))
         .route("/api/v1/terminal/write", post(api_terminal_write))
+        .route("/api/v1/fs/read", get(api_read_file))
         .fallback_service(ServeDir::new(dist).append_index_html_on_directories(true))
         .layer(cors)
         .with_state(rt);
@@ -137,6 +139,18 @@ async fn api_recent() -> Result<Json<Vec<String>>, ApiError> {
 #[derive(Deserialize)]
 struct ListDirQuery {
     path: String,
+}
+
+async fn api_read_file(
+    Query(q): Query<ListDirQuery>,
+) -> Result<String, (StatusCode, String)> {
+    fs::read_to_string(&q.path)
+        .map_err(|e| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("read {}: {e}", q.path),
+            )
+        })
 }
 
 async fn api_list_dir(

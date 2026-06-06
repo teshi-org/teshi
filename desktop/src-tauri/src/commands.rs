@@ -1,5 +1,6 @@
 //! Thin Tauri command adapters over `teshi-runtime`.
 
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -215,6 +216,12 @@ pub async fn open_project_dir(app: AppHandle) -> Result<Option<String>, String> 
         .blocking_pick_folder();
 
     Ok(picked.map(|p| p.to_string()))
+}
+
+/// Read a text file from disk (used for `.teshi/cdp-endpoint.json` polling).
+#[tauri::command]
+pub fn read_text_file(path: String) -> Result<String, String> {
+    fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))
 }
 
 /// Confirms destructive switch/exit when runtime is active.

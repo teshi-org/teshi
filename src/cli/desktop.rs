@@ -4,7 +4,11 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 
 /// Spawns the `teshi-desktop` binary with the same project flags as this CLI.
-pub fn spawn_desktop(project: Option<&str>, path: Option<&str>) -> Result<()> {
+pub fn spawn_desktop(
+    project: Option<&str>,
+    path: Option<&str>,
+    start_embedded: bool,
+) -> Result<()> {
     let binary = resolve_desktop_binary()?;
     let mut cmd = Command::new(&binary);
     cmd.stdin(Stdio::inherit())
@@ -15,6 +19,9 @@ pub fn spawn_desktop(project: Option<&str>, path: Option<&str>) -> Result<()> {
         cmd.arg("--project").arg(project);
     } else if let Some(path) = path {
         cmd.arg(path);
+    }
+    if start_embedded {
+        cmd.arg("--start-embedded");
     }
 
     let status = cmd

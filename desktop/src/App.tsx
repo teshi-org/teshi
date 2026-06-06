@@ -381,6 +381,29 @@ function AppShell() {
     dispatch({ type: "SET_BROWSER", wsUrl: null, running: false, mode: null });
   };
 
+  // Poll for .teshi/cdp-endpoint.json when browser is not running.
+  // This allows `teshi browser serve-embedded` or `--start-embedded` to
+  // auto-connect the Desktop/web UI without clicking "Start Embedded".
+  useEffect(() => {
+    if (!state.projectRoot || state.browserRunning) return;
+    const endpoint = state.projectRoot.replace(/\\/g, "/") + "/.teshi/cdp-endpoint.json";
+    const timer = setInterval(async () => {
+      try {
+        const text = await getRuntime().readTextFile(endpoint);
+        const data = JSON.parse(text) as { ws_url?: string; mode?: string };
+        if (data.ws_url && data.mode === "embedded") {
+          clearInterval(timer);
+          // Let the runtime manage the sidecar lifecycle — it will
+          // re-adopt or restart the existing embedded browser.
+          startBrowserMode("embedded");
+        }
+      } catch {
+        // file not yet written — continue polling
+      }
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [state.projectRoot, state.browserRunning, dispatch]);
+
   useEffect(() => {
     if (!state.projectRoot || !browserFullscreen) return;
 

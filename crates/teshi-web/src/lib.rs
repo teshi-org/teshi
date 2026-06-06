@@ -9,8 +9,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Parser;
 use teshi_runtime::{
-    default_browser_service_script, default_winapp_service_script, open_project, RuntimeConfig,
-    TeshiRuntime,
+    default_browser_service_script, default_winapp_service_script, open_project,
+    start_browser_sidecar, BrowserMode, RuntimeConfig, TeshiRuntime,
 };
 use tracing::info;
 
@@ -31,6 +31,9 @@ pub struct WebOptions {
     /// Directory of built frontend static files (`desktop/dist`).
     #[arg(long)]
     pub dist: Option<PathBuf>,
+    /// Auto-start embedded browser after server starts.
+    #[arg(long)]
+    pub start_embedded: bool,
 }
 
 /// Runs the web host until the process is interrupted.
@@ -72,6 +75,17 @@ pub async fn run(opts: WebOptions) -> Result<()> {
 
     if !opts.no_open {
         webbrowser::open(&url).context("open browser")?;
+    }
+
+    if opts.start_embedded {
+        let trt = Arc::clone(&rt);
+        tokio::spawn(async move {
+            // Brief delay so the HTTP server finishes binding first
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if let Err(e) = start_browser_sidecar(trt, BrowserMode::Embedded).await {
+                tracing::error!("auto-start embedded browser via web: {e:#?}");
+            }
+        });
     }
 
     info!("teshi web listening on {url}");

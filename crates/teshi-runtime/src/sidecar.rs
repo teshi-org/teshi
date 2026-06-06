@@ -1,6 +1,6 @@
 //! Python Playwright sidecar management.
 
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -350,6 +350,62 @@ fn read_child_stderr(child: &mut Child) -> String {
     String::new()
 }
 
+/// Read the first line from the child's stdout and parse it as a port number.
+/// Uses a background thread so the main thread can poll for child exit and timeout.
+fn read_port_from_child_stdout(
+    child: &mut Child,
+    timeout: Duration,
+) -> Result<u16, BrowserError> {
+    let mut stdout = child.stdout.take().expect("stdout must be piped");
+    let deadline = Instant::now() + timeout;
+
+    let handle = std::thread::spawn(move || -> Option<u16> {
+        let mut line = String::new();
+        BufReader::new(&mut stdout)
+            .read_line(&mut line)
+            .ok()?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        trimmed.parse::<u16>().ok()
+    });
+
+    loop {
+        if handle.is_finished() {
+            return match handle.join().unwrap() {
+                Some(port) => Ok(port),
+                None => Err(BrowserError {
+                    message: "Browser sidecar printed invalid port.".into(),
+                    hint: None,
+                }),
+            };
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            let detail = read_child_stderr(child);
+            let message = if detail.is_empty() {
+                format!("Browser sidecar exited during startup (status: {status}).")
+            } else {
+                format!("Browser sidecar exited during startup (status: {status}): {detail}")
+            };
+            return Err(BrowserError {
+                message,
+                hint: Some(
+                    "Check that Python dependencies (websockets, playwright) are installed."
+                        .into(),
+                ),
+            });
+        }
+        if Instant::now() >= deadline {
+            return Err(BrowserError {
+                message: "Timed out waiting for browser sidecar to report port.".into(),
+                hint: None,
+            });
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Frees port 17373 or reuses an existing bridge for the same project.
 fn prepare_chrome_discovery(project_root: &Path) -> Result<Option<String>, BrowserError> {
     if !port_is_open(CHROME_DISCOVERY_PORT) {
@@ -489,10 +545,6 @@ pub async fn start_browser_sidecar(
         });
     }
 
-    let port = pick_port().map_err(|e| BrowserError {
-        message: e.to_string(),
-        hint: None,
-    })?;
     let cdp_port = if mode == BrowserMode::Embedded {
         pick_port().map_err(|e| BrowserError {
             message: e.to_string(),
@@ -529,7 +581,7 @@ pub async fn start_browser_sidecar(
         "--host",
         "127.0.0.1",
         "--port",
-        &port.to_string(),
+        "0",
         "--mode",
         mode.as_str(),
         "--project-root",
@@ -544,7 +596,7 @@ pub async fn start_browser_sidecar(
         cmd.args(["--discovery-port", &CHROME_DISCOVERY_PORT.to_string()]);
     }
     let mut child = cmd
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| BrowserError {
@@ -552,10 +604,11 @@ pub async fn start_browser_sidecar(
             hint: None,
         })?;
 
+    let actual_port = read_port_from_child_stdout(&mut child, Duration::from_secs(10))?;
     let ready = if mode == BrowserMode::Chrome {
-        wait_until_chrome_ready(&mut child, port, CHROME_DISCOVERY_PORT)
+        wait_until_chrome_ready(&mut child, actual_port, CHROME_DISCOVERY_PORT)
     } else {
-        wait_until_ready(&mut child, port)
+        wait_until_ready(&mut child, actual_port)
     };
     if let Err(err) = ready {
         let _ = child.kill();
@@ -564,7 +617,7 @@ pub async fn start_browser_sidecar(
     }
 
     *rt.sidecar.child.lock().unwrap() = Some(child);
-    let ws_url = format!("ws://127.0.0.1:{port}");
+    let ws_url = format!("ws://127.0.0.1:{actual_port}");
     *rt.sidecar.ws_url.lock().unwrap() = Some(ws_url.clone());
     *rt.sidecar.mode.lock().unwrap() = Some(mode);
     *rt.project.browser_active.lock().unwrap() = true;

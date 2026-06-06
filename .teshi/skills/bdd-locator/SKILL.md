@@ -131,7 +131,7 @@ If step text contains an explicit `http(s)` URL:
 $TESHI browser navigate '<url>'
 $TESHI steps propose --strategy url --action navigate --value-arg '<url>' \
   --confidence 1.0 --rationale 'Step explicitly opens this URL'
-$TESHI steps wait --until either --timeout 120
+$TESHI steps wait --until confirmed --auto-confirm --timeout 120
 ```
 
 ## Infer locators (after R2)
@@ -154,7 +154,7 @@ $TESHI steps propose \
   --rationale '{"evidence":"file tree node README.md","match_count":1,"execute_ok":true}' \
   --highlight-applied
 
-$TESHI steps wait --until either --timeout 120
+$TESHI steps wait --until confirmed --auto-confirm --timeout 120
 ```
 
 If rejected, stop — do not auto re-propose.

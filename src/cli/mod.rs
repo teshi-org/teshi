@@ -56,6 +56,9 @@ pub enum Command {
         /// Project directory (shortcut for `--project`)
         #[arg(value_name = "PATH")]
         path: Option<String>,
+        /// Auto-start embedded browser on startup
+        #[arg(long)]
+        start_embedded: bool,
     },
     /// Run BDD features headlessly (CI / scripts; streams NDJSON runner events)
     Run {

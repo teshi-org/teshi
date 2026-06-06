@@ -148,8 +148,16 @@ fn main() -> Result<()> {
             let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
             return rt.block_on(teshi_web::run(options));
         }
-        Some(cli::Command::Desktop { project, path }) => {
-            return cli::desktop::spawn_desktop(project.as_deref(), path.as_deref());
+        Some(cli::Command::Desktop {
+            project,
+            path,
+            start_embedded,
+        }) => {
+            return cli::desktop::spawn_desktop(
+                project.as_deref(),
+                path.as_deref(),
+                start_embedded,
+            );
         }
         Some(cli::Command::Run {
             path,

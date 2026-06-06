@@ -233,6 +233,15 @@ export const webRuntime: TeshiRuntimeApi = {
     );
   },
 
+  async readTextFile(path: string) {
+    const q = new URLSearchParams({ path });
+    const res = await fetch(`${API}/fs/read?${q}`);
+    if (!res.ok) {
+      throw new Error(`read ${path}: ${res.statusText}`);
+    }
+    return res.text();
+  },
+
   async onEvent<T>(event: string, handler: (payload: T) => void) {
     ensureEventsSocket();
     // Only one PTY output subscriber: Vite HMR can remount the panel without running
