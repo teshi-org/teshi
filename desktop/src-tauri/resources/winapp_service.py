@@ -736,6 +736,10 @@ async def handle_command(session: WinAppSession, payload: dict[str, Any]) -> dic
             return session.clear_highlight()
         if cmd == "execute_locator":
             return session.execute(payload)
+        if cmd == "screenshot":
+            jpg = session.capture_jpeg()
+            b64 = base64.b64encode(jpg).decode("ascii")
+            return {"type": "response", "request_id": payload.get("request_id"), "ok": True, "screenshot": b64}
         if cmd == "get_target":
             return {"ok": True, "target": session.target_info()}
         return {"ok": False, "error": f"unknown command: {cmd}"}

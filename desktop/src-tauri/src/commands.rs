@@ -224,6 +224,22 @@ pub fn read_text_file(path: String) -> Result<String, String> {
     fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))
 }
 
+/// Read a file and return it as a data URL (base64-encoded with MIME prefix).
+#[tauri::command]
+pub fn read_file_base64(path: String) -> Result<String, String> {
+    let data = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?;
+    let mime = if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if path.ends_with(".png") {
+        "image/png"
+    } else {
+        "application/octet-stream"
+    };
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    Ok(format!("data:{mime};base64,{b64}"))
+}
+
 /// Confirms destructive switch/exit when runtime is active.
 #[tauri::command]
 pub async fn confirm_teardown(

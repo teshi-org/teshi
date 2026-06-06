@@ -52,3 +52,18 @@
 
 --- spawn 2026-06-06T02:36:06.382404 D:\Dev\Rust\teshi\target\debug\teshi.exe web --project D:\Dev\Rust\teshi --port 1421 --no-open ---
 [2m2026-06-05T18:36:07.044009Z[0m [32m INFO[0m [2mteshi_web[0m[2m:[0m teshi web listening on http://127.0.0.1:1421
+
+--- spawn 2026-06-06T02:42:34.333363 D:\Dev\Rust\teshi\target\debug\teshi.exe web --project D:\Dev\Rust\teshi --port 1421 --no-open ---
+[2m2026-06-05T18:42:34.741866Z[0m [32m INFO[0m [2mteshi_web[0m[2m:[0m teshi web listening on http://127.0.0.1:1421
+
+--- spawn 2026-06-06T02:46:20.631791 D:\Dev\Rust\teshi\target\debug\teshi.exe web --project D:\Dev\Rust\teshi --port 1421 --no-open ---
+[2m2026-06-05T18:46:21.289530Z[0m [32m INFO[0m [2mteshi_web[0m[2m:[0m teshi web listening on http://127.0.0.1:1421
+
+--- spawn 2026-06-06T12:48:36.350590 D:\Dev\Rust\teshi\target\debug\teshi.exe web --project D:\Dev\Rust\teshi --port 1421 --no-open ---
+[2m2026-06-06T04:48:37.140840Z[0m [32m INFO[0m [2mteshi_web[0m[2m:[0m teshi web listening on http://127.0.0.1:1421
+
+--- spawn 2026-06-06T13:13:15.752218 D:\Dev\Rust\teshi\target\debug\teshi.exe web --project D:\Dev\Rust\teshi --port 1421 --no-open ---
+[2m2026-06-06T05:13:16.415744Z[0m [32m INFO[0m [2mteshi_web[0m[2m:[0m teshi web listening on http://127.0.0.1:1421
+
+--- spawn 2026-06-06T14:23:02.594855 D:\Dev\Rust\teshi\target\debug\teshi.exe web --project D:\Dev\Rust\teshi --port 1421 --no-open ---
+[2m2026-06-06T06:23:03.263303Z[0m [32m INFO[0m [2mteshi_web[0m[2m:[0m teshi web listening on http://127.0.0.1:1421

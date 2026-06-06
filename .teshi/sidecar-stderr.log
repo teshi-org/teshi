@@ -1,0 +1,4 @@
+embedded sidecar ws_url=ws://127.0.0.1:57355
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop

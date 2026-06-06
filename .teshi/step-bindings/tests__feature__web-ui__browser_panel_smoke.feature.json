@@ -1,0 +1,342 @@
+{
+  "feature": "tests/feature/web-ui/browser_panel_smoke.feature",
+  "steps": [
+    {
+      "step_line": 10,
+      "step_keyword": "Given",
+      "step_text": "teshi web is open with the current project",
+      "step_text_normalized": "teshi web is open with the current project",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "url",
+        "value": "http://127.0.0.1:1420/?e2e=1",
+        "action": "navigate",
+        "value_arg": "http://127.0.0.1:1420/?e2e=1"
+      },
+      "confirmed_at": "2026-06-06T07:17:39.635317+00:00"
+    },
+    {
+      "step_line": 11,
+      "step_keyword": "And",
+      "step_text": "the Browser panel is visible",
+      "step_text_normalized": "the browser panel is visible",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"BrowserAddressBar\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:17:54.047450+00:00"
+    },
+    {
+      "step_line": 14,
+      "step_keyword": "When",
+      "step_text": "I click the Start Embedded button",
+      "step_text_normalized": "I click the Start Embedded button",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid=\"BrowserStartEmbedded\"]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-06-06T15:20:00+08:00"
+    },
+    {
+      "step_line": 15,
+      "step_keyword": "Then",
+      "step_text": "the Embedded browser should start",
+      "step_text_normalized": "the embedded browser should start",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"BrowserAddressBar\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:31:09.151979+00:00"
+    },
+    {
+      "step_line": 16,
+      "step_keyword": "And",
+      "step_text": "the status indicator should show \"connected\"",
+      "step_text_normalized": "the status indicator should show \"connected\"",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"BrowserGo\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:31:23.787335800+00:00"
+    },
+    {
+      "step_line": 19,
+      "step_keyword": "Given",
+      "step_text": "the Embedded browser is running",
+      "step_text_normalized": "the embedded browser is running",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid=\"BrowserStartEmbedded\"]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-06-06T07:38:56.166894400+00:00"
+    },
+    {
+      "step_line": 20,
+      "step_keyword": "When",
+      "step_text": "I type \"http://127.0.0.1:1421\" in the address bar",
+      "step_text_normalized": "i type \"http://127.0.0.1:1421\" in the address bar",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"BrowserAddressBar\"]",
+        "action": "fill"
+      },
+      "confirmed_at": "2026-06-06T07:32:22.133894+00:00"
+    },
+    {
+      "step_line": 21,
+      "step_keyword": "And",
+      "step_text": "I click the Go button",
+      "step_text_normalized": "i click the go button",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"BrowserGo\"]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-06-06T07:32:32.597857600+00:00"
+    },
+    {
+      "step_line": 22,
+      "step_keyword": "Then",
+      "step_text": "the browser should navigate to \"http://127.0.0.1:1421\"",
+      "step_text_normalized": "the browser should navigate to \"http://127.0.0.1:1421\"",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"BrowserAddressBar\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:32:43.029102600+00:00"
+    },
+    {
+      "step_line": 23,
+      "step_keyword": "And",
+      "step_text": "the address bar should display the current URL",
+      "step_text_normalized": "the address bar should display the current url",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"BrowserAddressBar\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:32:53.455773200+00:00"
+    },
+    {
+      "step_line": 27,
+      "step_keyword": "When",
+      "step_text": "I click the Zoom In button",
+      "step_text_normalized": "i click the zoom in button",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "button.browser-zoom-btn[text=\"+\"]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-06-06T07:33:22.707620300+00:00"
+    },
+    {
+      "step_line": 28,
+      "step_keyword": "Then",
+      "step_text": "the zoom level display should increase",
+      "step_text_normalized": "the zoom level display should increase",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "button.browser-zoom-label",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:33:33.137315+00:00"
+    },
+    {
+      "step_line": 29,
+      "step_keyword": "When",
+      "step_text": "I click the Zoom Out button",
+      "step_text_normalized": "i click the zoom out button",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "button.browser-zoom-btn[text=\"-\"]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-06-06T07:33:43.565757+00:00"
+    },
+    {
+      "step_line": 30,
+      "step_keyword": "Then",
+      "step_text": "the zoom level display should decrease",
+      "step_text_normalized": "the zoom level display should decrease",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "button.browser-zoom-label",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:33:54.000519800+00:00"
+    },
+    {
+      "step_line": 31,
+      "step_keyword": "When",
+      "step_text": "I click the Fit button",
+      "step_text_normalized": "i click the fit button",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "button.browser-zoom-fit-btn",
+        "action": "click"
+      },
+      "confirmed_at": "2026-06-06T07:34:04.429000500+00:00"
+    },
+    {
+      "step_line": 32,
+      "step_keyword": "Then",
+      "step_text": "the zoom level should reset to 100%",
+      "step_text_normalized": "the zoom level should reset to 100%",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "button.browser-zoom-label",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:34:14.854690200+00:00"
+    },
+    {
+      "step_line": 36,
+      "step_keyword": "When",
+      "step_text": "I click the Fullscreen button",
+      "step_text_normalized": "i click the fullscreen button",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "button.panel-header-icon-btn",
+        "action": "click"
+      },
+      "confirmed_at": "2026-06-06T07:34:43.420699400+00:00"
+    },
+    {
+      "step_line": 37,
+      "step_keyword": "Then",
+      "step_text": "the Browser panel should expand to fill the workspace",
+      "step_text_normalized": "the browser panel should expand to fill the workspace",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": ".layout--browser-fullscreen",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:34:54.113110800+00:00"
+    },
+    {
+      "step_line": 38,
+      "step_keyword": "And",
+      "step_text": "the Gherkin and Files panels should be hidden",
+      "step_text_normalized": "the gherkin and files panels should be hidden",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": ".layout--browser-fullscreen",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:35:04.536009400+00:00"
+    },
+    {
+      "step_line": 39,
+      "step_keyword": "When",
+      "step_text": "I press the Escape key",
+      "step_text_normalized": "i press the escape key",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "button.panel-header-icon-btn",
+        "action": "press_key"
+      },
+      "confirmed_at": "2026-06-06T07:35:14.973506300+00:00"
+    },
+    {
+      "step_line": 40,
+      "step_keyword": "Then",
+      "step_text": "the workspace should return to the three-panel layout",
+      "step_text_normalized": "the workspace should return to the three-panel layout",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"FileTreeTab\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:35:25.402971500+00:00"
+    },
+    {
+      "step_line": 44,
+      "step_keyword": "When",
+      "step_text": "I click the Disconnect button",
+      "step_text_normalized": "i click the disconnect button",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "button.panel-header-btn",
+        "action": "click"
+      },
+      "confirmed_at": "2026-06-06T07:35:46.285431300+00:00"
+    },
+    {
+      "step_line": 45,
+      "step_keyword": "Then",
+      "step_text": "the Embedded browser should stop",
+      "step_text_normalized": "the embedded browser should stop",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"BrowserStartEmbedded\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:35:56.708576600+00:00"
+    },
+    {
+      "step_line": 46,
+      "step_keyword": "And",
+      "step_text": "the Start Embedded button should reappear",
+      "step_text_normalized": "the start embedded button should reappear",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"BrowserStartEmbedded\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:36:07.148790700+00:00"
+    }
+  ]
+}

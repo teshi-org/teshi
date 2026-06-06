@@ -190,7 +190,7 @@ fn step_bindings_dir(project_root: &Path) -> PathBuf {
     teshi_dir(project_root).join("step-bindings")
 }
 
-fn sanitize_feature_path(feature_relative_path: &str) -> String {
+pub fn sanitize_feature_path(feature_relative_path: &str) -> String {
     let mut out = String::with_capacity(feature_relative_path.len());
     for ch in feature_relative_path.chars() {
         match ch {

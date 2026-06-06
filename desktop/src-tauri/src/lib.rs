@@ -17,10 +17,11 @@ use crate::commands::{
     abandon_pending_locator_cmd, check_project_switch_allowed_cmd, confirm_locator_cmd,
     confirm_teardown, get_active_step_cmd, get_pending_locator_cmd, get_project_root,
     get_project_settings_cmd, get_recent_projects_cmd, get_step_binding_statuses_cmd,
-    highlight_locator_cmd, list_dir, open_project, open_project_dir, read_text_file,
-    reject_locator_cmd, render_feature_cmd, resize_terminal, set_browser_active_cmd,
-    set_terminal_active_cmd, spawn_terminal, start_browser_sidecar, stop_browser_sidecar,
-    stop_terminal, sync_active_step_cmd, teardown_runtime, unbind_step_cmd, write_terminal,
+    highlight_locator_cmd, list_dir, open_project, open_project_dir, read_file_base64,
+    read_text_file, reject_locator_cmd, render_feature_cmd, resize_terminal,
+    set_browser_active_cmd, set_terminal_active_cmd, spawn_terminal, start_browser_sidecar,
+    stop_browser_sidecar, stop_terminal, sync_active_step_cmd, teardown_runtime, unbind_step_cmd,
+    write_terminal,
 };
 use crate::window_state::{
     take_legacy_window_size_from_settings, PendingLegacyWindowSize, PERSISTED_STATE_FLAGS,
@@ -81,6 +82,7 @@ pub fn run() {
             set_terminal_active_cmd,
             finalize_main_window_cmd,
             read_text_file,
+            read_file_base64,
         ])
         .setup(move |app| {
             let script = resolve_service_script(app, "browser_service.py")?;

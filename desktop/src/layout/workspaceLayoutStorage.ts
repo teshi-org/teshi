@@ -30,7 +30,7 @@ export type WorkspaceDockLayout = {
   dock: number;
 };
 
-export type WorkspaceDockTab = "locator" | "output" | "logs";
+export type WorkspaceDockTab = "locator" | "output" | "logs" | "screenshots";
 
 export type WorkspaceLayoutState = {
   version: 1;
@@ -138,7 +138,9 @@ export function dockLayoutFromGroupLayout(
 }
 
 function readDockTab(value: unknown): WorkspaceDockTab {
-  return value === "output" || value === "logs" ? value : "locator";
+  return value === "output" || value === "logs" || value === "screenshots"
+    ? value
+    : "locator";
 }
 
 function parseStoredMap(raw: string): StoredMap {

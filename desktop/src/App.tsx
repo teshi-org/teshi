@@ -384,7 +384,10 @@ function AppShell() {
   // Poll for .teshi/cdp-endpoint.json when browser is not running.
   // This allows `teshi browser serve-embedded` or `--start-embedded` to
   // auto-connect the Desktop/web UI without clicking "Start Embedded".
+  // Skipped during E2E self-tests (`?e2e=1`) so locator recording can observe
+  // the "Start Embedded" button state rather than jumping to connected mode.
   useEffect(() => {
+    if ((window as Window & { __TESHI_E2E__?: boolean }).__TESHI_E2E__) return;
     if (!state.projectRoot || state.browserRunning) return;
     const endpoint = state.projectRoot.replace(/\\/g, "/") + "/.teshi/cdp-endpoint.json";
     const timer = setInterval(async () => {
@@ -507,6 +510,7 @@ function AppShell() {
               activeStep={state.activeStep}
               pendingLocator={state.pendingLocator}
               stepBindingStatuses={state.stepBindingStatuses}
+              projectRoot={state.projectRoot}
               onToggle={() => dispatch({ type: "TOGGLE_DOCK" })}
               onTabChange={(tab) => dispatch({ type: "SET_DOCK_TAB", tab })}
               onPendingChange={(pending) => {

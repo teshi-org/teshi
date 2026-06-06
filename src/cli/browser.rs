@@ -14,9 +14,12 @@ use teshi_runtime::{
 
 use super::browser_endpoint::{
     auto_reconnect_enabled, doctor_endpoint, ensure_sidecar_healthy, read_cdp_endpoint,
-    reconnect_embedded, resolve_browser_project_root,
+    reconnect_embedded, resolve_browser_project_root, write_cdp_endpoint_from_rust,
 };
 use super::locator_verify::{LocatorVerifyRecord, append_locator_verify, verify_record_json};
+use super::replay_screenshots::{
+    ReplayScreenshotEntry, capture_and_save_screenshot, iso_now, load_or_create_index, save_index,
+};
 use super::{
     BrowserCommand, BrowserExecuteArgs, BrowserNavigateArgs, BrowserReconnectArgs,
     BrowserReplayArgs, BrowserSelectorArgs, BrowserServeEmbeddedArgs, BrowserSnapshotArgs,
@@ -227,6 +230,10 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
         return Err(anyhow!("no confirmed bindings found for {feature}"));
     }
 
+    let mut screenshot_entries: Vec<ReplayScreenshotEntry> = Vec::new();
+    let screenshot_dir = project_root.join(".teshi").join("logs").join("replay-screenshots");
+    let _ = fs::create_dir_all(&screenshot_dir);
+
     let non_interactive = args.non_interactive || args.yes;
     for (idx, step) in steps.iter().enumerate() {
         println!(
@@ -292,6 +299,26 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                 command_timeout_for_ms(timeout_ms),
             )?
         };
+        // Capture screenshot after each step (before ensure_ok so we capture even on failure)
+        if !args.dry_run {
+            match read_cdp_endpoint(project_root) {
+                Ok(endpoint) => {
+                    match capture_and_save_screenshot(
+                        &endpoint.ws_url,
+                        project_root,
+                        &teshi_runtime::sanitize_feature_path(&feature),
+                        step.step_line,
+                        &step.step_keyword,
+                        &step.step_text,
+                        &screenshot_dir,
+                    ) {
+                        Ok(entry) => screenshot_entries.push(entry),
+                        Err(e) => eprintln!("warning: screenshot capture failed at L{}: {e}", step.step_line),
+                    }
+                }
+                Err(e) => eprintln!("warning: cannot read cdp-endpoint for screenshot at L{}: {e}", step.step_line),
+            }
+        }
         ensure_ok(&response).with_context(|| {
             format!(
                 "replay failed at line {}: {} {}",
@@ -299,6 +326,22 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
             )
         })?;
     }
+
+    if !args.dry_run && !screenshot_entries.is_empty() {
+        let mut index = load_or_create_index(&screenshot_dir, &feature);
+        index.steps = screenshot_entries;
+        index.completed_at = Some(iso_now());
+        index.status = "completed".to_string();
+        if let Err(e) = save_index(&screenshot_dir, &index) {
+            eprintln!("warning: failed to write screenshot index: {e}");
+        }
+        println!("{}", serde_json::to_string(&json!({
+            "event": "replay_complete",
+            "screenshots_saved": index.steps.len(),
+            "screenshots_dir": screenshot_dir.to_string_lossy(),
+        }))?);
+    }
+
     Ok(())
 }
 
@@ -328,7 +371,7 @@ async fn serve_embedded_async(args: &BrowserServeEmbeddedArgs) -> Result<()> {
         RuntimeConfig {
             browser_service_script: dev_browser_script,
             winapp_service_script: default_winapp_service_script(),
-            embedded_no_preview_stream: true,
+            embedded_no_preview_stream: false,
         },
         None,
     );
@@ -343,6 +386,17 @@ async fn serve_embedded_async(args: &BrowserServeEmbeddedArgs) -> Result<()> {
 
     eprintln!("embedded sidecar ws_url={}", start.ws_url);
     eprintln!("cdp endpoint={}", start.cdp_endpoint_path);
+
+    // Ensure cdp-endpoint.json is written from the Rust side with the actual ws_url,
+    // so subsequent commands (e.g. navigate) don't race with the Python sidecar's write.
+    if let Err(e) = write_cdp_endpoint_from_rust(
+        &project_root,
+        &start.ws_url,
+        &start.mode,
+        "about:blank",
+    ) {
+        eprintln!("warning: failed to write cdp-endpoint.json: {e}");
+    }
 
     if let Some(url) = args.navigate.as_deref() {
         let timeout_ms = 15_000;

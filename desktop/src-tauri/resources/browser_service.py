@@ -460,6 +460,15 @@ async def handle_embedded_command(
         )
         return {"type": "response", "request_id": request_id, **result}
 
+    if cmd == "screenshot":
+        b64 = await session.screenshot_jpeg_b64()
+        return {
+            "type": "response",
+            "request_id": request_id,
+            "ok": True,
+            "screenshot": b64,
+        }
+
     return {
         "type": "response",
         "request_id": request_id,
@@ -548,7 +557,7 @@ async def run_embedded(
                         write_cdp_endpoint_file(
                             project_root,
                             mode="embedded",
-                            ws_url=f"ws://{host}:{port}",
+                            ws_url=f"ws://{host}:{actual_port}",
                             page_url=session.current_url(),
                             cdp_http_url=cdp_meta.get("http_url"),
                         )
@@ -558,6 +567,22 @@ async def run_embedded(
     async with websockets.serve(handler, host, port) as server:
         actual_port = server.sockets[0].getsockname()[1]
         print(actual_port, flush=True)
+        # Re-write cdp-endpoint.json with the actual WebSocket port so CLI commands
+        # (browser doctor / execute / snapshot) can find the sidecar. The initial
+        # write before websockets.serve used --port 0, which yields ws://...:0.
+        if project_root is not None:
+            try:
+                cdp_meta = fetch_playwright_cdp_endpoint(cdp_port)
+                write_cdp_endpoint_file(
+                    project_root,
+                    mode="embedded",
+                    ws_url=f"ws://{host}:{actual_port}",
+                    page_url=session.current_url(),
+                    cdp_http_url=cdp_meta.get("http_url"),
+                    extension_connected=False,
+                )
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+                print(f"warning: failed to rewrite cdp-endpoint.json: {exc}", file=sys.stderr)
         if no_preview_stream:
             # CI/CLI mode: avoid concurrent JPEG screencast with locator commands.
             await asyncio.Future()

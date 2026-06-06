@@ -2,7 +2,7 @@ import type { FeatureRenderPayload } from "../types";
 import type { ActiveStep, PendingLocator, StepBindingStatus } from "../locatorTypes";
 
 export type LayoutMode = "normal" | "browserFullscreen";
-export type DockTab = "locator" | "output" | "logs";
+export type DockTab = "locator" | "output" | "logs" | "screenshots";
 export type BrowserSessionMode = "embedded" | "chrome" | "winapp";
 
 export interface ProjectState {

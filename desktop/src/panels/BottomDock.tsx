@@ -1,6 +1,7 @@
 import type { DockTab } from "../context/projectState";
 import type { ActiveStep, PendingLocator } from "../locatorTypes";
 import { LocatorPanel } from "./LocatorPanel";
+import { ScreenshotsPanel } from "./ScreenshotsPanel";
 
 interface Props {
   expanded: boolean;
@@ -8,6 +9,7 @@ interface Props {
   activeStep: ActiveStep | null;
   pendingLocator: PendingLocator | null;
   stepBindingStatuses: Record<number, import("../locatorTypes").StepBindingStatus>;
+  projectRoot: string | null;
   onToggle: () => void;
   onTabChange: (tab: DockTab) => void;
   onPendingChange: (pending: PendingLocator | null) => void;
@@ -18,6 +20,7 @@ const TABS: { id: DockTab; label: string }[] = [
   { id: "locator", label: "Locator" },
   { id: "output", label: "Output" },
   { id: "logs", label: "Logs" },
+  { id: "screenshots", label: "Screenshots" },
 ];
 
 export function BottomDock({
@@ -26,6 +29,7 @@ export function BottomDock({
   activeStep,
   pendingLocator,
   stepBindingStatuses,
+  projectRoot,
   onToggle,
   onTabChange,
   onPendingChange,
@@ -77,6 +81,9 @@ export function BottomDock({
           )}
           {activeTab === "logs" && (
             <p className="placeholder">Application logs are written under AppData.</p>
+          )}
+          {activeTab === "screenshots" && (
+            <ScreenshotsPanel projectRoot={projectRoot} />
           )}
         </div>
       )}

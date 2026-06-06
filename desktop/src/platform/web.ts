@@ -242,6 +242,19 @@ export const webRuntime: TeshiRuntimeApi = {
     return res.text();
   },
 
+  async readFileAsDataUrl(path: string) {
+    const q = new URLSearchParams({ path });
+    const res = await fetch(`/api/v1/fs/read-binary?${q}`);
+    if (!res.ok) throw new Error(`read ${path}: ${res.statusText}`);
+    const blob = await res.blob();
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(new Error("Failed to read blob as data URL"));
+      reader.readAsDataURL(blob);
+    });
+  },
+
   async onEvent<T>(event: string, handler: (payload: T) => void) {
     ensureEventsSocket();
     // Only one PTY output subscriber: Vite HMR can remount the panel without running

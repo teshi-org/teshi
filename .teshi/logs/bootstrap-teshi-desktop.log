@@ -31,3 +31,18 @@
 --- spawn 2026-06-06T02:34:55.953343 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
 
 --- spawn 2026-06-06T02:36:05.379108 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-06T02:42:33.187720 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-06T02:46:19.432078 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-06T02:46:35.524234 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-06T12:48:35.283757 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-06T13:03:21.610969 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-06T13:13:14.597309 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+[0606/142222.355:ERROR:ui\gfx\win\window_impl.cc:172] Failed to unregister class Chrome_WidgetWin_0. Error = 1411
+
+--- spawn 2026-06-06T14:23:01.437331 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---

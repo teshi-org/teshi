@@ -9,6 +9,10 @@ use teshi_runtime::{
     StepBinding, read_active_step, resolve_step_bindings, send_sidecar_command_with_timeout,
 };
 
+use super::browser_endpoint::read_cdp_endpoint;
+use super::replay_screenshots::{
+    ReplayScreenshotEntry, capture_and_save_screenshot, iso_now, load_or_create_index, save_index,
+};
 use super::{
     WinAppAttachArgs, WinAppCommand, WinAppExecuteArgs, WinAppLaunchArgs, WinAppReplayArgs,
     WinAppSelectorArgs, WinAppSnapshotArgs,
@@ -138,6 +142,10 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
         return Err(anyhow!("no confirmed bindings found for {feature}"));
     }
 
+    let mut screenshot_entries: Vec<ReplayScreenshotEntry> = Vec::new();
+    let screenshot_dir = project_root.join(".teshi").join("logs").join("replay-screenshots");
+    let _ = fs::create_dir_all(&screenshot_dir);
+
     let non_interactive = args.non_interactive || args.yes;
     for (idx, step) in steps.iter().enumerate() {
         println!(
@@ -168,6 +176,26 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
             command_timeout_for_ms(timeout_ms),
             &format!("winapp-replay-{}", idx + 1),
         )?;
+        // Capture screenshot after each step (before ensure_ok so we capture even on failure)
+        if !args.dry_run {
+            match read_cdp_endpoint(project_root) {
+                Ok(endpoint) => {
+                    match capture_and_save_screenshot(
+                        &endpoint.ws_url,
+                        project_root,
+                        &teshi_runtime::sanitize_feature_path(&feature),
+                        step.step_line,
+                        &step.step_keyword,
+                        &step.step_text,
+                        &screenshot_dir,
+                    ) {
+                        Ok(entry) => screenshot_entries.push(entry),
+                        Err(e) => eprintln!("warning: screenshot capture failed at L{}: {e}", step.step_line),
+                    }
+                }
+                Err(e) => eprintln!("warning: cannot read cdp-endpoint for screenshot at L{}: {e}", step.step_line),
+            }
+        }
         ensure_ok(&response).with_context(|| {
             format!(
                 "replay failed at line {}: {} {}",
@@ -175,6 +203,22 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
             )
         })?;
     }
+
+    if !args.dry_run && !screenshot_entries.is_empty() {
+        let mut index = load_or_create_index(&screenshot_dir, &feature);
+        index.steps = screenshot_entries;
+        index.completed_at = Some(iso_now());
+        index.status = "completed".to_string();
+        if let Err(e) = save_index(&screenshot_dir, &index) {
+            eprintln!("warning: failed to write screenshot index: {e}");
+        }
+        println!("{}", serde_json::to_string(&json!({
+            "event": "replay_complete",
+            "screenshots_saved": index.steps.len(),
+            "screenshots_dir": screenshot_dir.to_string_lossy(),
+        }))?);
+    }
+
     Ok(())
 }
 

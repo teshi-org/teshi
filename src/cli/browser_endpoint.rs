@@ -222,6 +222,32 @@ pub fn reconnect_embedded(
     ))
 }
 
+/// Writes `cdp-endpoint.json` from the Rust side with the actual ws_url.
+/// Used after starting the sidecar to ensure the file exists before any command reads it.
+pub fn write_cdp_endpoint_from_rust(
+    project_root: &Path,
+    ws_url: &str,
+    mode: &str,
+    page_url: &str,
+) -> Result<()> {
+    let path = project_root.join(".teshi").join("cdp-endpoint.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
+    }
+    let payload = json!({
+        "mode": mode,
+        "ws_url": ws_url,
+        "page_url": page_url,
+        "bridge": "python",
+        "extension_connected": false,
+        "viewport": {"width": 1920, "height": 1080},
+    });
+    let text = serde_json::to_string_pretty(&payload).context("serialize cdp-endpoint")?;
+    std::fs::write(&path, text).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
 /// When enabled (default), runs doctor and one reconnect attempt before sidecar commands.
 pub fn auto_reconnect_enabled() -> bool {
     !matches!(

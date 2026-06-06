@@ -4,6 +4,7 @@ pub mod browser_endpoint;
 pub mod desktop;
 pub mod export;
 pub mod locator_verify;
+pub mod replay_screenshots;
 pub mod steps;
 pub mod winapp;
 

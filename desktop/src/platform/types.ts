@@ -31,4 +31,5 @@ export interface TeshiRuntimeApi {
   finalizeMainWindow?(): Promise<void>;
   onEvent<T>(event: string, handler: (payload: T) => void): Promise<() => void>;
   readTextFile(path: string): Promise<string>;
+  readFileAsDataUrl(path: string): Promise<string>;
 }

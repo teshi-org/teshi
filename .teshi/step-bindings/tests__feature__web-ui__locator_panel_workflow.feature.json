@@ -1,0 +1,271 @@
+{
+  "feature": "tests/feature/web-ui/locator_panel_workflow.feature",
+  "steps": [
+    {
+      "step_line": 10,
+      "step_keyword": "Given",
+      "step_text": "teshi web is open with the current project",
+      "step_text_normalized": "teshi web is open with the current project",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid=\"WelcomeRecent-_D_Dev_Rust_teshi\"]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-06-06T07:52:10.464985100+00:00"
+    },
+    {
+      "step_line": 11,
+      "step_keyword": "And",
+      "step_text": "a Gherkin feature file is selected and a step is highlighted",
+      "step_text_normalized": "a gherkin feature file is selected and a step is highlighted",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"GherkinStep-10\"]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-06-06T07:52:20.938264400+00:00"
+    },
+    {
+      "step_line": 12,
+      "step_keyword": "And",
+      "step_text": "a pending locator proposal exists for that step",
+      "step_text_normalized": "a pending locator proposal exists for that step",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"LocatorConfirm\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:52:31.366884100+00:00"
+    },
+    {
+      "step_line": 15,
+      "step_keyword": "When",
+      "step_text": "the bottom dock Locator tab is active",
+      "step_text_normalized": "the bottom dock locator tab is active",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": ".bottom-dock-toggle",
+        "action": "click"
+      },
+      "confirmed_at": "2026-06-06T07:52:41.795363500+00:00"
+    },
+    {
+      "step_line": 16,
+      "step_keyword": "Then",
+      "step_text": "the Locator panel should display the pending proposal",
+      "step_text_normalized": "the locator panel should display the pending proposal",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"LocatorConfirm\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:52:52.224114700+00:00"
+    },
+    {
+      "step_line": 17,
+      "step_keyword": "And",
+      "step_text": "the proposal should show the candidate strategy, selector, and action",
+      "step_text_normalized": "the proposal should show the candidate strategy, selector, and action",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"LocatorConfirm\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:53:02.684636400+00:00"
+    },
+    {
+      "step_line": 18,
+      "step_keyword": "And",
+      "step_text": "the Confirm button should be enabled",
+      "step_text_normalized": "the confirm button should be enabled",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"LocatorConfirm\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:53:13.109777200+00:00"
+    },
+    {
+      "step_line": 19,
+      "step_keyword": "And",
+      "step_text": "the Reject button should be enabled",
+      "step_text_normalized": "the reject button should be enabled",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"LocatorReject\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:53:23.535776200+00:00"
+    },
+    {
+      "step_line": 23,
+      "step_keyword": "When",
+      "step_text": "I click the Confirm button",
+      "step_text_normalized": "i click the confirm button",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"LocatorConfirm\"]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-06-06T07:53:52.149600700+00:00"
+    },
+    {
+      "step_line": 24,
+      "step_keyword": "Then",
+      "step_text": "the binding should be persisted to the step-bindings file",
+      "step_text_normalized": "the binding should be persisted to the step-bindings file",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"LocatorConfirm\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:54:02.579566600+00:00"
+    },
+    {
+      "step_line": 25,
+      "step_keyword": "And",
+      "step_text": "the step badge in the Gherkin panel should update to confirmed",
+      "step_text_normalized": "the step badge in the gherkin panel should update to confirmed",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": ".step-binding-badge",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:54:13.089757600+00:00"
+    },
+    {
+      "step_line": 28,
+      "step_keyword": "Given",
+      "step_text": "the Locator panel shows a pending proposal",
+      "step_text_normalized": "the locator panel shows a pending proposal",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"LocatorReject\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:54:23.537421800+00:00"
+    },
+    {
+      "step_line": 29,
+      "step_keyword": "When",
+      "step_text": "I click the Reject button",
+      "step_text_normalized": "i click the reject button",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"LocatorReject\"]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-06-06T07:54:33.962620600+00:00"
+    },
+    {
+      "step_line": 30,
+      "step_keyword": "Then",
+      "step_text": "the pending proposal should be discarded",
+      "step_text_normalized": "the pending proposal should be discarded",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"LocatorReject\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:54:44.396053800+00:00"
+    },
+    {
+      "step_line": 31,
+      "step_keyword": "And",
+      "step_text": "the Locator panel should show no pending proposal",
+      "step_text_normalized": "the locator panel should show no pending proposal",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"LocatorReject\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:54:54.823496800+00:00"
+    },
+    {
+      "step_line": 34,
+      "step_keyword": "Given",
+      "step_text": "the Gherkin panel shows a step with a confirmed binding",
+      "step_text_normalized": "the gherkin panel shows a step with a confirmed binding",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"GherkinPanel\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:55:05.250623700+00:00"
+    },
+    {
+      "step_line": 35,
+      "step_keyword": "When",
+      "step_text": "I click the Unbind button in the Locator panel",
+      "step_text_normalized": "i click the unbind button in the locator panel",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"LocatorUnbind\"]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-06-06T07:55:15.679340500+00:00"
+    },
+    {
+      "step_line": 36,
+      "step_keyword": "Then",
+      "step_text": "the binding should be removed from the step-bindings file",
+      "step_text_normalized": "the binding should be removed from the step-bindings file",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"LocatorUnbind\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:55:26.149013600+00:00"
+    },
+    {
+      "step_line": 37,
+      "step_keyword": "And",
+      "step_text": "the step badge should return to unbound status",
+      "step_text_normalized": "the step badge should return to unbound status",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"LocatorUnbind\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-06-06T07:55:36.703288300+00:00"
+    }
+  ]
+}
