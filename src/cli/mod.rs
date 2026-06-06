@@ -453,6 +453,9 @@ pub struct WinAppExecuteArgs {
     /// Timeout in milliseconds
     #[arg(long, default_value_t = 5000)]
     pub timeout_ms: u64,
+    /// Input mode: foreground (default) or background (non-intrusive PostMessage)
+    #[arg(long, default_value = "foreground")]
+    pub mode: String,
 }
 
 #[derive(Debug, Args)]
@@ -475,6 +478,9 @@ pub struct WinAppReplayArgs {
     /// Launch this executable and attach before replay (when not already attached)
     #[arg(long)]
     pub launch: Option<String>,
+    /// Input mode for all replay steps: foreground (default) or background (non-intrusive PostMessage)
+    #[arg(long, default_value = "foreground")]
+    pub mode: String,
 }
 
 #[derive(Debug, Subcommand)]

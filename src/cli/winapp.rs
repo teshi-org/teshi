@@ -117,6 +117,7 @@ fn execute(project_root: &Path, args: &WinAppExecuteArgs) -> Result<()> {
         args.timeout_ms,
         timeout,
         "winapp-execute",
+        &args.mode,
     )?;
     ensure_ok(&response)?;
     print_json_response(response)
@@ -175,6 +176,7 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
             timeout_ms,
             command_timeout_for_ms(timeout_ms),
             &format!("winapp-replay-{}", idx + 1),
+            &args.mode,
         )?;
         // Capture screenshot after each step (before ensure_ok so we capture even on failure)
         if !args.dry_run {
@@ -246,6 +248,7 @@ fn execute_locator(
     timeout_ms: u64,
     sidecar_timeout: Duration,
     request_id: &str,
+    mode: &str,
 ) -> Result<serde_json::Value> {
     send_winapp_command(
         project_root,
@@ -255,7 +258,8 @@ fn execute_locator(
             "selector": selector,
             "action": action,
             "value": value,
-            "timeout_ms": timeout_ms
+            "timeout_ms": timeout_ms,
+            "mode": mode,
         }),
         sidecar_timeout,
     )
