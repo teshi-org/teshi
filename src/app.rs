@@ -156,25 +156,6 @@ pub enum ModelPanelMode {
 pub enum AgentPanelMode {
     /// Show the list of profiles.
     List,
-    /// Show the "Add agent" form.
-    Adding,
-    /// Show the "Edit agent" form.
-    Editing,
-}
-
-/// Last config tab index in the agent profile form (Basic .. Model).
-const AGENT_CONFIG_TAB_MAX: usize = 4;
-
-/// Inclusive `(min, max)` `agent_form_focus` indices for a config tab.
-fn agent_config_tab_field_range(tab: usize) -> (usize, usize) {
-    match tab {
-        0 => (0, 1),
-        1 => (2, 2),
-        2 => (3, 3),
-        3 => (4, 4),
-        4 => (5, 5),
-        _ => (0, 0),
-    }
 }
 
 /// Navigation focus on the current line: Gherkin keyword/token vs editable trailing text (step body or header title).
@@ -466,23 +447,12 @@ pub struct App {
     pub session_list: Vec<crate::session::Session>,
     // ── Skill/template registry ─────────────────────────
     pub skill_registry: crate::agent::skills::SkillRegistry,
-    // ── Agent profile state ─────────────────────────────
-    pub agent_profiles: Vec<crate::agent::profile::AgentProfile>,
+    // ── Agent state ─────────────────────────────────
+    pub agent_registry: crate::agent::registry::AgentRegistry,
     pub agent_profile_panel_active: bool,
     pub agent_profile_panel_selection: usize,
     // ── Agent profile form state ────────────────────────
     pub agent_panel_mode: AgentPanelMode,
-    /// When editing, the ID of the profile being edited.
-    pub agent_form_editing_id: Option<String>,
-    pub agent_form_focus: usize,
-    pub agent_form_name: String,
-    pub agent_form_description: String,
-    pub agent_form_instructions: String,
-    pub agent_form_tools_str: String,
-    pub agent_form_skills_str: String,
-    pub agent_form_model_ref: String,
-    /// Active tab in the agent config form (0=Basic, 1=Instructions, 2=Tools, 3=Skills, 4=Model).
-    pub agent_config_tab: usize,
     // ── Generation pipeline state ───────────────────────
     pub generation_stage: crate::agent::pipeline::GenerationStage,
     pub pipeline_requirement: Option<crate::agent::pipeline::Requirement>,
@@ -764,33 +734,18 @@ impl App {
             session_panel_selection: 0,
             session_list: Vec::new(),
             skill_registry: crate::agent::skills::SkillRegistry::new(), // reloaded below
-            agent_profiles: crate::agent::profile::AgentProfileRegistry::load_all(Some(dir))
-                .list()
-                .to_vec(),
+            agent_registry: crate::agent::registry::AgentRegistry::load(Some(dir)),
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
             agent_panel_mode: AgentPanelMode::List,
-            agent_form_editing_id: None,
-            agent_form_focus: 0,
-            agent_form_name: String::new(),
-            agent_form_description: String::new(),
-            agent_form_instructions: String::new(),
-            agent_form_tools_str: String::new(),
-            agent_form_skills_str: String::new(),
-            agent_form_model_ref: String::new(),
-            agent_config_tab: 0,
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
         };
         // Load skill registry using the default profile's skill dirs
         {
-            let default_profile = app
-                .agent_profiles
-                .iter()
-                .find(|p| p.id == "default")
-                .unwrap_or(&app.agent_profiles[0]);
-            app.skill_registry = Self::load_skill_registry(dir, &default_profile.skills_dirs);
+            let default_profile = app.agent_registry.default();
+            app.skill_registry = Self::load_skill_registry(dir, &[]);
         }
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -926,24 +881,13 @@ impl App {
             skill_registry: {
                 crate::agent::skills::SkillRegistry::new() // reloaded below
             },
-            agent_profiles: {
+            agent_registry: {
                 let root_dir = path.parent().unwrap_or(Path::new("."));
-                crate::agent::profile::AgentProfileRegistry::load_all(Some(root_dir))
-                    .list()
-                    .to_vec()
+                crate::agent::registry::AgentRegistry::load(Some(root_dir))
             },
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
             agent_panel_mode: AgentPanelMode::List,
-            agent_form_editing_id: None,
-            agent_form_focus: 0,
-            agent_form_name: String::new(),
-            agent_form_description: String::new(),
-            agent_form_instructions: String::new(),
-            agent_form_tools_str: String::new(),
-            agent_form_skills_str: String::new(),
-            agent_form_model_ref: String::new(),
-            agent_config_tab: 0,
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
@@ -952,12 +896,8 @@ impl App {
         // Load skill registry using the default profile's skill dirs
         {
             let root_dir = path.parent().unwrap_or(Path::new("."));
-            let default_profile = app
-                .agent_profiles
-                .iter()
-                .find(|p| p.id == "default")
-                .unwrap_or(&app.agent_profiles[0]);
-            app.skill_registry = Self::load_skill_registry(root_dir, &default_profile.skills_dirs);
+            let default_profile = app.agent_registry.default();
+            app.skill_registry = Self::load_skill_registry(root_dir, &[]);
         }
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -1079,21 +1019,10 @@ impl App {
             session_panel_selection: 0,
             session_list: Vec::new(),
             skill_registry: crate::agent::skills::SkillRegistry::new(),
-            agent_profiles: crate::agent::profile::AgentProfileRegistry::load_all(None)
-                .list()
-                .to_vec(),
+            agent_registry: crate::agent::registry::AgentRegistry::load(None),
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
             agent_panel_mode: AgentPanelMode::List,
-            agent_form_editing_id: None,
-            agent_form_focus: 0,
-            agent_form_name: String::new(),
-            agent_form_description: String::new(),
-            agent_form_instructions: String::new(),
-            agent_form_tools_str: String::new(),
-            agent_form_skills_str: String::new(),
-            agent_form_model_ref: String::new(),
-            agent_config_tab: 0,
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
@@ -1303,24 +1232,24 @@ impl App {
         self.status = format!("Switched to model: {}", profile.name);
     }
 
-    /// Get the agent profile for a given agent index.
-    fn agent_profile(&self, agent_idx: usize) -> Option<&crate::agent::profile::AgentProfile> {
+    /// Get the agent definition for a given agent index.
+    fn agent_profile(&self, agent_idx: usize) -> Option<&crate::agent::definition::AgentDefinition> {
         let profile_id = self.agents.get(agent_idx)?.profile_id.as_deref();
         let id = profile_id.unwrap_or("default");
-        self.agent_profiles.iter().find(|p| p.id == id)
+        self.agent_registry.get(id)
     }
 
-    /// Get the active profile for the selected agent.
-    pub(crate) fn active_agent_profile(&self) -> &crate::agent::profile::AgentProfile {
+    /// Get the active agent definition for the selected agent.
+    pub(crate) fn active_agent_profile(&self) -> &crate::agent::definition::AgentDefinition {
         self.agent_profile(self.selected_agent)
-            .unwrap_or_else(|| &self.agent_profiles[0])
+            .unwrap_or_else(|| self.agent_registry.default())
     }
 
-    /// Reload the skill registry based on the current active agent profile's skill dirs.
+    /// Reload the skill registry based on the current active agent's skill dirs.
     fn reload_skills_for_profile(&mut self) {
-        let profile = self.active_agent_profile().clone();
+        let profile = self.active_agent_profile();
         let project_dir = self.find_project_dir();
-        self.skill_registry = Self::load_skill_registry(project_dir, &profile.skills_dirs);
+        self.skill_registry = Self::load_skill_registry(project_dir, &profile.skills);
     }
 
     /// Try to find a sensible project root directory.
@@ -1525,12 +1454,10 @@ impl App {
                                     self.compact_context_if_needed(i);
                                     let messages = self.build_chat_messages_for_agent(i);
                                     let profile = self.agent_profile(i);
-                                    let allowed = profile.and_then(|p| {
-                                        if p.tools.is_empty() {
-                                            None
-                                        } else {
-                                            Some(p.tools.as_slice())
-                                        }
+                                    let allowed: Option<&[String]> = profile.and_then(|p| match &p.tools {
+                                        crate::agent::definition::ToolPermission::All => None,
+                                        crate::agent::definition::ToolPermission::None => Some(&[] as &[String]),
+                                        crate::agent::definition::ToolPermission::Whitelist(list) => Some(list.as_slice()),
                                     });
                                     let tools = Some(crate::agent::get_tools(allowed));
                                     let _ = self.agents[i].llm_handle.as_ref().unwrap().send(
@@ -1575,12 +1502,10 @@ impl App {
                                 self.compact_context_if_needed(i);
                                 let messages = self.build_chat_messages_for_agent(i);
                                 let profile = self.agent_profile(i);
-                                let allowed = profile.and_then(|p| {
-                                    if p.tools.is_empty() {
-                                        None
-                                    } else {
-                                        Some(p.tools.as_slice())
-                                    }
+                                let allowed: Option<&[String]> = profile.and_then(|p| match &p.tools {
+                                    crate::agent::definition::ToolPermission::All => None,
+                                    crate::agent::definition::ToolPermission::None => Some(&[] as &[String]),
+                                    crate::agent::definition::ToolPermission::Whitelist(list) => Some(list.as_slice()),
                                 });
                                 let tools = Some(crate::agent::get_tools(allowed));
                                 let handle = self.agents[i].llm_handle.as_ref().unwrap();
@@ -1742,7 +1667,7 @@ impl App {
     /// If `skills_dirs` is empty, falls back to the default hardcoded paths.
     fn load_skill_registry(
         project_dir: &Path,
-        skills_dirs: &[String],
+        skills_dirs: &[std::path::PathBuf],
     ) -> crate::agent::skills::SkillRegistry {
         let dirs: Vec<std::path::PathBuf> = if skills_dirs.is_empty() {
             // Fallback to hardcoded defaults
@@ -1751,7 +1676,7 @@ impl App {
                 project_dir.join("skills"),
             ]
         } else {
-            skills_dirs.iter().map(|d| project_dir.join(d)).collect()
+            skills_dirs.to_vec()
         };
         for dir in &dirs {
             if dir.exists() {
@@ -1774,8 +1699,8 @@ impl App {
     fn ai_system_prompt(&self, request: Option<&str>, agent_idx: usize) -> String {
         let profile = self.agent_profile(agent_idx);
         let instructions = profile
-            .map(|p| p.instructions_or_default())
-            .unwrap_or_else(crate::agent::profile::default_builtin_instructions);
+            .map(|p| p.system_prompt.clone())
+            .unwrap_or_else(|| "You are a helpful assistant.".to_string());
         let mut prompt = instructions;
 
         // Add skill catalog
@@ -1877,12 +1802,10 @@ impl App {
         }
         let messages = self.build_chat_messages_for_agent(agent_idx);
         let system_prompt = self.ai_system_prompt(None, agent_idx);
-        let allowed_tools: Option<Vec<String>> = self.agent_profile(agent_idx).and_then(|p| {
-            if p.tools.is_empty() {
-                None
-            } else {
-                Some(p.tools.clone())
-            }
+        let allowed_tools: Option<Vec<String>> = self.agent_profile(agent_idx).and_then(|p| match &p.tools {
+            crate::agent::definition::ToolPermission::All => None,
+            crate::agent::definition::ToolPermission::None => Some(vec![]),
+            crate::agent::definition::ToolPermission::Whitelist(list) => Some(list.clone()),
         });
         let agent = &mut self.agents[agent_idx];
         agent.agent_loop_count += 1;
@@ -3549,184 +3472,9 @@ impl App {
         self.quit_pending_confirm = false;
     }
 
-    /// Handle keyboard actions while the agent profile add/edit form is open.
-    fn handle_agent_profile_form_action(&mut self, action: Action) -> Result<()> {
-        match action {
-            Action::AgentPanelFormCancel => {
-                self.agent_panel_mode = AgentPanelMode::List;
-                self.status = "Agent profiles: a add · e edit · d delete · ↑↓ select · Enter apply · Esc close".to_string();
-                self.quit_pending_confirm = false;
-            }
-            Action::AgentPanelFormTabPrev => {
-                if self.agent_config_tab > 0 {
-                    self.agent_config_tab -= 1;
-                    let (min, _) = agent_config_tab_field_range(self.agent_config_tab);
-                    self.agent_form_focus = min;
-                }
-                self.quit_pending_confirm = false;
-            }
-            Action::AgentPanelFormTabNext => {
-                if self.agent_config_tab < AGENT_CONFIG_TAB_MAX {
-                    self.agent_config_tab += 1;
-                    let (min, _) = agent_config_tab_field_range(self.agent_config_tab);
-                    self.agent_form_focus = min;
-                }
-                self.quit_pending_confirm = false;
-            }
-            Action::AgentPanelFormNext => {
-                let (_, max) = agent_config_tab_field_range(self.agent_config_tab);
-                if self.agent_form_focus < max {
-                    self.agent_form_focus += 1;
-                } else if self.agent_config_tab < AGENT_CONFIG_TAB_MAX {
-                    self.agent_config_tab += 1;
-                    let (next_min, _) = agent_config_tab_field_range(self.agent_config_tab);
-                    self.agent_form_focus = next_min;
-                }
-                self.quit_pending_confirm = false;
-            }
-            Action::AgentPanelFormPrev => {
-                let (min, _) = agent_config_tab_field_range(self.agent_config_tab);
-                if self.agent_form_focus > min {
-                    self.agent_form_focus -= 1;
-                } else if self.agent_config_tab > 0 {
-                    self.agent_config_tab -= 1;
-                    let (_, prev_max) = agent_config_tab_field_range(self.agent_config_tab);
-                    self.agent_form_focus = prev_max;
-                }
-                self.quit_pending_confirm = false;
-            }
-            Action::AgentPanelFormInsert(ch) => {
-                let field = match self.agent_form_focus {
-                    0 => &mut self.agent_form_name,
-                    1 => &mut self.agent_form_description,
-                    2 => &mut self.agent_form_instructions,
-                    3 => &mut self.agent_form_tools_str,
-                    4 => &mut self.agent_form_skills_str,
-                    5 => &mut self.agent_form_model_ref,
-                    _ => return Ok(()),
-                };
-                field.push(ch);
-                self.quit_pending_confirm = false;
-            }
-            Action::AgentPanelFormBackspace => {
-                let field = match self.agent_form_focus {
-                    0 => &mut self.agent_form_name,
-                    1 => &mut self.agent_form_description,
-                    2 => &mut self.agent_form_instructions,
-                    3 => &mut self.agent_form_tools_str,
-                    4 => &mut self.agent_form_skills_str,
-                    5 => &mut self.agent_form_model_ref,
-                    _ => return Ok(()),
-                };
-                field.pop();
-                self.quit_pending_confirm = false;
-            }
-            Action::AgentPanelFormSubmit => {
-                let name = self.agent_form_name.trim().to_string();
-                if name.is_empty() {
-                    self.status = "Name is required.".to_string();
-                    self.quit_pending_confirm = false;
-                    return Ok(());
-                }
-
-                let is_editing = self.agent_form_editing_id.is_some();
-
-                let profile = if let Some(ref edit_id) = self.agent_form_editing_id {
-                    let mut p = match self
-                        .agent_profiles
-                        .iter()
-                        .find(|p| p.id == *edit_id)
-                        .cloned()
-                    {
-                        Some(p) => p,
-                        None => {
-                            self.status = "Profile not found for editing.".to_string();
-                            self.quit_pending_confirm = false;
-                            return Ok(());
-                        }
-                    };
-                    p.name = name;
-                    p.description = self.agent_form_description.trim().to_string();
-                    p.instructions = self.agent_form_instructions.to_string();
-                    p.tools = self
-                        .agent_form_tools_str
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    p.skills_dirs = self
-                        .agent_form_skills_str
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    p.model_ref = {
-                        let m = self.agent_form_model_ref.trim().to_string();
-                        if m.is_empty() { None } else { Some(m) }
-                    };
-                    p
-                } else {
-                    let mut p = crate::agent::profile::AgentProfile::new(&name);
-                    p.description = self.agent_form_description.trim().to_string();
-                    p.instructions = self.agent_form_instructions.to_string();
-                    p.tools = self
-                        .agent_form_tools_str
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    p.skills_dirs = self
-                        .agent_form_skills_str
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    p.model_ref = {
-                        let m = self.agent_form_model_ref.trim().to_string();
-                        if m.is_empty() { None } else { Some(m) }
-                    };
-                    p
-                };
-
-                if let Err(e) = profile.save_to_disk() {
-                    self.status = format!("Failed to save profile: {e}");
-                    self.quit_pending_confirm = false;
-                    return Ok(());
-                }
-
-                if is_editing {
-                    self.status = format!("Updated agent profile: {}", profile.name);
-                } else {
-                    self.status = format!("Added agent profile: {}", profile.name);
-                }
-
-                self.agent_profiles = crate::agent::profile::AgentProfileRegistry::load_all(Some(
-                    self.find_project_dir(),
-                ))
-                .list()
-                .to_vec();
-                self.agent_panel_mode = AgentPanelMode::List;
-                self.agent_form_editing_id = None;
-                self.agent_profile_panel_selection = 0;
-                self.quit_pending_confirm = false;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
     // ── Action handler ──────────────────────────────────────────────
 
     pub fn handle_action(&mut self, action: Action) -> Result<()> {
-        // Agent profile form overlay wins over other prompts (external change, agent change, quit).
-        if self.agent_profile_panel_active
-            && matches!(
-                self.agent_panel_mode,
-                AgentPanelMode::Adding | AgentPanelMode::Editing
-            )
-        {
-            return self.handle_agent_profile_form_action(action);
-        }
 
         if self.external_change_prompt.is_some() {
             return match action {
@@ -3790,7 +3538,7 @@ impl App {
             };
         }
 
-        // Agent profile selection panel intercept (list mode; form handled above).
+        // Agent profile selection panel intercept.
         if self.agent_profile_panel_active {
             return match action {
                 Action::AgentPanelUp => {
@@ -3801,7 +3549,7 @@ impl App {
                     Ok(())
                 }
                 Action::AgentPanelDown => {
-                    if self.agent_profile_panel_selection + 1 < self.agent_profiles.len() {
+                    if self.agent_profile_panel_selection + 1 < self.agent_registry.len() {
                         self.agent_profile_panel_selection += 1;
                     }
                     self.quit_pending_confirm = false;
@@ -3809,12 +3557,13 @@ impl App {
                 }
                 Action::AgentPanelSelect => {
                     let selected_idx = self.agent_profile_panel_selection;
-                    let profile_clone = self.agent_profiles.get(selected_idx).cloned();
+                    let profile_clone = self.agent_registry.get_index(selected_idx).cloned();
                     if let Some(profile) = profile_clone {
                         let agent = self.agent_mut();
                         agent.profile_id = Some(profile.id.clone());
                         let _ = agent;
-                        if let Some(model_id) = &profile.model_ref {
+                        if !profile.model_ref.is_empty() {
+                            let model_id = &profile.model_ref;
                             let model_profile_clone = self
                                 .model_profiles
                                 .iter()
@@ -3828,77 +3577,6 @@ impl App {
                         self.status = format!("Switched to agent: {}", profile.name);
                     }
                     self.agent_profile_panel_active = false;
-                    self.quit_pending_confirm = false;
-                    Ok(())
-                }
-                Action::AgentPanelAdd => {
-                    self.agent_form_editing_id = None;
-                    self.agent_panel_mode = AgentPanelMode::Adding;
-                    self.agent_config_tab = 0;
-                    self.agent_form_focus = 0;
-                    self.agent_form_name.clear();
-                    self.agent_form_description.clear();
-                    self.agent_form_instructions.clear();
-                    self.agent_form_tools_str.clear();
-                    self.agent_form_skills_str.clear();
-                    self.agent_form_model_ref.clear();
-                    self.status = "Fill in the fields and press Enter to save.".to_string();
-                    self.quit_pending_confirm = false;
-                    Ok(())
-                }
-                Action::AgentPanelEdit => {
-                    if let Some(profile) = self
-                        .agent_profiles
-                        .get(self.agent_profile_panel_selection)
-                        .cloned()
-                    {
-                        self.agent_form_editing_id = Some(profile.id.clone());
-                        self.agent_panel_mode = AgentPanelMode::Editing;
-                        self.agent_config_tab = 0;
-                        self.agent_form_focus = 0;
-                        self.agent_form_name = profile.name;
-                        self.agent_form_description = profile.description;
-                        self.agent_form_instructions = profile.instructions;
-                        self.agent_form_tools_str = profile.tools.join(", ");
-                        self.agent_form_skills_str = profile.skills_dirs.join(", ");
-                        self.agent_form_model_ref = profile.model_ref.unwrap_or_default();
-                        self.status = "Edit the fields and press Enter to save.".to_string();
-                    }
-                    self.quit_pending_confirm = false;
-                    Ok(())
-                }
-                Action::AgentPanelDelete => {
-                    if let Some(profile) = self
-                        .agent_profiles
-                        .get(self.agent_profile_panel_selection)
-                        .cloned()
-                    {
-                        if profile.id == "default" {
-                            self.status = "Cannot delete the built-in default profile.".to_string();
-                            self.quit_pending_confirm = false;
-                            return Ok(());
-                        }
-                        let name = profile.name.clone();
-                        if let Err(e) = profile.delete_from_disk() {
-                            self.status = format!("Failed to delete profile: {e}");
-                        } else {
-                            self.agent_profiles =
-                                crate::agent::profile::AgentProfileRegistry::load_all(Some(
-                                    self.find_project_dir(),
-                                ))
-                                .list()
-                                .to_vec();
-                            if self.agent_profile_panel_selection >= self.agent_profiles.len() {
-                                self.agent_profile_panel_selection =
-                                    self.agent_profiles.len().saturating_sub(1);
-                            }
-                            if self.agent().profile_id.as_deref() == Some(&profile.id) {
-                                self.agent_mut().profile_id = Some("default".to_string());
-                                self.reload_skills_for_profile();
-                            }
-                            self.status = format!("Deleted profile: {name}");
-                        }
-                    }
                     self.quit_pending_confirm = false;
                     Ok(())
                 }
@@ -4034,12 +3712,10 @@ impl App {
                     } else if let Some(ref handle) = self.agent().llm_handle {
                         let messages = self.build_chat_messages_for_agent(self.selected_agent);
                         let profile = self.agent_profile(self.selected_agent);
-                        let allowed = profile.and_then(|p| {
-                            if p.tools.is_empty() {
-                                None
-                            } else {
-                                Some(p.tools.as_slice())
-                            }
+                        let allowed: Option<&[String]> = profile.and_then(|p| match &p.tools {
+                            crate::agent::definition::ToolPermission::All => None,
+                            crate::agent::definition::ToolPermission::None => Some(&[] as &[String]),
+                            crate::agent::definition::ToolPermission::Whitelist(list) => Some(list.as_slice()),
                         });
                         let tools = Some(crate::agent::get_tools(allowed));
                         if handle
@@ -4723,16 +4399,13 @@ impl App {
                         return Ok(());
                     }
                     if cmd == "agent" || cmd == "agents" {
-                        self.agent_profiles =
-                            crate::agent::profile::AgentProfileRegistry::load_all(Some(
+                        self.agent_registry = crate::agent::registry::AgentRegistry::load(Some(
                                 self.find_project_dir(),
-                            ))
-                            .list()
-                            .to_vec();
+                            ));
                         self.agent_profile_panel_active = true;
                         self.agent_panel_mode = AgentPanelMode::List;
                         self.agent_profile_panel_selection = self
-                            .agent_profiles
+                            .agent_registry
                             .iter()
                             .position(|p| {
                                 Some(p.id.as_str()) == self.agent().profile_id.as_deref()
@@ -4794,12 +4467,10 @@ impl App {
                     use crate::llm::LlmRequest;
                     let messages = self.build_chat_messages_for_agent(self.selected_agent);
                     let profile = self.agent_profile(self.selected_agent);
-                    let allowed = profile.and_then(|p| {
-                        if p.tools.is_empty() {
-                            None
-                        } else {
-                            Some(p.tools.as_slice())
-                        }
+                    let allowed: Option<&[String]> = profile.and_then(|p| match &p.tools {
+                        crate::agent::definition::ToolPermission::All => None,
+                        crate::agent::definition::ToolPermission::None => Some(&[] as &[String]),
+                        crate::agent::definition::ToolPermission::Whitelist(list) => Some(list.as_slice()),
                     });
                     let tools = Some(crate::agent::get_tools(allowed));
                     let handle = self.agent().llm_handle.as_ref().unwrap();
@@ -4941,16 +4612,14 @@ impl App {
                             Ok(())
                         }
                         "agent" => {
-                            self.agent_profiles =
-                                crate::agent::profile::AgentProfileRegistry::load_all(Some(
+                            self.agent_registry =
+                                crate::agent::registry::AgentRegistry::load(Some(
                                     self.find_project_dir(),
-                                ))
-                                .list()
-                                .to_vec();
+                                ));
                             self.agent_profile_panel_active = true;
                             self.agent_panel_mode = AgentPanelMode::List;
                             self.agent_profile_panel_selection = self
-                                .agent_profiles
+                                .agent_registry
                                 .iter()
                                 .position(|p| {
                                     Some(p.id.as_str()) == self.agent().profile_id.as_deref()
@@ -7002,21 +6671,10 @@ mod tests {
             session_panel_selection: 0,
             session_list: Vec::new(),
             skill_registry: crate::agent::skills::SkillRegistry::new(),
-            agent_profiles: crate::agent::profile::AgentProfileRegistry::load_all(None)
-                .list()
-                .to_vec(),
+            agent_registry: crate::agent::registry::AgentRegistry::load(None),
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
             agent_panel_mode: AgentPanelMode::List,
-            agent_form_editing_id: None,
-            agent_form_focus: 0,
-            agent_form_name: String::new(),
-            agent_form_description: String::new(),
-            agent_form_instructions: String::new(),
-            agent_form_tools_str: String::new(),
-            agent_form_skills_str: String::new(),
-            agent_form_model_ref: String::new(),
-            agent_config_tab: 0,
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
@@ -7170,21 +6828,10 @@ Feature: B
             session_panel_selection: 0,
             session_list: Vec::new(),
             skill_registry: crate::agent::skills::SkillRegistry::new(),
-            agent_profiles: crate::agent::profile::AgentProfileRegistry::load_all(None)
-                .list()
-                .to_vec(),
+            agent_registry: crate::agent::registry::AgentRegistry::load(None),
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
             agent_panel_mode: AgentPanelMode::List,
-            agent_form_editing_id: None,
-            agent_form_focus: 0,
-            agent_form_name: String::new(),
-            agent_form_description: String::new(),
-            agent_form_instructions: String::new(),
-            agent_form_tools_str: String::new(),
-            agent_form_skills_str: String::new(),
-            agent_form_model_ref: String::new(),
-            agent_config_tab: 0,
             generation_stage: crate::agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,

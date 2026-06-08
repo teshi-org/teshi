@@ -6,6 +6,7 @@ mod cli;
 mod config;
 mod diff;
 mod editor_buffer;
+mod engine;
 mod gherkin;
 mod gherkin_lang;
 mod highlight;
@@ -138,6 +139,14 @@ fn main() -> Result<()> {
         let _ = writeln!(file, "pid {}: entered main", std::process::id());
     }
 
+    // Handle --daemon-internal (hidden flag for forked daemon process)
+    if std::env::args().any(|a| a == "--daemon-internal") {
+        let opts: teshi_daemon::DaemonInternalOptions =
+            clap::Parser::parse_from(std::env::args());
+        let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+        return rt.block_on(teshi_daemon::run_daemon_internal(opts));
+    }
+
     let cli_args = cli::Cli::parse();
 
     match cli_args.command {
@@ -146,7 +155,7 @@ fn main() -> Result<()> {
         }
         Some(cli::Command::Web { options }) => {
             let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
-            return rt.block_on(teshi_web::run(options));
+            return rt.block_on(teshi_daemon::run_client(options));
         }
         Some(cli::Command::Desktop {
             project,
@@ -183,6 +192,15 @@ fn main() -> Result<()> {
         }
         Some(cli::Command::Export { args }) => {
             return cli::export::handle_export_command(&args);
+        }
+        Some(cli::Command::Daemon { action }) => {
+            return cli::daemon::handle_daemon_command(&action);
+        }
+        Some(cli::Command::Record { url, feature, auto_propose }) => {
+            return engine::handle_record_command(&url, feature.as_deref(), auto_propose);
+        }
+        Some(cli::Command::Generate { action }) => {
+            return engine::handle_generate_command(&action);
         }
         None => {}
     }
@@ -230,8 +248,6 @@ fn main() -> Result<()> {
                             scenario_dropdown_open: app.scenario_dropdown_open,
                             approval_panel_active: app.approval_panel_active,
                             agent_profile_panel_active: app.agent_profile_panel_active,
-                            agent_panel_adding: app.agent_panel_mode == app::AgentPanelMode::Adding
-                                || app.agent_panel_mode == app::AgentPanelMode::Editing,
                             quit_pending_confirm: app.quit_pending_confirm,
                         },
                     ) {

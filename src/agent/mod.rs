@@ -5,8 +5,10 @@
 //! file-modifying tools (e.g. `insert_scenario`) queue changes for user confirmation.
 
 pub mod approval;
+pub mod definition;
+pub mod loader;
 pub mod pipeline;
-pub mod profile;
+pub mod registry;
 pub mod skills;
 mod tools;
 pub mod validator;

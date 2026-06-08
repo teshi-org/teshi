@@ -35,8 +35,7 @@ pub struct KeyContext {
     pub approval_panel_active: bool,
     /// Whether the agent profile selection panel is open.
     pub agent_profile_panel_active: bool,
-    /// Whether the agent panel is in adding/editing form mode (vs list mode).
-    pub agent_panel_adding: bool,
+
     /// Whether the quit confirmation panel is open.
     pub quit_pending_confirm: bool,
 }
@@ -293,31 +292,6 @@ impl Action {
         // Ctrl+C always maps to Quit, regardless of mode.
         if event.code == KeyCode::Char('c') && event.modifiers == KeyModifiers::CONTROL {
             return Some(Self::Quit);
-        }
-
-        // Agent profile form takes priority over other overlays so Tab/Enter/Esc work while editing.
-        if context.agent_profile_panel_active && context.agent_panel_adding {
-            return match (event.code, event.modifiers) {
-                (KeyCode::Esc, _) => Some(Self::AgentPanelFormCancel),
-                (KeyCode::Tab, _) => Some(Self::AgentPanelFormNext),
-                (KeyCode::BackTab, _) => Some(Self::AgentPanelFormPrev),
-                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                    Some(Self::AgentPanelFormPrev)
-                }
-                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                    Some(Self::AgentPanelFormNext)
-                }
-                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
-                    Some(Self::AgentPanelFormTabPrev)
-                }
-                (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
-                    Some(Self::AgentPanelFormTabNext)
-                }
-                (KeyCode::Enter, _) => Some(Self::AgentPanelFormSubmit),
-                (KeyCode::Backspace, _) => Some(Self::AgentPanelFormBackspace),
-                (KeyCode::Char(ch), _) if !ch.is_control() => Some(Self::AgentPanelFormInsert(ch)),
-                _ => None,
-            };
         }
 
         if context.external_change_prompt_active {
@@ -836,7 +810,6 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
-            agent_panel_adding: false,
             quit_pending_confirm: false,
         };
         let action = Action::from_key_event(
@@ -870,7 +843,6 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
-            agent_panel_adding: false,
             quit_pending_confirm: false,
         };
         let action = Action::from_key_event(
@@ -904,7 +876,6 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
-            agent_panel_adding: false,
             quit_pending_confirm: false,
         };
         assert_eq!(
@@ -948,7 +919,6 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
-            agent_panel_adding: false,
             quit_pending_confirm: false,
         };
         assert_eq!(
@@ -992,7 +962,6 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
-            agent_panel_adding: false,
             quit_pending_confirm: false,
         };
         assert_eq!(
@@ -1044,7 +1013,6 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
-            agent_panel_adding: false,
             quit_pending_confirm: false,
         };
         let action = Action::from_key_event(
@@ -1078,7 +1046,6 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
-            agent_panel_adding: false,
             quit_pending_confirm: false,
         };
         let action = Action::from_key_event(
@@ -1112,7 +1079,6 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
-            agent_panel_adding: false,
             quit_pending_confirm: false,
         };
         assert_eq!(
@@ -1170,7 +1136,6 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
-            agent_panel_adding: false,
             quit_pending_confirm: false,
         };
         let copy_context = KeyContext {
@@ -1221,7 +1186,6 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
-            agent_panel_adding: false,
             quit_pending_confirm: false,
         };
         assert_eq!(
@@ -1234,61 +1198,4 @@ mod tests {
         );
     }
 
-    fn agent_profile_form_key_context(agent_change_prompt_active: bool) -> KeyContext {
-        KeyContext {
-            step_keyword_picker_active: false,
-            step_input_active: false,
-            external_change_prompt_active: false,
-            agent_change_prompt_active,
-            active_tab: MainTab::Ai,
-            view_stage: ViewStage::TreeOnly,
-            explore_edit_mode: false,
-            pending_char: None,
-            mindmap_focus: MindMapFocus::Main,
-            mindmap_ai_panel_visible: false,
-            ai_input_focused: true,
-            slash_suggestion_active: false,
-            auth_panel_active: false,
-            model_panel_active: false,
-            model_panel_adding: false,
-            session_panel_active: false,
-            change_summary_visible: false,
-            ai_status_waiting: false,
-            scenario_dropdown_open: false,
-            approval_panel_active: false,
-            agent_profile_panel_active: true,
-            agent_panel_adding: true,
-            quit_pending_confirm: true,
-        }
-    }
-
-    #[test]
-    fn test_agent_profile_form_keys_override_agent_change_prompt() {
-        let context = agent_profile_form_key_context(true);
-        assert_eq!(
-            Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
-            Some(Action::AgentPanelFormNext)
-        );
-        assert_eq!(
-            Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
-            Some(Action::AgentPanelFormSubmit)
-        );
-        assert_eq!(
-            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
-            Some(Action::AgentPanelFormCancel)
-        );
-    }
-
-    #[test]
-    fn test_agent_profile_form_left_right_switch_tabs() {
-        let context = agent_profile_form_key_context(false);
-        assert_eq!(
-            Action::from_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), context),
-            Some(Action::AgentPanelFormTabPrev)
-        );
-        assert_eq!(
-            Action::from_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), context),
-            Some(Action::AgentPanelFormTabNext)
-        );
-    }
 }
