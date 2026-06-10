@@ -1,6 +1,6 @@
 [package]
 name = "teshi"
-version = "0.7.2"
+version = "0.7.4"
 edition = "2024"
 authors = ["teshi-org"]
 license = "MIT"
@@ -9,6 +9,10 @@ repository = "https://github.com/teshi-org/teshi"
 readme = "README.md"
 keywords = ["tui", "mindmap", "editor", "terminal", "notes"]
 publish = false
+
+[profile.release]
+lto = true
+strip = "symbols"
 
 [package.metadata.wix]
 eula = false

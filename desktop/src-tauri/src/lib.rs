@@ -114,7 +114,9 @@ pub fn run() {
                         tracing::error!("open project from CLI: {e}");
                     }
                     if auto_browser {
-                        if let Err(e) = runtime_start_browser_sidecar(rt, BrowserMode::Embedded).await {
+                        if let Err(e) =
+                            runtime_start_browser_sidecar(rt, BrowserMode::Embedded).await
+                        {
                             tracing::error!("auto-start embedded browser: {e:#?}");
                         }
                     }

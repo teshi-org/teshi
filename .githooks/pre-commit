@@ -97,6 +97,29 @@ else
     echo -e "${GREEN}   - All components at $REF${NC}"
 fi
 
+# ---- 2e. 0.7.x version lock ------------------------------------------------
+echo ":: 0.7.x version lock check ..."
+LOCK_FAIL=0
+for entry in "${VERSION_FILES[@]}"; do
+    FILE="${entry%%:*}"
+    PATTERN="${entry#*:}"
+    FOUND=$(grep -m1 "$PATTERN" "$FILE" 2>/dev/null | tr -d '\r' | sed 's/.*"\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/' | sed 's/.*= "\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/')
+    if [ -n "$FOUND" ]; then
+        MAJOR=$(echo "$FOUND" | cut -d. -f1)
+        MINOR=$(echo "$FOUND" | cut -d. -f2)
+        if [ "$MAJOR" != "0" ] || [ "$MINOR" != "7" ]; then
+            echo -e "${RED}   x  $FILE version $FOUND violates 0.7.x lock!${NC}"
+            LOCK_FAIL=1
+        fi
+    fi
+done
+if [ "$LOCK_FAIL" -eq 1 ]; then
+    echo -e "${RED}   x  0.7.x lock violated. Version bumps beyond patch are blocked.${NC}"
+    PASS=false
+else
+    echo -e "${GREEN}   - All versions within 0.7.x${NC}"
+fi
+
 # ---- 3. dbg!() in staged .rs files -----------------------------------------
 STAGED_DBG=$(git diff --cached -G'dbg!' -- '*.rs' || true)
 if [ -n "$STAGED_DBG" ]; then

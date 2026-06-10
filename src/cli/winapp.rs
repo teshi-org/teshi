@@ -144,7 +144,10 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
     }
 
     let mut screenshot_entries: Vec<ReplayScreenshotEntry> = Vec::new();
-    let screenshot_dir = project_root.join(".teshi").join("logs").join("replay-screenshots");
+    let screenshot_dir = project_root
+        .join(".teshi")
+        .join("logs")
+        .join("replay-screenshots");
     let _ = fs::create_dir_all(&screenshot_dir);
 
     let non_interactive = args.non_interactive || args.yes;
@@ -192,10 +195,16 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
                         &screenshot_dir,
                     ) {
                         Ok(entry) => screenshot_entries.push(entry),
-                        Err(e) => eprintln!("warning: screenshot capture failed at L{}: {e}", step.step_line),
+                        Err(e) => eprintln!(
+                            "warning: screenshot capture failed at L{}: {e}",
+                            step.step_line
+                        ),
                     }
                 }
-                Err(e) => eprintln!("warning: cannot read cdp-endpoint for screenshot at L{}: {e}", step.step_line),
+                Err(e) => eprintln!(
+                    "warning: cannot read cdp-endpoint for screenshot at L{}: {e}",
+                    step.step_line
+                ),
             }
         }
         ensure_ok(&response).with_context(|| {
@@ -214,11 +223,14 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
         if let Err(e) = save_index(&screenshot_dir, &index) {
             eprintln!("warning: failed to write screenshot index: {e}");
         }
-        println!("{}", serde_json::to_string(&json!({
-            "event": "replay_complete",
-            "screenshots_saved": index.steps.len(),
-            "screenshots_dir": screenshot_dir.to_string_lossy(),
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "event": "replay_complete",
+                "screenshots_saved": index.steps.len(),
+                "screenshots_dir": screenshot_dir.to_string_lossy(),
+            }))?
+        );
     }
 
     Ok(())

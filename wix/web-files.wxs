@@ -1,42 +1,48 @@
-<?xml version="1.0" encoding="utf-8"?>
-<?ifndef WebRoot ?>
-	<?define WebRoot = "staging\msi-root\share\web" ?>
-<?endif ?>
-<?ifndef BridgeRoot ?>
-	<?define BridgeRoot = "staging\msi-root\share\teshi-bridge" ?>
-<?endif ?>
+<?xml version="1.0" encoding="utf-8"?>
+<?ifndef WebRoot ?><?define WebRoot = "D:\Dev\Rust\teshi\staging\msi-root\share\web"?><?endif ?>
+<?ifndef BridgeRoot ?><?define BridgeRoot = "D:\Dev\Rust\teshi\staging\msi-root\share\teshi-bridge"?><?endif ?>
+
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
     <Fragment>
         <DirectoryRef Id="ShareWebDir">
-            <Component Id="cmpF3E8630ED39B86EDE4976A1DF3D74354" Guid="{14A8D9F1-4A53-489D-9668-B17BF8FB3782}">
+            <Component Id="cmpF3E8630ED39B86EDE4976A1DF3D74354" Guid="{4935D926-9DB6-4EC9-B73C-A309504F04C1}">
                 <File Id="filDACD5EBCBA6969F43A883D8F4BF3D3DF" KeyPath="yes" Source="$(var.WebRoot)\index.html" />
             </Component>
             <Directory Id="dirEB054993823F2B2A6A0B5444C6DA65F1" Name="assets">
-                <Component Id="cmp0DCD71F567DC147FFF48962543727230" Guid="{9D4A8B03-230C-4265-A304-B99223764D8C}">
+                <Component Id="cmp0DCD71F567DC147FFF48962543727230" Guid="{3EB0AC33-FB8A-4E56-879B-EE547C1A2FD0}">
                     <File Id="fil53C5FCE1CEA3F785BC80B8F7FFA09084" KeyPath="yes" Source="$(var.WebRoot)\assets\addon-fit-BlxrFPDK.js" />
                 </Component>
-                <Component Id="cmp98B2575B14A3A8A2348A5E5DF889E7E8" Guid="{71FB118C-C421-4715-9EEF-E4A54C191024}">
+                <Component Id="cmp98B2575B14A3A8A2348A5E5DF889E7E8" Guid="{3DF02088-2B29-4797-8578-BA264F15AA59}">
                     <File Id="filD22DF8ACF728C1D7BD6920D77BC59A49" KeyPath="yes" Source="$(var.WebRoot)\assets\index-BeE1yiWN.js" />
                 </Component>
-                <Component Id="cmpDE517C98FBF2AC4181B27113DD8C6CDF" Guid="{89EDA87E-7AE0-4EEA-ADEA-2403F1C53251}">
+                <Component Id="cmpDE517C98FBF2AC4181B27113DD8C6CDF" Guid="{CC96B370-BF23-4330-80D9-EB6184FBD8D0}">
                     <File Id="filECF5A4BA83A04FC2D500046D5AAA28B0" KeyPath="yes" Source="$(var.WebRoot)\assets\index-BgovbiTI.js" />
                 </Component>
-                <Component Id="cmp42727E19310A69A1F874EFFEA3146C6C" Guid="{062631DA-818C-40F0-BFB7-0E55D81677C0}">
+                <Component Id="cmp0CC461502FEF3C67FDCFE7048E63A13D" Guid="{68146B22-04A0-486E-BCA1-6FA00572845E}">
+                    <File Id="filB2A857601B80A2E796D5E218D5DB5B31" KeyPath="yes" Source="$(var.WebRoot)\assets\index-ByNi2Ski.js" />
+                </Component>
+                <Component Id="cmp2AAE2A74817A835533D7977894F6A545" Guid="{43E25A6A-D496-411B-8010-F8C3BB0846A4}">
+                    <File Id="fil2FAFE33D24F2776D7DB3813FE269CE0C" KeyPath="yes" Source="$(var.WebRoot)\assets\index-CK3UqqVd.css" />
+                </Component>
+                <Component Id="cmp42727E19310A69A1F874EFFEA3146C6C" Guid="{3D8D5161-C8F6-432C-95A1-15DBA9AFD601}">
                     <File Id="filC695F036CBB15E4024FB043541B6E272" KeyPath="yes" Source="$(var.WebRoot)\assets\index-clwjjh73.js" />
                 </Component>
-                <Component Id="cmpE13E8385C1BBF4C3EC8C6BC2F6458174" Guid="{C9FA004C-9511-44D1-9971-0303DF3B0B97}">
+                <Component Id="cmpE13E8385C1BBF4C3EC8C6BC2F6458174" Guid="{B7223F66-EA8D-46F6-8568-05C24CE1405B}">
                     <File Id="filF40D76288F6E33C3EA61BC2730B51EC8" KeyPath="yes" Source="$(var.WebRoot)\assets\index-D1_h3iZn.css" />
                 </Component>
-                <Component Id="cmpEF068AC139D0F65FBB2BADB788A95A04" Guid="{2224A1F6-76F6-4C3A-9750-CDED313B4C34}">
+                <Component Id="cmpEF068AC139D0F65FBB2BADB788A95A04" Guid="{0DAF7B05-D780-41D4-AAA5-8CA32278CA12}">
                     <File Id="filAA58762625276FB2E9DC81F1F877D830" KeyPath="yes" Source="$(var.WebRoot)\assets\index-Dv-CTwOq.css" />
                 </Component>
-                <Component Id="cmp6C7C89D7EB5EA4861E6B570E61574355" Guid="{FD82320F-61FD-4C1F-881D-5FCAF89D1069}">
+                <Component Id="cmp915D48838A6491590A2CE0E38CC4B8BA" Guid="{B0E26A54-9860-47A3-BD78-3016FC517E05}">
+                    <File Id="filABDEF23FCA82D6DF5A9EAF09873FBA75" KeyPath="yes" Source="$(var.WebRoot)\assets\index-loAiVy9O.js" />
+                </Component>
+                <Component Id="cmp6C7C89D7EB5EA4861E6B570E61574355" Guid="{BC0A3D1E-6602-461D-B3FC-526BEAD0A352}">
                     <File Id="fil15A5E4F5F22EDC4F9D0DD07D076C2BA6" KeyPath="yes" Source="$(var.WebRoot)\assets\index-zpESIMl2.js" />
                 </Component>
-                <Component Id="cmp8AD8ECB5EC250C1FBB4B0F01771D2C51" Guid="{DC66011F-16FD-4D94-B78E-FDC41366B829}">
+                <Component Id="cmp8AD8ECB5EC250C1FBB4B0F01771D2C51" Guid="{91394260-F2D9-49A8-AF05-F8A81751AF01}">
                     <File Id="fil38B456AB3980E68AD4D7385509417207" KeyPath="yes" Source="$(var.WebRoot)\assets\xterm-BTGVxaYV.js" />
                 </Component>
-                <Component Id="cmpE211E4CEFC5CD1FA37B0AEAF85EC7790" Guid="{F1AE51AD-DF0D-412C-97CE-2C4F4D02B4A0}">
+                <Component Id="cmpE211E4CEFC5CD1FA37B0AEAF85EC7790" Guid="{C06FB88A-E634-477D-9AEA-F9888D5DF5AC}">
                     <File Id="fil316DA92E3B3720BC31538EDDCB25DC99" KeyPath="yes" Source="$(var.WebRoot)\assets\xterm-LZoznX6r.css" />
                 </Component>
             </Directory>
@@ -48,9 +54,12 @@
             <ComponentRef Id="cmp0DCD71F567DC147FFF48962543727230" />
             <ComponentRef Id="cmp98B2575B14A3A8A2348A5E5DF889E7E8" />
             <ComponentRef Id="cmpDE517C98FBF2AC4181B27113DD8C6CDF" />
+            <ComponentRef Id="cmp0CC461502FEF3C67FDCFE7048E63A13D" />
+            <ComponentRef Id="cmp2AAE2A74817A835533D7977894F6A545" />
             <ComponentRef Id="cmp42727E19310A69A1F874EFFEA3146C6C" />
             <ComponentRef Id="cmpE13E8385C1BBF4C3EC8C6BC2F6458174" />
             <ComponentRef Id="cmpEF068AC139D0F65FBB2BADB788A95A04" />
+            <ComponentRef Id="cmp915D48838A6491590A2CE0E38CC4B8BA" />
             <ComponentRef Id="cmp6C7C89D7EB5EA4861E6B570E61574355" />
             <ComponentRef Id="cmp8AD8ECB5EC250C1FBB4B0F01771D2C51" />
             <ComponentRef Id="cmpE211E4CEFC5CD1FA37B0AEAF85EC7790" />

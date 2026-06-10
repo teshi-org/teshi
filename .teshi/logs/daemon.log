@@ -32,3 +32,11 @@
 2026-06-07T07:00:55.172836Z  INFO teshi_daemon: teshi daemon listening on 127.0.0.1:65324
 2026-06-07T07:05:26.822689Z  INFO teshi_daemon: teshi daemon listening on 127.0.0.1:58160
 2026-06-07T07:06:46.496142Z  INFO teshi_daemon: teshi daemon listening on 127.0.0.1:56371
+2026-06-10T15:39:24.575474Z  INFO teshi_daemon: teshi daemon listening on 127.0.0.1:0
+2026-06-10T15:41:05.622664Z  INFO teshi_daemon: teshi daemon listening on 127.0.0.1:23456
+2026-06-10T15:42:41.885727Z  INFO teshi_daemon: teshi daemon listening on 127.0.0.1:23457
+2026-06-10T15:43:05.822601Z  INFO teshi_daemon: teshi daemon listening on 127.0.0.1:23459
+2026-06-10T15:44:18.235819Z  INFO teshi_daemon: teshi daemon listening on 127.0.0.1:23461
+2026-06-10T15:45:47.013959Z  INFO teshi_daemon: teshi daemon listening on 127.0.0.1:23465
+2026-06-10T15:45:54.791662Z  INFO teshi_daemon: teshi daemon listening on 127.0.0.1:23466
+2026-06-10T15:48:23.525510Z  INFO teshi_daemon: teshi daemon listening on 127.0.0.1:58723

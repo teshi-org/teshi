@@ -355,18 +355,13 @@ fn read_child_stderr(child: &mut Child) -> String {
 ///   - Plain port number: `54321\n` (embedded/chrome modes)
 ///   - JSON readiness object: `{"ready": true, "ws_url": "ws://127.0.0.1:54321", ...}` (winapp mode)
 /// Uses a background thread so the main thread can poll for child exit and timeout.
-fn read_port_from_child_stdout(
-    child: &mut Child,
-    timeout: Duration,
-) -> Result<u16, BrowserError> {
+fn read_port_from_child_stdout(child: &mut Child, timeout: Duration) -> Result<u16, BrowserError> {
     let mut stdout = child.stdout.take().expect("stdout must be piped");
     let deadline = Instant::now() + timeout;
 
     let handle = std::thread::spawn(move || -> Option<u16> {
         let mut line = String::new();
-        BufReader::new(&mut stdout)
-            .read_line(&mut line)
-            .ok()?;
+        BufReader::new(&mut stdout).read_line(&mut line).ok()?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             return None;
@@ -378,7 +373,11 @@ fn read_port_from_child_stdout(
         // 2) JSON readiness object (winapp mode): extract port from ws_url
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
             if let Some(ws_url) = v.get("ws_url").and_then(|u| u.as_str()) {
-                if let Some(port) = ws_url.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) {
+                if let Some(port) = ws_url
+                    .rsplit(':')
+                    .next()
+                    .and_then(|p| p.parse::<u16>().ok())
+                {
                     return Some(port);
                 }
             }
@@ -406,8 +405,7 @@ fn read_port_from_child_stdout(
             return Err(BrowserError {
                 message,
                 hint: Some(
-                    "Check that Python dependencies (websockets, playwright) are installed."
-                        .into(),
+                    "Check that Python dependencies (websockets, playwright) are installed.".into(),
                 ),
             });
         }

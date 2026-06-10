@@ -22,6 +22,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# HARD RULE: teshi is locked to 0.7.x until the lock is intentionally removed.
+ALLOWED_MAJOR = 0
+ALLOWED_MINOR = 7
+
 VERSION_FILES: list[tuple[str, str, re.Pattern, str]] = [
     # (label, file_path, regex, replacement)
     ("Cargo.toml (root)", "Cargo.toml",
@@ -111,11 +115,15 @@ def recommend_bump(analysis: dict) -> str:
 
 def bump_version(version: str, bump: str) -> str:
     major, minor, patch = map(int, version.split("."))
-    if bump == "major":
-        return f"{major + 1}.0.0"
-    elif bump == "minor":
-        return f"{major}.{minor + 1}.0"
-    elif bump == "patch":
+    # HARD RULE: version stays locked in ALLOWED_MAJOR.ALLOWED_MINOR.x
+    if bump == "major" or bump == "minor":
+        print(f"  ⛔ {bump} bump blocked by {ALLOWED_MAJOR}.{ALLOWED_MINOR}.x lock — forcing patch bump instead.")
+        bump = "patch"
+    if major != ALLOWED_MAJOR or minor != ALLOWED_MINOR:
+        print(f"  ⛔ Version {version} outside {ALLOWED_MAJOR}.{ALLOWED_MINOR}.x — forcing to {ALLOWED_MAJOR}.{ALLOWED_MINOR}.x.")
+        major, minor = ALLOWED_MAJOR, ALLOWED_MINOR
+        patch = 0
+    if bump == "patch":
         return f"{major}.{minor}.{patch + 1}"
     return version
 
@@ -240,6 +248,25 @@ def main() -> None:
     updated = update_version_files(new_version, dry_run=not apply)
     for f in updated:
         print(f"  {'✓' if apply else '·'} {f}")
+
+    if apply:
+        # Post-update validation: enforce 0.7.x across all files
+        versions = get_current_versions()
+        for label, ver in versions.items():
+            if ver == "???":
+                continue
+            parts = ver.split(".")
+            if int(parts[0]) != ALLOWED_MAJOR or int(parts[1]) != ALLOWED_MINOR:
+                print(f"\n  ❌ {label} version {ver} violates {ALLOWED_MAJOR}.{ALLOWED_MINOR}.x lock!")
+                print(f"     Reverting changes.")
+                # Revert by restoring from git
+                subprocess.run(
+                    ["git", "checkout", "--"]
+                    + [REPO_ROOT / f[1] for f in VERSION_FILES],
+                    cwd=REPO_ROOT,
+                )
+                sys.exit(1)
+        print(f"\n  ✅ All files locked to {ALLOWED_MAJOR}.{ALLOWED_MINOR}.x — good.")
 
     if not apply:
         print()

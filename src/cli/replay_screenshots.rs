@@ -1,9 +1,9 @@
-use std::fs;
-use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::fs;
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 use teshi_runtime::send_sidecar_command_with_timeout;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,10 +103,8 @@ pub fn load_or_create_index(screenshot_dir: &Path, feature: &str) -> ReplayScree
 /// Writes index.json to the screenshot directory.
 pub fn save_index(screenshot_dir: &Path, index: &ReplayScreenshotsIndex) -> Result<()> {
     let path = screenshot_dir.join("index.json");
-    let text = serde_json::to_string_pretty(index)
-        .context("serialize screenshot index")?;
-    fs::write(&path, &text)
-        .with_context(|| format!("write {}", path.display()))?;
+    let text = serde_json::to_string_pretty(index).context("serialize screenshot index")?;
+    fs::write(&path, &text).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 

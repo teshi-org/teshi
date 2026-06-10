@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use teshi_runtime::{find_project_root, spawn_daemon_background, DaemonManifest};
+use teshi_runtime::{DaemonManifest, find_project_root, spawn_daemon_background};
 
 use super::DaemonCommand;
 
@@ -33,8 +33,8 @@ fn daemon_start(project_root: &Path) -> Result<()> {
 }
 
 fn daemon_stop(project_root: &Path) -> Result<()> {
-    let manifest = DaemonManifest::load(project_root)
-        .context("daemon not running (no daemon.json found)")?;
+    let manifest =
+        DaemonManifest::load(project_root).context("daemon not running (no daemon.json found)")?;
 
     if !manifest.is_alive() {
         eprintln!("daemon was not running; cleaning up stale manifest");
@@ -53,7 +53,10 @@ fn daemon_stop(project_root: &Path) -> Result<()> {
 
     if !http_ok {
         // Fallback: force-kill the daemon process
-        eprintln!("graceful shutdown failed, killing daemon (pid {})", manifest.pid);
+        eprintln!(
+            "graceful shutdown failed, killing daemon (pid {})",
+            manifest.pid
+        );
         #[cfg(windows)]
         {
             let _ = std::process::Command::new("taskkill")
@@ -78,6 +81,9 @@ fn daemon_stop(project_root: &Path) -> Result<()> {
 
     // Clean up manifest
     teshi_runtime::remove_daemon_manifest(project_root);
-    println!("daemon stopped (was pid {}, port {})", manifest.pid, manifest.port);
+    println!(
+        "daemon stopped (was pid {}, port {})",
+        manifest.pid, manifest.port
+    );
     Ok(())
 }

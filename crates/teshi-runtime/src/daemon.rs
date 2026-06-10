@@ -46,11 +46,7 @@ impl DaemonManifest {
     pub fn is_alive(&self) -> bool {
         // Quick TCP probe — if the port accepts a connection, the daemon is alive.
         let addr = format!("127.0.0.1:{}", self.port);
-        TcpStream::connect_timeout(
-            &addr.parse().unwrap(),
-            Duration::from_millis(200),
-        )
-        .is_ok()
+        TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(200)).is_ok()
     }
 }
 
@@ -78,8 +74,7 @@ pub fn find_project_root(start_dir: Option<&Path>) -> Option<PathBuf> {
 
 /// Returns a free TCP port on loopback by binding to port 0.
 pub fn pick_free_port() -> Result<u16> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .context("find free loopback port")?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").context("find free loopback port")?;
     Ok(listener.local_addr()?.port())
 }
 
@@ -97,11 +92,7 @@ pub fn remove_daemon_manifest(project_root: &Path) {
 ///
 /// `dist` is optional — pass `Some(...)` when the frontend dist directory is known
 /// (e.g. `teshi web`), or `None` when the daemon should resolve it itself.
-pub fn spawn_daemon_background(
-    project_root: &Path,
-    port: u16,
-    dist: Option<&Path>,
-) -> Result<()> {
+pub fn spawn_daemon_background(project_root: &Path, port: u16, dist: Option<&Path>) -> Result<()> {
     let exe = std::env::current_exe().context("resolve current executable")?;
 
     let mut args: Vec<String> = vec![
@@ -119,13 +110,24 @@ pub fn spawn_daemon_background(
     #[cfg(windows)]
     {
         // Delegate to PowerShell Start-Process to avoid self-spawn deadlock.
+        // NOTE: -ArgumentList must be a single string (not comma-separated)
+        // because comma-separated args don't handle spaces in paths correctly.
+        let arg_str = args
+            .iter()
+            .map(|a| {
+                if a.contains(' ') {
+                    // Double-quote paths with spaces
+                    format!("\"{}\"", a.replace('"', "\\\""))
+                } else {
+                    a.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
         let ps_cmd = format!(
-            "Start-Process -FilePath '{}' -ArgumentList {} -WindowStyle Hidden",
+            "Start-Process -FilePath '{}' -ArgumentList '{}' -WindowStyle Hidden",
             exe.display(),
-            args.iter()
-                .map(|a| format!("'{}'", a.replace('\'', "''")))
-                .collect::<Vec<_>>()
-                .join(","),
+            arg_str.replace('\'', "''"),
         );
         std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])

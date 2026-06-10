@@ -154,7 +154,13 @@ pub(crate) struct EngineStep {
 }
 
 impl EngineStep {
-    fn from_binding(step_line: usize, action: &str, strategy: &str, value: &str, value_arg: Option<&str>) -> Self {
+    fn from_binding(
+        step_line: usize,
+        action: &str,
+        strategy: &str,
+        value: &str,
+        value_arg: Option<&str>,
+    ) -> Self {
         let (engine_action, url) = match action {
             "navigate" => ("goto", Some(value.to_string())),
             "goto" => ("goto", Some(value.to_string())),
@@ -218,9 +224,24 @@ pub fn load_engine_config(
     // 3. Auto-detect: check common engine locations relative to project root
     //    Priority: engine/engine/__main__.py > engine/__main__.py > teshi-engine in PATH
     let candidates = [
-        ("engine/engine/__main__.py", vec!["-m".to_string(), "engine".to_string()]),
-        ("engine/__main__.py",      vec!["-m".to_string(), "engine".to_string()]),
-        ("engine/cli.py",           vec![project_root.join("engine").join("cli.py").to_string_lossy().to_string()]),
+        (
+            "engine/engine/__main__.py",
+            vec!["-m".to_string(), "engine".to_string()],
+        ),
+        (
+            "engine/__main__.py",
+            vec!["-m".to_string(), "engine".to_string()],
+        ),
+        (
+            "engine/cli.py",
+            vec![
+                project_root
+                    .join("engine")
+                    .join("cli.py")
+                    .to_string_lossy()
+                    .to_string(),
+            ],
+        ),
     ];
 
     for (rel_path, args) in &candidates {
@@ -266,7 +287,9 @@ pub fn load_engine_config(
 }
 
 /// Spawn the engine process and return a receiver for engine events.
-pub fn spawn_engine(config: &EngineConfig) -> Result<(Sender<serde_json::Value>, Receiver<EngineEvent>)> {
+pub fn spawn_engine(
+    config: &EngineConfig,
+) -> Result<(Sender<serde_json::Value>, Receiver<EngineEvent>)> {
     let (cmd_tx, cmd_rx) = mpsc::channel::<serde_json::Value>();
     let (event_tx, event_rx) = mpsc::channel::<EngineEvent>();
 
@@ -276,7 +299,9 @@ pub fn spawn_engine(config: &EngineConfig) -> Result<(Sender<serde_json::Value>,
     let env = config.env.clone();
 
     thread::spawn(move || {
-        if let Err(err) = run_engine_child(&cmd, &args, cwd.as_deref(), &env, cmd_rx, event_tx.clone()) {
+        if let Err(err) =
+            run_engine_child(&cmd, &args, cwd.as_deref(), &env, cmd_rx, event_tx.clone())
+        {
             let _ = event_tx.send(EngineEvent::EngineError {
                 code: "spawn_failed".to_string(),
                 message: err.to_string(),
@@ -341,7 +366,10 @@ pub fn run_feature_with_engine(
         let steps = match bindings_to_engine_steps(&project_root, &case.feature_path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("warning: failed to resolve bindings for {}: {e}", case.feature_path);
+                eprintln!(
+                    "warning: failed to resolve bindings for {}: {e}",
+                    case.feature_path
+                );
                 skipped += 1;
                 continue;
             }
@@ -368,7 +396,13 @@ pub fn run_feature_with_engine(
         let mut case_passed = true;
         loop {
             match event_rx.recv() {
-                Ok(EngineEvent::StepExecuted { step_id, status, duration_ms, error, .. }) => {
+                Ok(EngineEvent::StepExecuted {
+                    step_id,
+                    status,
+                    duration_ms,
+                    error,
+                    ..
+                }) => {
                     let icon = if status == "success" { "✓" } else { "✗" };
                     let err_info = error.map(|e| format!("  {e}")).unwrap_or_default();
                     println!("  {icon} {step_id} ({duration_ms:.0}ms){err_info}");
@@ -376,7 +410,15 @@ pub fn run_feature_with_engine(
                         case_passed = false;
                     }
                 }
-                Ok(EngineEvent::ScenarioFinished { scenario_id: sid, overall_status, passed: p, failed: f, total_duration_ms, self_healed, .. }) => {
+                Ok(EngineEvent::ScenarioFinished {
+                    scenario_id: sid,
+                    overall_status,
+                    passed: p,
+                    failed: f,
+                    total_duration_ms,
+                    self_healed,
+                    ..
+                }) => {
                     let heal_info = if self_healed > 0 {
                         format!(" (self-healed: {self_healed})")
                     } else {
@@ -391,11 +433,23 @@ pub fn run_feature_with_engine(
                     }
                     break; // done with this scenario
                 }
-                Ok(EngineEvent::HealDiff { step_id, original_locator, healed_locator, strategy, .. }) => {
+                Ok(EngineEvent::HealDiff {
+                    step_id,
+                    original_locator,
+                    healed_locator,
+                    strategy,
+                    ..
+                }) => {
                     eprintln!(
                         "  heal: {step_id} [{strategy}] {} → {}",
-                        original_locator.get("value").and_then(|v| v.as_str()).unwrap_or("?"),
-                        healed_locator.get("value").and_then(|v| v.as_str()).unwrap_or("?"),
+                        original_locator
+                            .get("value")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?"),
+                        healed_locator
+                            .get("value")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?"),
                     );
 
                     // Persist the healed locator to the step bindings
@@ -404,8 +458,14 @@ pub fn run_feature_with_engine(
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
                     if step_line > 0 {
-                        let healed_strategy = healed_locator.get("type").and_then(|v| v.as_str()).unwrap_or("css");
-                        let healed_value = healed_locator.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                        let healed_strategy = healed_locator
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("css");
+                        let healed_value = healed_locator
+                            .get("value")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         if !healed_value.is_empty() {
                             let _ = teshi_runtime::update_binding_locator(
                                 &project_root,
@@ -471,10 +531,13 @@ pub fn handle_record_command(url: &str, feature: Option<&str>, auto_propose: boo
     let config = load_engine_config(&project_root, None, &[])?;
     let (cmd_tx, event_rx) = spawn_engine(&config)?;
 
-    let session_id = format!("rec-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs());
+    let session_id = format!(
+        "rec-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
 
     let msg = serde_json::json!({
         "type": "RECORD_START",
@@ -483,7 +546,9 @@ pub fn handle_record_command(url: &str, feature: Option<&str>, auto_propose: boo
     });
 
     if cmd_tx.send(msg).is_err() {
-        return Err(anyhow::anyhow!("engine process died before recording started"));
+        return Err(anyhow::anyhow!(
+            "engine process died before recording started"
+        ));
     }
 
     eprintln!("[teshi] Recording started at {url}");
@@ -493,7 +558,11 @@ pub fn handle_record_command(url: &str, feature: Option<&str>, auto_propose: boo
 
     loop {
         match event_rx.recv() {
-            Ok(EngineEvent::RecordStep { session_id: _, action, .. }) => {
+            Ok(EngineEvent::RecordStep {
+                session_id: _,
+                action,
+                ..
+            }) => {
                 let action_type = action.get("action").and_then(|v| v.as_str()).unwrap_or("?");
                 let locator_value = action
                     .get("locator")
@@ -504,7 +573,11 @@ pub fn handle_record_command(url: &str, feature: Option<&str>, auto_propose: boo
                 recorded_steps.push(action.clone());
             }
             Ok(EngineEvent::RecordStopped { steps, status, .. }) => {
-                eprintln!("[teshi] Recording {} — {} actions captured", status, steps.len());
+                eprintln!(
+                    "[teshi] Recording {} — {} actions captured",
+                    status,
+                    steps.len()
+                );
                 recorded_steps = steps;
                 break;
             }
@@ -524,7 +597,10 @@ pub fn handle_record_command(url: &str, feature: Option<&str>, auto_propose: boo
         // Write first recorded step as pending locator proposal
         if let Some(first_step) = recorded_steps.first() {
             let locator = first_step.get("locator").and_then(|l| l.as_object());
-            let action = first_step.get("action").and_then(|v| v.as_str()).unwrap_or("click");
+            let action = first_step
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("click");
 
             if let Some(loc) = locator {
                 let strategy = loc.get("type").and_then(|v| v.as_str()).unwrap_or("css");
@@ -545,7 +621,10 @@ pub fn handle_record_command(url: &str, feature: Option<&str>, auto_propose: boo
                         strategy: strategy.to_string(),
                         value: value.to_string(),
                         action: action.to_string(),
-                        value_arg: first_step.get("value").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        value_arg: first_step
+                            .get("value")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
                         confidence: 0.9,
                         rationale: format!("Recorded from browser interaction at {url}"),
                     }],
@@ -559,10 +638,13 @@ pub fn handle_record_command(url: &str, feature: Option<&str>, auto_propose: boo
         }
     }
 
-    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-        "session_id": session_id,
-        "steps": recorded_steps.len(),
-    }))?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "session_id": session_id,
+            "steps": recorded_steps.len(),
+        }))?
+    );
 
     Ok(())
 }
@@ -576,7 +658,11 @@ pub fn handle_generate_command(action: &GenerateCommand) -> Result<()> {
     let (cmd_tx, event_rx) = spawn_engine(&config)?;
 
     match action {
-        GenerateCommand::Po { scenario, feature, output } => {
+        GenerateCommand::Po {
+            scenario,
+            feature,
+            output,
+        } => {
             let steps: Vec<serde_json::Value> = if let Some(path) = scenario {
                 let content = std::fs::read_to_string(path)
                     .with_context(|| format!("failed to read {path}"))?;
@@ -609,10 +695,13 @@ pub fn handle_generate_command(action: &GenerateCommand) -> Result<()> {
                 println!("{code}");
             }
         }
-        GenerateCommand::Steps { page_object, feature, output } => {
+        GenerateCommand::Steps {
+            page_object,
+            feature,
+            output,
+        } => {
             let po_code = if let Some(path) = page_object {
-                std::fs::read_to_string(path)
-                    .with_context(|| format!("failed to read {path}"))?
+                std::fs::read_to_string(path).with_context(|| format!("failed to read {path}"))?
             } else if let Some(feature_path) = feature {
                 // Generate PO first, then steps from it
                 let engine_steps = bindings_to_engine_steps(&project_root, feature_path)?;
@@ -670,8 +759,15 @@ pub fn handle_generate_command(action: &GenerateCommand) -> Result<()> {
 
             loop {
                 match event_rx.recv() {
-                    Ok(EngineEvent::ProjectGenerated { output_dir, files, code_lines }) => {
-                        println!("Project generated at {output_dir}: {} files, {code_lines} lines", files.len());
+                    Ok(EngineEvent::ProjectGenerated {
+                        output_dir,
+                        files,
+                        code_lines,
+                    }) => {
+                        println!(
+                            "Project generated at {output_dir}: {} files, {code_lines} lines",
+                            files.len()
+                        );
                         for f in &files {
                             println!("  {f}");
                         }
@@ -713,7 +809,8 @@ fn run_engine_child(
     event_tx: Sender<EngineEvent>,
 ) -> Result<()> {
     let mut command = Command::new(cmd);
-    command.args(args)
+    command
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -802,18 +899,36 @@ fn parse_engine_event(line: &str) -> Option<EngineEvent> {
         "STEP_EXECUTED" => Some(EngineEvent::StepExecuted {
             step_id: value.get("step_id")?.as_str()?.to_string(),
             status: value.get("status")?.as_str()?.to_string(),
-            duration_ms: value.get("duration_ms").and_then(|v| v.as_f64()).unwrap_or(0.0),
-            error: value.get("error").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            screenshot_path: value.get("screenshot_path").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            duration_ms: value
+                .get("duration_ms")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0),
+            error: value
+                .get("error")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            screenshot_path: value
+                .get("screenshot_path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         }),
         "SCENARIO_FINISHED" => Some(EngineEvent::ScenarioFinished {
             scenario_id: value.get("scenario_id")?.as_str()?.to_string(),
             overall_status: value.get("overall_status")?.as_str()?.to_string(),
-            total_steps: value.get("total_steps").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            total_steps: value
+                .get("total_steps")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize,
             passed: value.get("passed").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
             failed: value.get("failed").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
-            total_duration_ms: value.get("total_duration_ms").and_then(|v| v.as_f64()).unwrap_or(0.0),
-            self_healed: value.get("self_healed").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            total_duration_ms: value
+                .get("total_duration_ms")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0),
+            self_healed: value
+                .get("self_healed")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize,
         }),
         "SCENARIO_TRACE" => Some(EngineEvent::ScenarioTrace {
             scenario_id: value.get("scenario_id")?.as_str()?.to_string(),
@@ -824,41 +939,105 @@ fn parse_engine_event(line: &str) -> Option<EngineEvent> {
             scenario_id: value.get("scenario_id")?.as_str()?.to_string(),
             original_locator: value.get("original_locator").cloned().unwrap_or_default(),
             healed_locator: value.get("healed_locator").cloned().unwrap_or_default(),
-            strategy: value.get("strategy").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
+            strategy: value
+                .get("strategy")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string(),
         }),
         "RECORD_STEP" => Some(EngineEvent::RecordStep {
             session_id: value.get("session_id")?.as_str()?.to_string(),
             action: value.get("action").cloned().unwrap_or_default(),
-            screenshot: value.get("screenshot").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            screenshot: value
+                .get("screenshot")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         }),
         "RECORD_STOPPED" => Some(EngineEvent::RecordStopped {
             session_id: value.get("session_id")?.as_str()?.to_string(),
-            steps: value.get("steps").and_then(|v| v.as_array()).map(|a| a.iter().cloned().collect()).unwrap_or_default(),
-            status: value.get("status").and_then(|v| v.as_str()).unwrap_or("completed").to_string(),
+            steps: value
+                .get("steps")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().cloned().collect())
+                .unwrap_or_default(),
+            status: value
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("completed")
+                .to_string(),
         }),
         "PAGE_OBJECT_GENERATED" => Some(EngineEvent::PageObjectGenerated {
-            name: value.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
-            method_count: value.get("method_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
-            code_lines: value.get("code_lines").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            name: value
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string(),
+            method_count: value
+                .get("method_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize,
+            code_lines: value
+                .get("code_lines")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize,
         }),
         "STEP_DEFS_GENERATED" => Some(EngineEvent::StepDefsGenerated {
-            code_lines: value.get("code_lines").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
-            method_count: value.get("method_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            code_lines: value
+                .get("code_lines")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize,
+            method_count: value
+                .get("method_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize,
         }),
         "PROJECT_GENERATED" => Some(EngineEvent::ProjectGenerated {
-            output_dir: value.get("output_dir").and_then(|v| v.as_str()).unwrap_or("generated").to_string(),
-            files: value.get("files").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()).unwrap_or_default(),
-            code_lines: value.get("code_lines").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            output_dir: value
+                .get("output_dir")
+                .and_then(|v| v.as_str())
+                .unwrap_or("generated")
+                .to_string(),
+            files: value
+                .get("files")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            code_lines: value
+                .get("code_lines")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize,
         }),
         "ERROR" => Some(EngineEvent::EngineError {
-            code: value.get("code").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-            message: value.get("message").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+            code: value
+                .get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            message: value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
         }),
         "MAPPING_UPDATED" => Some(EngineEvent::MappingUpdated {
             step_id: value.get("step_id")?.as_str()?.to_string(),
-            page_object_name: value.get("page_object_name").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
-            locator_key: value.get("locator_key").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            recording_step_id: value.get("recording_step_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            page_object_name: value
+                .get("page_object_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string(),
+            locator_key: value
+                .get("locator_key")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            recording_step_id: value
+                .get("recording_step_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         }),
         "PONG" => Some(EngineEvent::Pong {
             ts: value.get("ts").and_then(|v| v.as_f64()),

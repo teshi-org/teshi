@@ -232,8 +232,7 @@ pub fn write_cdp_endpoint_from_rust(
 ) -> Result<()> {
     let path = project_root.join(".teshi").join("cdp-endpoint.json");
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let payload = json!({
         "mode": mode,

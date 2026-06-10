@@ -3714,7 +3714,10 @@ fn render_agent_profile_main(frame: &mut Frame<'_>, app: &App, area: Rect) {
 fn render_agent_profile_summary(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    let Some(profile) = app.agent_registry.get_index(app.agent_profile_panel_selection) else {
+    let Some(profile) = app
+        .agent_registry
+        .get_index(app.agent_profile_panel_selection)
+    else {
         lines.extend(hatched_empty_lines(
             area.height as usize,
             "No profile selected",

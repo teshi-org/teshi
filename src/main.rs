@@ -141,8 +141,7 @@ fn main() -> Result<()> {
 
     // Handle --daemon-internal (hidden flag for forked daemon process)
     if std::env::args().any(|a| a == "--daemon-internal") {
-        let opts: teshi_daemon::DaemonInternalOptions =
-            clap::Parser::parse_from(std::env::args());
+        let opts: teshi_daemon::DaemonInternalOptions = clap::Parser::parse_from(std::env::args());
         let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
         return rt.block_on(teshi_daemon::run_daemon_internal(opts));
     }
@@ -196,7 +195,11 @@ fn main() -> Result<()> {
         Some(cli::Command::Daemon { action }) => {
             return cli::daemon::handle_daemon_command(&action);
         }
-        Some(cli::Command::Record { url, feature, auto_propose }) => {
+        Some(cli::Command::Record {
+            url,
+            feature,
+            auto_propose,
+        }) => {
             return engine::handle_record_command(&url, feature.as_deref(), auto_propose);
         }
         Some(cli::Command::Generate { action }) => {

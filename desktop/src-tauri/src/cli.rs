@@ -72,6 +72,7 @@ mod tests {
         let cli = DesktopCli {
             project: Some(PathBuf::from("/a")),
             path: Some(PathBuf::from("/b")),
+            start_embedded: false,
         };
         assert_eq!(cli.project_path(), Some(PathBuf::from("/a")));
     }

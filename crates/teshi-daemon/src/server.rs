@@ -122,7 +122,8 @@ pub async fn run_server(
             if ws_count == 0 && idle > std::time::Duration::from_secs(300) {
                 tracing::info!(
                     "idle watchdog: {:?} since last request, {} active WS — shutting down",
-                    idle, ws_count
+                    idle,
+                    ws_count
                 );
                 token.cancel();
                 return;
@@ -164,7 +165,11 @@ impl Drop for WsGuard {
     }
 }
 
-async fn handle_events_socket(rt: SharedRuntime, active_ws: Arc<AtomicUsize>, mut socket: WebSocket) {
+async fn handle_events_socket(
+    rt: SharedRuntime,
+    active_ws: Arc<AtomicUsize>,
+    mut socket: WebSocket,
+) {
     active_ws.fetch_add(1, Ordering::Relaxed);
     let _guard = WsGuard(active_ws);
     let mut rx = rt.events.subscribe();
@@ -241,16 +246,9 @@ struct ListDirQuery {
     path: String,
 }
 
-async fn api_read_file(
-    Query(q): Query<ListDirQuery>,
-) -> Result<String, (StatusCode, String)> {
+async fn api_read_file(Query(q): Query<ListDirQuery>) -> Result<String, (StatusCode, String)> {
     fs::read_to_string(&q.path)
-        .map_err(|e| {
-            (
-                StatusCode::NOT_FOUND,
-                format!("read {}: {e}", q.path),
-            )
-        })
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("read {}: {e}", q.path)))
 }
 
 async fn api_list_dir(
