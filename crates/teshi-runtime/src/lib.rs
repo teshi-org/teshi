@@ -10,6 +10,8 @@ mod sidecar;
 mod terminal;
 mod venv;
 mod watcher;
+mod fs_util;
+mod daemon;
 
 /// Project Python venv resolution and import preflight (used by sidecar; exposed for tests).
 pub mod python_env {
@@ -35,9 +37,9 @@ pub use locator::{
     propose_locator, read_active_step, read_pending, reject_locator, reject_pending_locator,
     resolve_step_bindings, resolve_step_context, sanitize_feature_path, start_locator_watch,
     step_binding_statuses, sync_active_step, unbind_step, unbind_step_binding,
-    wait_for_step_status, write_active_step, ActiveStep, FeatureStepRef, HighlightInfo,
-    LocatorCandidate, LocatorPrimary, LocatorWatcherState, PendingLocator, StepBinding,
-    StepBindingStatus, StepBindingsFile, StepWaitResult, StepWaitUntil,
+    update_binding_locator, wait_for_step_status, write_active_step, ActiveStep, FeatureStepRef,
+    HighlightInfo, LocatorCandidate, LocatorPrimary, LocatorWatcherState, PendingLocator,
+    StepBinding, StepBindingStatus, StepBindingsFile, StepWaitResult, StepWaitUntil,
 };
 pub use project::{
     check_project_switch_allowed, get_project_root, list_dir, open_project, set_browser_active,
@@ -53,6 +55,11 @@ pub use sidecar::{
 };
 pub use terminal::{resize_terminal, spawn_terminal, stop_terminal, write_terminal, TerminalState};
 pub use watcher::FileWatcherState;
+pub use fs_util::{read_locked, write_atomic};
+pub use daemon::{
+    find_project_root, pick_free_port, remove_daemon_manifest, spawn_daemon_background,
+    DaemonManifest,
+};
 
 use std::path::PathBuf;
 use std::sync::Arc;

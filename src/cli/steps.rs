@@ -21,7 +21,17 @@ use super::{
 
 /// Handles `teshi steps ...` subcommands.
 pub fn handle_steps_command(action: &StepsCommand) -> Result<()> {
-    let project_root = std::env::current_dir().context("resolve current directory")?;
+    let project_root = teshi_runtime::find_project_root(None)
+        .unwrap_or_else(|| std::env::current_dir().unwrap());
+
+    // Try daemon for state-modifying operations
+    if let Some(manifest) = teshi_runtime::DaemonManifest::load(&project_root) {
+        if manifest.is_alive() {
+            return handle_steps_via_daemon(&manifest, action);
+        }
+    }
+
+    // Fallback: direct file I/O
     match action {
         StepsCommand::Select(args) => select(&project_root, args),
         StepsCommand::Unbound(args) => unbound(&project_root, args),
@@ -34,6 +44,109 @@ pub fn handle_steps_command(action: &StepsCommand) -> Result<()> {
         StepsCommand::List(args) => list(&project_root, args),
         StepsCommand::Unbind(args) => unbind(&project_root, args),
     }
+}
+
+/// Route steps commands through the daemon's REST API.
+fn handle_steps_via_daemon(
+    manifest: &teshi_runtime::DaemonManifest,
+    action: &StepsCommand,
+) -> Result<()> {
+    let base = format!("http://127.0.0.1:{}", manifest.port);
+    let client = reqwest::blocking::Client::new();
+
+    match action {
+        StepsCommand::Select(args) => {
+            let resp = client
+                .post(format!("{base}/api/v1/locator/sync-step"))
+                .json(&json!({
+                    "feature_path": args.feature,
+                    "step_line": args.line,
+                }))
+                .send()
+                .context("sync step via daemon")?;
+            print_response(resp)?;
+        }
+        StepsCommand::Unbound(args) => {
+            let feature =
+                resolve_feature_arg_daemon(&client, &base, args.feature.as_deref())?;
+            let resp = client
+                .get(format!(
+                    "{base}/api/v1/steps/statuses?feature_path={feature}"
+                ))
+                .send()
+                .context("get step statuses via daemon")?;
+            print_response(resp)?;
+        }
+        StepsCommand::Confirm(args) => {
+            let resp = client
+                .post(format!("{base}/api/v1/locator/confirm"))
+                .json(&json!({
+                    "candidate_rank": args.rank,
+                    "edited_value": args.value,
+                }))
+                .send()
+                .context("confirm locator via daemon")?;
+            print_response(resp)?;
+        }
+        StepsCommand::Reject => {
+            let resp = client
+                .post(format!("{base}/api/v1/locator/reject"))
+                .send()
+                .context("reject locator via daemon")?;
+            print_response(resp)?;
+        }
+        // For read-only ops that don't have direct daemon API equivalents,
+        // fall back to direct file I/O:
+        _ => {
+            let project_root = teshi_runtime::find_project_root(None)
+                .unwrap_or_else(|| std::env::current_dir().unwrap());
+            return match action {
+                StepsCommand::NextUnbound(args) => next_unbound(&project_root, args),
+                StepsCommand::Propose(args) => propose(&project_root, args),
+                StepsCommand::Wait(args) => wait(&project_root, args),
+                StepsCommand::Resolve(args) => resolve(&project_root, args),
+                StepsCommand::List(args) => list(&project_root, args),
+                StepsCommand::Unbind(args) => unbind(&project_root, args),
+                _ => unreachable!(),
+            };
+        }
+    }
+    Ok(())
+}
+
+fn print_response(resp: reqwest::blocking::Response) -> Result<()> {
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "daemon returned {}: {}",
+            resp.status(),
+            resp.text().unwrap_or_default()
+        );
+    }
+    let body = resp.text()?;
+    if !body.trim().is_empty() {
+        println!("{body}");
+    }
+    Ok(())
+}
+
+fn resolve_feature_arg_daemon(
+    client: &reqwest::blocking::Client,
+    base: &str,
+    feature: Option<&str>,
+) -> Result<String> {
+    if let Some(f) = feature {
+        return Ok(f.replace('\\', "/"));
+    }
+    // Get active step from daemon
+    let resp = client
+        .get(format!("{base}/api/v1/locator/active-step"))
+        .send()
+        .context("get active step via daemon")?;
+    let body: serde_json::Value = resp.json()?;
+    body.get("feature_relative_path")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .context("no active step; pass --feature explicitly")
 }
 
 fn select(project_root: &Path, args: &StepsSelectArgs) -> Result<()> {

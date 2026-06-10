@@ -348,6 +348,25 @@ def process_name_for_pid(pid: int) -> str | None:
         return output.split(",", 1)[0].strip('"') or None
 
 
+def _process_is_running(process_name: str) -> bool:
+    """Check whether any process whose image name contains `process_name` is running."""
+    try:
+        output = subprocess.check_output(
+            ["tasklist", "/FI", f"IMAGENAME eq {process_name}", "/FO", "CSV", "/NH"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if not output or output.startswith("INFO:"):
+        return False
+    try:
+        row = next(csv.reader([output]))
+        return row[0].strip('"').casefold() == process_name.casefold()
+    except Exception:
+        return process_name.casefold() in output.casefold()
+
+
 def find_window(
     *,
     hwnd: int | None = None,
@@ -699,17 +718,27 @@ class WinAppSession:
         return {"ok": True}
 
     def execute(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Run one action against a selected UIA control.
+        """Run one action against a selected UIA control, or exec a system command.
 
         mode: "foreground" (default, SetForegroundWindow + SendInput)
               "background" (PostMessage/SendMessage, no focus change)
+
+        exec actions (no selector needed):
+          exec: launch <path>           spawn a process
+          exec: close                   send WM_CLOSE to attached window
+          exec: assert_process <name>   fail if no process matches
+          exec: assert_no_process <name>  fail if any process matches
         """
         selector = str(payload.get("selector") or "")
         action = str(payload.get("action") or "click")
         value = payload.get("value")
         mode = str(payload.get("mode") or "foreground").casefold()
-        control = self.find_control(selector)
         try:
+            # --- exec actions (no UIA control needed) ---
+            if action == "exec":
+                return self._handle_exec(selector, str(value or ""))
+
+            control = self.find_control(selector)
             if mode not in ("foreground", "background"):
                 return {"ok": False, "error": f"invalid mode: {mode!r}; use foreground or background"}
             if mode == "foreground" and self.hwnd is not None and user32 is not None:
@@ -758,6 +787,47 @@ class WinAppSession:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "selector": selector, "action": action}
+
+    def _handle_exec(self, sub_action: str, value_arg: str) -> dict[str, Any]:
+        """Handle exec commands: launch, close, assert_process, assert_no_process."""
+        if sub_action == "launch":
+            if not value_arg:
+                return {"ok": False, "error": "exec launch requires value_arg (exe path)"}
+            exe_name = os.path.basename(value_arg)
+            if _process_is_running(exe_name):
+                return {"ok": True, "exec": "launch", "skipped": True, "reason": f"{exe_name} is already running"}
+            try:
+                proc = subprocess.Popen([value_arg], text=True)
+                return {"ok": True, "exec": "launch", "pid": proc.pid}
+            except OSError as exc:
+                return {"ok": False, "error": f"launch failed: {exc}"}
+
+        if sub_action == "close":
+            if self.hwnd is None or user32 is None:
+                return {"ok": False, "error": "no attached window to close"}
+            user32.PostMessageW(self.hwnd, 0x0010, 0, 0)  # WM_CLOSE
+            return {"ok": True, "exec": "close", "hwnd": self.hwnd}
+
+        if sub_action == "kill":
+            if not value_arg:
+                return {"ok": False, "error": "exec kill requires value_arg (process name)"}
+            try:
+                subprocess.run(["taskkill", "/F", "/IM", value_arg], capture_output=True, text=True)
+            except OSError as exc:
+                return {"ok": False, "error": f"kill failed: {exc}"}
+            return {"ok": True, "exec": "kill", "process": value_arg}
+
+        if sub_action in ("assert_process", "assert_no_process"):
+            if not value_arg:
+                return {"ok": False, "error": f"exec {sub_action} requires value_arg (process name)"}
+            found = _process_is_running(value_arg)
+            if sub_action == "assert_process" and not found:
+                return {"ok": False, "error": f"process {value_arg!r} is not running"}
+            if sub_action == "assert_no_process" and found:
+                return {"ok": False, "error": f"process {value_arg!r} is still running"}
+            return {"ok": True, "exec": sub_action, "process": value_arg, "running": found}
+
+        return {"ok": False, "error": f"unsupported exec action: {sub_action!r}"}
 
     def _click(self, control: Any) -> None:
         try:
@@ -1218,9 +1288,6 @@ async def handle_command(session: WinAppSession, payload: dict[str, Any]) -> dic
 async def run_server(host: str, port: int, project_root: Path | None) -> None:
     """Run the WinApp sidecar WebSocket server."""
     session = WinAppSession(project_root)
-    ws_url = f"ws://{host}:{port}"
-    if project_root is not None:
-        write_endpoint_file(project_root, mode="winapp", ws_url=ws_url)
 
     async def handler(websocket: Any) -> None:
         session.clients.add(websocket)
@@ -1245,7 +1312,11 @@ async def run_server(host: str, port: int, project_root: Path | None) -> None:
             session.clients.discard(websocket)
 
     frame_task = asyncio.create_task(session.broadcast_frame_loop())
-    async with websockets.serve(handler, host, port):
+    async with websockets.serve(handler, host, port) as server:
+        actual_port = server.sockets[0].getsockname()[1]
+        ws_url = f"ws://{host}:{actual_port}"
+        if project_root is not None:
+            write_endpoint_file(project_root, mode="winapp", ws_url=ws_url)
         print(json.dumps({"ready": True, "mode": "winapp", "ws_url": ws_url}), flush=True)
         try:
             await asyncio.Future()

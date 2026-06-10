@@ -351,6 +351,9 @@ fn read_child_stderr(child: &mut Child) -> String {
 }
 
 /// Read the first line from the child's stdout and parse it as a port number.
+/// Handles two formats:
+///   - Plain port number: `54321\n` (embedded/chrome modes)
+///   - JSON readiness object: `{"ready": true, "ws_url": "ws://127.0.0.1:54321", ...}` (winapp mode)
 /// Uses a background thread so the main thread can poll for child exit and timeout.
 fn read_port_from_child_stdout(
     child: &mut Child,
@@ -368,7 +371,19 @@ fn read_port_from_child_stdout(
         if trimmed.is_empty() {
             return None;
         }
-        trimmed.parse::<u16>().ok()
+        // 1) Plain port number (embedded/chrome modes)
+        if let Ok(port) = trimmed.parse::<u16>() {
+            return Some(port);
+        }
+        // 2) JSON readiness object (winapp mode): extract port from ws_url
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(ws_url) = v.get("ws_url").and_then(|u| u.as_str()) {
+                if let Some(port) = ws_url.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) {
+                    return Some(port);
+                }
+            }
+        }
+        None
     });
 
     loop {

@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod browser;
 pub mod browser_endpoint;
+pub mod daemon;
 pub mod desktop;
 pub mod export;
 pub mod locator_verify;
@@ -47,7 +48,7 @@ pub enum Command {
     /// Browser GUI via loopback HTTP server (same UI as desktop, no Tauri install)
     Web {
         #[command(flatten)]
-        options: teshi_web::WebOptions,
+        options: teshi_daemon::WebOptions,
     },
     /// Native desktop shell (Chrome extension locator, embedded terminal)
     Desktop {
@@ -102,6 +103,28 @@ pub enum Command {
     Export {
         #[command(flatten)]
         args: ExportArgs,
+    },
+    /// Manage the project daemon
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonCommand,
+    },
+    /// Record browser interactions via the engine (JS-injected capture)
+    Record {
+        /// Starting URL (default: https://github.com)
+        #[arg(long, default_value = "https://github.com")]
+        url: String,
+        /// Feature path to associate with the recording
+        #[arg(long)]
+        feature: Option<String>,
+        /// Auto-propose recorded steps as pending locator proposals
+        #[arg(long)]
+        auto_propose: bool,
+    },
+    /// Generate code artifacts via the engine (PageObject, step defs, project)
+    Generate {
+        #[command(subcommand)]
+        action: GenerateCommand,
     },
 }
 
@@ -277,6 +300,10 @@ pub enum BrowserCommand {
     Reconnect(BrowserReconnectArgs),
     /// Highlight + execute a locator and append verification log (RVP R4–R5)
     Verify(BrowserVerifyArgs),
+    /// Probe an element for the best-priority locator (testid > role > label > ...)
+    Enhance(BrowserSelectorArgs),
+    /// Execute a locator with automatic self-healing retry chain
+    HealExecute(BrowserExecuteArgs),
 }
 
 #[derive(Debug, Args)]
@@ -502,6 +529,51 @@ pub enum AuthCommand {
     Status,
     /// Migrate API keys from environment variables to secure storage
     Migrate,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DaemonCommand {
+    /// Start the project daemon if not already running
+    Start,
+    /// Stop the running project daemon
+    Stop,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GenerateCommand {
+    /// Generate PageObject from recorded steps or feature bindings
+    Po {
+        /// Path to scenario JSON file
+        #[arg(value_name = "SCENARIO_JSON")]
+        scenario: Option<String>,
+        /// Feature path to read bindings from
+        #[arg(long)]
+        feature: Option<String>,
+        /// Output file
+        #[arg(long, short = 'o')]
+        output: Option<String>,
+    },
+    /// Generate behave step definitions from a PageObject
+    Steps {
+        /// Path to PageObject .py file
+        #[arg(value_name = "PO_FILE")]
+        page_object: Option<String>,
+        /// Feature path to read bindings from (generates PO first, then steps)
+        #[arg(long)]
+        feature: Option<String>,
+        /// Output file
+        #[arg(long, short = 'o')]
+        output: Option<String>,
+    },
+    /// Generate a complete behave BDD project
+    Project {
+        /// Feature path relative to project root (required)
+        #[arg(long)]
+        feature: String,
+        /// Output directory (default: generated)
+        #[arg(long, short = 'o', default_value = "generated")]
+        output: String,
+    },
 }
 
 impl Command {

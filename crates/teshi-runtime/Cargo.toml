@@ -11,6 +11,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 dunce = "1"
 dirs = "6"
+fd-lock = "4"
 notify = "7.0"
 portable-pty = "0.8"
 serde = { version = "1", features = ["derive"] }

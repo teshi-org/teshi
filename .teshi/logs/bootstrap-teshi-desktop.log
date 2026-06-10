@@ -46,3 +46,7 @@
 [0606/142222.355:ERROR:ui\gfx\win\window_impl.cc:172] Failed to unregister class Chrome_WidgetWin_0. Error = 1411
 
 --- spawn 2026-06-06T14:23:01.437331 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-06T17:35:26.069359 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---
+
+--- spawn 2026-06-06T17:55:06.771937 D:\Dev\Rust\teshi\target\debug\teshi-desktop.exe --project D:\Dev\Rust\teshi ---

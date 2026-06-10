@@ -186,8 +186,18 @@ fn pending_locator_path(project_root: &Path) -> PathBuf {
     teshi_dir(project_root).join("pending-locator.json")
 }
 
-fn step_bindings_dir(project_root: &Path) -> PathBuf {
-    teshi_dir(project_root).join("step-bindings")
+fn step_bindings_path(project_root: &Path, feature_relative_path: &str) -> PathBuf {
+    let feature = feature_relative_path.replace('\\', "/");
+    let parent = project_root.join(
+        Path::new(&feature)
+            .parent()
+            .unwrap_or(Path::new("")),
+    );
+    let stem = Path::new(&feature)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&feature);
+    parent.join(format!("{}.bindings.json", stem))
 }
 
 pub fn sanitize_feature_path(feature_relative_path: &str) -> String {
@@ -207,11 +217,10 @@ pub fn sanitize_feature_path(feature_relative_path: &str) -> String {
     }
 }
 
-fn step_bindings_path(project_root: &Path, feature_relative_path: &str) -> PathBuf {
-    step_bindings_dir(project_root).join(format!(
-        "{}.json",
-        sanitize_feature_path(feature_relative_path)
-    ))
+fn legacy_step_bindings_path(project_root: &Path, feature_relative_path: &str) -> PathBuf {
+    teshi_dir(project_root)
+        .join("step-bindings")
+        .join(format!("{}.json", sanitize_feature_path(feature_relative_path)))
 }
 
 fn ensure_teshi_dir(project_root: &Path) -> Result<PathBuf> {
@@ -412,6 +421,13 @@ fn read_step_bindings_file(
 ) -> Result<StepBindingsFile> {
     let path = step_bindings_path(project_root, feature_relative_path);
     if !path.exists() {
+        // Migration: check legacy .teshi/step-bindings/ path
+        let legacy = legacy_step_bindings_path(project_root, feature_relative_path);
+        if legacy.exists() {
+            let bindings: StepBindingsFile = read_json(&legacy)?;
+            write_step_bindings_file(project_root, &bindings)?;
+            return Ok(bindings);
+        }
         return Ok(StepBindingsFile {
             feature: feature_relative_path.to_string(),
             steps: Vec::new(),
@@ -713,6 +729,32 @@ pub fn unbind_step_binding(
     let removed = bindings.steps.remove(idx);
     write_step_bindings_file(project_root, &bindings)?;
     Ok(Some(removed))
+}
+
+/// Updates a confirmed binding's locator (strategy + value) in-place.
+/// Used by the engine's self-healing feedback to persist healed locators.
+///
+/// # Errors
+///
+/// Returns an error when no binding exists for the line or the file cannot be written.
+pub fn update_binding_locator(
+    project_root: &Path,
+    feature_relative_path: &str,
+    step_line: usize,
+    strategy: &str,
+    value: &str,
+) -> Result<Option<StepBinding>> {
+    let feature_relative = normalize_feature_relative_path(project_root, feature_relative_path)?;
+    let mut bindings = read_step_bindings_file(project_root, &feature_relative)?;
+    let idx = bindings.steps.iter().position(|s| s.step_line == step_line);
+    let Some(idx) = idx else {
+        return Ok(None);
+    };
+    bindings.steps[idx].primary.strategy = strategy.to_string();
+    bindings.steps[idx].primary.value = value.to_string();
+    let result = bindings.steps[idx].clone();
+    write_step_bindings_file(project_root, &bindings)?;
+    Ok(Some(result))
 }
 
 /// Resolves confirmed binding steps up to an optional line number.

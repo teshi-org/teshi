@@ -2183,3 +2183,33 @@ embedded sidecar ws_url=ws://127.0.0.1:55315
 cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
 navigated to http://127.0.0.1:1420/?e2e=1
 embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-06T17:35:29.457937 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:53836
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-06T17:38:51.340705 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:52213
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-06T17:41:06.778020 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:54261
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-06T17:43:05.070541 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:56372
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop
+
+--- spawn 2026-06-06T17:53:08.384479 D:\Dev\Rust\teshi\target\debug\teshi.exe browser serve-embedded --project D:\Dev\Rust\teshi --navigate http://127.0.0.1:1420/?e2e=1 ---
+embedded sidecar ws_url=ws://127.0.0.1:62719
+cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
+navigated to http://127.0.0.1:1420/?e2e=1
+embedded sidecar running; press Ctrl+C to stop

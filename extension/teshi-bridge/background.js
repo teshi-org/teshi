@@ -435,6 +435,50 @@ async function cdp(tabId, method, params = {}) {
 async function collectInteractiveElements(tabId) {
   const { result } = await cdp(tabId, "Runtime.evaluate", {
     expression: `(() => {
+      // makeShortSelector — compact CSS selector generator (ported from teshi-engine)
+      function makeShortSelector(el) {
+        if (!el || el === document.body || el === document.documentElement) return el ? el.tagName.toLowerCase() : '';
+        if (el.id) return '#' + el.id;
+        var tid = el.getAttribute('data-testid');
+        if (tid) return '[data-testid="' + tid.replace(/"/g,'\\\\"') + '"]';
+        var na = el.getAttribute('name');
+        if (na) return '[name="' + na.replace(/"/g,'\\\\"') + '"]';
+        var aa = el.getAttribute('aria-label');
+        if (aa) return '[aria-label="' + aa.replace(/"/g,'\\\\"') + '"]';
+        var pa = el.getAttribute('placeholder');
+        if (pa) return '[placeholder="' + pa.replace(/"/g,'\\\\"') + '"]';
+        var ta = el.getAttribute('title');
+        if (ta) return '[title="' + ta.replace(/"/g,'\\\\"') + '"]';
+        var href = el.getAttribute('href');
+        if (href && el.tagName.toLowerCase() === 'a') return 'a[href*="' + href.replace(/"/g,'\\\\"') + '"]';
+        var path = [], cur = el;
+        while (cur && cur !== document.body && cur !== document.documentElement) {
+          var tag = cur.tagName.toLowerCase(), seg = tag;
+          var cls = cur.className, parts = [];
+          if (cls && typeof cls === 'string') {
+            parts = cls.trim().split(/\\s+/).filter(function(c){
+              return c && !/^[a-z]+-[a-z]+-\\d+$/.test(c) && c.indexOf('__')===-1
+                && !/^sc-[A-Z]/.test(c) && !/^_[a-z]+_/.test(c)
+                && !/^(flex|items-center|justify-|text-|w-full|h-full|relative|absolute|fixed|sticky|z-\\d+|gap-\\d+|p-\\d+|m-\\d+)/.test(c);
+            }).slice(0, 2);
+          }
+          if (parts.length) { seg += '.' + parts.join('.'); }
+          else {
+            var p = cur.parentElement;
+            if (p) {
+              var ch = Array.from(p.children);
+              var same = ch.filter(function(s){return s.tagName === cur.tagName;});
+              if (same.length > 1) seg += ':nth-of-type('+(same.indexOf(cur)+1)+')';
+            }
+          }
+          path.unshift(seg);
+          cur = cur.parentElement;
+        }
+        var vt = (el.innerText || el.textContent || '').trim().substring(0, 60);
+        if (vt.length >= 3) return path.join(' > ') + ':has-text("'+vt.replace(/"/g,'\\\\"')+'")';
+        return path.join(' > ');
+      }
+
       const sel = "button, [role='button'], input, input[type='submit'], select, a[href], [role='link'], textarea";
       const elements = Array.from(document.querySelectorAll(sel));
       return elements.slice(0, 60).map(el => ({
@@ -444,6 +488,10 @@ async function collectInteractiveElements(tabId) {
         testId: el.getAttribute('data-testid'),
         role: el.getAttribute('role'),
         classes: el.className || null,
+        shortSelector: makeShortSelector(el),
+        ariaLabel: el.getAttribute('aria-label'),
+        placeholder: el.getAttribute('placeholder'),
+        name: el.getAttribute('name'),
       }));
     })()`,
     returnByValue: true,

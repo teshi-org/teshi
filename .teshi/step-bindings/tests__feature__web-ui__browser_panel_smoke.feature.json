@@ -9,12 +9,11 @@
       "source": "binding",
       "status": "confirmed",
       "primary": {
-        "strategy": "url",
-        "value": "http://127.0.0.1:1420/?e2e=1",
-        "action": "navigate",
-        "value_arg": "http://127.0.0.1:1420/?e2e=1"
+        "strategy": "css",
+        "value": "[data-testid=\"WelcomeRecent-_D_Dev_Rust_teshi\"]",
+        "action": "click"
       },
-      "confirmed_at": "2026-06-06T07:17:39.635317+00:00"
+      "confirmed_at": "2026-06-06T09:39:39.375615600+00:00"
     },
     {
       "step_line": 11,
@@ -25,10 +24,10 @@
       "status": "confirmed",
       "primary": {
         "strategy": "testid",
-        "value": "[data-testid=\"BrowserAddressBar\"]",
+        "value": "[data-testid=\"BrowserStartEmbedded\"]",
         "action": "assert_visible"
       },
-      "confirmed_at": "2026-06-06T07:17:54.047450+00:00"
+      "confirmed_at": "2026-06-06T09:39:49.942711700+00:00"
     },
     {
       "step_line": 14,

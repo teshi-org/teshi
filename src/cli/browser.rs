@@ -41,6 +41,8 @@ pub fn handle_browser_command(action: &BrowserCommand) -> Result<()> {
         BrowserCommand::Doctor => doctor(&project_root),
         BrowserCommand::Reconnect(args) => reconnect(&project_root, args),
         BrowserCommand::Verify(args) => verify(&project_root, args),
+        BrowserCommand::Enhance(args) => enhance(&project_root, args),
+        BrowserCommand::HealExecute(args) => heal_execute(&project_root, args),
     }
 }
 
@@ -213,6 +215,56 @@ fn execute(project_root: &Path, args: &BrowserExecuteArgs) -> Result<()> {
         timeout,
     )?;
     ensure_ok(&response)?;
+    print_json_response(response)
+}
+
+fn enhance(project_root: &Path, args: &BrowserSelectorArgs) -> Result<()> {
+    let timeout = command_timeout_for_ms(10_000);
+    let response = send_browser_command(
+        project_root,
+        json!({
+            "cmd": "enhance_locator",
+            "request_id": "browser-enhance",
+            "selector": args.selector,
+        }),
+        timeout,
+        true,
+    )?;
+    let ok = response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !ok {
+        let error = response.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
+        anyhow::bail!("enhance failed: {error}");
+    }
+    print_json_response(response)
+}
+
+fn heal_execute(project_root: &Path, args: &BrowserExecuteArgs) -> Result<()> {
+    let timeout = command_timeout_for_ms(args.timeout_ms + 15_000);
+    let response = send_browser_command(
+        project_root,
+        json!({
+            "cmd": "heal_execute_locator",
+            "request_id": "browser-heal-execute",
+            "selector": args.selector,
+            "action": args.action,
+            "value": args.value_arg,
+            "timeout_ms": args.timeout_ms,
+        }),
+        timeout,
+        true,
+    )?;
+    let ok = response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !ok {
+        let error = response.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
+        anyhow::bail!("heal_execute failed: {error}");
+    }
+    if response.get("healed").and_then(|v| v.as_bool()).unwrap_or(false) {
+        eprintln!(
+            "  healed: original={} → {}",
+            response.get("original_selector").and_then(|v| v.as_str()).unwrap_or("?"),
+            response.get("selector").and_then(|v| v.as_str()).unwrap_or("?"),
+        );
+    }
     print_json_response(response)
 }
 

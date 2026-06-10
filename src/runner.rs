@@ -372,7 +372,30 @@ pub struct RunCliOptions {
 pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
     let feature_path = opts
         .path
+        .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    // Resolve project root once and reuse
+    let project_root = teshi_runtime::find_project_root(Some(&feature_path))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    // Try daemon first
+    if let Some(manifest) = teshi_runtime::DaemonManifest::load(&project_root) {
+        if manifest.is_alive() {
+            return run_via_daemon(&manifest, &feature_path, opts);
+        }
+    }
+
+    // Fallback: direct runner spawn
+    // First, try engine-backed execution
+    match crate::engine::load_engine_config(&project_root, opts.runner_cmd.as_deref(), &opts.runner_args) {
+        Ok(engine_config) => {
+            return crate::engine::run_feature_with_engine(&engine_config, &feature_path, &opts);
+        }
+        Err(_engine_err) => {
+            // Engine not available; fall through to generic runner
+        }
+    }
     let config = load_runner_config(Some(RunnerCliOverride {
         cmd: opts.runner_cmd,
         args: opts.runner_args,
@@ -413,7 +436,42 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
     Ok(())
 }
 
-fn build_cases_from_path(path: &Path, scenario_filter: Option<&str>) -> Result<Vec<RunCase>> {
+/// POST run request to daemon and stream NDJSON events to stdout.
+fn run_via_daemon(
+    manifest: &teshi_runtime::DaemonManifest,
+    feature_path: &Path,
+    opts: RunCliOptions,
+) -> Result<()> {
+    let url = format!("http://127.0.0.1:{}/api/v1/daemon/run", manifest.port);
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "feature_path": feature_path.to_string_lossy(),
+            "scenario": opts.scenario,
+        }))
+        .send()
+        .context("send run request to daemon")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        anyhow::bail!("daemon returned {status}: {body}");
+    }
+
+    // Stream NDJSON lines to stdout
+    use std::io::{BufRead, BufReader, Write};
+    let reader = BufReader::new(resp);
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    for line in reader.lines() {
+        let line = line.context("read daemon response")?;
+        writeln!(handle, "{line}")?;
+    }
+    Ok(())
+}
+
+pub fn build_cases_from_path(path: &Path, scenario_filter: Option<&str>) -> Result<Vec<RunCase>> {
     let mut cases = Vec::new();
     if path.is_dir() {
         let project = crate::gherkin::parse_project(path);

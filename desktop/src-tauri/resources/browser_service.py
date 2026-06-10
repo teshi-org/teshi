@@ -95,6 +95,122 @@ EXECUTE_ACTIONS = {
     "press_key",
 }
 
+# ── Engine-inspired JS helpers injected into page context ──
+
+# Short, robust CSS selector generator (port of engine's makeShortSelector)
+MAKE_SHORT_SELECTOR_JS = """() => {
+  window.__teshiMakeShortSelector = function(e) {
+    if (!e || e === document.body || e === document.documentElement) return e ? e.tagName.toLowerCase() : '';
+    if (e.id) return '#' + e.id;
+    var tid = e.getAttribute('data-testid');
+    if (tid) return '[data-testid="' + tid.replace(/"/g,'\\\\"') + '"]';
+    var na = e.getAttribute('name');
+    if (na) return '[name="' + na.replace(/"/g,'\\\\"') + '"]';
+    var aa = e.getAttribute('aria-label');
+    if (aa) return '[aria-label="' + aa.replace(/"/g,'\\\\"') + '"]';
+    var pa = e.getAttribute('placeholder');
+    if (pa) return '[placeholder="' + pa.replace(/"/g,'\\\\"') + '"]';
+    var ta = e.getAttribute('title');
+    if (ta) return '[title="' + ta.replace(/"/g,'\\\\"') + '"]';
+    var href = e.getAttribute('href');
+    if (href && e.tagName.toLowerCase() === 'a') return 'a[href*="' + href.replace(/"/g,'\\\\"') + '"]';
+    var path = [], cur = e;
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+      var tag = cur.tagName.toLowerCase(), seg = tag;
+      var cls = cur.className;
+      var parts = [];
+      if (cls && typeof cls === 'string') {
+        parts = cls.trim().split(/\\s+/).filter(function(c){
+          return c && !/^[a-z]+-[a-z]+-\\d+$/.test(c) && c.indexOf('__')===-1
+            && !/^sc-[A-Z]/.test(c) && !/^_[a-z]+_/.test(c);
+        }).slice(0,2);
+      }
+      if (parts.length) { seg += '.' + parts.join('.'); }
+      else {
+        var p = cur.parentElement;
+        if (p) {
+          var ch = Array.from(p.children);
+          var same = ch.filter(function(s){return s.tagName===cur.tagName;});
+          if (same.length>1) seg += ':nth-of-type('+(same.indexOf(cur)+1)+')';
+        }
+      }
+      path.unshift(seg);
+      cur = cur.parentElement;
+    }
+    var vt = (e.innerText||e.textContent||'').trim().substring(0,60);
+    if (vt.length>=3) return path.join(' > ')+':has-text("'+vt.replace(/"/g,'\\\\"')+'")';
+    return path.join(' > ');
+  };
+  return true;
+}"""
+
+# Rich element snapshot (port of engine's getElementSnapshot)
+GET_ELEMENT_SNAPSHOT_JS = """(selector) => {
+  var el = document.querySelector(selector);
+  if (!el) return null;
+  function computeAccessibleName(el) {
+    var lb = el.getAttribute('aria-labelledby');
+    if (lb) { var ids=lb.split(/\\s+/), parts=[]; for(var i=0;i<ids.length;i++){var ref=document.getElementById(ids[i]);if(ref){var t=(ref.textContent||'').trim();if(t)parts.push(t);}} if(parts.length) return parts.join(' '); }
+    var al = el.getAttribute('aria-label'); if(al) return al.trim();
+    var tag=el.tagName.toLowerCase(); if((tag==='img'||tag==='area'||el.getAttribute('role')==='img')){var alt=el.getAttribute('alt');if(alt)return alt.trim();}
+    if(el.labels&&el.labels.length){var lt=el.labels[0].textContent.trim();if(lt)return lt;}
+    var ti=el.getAttribute('title'); if(ti) return ti.trim();
+    if(tag==='button'||tag==='a'||el.getAttribute('role')==='button'||el.getAttribute('role')==='link'||el.getAttribute('role')==='menuitem'){var ct=(el.innerText||el.textContent||'').trim();if(ct)return ct.substring(0,120);}
+    if(tag==='input'){var it=(el.getAttribute('type')||'text').toLowerCase();if(it==='button'||it==='submit'||it==='reset'){var v=el.getAttribute('value');if(v)return v.trim();}}
+    return null;
+  }
+  var txt = (el.textContent||'').trim().substring(0,120);
+  var attrs = {}; try{var names=el.getAttributeNames?el.getAttributeNames():[];for(var i=0;i<names.length;i++){var n=names[i],v=el.getAttribute(n);if(v!==null&&v!==undefined)attrs[n]=v;}}catch(e){}
+  var rect = null; try{var r=el.getBoundingClientRect();rect={x:r.x,y:r.y,width:r.width,height:r.height};}catch(e){}
+  var styles=null; try{var cs=window.getComputedStyle(el);styles={display:cs.display,visibility:cs.visibility,opacity:cs.opacity,position:cs.position,pointerEvents:cs.pointerEvents};}catch(e){}
+  var parent=el.parentElement, parentRect=null;
+  if(parent){try{var pr=parent.getBoundingClientRect();parentRect={x:pr.x,y:pr.y,width:pr.width,height:pr.height};}catch(e){}}
+  var siblingIndex=-1,totalSiblings=0;
+  if(parent){var children=Array.from(parent.children);totalSiblings=children.length;siblingIndex=children.indexOf(el);}
+  var shortSel=window.__teshiMakeShortSelector?window.__teshiMakeShortSelector(el):null;
+  var parentSel=parent&&window.__teshiMakeShortSelector?window.__teshiMakeShortSelector(parent):null;
+  return {
+    id: el.id||null,
+    testid: el.getAttribute('data-testid')||null,
+    ariaLabel: el.getAttribute('aria-label')||null,
+    role: el.getAttribute('role')||null,
+    placeholder: el.getAttribute('placeholder')||null,
+    name: el.getAttribute('name')||null,
+    tag: tag,
+    text: txt,
+    classes: (el.className&&typeof el.className==='string')?el.className.trim().split(/\\s+/).slice(0,3).join('.'):'',
+    label: (el.labels&&el.labels.length)?el.labels[0].textContent.trim():null,
+    alt: el.getAttribute('alt')||null,
+    title: el.getAttribute('title')||null,
+    computedAccessibleName: computeAccessibleName(el),
+    allAttributes: attrs,
+    rect: rect,
+    computedStyles: styles,
+    shortSelector: shortSel,
+    domPath: shortSel,
+    parentTag: parent?parent.tagName.toLowerCase():null,
+    parentSelector: parentSel,
+    siblingIndex: siblingIndex,
+    totalSiblings: totalSiblings,
+    parentBoundingRect: parentRect,
+    inShadowDOM: el.getRootNode?el.getRootNode() instanceof ShadowRoot:false,
+    inIframe: window!==window.top,
+  };
+}"""
+
+# Probe element for the best locator by priority (port of SmartLocatorEnhancer._probe_element)
+PROBE_LOCATOR_JS = """(selector) => {
+  var el = document.querySelector(selector);
+  if (!el) return null;
+  var result = { testid: el.getAttribute('data-testid'), ariaLabel: el.getAttribute('aria-label'),
+    role: el.getAttribute('role')||(el.tagName==='A'?'link':el.tagName==='BUTTON'?'button':el.tagName==='INPUT'?(el.getAttribute('type')||'textbox'):null),
+    placeholder: el.getAttribute('placeholder'), name: el.getAttribute('name'),
+    label: (el.labels&&el.labels.length)?el.labels[0].textContent.trim():null,
+    text: (el.textContent||'').trim().substring(0,120), tag: el.tagName.toLowerCase(),
+    alt: el.getAttribute('alt')||null, title: el.getAttribute('title')||null };
+  return result;
+}"""
+
 
 def normalize_snapshot(
     url: str,
@@ -215,6 +331,9 @@ class EmbeddedSession:
         self.page = await self.context.new_page()
         await self.page.goto("about:blank")
         self.cdp_session = await self.context.new_cdp_session(self.page)
+
+        # Inject engine-inspired JS helpers
+        await self.page.evaluate(MAKE_SHORT_SELECTOR_JS)
 
     def current_url(self) -> str:
         if self.page is None:
@@ -416,7 +535,202 @@ class EmbeddedSession:
                 tree = {"error": str(exc)}
 
             buttons = await self.page.evaluate(INTERACTIVE_EVAL)
+
+            # Also inject __teshiMakeShortSelector if not already present
+            try:
+                await self.page.evaluate(
+                    "typeof window.__teshiMakeShortSelector === 'function'"
+                )
+            except Exception:
+                await self.page.evaluate(MAKE_SHORT_SELECTOR_JS)
+
             return normalize_snapshot(url, title, tree, buttons)
+
+    async def smart_enhance_locator(self, selector: str) -> dict[str, Any]:
+        """Probe an element for the best-priority locator.
+        Priority: testid > role+aria-label > role+text > label > placeholder > css
+        """
+        async with self._lock:
+            if self.page is None:
+                return {"ok": False, "error": "browser not ready"}
+
+            # Ensure JS helper is injected
+            try:
+                await self.page.evaluate(
+                    "typeof window.__teshiMakeShortSelector === 'function'"
+                )
+            except Exception:
+                await self.page.evaluate(MAKE_SHORT_SELECTOR_JS)
+
+            attrs = await self.page.evaluate(PROBE_LOCATOR_JS, selector)
+            if not attrs:
+                return {"ok": False, "error": "selector matched no elements"}
+
+            # Also get rich snapshot
+            snapshot = await self.page.evaluate(GET_ELEMENT_SNAPSHOT_JS, selector)
+
+            candidates = []
+
+            # Priority: testid > role+name > label > placeholder > text > css
+            if attrs.get("testid"):
+                candidates.append({
+                    "strategy": "testid",
+                    "value": f'[data-testid="{attrs["testid"]}"]',
+                    "confidence": 0.95,
+                    "rationale": "data-testid attribute",
+                })
+
+            role = attrs.get("role")
+            aria_label = attrs.get("ariaLabel")
+            if role and aria_label:
+                candidates.append({
+                    "strategy": "role",
+                    "value": role,
+                    "name": aria_label,
+                    "confidence": 0.90,
+                    "rationale": f"role={role} + aria-label",
+                })
+
+            if role and attrs.get("text"):
+                candidates.append({
+                    "strategy": "role",
+                    "value": role,
+                    "name": attrs["text"],
+                    "confidence": 0.80,
+                    "rationale": f"role={role} + visible text",
+                })
+
+            if attrs.get("label"):
+                candidates.append({
+                    "strategy": "label",
+                    "value": f'[aria-label="{attrs["label"]}"]',
+                    "confidence": 0.75,
+                    "rationale": "label text",
+                })
+
+            if attrs.get("placeholder"):
+                candidates.append({
+                    "strategy": "placeholder",
+                    "value": attrs["placeholder"],
+                    "confidence": 0.65,
+                    "rationale": "placeholder text",
+                })
+
+            if attrs.get("text") and len(attrs["text"]) > 1:
+                candidates.append({
+                    "strategy": "text",
+                    "value": attrs["text"],
+                    "confidence": 0.50,
+                    "rationale": "visible text",
+                })
+
+            # Get short selector from makeShortSelector
+            short_css = snapshot.get("shortSelector") if snapshot else None
+            if short_css:
+                candidates.append({
+                    "strategy": "css",
+                    "value": short_css,
+                    "confidence": 0.70,
+                    "rationale": "short CSS selector from DOM analysis",
+                })
+
+            return {
+                "ok": True,
+                "selector": selector,
+                "candidates": candidates,
+                "snapshot": snapshot,
+            }
+
+    async def heal_execute_locator(
+        self,
+        selector: str,
+        action: str,
+        value: str | None = None,
+        timeout_ms: int = 5000,
+    ) -> dict[str, Any]:
+        """Execute a locator action with self-healing retry chain.
+
+        On failure, attempts alternative strategies (attribute matching,
+        text matching, DOM path shortening) before reporting failure.
+        """
+        result = await self.execute_locator(selector, action, value, timeout_ms)
+        if result.get("ok"):
+            return result
+
+        # Self-healing: try alternative selectors
+        from urllib.parse import urlparse
+
+        healed_selector = None
+        healed_strategy = None
+
+        # 1. Try attribute-based matching (data-testid, aria-label, etc.)
+        snapshot = await self.page.evaluate(GET_ELEMENT_SNAPSHOT_JS, selector)
+        if snapshot:
+            attrs = snapshot.get("allAttributes", {})
+            priority_attrs = ["data-testid", "aria-label", "role", "name", "title", "alt"]
+            for attr_name in priority_attrs:
+                attr_value = attrs.get(attr_name)
+                if attr_value and len(str(attr_value)) <= 150:
+                    attempted = f'[{attr_name}="{attr_value}"]'
+                    r = await self.execute_locator(attempted, action, value, timeout_ms)
+                    if r.get("ok"):
+                        healed_selector = attempted
+                        healed_strategy = f"attr_{attr_name}"
+                        break
+            if not healed_selector:
+                # Try all other non-style/class attributes
+                for attr_name, attr_value in attrs.items():
+                    if not attr_value or len(str(attr_value)) > 150:
+                        continue
+                    if attr_name in ("style", "class", "id", *priority_attrs):
+                        continue
+                    attempted = f'[{attr_name}="{attr_value}"]'
+                    r = await self.execute_locator(attempted, action, value, timeout_ms)
+                    if r.get("ok"):
+                        healed_selector = attempted
+                        healed_strategy = "attr_match"
+                        break
+
+        # 2. Try text matching
+        if not healed_selector and snapshot and snapshot.get("text"):
+            text_val = snapshot["text"]
+            if len(text_val) >= 2:
+                try:
+                    text_loc = self.page.get_by_text(text_val, exact=False)
+                    count = await text_loc.count()
+                    if count > 0:
+                        r = await self.execute_locator(
+                            f':has-text("{text_val}")', action, value, timeout_ms
+                        )
+                        if r.get("ok"):
+                            healed_selector = f':has-text("{text_val}")'
+                            healed_strategy = "text_match"
+                except Exception:
+                    pass
+
+        # 3. Try DOM path shortening
+        if not healed_selector and snapshot and snapshot.get("domPath"):
+            dom_path = snapshot["domPath"]
+            parts = dom_path.split(" > ")
+            for i in range(len(parts) - 1, 0, -1):
+                shorter = " > ".join(parts[:i]) + " > *"
+                r = await self.execute_locator(shorter, action, value, timeout_ms)
+                if r.get("ok"):
+                    healed_selector = shorter
+                    healed_strategy = "dom_path"
+                    break
+
+        if healed_selector:
+            return {
+                "ok": True,
+                "selector": healed_selector,
+                "action": action,
+                "healed": True,
+                "original_selector": selector,
+                "healed_strategy": healed_strategy,
+            }
+
+        return result
 
 
 async def handle_embedded_command(
@@ -457,6 +771,21 @@ async def handle_embedded_command(
             str(data.get("action", "")),
             data.get("value"),
             int(data.get("timeout_ms", 5000) or 5000),
+        )
+        return {"type": "response", "request_id": request_id, **result}
+
+    if cmd == "heal_execute_locator":
+        result = await session.heal_execute_locator(
+            str(data.get("selector", "")),
+            str(data.get("action", "")),
+            data.get("value"),
+            int(data.get("timeout_ms", 5000) or 5000),
+        )
+        return {"type": "response", "request_id": request_id, **result}
+
+    if cmd == "enhance_locator":
+        result = await session.smart_enhance_locator(
+            str(data.get("selector", "")),
         )
         return {"type": "response", "request_id": request_id, **result}
 

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use teshi_runtime::{find_project_root, DaemonManifest};
+use teshi_runtime::{find_project_root, spawn_daemon_background, DaemonManifest};
 
 use super::DaemonCommand;
 
@@ -27,46 +27,7 @@ fn daemon_start(project_root: &Path) -> Result<()> {
     }
 
     let port = teshi_runtime::pick_free_port()?;
-    let exe = std::env::current_exe().context("resolve current executable")?;
-
-    // On Windows, delegate to PowerShell Start-Process to fully detach.
-    // Calling CreateProcess on our own exe from any thread in the same
-    // process causes the parent to hang on exit.  PowerShell's Start-Process
-    // runs in a separate powershell.exe process, avoiding the deadlock.
-    #[cfg(windows)]
-    {
-        let ps_cmd = format!(
-            "Start-Process -FilePath '{}' -ArgumentList '--daemon-internal','--project-root','{}','--port','{}' -WindowStyle Hidden",
-            exe.display(),
-            project_root.display(),
-            port
-        );
-        std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .context("spawn daemon via powershell")?;
-    }
-
-    #[cfg(not(windows))]
-    {
-        let args: Vec<String> = vec![
-            "--daemon-internal".to_string(),
-            "--project-root".to_string(),
-            project_root.to_string_lossy().to_string(),
-            "--port".to_string(),
-            port.to_string(),
-        ];
-        let mut cmd = std::process::Command::new(&exe);
-        cmd.args(&args);
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        cmd.spawn().context("spawn daemon process")?;
-    }
-
+    spawn_daemon_background(project_root, port, None)?;
     eprintln!("daemon spawning on port {port}");
     Ok(())
 }
