@@ -169,17 +169,22 @@ API keys should **never** be written directly in config files. Use `teshi auth l
 
 ## Environment variables
 
-| Variable | Effect |
-|----------|--------|
-| `TESHI_DEFAULT_PROVIDER` | Override default LLM provider |
-| `TESHI_LLM_API_KEY` | LLM API key |
-| `TESHI_LLM_BASE_URL` | LLM API base URL |
-| `TESHI_LLM_MODEL` | LLM model name |
-| `TESHI_RUNNER_CMD` | Override runner command (after `teshi.toml`) |
-| `TESHI_RUNNER_ARGS` | Override runner args (space-separated) |
-| `TESHI_RUNNER_CWD` | Override runner working directory |
-| `TESHI_CLI` | Absolute path to `teshi` binary (Desktop embedded terminal sets this to the dev build) |
-| `TESHI_OPENAI_API_KEY` | Legacy (migrated by `teshi auth migrate`) |
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `TESHI_DEFAULT_PROVIDER` | — | Override default LLM provider |
+| `TESHI_LLM_API_KEY` | — | LLM API key |
+| `TESHI_LLM_BASE_URL` | `https://api.openai.com/v1` | LLM API base URL |
+| `TESHI_LLM_MODEL` | `gpt-4o-mini` | LLM model name |
+| `TESHI_LLM_MAX_TOKENS` | `1024` | Max tokens per completion |
+| `TESHI_LLM_TEMPERATURE` | `0.7` | Sampling temperature |
+| `TESHI_RUNNER_CMD` | — | Override runner command |
+| `TESHI_RUNNER_ARGS` | — | Override runner args (space-separated) |
+| `TESHI_RUNNER_CWD` | current dir | Override runner working directory |
+| `TESHI_CLI` | — | Absolute path to `teshi` binary (Desktop embedded terminal sets this to the dev build) |
+| `TESHI_DIAG_PATH` | — | Write diagnostic log to this file path |
+| `TESHI_NO_RAW` | — | Disable raw terminal mode |
+| `TESHI_NO_ALT` | — | Disable alternate screen |
+| `TESHI_OPENAI_API_KEY` | — | Legacy (migrated by `teshi auth migrate`) |
 
 Precedence for runner settings: `teshi.toml` → environment variables → CLI flags.
 
