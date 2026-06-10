@@ -230,9 +230,15 @@ fn enhance(project_root: &Path, args: &BrowserSelectorArgs) -> Result<()> {
         timeout,
         true,
     )?;
-    let ok = response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let ok = response
+        .get("ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if !ok {
-        let error = response.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let error = response
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         anyhow::bail!("enhance failed: {error}");
     }
     print_json_response(response)
@@ -253,16 +259,32 @@ fn heal_execute(project_root: &Path, args: &BrowserExecuteArgs) -> Result<()> {
         timeout,
         true,
     )?;
-    let ok = response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let ok = response
+        .get("ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if !ok {
-        let error = response.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let error = response
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         anyhow::bail!("heal_execute failed: {error}");
     }
-    if response.get("healed").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if response
+        .get("healed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         eprintln!(
             "  healed: original={} → {}",
-            response.get("original_selector").and_then(|v| v.as_str()).unwrap_or("?"),
-            response.get("selector").and_then(|v| v.as_str()).unwrap_or("?"),
+            response
+                .get("original_selector")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
+            response
+                .get("selector")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
         );
     }
     print_json_response(response)
@@ -283,7 +305,10 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
     }
 
     let mut screenshot_entries: Vec<ReplayScreenshotEntry> = Vec::new();
-    let screenshot_dir = project_root.join(".teshi").join("logs").join("replay-screenshots");
+    let screenshot_dir = project_root
+        .join(".teshi")
+        .join("logs")
+        .join("replay-screenshots");
     let _ = fs::create_dir_all(&screenshot_dir);
 
     let non_interactive = args.non_interactive || args.yes;
@@ -365,10 +390,16 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                         &screenshot_dir,
                     ) {
                         Ok(entry) => screenshot_entries.push(entry),
-                        Err(e) => eprintln!("warning: screenshot capture failed at L{}: {e}", step.step_line),
+                        Err(e) => eprintln!(
+                            "warning: screenshot capture failed at L{}: {e}",
+                            step.step_line
+                        ),
                     }
                 }
-                Err(e) => eprintln!("warning: cannot read cdp-endpoint for screenshot at L{}: {e}", step.step_line),
+                Err(e) => eprintln!(
+                    "warning: cannot read cdp-endpoint for screenshot at L{}: {e}",
+                    step.step_line
+                ),
             }
         }
         ensure_ok(&response).with_context(|| {
@@ -387,11 +418,14 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
         if let Err(e) = save_index(&screenshot_dir, &index) {
             eprintln!("warning: failed to write screenshot index: {e}");
         }
-        println!("{}", serde_json::to_string(&json!({
-            "event": "replay_complete",
-            "screenshots_saved": index.steps.len(),
-            "screenshots_dir": screenshot_dir.to_string_lossy(),
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "event": "replay_complete",
+                "screenshots_saved": index.steps.len(),
+                "screenshots_dir": screenshot_dir.to_string_lossy(),
+            }))?
+        );
     }
 
     Ok(())
@@ -441,12 +475,9 @@ async fn serve_embedded_async(args: &BrowserServeEmbeddedArgs) -> Result<()> {
 
     // Ensure cdp-endpoint.json is written from the Rust side with the actual ws_url,
     // so subsequent commands (e.g. navigate) don't race with the Python sidecar's write.
-    if let Err(e) = write_cdp_endpoint_from_rust(
-        &project_root,
-        &start.ws_url,
-        &start.mode,
-        "about:blank",
-    ) {
+    if let Err(e) =
+        write_cdp_endpoint_from_rust(&project_root, &start.ws_url, &start.mode, "about:blank")
+    {
         eprintln!("warning: failed to write cdp-endpoint.json: {e}");
     }
 

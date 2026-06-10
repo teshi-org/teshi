@@ -388,7 +388,11 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
 
     // Fallback: direct runner spawn
     // First, try engine-backed execution
-    match crate::engine::load_engine_config(&project_root, opts.runner_cmd.as_deref(), &opts.runner_args) {
+    match crate::engine::load_engine_config(
+        &project_root,
+        opts.runner_cmd.as_deref(),
+        &opts.runner_args,
+    ) {
         Ok(engine_config) => {
             return crate::engine::run_feature_with_engine(&engine_config, &feature_path, &opts);
         }

@@ -58,10 +58,11 @@ jobs:
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Build release binary
+      - name: Build teshi CLI
         run: cargo build --release --locked --target ${{ matrix.target }} --bin teshi
 
-      - name: Setup Node
+      # Windows-only: build teshi-desktop + combined MSI installer
+      - name: Setup Node.js
         if: matrix.target == 'x86_64-pc-windows-msvc'
         uses: actions/setup-node@v4
         with:
@@ -69,19 +70,23 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
-      - name: Build teshi-desktop
+      - name: Build frontend (desktop/dist)
         if: matrix.target == 'x86_64-pc-windows-msvc'
         working-directory: desktop
         run: |
           npm ci
-          npx tauri build --bundles msi
+          npm run build
+
+      - name: Build teshi-desktop binary
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo build --release --locked -p teshi-desktop
 
       - name: Install WiX Toolset
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: choco install wixtoolset --no-progress -y
 
-      - name: Cache cargo-wix binary
+      - name: Cache cargo-wix
         id: cache_cargo_wix
         if: matrix.target == 'x86_64-pc-windows-msvc'
         uses: actions/cache@v4
@@ -93,7 +98,7 @@ jobs:
         if: matrix.target == 'x86_64-pc-windows-msvc' && steps.cache_cargo_wix.outputs.cache-hit != 'true'
         run: cargo install cargo-wix --locked --version 0.3.9
 
-      - name: Build MSI installer
+      - name: Build combined MSI installer
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: |
@@ -101,89 +106,48 @@ jobs:
           if ("${{ github.event_name }}" -eq "workflow_dispatch") {
             $tag = "${{ github.event.inputs.release_tag }}"
           }
-
-          if (-not $tag.StartsWith("v")) {
-            throw "Release tag must start with 'v' (got: $tag)."
-          }
-
-          if (-not (Test-Path "wix/main.wxs")) {
-            cargo wix init --package teshi
-          }
+          if (-not $tag.StartsWith("v")) { throw "Release tag must start with 'v' (got: $tag)." }
 
           $stagingRoot = "staging/msi-root"
-          $binDir = Join-Path $stagingRoot "bin"
-          $shareDir = Join-Path $stagingRoot "share"
-          $webDir = Join-Path $stagingRoot "share/web"
+          $binDir    = Join-Path $stagingRoot "bin"
+          $shareDir  = Join-Path $stagingRoot "share"
+          $webDir    = Join-Path $stagingRoot "share/web"
           $bridgeDir = Join-Path $stagingRoot "share/teshi-bridge"
           New-Item -ItemType Directory -Force -Path $binDir, $webDir, $bridgeDir | Out-Null
 
-          $builtExe = "target/${{ matrix.target }}/release/teshi.exe"
-          $desktopExe = "target/release/teshi-desktop.exe"
-          if (-not (Test-Path $builtExe)) {
-            throw "Missing built binary at $builtExe"
-          }
-          if (-not (Test-Path $desktopExe)) {
-            throw "Missing built binary at $desktopExe"
-          }
-          if (-not (Test-Path "desktop/dist")) {
-            throw "Missing frontend dist at desktop/dist"
-          }
-          if (-not (Test-Path "desktop/src-tauri/resources/browser_service.py")) {
-            throw "Missing browser service script at desktop/src-tauri/resources/browser_service.py"
-          }
-          if (-not (Test-Path "desktop/src-tauri/resources/winapp_service.py")) {
-            throw "Missing WinApp service script at desktop/src-tauri/resources/winapp_service.py"
-          }
-          if (-not (Test-Path "extension/teshi-bridge/manifest.json")) {
-            throw "Missing extension manifest at extension/teshi-bridge/manifest.json"
-          }
+          # Verify required files
+          $builtExe    = "target/${{ matrix.target }}/release/teshi.exe"
+          $desktopExe  = "target/release/teshi-desktop.exe"
+          @($builtExe, $desktopExe, "desktop/dist", "desktop/src-tauri/resources/browser_service.py",
+            "desktop/src-tauri/resources/winapp_service.py", "extension/teshi-bridge/manifest.json") |
+            ForEach-Object { if (-not (Test-Path $_)) { throw "Missing: $_" } }
 
-          Copy-Item $builtExe (Join-Path $binDir "teshi.exe") -Force
-          Copy-Item $desktopExe (Join-Path $binDir "teshi-desktop.exe") -Force
+          Copy-Item $builtExe   (Join-Path $binDir "teshi.exe")          -Force
+          Copy-Item $desktopExe (Join-Path $binDir "teshi-desktop.exe")  -Force
           Copy-Item "desktop/src-tauri/resources/browser_service.py" (Join-Path $shareDir "browser_service.py") -Force
-          Copy-Item "desktop/src-tauri/resources/winapp_service.py" (Join-Path $shareDir "winapp_service.py") -Force
-          Copy-Item -Path "desktop/dist/*" -Destination $webDir -Recurse -Force
+          Copy-Item "desktop/src-tauri/resources/winapp_service.py"  (Join-Path $shareDir "winapp_service.py") -Force
+          Copy-Item -Path "desktop/dist/*"       -Destination $webDir    -Recurse -Force
           Copy-Item -Path "extension/teshi-bridge/*" -Destination $bridgeDir -Recurse -Force
 
+          # Generate WiX fragments for web and bridge files
           $heat = Join-Path $env:WIX "bin/heat.exe"
-          if (-not (Test-Path $heat)) {
-            throw "Missing heat.exe at $heat"
-          }
+          & $heat dir $webDir    -out wix/web-files.wxs    -gg -sfrag -srd -dr ShareWebDir    -cg WebFiles    -var var.WebRoot
+          & $heat dir $bridgeDir -out wix/bridge-files.wxs -gg -sfrag -srd -dr ShareTeshiBridgeDir -cg BridgeFiles -var var.BridgeRoot
 
-          & $heat dir $webDir `
-            -out wix/web-files.wxs `
-            -gg -sfrag -srd `
-            -dr ShareWebDir `
-            -cg WebFiles `
-            -var var.WebRoot
-          & $heat dir $bridgeDir `
-            -out wix/bridge-files.wxs `
-            -gg -sfrag -srd `
-            -dr ShareTeshiBridgeDir `
-            -cg BridgeFiles `
-            -var var.BridgeRoot
-
-          # Add defaults to heat-generated files so they work in any compilation order
-          $defaultBlock = "`n" +
-            '<?ifndef WebRoot ?>' + "`n" +
-            "`t`t" + '<?define WebRoot = "staging\msi-root\share\web" ?>' + "`n" +
-            '<?endif ?>' + "`n" +
-            '<?ifndef BridgeRoot ?>' + "`n" +
-            "`t`t" + '<?define BridgeRoot = "staging\msi-root\share\teshi-bridge" ?>' + "`n" +
-            '<?endif ?>' + "`n"
+          # Add fallback defines to heat-generated files
+          $defaultBlock = @"
+`n<?ifndef WebRoot ?><?define WebRoot = "$([System.IO.Path]::GetFullPath($webDir))"?><?endif ?>
+<?ifndef BridgeRoot ?><?define BridgeRoot = "$([System.IO.Path]::GetFullPath($bridgeDir))"?><?endif ?>
+"@
           foreach ($f in @("wix/web-files.wxs", "wix/bridge-files.wxs")) {
-              $content = Get-Content $f -Raw
-              # Insert defaults after the XML declaration (always first line)
-              $newline = "`n"
-              $idx = $content.IndexOf($newline)
-              if ($idx -ge 0) {
-                  $content = $content.Substring(0, $idx) + $defaultBlock + $content.Substring($idx)
-              }
-              Set-Content $f -Value $content -NoNewline
+            $content = Get-Content $f -Raw
+            $idx = $content.IndexOf("`n")
+            if ($idx -ge 0) {
+              Set-Content $f -Value ($content.Substring(0, $idx) + $defaultBlock + $content.Substring($idx)) -NoNewline
+            }
           }
 
-          cargo wix --package teshi --nocapture --no-build `
-            -o "target/wix/teshi-$tag-x64.msi"
+          cargo wix --package teshi --nocapture --no-build -o "target/wix/teshi-$tag-x64.msi"
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -200,14 +164,6 @@ jobs:
         with:
           name: teshi-msi
           path: target/wix/teshi-*-x64.msi
-          if-no-files-found: error
-
-      - name: Upload desktop artifact
-        if: matrix.target == 'x86_64-pc-windows-msvc'
-        uses: actions/upload-artifact@v4
-        with:
-          name: teshi-desktop-windows
-          path: target/release/teshi-desktop.exe
           if-no-files-found: error
 
       - name: Upload web dist artifact
@@ -235,98 +191,62 @@ jobs:
         with:
           path: artifacts
 
-      - name: Resolve release metadata
+      - name: Resolve release tag
         id: release_meta
         shell: bash
         run: |
-          set -euo pipefail
-
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            tag="${{ github.event.inputs.release_tag }}"
-          else
-            tag="${GITHUB_REF_NAME}"
-          fi
-
-          if [[ ! "${tag}" =~ ^v.+$ ]]; then
-            echo "Release tag must start with 'v' (got: ${tag})." >&2
-            exit 1
-          fi
-
-          tag_sha=$(git rev-list -n 1 "${tag}")
+          tag="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}"
+          if [[ ! "${tag}" =~ ^v.+$ ]]; then echo "Tag must start with 'v' (got: ${tag})." >&2; exit 1; fi
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "tag_sha=${tag_sha}" >> "$GITHUB_OUTPUT"
+          echo "tag_sha=$(git rev-list -n 1 "${tag}")" >> "$GITHUB_OUTPUT"
 
       - name: Package release assets
         shell: bash
         run: |
           set -euo pipefail
-
           version="${{ steps.release_meta.outputs.tag }}"
           mkdir -p dist
 
-          targets=(
-            x86_64-unknown-linux-gnu
-            x86_64-pc-windows-msvc
-            aarch64-apple-darwin
-          )
+          artifacts_dir="${{ github.workspace }}/artifacts"
+          repo_dir="${{ github.workspace }}"
 
-          for target in "${targets[@]}"; do
-            artifact_dir="artifacts/teshi-${target}"
+          for target in x86_64-unknown-linux-gnu x86_64-pc-windows-msvc aarch64-apple-darwin; do
             binary_name="teshi"
-            if [[ "${target}" == *"windows"* ]]; then
-              binary_name="teshi.exe"
-            fi
+            [[ "${target}" == *"windows"* ]] && binary_name="teshi.exe"
 
             stage_dir="dist/teshi-${version}-${target}"
             mkdir -p "${stage_dir}"
-
-            cp "${artifact_dir}/${binary_name}" "${stage_dir}/"
-            cp README.md LICENSE "${stage_dir}/"
+            cp "${artifacts_dir}/teshi-${target}/${binary_name}" "${stage_dir}/"
 
             if [[ "${target}" == *"windows"* ]]; then
-              cp "artifacts/teshi-desktop-windows/teshi-desktop.exe" "${stage_dir}/"
-              mkdir -p "${stage_dir}/share/teshi-bridge"
-              mkdir -p "${stage_dir}/share/web"
-              cp "desktop/src-tauri/resources/browser_service.py" "${stage_dir}/share/browser_service.py"
-              cp "desktop/src-tauri/resources/winapp_service.py" "${stage_dir}/share/winapp_service.py"
-              cp -r extension/teshi-bridge/. "${stage_dir}/share/teshi-bridge/"
-              cp -r artifacts/teshi-web-dist/. "${stage_dir}/share/web/"
-            fi
-
-            if [[ "${target}" != *"windows"* ]]; then
+              # Service scripts and browser extension from git checkout
+              mkdir -p "${stage_dir}/share/teshi-bridge" "${stage_dir}/share/web"
+              cp "${repo_dir}/desktop/src-tauri/resources/browser_service.py" "${stage_dir}/share/browser_service.py"
+              cp "${repo_dir}/desktop/src-tauri/resources/winapp_service.py"  "${stage_dir}/share/winapp_service.py"
+              cp -r "${repo_dir}/extension/teshi-bridge/."  "${stage_dir}/share/teshi-bridge/"
+              cp -r "${artifacts_dir}/teshi-web-dist/."      "${stage_dir}/share/web/"
+            else
               chmod +x "${stage_dir}/teshi"
             fi
 
             if [[ "${target}" == *"windows"* ]]; then
-              (
-                cd dist
-                zip -r "teshi-${version}-${target}.zip" "teshi-${version}-${target}"
-              )
+              (cd dist && zip -r "teshi-${version}-${target}.zip" "teshi-${version}-${target}")
             else
               tar -C dist -czf "dist/teshi-${version}-${target}.tar.gz" "teshi-${version}-${target}"
             fi
           done
 
-          (
-            cd extension/teshi-bridge
-            zip -r "../../dist/teshi-bridge-${version}.zip" .
-          )
+          (cd "${repo_dir}/extension/teshi-bridge" && zip -r "${repo_dir}/dist/teshi-bridge-${version}.zip" .)
 
-          (
-            cd dist
-            cp ../artifacts/teshi-msi/*.msi .
-
-            find . -maxdepth 1 \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.msi" \) \
-              -exec sha256sum {} + \
-              | sed 's|\./||' \
-              > SHA256SUMS
-          )
+          cp "${artifacts_dir}/teshi-msi/"*.msi dist/
+          cd dist
+          find . -maxdepth 1 \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.msi" \) \
+            -exec sha256sum {} + | sed 's|\./||' > SHA256SUMS
 
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release_meta.outputs.tag }}
-          target_commitish: ${{ steps.release_meta.outputs.tag_sha }}
           generate_release_notes: true
           files: |
             dist/*.zip
@@ -341,17 +261,6 @@ jobs:
     if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_scope != 'windows-only' }}
 
     steps:
-      - name: Ensure release tag format
-        shell: pwsh
-        run: |
-          $tag = "${{ github.ref_name }}"
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $tag = "${{ github.event.inputs.release_tag }}"
-          }
-          if (-not $tag.StartsWith("v")) {
-            throw "Release tag must start with 'v' (got: $tag)."
-          }
-
       - name: Install wingetcreate
         shell: pwsh
         run: winget install --id Microsoft.WingetCreate -e --source winget --accept-package-agreements --accept-source-agreements
@@ -366,14 +275,10 @@ jobs:
             exit 0
           }
 
-          $tag = "${{ github.ref_name }}"
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $tag = "${{ github.event.inputs.release_tag }}"
-          }
-
-          $msiUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/teshi-$tag-x64.msi"
-          $prTitle = "Add teshi $($tag.TrimStart('v'))"
+          $tag = "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}"
           $version = $tag.TrimStart('v')
+          $msiUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/teshi-$tag-x64.msi"
+          $prTitle = "Add teshi $version"
           $pkgId = "teshi-org.teshi"
           $manifestDir = ".\winget-manifests\manifests\t\teshi-org\teshi\$version"
 

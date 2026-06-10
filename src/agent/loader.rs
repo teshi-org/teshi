@@ -25,15 +25,9 @@ pub struct LoadError {
 #[derive(Debug, Clone)]
 pub enum LoadErrorKind {
     /// Filesystem error (missing dir, permission denied, etc.).
-    Io {
-        path: PathBuf,
-        message: String,
-    },
+    Io { path: PathBuf, message: String },
     /// YAML parse error or semantic error in a specific file.
-    Parse {
-        path: PathBuf,
-        detail: String,
-    },
+    Parse { path: PathBuf, detail: String },
     /// Circular `sub_agents` reference.
     CycleDetected {
         /// The full cycle path, e.g. ["default", "reviewer", "default"].
@@ -45,13 +39,30 @@ impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.kind {
             LoadErrorKind::Io { path, message } => {
-                write!(f, "[{}] I/O error at {}: {}", self.agent_id, path.display(), message)
+                write!(
+                    f,
+                    "[{}] I/O error at {}: {}",
+                    self.agent_id,
+                    path.display(),
+                    message
+                )
             }
             LoadErrorKind::Parse { path, detail } => {
-                write!(f, "[{}] parse error in {}: {}", self.agent_id, path.display(), detail)
+                write!(
+                    f,
+                    "[{}] parse error in {}: {}",
+                    self.agent_id,
+                    path.display(),
+                    detail
+                )
             }
             LoadErrorKind::CycleDetected { cycle } => {
-                write!(f, "[{}] cycle detected in sub_agents: {}", self.agent_id, cycle.join(" → "))
+                write!(
+                    f,
+                    "[{}] cycle detected in sub_agents: {}",
+                    self.agent_id,
+                    cycle.join(" → ")
+                )
             }
         }
     }
@@ -153,7 +164,10 @@ fn resolve_project_agent_dir(loader: &AgentLoader) -> Option<PathBuf> {
     if let Some(ref dir) = loader.project_agent_dir_override {
         return Some(dir.clone());
     }
-    loader.project_dir.as_ref().map(|p| p.join(".teshi").join("agents"))
+    loader
+        .project_dir
+        .as_ref()
+        .map(|p| p.join(".teshi").join("agents"))
 }
 
 /// Scan a single agent directory, inserting into the tiered map.
@@ -446,11 +460,9 @@ impl Resolver {
         };
 
         let persistent = mem_raw.persistent.as_ref().map(|p| match p {
-            PersistentMemoryBackendRaw::File { path } => {
-                PersistentMemoryBackend::File {
-                    path: agent_dir.join(path),
-                }
-            }
+            PersistentMemoryBackendRaw::File { path } => PersistentMemoryBackend::File {
+                path: agent_dir.join(path),
+            },
         });
 
         MemoryConfig { persistent }
@@ -533,7 +545,11 @@ compaction:
     #[test]
     fn load_single_agent() {
         let dir = tempfile::tempdir().unwrap();
-        write_agent(&dir.path().join("test-agent"), "test-agent", Some("You are a test agent."));
+        write_agent(
+            &dir.path().join("test-agent"),
+            "test-agent",
+            Some("You are a test agent."),
+        );
 
         let raws = &mut HashMap::new();
         let dirs = &mut HashMap::new();
@@ -584,7 +600,11 @@ compaction:
 
         // Project tier — overrides agent-a
         let project_agent_dir = base.path().join("project_agents");
-        write_agent(&project_agent_dir.join("agent-a"), "agent-a", Some("project version"));
+        write_agent(
+            &project_agent_dir.join("agent-a"),
+            "agent-a",
+            Some("project version"),
+        );
 
         let loader = AgentLoader::new(None)
             .with_user_agent_dir(user_dir)
@@ -633,7 +653,10 @@ compaction:
         unsafe { std::env::set_var("TESHI_TEST_VAR", "expanded_value") };
         assert_eq!(expand_env_var("${TESHI_TEST_VAR}"), "expanded_value");
         assert_eq!(expand_env_var("literal"), "literal");
-        assert_eq!(expand_env_var("prefix_${TESHI_TEST_VAR}_suffix"), "prefix_expanded_value_suffix");
+        assert_eq!(
+            expand_env_var("prefix_${TESHI_TEST_VAR}_suffix"),
+            "prefix_expanded_value_suffix"
+        );
     }
 
     #[test]

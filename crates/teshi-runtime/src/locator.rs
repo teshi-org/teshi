@@ -188,11 +188,7 @@ fn pending_locator_path(project_root: &Path) -> PathBuf {
 
 fn step_bindings_path(project_root: &Path, feature_relative_path: &str) -> PathBuf {
     let feature = feature_relative_path.replace('\\', "/");
-    let parent = project_root.join(
-        Path::new(&feature)
-            .parent()
-            .unwrap_or(Path::new("")),
-    );
+    let parent = project_root.join(Path::new(&feature).parent().unwrap_or(Path::new("")));
     let stem = Path::new(&feature)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -218,9 +214,10 @@ pub fn sanitize_feature_path(feature_relative_path: &str) -> String {
 }
 
 fn legacy_step_bindings_path(project_root: &Path, feature_relative_path: &str) -> PathBuf {
-    teshi_dir(project_root)
-        .join("step-bindings")
-        .join(format!("{}.json", sanitize_feature_path(feature_relative_path)))
+    teshi_dir(project_root).join("step-bindings").join(format!(
+        "{}.json",
+        sanitize_feature_path(feature_relative_path)
+    ))
 }
 
 fn ensure_teshi_dir(project_root: &Path) -> Result<PathBuf> {

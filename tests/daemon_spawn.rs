@@ -83,10 +83,7 @@ fn daemon_start_exits_promptly() {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                assert!(
-                    status.success(),
-                    "daemon start exited with {status}"
-                );
+                assert!(status.success(), "daemon start exited with {status}");
                 break;
             }
             Ok(None) => {
@@ -136,11 +133,8 @@ fn daemon_start_exits_promptly() {
     let addr = format!("127.0.0.1:{port}");
     let start = std::time::Instant::now();
     loop {
-        if std::net::TcpStream::connect_timeout(
-            &addr.parse().unwrap(),
-            Duration::from_millis(500),
-        )
-        .is_ok()
+        if std::net::TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(500))
+            .is_ok()
         {
             break;
         }
@@ -161,11 +155,8 @@ fn daemon_start_exits_promptly() {
 
     // Wait for daemon to exit
     for _ in 0..20 {
-        if std::net::TcpStream::connect_timeout(
-            &addr.parse().unwrap(),
-            Duration::from_millis(100),
-        )
-        .is_err()
+        if std::net::TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(100))
+            .is_err()
         {
             break;
         }
@@ -210,7 +201,10 @@ fn daemon_start_exits_fast_when_already_running() {
             break;
         }
         if start.elapsed() > Duration::from_secs(DAEMON_READY_TIMEOUT_SECS) {
-            panic!("first daemon didn't write manifest after {:?}", start.elapsed());
+            panic!(
+                "first daemon didn't write manifest after {:?}",
+                start.elapsed()
+            );
         }
         std::thread::sleep(Duration::from_millis(500));
     }

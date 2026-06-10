@@ -1233,7 +1233,10 @@ impl App {
     }
 
     /// Get the agent definition for a given agent index.
-    fn agent_profile(&self, agent_idx: usize) -> Option<&crate::agent::definition::AgentDefinition> {
+    fn agent_profile(
+        &self,
+        agent_idx: usize,
+    ) -> Option<&crate::agent::definition::AgentDefinition> {
         let profile_id = self.agents.get(agent_idx)?.profile_id.as_deref();
         let id = profile_id.unwrap_or("default");
         self.agent_registry.get(id)
@@ -1454,11 +1457,16 @@ impl App {
                                     self.compact_context_if_needed(i);
                                     let messages = self.build_chat_messages_for_agent(i);
                                     let profile = self.agent_profile(i);
-                                    let allowed: Option<&[String]> = profile.and_then(|p| match &p.tools {
-                                        crate::agent::definition::ToolPermission::All => None,
-                                        crate::agent::definition::ToolPermission::None => Some(&[] as &[String]),
-                                        crate::agent::definition::ToolPermission::Whitelist(list) => Some(list.as_slice()),
-                                    });
+                                    let allowed: Option<&[String]> =
+                                        profile.and_then(|p| match &p.tools {
+                                            crate::agent::definition::ToolPermission::All => None,
+                                            crate::agent::definition::ToolPermission::None => {
+                                                Some(&[] as &[String])
+                                            }
+                                            crate::agent::definition::ToolPermission::Whitelist(
+                                                list,
+                                            ) => Some(list.as_slice()),
+                                        });
                                     let tools = Some(crate::agent::get_tools(allowed));
                                     let _ = self.agents[i].llm_handle.as_ref().unwrap().send(
                                         crate::llm::LlmRequest::Chat {
@@ -1502,11 +1510,16 @@ impl App {
                                 self.compact_context_if_needed(i);
                                 let messages = self.build_chat_messages_for_agent(i);
                                 let profile = self.agent_profile(i);
-                                let allowed: Option<&[String]> = profile.and_then(|p| match &p.tools {
-                                    crate::agent::definition::ToolPermission::All => None,
-                                    crate::agent::definition::ToolPermission::None => Some(&[] as &[String]),
-                                    crate::agent::definition::ToolPermission::Whitelist(list) => Some(list.as_slice()),
-                                });
+                                let allowed: Option<&[String]> =
+                                    profile.and_then(|p| match &p.tools {
+                                        crate::agent::definition::ToolPermission::All => None,
+                                        crate::agent::definition::ToolPermission::None => {
+                                            Some(&[] as &[String])
+                                        }
+                                        crate::agent::definition::ToolPermission::Whitelist(
+                                            list,
+                                        ) => Some(list.as_slice()),
+                                    });
                                 let tools = Some(crate::agent::get_tools(allowed));
                                 let handle = self.agents[i].llm_handle.as_ref().unwrap();
                                 let _ = handle.send(crate::llm::LlmRequest::Chat {
@@ -1802,11 +1815,12 @@ impl App {
         }
         let messages = self.build_chat_messages_for_agent(agent_idx);
         let system_prompt = self.ai_system_prompt(None, agent_idx);
-        let allowed_tools: Option<Vec<String>> = self.agent_profile(agent_idx).and_then(|p| match &p.tools {
-            crate::agent::definition::ToolPermission::All => None,
-            crate::agent::definition::ToolPermission::None => Some(vec![]),
-            crate::agent::definition::ToolPermission::Whitelist(list) => Some(list.clone()),
-        });
+        let allowed_tools: Option<Vec<String>> =
+            self.agent_profile(agent_idx).and_then(|p| match &p.tools {
+                crate::agent::definition::ToolPermission::All => None,
+                crate::agent::definition::ToolPermission::None => Some(vec![]),
+                crate::agent::definition::ToolPermission::Whitelist(list) => Some(list.clone()),
+            });
         let agent = &mut self.agents[agent_idx];
         agent.agent_loop_count += 1;
         let max_iter = max_agent_iterations();
@@ -3475,7 +3489,6 @@ impl App {
     // ── Action handler ──────────────────────────────────────────────
 
     pub fn handle_action(&mut self, action: Action) -> Result<()> {
-
         if self.external_change_prompt.is_some() {
             return match action {
                 Action::ExternalChangeReload => self.accept_external_reload(),
@@ -3714,8 +3727,12 @@ impl App {
                         let profile = self.agent_profile(self.selected_agent);
                         let allowed: Option<&[String]> = profile.and_then(|p| match &p.tools {
                             crate::agent::definition::ToolPermission::All => None,
-                            crate::agent::definition::ToolPermission::None => Some(&[] as &[String]),
-                            crate::agent::definition::ToolPermission::Whitelist(list) => Some(list.as_slice()),
+                            crate::agent::definition::ToolPermission::None => {
+                                Some(&[] as &[String])
+                            }
+                            crate::agent::definition::ToolPermission::Whitelist(list) => {
+                                Some(list.as_slice())
+                            }
                         });
                         let tools = Some(crate::agent::get_tools(allowed));
                         if handle
@@ -4400,8 +4417,8 @@ impl App {
                     }
                     if cmd == "agent" || cmd == "agents" {
                         self.agent_registry = crate::agent::registry::AgentRegistry::load(Some(
-                                self.find_project_dir(),
-                            ));
+                            self.find_project_dir(),
+                        ));
                         self.agent_profile_panel_active = true;
                         self.agent_panel_mode = AgentPanelMode::List;
                         self.agent_profile_panel_selection = self
@@ -4470,7 +4487,9 @@ impl App {
                     let allowed: Option<&[String]> = profile.and_then(|p| match &p.tools {
                         crate::agent::definition::ToolPermission::All => None,
                         crate::agent::definition::ToolPermission::None => Some(&[] as &[String]),
-                        crate::agent::definition::ToolPermission::Whitelist(list) => Some(list.as_slice()),
+                        crate::agent::definition::ToolPermission::Whitelist(list) => {
+                            Some(list.as_slice())
+                        }
                     });
                     let tools = Some(crate::agent::get_tools(allowed));
                     let handle = self.agent().llm_handle.as_ref().unwrap();
@@ -4612,10 +4631,9 @@ impl App {
                             Ok(())
                         }
                         "agent" => {
-                            self.agent_registry =
-                                crate::agent::registry::AgentRegistry::load(Some(
-                                    self.find_project_dir(),
-                                ));
+                            self.agent_registry = crate::agent::registry::AgentRegistry::load(
+                                Some(self.find_project_dir()),
+                            );
                             self.agent_profile_panel_active = true;
                             self.agent_panel_mode = AgentPanelMode::List;
                             self.agent_profile_panel_selection = self

@@ -10,9 +10,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use teshi_runtime::{
-    default_browser_service_script, default_winapp_service_script, find_project_root,
-    open_project, pick_free_port, remove_daemon_manifest, spawn_daemon_background,
-    DaemonManifest, RuntimeConfig, TeshiRuntime,
+    default_browser_service_script, default_winapp_service_script, find_project_root, open_project,
+    pick_free_port, remove_daemon_manifest, spawn_daemon_background, DaemonManifest, RuntimeConfig,
+    TeshiRuntime,
 };
 use tracing::info;
 
@@ -167,9 +167,10 @@ pub async fn run_daemon_internal(opts: DaemonInternalOptions) -> Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("open project: {e}"))?;
 
-    let dist = opts.dist.or_else(resolve_web_dist).unwrap_or_else(|| {
-        opts.project_root.join("desktop").join("dist")
-    });
+    let dist = opts
+        .dist
+        .or_else(resolve_web_dist)
+        .unwrap_or_else(|| opts.project_root.join("desktop").join("dist"));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], opts.port));
     info!("teshi daemon listening on {addr}");

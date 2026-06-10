@@ -1197,5 +1197,4 @@ mod tests {
             Some(Action::ExternalChangeKeepLocal)
         );
     }
-
 }

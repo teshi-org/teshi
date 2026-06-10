@@ -21,8 +21,8 @@ use super::{
 
 /// Handles `teshi steps ...` subcommands.
 pub fn handle_steps_command(action: &StepsCommand) -> Result<()> {
-    let project_root = teshi_runtime::find_project_root(None)
-        .unwrap_or_else(|| std::env::current_dir().unwrap());
+    let project_root =
+        teshi_runtime::find_project_root(None).unwrap_or_else(|| std::env::current_dir().unwrap());
 
     // Try daemon for state-modifying operations
     if let Some(manifest) = teshi_runtime::DaemonManifest::load(&project_root) {
@@ -67,8 +67,7 @@ fn handle_steps_via_daemon(
             print_response(resp)?;
         }
         StepsCommand::Unbound(args) => {
-            let feature =
-                resolve_feature_arg_daemon(&client, &base, args.feature.as_deref())?;
+            let feature = resolve_feature_arg_daemon(&client, &base, args.feature.as_deref())?;
             let resp = client
                 .get(format!(
                     "{base}/api/v1/steps/statuses?feature_path={feature}"

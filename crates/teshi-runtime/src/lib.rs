@@ -1,7 +1,9 @@
 //! Shared BDD runtime for teshi desktop and web hosts.
 
 mod app_data;
+mod daemon;
 mod events;
+mod fs_util;
 mod gherkin;
 mod locator;
 mod project;
@@ -10,8 +12,6 @@ mod sidecar;
 mod terminal;
 mod venv;
 mod watcher;
-mod fs_util;
-mod daemon;
 
 /// Project Python venv resolution and import preflight (used by sidecar; exposed for tests).
 pub mod python_env {
@@ -28,7 +28,12 @@ pub use app_data::{
     open_dialog_default_dir, save_settings, validated_window_size, AppSettings, MIN_WINDOW_HEIGHT,
     MIN_WINDOW_WIDTH,
 };
+pub use daemon::{
+    find_project_root, pick_free_port, remove_daemon_manifest, spawn_daemon_background,
+    DaemonManifest,
+};
 pub use events::{HostEventCallback, RuntimeEvent, RuntimeEvents};
+pub use fs_util::{read_locked, write_atomic};
 pub use gherkin::{emit_feature_refresh, render_feature};
 pub use locator::{
     abandon_pending_locator, active_step_mismatch_with_pending, confirm_locator,
@@ -55,11 +60,6 @@ pub use sidecar::{
 };
 pub use terminal::{resize_terminal, spawn_terminal, stop_terminal, write_terminal, TerminalState};
 pub use watcher::FileWatcherState;
-pub use fs_util::{read_locked, write_atomic};
-pub use daemon::{
-    find_project_root, pick_free_port, remove_daemon_manifest, spawn_daemon_background,
-    DaemonManifest,
-};
 
 use std::path::PathBuf;
 use std::sync::Arc;

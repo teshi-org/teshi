@@ -171,15 +171,17 @@ model_ref: test-model
 
         let reg = AgentRegistry::load(Some(_tmp.path()));
         // Order depends on filesystem iteration — just verify both exist
-        let ids: std::collections::HashSet<&str> =
-            reg.iter().map(|d| d.id.as_str()).collect();
+        let ids: std::collections::HashSet<&str> = reg.iter().map(|d| d.id.as_str()).collect();
         assert!(ids.contains("a"), "agent 'a' should be present");
         assert!(ids.contains("b"), "agent 'b' should be present");
         // Index access should not panic and should return valid entries
         for i in 0..reg.len() {
             assert!(reg.get_index(i).is_some(), "index {i} should have an agent");
         }
-        assert!(reg.get_index(reg.len()).is_none(), "past-the-end should be None");
+        assert!(
+            reg.get_index(reg.len()).is_none(),
+            "past-the-end should be None"
+        );
     }
 
     #[test]
@@ -189,8 +191,7 @@ model_ref: test-model
         write_agent(&agent_dir.join("y"), "y");
 
         let reg = AgentRegistry::load(Some(_tmp.path()));
-        let ids: std::collections::HashSet<&str> =
-            reg.iter().map(|d| d.id.as_str()).collect();
+        let ids: std::collections::HashSet<&str> = reg.iter().map(|d| d.id.as_str()).collect();
         assert_eq!(ids.len(), 2, "should have exactly 2 agents");
         assert!(ids.contains("x"));
         assert!(ids.contains("y"));
