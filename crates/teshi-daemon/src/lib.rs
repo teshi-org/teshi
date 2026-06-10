@@ -71,10 +71,16 @@ pub async fn run_client(opts: WebOptions) -> Result<()> {
         // Ensure .teshi/ directory exists
         std::fs::create_dir_all(root.join(".teshi")).ok();
         root
+    } else if let Some(root) = find_project_root(None) {
+        root
     } else {
-        find_project_root(None).context(
-            "no .teshi/ directory found; run `teshi web --project PATH` or cd into a project",
-        )?
+        // No project — use a user-level daemon directory so the web UI can
+        // start without a project (welcome screen → user picks a project later).
+        let fallback =
+            teshi_runtime::app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("teshi"));
+        let root = fallback.join("daemon");
+        std::fs::create_dir_all(root.join(".teshi")).ok();
+        root
     };
 
     let dist = opts
