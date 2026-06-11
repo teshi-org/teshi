@@ -77,9 +77,14 @@ jobs:
           npm ci
           npm run build
 
-      - name: Build teshi-desktop binary
+      - name: Build teshi-desktop binary (fresh compile)
         if: matrix.target == 'x86_64-pc-windows-msvc'
-        run: cargo build --release --locked -p teshi-desktop
+        run: |
+          # Force fresh compile — rust-cache may restore a stale binary with
+          # an outdated embedded frontend, causing "localhost refused connection"
+          # in the Tauri webview.
+          cargo clean -p teshi-desktop 2>&1
+          cargo build --release -p teshi-desktop 2>&1
 
       - name: Install WiX Toolset
         if: matrix.target == 'x86_64-pc-windows-msvc'

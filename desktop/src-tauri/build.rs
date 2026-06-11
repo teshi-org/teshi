@@ -22,5 +22,12 @@ fn main() {
             index.display()
         );
     }
+    // Tell cargo to re-run this script (and thus recompile teshi-desktop) whenever
+    // any file in the frontend dist directory changes. Without this, cargo's
+    // incremental compilation may skip recompilation when only the frontend changed,
+    // leading to a binary with stale embedded UI and "localhost refused connection".
+    if dist.is_dir() {
+        println!("cargo:rerun-if-changed={}", dist.display());
+    }
     tauri_build::build()
 }
