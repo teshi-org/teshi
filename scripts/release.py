@@ -20,6 +20,12 @@ import sys
 from datetime import date
 from pathlib import Path
 
+# Optional: validate release.yml YAML syntax (fail early before CI).
+try:
+    import yaml as _yaml
+except ImportError:
+    _yaml = None
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # HARD RULE: teshi is locked to 0.7.x until the lock is intentionally removed.
@@ -158,6 +164,40 @@ def update_version_files(new_version: str, dry_run: bool = True) -> list[str]:
     return updated
 
 
+def validate_release_artifacts() -> bool:
+    """Quick pre-flight checks before committing a release tag.
+
+    Catches common issues that would otherwise fail the CI workflow.
+    """
+    ok = True
+
+    # 1. Validate release.yml YAML syntax.
+    workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
+    if _yaml is not None and workflow.is_file():
+        try:
+            _yaml.safe_load(workflow.read_text(encoding="utf-8"))
+        except _yaml.YAMLError as e:
+            print(f"  ❌ {workflow.name} has invalid YAML:\n     {e}")
+            ok = False
+    elif _yaml is None and workflow.is_file():
+        print("  ⚠  PyYAML not installed — skipping release.yml syntax check.")
+
+    # 2. Verify Cargo.lock is parseable (minimal check).
+    lock = REPO_ROOT / "Cargo.lock"
+    if lock.is_file():
+        try:
+            text = lock.read_text(encoding="utf-8")
+            # Ensure the root package version is present and non-empty.
+            if 'name = "teshi"' not in text:
+                print("  ❌ Cargo.lock missing root package entry.")
+                ok = False
+        except Exception as e:
+            print(f"  ❌ Cargo.lock read error: {e}")
+            ok = False
+
+    return ok
+
+
 def git_commit_and_tag(version: str) -> None:
     # Stage all modified version files
     files = [file_path for _, file_path, _, _ in VERSION_FILES]
@@ -275,6 +315,15 @@ def main() -> None:
                 )
                 sys.exit(1)
         print(f"\n  ✅ All files locked to {ALLOWED_MAJOR}.{ALLOWED_MINOR}.x — good.")
+
+        # Pre-flight CI validation — catch workflow YAML / Cargo.lock issues
+        # before the tag push triggers a failing CI run.
+        print("\n── Pre-flight CI validation ──")
+        if not validate_release_artifacts():
+            print(f"\n  ❌ Pre-flight checks failed. Aborting.")
+            print(f"     Fix the issues above and re-run.")
+            sys.exit(1)
+        print(f"  ✅ Pre-flight checks passed.")
 
     if not apply:
         print()
