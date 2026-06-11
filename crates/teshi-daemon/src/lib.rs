@@ -91,7 +91,7 @@ pub async fn run_client(opts: WebOptions) -> Result<()> {
         )?;
 
     // Ensure daemon is running
-    let port = ensure_daemon(&project_root, Some(dist.clone())).await?;
+    let port = ensure_daemon(&project_root, Some(dist.clone()), opts.port).await?;
 
     let url = format!("http://127.0.0.1:{port}");
 
@@ -203,7 +203,12 @@ pub async fn run_daemon_internal(opts: DaemonInternalOptions) -> Result<()> {
 
 /// Finds or starts the daemon for the given project root.
 /// Returns the daemon's port.
-pub async fn ensure_daemon(project_root: &std::path::Path, dist: Option<PathBuf>) -> Result<u16> {
+/// If `requested_port` is `Some`, tries to use that port; falls back to a free port if it's unavailable.
+pub async fn ensure_daemon(
+    project_root: &std::path::Path,
+    dist: Option<PathBuf>,
+    requested_port: Option<u16>,
+) -> Result<u16> {
     // 1. Check if daemon is already running
     if let Some(manifest) = DaemonManifest::load(project_root) {
         if manifest.is_alive() {
@@ -213,8 +218,12 @@ pub async fn ensure_daemon(project_root: &std::path::Path, dist: Option<PathBuf>
         remove_daemon_manifest(project_root);
     }
 
-    // 2. Pick a free port
-    let port = pick_free_port()?;
+    // 2. Pick port: use requested_port if provided, otherwise pick a free port
+    let port = if let Some(requested) = requested_port {
+        requested
+    } else {
+        pick_free_port()?
+    };
 
     // 3. Spawn detached background daemon process
     spawn_daemon_background(project_root, port, dist.as_deref())?;

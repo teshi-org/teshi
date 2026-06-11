@@ -10,7 +10,7 @@
       "status": "confirmed",
       "primary": {
         "strategy": "url",
-        "value": "http://127.0.0.1:58354/?e2e=1",
+        "value": "http://127.0.0.1:1420/?e2e=1",
         "action": "navigate"
       },
       "confirmed_at": "2026-06-11T11:39:43.331682500+00:00"
@@ -113,7 +113,7 @@
         "action": "press_key",
         "value_arg": "Enter"
       },
-      "confirmed_at": "2026-06-11T11:43:26.292053+00:00"
+      "confirmed_at": "2026-06-11T19:43:26.292053+08:00"
     },
     {
       "step_line": 31,
