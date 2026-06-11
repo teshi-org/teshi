@@ -59,7 +59,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build teshi CLI
-        run: cargo build --release --locked --target ${{ matrix.target }} --bin teshi
+        run: cargo build --release --target ${{ matrix.target }} --bin teshi
 
       # Windows-only: build teshi-desktop + combined MSI installer
       - name: Setup Node.js

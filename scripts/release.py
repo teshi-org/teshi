@@ -147,6 +147,14 @@ def update_version_files(new_version: str, dry_run: bool = True) -> list[str]:
             if not dry_run:
                 path.write_text(new_text, encoding="utf-8")
             updated.append(label)
+    if updated and not dry_run:
+        # Regenerate Cargo.lock so it stays in sync with the bumped version.
+        # Without this, CI builds with --locked would fail.
+        subprocess.run(
+            ["cargo", "generate-lockfile"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+        )
     return updated
 
 
