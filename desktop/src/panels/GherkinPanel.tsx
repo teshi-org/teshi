@@ -16,7 +16,7 @@ const kindClass: Record<string, string> = {
   doc_string: "hl-doc",
 };
 
-// keyword_kind 来自后端 StepKeywordType（Given/When/Then/And/But），据此做语法着色。
+// keyword_kind comes from backend StepKeywordType (Given/When/Then/And/But); use it for syntax coloring.
 const stepKeywordClass: Record<string, string> = {
   Given: "hl-given",
   When: "hl-when",

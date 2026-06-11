@@ -6,7 +6,7 @@ use teshi_gherkin::highlight::{HighlightKind, highlight_line_spans};
 pub use teshi_gherkin::highlight::{
     StepHighlightState, leading_whitespace_chars, step_keyword_gutter_pad,
 };
-// STEP_KEYWORD_COL_WIDTH 仅被对齐相关的测试使用，仅在测试构建中 re-export，避免发布构建出现 unused import。
+// STEP_KEYWORD_COL_WIDTH is only used by alignment tests; re-export under cfg(test) to avoid unused import warnings.
 #[cfg(test)]
 pub use teshi_gherkin::highlight::STEP_KEYWORD_COL_WIDTH;
 
