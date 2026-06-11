@@ -249,12 +249,18 @@ fn shell_cwd(project_root: &Path) -> PathBuf {
     dunce::simplified(project_root).to_path_buf()
 }
 
-/// Embedded panel init: drop PSReadLine (per-keystroke VT redraws break browser xterm),
-/// then optionally load profile aliases. Profile is loaded last so Remove-Module runs again.
+/// Embedded panel init: disable PSReadLine predictions (per-keystroke VT redraws break
+/// browser xterm), but MUST KEEP the module loaded — removing PSReadLine causes the
+/// console host to fall back to raw .NET ConsoleHost input handling, which can
+/// misinterpret ConPTY device-attribute / terminal-query reply sequences as Enter
+/// keystrokes, resulting in infinite prompt loops (repeated auto-Enter).
+///
+/// Profile is loaded to restore aliases; prediction is disabled again after the profile
+/// in case it re-enabled predictions.
 const EMBEDDED_SHELL_INIT: &str = concat!(
-    "Remove-Module PSReadLine -ErrorAction SilentlyContinue -Force; ",
+    "try { Set-PSReadLineOption -PredictionSource None } catch { }; ",
     "if (Test-Path $PROFILE) { . $PROFILE }; ",
-    "Remove-Module PSReadLine -ErrorAction SilentlyContinue -Force"
+    "try { Set-PSReadLineOption -PredictionSource None } catch { }"
 );
 
 fn shell_commands() -> Vec<CommandBuilder> {
