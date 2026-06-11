@@ -1,6 +1,6 @@
 [package]
 name = "teshi-desktop"
-version = "0.7.6"
+version = "0.7.7"
 description = "teshi desktop recorder and runner shell"
 authors = ["teshi-org"]
 edition = "2021"
