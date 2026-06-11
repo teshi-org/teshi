@@ -43,6 +43,38 @@ else
     echo -e "${GREEN}   - OK${NC}"
 fi
 
+# ---- 4. Release tag gate: verify local MSI exists before tag push -----------
+while read local_ref local_sha remote_ref remote_sha; do
+    # Only check pushes of local tags matching v*
+    if [[ "$local_ref" == refs/tags/v* ]]; then
+        tag="${local_ref#refs/tags/}"
+        echo ":: Release tag gate (${tag}) ..."
+
+        msi="target/wix/teshi-${tag}-x64.msi"
+        if [ ! -f "$msi" ]; then
+            echo -e "${RED}   x  MSI not found: ${msi}${NC}"
+            echo -e "${RED}   x  Build the MSI locally first:${NC}"
+            echo -e "${RED}      cd desktop && npx tauri build --bundles msi${NC}"
+            echo -e "${RED}      && Remove-Item target/release/bundle/msi/*.msi${NC}"
+            echo -e "${RED}      && cargo wix ... -o ${msi}${NC}"
+            PASS=false
+            continue
+        fi
+
+        # Check MSI was built AFTER the commit being tagged
+        commit_ts=$(git log -1 --format=%ct "$local_sha" 2>/dev/null || echo 0)
+        msi_ts=$(stat -c %Y "$msi" 2>/dev/null || echo 0)
+        if [ "$msi_ts" -lt "$commit_ts" ]; then
+            echo -e "${YELLOW}   !  MSI is older than the commit. Rebuild to include latest changes.${NC}"
+            echo -e "${YELLOW}      MSI mtime:  $(date -d @"$msi_ts" 2>/dev/null || echo $msi_ts)${NC}"
+            echo -e "${YELLOW}      Commit:     $(date -d @"$commit_ts" 2>/dev/null || echo $commit_ts)${NC}"
+            PASS=false
+        else
+            echo -e "${GREEN}   - MSI found and up-to-date${NC}"
+        fi
+    fi
+done
+
 # ---- Result ----------------------------------------------------------------
 if [ "$PASS" = false ]; then
     echo -e "${RED}-- pre-push checks failed -------------------------------------${NC}"
