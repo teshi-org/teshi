@@ -6,7 +6,9 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 
 /// Large enough for PTY screen redraw bursts (TUI apps, fast output).
-const EVENT_CHANNEL_CAPACITY: usize = 4096;
+/// WebSocket consumers may lag behind the PTY forwarder; a generous capacity
+/// avoids silent event loss that would truncate terminal output.
+const EVENT_CHANNEL_CAPACITY: usize = 65536;
 
 /// Optional host callback (e.g. Tauri `emit`) for desktop shells.
 pub type HostEventCallback = Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>;

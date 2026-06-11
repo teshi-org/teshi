@@ -61,17 +61,6 @@ function decodeTerminalChunk(base64: string): Uint8Array {
   return bytes;
 }
 
-/** ConPTY on Windows 11+ (build >= 21376) emits native wrap/erase sequences xterm understands. */
-function embeddedWindowsPty(): import("@xterm/xterm").ITerminalOptions["windowsPty"] | undefined {
-  if (typeof navigator === "undefined") {
-    return undefined;
-  }
-  if (!/Windows|Win32/i.test(navigator.userAgent)) {
-    return undefined;
-  }
-  return { backend: "conpty", buildNumber: 22631 };
-}
-
 function normalizeTerminalSize(cols: number, rows: number): { cols: number; rows: number } {
   return {
     cols: Math.max(cols, TERMINAL_MIN_COLS),
@@ -226,12 +215,10 @@ export function FileTreeTerminalPanel({
       await waitForLayout();
       if (disposed || !terminalRef.current) return;
 
-      const windowsPty = embeddedWindowsPty();
       const term = new Terminal({
         theme: TERMINAL_THEME,
         fontFamily: "Consolas, 'Cascadia Mono', monospace",
         cursorBlink: true,
-        ...(windowsPty ? { windowsPty } : {}),
       });
       const fit = new FitAddon();
       term.loadAddon(fit);

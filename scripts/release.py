@@ -51,6 +51,9 @@ VERSION_FILES: list[tuple[str, str, re.Pattern, str]] = [
      '"version": "{version}"'),
 ]
 
+CHANGELOG_PATH = "CHANGELOG.md"
+CHANGELOG_GENERATOR = REPO_ROOT / "scripts" / "changelog_generator.py"
+
 BREAKING_PATTERN = re.compile(r'!\s*:|BREAKING CHANGE', re.IGNORECASE)
 FEAT_PATTERN = re.compile(r'^(feat|feature)', re.IGNORECASE)
 FIX_PATTERN = re.compile(r'^(fix|perf|security|refactor)', re.IGNORECASE)
@@ -206,11 +209,68 @@ def git_commit_and_tag(version: str) -> None:
     lock = REPO_ROOT / "Cargo.lock"
     if lock.exists():
         git("add", str(lock))
+    # Stage CHANGELOG.md if it was updated
+    changelog = REPO_ROOT / CHANGELOG_PATH
+    if changelog.exists():
+        git("add", str(changelog))
 
     git("commit", "-m", f"chore: bump version to v{version}")
     git("tag", f"v{version}")
     print(f"  ✓ Committed and tagged v{version}")
     print(f"  → To push: git push origin main && git push origin v{version}")
+
+
+def update_changelog(version: str, last_tag: str) -> bool:
+    """Generate and prepend changelog entry for the new version.
+
+    Delegates to scripts/changelog_generator.py (Keep a Changelog format).
+    Returns True if CHANGELOG.md was updated.
+    """
+    generator = CHANGELOG_GENERATOR
+    if not generator.is_file():
+        print(f"  ⚠  changelog generator not found at {generator}")
+        return False
+
+    # Get commit log since last tag
+    log_result = subprocess.run(
+        ["git", "log", "--format=%h %s", f"{last_tag}..HEAD"],
+        capture_output=True, text=True, cwd=REPO_ROOT,
+    )
+    if not log_result.stdout.strip():
+        print("  ⚠  No commits since last tag — skipping changelog.")
+        return False
+
+    # Run changelog generator
+    result = subprocess.run(
+        [sys.executable, str(generator),
+         "--version", version,
+         "--base-url", "https://github.com/teshi-org/teshi"],
+        input=log_result.stdout,
+        capture_output=True, text=True, cwd=REPO_ROOT,
+    )
+    if result.returncode != 0:
+        print(f"  ⚠  changelog generator failed:\n{result.stderr}")
+        return False
+
+    new_entry = result.stdout.strip()
+    if not new_entry:
+        return False
+
+    changelog_path = REPO_ROOT / CHANGELOG_PATH
+    existing = changelog_path.read_text(encoding="utf-8") if changelog_path.exists() else ""
+
+    # Keep a Changelog header if file is new
+    if not existing.strip():
+        existing = (
+            "# Changelog\n\n"
+            "All notable changes to this project will be documented in this file.\n\n"
+        )
+
+    # Prepend new entry before existing content
+    content = new_entry + "\n\n" + existing
+    changelog_path.write_text(content, encoding="utf-8")
+    print(f"  ✓ Updated {CHANGELOG_PATH}")
+    return True
 
 
 def main() -> None:
@@ -310,7 +370,8 @@ def main() -> None:
                 # Revert by restoring from git
                 subprocess.run(
                     ["git", "checkout", "--"]
-                    + [REPO_ROOT / f[1] for f in VERSION_FILES],
+                    + [REPO_ROOT / f[1] for f in VERSION_FILES]
+                    + ([REPO_ROOT / CHANGELOG_PATH] if (REPO_ROOT / CHANGELOG_PATH).exists() else []),
                     cwd=REPO_ROOT,
                 )
                 sys.exit(1)
@@ -331,6 +392,13 @@ def main() -> None:
         return
 
     if args.tag:
+        # Generate changelog entry from commits since last tag
+        print("\n── Changelog ──")
+        if last_tag:
+            update_changelog(new_version, last_tag)
+        else:
+            print("  ⚠  No previous tag — skipping changelog.")
+
         print()
         git_commit_and_tag(new_version)
     else:
