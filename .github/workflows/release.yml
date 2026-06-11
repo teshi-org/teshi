@@ -134,11 +134,12 @@ jobs:
           & $heat dir $webDir    -out wix/web-files.wxs    -gg -sfrag -srd -dr ShareWebDir    -cg WebFiles    -var var.WebRoot
           & $heat dir $bridgeDir -out wix/bridge-files.wxs -gg -sfrag -srd -dr ShareTeshiBridgeDir -cg BridgeFiles -var var.BridgeRoot
 
-          # Add fallback defines to heat-generated files
-          $defaultBlock = @"
-`n<?ifndef WebRoot ?><?define WebRoot = "$([System.IO.Path]::GetFullPath($webDir))"?><?endif ?>
-<?ifndef BridgeRoot ?><?define BridgeRoot = "$([System.IO.Path]::GetFullPath($bridgeDir))"?><?endif ?>
-"@
+          # Add fallback defines to heat-generated files (avoid here-string to prevent YAML backtick issues)
+          $webDirFull = (Resolve-Path $webDir).Path
+          $bridgeDirFull = (Resolve-Path $bridgeDir).Path
+          $defaultBlock = "`n" +
+            '<?ifndef WebRoot ?><?define WebRoot = "' + $webDirFull + '"?><?endif ?>' + "`n" +
+            '<?ifndef BridgeRoot ?><?define BridgeRoot = "' + $bridgeDirFull + '"?><?endif ?>' + "`n"
           foreach ($f in @("wix/web-files.wxs", "wix/bridge-files.wxs")) {
             $content = Get-Content $f -Raw
             $idx = $content.IndexOf("`n")
