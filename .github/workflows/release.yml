@@ -70,21 +70,20 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
-      - name: Build frontend (desktop/dist)
+      - name: Install npm dependencies
         if: matrix.target == 'x86_64-pc-windows-msvc'
         working-directory: desktop
-        run: |
-          npm ci
-          npm run build
+        run: npm ci
 
-      - name: Build teshi-desktop binary (fresh compile)
+      - name: Build teshi-desktop (via tauri build)
         if: matrix.target == 'x86_64-pc-windows-msvc'
-        run: |
-          # Force fresh compile — rust-cache may restore a stale binary with
-          # an outdated embedded frontend, causing "localhost refused connection"
-          # in the Tauri webview.
-          cargo clean -p teshi-desktop 2>&1
-          cargo build --release -p teshi-desktop 2>&1
+        working-directory: desktop
+        run: npx tauri build --bundles msi
+
+      - name: Remove bundled Tauri MSI (use combined cargo-wix MSI instead)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: Remove-Item -Path "../../target/release/bundle/msi/*.msi" -Force -ErrorAction SilentlyContinue
 
       - name: Install WiX Toolset
         if: matrix.target == 'x86_64-pc-windows-msvc'
