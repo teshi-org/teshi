@@ -1,6 +1,7 @@
 //! Daemon HTTP server and client auto-spawn for the teshi web UI.
 
 mod server;
+pub mod session;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

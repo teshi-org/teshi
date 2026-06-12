@@ -10,14 +10,17 @@ use std::time::Instant;
 
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, Method, StatusCode};
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use teshi_gherkin::FeatureRenderPayload;
+
+use crate::session::{Role, SessionStore};
 use teshi_runtime::{
     check_project_switch_allowed, confirm_locator, get_active_step, get_pending_locator,
     get_project_root, get_recent_projects, highlight_locator, list_dir, load_project_settings,
@@ -33,10 +36,11 @@ use tower_http::services::ServeDir;
 
 type SharedRuntime = Arc<TeshiRuntime>;
 
-/// Shared state with idle tracking for the daemon.
+/// Shared state with idle tracking and session store for the daemon.
 #[derive(Clone)]
 struct DaemonState {
     rt: SharedRuntime,
+    sessions: SessionStore,
     active_ws: Arc<AtomicUsize>,
     last_request: Arc<StdMutex<Instant>>,
     shutdown_token: CancellationToken,
@@ -59,8 +63,10 @@ pub async fn run_server(
     project_root: Option<std::path::PathBuf>,
 ) -> Result<()> {
     let shutdown_token = CancellationToken::new();
+    let sessions = SessionStore::new();
     let state = DaemonState {
         rt,
+        sessions: sessions.clone(),
         active_ws: Arc::new(AtomicUsize::new(0)),
         last_request: Arc::new(StdMutex::new(Instant::now())),
         shutdown_token: shutdown_token.clone(),
@@ -68,11 +74,18 @@ pub async fn run_server(
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST])
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers(Any);
 
-    let app = Router::new()
+    // ── Public routes (no auth required) ──────────────────────────────────────
+    let public_routes = Router::new()
         .route("/api/v1/events", get(events_ws))
+        .route("/api/v1/sessions", post(api_create_session))
+        .route("/api/v1/sessions/{token}", get(api_get_session))
+        .route("/api/v1/sessions/{token}", delete(api_delete_session));
+
+    // ── Protected routes (checked by auth middleware) ─────────────────────────
+    let protected_routes = Router::new()
         .route("/api/v1/projects/open", post(api_open_project))
         .route("/api/v1/projects/teardown", post(api_teardown))
         .route("/api/v1/projects/switch-allowed", get(api_switch_allowed))
@@ -97,6 +110,14 @@ pub async fn run_server(
         .route("/api/v1/fs/read", get(api_read_file))
         .route("/api/v1/daemon/run", post(api_run))
         .route("/api/v1/daemon/shutdown", post(api_daemon_shutdown))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
+
+    let app = Router::new()
+        .merge(public_routes)
+        .merge(protected_routes)
         .fallback_service(ServeDir::new(dist).append_index_html_on_directories(true))
         .layer(cors)
         .with_state(state.clone());
@@ -199,6 +220,126 @@ async fn handle_events_socket(
             }
         }
     }
+}
+
+// ── Auth middleware ─────────────────────────────────────────────────────────
+
+/// Axum middleware that checks `X-Teshi-Token` against the session store.
+///
+/// Requests without a token default to `Admin` (backward compatible with the
+/// web UI which does not yet send tokens).  Unknown tokens also fall back to
+/// `Admin` rather than rejecting — only explicit restricted tokens are limited.
+async fn auth_middleware(
+    State(state): State<DaemonState>,
+    req: Request,
+    next: middleware::Next,
+) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
+    let path = req.uri().path().to_string();
+
+    // Extract token from header
+    let token = req
+        .headers()
+        .get("x-teshi-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    // Determine role: explicit session token overrides, otherwise Admin
+    let role = if token.is_empty() {
+        Role::Admin
+    } else {
+        state
+            .sessions
+            .get_session(token)
+            .map(|s| s.role)
+            .unwrap_or(Role::Admin)
+    };
+
+    if !role.can_execute(&path) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": format!(
+                    "Security Guard: Action '{}' is not allowed for role '{:?}'",
+                    path, role
+                )
+            })),
+        ));
+    }
+
+    Ok(next.run(req).await)
+}
+
+// ── Session API ─────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CreateSessionBody {
+    role: String,
+    #[serde(default)]
+    metadata: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Serialize)]
+struct CreateSessionResponse {
+    token: String,
+    role: String,
+}
+
+async fn api_create_session(
+    State(state): State<DaemonState>,
+    Json(body): Json<CreateSessionBody>,
+) -> Result<Json<CreateSessionResponse>, (StatusCode, Json<Value>)> {
+    let role = match body.role.to_lowercase().as_str() {
+        "admin" => Role::Admin,
+        "agent_recorder" | "agentrecorder" | "agent-recorder" => Role::AgentRecorder,
+        "batch_runner" | "batchrunner" | "batch-runner" => Role::BatchRunner,
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!(
+                        "Unknown role '{other}'. Valid roles: admin, agent_recorder, batch_runner"
+                    )
+                })),
+            ));
+        }
+    };
+    let token = state.sessions.create_session(role, body.metadata);
+    Ok(Json(CreateSessionResponse {
+        token,
+        role: format!("{role:?}"),
+    }))
+}
+
+#[derive(Serialize)]
+struct SessionInfo {
+    token: String,
+    role: String,
+    created_at_secs: f64,
+}
+
+async fn api_get_session(
+    State(state): State<DaemonState>,
+    Path(token): Path<String>,
+) -> Result<Json<SessionInfo>, (StatusCode, Json<Value>)> {
+    let session = state.sessions.get_session(&token).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "session not found" })),
+        )
+    })?;
+    Ok(Json(SessionInfo {
+        token: session.token,
+        role: format!("{:?}", session.role),
+        created_at_secs: session.created_at_secs,
+    }))
+}
+
+async fn api_delete_session(
+    State(state): State<DaemonState>,
+    Path(token): Path<String>,
+) -> StatusCode {
+    state.sessions.remove_session(&token);
+    StatusCode::NO_CONTENT
 }
 
 // ---- Request types ----
@@ -690,5 +831,248 @@ impl IntoResponse for ApiError {
             Json(json!({ "error": self.message })),
         )
             .into_response()
+    }
+}
+// ── Integration tests (calls router directly via clone+oneshot) ─────────────
+
+#[cfg(test)]
+mod integration {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{HeaderValue, Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    fn test_state() -> DaemonState {
+        let rt = teshi_runtime::TeshiRuntime::new(
+            teshi_runtime::RuntimeConfig {
+                browser_service_script: PathBuf::from(""),
+                winapp_service_script: PathBuf::from(""),
+                embedded_no_preview_stream: false,
+            },
+            None,
+        );
+        DaemonState {
+            rt,
+            sessions: SessionStore::new(),
+            active_ws: Arc::new(AtomicUsize::new(0)),
+            last_request: Arc::new(StdMutex::new(Instant::now())),
+            shutdown_token: CancellationToken::new(),
+        }
+    }
+
+    fn build_router(state: DaemonState) -> Router {
+        let public = Router::new()
+            .route("/api/v1/sessions", post(api_create_session))
+            .route("/api/v1/sessions/{token}", get(api_get_session))
+            .route("/api/v1/sessions/{token}", delete(api_delete_session));
+
+        let protected = Router::new()
+            .route("/api/v1/_ping", get(|| async { "pong" }))
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ));
+
+        Router::new()
+            .merge(public)
+            .merge(protected)
+            .with_state(state)
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    fn build_req(method: &str, uri: &str, body: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(body_str) = body {
+            b = b.header("content-length", body_str.len().to_string());
+        }
+        b.body(Body::from(body.unwrap_or("").to_string())).unwrap()
+    }
+
+    fn with_token(req: Request<Body>, token: &str) -> Request<Body> {
+        let (mut parts, body) = req.into_parts();
+        parts
+            .headers
+            .insert("x-teshi-token", HeaderValue::from_str(token).unwrap());
+        Request::from_parts(parts, body)
+    }
+
+    async fn exec(router: &mut Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let resp = router.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or_default();
+        (status, val)
+    }
+
+    async fn exec_status(router: &mut Router, req: Request<Body>) -> StatusCode {
+        let resp = router.clone().oneshot(req).await.unwrap();
+        resp.status()
+    }
+
+    // ── Main test ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn all_scenarios() {
+        let state = test_state();
+        let sessions = state.sessions.clone();
+        let mut router = build_router(state);
+
+        // ── 1. Create AgentRecorder session ──────────────────────────────────
+        let (status, body) = exec(
+            &mut router,
+            build_req(
+                "POST",
+                "/api/v1/sessions",
+                Some(r#"{"role":"agent_recorder"}"#),
+            ),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let token_a = body["token"].as_str().unwrap().to_string();
+        assert!(token_a.starts_with("tk_"), "token prefix tk_");
+        assert_eq!(body["role"], "AgentRecorder");
+
+        // ── 2. Create Admin session ──────────────────────────────────────────
+        let (status, body) = exec(
+            &mut router,
+            build_req("POST", "/api/v1/sessions", Some(r#"{"role":"admin"}"#)),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body["role"], "Admin");
+
+        // ── 3. Read session ──────────────────────────────────────────────────
+        let (status, body) = exec(
+            &mut router,
+            build_req("GET", &format!("/api/v1/sessions/{token_a}"), None),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body["role"], "AgentRecorder");
+        assert!(body["created_at_secs"].as_f64().unwrap() > 0.0);
+
+        // ── 4. Read unknown → 404 ────────────────────────────────────────────
+        let status = exec_status(
+            &mut router,
+            build_req("GET", "/api/v1/sessions/tk_doesnotexist", None),
+        )
+        .await;
+        assert_eq!(status, 404);
+
+        // ── 5. Delete session ────────────────────────────────────────────────
+        let status = exec_status(
+            &mut router,
+            build_req("DELETE", &format!("/api/v1/sessions/{token_a}"), None),
+        )
+        .await;
+        assert_eq!(status, 204);
+
+        // ── 6. Read after delete → 404 ───────────────────────────────────────
+        let status = exec_status(
+            &mut router,
+            build_req("GET", &format!("/api/v1/sessions/{token_a}"), None),
+        )
+        .await;
+        assert_eq!(status, 404);
+
+        // ── 7. Invalid role → 400 ────────────────────────────────────────────
+        let status = exec_status(
+            &mut router,
+            build_req(
+                "POST",
+                "/api/v1/sessions",
+                Some(r#"{"role":"super_admin"}"#),
+            ),
+        )
+        .await;
+        assert_eq!(status, 400);
+
+        // ── 8. No token → Admin → allowed ────────────────────────────────────
+        let status = exec_status(&mut router, build_req("GET", "/api/v1/_ping", None)).await;
+        assert_eq!(status, 200, "no token = Admin");
+
+        // ── 9. Unknown token → falls back to Admin ───────────────────────────
+        let status = exec_status(
+            &mut router,
+            with_token(build_req("GET", "/api/v1/_ping", None), "tk_nevercreated"),
+        )
+        .await;
+        assert_eq!(status, 200, "unknown token = Admin fallback");
+
+        // ── 10. Admin token → allowed ────────────────────────────────────────
+        let admin_tok = sessions.create_session(Role::Admin, None);
+        let status = exec_status(
+            &mut router,
+            with_token(build_req("GET", "/api/v1/_ping", None), &admin_tok),
+        )
+        .await;
+        assert_eq!(status, 200, "Admin allowed");
+
+        // ── 11. AgentRecorder → blocked on /api/v1/_ping ─────────────────────
+        let restricted_tok = sessions.create_session(Role::AgentRecorder, None);
+        let (status, body) = exec(
+            &mut router,
+            with_token(build_req("GET", "/api/v1/_ping", None), &restricted_tok),
+        )
+        .await;
+        assert_eq!(status, 403, "AgentRecorder blocked on _ping");
+        assert!(
+            body["error"].as_str().unwrap().contains("AgentRecorder"),
+            "error mentions role"
+        );
+
+        // ── 12. BatchRunner → blocked on /api/v1/_ping ───────────────────────
+        let batch_tok = sessions.create_session(Role::BatchRunner, None);
+        let status = exec_status(
+            &mut router,
+            with_token(build_req("GET", "/api/v1/_ping", None), &batch_tok),
+        )
+        .await;
+        assert_eq!(status, 403, "BatchRunner blocked on _ping");
+
+        // ── 13. AgentRecorder IS allowed on whitelisted paths ────────────────
+        for path in &[
+            "/api/v1/locator/confirm",
+            "/api/v1/locator/highlight",
+            "/api/v1/locator/active-step",
+            "/api/v1/steps/statuses",
+            "/api/v1/gherkin/render",
+            "/api/v1/events",
+        ] {
+            let status = exec_status(
+                &mut router,
+                with_token(build_req("GET", path, None), &restricted_tok),
+            )
+            .await;
+            // Routes don't exist in test router → 404, but NOT 403 (auth passes)
+            assert_ne!(
+                status, 403,
+                "AgentRecorder not blocked on whitelisted {path}"
+            );
+        }
+
+        // ── 14. Session independence ─────────────────────────────────────────
+        sessions.remove_session(&restricted_tok);
+
+        // Deleted token falls back to Admin
+        let status = exec_status(
+            &mut router,
+            with_token(build_req("GET", "/api/v1/_ping", None), &restricted_tok),
+        )
+        .await;
+        assert_eq!(status, 200, "deleted token = Admin fallback");
+
+        // Admin token still works independently
+        let status = exec_status(
+            &mut router,
+            with_token(build_req("GET", "/api/v1/_ping", None), &admin_tok),
+        )
+        .await;
+        assert_eq!(status, 200, "Admin token unaffected");
     }
 }

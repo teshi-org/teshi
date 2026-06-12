@@ -5014,6 +5014,7 @@ dependencies = [
  "clap",
  "fd-lock",
  "futures-util",
+ "http-body-util",
  "reqwest",
  "serde",
  "serde_json",
@@ -5022,9 +5023,11 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.8.2",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "webbrowser",
 ]
 
