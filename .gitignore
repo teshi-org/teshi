@@ -18,6 +18,17 @@ Thumbs.db
 
 # Cursor: ignore local workspace state, keep shared rules
 .cursor/*
+
+# OpenSpec change tracking (separate BDD project artifacts)
+.agents/
+openspec/
+
+# Exploration traces
+.teshi/traces/
+
+# Miscellaneous working-tree artifacts
+arch-vision.html
+tests/feature/example.feature
 !.cursor/rules/
 !.cursor/rules/*.mdc
 

@@ -431,6 +431,10 @@ fn parse_steps(lines: &[&str], idx: &mut usize, lang: &GherkinLanguage) -> Vec<B
             *idx += 1;
             continue;
         }
+        // If we hit a structural keyword (Scenario, Rule, etc.), steps are done
+        if lang.match_structural_prefix(trimmed).is_some() {
+            break;
+        }
         if let Some(mut step) = try_parse_step(trimmed, *idx + 1, lang) {
             *idx += 1;
             // Parse doc string / data table after this step
@@ -439,7 +443,12 @@ fn parse_steps(lines: &[&str], idx: &mut usize, lang: &GherkinLanguage) -> Vec<B
             step.data_table = dt;
             steps.push(step);
         } else {
-            break;
+            // Not a step, not structural — skip line (continuation, stray text, etc.)
+            // Exception: break on tag lines (@xxx) — they belong to the next block
+            if trimmed.starts_with('@') {
+                break;
+            }
+            *idx += 1;
         }
     }
     steps
