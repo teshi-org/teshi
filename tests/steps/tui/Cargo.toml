@@ -1,8 +1,0 @@
-[package]
-name = "teshi-tui-steps"
-version = "0.1.0"
-edition = "2024"
-description = "TUI e2e step implementations for teshi BDD runner"
-
-[dependencies]
-anyhow = "1"
