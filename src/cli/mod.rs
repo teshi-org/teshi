@@ -7,7 +7,6 @@ pub mod export;
 pub mod locator_verify;
 pub mod replay_screenshots;
 pub mod steps;
-pub mod trace;
 pub mod winapp;
 
 use std::path::PathBuf;
@@ -126,11 +125,6 @@ pub enum Command {
     Generate {
         #[command(subcommand)]
         action: GenerateCommand,
-    },
-    /// List and inspect exploration traces
-    Trace {
-        #[command(subcommand)]
-        action: TraceCommand,
     },
 }
 
@@ -622,17 +616,6 @@ impl Command {
             runner_cwd: runner_cwd.map(PathBuf::from),
         }
     }
-}
-
-#[derive(Debug, Subcommand)]
-pub enum TraceCommand {
-    /// List all exploration traces
-    List,
-    /// Show details of a specific trace
-    Show {
-        /// Trace session ID (e.g. 'explore-1234567890')
-        id: String,
-    },
 }
 
 #[cfg(test)]

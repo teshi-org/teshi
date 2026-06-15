@@ -9,7 +9,6 @@ pub mod definition;
 pub mod loader;
 pub mod pipeline;
 pub mod registry;
-pub mod skills;
 mod tools;
 pub mod validator;
 
@@ -48,7 +47,6 @@ pub fn execute_tool(
         "reorder_steps" => execute_reorder_steps(app, args_json, tool_call_id, agent_idx),
         "search_features" => execute_search_features(app, args_json),
         "run_tests" => execute_run_tests(app, args_json),
-        "load_skill" => execute_load_skill(app, args_json),
         "submit_requirements" => execute_submit_requirements(app, args_json),
         "generate_plan" => execute_generate_plan(app, args_json),
         "validate_feature" => execute_validate_feature(app, args_json),
@@ -1060,36 +1058,6 @@ fn execute_run_tests(app: &mut crate::app::App, args_json: &str) -> Result<Strin
     ))
 }
 
-// ── load_skill ────────────────────────────────────────────────────────────
-
-fn execute_load_skill(app: &mut crate::app::App, args_json: &str) -> Result<String> {
-    let args: serde_json::Value =
-        serde_json::from_str(args_json).context("invalid JSON arguments")?;
-    let skill_name = args
-        .get("skill_name")
-        .and_then(|v| v.as_str())
-        .context("missing 'skill_name'")?;
-
-    if let Some(skill) = app.skill_registry.get(skill_name) {
-        Ok(format!("## Skill: {}\n\n{}", skill.name, skill.content))
-    } else {
-        let catalog_text = app.skill_registry.catalog();
-        let available: Vec<_> = catalog_text
-            .lines()
-            .filter(|l| l.starts_with("  - "))
-            .collect();
-        Ok(format!(
-            "Skill '{}' not found. Available templates:\n{}",
-            skill_name,
-            if available.is_empty() {
-                "  (no templates loaded)".into()
-            } else {
-                available.join("\n")
-            }
-        ))
-    }
-}
-
 // ── submit_requirements ───────────────────────────────────────────────────────
 
 fn execute_submit_requirements(app: &mut crate::app::App, args_json: &str) -> Result<String> {
@@ -1177,7 +1145,7 @@ fn execute_validate_feature(app: &mut crate::app::App, args_json: &str) -> Resul
     // Build a temporary project filtered by file if needed
     let project = &app.project;
 
-    let mut issues = if let Some(fp) = file_path_opt {
+    let issues = if let Some(fp) = file_path_opt {
         // Filter to just the requested file
         let filtered: Vec<_> = project
             .features
@@ -1214,34 +1182,6 @@ fn execute_validate_feature(app: &mut crate::app::App, args_json: &str) -> Resul
     } else {
         crate::agent::validator::validate_project(project)
     };
-
-    // Coverage check: compare generated scenarios against skill templates
-    if let Some(fp) = file_path_opt
-        && let Some(feature) = project.features.iter().find(|f| {
-            let path_str = f.file_path.to_string_lossy();
-            path_str == fp || path_str.ends_with(fp)
-        })
-    {
-        // Collect scenarios from both scenarios and rules for coverage check
-        let all_scenarios: Vec<crate::gherkin::BddScenario> = feature
-            .scenarios
-            .iter()
-            .chain(feature.rules.iter().flat_map(|r| r.scenarios.iter()))
-            .cloned()
-            .collect();
-
-        if !all_scenarios.is_empty() {
-            let coverage_issues = crate::agent::validator::check_coverage(
-                &feature.name,
-                &all_scenarios,
-                &app.skill_registry,
-            );
-            for mut ci in coverage_issues {
-                ci.file = fp.to_string();
-                issues.push(ci);
-            }
-        }
-    }
 
     if issues.is_empty() {
         app.generation_stage = crate::agent::pipeline::GenerationStage::Complete;

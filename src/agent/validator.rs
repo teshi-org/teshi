@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 
-use crate::agent::skills::SkillRegistry;
 use crate::gherkin::{BddProject, BddScenario, ScenarioKind};
 use crate::gherkin_lang::StepKeywordType;
 
@@ -307,122 +306,9 @@ pub fn format_validation_result(issues: &[ValidationIssue]) -> String {
     out
 }
 
-/// Check if a feature's scenarios cover the patterns recommended by matching
-/// skill templates. Returns suggestions for missing scenario types.
-pub fn check_coverage(
-    feature_name: &str,
-    scenarios: &[BddScenario],
-    skill_registry: &SkillRegistry,
-) -> Vec<ValidationIssue> {
-    let mut issues = Vec::new();
-
-    if skill_registry.is_empty() {
-        return issues;
-    }
-
-    // Match skills against the feature name
-    let matched = skill_registry.match_skills(feature_name);
-    if matched.is_empty() {
-        return issues;
-    }
-
-    // Extract scenario names from the generated feature
-    let generated_names: Vec<&str> = scenarios.iter().map(|s| s.name.as_str()).collect();
-    let generated_lower: Vec<String> = generated_names.iter().map(|n| n.to_lowercase()).collect();
-
-    for skill in &matched {
-        // Parse "Recommended Scenarios" section from skill content
-        let recommendations = extract_recommended_scenarios(&skill.content);
-        if recommendations.is_empty() {
-            continue;
-        }
-
-        let mut covered: usize = 0;
-        for rec in &recommendations {
-            let rec_lower = rec.to_lowercase();
-            let found = generated_lower.iter().any(|n| {
-                // Check if any generated scenario name contains keywords from the recommendation
-                let rec_keywords: Vec<&str> = rec_lower
-                    .split_whitespace()
-                    .filter(|w| w.len() > 3) // only meaningful words
-                    .collect();
-                let match_count = rec_keywords.iter().filter(|kw| n.contains(*kw)).count();
-                // Match if at least half of the keywords are found
-                !rec_keywords.is_empty() && match_count >= rec_keywords.len().max(1) / 2
-            });
-
-            if !found {
-                issues.push(ValidationIssue {
-                    severity: IssueSeverity::Suggestion,
-                    file: String::new(),
-                    line: None,
-                    message: format!(
-                        "Consider adding a scenario for '{}' (recommended by template '{}')",
-                        rec, skill.name
-                    ),
-                });
-            } else {
-                covered += 1;
-            }
-        }
-
-        if covered < recommendations.len() && recommendations.len() > 1 {
-            issues.push(ValidationIssue {
-                severity: IssueSeverity::Suggestion,
-                file: String::new(),
-                line: None,
-                message: format!(
-                    "Coverage: {}/{} recommended scenario patterns covered for template '{}'",
-                    covered,
-                    recommendations.len(),
-                    skill.name
-                ),
-            });
-        }
-    }
-
-    issues
-}
-
-/// Extract recommended scenario descriptions from a skill template's content.
-/// Looks for "## Recommended Scenarios" section and parses numbered items.
-fn extract_recommended_scenarios(content: &str) -> Vec<String> {
-    let mut result = Vec::new();
-    let mut in_section = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("## Recommended Scenarios") {
-            in_section = true;
-            continue;
-        }
-        if in_section {
-            // Stop at next heading or section break
-            if trimmed.starts_with("## ") || trimmed.starts_with("---") {
-                break;
-            }
-            // Extract numbered items like "1. **text** — more text" or "- text"
-            if let Some(item) = trimmed
-                .strip_prefix(|c: char| c.is_ascii_digit())
-                .and_then(|s| s.trim().strip_prefix(". "))
-                .or_else(|| trimmed.strip_prefix("- "))
-            {
-                // Clean up markdown formatting: **text** → text
-                let clean = item.replace("**", "").trim().to_string();
-                if !clean.is_empty() {
-                    result.push(clean);
-                }
-            }
-        }
-    }
-
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::skills::{SkillDefinition, SkillRegistry};
     use crate::gherkin::{BddFeature, BddProject, BddScenario, BddStep, ScenarioKind};
     use crate::gherkin_lang::StepKeywordType;
 
@@ -452,91 +338,6 @@ mod tests {
             examples: vec![],
             line_number: 10,
         }
-    }
-
-    // ── coverage / recommended scenario tests ──────────────────────────────
-
-    #[test]
-    fn check_coverage_finds_missing_scenarios() {
-        let mut registry = SkillRegistry::new();
-        registry.register(SkillDefinition {
-            name: "test-flow".into(),
-            description: "Test template".into(),
-            keywords: vec!["test".into()],
-            content: "\
-## Recommended Scenarios
-1. **Successful test** — basic positive case
-2. **Failed test** — error handling
-3. **Edge case** — boundary values
-"
-            .into(),
-            path: None,
-        });
-
-        // Only 1 of 3 recommended scenarios is present
-        let scenarios = vec![BddScenario {
-            name: "Successful test".into(),
-            tags: vec![],
-            kind: ScenarioKind::Scenario,
-            steps: vec![],
-            examples: vec![],
-            line_number: 1,
-        }];
-
-        let issues = check_coverage("test-flow", &scenarios, &registry);
-        assert!(!issues.is_empty(), "should find missing scenarios");
-
-        // Should have at least "Coverage: X/Y" line
-        let has_coverage = issues.iter().any(|i| i.message.contains("Coverage:"));
-        assert!(has_coverage, "should report coverage ratio");
-
-        // Should suggest "Failed test"
-        let has_failed = issues.iter().any(|i| i.message.contains("Failed test"));
-        assert!(has_failed, "should suggest missing 'Failed test'");
-    }
-
-    #[test]
-    fn check_coverage_empty_for_no_match() {
-        let registry = SkillRegistry::new();
-        let scenarios = vec![];
-        let issues = check_coverage("unmatched", &scenarios, &registry);
-        assert!(issues.is_empty(), "no issues when no skills match");
-    }
-
-    #[test]
-    fn extract_recommended_scenarios_parses_numbered_list() {
-        let content = "\
-# Some heading
-## Recommended Scenarios
-1. **First** — description one
-2. **Second** — description two
-## Other section
-- not extracted
-";
-        let recs = extract_recommended_scenarios(content);
-        assert_eq!(recs.len(), 2);
-        assert!(recs[0].contains("First"));
-        assert!(recs[1].contains("Second"));
-    }
-
-    #[test]
-    fn extract_recommended_scenarios_parses_bullet_list() {
-        let content = "\
-## Recommended Scenarios
-- **Login** with valid credentials
-- **Error** handling
-- **Edge** cases
-";
-        let recs = extract_recommended_scenarios(content);
-        assert_eq!(recs.len(), 3);
-        assert!(recs[0].contains("Login"));
-    }
-
-    #[test]
-    fn extract_recommended_scenarios_empty_when_no_section() {
-        let content = "# No section here\n- item\n";
-        let recs = extract_recommended_scenarios(content);
-        assert!(recs.is_empty());
     }
 
     // ── check_scenario_dependency tests ──────────────────────────────────────

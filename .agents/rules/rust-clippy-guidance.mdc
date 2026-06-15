@@ -1,0 +1,18 @@
+---
+description: Clippy linting & code quality guidance (project-scoped)
+globs: **/*.rs
+alwaysApply: false
+---
+
+# Clippy linting & code quality guidance
+
+- Run Clippy regularly: `cargo clippy --all-targets --all-features`.
+- Treat new warnings as bugs: prefer fixing the root cause over adding `allow(...)` broadly.
+- Prefer idiomatic standard library usage (iterators, conversions, error handling) over manual patterns.
+- Common fix targets Clippy often flags:
+  - unnecessary borrows/dereferences
+  - needless allocations or clones
+  - overly complex types when a simpler approach exists
+  - functions that return `Ok(...)`/`Some(...)` in redundant ways
+- When a lint is false positive or style disagreement, scope the `#[allow(...)]` to the smallest possible item and add a short comment explaining why.
+

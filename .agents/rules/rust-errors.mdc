@@ -1,0 +1,15 @@
+---
+description: Error handling conventions (project-scoped)
+globs: **/*.rs
+alwaysApply: false
+---
+
+# Error handling conventions
+
+- Use typed errors for libraries; use a general-purpose error (e.g. `anyhow`) for binaries/apps if that matches your project.
+- Add context at the boundary where it matters (e.g. when converting/propagating errors to higher layers).
+- Prefer domain-specific error types over stringly-typed failures.
+- When you define custom errors, derive `std::error::Error` (often via `thiserror`) and implement helpful `Display` messages.
+- Don’t silence errors with broad `match` + empty arms; handle or propagate them explicitly.
+- For long-lived types, consider ownership boundaries carefully (errors should not force unnecessary clones).
+

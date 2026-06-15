@@ -519,8 +519,10 @@ fn catalog(project_root: &Path, args: &StepsCatalogArgs) -> Result<()> {
 
     match args.format.as_str() {
         "text" => {
-            println!("Step Catalog — {} unique steps from {} features",
-                result["unique_normalized"], result["num_features"]);
+            println!(
+                "Step Catalog — {} unique steps from {} features",
+                result["unique_normalized"], result["num_features"]
+            );
             println!("Total occurrences: {}", result["total_raw_steps"]);
             println!();
             for entry in result["entries"].as_array().unwrap_or(&vec![]) {
@@ -587,7 +589,11 @@ fn is_leap(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
-fn collect_feature_files(root: &Path, dir: &Path, features: &mut Vec<teshi_gherkin::BddFeature>) -> Result<()> {
+fn collect_feature_files(
+    root: &Path,
+    dir: &Path,
+    features: &mut Vec<teshi_gherkin::BddFeature>,
+) -> Result<()> {
     for entry in fs::read_dir(dir).context("read directory")? {
         let entry = entry.context("read entry")?;
         let path = entry.path();

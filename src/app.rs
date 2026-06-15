@@ -23,8 +23,8 @@ use crate::gherkin_lang::StructuralType;
 use crate::keymap::Action;
 use crate::mindmap;
 use crate::runner::{self, RunCase, RunEvent, RunRequest, RunnerConfig};
-use teshi_gherkin::StepIndex;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+use teshi_gherkin::StepIndex;
 
 /// Available slash commands: (name, description)
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -445,8 +445,6 @@ pub struct App {
     pub session_panel_active: bool,
     pub session_panel_selection: usize,
     pub session_list: Vec<crate::session::Session>,
-    // ── Skill/template registry ─────────────────────────
-    pub skill_registry: crate::agent::skills::SkillRegistry,
     // ── Agent state ─────────────────────────────────
     pub agent_registry: crate::agent::registry::AgentRegistry,
     pub agent_profile_panel_active: bool,
@@ -733,7 +731,6 @@ impl App {
             session_panel_active: false,
             session_panel_selection: 0,
             session_list: Vec::new(),
-            skill_registry: crate::agent::skills::SkillRegistry::new(), // reloaded below
             agent_registry: crate::agent::registry::AgentRegistry::load(Some(dir)),
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
@@ -742,11 +739,6 @@ impl App {
             pipeline_requirement: None,
             pipeline_plan: None,
         };
-        // Load skill registry using the default profile's skill dirs
-        {
-            let default_profile = app.agent_registry.default();
-            app.skill_registry = Self::load_skill_registry(dir, &[]);
-        }
         app.spawn_llm_if_configured();
         app.activate_active_profile();
         app.mindmap_index.apply_highlight_categories("root");
@@ -878,9 +870,6 @@ impl App {
             session_panel_active: false,
             session_panel_selection: 0,
             session_list: Vec::new(),
-            skill_registry: {
-                crate::agent::skills::SkillRegistry::new() // reloaded below
-            },
             agent_registry: {
                 let root_dir = path.parent().unwrap_or(Path::new("."));
                 crate::agent::registry::AgentRegistry::load(Some(root_dir))
@@ -892,13 +881,6 @@ impl App {
             pipeline_requirement: None,
             pipeline_plan: None,
         };
-
-        // Load skill registry using the default profile's skill dirs
-        {
-            let root_dir = path.parent().unwrap_or(Path::new("."));
-            let default_profile = app.agent_registry.default();
-            app.skill_registry = Self::load_skill_registry(root_dir, &[]);
-        }
         app.spawn_llm_if_configured();
         app.activate_active_profile();
         app.sync_cursor_to_first_node();
@@ -1018,7 +1000,6 @@ impl App {
             session_panel_active: false,
             session_panel_selection: 0,
             session_list: Vec::new(),
-            skill_registry: crate::agent::skills::SkillRegistry::new(),
             agent_registry: crate::agent::registry::AgentRegistry::load(None),
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
@@ -1246,13 +1227,6 @@ impl App {
     pub(crate) fn active_agent_profile(&self) -> &crate::agent::definition::AgentDefinition {
         self.agent_profile(self.selected_agent)
             .unwrap_or_else(|| self.agent_registry.default())
-    }
-
-    /// Reload the skill registry based on the current active agent's skill dirs.
-    fn reload_skills_for_profile(&mut self) {
-        let profile = self.active_agent_profile();
-        let project_dir = self.find_project_dir();
-        self.skill_registry = Self::load_skill_registry(project_dir, &profile.skills);
     }
 
     /// Try to find a sensible project root directory.
@@ -1676,52 +1650,15 @@ impl App {
         msgs
     }
 
-    /// Load the skill registry from a project directory, using the provided skill dirs.
-    /// If `skills_dirs` is empty, falls back to the default hardcoded paths.
-    fn load_skill_registry(
-        project_dir: &Path,
-        skills_dirs: &[std::path::PathBuf],
-    ) -> crate::agent::skills::SkillRegistry {
-        let dirs: Vec<std::path::PathBuf> = if skills_dirs.is_empty() {
-            // Fallback to hardcoded defaults
-            vec![
-                project_dir.join(".teshi/skills"),
-                project_dir.join("skills"),
-            ]
-        } else {
-            skills_dirs.to_vec()
-        };
-        for dir in &dirs {
-            if dir.exists() {
-                return crate::agent::skills::SkillRegistry::load_from_dir(dir);
-            }
-        }
-        // Also check parent directories (useful when project is a subdirectory)
-        if let Some(parent) = project_dir.parent() {
-            let parent_skills = parent.join(".teshi/skills");
-            if parent_skills.exists() {
-                return crate::agent::skills::SkillRegistry::load_from_dir(&parent_skills);
-            }
-        }
-        crate::agent::skills::SkillRegistry::new()
-    }
-
     /// The system prompt used for all AI chat requests.
     /// Uses the active agent profile's instructions as the base, then appends
-    /// skill catalog and pipeline guidance.
+    /// pipeline guidance.
     fn ai_system_prompt(&self, request: Option<&str>, agent_idx: usize) -> String {
         let profile = self.agent_profile(agent_idx);
         let instructions = profile
             .map(|p| p.system_prompt.clone())
             .unwrap_or_else(|| "You are a helpful assistant.".to_string());
         let mut prompt = instructions;
-
-        // Add skill catalog
-        if !self.skill_registry.is_empty() {
-            prompt.push_str("\n\n## Available Generation Templates\n");
-            prompt.push_str(&self.skill_registry.catalog());
-            prompt.push_str("Use the `load_skill` tool to load the full template content.");
-        }
 
         // Generation pipeline guidance
         prompt.push_str(
@@ -3586,7 +3523,6 @@ impl App {
                                 self.activate_model_profile(&mp);
                             }
                         }
-                        self.reload_skills_for_profile();
                         self.status = format!("Switched to agent: {}", profile.name);
                     }
                     self.agent_profile_panel_active = false;
@@ -6688,7 +6624,6 @@ mod tests {
             session_panel_active: false,
             session_panel_selection: 0,
             session_list: Vec::new(),
-            skill_registry: crate::agent::skills::SkillRegistry::new(),
             agent_registry: crate::agent::registry::AgentRegistry::load(None),
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
@@ -6845,7 +6780,6 @@ Feature: B
             session_panel_active: false,
             session_panel_selection: 0,
             session_list: Vec::new(),
-            skill_registry: crate::agent::skills::SkillRegistry::new(),
             agent_registry: crate::agent::registry::AgentRegistry::load(None),
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,

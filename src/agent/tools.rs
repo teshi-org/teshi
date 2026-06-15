@@ -301,25 +301,6 @@ fn get_all_tools() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "load_skill".into(),
-            description: "Load the full content of a generation template by name. \
-                          Use this when you need detailed guidance for generating a \
-                          specific type of feature (e.g. 'auth-flow', 'crud-api'). \
-                          First check [Project Context] for available templates. \
-                          Returns the full template instructions."
-                .into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "skill_name": {
-                        "type": "string",
-                        "description": "Name of the skill/template to load (from Available Generation Templates catalog)"
-                    }
-                },
-                "required": ["skill_name"]
-            }),
-        },
-        ToolDefinition {
             name: "run_tests".into(),
             description: "Run the external test runner for scenarios in the project. \
                           Optionally filter by feature file path or scenario name. \

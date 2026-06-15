@@ -1,0 +1,14 @@
+---
+description: Cargo runbook & quality gates (project-scoped)
+globs: **/*.rs
+alwaysApply: false
+---
+
+# Cargo runbook & quality gates
+
+- Format: `cargo fmt --all`
+- Compile check (fast feedback): `cargo check`
+- Lint gate (CI-like): `cargo clippy --all-targets --all-features -D warnings`
+- Test gate: `cargo test --all`
+- Optional docs gate: `cargo doc --no-deps --document-private-items`
+
