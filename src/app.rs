@@ -23,7 +23,7 @@ use crate::gherkin_lang::StructuralType;
 use crate::keymap::Action;
 use crate::mindmap;
 use crate::runner::{self, RunCase, RunEvent, RunRequest, RunnerConfig};
-use crate::step_index::StepIndex;
+use teshi_gherkin::StepIndex;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
 /// Available slash commands: (name, description)

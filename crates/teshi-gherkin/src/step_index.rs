@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use crate::gherkin::BddProject;
+use crate::BddProject;
 
 /// Where a step occurs within the project tree.
 #[derive(Debug, Clone)]
@@ -103,7 +103,7 @@ fn normalize(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gherkin::{BddProject, parse_feature};
+    use crate::{BddProject, parse_feature};
     use std::path::PathBuf;
 
     fn sample_project() -> BddProject {

@@ -5,6 +5,7 @@ pub mod gherkin_keywords;
 pub mod gherkin_lang;
 pub mod highlight;
 pub mod render;
+pub mod step_index;
 
 pub use gherkin::*;
 pub use gherkin_lang::*;
@@ -13,3 +14,4 @@ pub use render::{
     FeatureRenderPayload, RenderBlock, RenderError, RenderExamples, RenderLine, RenderScenario,
     RenderStep, render_feature,
 };
+pub use step_index::*;

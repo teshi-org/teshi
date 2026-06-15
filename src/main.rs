@@ -17,7 +17,6 @@ mod mindmap;
 mod profiles;
 mod runner;
 mod session;
-mod step_index;
 mod ui;
 
 use std::fmt;
@@ -185,6 +184,9 @@ fn main() -> Result<()> {
         }
         Some(cli::Command::Browser { action }) => {
             return cli::browser::handle_browser_command(&action);
+        }
+        Some(cli::Command::Trace { action }) => {
+            return cli::trace::handle_trace_command(&action);
         }
         Some(cli::Command::WinApp { action }) => {
             return cli::winapp::handle_winapp_command(&action);

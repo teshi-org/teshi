@@ -14,9 +14,12 @@ use teshi_runtime::{
 };
 
 use super::locator_verify::locator_verify_satisfied;
+use teshi_gherkin::{BddProject, StepIndex};
+
 use super::{
-    StepsCommand, StepsConfirmArgs, StepsFeatureArgs, StepsListArgs, StepsProposeArgs,
-    StepsResolveArgs, StepsSelectArgs, StepsUnbindArgs, StepsWaitArgs, WaitUntilArg,
+    StepsCatalogArgs, StepsCommand, StepsConfirmArgs, StepsFeatureArgs, StepsListArgs,
+    StepsProposeArgs, StepsResolveArgs, StepsSelectArgs, StepsUnbindArgs, StepsWaitArgs,
+    WaitUntilArg,
 };
 
 /// Handles `teshi steps ...` subcommands.
@@ -33,6 +36,7 @@ pub fn handle_steps_command(action: &StepsCommand) -> Result<()> {
 
     // Fallback: direct file I/O
     match action {
+        StepsCommand::Catalog(args) => catalog(&project_root, args),
         StepsCommand::Select(args) => select(&project_root, args),
         StepsCommand::Unbound(args) => unbound(&project_root, args),
         StepsCommand::NextUnbound(args) => next_unbound(&project_root, args),
@@ -55,6 +59,25 @@ fn handle_steps_via_daemon(
     let client = reqwest::blocking::Client::new();
 
     match action {
+        StepsCommand::Catalog(args) => {
+            let mut url = format!("{base}/api/v1/steps/catalog");
+            let mut params = Vec::new();
+            if let Some(mc) = args.min_count {
+                params.push(format!("min_count={mc}"));
+            }
+            if let Some(t) = args.top {
+                params.push(format!("top={t}"));
+            }
+            if args.no_locations {
+                params.push("no_locations=true".into());
+            }
+            if !params.is_empty() {
+                url.push('?');
+                url.push_str(&params.join("&"));
+            }
+            let resp = client.get(&url).send().context("get catalog via daemon")?;
+            print_response(resp)?;
+        }
         StepsCommand::Select(args) => {
             let resp = client
                 .post(format!("{base}/api/v1/locator/sync-step"))
@@ -425,6 +448,157 @@ fn proposal_value(args: &StepsProposeArgs) -> Result<String> {
                 args.action
             )
         })
+}
+
+fn catalog(project_root: &Path, args: &StepsCatalogArgs) -> Result<()> {
+    let root = args
+        .project_root
+        .as_deref()
+        .map(Path::new)
+        .unwrap_or(project_root);
+
+    let mut features = Vec::new();
+    collect_feature_files(root, root, &mut features)?;
+
+    let project = BddProject {
+        root_dir: root.to_path_buf(),
+        features,
+    };
+    let index = StepIndex::build(&project);
+
+    let mut entries: Vec<serde_json::Value> = index
+        .most_common(usize::MAX)
+        .into_iter()
+        .filter(|(_, count)| args.min_count.map_or(true, |m| *count >= m))
+        .map(|(text, count)| {
+            let locations = index.usages.get(&text).map(|locs| {
+                locs.iter()
+                    .map(|loc| {
+                        let f = &project.features[loc.feature_idx];
+                        let scenario = if loc.scenario_idx == usize::MAX {
+                            "<Background>".to_string()
+                        } else if loc.scenario_idx < f.scenarios.len() {
+                            f.scenarios[loc.scenario_idx].name.clone()
+                        } else {
+                            format!("<Rule-{}>", loc.scenario_idx)
+                        };
+                        json!({
+                            "feature": f.file_path.strip_prefix(root).unwrap_or(&f.file_path).to_string_lossy(),
+                            "scenario": scenario,
+                            "line": loc.step_idx,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+            let mut entry = json!({
+                "text": text,
+                "normalized": text,
+                "count": count,
+            });
+            if !args.no_locations {
+                entry["locations"] = json!(locations);
+            }
+            entry
+        })
+        .collect();
+
+    if let Some(top) = args.top {
+        entries.truncate(top);
+    }
+
+    let result = json!({
+        "project_root": root.to_string_lossy(),
+        "total_raw_steps": index.usages.values().map(|v| v.len()).sum::<usize>(),
+        "unique_normalized": index.usages.len(),
+        "num_features": project.features.len(),
+        "generated_at": format_timestamp(),
+        "entries": entries,
+    });
+
+    match args.format.as_str() {
+        "text" => {
+            println!("Step Catalog — {} unique steps from {} features",
+                result["unique_normalized"], result["num_features"]);
+            println!("Total occurrences: {}", result["total_raw_steps"]);
+            println!();
+            for entry in result["entries"].as_array().unwrap_or(&vec![]) {
+                let t = entry["text"].as_str().unwrap_or("");
+                let c = entry["count"].as_u64().unwrap_or(0);
+                println!("  ({c}x) {t}");
+            }
+        }
+        _ => {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+    }
+
+    Ok(())
+}
+
+fn format_timestamp() -> String {
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs();
+    // Simple UTC ISO 8601 without external dep
+    let days_since_epoch = secs / 86400;
+    let time_secs = secs % 86400;
+    let hours = time_secs / 3600;
+    let minutes = (time_secs % 3600) / 60;
+    let seconds = time_secs % 60;
+
+    // Days since 1970-01-01, simple leap year calculation
+    let mut y = 1970i64;
+    let mut remaining = days_since_epoch as i64;
+    loop {
+        let days_in_year = if is_leap(y) { 366 } else { 365 };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let month_days = if is_leap(y) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    let mut m = 0;
+    for (i, &md) in month_days.iter().enumerate() {
+        if remaining < md as i64 {
+            m = i + 1;
+            break;
+        }
+        remaining -= md as i64;
+    }
+    if m == 0 {
+        m = 12;
+    }
+    let d = remaining + 1;
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}+00:00",
+        y, m, d, hours, minutes, seconds
+    )
+}
+
+fn is_leap(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+fn collect_feature_files(root: &Path, dir: &Path, features: &mut Vec<teshi_gherkin::BddFeature>) -> Result<()> {
+    for entry in fs::read_dir(dir).context("read directory")? {
+        let entry = entry.context("read entry")?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_feature_files(root, &path, features)?;
+        } else if path.extension().and_then(|s| s.to_str()) == Some("feature") {
+            let content = fs::read_to_string(&path).context("read feature file")?;
+            features.push(teshi_gherkin::parse_feature(&content, path));
+        }
+    }
+    Ok(())
 }
 
 fn resolve_feature_arg(project_root: &Path, feature: Option<&str>) -> Result<String> {

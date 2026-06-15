@@ -7,6 +7,7 @@ pub mod export;
 pub mod locator_verify;
 pub mod replay_screenshots;
 pub mod steps;
+pub mod trace;
 pub mod winapp;
 
 use std::path::PathBuf;
@@ -126,6 +127,11 @@ pub enum Command {
         #[command(subcommand)]
         action: GenerateCommand,
     },
+    /// List and inspect exploration traces
+    Trace {
+        #[command(subcommand)]
+        action: TraceCommand,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -151,6 +157,8 @@ pub enum ExportTargetArg {
 
 #[derive(Debug, Subcommand)]
 pub enum StepsCommand {
+    /// List indexed step catalog with reuse statistics
+    Catalog(StepsCatalogArgs),
     /// Set the active Gherkin step for locator recording
     Select(StepsSelectArgs),
     /// List steps that still need confirmed bindings
@@ -269,6 +277,25 @@ pub struct StepsFeatureArgs {
     /// Feature path relative to the project root; defaults to active step feature
     #[arg(long)]
     pub feature: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct StepsCatalogArgs {
+    /// Project root directory (default: current directory)
+    #[arg(long)]
+    pub project_root: Option<String>,
+    /// Minimum reuse count to include
+    #[arg(long)]
+    pub min_count: Option<usize>,
+    /// Maximum number of entries to return
+    #[arg(long)]
+    pub top: Option<usize>,
+    /// Omit location details from output
+    #[arg(long)]
+    pub no_locations: bool,
+    /// Output format (json or text)
+    #[arg(long, default_value = "json")]
+    pub format: String,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -595,6 +622,17 @@ impl Command {
             runner_cwd: runner_cwd.map(PathBuf::from),
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TraceCommand {
+    /// List all exploration traces
+    List,
+    /// Show details of a specific trace
+    Show {
+        /// Trace session ID (e.g. 'explore-1234567890')
+        id: String,
+    },
 }
 
 #[cfg(test)]

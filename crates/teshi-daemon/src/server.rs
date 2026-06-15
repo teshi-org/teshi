@@ -18,7 +18,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use teshi_gherkin::FeatureRenderPayload;
+use teshi_gherkin::{BddFeature, BddProject, FeatureRenderPayload, StepIndex};
 
 use crate::session::{Role, SessionStore};
 use teshi_runtime::{
@@ -110,6 +110,7 @@ pub async fn run_server(
         .route("/api/v1/fs/read", get(api_read_file))
         .route("/api/v1/daemon/run", post(api_run))
         .route("/api/v1/daemon/shutdown", post(api_daemon_shutdown))
+        .route("/api/v1/steps/catalog", get(api_step_catalog))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -499,6 +500,109 @@ async fn api_project_settings(
     Ok(Json(
         load_project_settings(&project_root).map_err(|e| e.to_string())?,
     ))
+}
+
+#[derive(Debug, Deserialize)]
+struct StepCatalogQuery {
+    min_count: Option<usize>,
+    top: Option<usize>,
+    no_locations: Option<bool>,
+}
+
+async fn api_step_catalog(
+    State(state): State<DaemonState>,
+    Query(q): Query<StepCatalogQuery>,
+) -> Result<Json<Value>, ApiError> {
+    state.touch();
+    let rt = &state.rt;
+    let root = rt
+        .project
+        .root
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "no project open".to_string())?;
+
+    // Scan .feature files recursively
+    let mut features = Vec::new();
+    scan_feature_files(&root, &root, &mut features)?;
+
+    let project = BddProject {
+        root_dir: root.clone(),
+        features,
+    };
+    let index = StepIndex::build(&project);
+
+    let mut entries: Vec<Value> = index
+        .most_common(usize::MAX)
+        .into_iter()
+        .filter(|(_, count)| q.min_count.map_or(true, |m| *count >= m))
+        .map(|(text, count)| {
+            let locations = index.usages.get(&text).map(|locs| {
+                locs.iter()
+                    .map(|loc| {
+                        let feature = &project.features[loc.feature_idx];
+                        json!({
+                            "feature": feature.file_path.strip_prefix(&root).unwrap_or(&feature.file_path).to_string_lossy(),
+                            "scenario": if loc.scenario_idx == usize::MAX { "<Background>".to_string() } else {
+                                if loc.scenario_idx < feature.scenarios.len() {
+                                    feature.scenarios[loc.scenario_idx].name.clone()
+                                } else {
+                                    format!("<Rule-{}>", loc.scenario_idx)
+                                }
+                            },
+                            "line": loc.step_idx,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+            let mut entry = json!({
+                "text": text,
+                "normalized": text,
+                "count": count,
+            });
+            if !q.no_locations.unwrap_or(false) {
+                entry["locations"] = json!(locations);
+            }
+            entry
+        })
+        .collect();
+
+    // Apply top limit
+    if let Some(top) = q.top {
+        entries.truncate(top);
+    }
+
+    Ok(Json(json!({
+        "project_root": root.to_string_lossy(),
+        "total_raw_steps": index.usages.values().map(|v| v.len()).sum::<usize>(),
+        "unique_normalized": index.usages.len(),
+        "num_features": project.features.len(),
+        "generated_at": chrono::Local::now().to_rfc3339(),
+        "entries": entries,
+    })))
+}
+
+fn scan_feature_files(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    features: &mut Vec<BddFeature>,
+) -> Result<(), ApiError> {
+    for entry in fs::read_dir(dir).map_err(|e| ApiError::internal(e.to_string()))? {
+        let entry = entry.map_err(|e| ApiError::internal(e.to_string()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            scan_feature_files(root, &path, features)?;
+        } else if path.extension().and_then(|s| s.to_str()) == Some("feature") {
+            let content =
+                fs::read_to_string(&path).map_err(|e| ApiError::internal(e.to_string()))?;
+            let feature = teshi_gherkin::parse_feature(&content, path);
+            features.push(feature);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
