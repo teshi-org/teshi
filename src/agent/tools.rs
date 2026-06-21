@@ -413,6 +413,93 @@ fn get_all_tools() -> Vec<ToolDefinition> {
                 "required": []
             }),
         },
+        // ── Browser agent exploration tools ──
+        ToolDefinition {
+            name: "browser_snapshot".into(),
+            description: "Get a structured snapshot of the current browser page, \
+                          listing all interactive elements with their teshi-id ref, \
+                          role, accessible name, and element type. Use this before \
+                          taking any action to understand the current page state."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        ToolDefinition {
+            name: "browser_click".into(),
+            description: "Click an interactive element identified by its teshi-id ref. \
+                          Use browser_snapshot first to discover available refs. \
+                          Returns success or an error if the ref is not found."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ref": {
+                        "type": "string",
+                        "description": "The teshi-id ref of the element to click (e.g. 'e15')"
+                    }
+                },
+                "required": ["ref"]
+            }),
+        },
+        ToolDefinition {
+            name: "browser_type".into(),
+            description: "Type text into an input element identified by its teshi-id ref. \
+                          The element must be an input, textarea, or contenteditable element. \
+                          Use browser_snapshot first to discover the correct ref."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ref": {
+                        "type": "string",
+                        "description": "The teshi-id ref of the input element (e.g. 'e22')"
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "The text to type into the element"
+                    }
+                },
+                "required": ["ref", "text"]
+            }),
+        },
+        ToolDefinition {
+            name: "browser_assert".into(),
+            description: "Assert a condition on the current browser page. \
+                          Supported types: 'text_visible' checks if a text substring \
+                          is visible on the page; 'url_match' checks if the current URL \
+                          matches a regex pattern. Returns success or failure with details."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "condition_type": {
+                        "type": "string",
+                        "enum": ["text_visible", "url_match"],
+                        "description": "Type of assertion: 'text_visible' checks page text, 'url_match' checks URL regex"
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "The text substring to find (for text_visible) or regex pattern (for url_match)"
+                    }
+                },
+                "required": ["condition_type", "value"]
+            }),
+        },
+        ToolDefinition {
+            name: "browser_go_back".into(),
+            description: "Navigate the browser back one page in history. \
+                          Use this if the agent navigated to an unexpected page \
+                          or needs to return to a previous state."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
     ]
 }
 

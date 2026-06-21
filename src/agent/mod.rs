@@ -19,6 +19,39 @@ use anyhow::{Context, Result};
 use crate::app::{AgentMutation, AgentPendingChange};
 use crate::gherkin_lang::StructuralType;
 
+// Browser tool helpers
+fn resolve_sidecar_ws_url() -> Option<String> {
+    let project_root = std::env::current_dir().ok()?;
+    let endpoint_path = project_root.join(".teshi").join("cdp-endpoint.json");
+    let text = std::fs::read_to_string(endpoint_path).ok()?;
+    let payload: serde_json::Value = serde_json::from_str(&text).ok()?;
+    payload.get("ws_url")?.as_str().map(|s| s.to_string())
+}
+
+fn send_browser_command(cmd: &str, args: serde_json::Value) -> Result<String> {
+    use std::time::Duration;
+    let ws_url = resolve_sidecar_ws_url().ok_or_else(|| {
+        anyhow::anyhow!("no browser sidecar connected; start Embedded or connect Chrome first")
+    })?;
+
+    let mut command = args.clone();
+    let request_id = format!(
+        "agent-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    command["cmd"] = serde_json::json!(cmd);
+    command["request_id"] = serde_json::json!(request_id);
+
+    let response =
+        teshi_runtime::send_sidecar_command_with_timeout(&ws_url, command, Duration::from_secs(15))
+            .map_err(|e| anyhow::anyhow!("browser command failed: {e}"))?;
+
+    Ok(serde_json::to_string_pretty(&response)?)
+}
+
 /// Execute a named tool with the given JSON arguments and return the result
 /// as plain text for the LLM.
 ///
@@ -50,6 +83,12 @@ pub fn execute_tool(
         "submit_requirements" => execute_submit_requirements(app, args_json),
         "generate_plan" => execute_generate_plan(app, args_json),
         "validate_feature" => execute_validate_feature(app, args_json),
+        // Browser agent exploration tools
+        "browser_snapshot" => execute_browser_snapshot(app),
+        "browser_click" => execute_browser_click(app, args_json),
+        "browser_type" => execute_browser_type(app, args_json),
+        "browser_assert" => execute_browser_assert(app, args_json),
+        "browser_go_back" => execute_browser_go_back(app),
         _ => anyhow::bail!("unknown tool: {name}"),
     }
 }
@@ -1188,4 +1227,106 @@ fn execute_validate_feature(app: &mut crate::app::App, args_json: &str) -> Resul
     }
 
     Ok(crate::agent::validator::format_validation_result(&issues))
+}
+
+// ── Browser agent exploration tool handlers ──
+
+fn execute_browser_snapshot(_app: &mut crate::app::App) -> Result<String> {
+    send_browser_command("get_structured_snapshot", serde_json::json!({}))
+}
+
+fn execute_browser_click(_app: &mut crate::app::App, args_json: &str) -> Result<String> {
+    let args: serde_json::Value =
+        serde_json::from_str(args_json).context("invalid JSON arguments")?;
+    let ref_id = args
+        .get("ref")
+        .and_then(|v| v.as_str())
+        .context("missing 'ref'")?;
+    send_browser_command("click_ref", serde_json::json!({"ref": ref_id}))
+}
+
+fn execute_browser_type(_app: &mut crate::app::App, args_json: &str) -> Result<String> {
+    let args: serde_json::Value =
+        serde_json::from_str(args_json).context("invalid JSON arguments")?;
+    let ref_id = args
+        .get("ref")
+        .and_then(|v| v.as_str())
+        .context("missing 'ref'")?;
+    let text = args
+        .get("text")
+        .and_then(|v| v.as_str())
+        .context("missing 'text'")?;
+    send_browser_command("type_ref", serde_json::json!({"ref": ref_id, "text": text}))
+}
+
+fn execute_browser_assert(_app: &mut crate::app::App, args_json: &str) -> Result<String> {
+    let args: serde_json::Value =
+        serde_json::from_str(args_json).context("invalid JSON arguments")?;
+    let condition_type = args
+        .get("condition_type")
+        .and_then(|v| v.as_str())
+        .context("missing 'condition_type'")?;
+    let value = args
+        .get("value")
+        .and_then(|v| v.as_str())
+        .context("missing 'value'")?;
+
+    match condition_type {
+        "text_visible" => {
+            // Get snapshot and check for text in the page
+            let snap = send_browser_command("get_structured_snapshot", serde_json::json!({}))?;
+            let snap_val: serde_json::Value = serde_json::from_str(&snap)?;
+            if let Some(snapshot) = snap_val.get("snapshot") {
+                if let Some(elements) = snapshot.get("elements").and_then(|v| v.as_array()) {
+                    for el in elements {
+                        if let Some(text) = el.get("text").and_then(|v| v.as_str()) {
+                            if text.contains(value) {
+                                return Ok(format!(
+                                    "assertion passed: text '{}' found on page",
+                                    value
+                                ));
+                            }
+                        }
+                        if let Some(name) = el.get("name").and_then(|v| v.as_str()) {
+                            if name.contains(value) {
+                                return Ok(format!(
+                                    "assertion passed: accessible name '{}' found on page",
+                                    value
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(format!(
+                "assertion failed: text '{}' not found on page",
+                value
+            ))
+        }
+        "url_match" => {
+            let snap = send_browser_command("get_structured_snapshot", serde_json::json!({}))?;
+            let snap_val: serde_json::Value = serde_json::from_str(&snap)?;
+            if let Some(snapshot) = snap_val.get("snapshot") {
+                if let Some(url) = snapshot.get("url").and_then(|v| v.as_str()) {
+                    let matches = url.contains(value) || url.starts_with(value);
+                    if matches {
+                        return Ok(format!(
+                            "assertion passed: URL '{}' contains '{}'",
+                            url, value
+                        ));
+                    }
+                    return Ok(format!(
+                        "assertion failed: URL '{}' does not contain '{}'",
+                        url, value
+                    ));
+                }
+            }
+            Ok(format!("assertion failed: could not get current URL"))
+        }
+        other => anyhow::bail!("unknown condition_type: {other}"),
+    }
+}
+
+fn execute_browser_go_back(_app: &mut crate::app::App) -> Result<String> {
+    send_browser_command("go_back", serde_json::json!({}))
 }

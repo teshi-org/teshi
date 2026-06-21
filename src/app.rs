@@ -158,6 +158,46 @@ pub enum AgentPanelMode {
     List,
 }
 
+/// One recorded action in an exploration trace.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TraceAction {
+    pub step_index: usize,
+    pub action: String,
+    pub ref_id: Option<String>,
+    pub text: Option<String>,
+    pub url: String,
+    pub timestamp_ms: u64,
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+/// Full exploration session state.
+#[derive(Debug, Clone)]
+pub struct ExploreState {
+    /// Feature file path (relative to project root).
+    pub feature_path: String,
+    /// Gherkin scenario steps: (line_number, keyword, text).
+    pub steps: Vec<(usize, String, String)>,
+    /// Index into steps currently being worked on.
+    pub current_step: usize,
+    /// Accumulated trace of actions taken.
+    pub trace: Vec<TraceAction>,
+    /// Step counter for the entire exploration (all steps).
+    pub step_count: u32,
+    /// Maximum steps allowed before termination.
+    pub max_steps: u32,
+    /// URL whitelist patterns (substring match).
+    pub url_whitelist: Vec<String>,
+    /// Session ID for trace file naming.
+    pub session_id: String,
+    /// Whether exploration has completed successfully.
+    pub completed: bool,
+    /// Whether exploration was terminated (step limit / violation).
+    pub terminated: bool,
+    /// Termination reason if terminated.
+    pub termination_reason: Option<String>,
+}
+
 /// Navigation focus on the current line: Gherkin keyword/token vs editable trailing text (step body or header title).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BddFocusSlot {
@@ -401,6 +441,8 @@ pub struct App {
     pub agents: Vec<AgentThread>,
     pub selected_agent: usize,
     pub next_agent_id: usize,
+    /// Active exploration session state (None = not exploring).
+    pub explore_state: Option<ExploreState>,
     /// Approval mode for agent tool calls (Manual / Auto / Bypass).
     pub approval_mode: crate::agent::approval::ApprovalMode,
     /// Whether the approval mode selection panel is active.
@@ -701,6 +743,7 @@ impl App {
             agents: vec![AgentThread::new(0, "Agent 1")],
             selected_agent: 0,
             next_agent_id: 1,
+            explore_state: None,
             approval_mode: crate::agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
             approval_panel_selection: 0,
@@ -796,6 +839,7 @@ impl App {
             agents: vec![AgentThread::new(0, "Agent 1")],
             selected_agent: 0,
             next_agent_id: 1,
+            explore_state: None,
             approval_mode: crate::agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
             approval_panel_selection: 0,
@@ -926,6 +970,7 @@ impl App {
             agents: vec![AgentThread::new(0, "Agent 1")],
             selected_agent: 0,
             next_agent_id: 1,
+            explore_state: None,
             approval_mode: crate::agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
             approval_panel_selection: 0,
@@ -1704,6 +1749,32 @@ impl App {
             );
         }
 
+        // Exploration mode guidance
+        if self.explore_state.is_some() {
+            prompt.push_str(
+                "\n\n## Exploration Mode (Active)\n\
+                 You are in **exploration mode**. Your task is to explore a web application\n\
+                 and find the elements described in each Gherkin step below.\n\n\
+                 Available browser tools:\n\
+                 - `browser_snapshot` — Get a structured list of interactive elements on the current page.\n\
+                 - `browser_click(ref)` — Click an element by its teshi-id ref.\n\
+                 - `browser_type(ref, text)` — Type text into an input element by its teshi-id ref.\n\
+                 - `browser_assert(condition_type, value)` — Assert text is visible or URL matches.\n\
+                 - `browser_go_back` — Go back one page in history.\n\n\
+                 For each Gherkin step, do the following:\n\
+                 1. Call `browser_snapshot` to see what's on the page.\n\
+                 2. Find the element that matches the step description.\n\
+                 3. Interact with it (click, type) or assert the expected state.\n\
+                 4. Move to the next step.\n\n\
+                 IMPORTANT RULES:\n\
+                 - Always call `browser_snapshot` first to understand the page.\n\
+                 - Do NOT navigate to URLs outside the test application.\n\
+                 - If you get stuck or can't find an element, report what you see.\n\
+                 - Each step should be completed with one or two tool calls.\n\
+                 - Do NOT modify Gherkin files during exploration.",
+            );
+        }
+
         prompt
     }
 
@@ -1783,6 +1854,176 @@ impl App {
                 messages,
                 tools,
             });
+        }
+    }
+
+    // ── Exploration loop management ──
+
+    /// Start an exploration session for the given scenario.
+    pub fn start_exploration(
+        &mut self,
+        feature_path: String,
+        steps: Vec<(usize, String, String)>,
+        agent_idx: usize,
+    ) {
+        let session_id = format!(
+            "explore-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)
+        );
+
+        self.explore_state = Some(ExploreState {
+            feature_path: feature_path.clone(),
+            steps: steps.clone(),
+            current_step: 0,
+            trace: Vec::new(),
+            step_count: 0,
+            max_steps: 15,
+            url_whitelist: Vec::new(),
+            session_id,
+            completed: false,
+            terminated: false,
+            termination_reason: None,
+        });
+
+        // Build the exploration task message
+        let mut task_msg = String::new();
+        task_msg.push_str("## Exploration Task\n\n");
+        task_msg.push_str(&format!("Feature file: **{}**\n\n", feature_path));
+        task_msg.push_str("### Scenario Steps\n\n");
+        task_msg.push_str("| # | Step |\n|---|---|\n");
+        for (i, (line, keyword, text)) in steps.iter().enumerate() {
+            task_msg.push_str(&format!(
+                "| **{}** (line {}) | {} {} |\n",
+                i + 1,
+                line,
+                keyword,
+                text
+            ));
+        }
+        task_msg.push_str("\nExplore the web application and complete each step above.\n");
+        task_msg.push_str("Start by calling `browser_snapshot` to see the current page.\n");
+
+        // Push the task message as a user message
+        self.agents[agent_idx].messages.push(AiChatMessage {
+            role: AiRole::User,
+            content: task_msg,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+        });
+
+        // Start the LLM request (same pattern as user message submit)
+        if self.agents[agent_idx].llm_handle.is_none() {
+            self.status = "AI not configured".to_string();
+            return;
+        }
+        self.compact_context_if_needed(agent_idx);
+        let messages = self.build_chat_messages_for_agent(agent_idx);
+        let profile = self.agent_profile(agent_idx);
+        let allowed: Option<&[String]> = profile.and_then(|p| match &p.tools {
+            crate::agent::definition::ToolPermission::All => None,
+            crate::agent::definition::ToolPermission::None => Some(&[] as &[String]),
+            crate::agent::definition::ToolPermission::Whitelist(list) => Some(list.as_slice()),
+        });
+        use crate::llm::LlmRequest;
+        let tools = Some(crate::agent::get_tools(allowed));
+        let handle = self.agents[agent_idx].llm_handle.as_ref().unwrap();
+        if handle
+            .send(LlmRequest::Chat {
+                system: Some(self.ai_system_prompt(None, agent_idx)),
+                messages,
+                tools,
+            })
+            .is_err()
+        {
+            self.agents[agent_idx].status = AiStatus::Error;
+            self.agents[agent_idx].partial_response.clear();
+            self.status = "AI error: background LLM thread has exited".to_string();
+            return;
+        }
+        self.agents[agent_idx].status = AiStatus::Waiting;
+        self.agents[agent_idx].tool_status = Some("Teshi is exploring...".into());
+    }
+
+    /// Check exploration limits (step count, URL sandbox) and terminate if breached.
+    /// Returns true if exploration was terminated.
+    pub fn check_exploration_limits(&mut self) -> bool {
+        let Some(ref state) = self.explore_state.clone() else {
+            return false;
+        };
+        if state.terminated || state.completed {
+            return false;
+        }
+
+        // Check step limit
+        if state.step_count >= state.max_steps {
+            self.explore_state.as_mut().unwrap().terminated = true;
+            self.explore_state.as_mut().unwrap().termination_reason =
+                Some(format!("Step limit exceeded (max {})", state.max_steps));
+            self.status = format!(
+                "Exploration terminated: step limit ({}) exceeded",
+                state.max_steps
+            );
+            self.save_exploration_trace();
+            return true;
+        }
+
+        false
+    }
+
+    /// Record a tool call action in the exploration trace.
+    pub fn record_exploration_action(
+        &mut self,
+        action: String,
+        ref_id: Option<String>,
+        text: Option<String>,
+        ok: bool,
+        error: Option<String>,
+    ) {
+        let Some(ref mut state) = self.explore_state else {
+            return;
+        };
+        let url = String::new(); // Will be populated from snapshot
+        state.trace.push(TraceAction {
+            step_index: state.current_step,
+            action,
+            ref_id,
+            text,
+            url,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            ok,
+            error,
+        });
+        state.step_count += 1;
+    }
+
+    /// Save the exploration trace to disk.
+    pub fn save_exploration_trace(&self) {
+        let Some(ref state) = self.explore_state else {
+            return;
+        };
+        let project_root = match std::env::current_dir() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let trace_dir = project_root.join(".teshi").join("traces");
+        let _ = std::fs::create_dir_all(&trace_dir);
+        let trace_path = trace_dir.join(format!("{}.jsonl", state.session_id));
+        if let Ok(file) = std::fs::File::create(&trace_path) {
+            use std::io::Write;
+            let mut writer = std::io::BufWriter::new(file);
+            for action in &state.trace {
+                if let Ok(line) = serde_json::to_string(action) {
+                    let _ = writeln!(writer, "{}", line);
+                }
+            }
         }
     }
 
@@ -6594,6 +6835,7 @@ mod tests {
             agents: vec![AgentThread::new(0, "Agent 1")],
             selected_agent: 0,
             next_agent_id: 1,
+            explore_state: None,
             approval_mode: crate::agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
             approval_panel_selection: 0,
@@ -6750,6 +6992,7 @@ Feature: B
             agents: vec![AgentThread::new(0, "Agent 1")],
             selected_agent: 0,
             next_agent_id: 1,
+            explore_state: None,
             approval_mode: crate::agent::approval::ApprovalMode::default(),
             approval_panel_active: false,
             approval_panel_selection: 0,
