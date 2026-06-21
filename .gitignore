@@ -21,8 +21,6 @@ Thumbs.db
 
 # OpenSpec change tracking (separate BDD project artifacts)
 .agents/
-openspec/
-
 # Exploration traces
 .teshi/traces/
 

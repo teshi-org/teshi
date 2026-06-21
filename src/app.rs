@@ -188,6 +188,8 @@ pub struct ExploreState {
     pub max_steps: u32,
     /// URL whitelist patterns (substring match).
     pub url_whitelist: Vec<String>,
+    /// Current page URL (updated from snapshot responses).
+    pub current_url: String,
     /// Session ID for trace file naming.
     pub session_id: String,
     /// Whether exploration has completed successfully.
@@ -1882,6 +1884,7 @@ impl App {
             step_count: 0,
             max_steps: 15,
             url_whitelist: Vec::new(),
+            current_url: String::new(),
             session_id,
             completed: false,
             terminated: false,
@@ -1949,6 +1952,17 @@ impl App {
         self.agents[agent_idx].tool_status = Some("Teshi is exploring...".into());
     }
 
+    /// Check if a URL is allowed by the whitelist patterns (substring match).
+    /// An empty whitelist allows all URLs.
+    pub fn is_url_allowed(url: &str, whitelist: &[String]) -> bool {
+        if whitelist.is_empty() {
+            return true;
+        }
+        whitelist
+            .iter()
+            .any(|pattern| url.contains(pattern.as_str()))
+    }
+
     /// Check exploration limits (step count, URL sandbox) and terminate if breached.
     /// Returns true if exploration was terminated.
     pub fn check_exploration_limits(&mut self) -> bool {
@@ -1967,6 +1981,23 @@ impl App {
             self.status = format!(
                 "Exploration terminated: step limit ({}) exceeded",
                 state.max_steps
+            );
+            self.save_exploration_trace();
+            return true;
+        }
+
+        // Check URL sandbox (if a current_url is tracked)
+        if !state.current_url.is_empty()
+            && !Self::is_url_allowed(&state.current_url, &state.url_whitelist)
+        {
+            self.explore_state.as_mut().unwrap().terminated = true;
+            self.explore_state.as_mut().unwrap().termination_reason = Some(format!(
+                "URL not allowed by whitelist: {}",
+                state.current_url
+            ));
+            self.status = format!(
+                "Exploration terminated: URL '{}' is not in the whitelist",
+                state.current_url
             );
             self.save_exploration_trace();
             return true;
@@ -6389,6 +6420,7 @@ mod tests {
     use crate::editor_buffer::EditorBuffer;
     use crate::gherkin_lang::GherkinLanguages;
     use crate::keymap::Action;
+    use teshi_gherkin::StepIndex;
 
     fn en() -> &'static crate::gherkin_lang::GherkinLanguage {
         GherkinLanguages::global().get("en")
@@ -6757,7 +6789,7 @@ mod tests {
             root_dir: PathBuf::from("."),
             features: vec![feature],
         };
-        let step_index = crate::step_index::StepIndex::build(&project);
+        let step_index = StepIndex::build(&project);
         let buffers = vec![EditorBuffer::from_string(content.to_string())];
         let mindmap_index = crate::mindmap::build_index(&project);
         let tree_state = crate::mindmap::init_tree_state(&mindmap_index);
@@ -6915,7 +6947,7 @@ Feature: B
             root_dir: PathBuf::from("."),
             features: vec![fa, fb],
         };
-        let step_index = crate::step_index::StepIndex::build(&project);
+        let step_index = StepIndex::build(&project);
         let mindmap_index = crate::mindmap::build_index(&project);
         let tree_state = crate::mindmap::init_tree_state(&mindmap_index);
 
@@ -7197,5 +7229,184 @@ Feature: B
         assert!(!app.dirty);
 
         let _ = fs::remove_file(path);
+    }
+
+    // ── Exploration state machine tests ──
+
+    #[test]
+    fn test_start_exploration_sets_initial_state() {
+        let mut app = editor_test_app();
+        let steps = vec![
+            (1, "Given".into(), "I am on the login page".into()),
+            (2, "When".into(), "I enter my password".into()),
+        ];
+        app.start_exploration("features/login.feature".into(), steps.clone(), 0);
+
+        let state = app
+            .explore_state
+            .as_ref()
+            .expect("explore_state should be set");
+        assert_eq!(state.feature_path, "features/login.feature");
+        assert_eq!(state.steps.len(), 2);
+        assert_eq!(state.current_step, 0);
+        assert_eq!(state.step_count, 0);
+        assert_eq!(state.max_steps, 15);
+        assert!(!state.completed);
+        assert!(!state.terminated);
+        assert!(state.termination_reason.is_none());
+        assert!(state.url_whitelist.is_empty());
+        assert!(state.current_url.is_empty());
+        assert!(state.trace.is_empty());
+    }
+
+    #[test]
+    fn test_record_exploration_action_increments_step_count() {
+        let mut app = editor_test_app();
+        app.start_exploration("test.feature".into(), vec![], 0);
+
+        assert_eq!(app.explore_state.as_ref().unwrap().step_count, 0);
+
+        app.record_exploration_action("browser_click".into(), Some("e1".into()), None, true, None);
+        assert_eq!(app.explore_state.as_ref().unwrap().step_count, 1);
+
+        app.record_exploration_action(
+            "browser_type".into(),
+            Some("e2".into()),
+            Some("hello".into()),
+            true,
+            None,
+        );
+        assert_eq!(app.explore_state.as_ref().unwrap().step_count, 2);
+    }
+
+    #[test]
+    fn test_record_exploration_action_adds_trace_entry() {
+        let mut app = editor_test_app();
+        app.start_exploration("test.feature".into(), vec![], 0);
+
+        app.record_exploration_action("browser_click".into(), Some("e15".into()), None, true, None);
+
+        let state = app.explore_state.as_ref().unwrap();
+        assert_eq!(state.trace.len(), 1);
+        assert_eq!(state.trace[0].action, "browser_click");
+        assert_eq!(state.trace[0].ref_id, Some("e15".into()));
+        assert!(state.trace[0].ok);
+        assert!(state.trace[0].error.is_none());
+    }
+
+    #[test]
+    fn test_record_exploration_action_no_state_does_not_panic() {
+        let mut app = editor_test_app();
+        // No explore_state set
+        app.record_exploration_action("browser_click".into(), None, None, true, None);
+        // Should not panic
+    }
+
+    #[test]
+    fn test_check_exploration_limits_no_state() {
+        let mut app = editor_test_app();
+        assert!(!app.check_exploration_limits());
+    }
+
+    #[test]
+    fn test_check_exploration_limits_step_limit_terminates() {
+        let mut app = editor_test_app();
+        app.start_exploration("test.feature".into(), vec![], 0);
+
+        // Manually set step_count to exceed max_steps
+        let state = app.explore_state.as_mut().unwrap();
+        state.step_count = 15;
+        state.max_steps = 15;
+
+        let terminated = app.check_exploration_limits();
+        assert!(terminated);
+
+        let state = app.explore_state.as_ref().unwrap();
+        assert!(state.terminated);
+        assert_eq!(
+            state.termination_reason.as_deref(),
+            Some("Step limit exceeded (max 15)")
+        );
+    }
+
+    #[test]
+    fn test_check_exploration_limits_below_limit_does_not_terminate() {
+        let mut app = editor_test_app();
+        app.start_exploration("test.feature".into(), vec![], 0);
+
+        let state = app.explore_state.as_mut().unwrap();
+        state.step_count = 10;
+        state.max_steps = 15;
+
+        assert!(!app.check_exploration_limits());
+        assert!(!app.explore_state.as_ref().unwrap().terminated);
+    }
+
+    #[test]
+    fn test_check_exploration_limits_already_terminated_returns_false() {
+        let mut app = editor_test_app();
+        app.start_exploration("test.feature".into(), vec![], 0);
+        {
+            let state = app.explore_state.as_mut().unwrap();
+            state.terminated = true;
+            state.step_count = 99;
+            state.max_steps = 15;
+        }
+        assert!(!app.check_exploration_limits());
+    }
+
+    #[test]
+    fn test_check_exploration_limits_already_completed_returns_false() {
+        let mut app = editor_test_app();
+        app.start_exploration("test.feature".into(), vec![], 0);
+        {
+            let state = app.explore_state.as_mut().unwrap();
+            state.completed = true;
+            state.step_count = 99;
+            state.max_steps = 15;
+        }
+        assert!(!app.check_exploration_limits());
+    }
+
+    // ── URL sandbox tests ──
+
+    #[test]
+    fn test_is_url_allowed_empty_whitelist() {
+        assert!(App::is_url_allowed("https://example.com", &[]));
+        assert!(App::is_url_allowed("https://evil.com", &[]));
+    }
+
+    #[test]
+    fn test_is_url_allowed_matching_substring() {
+        let whitelist = vec!["example.com".to_string()];
+        assert!(App::is_url_allowed("https://example.com/login", &whitelist));
+        assert!(App::is_url_allowed("http://example.com", &whitelist));
+        assert!(App::is_url_allowed(
+            "https://sub.example.com/page",
+            &whitelist
+        ));
+    }
+
+    #[test]
+    fn test_is_url_allowed_non_matching() {
+        let whitelist = vec!["example.com".to_string()];
+        assert!(!App::is_url_allowed("https://evil.com", &whitelist));
+        assert!(!App::is_url_allowed("https://malicious.org", &whitelist));
+    }
+
+    #[test]
+    fn test_is_url_allowed_multiple_patterns() {
+        let whitelist = vec!["example.com".to_string(), "trusted.org".to_string()];
+        assert!(App::is_url_allowed("https://example.com", &whitelist));
+        assert!(App::is_url_allowed("https://trusted.org/page", &whitelist));
+        assert!(!App::is_url_allowed("https://evil.com", &whitelist));
+    }
+
+    #[test]
+    fn test_is_url_allowed_case_sensitive() {
+        let whitelist = vec!["Example".to_string()];
+        // substring match is case-sensitive by default
+        assert!(App::is_url_allowed("https://Example.com", &whitelist));
+        assert!(!App::is_url_allowed("https://example.com", &whitelist));
     }
 }

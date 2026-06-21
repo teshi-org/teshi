@@ -45,26 +45,5 @@
 
 - [x] 6.1 Connect exploration start to a user action (e.g., select a scenario in the editor → run "explore scenario")
 - [x] 6.2 Ensure exploration mode properly pauses/resumes existing LLM streaming when switching between chat and explore
-- [ ] 6.3 Test the full flow end-to-end: select scenario → snapshot → agent decides → click/type → assert → next step → all done → trace saved
-- [ ] 6.4 Add `cargo test` tests for tool JSON Schema serialization, state machine transitions, URL sandbox logic, and step counter
-
----
-
-## Deferred — Phase 2 (Distillation & Step-Binding Writing)
-
-> These tasks are designed but NOT scoped for the current implementation phase.
-
-- [ ] 7.1 Enable MutationObserver in the injection script to catch dynamically rendered elements
-- [ ] 7.2 Implement multi-dimensional feature recording in the sidecar at action time
-- [ ] 7.3 Build the distillation engine: deterministic scoring of candidate locators from recorded features
-- [ ] 7.4 Write top-ranked locators into `.teshi/step-bindings/{feature}.json` per step_line, with `source: "agent"`
-- [ ] 7.5 Read existing bindings before writing to preserve manual bindings (incremental update)
-- [ ] 7.6 Add `teshi trace distill <id>` CLI command to produce a binding report from a raw trace
-
-## Deferred — Phase 3 (Self-Healing Locators & Exploration UI)
-
-> These tasks are designed but NOT scoped for the current implementation phase.
-
-- [ ] 8.1 Generate cascading fallback locators (data-testid → getByRole → relative anchor) for self-healing scripts
-- [ ] 8.2 Add independent Verifier Agent for hallucination-safe assertion validation
-- [ ] 8.3 Build TUI exploration panel: real-time agent state display, step timeline, action detail view, pause/resume/cancel controls
+- ~~6.3 Test the full flow end-to-end: select scenario → snapshot → agent decides → click/type → assert → next step → all done → trace saved~~ _(removed)_
+- [x] 6.4 Add `cargo test` tests for tool JSON Schema serialization, state machine transitions, URL sandbox logic, and step counter

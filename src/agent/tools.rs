@@ -515,3 +515,132 @@ pub fn get_tools(allowed: Option<&[String]>) -> Vec<ToolDefinition> {
         _ => all,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_all_tools_contains_browser_tools() {
+        let tools = get_all_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"browser_snapshot"));
+        assert!(names.contains(&"browser_click"));
+        assert!(names.contains(&"browser_type"));
+        assert!(names.contains(&"browser_assert"));
+        assert!(names.contains(&"browser_go_back"));
+    }
+
+    #[test]
+    fn test_browser_click_schema_has_ref_required() {
+        let tools = get_all_tools();
+        let click = tools.iter().find(|t| t.name == "browser_click").unwrap();
+        let params = click.parameters.as_object().unwrap();
+        let required = params["required"].as_array().unwrap();
+        assert!(
+            required.iter().any(|v| v == "ref"),
+            "browser_click should require 'ref'"
+        );
+        assert_eq!(params["type"], "object");
+    }
+
+    #[test]
+    fn test_browser_type_schema_has_ref_and_text_required() {
+        let tools = get_all_tools();
+        let type_tool = tools.iter().find(|t| t.name == "browser_type").unwrap();
+        let params = type_tool.parameters.as_object().unwrap();
+        let required: Vec<&str> = params["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(required.contains(&"ref"));
+        assert!(required.contains(&"text"));
+    }
+
+    #[test]
+    fn test_browser_assert_schema_has_enum() {
+        let tools = get_all_tools();
+        let assert_tool = tools.iter().find(|t| t.name == "browser_assert").unwrap();
+        let params = assert_tool.parameters.as_object().unwrap();
+        let condition_type = &params["properties"]["condition_type"];
+        let enum_values: Vec<&str> = condition_type["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(enum_values.contains(&"text_visible"));
+        assert!(enum_values.contains(&"url_match"));
+    }
+
+    #[test]
+    fn test_get_tools_filters_by_name() {
+        let all = get_all_tools();
+        let allowed = vec!["browser_snapshot".to_string(), "browser_click".to_string()];
+        let filtered = get_tools(Some(&allowed));
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].name, "browser_snapshot");
+        assert_eq!(filtered[1].name, "browser_click");
+    }
+
+    #[test]
+    fn test_get_tools_empty_allowed_returns_all() {
+        let all = get_all_tools();
+        let empty: Vec<String> = vec![];
+        let result = get_tools(Some(&empty));
+        assert_eq!(result.len(), all.len());
+    }
+
+    #[test]
+    fn test_get_tools_none_returns_all() {
+        let all = get_all_tools();
+        let result = get_tools(None);
+        assert_eq!(result.len(), all.len());
+    }
+
+    #[test]
+    fn test_browser_snapshot_has_no_required_params() {
+        let tools = get_all_tools();
+        let snap = tools.iter().find(|t| t.name == "browser_snapshot").unwrap();
+        let params = snap.parameters.as_object().unwrap();
+        let required = params["required"].as_array().unwrap();
+        assert!(required.is_empty());
+    }
+
+    #[test]
+    fn test_browser_go_back_has_no_required_params() {
+        let tools = get_all_tools();
+        let go_back = tools.iter().find(|t| t.name == "browser_go_back").unwrap();
+        let params = go_back.parameters.as_object().unwrap();
+        let required = params["required"].as_array().unwrap();
+        assert!(required.is_empty());
+    }
+
+    #[test]
+    fn test_all_tools_have_valid_json_schema() {
+        let tools = get_all_tools();
+        for tool in &tools {
+            let params = tool
+                .parameters
+                .as_object()
+                .unwrap_or_else(|| panic!("tool '{}' parameters must be an object", tool.name));
+            assert_eq!(
+                params["type"], "object",
+                "tool '{}' schema must have type 'object'",
+                tool.name
+            );
+            assert!(
+                params.contains_key("properties"),
+                "tool '{}' schema must have properties",
+                tool.name
+            );
+            assert!(
+                params.contains_key("required"),
+                "tool '{}' schema must have required",
+                tool.name
+            );
+        }
+    }
+}
