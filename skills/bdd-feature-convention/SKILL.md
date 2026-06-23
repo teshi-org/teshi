@@ -1,17 +1,9 @@
 ---
 name: bdd-feature-convention
-description: BDD Feature file granularity and language conventions. Use as a reference when writing new .feature files, reviewing existing ones, or instructing an AI to generate/audit Gherkin scenarios.
-license: MIT
-metadata:
-  author: openspec
-  version: "1.0"
+description: BDD Feature file granularity and language conventions for Gherkin/Behave projects. Use this skill whenever working with .feature files — writing new ones, reviewing PRs that touch them, splitting or refactoring existing scenarios, or instructing an AI to generate/audit Gherkin scenarios. Also use when discussing BDD test structure, scenario atomicity, step language isolation, or Feature file organization with Playwright + Behave + WinUI3 automation. This skill replaces ad-hoc BDD guidelines with a consistent, reviewable convention.
 ---
 
 # BDD Feature File Convention
-
-> Scope: UI automation projects (Playwright + Behave + WinUI3)  
-> Maintainer: Test Architecture Team  
-> Last updated: 2026-06
 
 ## Three-Layer Structure
 
@@ -73,7 +65,7 @@ Business rules below the user story are recommended but optional.
 **One Outcome** — Each Scenario verifies exactly one business result.
 
 ```gherkin
-# ❌ Too coarse: verifying both creation success and list refresh
+# ❌ Too coarse: verifying both creation success and list refresh 
 Scenario: Create task and verify list
   Given user is on the task list page
   When  user submits task name "fix login issue"
