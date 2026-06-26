@@ -47,18 +47,18 @@ function enqueueTerminalIo<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 function ensureEventsSocket(): WebSocket {
-  if (eventsSocket && eventsSocket.readyState === WebSocket.OPEN) {
+  if (eventsSocket && (eventsSocket.readyState === WebSocket.OPEN || eventsSocket.readyState === WebSocket.CONNECTING)) {
     return eventsSocket;
   }
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const url = `${proto}//${window.location.host}${API}/events`;
-  eventsSocket = new WebSocket(url);
-  eventsSocket.onclose = () => {
-    if (eventsSocket?.url === url) {
+  const ws = new WebSocket(url);
+  ws.onclose = () => {
+    if (eventsSocket === ws) {
       eventsSocket = null;
     }
   };
-  eventsSocket.onmessage = (msg) => {
+  ws.onmessage = (msg) => {
     try {
       const { event, payload } = JSON.parse(msg.data as string) as {
         event: string;
@@ -72,7 +72,8 @@ function ensureEventsSocket(): WebSocket {
       // ignore malformed frames
     }
   };
-  return eventsSocket;
+  eventsSocket = ws;
+  return ws;
 }
 
 /** Dispatches a host event to local subscribers (fallback when WS is slow or unavailable). */
