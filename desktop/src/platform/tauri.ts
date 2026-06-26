@@ -135,7 +135,7 @@ export const tauriRuntime: TeshiRuntimeApi = {
   },
 
   async onEvent<T>(event: string, handler: (payload: T) => void) {
-    if (event === "terminal-output" || event === "terminal-exit") {
+    if (event === "terminal-output" || event === "terminal-exit" || event === "terminal-loop-detected") {
       terminalExclusiveUnsubs.get(event)?.();
       terminalExclusiveUnsubs.delete(event);
     }
@@ -146,7 +146,7 @@ export const tauriRuntime: TeshiRuntimeApi = {
         terminalExclusiveUnsubs.delete(event);
       }
     };
-    if (event === "terminal-output" || event === "terminal-exit") {
+    if (event === "terminal-output" || event === "terminal-exit" || event === "terminal-loop-detected") {
       terminalExclusiveUnsubs.set(event, wrapped);
     }
     return wrapped;

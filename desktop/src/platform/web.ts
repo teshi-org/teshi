@@ -259,7 +259,7 @@ export const webRuntime: TeshiRuntimeApi = {
     ensureEventsSocket();
     // Only one PTY output subscriber: Vite HMR can remount the panel without running
     // prior cleanups, which otherwise duplicates xterm.write and doubles characters.
-    if (event === "terminal-output" || event === "terminal-exit") {
+    if (event === "terminal-output" || event === "terminal-exit" || event === "terminal-loop-detected") {
       terminalExclusiveUnsubs.get(event)?.();
       terminalExclusiveUnsubs.delete(event);
     }
@@ -276,7 +276,7 @@ export const webRuntime: TeshiRuntimeApi = {
         terminalExclusiveUnsubs.delete(event);
       }
     };
-    if (event === "terminal-output" || event === "terminal-exit") {
+    if (event === "terminal-output" || event === "terminal-exit" || event === "terminal-loop-detected") {
       terminalExclusiveUnsubs.set(event, unlisten);
     }
     return unlisten;

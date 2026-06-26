@@ -2,9 +2,10 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -12,6 +13,13 @@ use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySyste
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::TeshiRuntime;
+
+/// Max PTY output rate before detecting a loop condition.
+const RATE_LIMIT_BYTES_PER_SEC: u64 = 1_048_576; // 1 MB/s
+/// How many consecutive windows must exceed the limit to trigger loop detection.
+const RATE_WINDOW_MS: u64 = 100;
+/// Consecutive rate-limit violations before killing the shell.
+const RATE_VIOLATION_THRESHOLD: u32 = 2; // 2 × 100ms = 200ms
 
 /// Shared PTY session state for the embedded terminal panel.
 pub struct TerminalState {
@@ -24,6 +32,8 @@ pub struct TerminalState {
     session_id: AtomicU64,
     /// Join handle for the PTY output forwarder (kept so stop can wait briefly).
     output_forwarder: Mutex<Option<JoinHandle<()>>>,
+    /// Set by the reader thread when output rate exceeds threshold for too long.
+    loop_detected: AtomicBool,
 }
 
 impl Default for TerminalState {
@@ -42,6 +52,7 @@ impl TerminalState {
             spawn_lock: AsyncMutex::new(()),
             session_id: AtomicU64::new(0),
             output_forwarder: Mutex::new(None),
+            loop_detected: AtomicBool::new(false),
         }
     }
 
@@ -49,6 +60,7 @@ impl TerminalState {
     pub fn stop(&self) -> Result<()> {
         // Invalidate any in-flight reader/forwarder threads before dropping handles.
         self.session_id.fetch_add(1, Ordering::SeqCst);
+        self.loop_detected.store(false, Ordering::SeqCst);
         *self.master.lock().unwrap() = None;
         *self.writer.lock().unwrap() = None;
         if let Some(mut child) = self.child.lock().unwrap().take() {
@@ -170,6 +182,27 @@ pub async fn spawn_terminal(rt: Arc<TeshiRuntime>, cols: u16, rows: u16) -> Resu
         let mut batch: Vec<u8> = Vec::with_capacity(8192);
         let idle_ms = std::time::Duration::from_millis(20);
         loop {
+            // If the reader detected a loop, kill the session.
+            if rt_forwarder.terminal.loop_detected.load(Ordering::SeqCst) {
+                tracing::warn!(session_id, "forwarder: output loop detected, killing shell");
+                if let Some(mut child) = rt_forwarder.terminal.child.lock().unwrap().take() {
+                    let _ = child.kill();
+                }
+                rt_forwarder
+                    .terminal
+                    .session_id
+                    .fetch_add(1, Ordering::SeqCst);
+                rt_forwarder
+                    .terminal
+                    .loop_detected
+                    .store(false, Ordering::SeqCst);
+                let _ = rt_forwarder.terminal.master.lock().unwrap().take();
+                let _ = rt_forwarder.terminal.writer.lock().unwrap().take();
+                rt_forwarder.events.emit("terminal-loop-detected", ());
+                *rt_forwarder.project.terminal_active.lock().unwrap() = false;
+                break;
+            }
+
             let chunk = match output_rx.recv_timeout(idle_ms) {
                 Ok(chunk) => chunk,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -204,22 +237,73 @@ pub async fn spawn_terminal(rt: Arc<TeshiRuntime>, cols: u16, rows: u16) -> Resu
 
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
+        let mut window_bytes: u64 = 0;
+        let mut window_start = Instant::now();
+        let mut violations: u32 = 0;
+
         loop {
             if rt_reader.terminal.session_id.load(Ordering::SeqCst) != session_id {
                 break;
             }
+
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if output_tx.send(buf[..n].to_vec()).is_err() {
+                    let n = n as u64;
+
+                    // Rate-limit detection sliding window (100ms).
+                    let elapsed = window_start.elapsed();
+                    if elapsed.as_millis() as u64 >= RATE_WINDOW_MS {
+                        let effective_rate = if elapsed.as_secs_f64() > 0.0 {
+                            window_bytes as f64 / elapsed.as_secs_f64()
+                        } else {
+                            0.0
+                        };
+
+                        if effective_rate > RATE_LIMIT_BYTES_PER_SEC as f64 {
+                            violations += 1;
+                            tracing::warn!(
+                                session_id,
+                                rate_bps = effective_rate as u64,
+                                violations,
+                                "reader: output rate exceeds limit"
+                            );
+                            if violations >= RATE_VIOLATION_THRESHOLD {
+                                tracing::error!(
+                                    session_id,
+                                    rate_bps = effective_rate as u64,
+                                    "reader: loop detected, signalling forwarder"
+                                );
+                                rt_reader
+                                    .terminal
+                                    .loop_detected
+                                    .store(true, Ordering::SeqCst);
+                                // Drop the remaining channel data; forwarder will see the flag
+                                // on its next iteration and kill the session.
+                                drop(output_tx);
+                                break;
+                            }
+                        } else {
+                            violations = 0;
+                        }
+
+                        window_bytes = 0;
+                        window_start = Instant::now();
+                    }
+
+                    window_bytes += n;
+
+                    if output_tx.send(buf[..n as usize].to_vec()).is_err() {
                         break;
                     }
                 }
                 Err(_) => break,
             }
         }
-        drop(output_tx);
+
         if rt_reader.terminal.session_id.load(Ordering::SeqCst) == session_id {
+            // Do NOT clear loop_detected here — the forwarder reads the flag and
+            // clears it after killing the shell.
             rt_reader.events.emit("terminal-exit", ());
             rt_reader.terminal.clear_after_exit();
             *rt_reader.project.terminal_active.lock().unwrap() = false;
@@ -249,14 +333,6 @@ fn shell_cwd(project_root: &Path) -> PathBuf {
     dunce::simplified(project_root).to_path_buf()
 }
 
-/// Embedded panel init: disable PSReadLine predictions (per-keystroke VT redraws break
-/// browser xterm), but MUST KEEP the module loaded — removing PSReadLine causes the
-/// console host to fall back to raw .NET ConsoleHost input handling, which can
-/// misinterpret ConPTY device-attribute / terminal-query reply sequences as Enter
-/// keystrokes, resulting in infinite prompt loops (repeated auto-Enter).
-///
-/// Profile is loaded to restore aliases; prediction is disabled again after the profile
-/// in case it re-enabled predictions.
 const EMBEDDED_SHELL_INIT: &str = concat!(
     "try { Set-PSReadLineOption -PredictionSource None } catch { }; ",
     "if (Test-Path $PROFILE) { . $PROFILE }; ",

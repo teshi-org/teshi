@@ -167,11 +167,23 @@ fn init_logging() {
     let file_appender = tracing_appender::rolling::daily(log_dir, "teshi-desktop.log");
     let (writer, guard) = tracing_appender::non_blocking(file_appender);
     Box::leak(Box::new(guard));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("info")
+
+    // Try to set our file-based subscriber. If Tauri plugins have already set a
+    // global subscriber, try_init returns Err and our debug logs won't reach the
+    // file — they'll go wherever Tauri's subscriber sends them instead.
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("debug")
         .with_writer(writer)
         .with_ansi(false)
-        .try_init();
+        .finish();
+
+    let _ = tracing::subscriber::set_global_default(subscriber).map_err(|e| {
+        // Logging to file is best-effort; if global subscriber is already set,
+        // our tracing::debug! calls still work — they just go to Tauri's subscriber.
+        eprintln!(
+            "teshi-desktop: file logging unavailable ({e}), debug logs go to Tauri subscriber"
+        );
+    });
 }
 
 /// Post-restore hook: legacy migration, work-area clamp, and center for windowed mode.

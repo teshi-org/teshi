@@ -15,9 +15,13 @@ fn main() {
     {
         panic!(
             "\n\n  ❌ Frontend dist not found at {}\n\
-             \n     Before building teshi-desktop with cargo build, run:\n\
+             \n     Before building with cargo build, run:\n\
              \n       cd desktop && npm run build\n\
-             \n     Or use:  npx tauri build\n\
+             \n     Or build properly with:\n\
+             \n       cd desktop && npm run build:desktop\n\
+             \n     (which runs npm run build + tauri build --no-bundle)\n\
+             \n     Or directly:\n\
+             \n       cd desktop && npx tauri build\n\
              \n     (which runs npm run build automatically via beforeBuildCommand)\n",
             index.display()
         );
