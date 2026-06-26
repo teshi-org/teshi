@@ -27,7 +27,7 @@ fn daemon_start(project_root: &Path) -> Result<()> {
     }
 
     let port = teshi_runtime::pick_free_port()?;
-    spawn_daemon_background(project_root, port, None)?;
+    spawn_daemon_background(project_root, port, "0.0.0.0", None)?;
     eprintln!("daemon spawning on port {port}");
     Ok(())
 }

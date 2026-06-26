@@ -1289,7 +1289,7 @@ def _parse_args(argv: list[str] | None = None) -> BootstrapConfig:
         default="tauri-dev",
         help="tauri-dev: vite + teshi-desktop (no npm predev); separate: desktop exe + npm run dev",
     )
-    parser.add_argument("--api-port", type=int, default=1421, help="teshi web API port")
+    parser.add_argument("--api-port", type=int, default=20253, help="teshi web API port")
     parser.add_argument("--ui-port", type=int, default=1420, help="Vite dev / SUT UI port")
     parser.add_argument("--build", action="store_true", help="Run cargo build before starting")
     parser.add_argument(

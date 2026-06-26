@@ -5,8 +5,8 @@ import base64
 import httpx
 import websockets
 
-API = "http://127.0.0.1:1421/api/v1"
-WS = "ws://127.0.0.1:1421/api/v1/events"
+API = "http://127.0.0.1:20253/api/v1"
+WS = "ws://127.0.0.1:20253/api/v1/events"
 
 async def test_command(cmd: str, label: str):
     async with websockets.connect(WS) as ws:

@@ -12,7 +12,7 @@ export default defineConfig({
     // Dev SUT (:1420) proxies API to `teshi web` (:1421) during bootstrap dogfooding.
     proxy: {
       "/api/v1": {
-        target: "http://127.0.0.1:1421",
+        target: "http://127.0.0.1:20253",
         ws: true,
       },
     },

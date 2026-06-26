@@ -10,8 +10,8 @@
   5. 如果出现 >2 次则判定为重复（bug）
 
 Usage:
-    python tests/regression_terminal_dup.py          # 默认 http://127.0.0.1:1421
-    python tests/regression_terminal_dup.py --api http://127.0.0.1:1421
+    python tests/regression_terminal_dup.py          # 默认 http://127.0.0.1:20253
+    python tests/regression_terminal_dup.py --api http://127.0.0.1:20253
 """
 
 import argparse
@@ -136,8 +136,8 @@ def main():
     )
     parser.add_argument(
         "--api",
-        default="http://127.0.0.1:1421",
-        help="teshi web base URL (default: http://127.0.0.1:1421)",
+        default="http://127.0.0.1:20253",
+        help="teshi web base URL (default: http://127.0.0.1:20253)",
     )
     args = parser.parse_args()
 

@@ -12,8 +12,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use teshi_runtime::{
     default_browser_service_script, default_winapp_service_script, find_project_root, open_project,
-    pick_free_port, remove_daemon_manifest, spawn_daemon_background, DaemonManifest, RuntimeConfig,
-    TeshiRuntime,
+    remove_daemon_manifest, spawn_daemon_background, DaemonManifest, RuntimeConfig, TeshiRuntime,
 };
 use tracing::info;
 
@@ -30,6 +29,9 @@ pub struct WebOptions {
     /// TCP port for the local server (default: auto-pick).
     #[arg(long)]
     pub port: Option<u16>,
+    /// Host address to bind the local server (default: 0.0.0.0).
+    #[arg(long, default_value = "0.0.0.0")]
+    pub host: String,
     /// Do not open the system browser automatically.
     #[arg(long)]
     pub no_open: bool,
@@ -53,6 +55,8 @@ pub struct DaemonInternalOptions {
     pub project_root: PathBuf,
     #[arg(long)]
     pub port: u16,
+    #[arg(long, default_value = "0.0.0.0")]
+    pub host: String,
     #[arg(long)]
     pub dist: Option<PathBuf>,
 }
@@ -92,7 +96,7 @@ pub async fn run_client(opts: WebOptions) -> Result<()> {
         )?;
 
     // Ensure daemon is running
-    let port = ensure_daemon(&project_root, Some(dist.clone()), opts.port).await?;
+    let port = ensure_daemon(&project_root, Some(dist.clone()), opts.port, &opts.host).await?;
 
     let url = format!("http://127.0.0.1:{port}");
 
@@ -179,7 +183,9 @@ pub async fn run_daemon_internal(opts: DaemonInternalOptions) -> Result<()> {
         .or_else(resolve_web_dist)
         .unwrap_or_else(|| opts.project_root.join("desktop").join("dist"));
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], opts.port));
+    let addr: SocketAddr = format!("{}:{}", opts.host, opts.port)
+        .parse()
+        .context("invalid host or port in daemon options")?;
     info!("teshi daemon listening on {addr}");
 
     // Graceful shutdown: cleanup manifest on exit
@@ -209,6 +215,7 @@ pub async fn ensure_daemon(
     project_root: &std::path::Path,
     dist: Option<PathBuf>,
     requested_port: Option<u16>,
+    host: &str,
 ) -> Result<u16> {
     // 1. Check if daemon is already running
     if let Some(manifest) = DaemonManifest::load(project_root) {
@@ -219,15 +226,15 @@ pub async fn ensure_daemon(
         remove_daemon_manifest(project_root);
     }
 
-    // 2. Pick port: use requested_port if provided, otherwise pick a free port
+    // 2. Pick port: use requested_port if provided, otherwise default to 20253
     let port = if let Some(requested) = requested_port {
         requested
     } else {
-        pick_free_port()?
+        20253
     };
 
     // 3. Spawn detached background daemon process
-    spawn_daemon_background(project_root, port, dist.as_deref())?;
+    spawn_daemon_background(project_root, port, host, dist.as_deref())?;
 
     // 4. Wait for daemon to write daemon.json (max 15 seconds)
     let manifest_path = project_root.join(".teshi").join("daemon.json");

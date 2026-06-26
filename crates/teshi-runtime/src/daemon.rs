@@ -92,7 +92,12 @@ pub fn remove_daemon_manifest(project_root: &Path) {
 ///
 /// `dist` is optional — pass `Some(...)` when the frontend dist directory is known
 /// (e.g. `teshi web`), or `None` when the daemon should resolve it itself.
-pub fn spawn_daemon_background(project_root: &Path, port: u16, dist: Option<&Path>) -> Result<()> {
+pub fn spawn_daemon_background(
+    project_root: &Path,
+    port: u16,
+    host: &str,
+    dist: Option<&Path>,
+) -> Result<()> {
     let exe = std::env::current_exe().context("resolve current executable")?;
 
     let mut args: Vec<String> = vec![
@@ -101,6 +106,8 @@ pub fn spawn_daemon_background(project_root: &Path, port: u16, dist: Option<&Pat
         project_root.to_string_lossy().to_string(),
         "--port".to_string(),
         port.to_string(),
+        "--host".to_string(),
+        host.to_string(),
     ];
     if let Some(d) = dist {
         args.push("--dist".to_string());
