@@ -7,6 +7,7 @@ pub mod export;
 pub mod locator_verify;
 pub mod replay_screenshots;
 pub mod steps;
+pub mod terminal;
 pub mod trace;
 pub mod winapp;
 
@@ -99,6 +100,11 @@ pub enum Command {
     WinApp {
         #[command(subcommand)]
         action: WinAppCommand,
+    },
+    /// Control an interactive terminal via the terminal sidecar
+    Terminal {
+        #[command(subcommand)]
+        action: TerminalCommand,
     },
     /// Export confirmed step-bindings to an external test project
     Export {
@@ -535,6 +541,50 @@ pub struct WinAppReplayArgs {
     /// Input mode for all replay steps: foreground (default) or background (non-intrusive PostMessage)
     #[arg(long, default_value = "foreground")]
     pub mode: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TerminalCommand {
+    /// Start the terminal sidecar (blocking, press Ctrl+C to stop)
+    ServeEmbedded,
+    /// Read the current terminal screen as a structured JSON grid
+    Snapshot,
+    /// Query terminal process state (low-cost polling)
+    Status,
+    /// Execute a command and wait for completion
+    Exec(TerminalExecArgs),
+    /// Write text to the terminal stdin
+    Send(TerminalSendArgs),
+    /// Resize the terminal viewport
+    Resize(TerminalResizeArgs),
+    /// Kill the current terminal session
+    Kill,
+}
+
+#[derive(Debug, Args)]
+pub struct TerminalExecArgs {
+    /// Command to execute in the shell
+    pub command: String,
+    /// Timeout in milliseconds (default: 60000)
+    #[arg(long, default_value_t = 60_000)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct TerminalSendArgs {
+    /// Text to write to the terminal
+    pub text: String,
+    /// Append a newline after the text
+    #[arg(long)]
+    pub newline: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TerminalResizeArgs {
+    /// Number of columns
+    pub cols: u16,
+    /// Number of rows
+    pub rows: u16,
 }
 
 #[derive(Debug, Subcommand)]

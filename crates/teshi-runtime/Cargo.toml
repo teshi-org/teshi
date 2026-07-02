@@ -19,6 +19,7 @@ serde_json = "1"
 teshi-gherkin = { path = "../teshi-gherkin" }
 tokio = { version = "1", features = ["sync"] }
 tracing = "0.1"
+vte = "0.15"
 tungstenite = "0.24"
 
 [dev-dependencies]

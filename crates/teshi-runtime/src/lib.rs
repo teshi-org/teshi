@@ -8,6 +8,7 @@ mod gherkin;
 mod locator;
 mod project;
 mod project_settings;
+mod screen;
 mod sidecar;
 mod terminal;
 mod venv;
@@ -53,6 +54,7 @@ pub use project::{
 pub use project_settings::{
     load_project_settings, ProjectSettings, DEFAULT_LOCATOR_AUTO_CONFIRM_SEC,
 };
+pub use screen::{Cell, Color, ProcessState, ScreenGrid};
 pub use sidecar::{
     get_recent_projects, send_sidecar_command, send_sidecar_command_with_timeout,
     start_browser_sidecar, stop_browser_sidecar, BrowserError, BrowserMode, BrowserStartResult,

@@ -23,6 +23,7 @@ members = [
     "crates/teshi-gherkin",
     "crates/teshi-runtime",
     "crates/teshi-daemon",
+    "crates/teshi-terminal-sidecar",
     "desktop/src-tauri",
 ]
 exclude = ["runner"]
