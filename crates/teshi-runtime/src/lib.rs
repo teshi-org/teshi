@@ -5,6 +5,7 @@ mod daemon;
 mod events;
 mod fs_util;
 mod gherkin;
+pub mod llm;
 mod locator;
 mod project;
 mod project_settings;
@@ -36,6 +37,7 @@ pub use daemon::{
 pub use events::{HostEventCallback, RuntimeEvent, RuntimeEvents};
 pub use fs_util::{read_locked, write_atomic};
 pub use gherkin::{emit_feature_refresh, rebuild_and_emit_step_index, render_feature};
+pub use llm::{call_llm_with_tool, llm_config_from_env};
 pub use locator::{
     abandon_pending_locator, active_step_mismatch_with_pending, confirm_locator,
     confirm_pending_locator, first_unbound_feature_step, get_active_step, get_pending_locator,

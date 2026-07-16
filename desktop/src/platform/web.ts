@@ -282,6 +282,18 @@ export const webRuntime: TeshiRuntimeApi = {
     }
     return unlisten;
   },
+
+  async generateRequirements(text: string) {
+    return apiFetch<{
+      slug: string;
+      segments: Array<{ id: string; text: string; pos: [number, number] }>;
+      mindmap_xml: string;
+      mock_html: string;
+    }>("/requirements/generate", {
+      method: "POST",
+      body: JSON.stringify({ requirements_text: text }),
+    });
+  },
 };
 
 /**

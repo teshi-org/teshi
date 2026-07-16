@@ -151,4 +151,14 @@ export const tauriRuntime: TeshiRuntimeApi = {
     }
     return wrapped;
   },
+
+  async generateRequirements(text: string) {
+    const result = await invoke<{
+      slug: string;
+      segments: Array<{ id: string; text: string; pos: [number, number] }>;
+      mindmap_xml: string;
+      mock_html: string;
+    }>("generate_requirements_cmd", { text });
+    return result;
+  },
 };

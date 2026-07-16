@@ -1,0 +1,2 @@
+2026-07-07 17:38:39.679 <string>[25] <module> -> Find Control Timeout(10s): {Name: 'teshi', ControlType: WindowControl}
+2026-07-07 17:43:48.127 <string>[13] <module> -> 

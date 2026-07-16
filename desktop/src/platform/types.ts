@@ -32,4 +32,10 @@ export interface TeshiRuntimeApi {
   onEvent<T>(event: string, handler: (payload: T) => void): Promise<() => void>;
   readTextFile(path: string): Promise<string>;
   readFileAsDataUrl(path: string): Promise<string>;
+  generateRequirements(text: string): Promise<{
+    slug: string;
+    segments: Array<{ id: string; text: string; pos: [number, number] }>;
+    mindmap_xml: string;
+    mock_html: string;
+  }>;
 }

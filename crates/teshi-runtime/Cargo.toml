@@ -21,6 +21,7 @@ tokio = { version = "1", features = ["sync"] }
 tracing = "0.1"
 vte = "0.15"
 tungstenite = "0.24"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
 [dev-dependencies]
 tempfile = "3"

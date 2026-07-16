@@ -1231,3 +1231,205 @@ code {
   border-radius: 4px;
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.6);
 }
+
+/* Mode Toggle Button */
+.mode-toggle {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 1000;
+  padding: 6px 14px;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 6px;
+  background: rgba(30,30,30,0.9);
+  color: #e0e0e0;
+  font-size: 13px;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  transition: background 0.15s;
+}
+.mode-toggle:hover {
+  background: rgba(50,50,50,0.9);
+}
+
+/* Requirements Page Layout */
+.requirements-page {
+  display: flex;
+  flex: 1;
+  height: 100%;
+  gap: 1px;
+  background: #1a1a1a;
+}
+.requirements-page__panel {
+  flex: 1;
+  overflow: auto;
+  padding: 16px;
+  background: #1e1e1e;
+}
+.requirements-page__panel--input {
+  min-width: 280px;
+  max-width: 400px;
+}
+
+/* Requirements Input */
+.requirements-input {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+}
+.requirements-input__textarea {
+  flex: 1;
+  resize: none;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 12px;
+  background: #121212;
+  color: #e0e0e0;
+  font-size: 14px;
+  font-family: inherit;
+  line-height: 1.6;
+}
+.requirements-input__button {
+  padding: 10px 20px;
+  border: none;
+  border-radius: 6px;
+  background: #0ea5e9;
+  color: white;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.requirements-input__button:hover:not(:disabled) {
+  background: #0284c7;
+}
+.requirements-input__button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Requirements Text (word-level rendering) */
+.requirements-text {
+  height: 100%;
+  overflow: auto;
+}
+.requirements-text__title {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  color: #888;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.requirements-text__content {
+  line-height: 2.2;
+  font-size: 14px;
+  color: #d0d0d0;
+}
+.requirements-text__word {
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 1px 2px;
+  transition: background 0.1s;
+}
+.requirements-text__word:hover {
+  background: rgba(255,255,255,0.08);
+}
+.requirements-text__word--highlighted {
+  background: rgba(14, 165, 233, 0.25);
+  outline: 1px solid rgba(14, 165, 233, 0.5);
+}
+
+/* MindMap Viewer */
+.mindmap-viewer {
+  height: 100%;
+  overflow: auto;
+}
+.mindmap-viewer__title {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  color: #888;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.mindmap-viewer__tree {
+  font-size: 14px;
+}
+.mindmap-viewer__node {
+  user-select: none;
+}
+.mindmap-viewer__node-content {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.mindmap-viewer__node-content:hover {
+  background: rgba(255,255,255,0.06);
+}
+.mindmap-viewer__node-content--highlighted {
+  background: rgba(14, 165, 233, 0.2);
+  outline: 1px solid rgba(14, 165, 233, 0.4);
+}
+.mindmap-viewer__toggle {
+  font-size: 10px;
+  color: #666;
+  width: 14px;
+  flex-shrink: 0;
+}
+.mindmap-viewer__label {
+  color: #d0d0d0;
+}
+.mindmap-viewer__badge {
+  font-size: 10px;
+  color: #0ea5e9;
+  background: rgba(14, 165, 233, 0.15);
+  border-radius: 8px;
+  padding: 1px 6px;
+  margin-left: auto;
+}
+
+/* Mock HTML Viewer */
+.mock-html-viewer {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.mock-html-viewer__title {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  color: #888;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.mock-html-viewer__iframe {
+  flex: 1;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #fff;
+}
+
+/* Requirements Page Empty State */
+.requirements-page__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 24px;
+  text-align: center;
+  color: #888;
+}
+.requirements-page__empty p {
+  margin: 4px 0;
+}
+.requirements-page__empty-hint {
+  font-size: 12px;
+  color: #666;
+}

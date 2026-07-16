@@ -14,6 +14,7 @@ import { AppChrome } from "./chrome/AppChrome";
 import { ProjectProvider, useProject } from "./context/ProjectContext";
 import { getRuntime, isTauriHost } from "./platform";
 import { WelcomeScreen } from "./panels/WelcomeScreen";
+import { RequirementsPage } from "./panels/RequirementsPage";
 import { ResizableWorkspace } from "./panels/ResizableWorkspace";
 import { BottomDock } from "./panels/BottomDock";
 import {
@@ -33,6 +34,7 @@ function AppShell() {
   const [browserHint, setBrowserHint] = useState<string | null>(null);
   const selectedFeatureRelativePath = state.featurePayload?.relative_path ?? null;
   const browserFullscreen = state.layoutMode === "browserFullscreen";
+  const [showRequirements, setShowRequirements] = useState(true);
   const dockGroupRef = useGroupRef();
   const dockPanelRef = usePanelRef();
   const dockSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -427,24 +429,10 @@ function AppShell() {
     onOpenRecent: (path: string) => void openProjectPathWithFeedback(path),
   };
 
-  if (!state.projectRoot) {
-    return (
-      <div className="app-shell">
-        <AppChrome {...chromeProps} />
-        <WelcomeScreen
-          recentProjects={state.recentProjects}
-          onOpenProject={() => void pickProject()}
-          onOpenRecent={(path) => void openProjectPathWithFeedback(path)}
-        />
-        <Toaster theme="dark" />
-      </div>
-    );
-  }
-
   const workspacePanel = (
     <ResizableWorkspace
       browserFullscreen={browserFullscreen}
-      projectRoot={state.projectRoot}
+      projectRoot={state.projectRoot!}
       featurePayload={state.featurePayload}
       stepBindingStatuses={state.stepBindingStatuses}
       selectedScenarioLine={state.selectedScenarioLine}
@@ -479,50 +467,77 @@ function AppShell() {
 
   return (
     <div className="app-shell">
-      <AppChrome {...chromeProps} />
-      {browserFullscreen ? (
-        <div className="workspace">{workspacePanel}</div>
-      ) : (
-        <Group
-          key={state.projectRoot}
-          id="teshi-workspace-dock-layout"
-          orientation="vertical"
-          className="workspace"
-          groupRef={dockGroupRef}
-          defaultLayout={defaultDockLayout}
-          onLayoutChanged={scheduleDockPersist}
+      {state.projectRoot && (
+        <button
+          className="mode-toggle"
+          onClick={() => setShowRequirements((prev) => !prev)}
+          title={showRequirements ? "Switch to Workspace" : "Switch to Requirements"}
         >
-          <Panel id="main" defaultSize={defaultDockLayout.main} minSize={200}>
-            {workspacePanel}
-          </Panel>
-          <Separator className="resize-handle resize-handle--horizontal" />
-          <Panel
-            id="dock"
-            collapsible
-            collapsedSize="33px"
-            panelRef={dockPanelRef}
-            defaultSize={defaultDockLayout.dock}
-            minSize={120}
-          >
-            <BottomDock
-              expanded={state.dockExpanded}
-              activeTab={state.dockActiveTab}
-              activeStep={state.activeStep}
-              pendingLocator={state.pendingLocator}
-              stepBindingStatuses={state.stepBindingStatuses}
-              projectRoot={state.projectRoot}
-              onToggle={() => dispatch({ type: "TOGGLE_DOCK" })}
-              onTabChange={(tab) => dispatch({ type: "SET_DOCK_TAB", tab })}
-              onPendingChange={(pending) => {
-                dispatch({ type: "SET_PENDING_LOCATOR", pending });
-                void refreshStepStatuses(selectedFeatureRelativePath);
-              }}
-              onBindingChanged={() => {
-                void refreshStepStatuses(selectedFeatureRelativePath);
-              }}
-            />
-          </Panel>
-        </Group>
+          {showRequirements ? "🔍 Workspace" : "📋 Requirements"}
+        </button>
+      )}
+      {!state.projectRoot ? (
+        <>
+          <AppChrome {...chromeProps} />
+          <WelcomeScreen
+            recentProjects={state.recentProjects}
+            onOpenProject={() => void pickProject()}
+            onOpenRecent={(path) => void openProjectPathWithFeedback(path)}
+          />
+        </>
+      ) : (
+        <>
+          <div style={{ display: showRequirements ? "flex" : "none", flex: 1, flexDirection: "column" }}>
+            <RequirementsPage />
+          </div>
+          <div style={{ display: showRequirements ? "none" : "flex", flex: 1, flexDirection: "column" }}>
+            <AppChrome {...chromeProps} />
+            {browserFullscreen ? (
+              <div className="workspace">{workspacePanel}</div>
+            ) : (
+              <Group
+                key={state.projectRoot}
+                id="teshi-workspace-dock-layout"
+                orientation="vertical"
+                className="workspace"
+                groupRef={dockGroupRef}
+                defaultLayout={defaultDockLayout}
+                onLayoutChanged={scheduleDockPersist}
+              >
+                <Panel id="main" defaultSize={defaultDockLayout.main} minSize={200}>
+                  {workspacePanel}
+                </Panel>
+                <Separator className="resize-handle resize-handle--horizontal" />
+                <Panel
+                  id="dock"
+                  collapsible
+                  collapsedSize="33px"
+                  panelRef={dockPanelRef}
+                  defaultSize={defaultDockLayout.dock}
+                  minSize={120}
+                >
+                  <BottomDock
+                    expanded={state.dockExpanded}
+                    activeTab={state.dockActiveTab}
+                    activeStep={state.activeStep}
+                    pendingLocator={state.pendingLocator}
+                    stepBindingStatuses={state.stepBindingStatuses}
+                    projectRoot={state.projectRoot}
+                    onToggle={() => dispatch({ type: "TOGGLE_DOCK" })}
+                    onTabChange={(tab) => dispatch({ type: "SET_DOCK_TAB", tab })}
+                    onPendingChange={(pending) => {
+                      dispatch({ type: "SET_PENDING_LOCATOR", pending });
+                      void refreshStepStatuses(selectedFeatureRelativePath);
+                    }}
+                    onBindingChanged={() => {
+                      void refreshStepStatuses(selectedFeatureRelativePath);
+                    }}
+                  />
+                </Panel>
+              </Group>
+            )}
+          </div>
+        </>
       )}
       <Toaster theme="dark" />
     </div>

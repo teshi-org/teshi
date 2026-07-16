@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use teshi_gherkin::FeatureRenderPayload;
+use teshi_runtime::llm::{call_llm_with_tool, llm_config_from_env};
 use teshi_runtime::{
     abandon_pending_locator, check_project_switch_allowed, confirm_locator, get_active_step,
     get_pending_locator, get_project_root as runtime_project_root, get_recent_projects,
@@ -238,6 +239,118 @@ pub fn read_file_base64(path: String) -> Result<String, String> {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
     Ok(format!("data:{mime};base64,{b64}"))
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct GenerateRequirementsSegment {
+    pub id: String,
+    pub text: String,
+    pub pos: (usize, usize),
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct GenerateRequirementsResult {
+    pub slug: String,
+    pub segments: Vec<GenerateRequirementsSegment>,
+    pub mindmap_xml: String,
+    pub mock_html: String,
+}
+
+#[tauri::command]
+pub async fn generate_requirements_cmd(text: String) -> Result<GenerateRequirementsResult, String> {
+    if text.trim().is_empty() {
+        return Err("Requirements text is empty".to_string());
+    }
+
+    let (api_key, base_url, model) = llm_config_from_env()?;
+
+    let system_prompt = r#"You are a requirements analysis assistant. Given a free-text requirements document, you must:
+
+1. **Segment the text** into word-level semantic units. Each segment gets a unique ID (w1, w2, ...), the text content, and character position range [start, end]. Segments must cover the ENTIRE input text exactly once with no gaps or overlaps.
+
+2. **Generate test points** as a FreeMind XML mindmap. The root node is the system/module name. Intermediate nodes are feature categories. Leaf nodes are individual test points. Each leaf node MUST have a LINK attribute with comma-separated segment IDs that this test point verifies.
+
+3. **Generate mock HTML** - a complete, self-contained HTML document with inline CSS that demonstrates the user interface described by the requirements. Include realistic form elements, buttons, navigation, and content. Make it look like a real application.
+
+IMPORTANT RULES:
+- Only generate test points for requirements that are ACTUALLY mentioned in the text. Do not invent test points for unmentioned features.
+- Segment the text at word/phrase level, not character-by-character.
+- The mindmap XML must be valid FreeMind format (version 1.0.1).
+- LINK attributes use comma-separated segment IDs like LINK="w1,w3,w5".
+- The mock HTML must be complete with <!DOCTYPE html> and all styles inline.
+"#;
+
+    let tool_params = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "segments": {
+                "type": "array",
+                "description": "Word-level segments of the requirements text, covering every character exactly once",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "text": { "type": "string" },
+                        "pos": {
+                            "type": "array",
+                            "items": { "type": "integer" },
+                            "minItems": 2,
+                            "maxItems": 2
+                        }
+                    },
+                    "required": ["id", "text", "pos"]
+                }
+            },
+            "mindmap_xml": {
+                "type": "string",
+                "description": "FreeMind-compatible XML mindmap with test points"
+            },
+            "mock_html": {
+                "type": "string",
+                "description": "Complete self-contained high-fidelity HTML page"
+            }
+        },
+        "required": ["segments", "mindmap_xml", "mock_html"]
+    });
+
+    let result = call_llm_with_tool(
+        &api_key, &base_url, &model,
+        system_prompt,
+        &text,
+        "generate_testpoints",
+        "Generate test points, mindmap, and mock HTML from requirements text",
+        tool_params,
+    ).await?;
+
+    let segments: Vec<GenerateRequirementsSegment> = serde_json::from_value(
+        result.get("segments").cloned().unwrap_or_default()
+    ).map_err(|e| format!("Failed to parse segments: {}", e))?;
+
+    let mindmap_xml = result.get("mindmap_xml")
+        .and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let mock_html = result.get("mock_html")
+        .and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    // Validate
+    let text_len = text.chars().count();
+    for seg in &segments {
+        if seg.pos.0 >= seg.pos.1 || seg.pos.1 > text_len {
+            return Err(format!("Segment {} has invalid position range", seg.id));
+        }
+    }
+    if mindmap_xml.is_empty() {
+        return Err("Mindmap XML is empty".to_string());
+    }
+
+    let slug = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+
+    Ok(GenerateRequirementsResult {
+        slug,
+        segments,
+        mindmap_xml,
+        mock_html,
+    })
 }
 
 /// Confirms destructive switch/exit when runtime is active.
