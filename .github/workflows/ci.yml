@@ -27,6 +27,9 @@ jobs:
         with:
           components: clippy
 
+      - name: Install system deps (Linux)
+        run: sudo apt-get update && sudo apt-get install -y libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libglib2.0-dev libgtk-3-dev libgraphene-1.0-0 libpango1.0-dev libcairo2-dev libatk1.0-dev
+
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
 
@@ -46,7 +49,7 @@ jobs:
         run: cargo doc --workspace --exclude teshi-tauri --locked --no-deps --document-private-items
 
   desktop:
-    name: teshi-desktop build
+    name: teshi-desktop build (GPUI)
     runs-on: windows-latest
 
     steps:
@@ -59,49 +62,13 @@ jobs:
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: apps/teshi-tauri/frontend/package-lock.json
+      - name: Build teshi-desktop (GPUI)
+        run: cargo build -p teshi-desktop --locked
 
-      - name: Install frontend dependencies
-        working-directory: apps/teshi-tauri/frontend
-        run: npm ci
-
-      - name: Build frontend
-        working-directory: apps/teshi-tauri/frontend
-        run: npm run build
-
-      - name: Build teshi-tauri (no bundle)
-        run: npx --prefix apps/teshi-tauri/frontend tauri build --config apps/teshi-tauri/tauri.conf.json --no-bundle
-
-  web-ui-smoke:
-    name: teshi web UI smoke
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo build artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: apps/teshi-tauri/frontend/package-lock.json
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Run web UI smoke
-        run: bash scripts/run-web-ui-smoke.sh
+  # Tauri-related CI suspended — frontend moving to GPUI
+  # web-ui-smoke:
+  #   name: teshi web UI smoke
+  #   runs-on: ubuntu-latest
+  #   ...
+  #   - name: Run web UI smoke
+  #     run: bash scripts/run-web-ui-smoke.sh
