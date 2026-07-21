@@ -3,7 +3,7 @@
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
-$version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+$version = (Select-String -Path apps/teshi-cli/Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
 $tag = "v$version"
 Write-Host "==> Building teshi $tag MSI"
 
@@ -16,7 +16,7 @@ if (-not (Test-Path $heat)) {
 }
 
 Write-Host "==> Frontend"
-Push-Location desktop
+Push-Location apps/teshi-tauri/frontend
 npm ci
 npm run build
 Pop-Location
@@ -24,14 +24,12 @@ Pop-Location
 Write-Host "==> teshi CLI (release)"
 cargo build --release --bin teshi
 
-Write-Host "==> teshi-desktop (release, no bundle)"
-Push-Location desktop
-npx tauri build --no-bundle
-Pop-Location
+Write-Host "==> teshi-tauri (release, no bundle)"
+npx --prefix apps/teshi-tauri/frontend tauri build --config apps/teshi-tauri/tauri.conf.json --no-bundle
 
 $builtExe = "target/release/teshi.exe"
-$desktopExe = "target/release/teshi-desktop.exe"
-foreach ($p in @($builtExe, $desktopExe, "desktop/dist/index.html")) {
+$desktopExe = "target/release/teshi-tauri.exe"
+foreach ($p in @($builtExe, $desktopExe, "apps/teshi-tauri/frontend/dist/index.html")) {
     if (-not (Test-Path $p)) { throw "Missing $p" }
 }
 
@@ -45,9 +43,9 @@ New-Item -ItemType Directory -Force -Path $binDir, $webDir, $bridgeDir | Out-Nul
 
 Copy-Item $builtExe (Join-Path $binDir "teshi.exe") -Force
 Copy-Item $desktopExe (Join-Path $binDir "teshi-desktop.exe") -Force
-Copy-Item "desktop/src-tauri/resources/browser_service.py" (Join-Path $shareDir "browser_service.py") -Force
-Copy-Item "desktop/src-tauri/resources/winapp_service.py" (Join-Path $shareDir "winapp_service.py") -Force
-Copy-Item -Path "desktop/dist/*" -Destination $webDir -Recurse -Force
+Copy-Item "apps/teshi-tauri/resources/browser_service.py" (Join-Path $shareDir "browser_service.py") -Force
+Copy-Item "apps/teshi-tauri/resources/winapp_service.py" (Join-Path $shareDir "winapp_service.py") -Force
+Copy-Item -Path "apps/teshi-tauri/frontend/dist/*" -Destination $webDir -Recurse -Force
 Copy-Item -Path "extension/teshi-bridge/*" -Destination $bridgeDir -Recurse -Force
 
 Write-Host "==> heat web + bridge fragments"
@@ -87,7 +85,11 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $msiPath = Join-Path $outDir "teshi-$tag-x64.msi"
 
 Write-Host "==> cargo wix -> $msiPath"
-cargo wix --package teshi --nocapture --no-build `
+cargo wix --package teshi-cli `
+    --include wix/main.wxs `
+    --include wix/web-files.wxs `
+    --include wix/bridge-files.wxs `
+    --nocapture --no-build `
     -C "-dStagingRoot=staging/msi-root" `
     -C "-dWebRoot=staging/msi-root/share/web" `
     -C "-dBridgeRoot=staging/msi-root/share/teshi-bridge" `

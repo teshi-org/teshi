@@ -1,0 +1,18 @@
+[package]
+name = "teshi-terminal-sidecar"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Standalone terminal sidecar with VTE screen grid for CLI automation"
+
+[dependencies]
+anyhow = { workspace = true }
+futures-util = "0.3"
+portable-pty = "0.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
+teshi-engine = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = "0.24"
+tungstenite = "0.24"
+vte = "0.15"

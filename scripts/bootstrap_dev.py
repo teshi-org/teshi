@@ -81,7 +81,7 @@ class BootstrapConfig:
 
     @property
     def desktop_bin(self) -> Path:
-        name = "teshi-desktop.exe" if os.name == "nt" else "teshi-desktop"
+        name = "teshi-tauri.exe" if os.name == "nt" else "teshi-tauri"
         return self.repo_root / "target" / "debug" / name
 
     @property
@@ -438,8 +438,10 @@ def _external_teshi_pids(cfg: BootstrapConfig) -> list[tuple[int, str]]:
 
 
 def _probe_repo_versions(cfg: BootstrapConfig) -> ItemProbe:
-    cargo_v = _read_toml_version(cfg.repo_root / "Cargo.toml")
-    pkg_v = _read_json_version(cfg.repo_root / "desktop" / "package.json")
+    cargo_v = _read_toml_version(cfg.repo_root / "apps" / "teshi-cli" / "Cargo.toml")
+    pkg_v = _read_json_version(
+        cfg.repo_root / "apps" / "teshi-tauri" / "frontend" / "package.json"
+    )
     ext_v = _read_json_version(cfg.repo_root / "extension" / "teshi-bridge" / "manifest.json")
     versions = {"Cargo.toml": cargo_v, "package.json": pkg_v, "manifest.json": ext_v}
     unique = {v for v in versions.values() if v}
@@ -465,7 +467,7 @@ def _expected_debug_teshi_count(supervisor: ProcessSupervisor) -> int:
 
 def _probe_teshi_cli(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> ItemProbe:
     binary = cfg.teshi_bin
-    repo_v = _read_toml_version(cfg.repo_root / "Cargo.toml")
+    repo_v = _read_toml_version(cfg.repo_root / "apps" / "teshi-cli" / "Cargo.toml")
     run_v = _run_version(binary)
     build_time = _binary_build_time(binary)
     debug_pids = _pids_running_binary(binary)
@@ -479,14 +481,17 @@ def _probe_teshi_cli(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> Ite
         detail = "binary exists but --version failed"
         status = ItemStatus.UNHEALTHY
     else:
-        src_mtime = _newest_mtime(cfg.repo_root / "src")
+        src_mtime = max(
+            _newest_mtime(cfg.repo_root / "apps" / "teshi-cli" / "src"),
+            _newest_mtime(cfg.repo_root / "crates"),
+        )
         bin_mtime = binary.stat().st_mtime
         if repo_v and run_v != repo_v:
             status = ItemStatus.STALE
-            detail = f"built {run_v}, repo {repo_v}; run cargo build -p teshi"
+            detail = f"built {run_v}, repo {repo_v}; run cargo build -p teshi-cli"
         elif src_mtime > bin_mtime + 1:
             status = ItemStatus.STALE
-            detail = "debug binary older than src/; run cargo build -p teshi"
+            detail = "debug binary older than sources; run cargo build -p teshi-cli"
         else:
             status = ItemStatus.HEALTHY
             detail = str(binary)
@@ -530,7 +535,7 @@ def _probe_teshi_desktop(
     binary = cfg.desktop_bin
     run_v = _run_version(binary)
     build_time = _binary_build_time(binary)
-    repo_v = _read_toml_version(cfg.repo_root / "desktop" / "src-tauri" / "Cargo.toml")
+    repo_v = _read_toml_version(cfg.repo_root / "apps" / "teshi-tauri" / "Cargo.toml")
     debug_pids = _pids_running_binary(binary)
 
     status = ItemStatus.STOPPED
@@ -614,7 +619,9 @@ def _probe_teshi_web(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> Ite
 def _probe_vite_dev(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> ItemProbe:
     listeners = _pids_listening_on(cfg.ui_port)
     ok, msg = _http_ok(f"http://127.0.0.1:{cfg.ui_port}/", require_200=True)
-    pkg_v = _read_json_version(cfg.repo_root / "desktop" / "package.json")
+    pkg_v = _read_json_version(
+        cfg.repo_root / "apps" / "teshi-tauri" / "frontend" / "package.json"
+    )
 
     status = ItemStatus.STOPPED
     if len(listeners) > 1:
@@ -884,12 +891,12 @@ def _preflight(cfg: BootstrapConfig) -> None:
     """Verify tools required for the selected launch mode."""
     console = Console(stderr=True)
     if cfg.mode == "tauri-dev":
-        desktop = cfg.repo_root / "desktop"
-        if not (desktop / "node_modules").is_dir():
+        frontend = cfg.repo_root / "apps" / "teshi-tauri" / "frontend"
+        if not (frontend / "node_modules").is_dir():
             console.print("[dim]Installing desktop npm dependencies...[/dim]")
             subprocess.run(
                 [_npm_cmd(), "install"],
-                cwd=str(desktop),
+                cwd=str(frontend),
                 check=True,
             )
     if cfg.mode == "separate" and not cfg.desktop_bin.is_file():
@@ -1082,8 +1089,8 @@ def _build_workspace(cfg: BootstrapConfig) -> None:
     if stopped:
         console.print(f"[yellow]Released lock ({len(stopped)} process(es) stopped)[/yellow]")
     console.print("[dim]Building teshi CLI and desktop...[/dim]")
-    _run_cargo_build(cfg, "teshi")
-    _run_cargo_build(cfg, "teshi-desktop")
+    _run_cargo_build(cfg, "teshi-cli")
+    _run_cargo_build(cfg, "teshi-tauri")
 
 
 def _ensure_built(cfg: BootstrapConfig) -> None:
@@ -1093,10 +1100,10 @@ def _ensure_built(cfg: BootstrapConfig) -> None:
         return
     _release_teshi_exe_lock(cfg)
     console.print("[dim]Building teshi CLI...[/dim]")
-    _run_cargo_build(cfg, "teshi")
+    _run_cargo_build(cfg, "teshi-cli")
     if cfg.mode == "separate":
-        console.print("[dim]Building teshi-desktop...[/dim]")
-        _run_cargo_build(cfg, "teshi-desktop")
+        console.print("[dim]Building teshi-tauri...[/dim]")
+        _run_cargo_build(cfg, "teshi-tauri")
 
 
 def _build_spawn_panel(supervisor: ProcessSupervisor) -> Text:
@@ -1135,7 +1142,7 @@ def _start_stack(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> None:
         # Vite only — skip npm `predev` (cargo build) to avoid locking teshi.exe on Windows.
         supervisor.spawn(
             [_npm_cmd(), "run", "dev", "--ignore-scripts"],
-            cwd=cfg.repo_root / "desktop",
+            cwd=cfg.repo_root / "apps" / "teshi-tauri" / "frontend",
             label="vite",
         )
     elif cfg.mode == "separate":
@@ -1143,7 +1150,7 @@ def _start_stack(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> None:
             raise SystemExit(f"teshi binary not found at {cfg.teshi_bin}; pass --build")
         supervisor.spawn(
             [_npm_cmd(), "run", "dev"],
-            cwd=cfg.repo_root / "desktop",
+            cwd=cfg.repo_root / "apps" / "teshi-tauri" / "frontend",
             label="vite",
         )
         supervisor.spawn(

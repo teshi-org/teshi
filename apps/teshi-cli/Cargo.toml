@@ -1,0 +1,26 @@
+[package]
+name = "teshi-cli"
+version = "0.7.9"
+edition = "2024"
+authors = ["teshi-org"]
+license = "MIT"
+publish = false
+
+[package.metadata.wix]
+eula = false
+
+[[bin]]
+name = "teshi"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+teshi-daemon = { path = "../teshi-daemon" }
+teshi-tui = { workspace = true }
+tokio.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+serde_json.workspace = true
+tempfile = "3"

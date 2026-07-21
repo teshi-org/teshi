@@ -1,0 +1,14 @@
+[package]
+name = "teshi-desktop"
+version = "0.1.0"
+edition = "2024"
+description = "teshi GPUI desktop shell"
+authors = ["teshi-org"]
+license = "MIT"
+publish = false
+
+[dependencies]
+gpui = "0.2"
+teshi-agent = { path = "../../crates/teshi-agent" }
+teshi-core = { path = "../../crates/teshi-core" }
+teshi-engine = { path = "../../crates/teshi-engine" }

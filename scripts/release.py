@@ -34,16 +34,16 @@ ALLOWED_MINOR = 7
 
 VERSION_FILES: list[tuple[str, str, re.Pattern, str]] = [
     # (label, file_path, regex, replacement)
-    ("Cargo.toml (root)", "Cargo.toml",
+    ("apps/teshi-cli/Cargo.toml", "apps/teshi-cli/Cargo.toml",
      re.compile(r'^version = "(\d+\.\d+\.\d+)"', re.MULTILINE),
      'version = "{version}"'),
-    ("desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.toml",
+    ("apps/teshi-tauri/Cargo.toml", "apps/teshi-tauri/Cargo.toml",
      re.compile(r'^version = "(\d+\.\d+\.\d+)"', re.MULTILINE),
      'version = "{version}"'),
-    ("desktop/package.json", "desktop/package.json",
+    ("apps/teshi-tauri/frontend/package.json", "apps/teshi-tauri/frontend/package.json",
      re.compile(r'"version": "(\d+\.\d+\.\d+)"'),
      '"version": "{version}"'),
-    ("desktop/src-tauri/tauri.conf.json", "desktop/src-tauri/tauri.conf.json",
+    ("apps/teshi-tauri/tauri.conf.json", "apps/teshi-tauri/tauri.conf.json",
      re.compile(r'"version": "(\d+\.\d+\.\d+)"'),
      '"version": "{version}"'),
     ("extension/teshi-bridge/manifest.json", "extension/teshi-bridge/manifest.json",
@@ -190,9 +190,9 @@ def validate_release_artifacts() -> bool:
     if lock.is_file():
         try:
             text = lock.read_text(encoding="utf-8")
-            # Ensure the root package version is present and non-empty.
-            if 'name = "teshi"' not in text:
-                print("  ❌ Cargo.lock missing root package entry.")
+            # Ensure the distributable CLI package is present and non-empty.
+            if 'name = "teshi-cli"' not in text:
+                print("  ❌ Cargo.lock missing teshi-cli package entry.")
                 ok = False
         except Exception as e:
             print(f"  ❌ Cargo.lock read error: {e}")

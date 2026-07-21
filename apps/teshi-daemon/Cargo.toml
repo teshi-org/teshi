@@ -1,0 +1,31 @@
+[package]
+name = "teshi-daemon"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Local HTTP/WebSocket host for teshi desktop UI in the browser"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { version = "0.8", features = ["ws"] }
+chrono = { workspace = true }
+clap = { workspace = true }
+fd-lock = "4"
+futures-util = "0.3"
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+teshi-core = { workspace = true }
+teshi-engine = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["io"] }
+toml = "0.8"
+tower-http = { version = "0.6", features = ["fs", "cors", "set-header"] }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+webbrowser = "1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

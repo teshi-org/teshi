@@ -1,0 +1,36 @@
+[package]
+name = "teshi-tui"
+version = "0.7.9"
+edition = "2024"
+authors = ["teshi-org"]
+license = "MIT"
+description = "Terminal-first mindmap editor for structured notes and navigation."
+repository = "https://github.com/teshi-org/teshi"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+arboard = "3"
+base64.workspace = true
+clap.workspace = true
+crossterm = "=0.28.1"
+dirs = "6"
+futures = "0.3"
+inquire = "0.7"
+ratatui = "0.29"
+reqwest.workspace = true
+ropey = "1"
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+teshi-agent.workspace = true
+teshi-core.workspace = true
+teshi-engine.workspace = true
+tokio.workspace = true
+toml = "0.8"
+tui-tree-widget = "0.23"
+unicode-width = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
