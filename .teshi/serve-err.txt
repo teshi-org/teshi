@@ -1,3 +1,0 @@
-embedded sidecar ws_url=ws://127.0.0.1:54106
-cdp endpoint=\\?\D:\Dev\Rust\teshi\.teshi\cdp-endpoint.json
-embedded sidecar running; press Ctrl+C to stop

@@ -132,10 +132,10 @@ If you prefer to do it step by step:
 
 1. **Analyze commits** since last tag to determine bump type
 2. **Update version** in all 5 component files (must match):
-   - `Cargo.toml` (root)
-   - `desktop/src-tauri/Cargo.toml`
-   - `desktop/package.json`
-   - `desktop/src-tauri/tauri.conf.json`
+   - `apps/teshi-cli/Cargo.toml`
+   - `apps/teshi-tauri/Cargo.toml`
+   - `apps/teshi-tauri/frontend/package.json`
+   - `apps/teshi-tauri/tauri.conf.json`
    - `extension/teshi-bridge/manifest.json`
 3. **Commit and tag**: `git commit -m "chore: bump version to vX.Y.Z"` then `git tag vX.Y.Z`
 4. **Push**: `git push origin main && git push origin vX.Y.Z`

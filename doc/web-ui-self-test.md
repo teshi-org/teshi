@@ -57,7 +57,7 @@ teshi browser doctor
 5. Record bindings with **bdd-locator** (RVP verification) or follow **agent-web-ui-flow**.
 6. Replay: `teshi browser replay --non-interactive --yes`
 
-Use stable `[data-testid="..."]` selectors (see `desktop/src/panels/` and **web-ui-bootstrap** skill).
+Use stable `[data-testid="..."]` selectors (see `apps/teshi-tauri/frontend/src/panels/` and **web-ui-bootstrap** skill).
 
 ## Stable workflow (CI / smoke)
 

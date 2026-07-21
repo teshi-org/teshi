@@ -47,9 +47,9 @@ teshi.toml
 .teshi/logs/
 .teshi/daemon.json
 
-# --- teshi-desktop (Tauri + Vite) ---
-desktop/node_modules/
-desktop/dist/
+# --- teshi-tauri frontend (Tauri + Vite) ---
+apps/teshi-tauri/frontend/node_modules/
+apps/teshi-tauri/frontend/dist/
 
 # Local release packaging output (binaries, archives, checksums)
 release-pack/

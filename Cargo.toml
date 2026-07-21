@@ -1,58 +1,33 @@
-[package]
-name = "teshi"
-version = "0.7.9"
-edition = "2024"
-authors = ["teshi-org"]
-license = "MIT"
-description = "Terminal-first mindmap editor for structured notes and navigation."
-repository = "https://github.com/teshi-org/teshi"
-readme = "README.md"
-keywords = ["tui", "mindmap", "editor", "terminal", "notes"]
-publish = false
-
 [profile.release]
 lto = true
 strip = "symbols"
 
-[package.metadata.wix]
-eula = false
-
 [workspace]
+resolver = "3"
 members = [
-    ".",
-    "crates/teshi-gherkin",
-    "crates/teshi-runtime",
-    "crates/teshi-daemon",
-    "crates/teshi-terminal-sidecar",
-    "desktop/src-tauri",
+    "apps/teshi-cli",
+    "crates/teshi-tui",
+    "crates/teshi-core",
+    "crates/teshi-agent",
+    "crates/teshi-engine",
+    "apps/teshi-daemon",
+    "apps/teshi-terminal-sidecar",
+    "apps/teshi-tauri",
+    "apps/teshi-desktop",
 ]
 exclude = ["runner"]
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1"
-arboard = "3"
 base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
-crossterm = "=0.28.1"
-dirs = "6"
-inquire = "0.7"
-ratatui = "0.29"
-ropey = "1"
+reqwest = { version = "0.13", default-features = false, features = ["stream", "rustls", "json", "blocking"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
-teshi-gherkin = { path = "crates/teshi-gherkin" }
-teshi-runtime = { path = "crates/teshi-runtime" }
-teshi-daemon = { path = "crates/teshi-daemon" }
-toml = "0.8"
-tui-tree-widget = "0.23"
-unicode-width = "0.2"
-futures = "0.3"
-reqwest = { version = "0.13", default-features = false, features = ["stream", "rustls", "json", "blocking"] }
-tokio = { version = "1", features = ["rt", "macros", "time", "rt-multi-thread", "signal"] }
-
-[dev-dependencies]
-tempfile = "3"
-
-[build-dependencies]
-winres = "0.1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+teshi-agent = { path = "crates/teshi-agent" }
+teshi-core = { path = "crates/teshi-core" }
+teshi-engine = { path = "crates/teshi-engine" }
+teshi-tui = { path = "crates/teshi-tui" }

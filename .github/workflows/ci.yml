@@ -34,16 +34,16 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Compilation check
-        run: cargo check --workspace --exclude teshi-desktop --locked
+        run: cargo check --workspace --exclude teshi-tauri --locked
 
       - name: Run tests
-        run: cargo test --workspace --exclude teshi-desktop --locked
+        run: cargo test --workspace --exclude teshi-tauri --locked
 
       - name: Run clippy with warnings denied
-        run: cargo clippy --workspace --exclude teshi-desktop --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --exclude teshi-tauri --locked --all-targets --all-features -- -D warnings
 
       - name: Build doc
-        run: cargo doc --workspace --exclude teshi-desktop --locked --no-deps --document-private-items
+        run: cargo doc --workspace --exclude teshi-tauri --locked --no-deps --document-private-items
 
   desktop:
     name: teshi-desktop build
@@ -64,19 +64,18 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: desktop/package-lock.json
+          cache-dependency-path: apps/teshi-tauri/frontend/package-lock.json
 
       - name: Install frontend dependencies
-        working-directory: desktop
+        working-directory: apps/teshi-tauri/frontend
         run: npm ci
 
       - name: Build frontend
-        working-directory: desktop
+        working-directory: apps/teshi-tauri/frontend
         run: npm run build
 
-      - name: Build teshi-desktop (no bundle)
-        working-directory: desktop
-        run: npx tauri build --no-bundle
+      - name: Build teshi-tauri (no bundle)
+        run: npx --prefix apps/teshi-tauri/frontend tauri build --config apps/teshi-tauri/tauri.conf.json --no-bundle
 
   web-ui-smoke:
     name: teshi web UI smoke
@@ -97,7 +96,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: desktop/package-lock.json
+          cache-dependency-path: apps/teshi-tauri/frontend/package-lock.json
 
       - name: Setup Python
         uses: actions/setup-python@v5

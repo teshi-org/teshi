@@ -1,0 +1,13 @@
+[package]
+name = "teshi-core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Gherkin parser, multi-language keywords, and syntax highlighting for teshi"
+license = "MIT"
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+unicode-width = "0.2"
