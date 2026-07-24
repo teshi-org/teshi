@@ -44,5 +44,5 @@ pub trait LlmConfigBackend {
     fn set_llm_config(&self, update: LlmConfigUpdate) -> Result<(), String>;
 }
 
-/// Shared backend handle used by [`crate::LlmConfigView`].
+/// Shared backend handle used by [`crate::AppShell`] / [`crate::LlmConfigView`].
 pub type SharedLlmBackend = Rc<dyn LlmConfigBackend>;

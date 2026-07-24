@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use gpui::{App, Bounds, WindowBounds, WindowOptions, prelude::*, px, size};
 use teshi_ui::{
-    LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate, LlmConfigView, bind_llm_config_keys,
+    AppShell, LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate, bind_llm_config_keys,
 };
 
 struct NativeLlmBackend;
@@ -41,7 +41,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| LlmConfigView::new(backend.clone(), window, cx)),
+            |window, cx| cx.new(|cx| AppShell::new(backend.clone(), window, cx)),
         )
         .expect("open teshi-desktop window");
         cx.activate(true);

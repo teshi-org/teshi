@@ -1,4 +1,4 @@
-//! Single-screen LLM configuration UI for the GPUI spike.
+//! LLM configuration form hosted under the settings surface.
 
 use gpui::{
     App, Context, FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, KeyBinding,
@@ -35,7 +35,10 @@ impl Field {
     }
 }
 
-/// Root view: base URL, model, and API key with Save.
+/// Settings-hosted form: base URL, model, and API key with Save.
+///
+/// Key context remains `LlmConfigView` so [`bind_llm_config_keys`] still applies
+/// when this view is nested under [`crate::AppShell`] settings.
 pub struct LlmConfigView {
     backend: SharedLlmBackend,
     focus_handle: FocusHandle,
@@ -49,9 +52,11 @@ pub struct LlmConfigView {
 
 impl LlmConfigView {
     /// Create the view and load the initial snapshot from `backend`.
-    pub fn new(backend: SharedLlmBackend, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    ///
+    /// Does not take window focus; the parent shell focuses this view when
+    /// settings is opened so the main surface stays the default landing target.
+    pub fn new(backend: SharedLlmBackend, _window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        window.focus(&focus_handle, cx);
         let mut view = Self {
             backend,
             focus_handle,
@@ -138,11 +143,11 @@ impl LlmConfigView {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ch) = event.keystroke.key_char.as_ref() {
-            if ch.chars().all(|c| !c.is_control()) {
-                self.active_buffer_mut().push_str(ch);
-                cx.notify();
-            }
+        if let Some(ch) = event.keystroke.key_char.as_ref()
+            && ch.chars().all(|c| !c.is_control())
+        {
+            self.active_buffer_mut().push_str(ch);
+            cx.notify();
         }
     }
 
@@ -207,13 +212,13 @@ impl Focusable for LlmConfigView {
 
 impl Render for LlmConfigView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Fill the settings content area without a second full-window chrome.
         div()
             .size_full()
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
-            .bg(rgb(0x1e1e2e))
             .text_color(rgb(0xcdd6f4))
             .track_focus(&self.focus_handle(cx))
             .key_context("LlmConfigView")
@@ -236,7 +241,7 @@ impl Render for LlmConfigView {
                         div()
                             .text_xl()
                             .font_weight(FontWeight::MEDIUM)
-                            .child("LLM Configuration"),
+                            .child("LLM"),
                     )
                     .child(
                         div()

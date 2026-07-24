@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use teshi_ui::{
-    LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate, LlmConfigView, bind_llm_config_keys,
+    AppShell, LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate, bind_llm_config_keys,
 };
 use wasm_bindgen::prelude::*;
 
@@ -64,7 +64,7 @@ pub fn run() -> Result<(), JsValue> {
         bind_llm_config_keys(cx);
         let backend: Rc<dyn LlmConfigBackend> = Rc::new(WasmLlmBackend);
         cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-            cx.new(|cx| LlmConfigView::new(backend.clone(), window, cx))
+            cx.new(|cx| AppShell::new(backend.clone(), window, cx))
         })
         .expect("open teshi-web window");
         cx.activate(true);
