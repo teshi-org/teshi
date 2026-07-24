@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="teshi GPUI web shell (LLM config spike)">
+    <title>teshi — LLM Config</title>
+    <style>
+      :root { color: #cdd6f4; background: #1e1e2e; font-family: system-ui, sans-serif; }
+      * { box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; margin: 0; }
+      body { overflow: hidden; }
+      body > canvas { display: block; width: 100%; height: 100%; }
+      #loading {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: #1e1e2e;
+        color: #a6adc8;
+        font-size: 0.85rem;
+        letter-spacing: 0.12em;
+      }
+      #loading[hidden] { display: none; }
+      #loading.error { color: #f38ba8; letter-spacing: normal; padding: 2rem; text-align: center; }
+    </style>
+  </head>
+  <body>
+    <div id="loading" role="status">LOADING TESHI</div>
+    <noscript>teshi requires JavaScript and WebAssembly.</noscript>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

@@ -14,7 +14,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, Method, StatusCode};
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -23,12 +23,13 @@ use teshi_core::{BddFeature, BddProject, FeatureRenderPayload, StepIndex};
 use crate::session::{Role, SessionStore};
 use teshi_engine::{
     check_project_switch_allowed, confirm_locator, get_active_step, get_pending_locator,
-    get_project_root, get_recent_projects, highlight_locator, list_dir, load_project_settings,
-    open_project, reject_locator, render_feature, resize_terminal, spawn_terminal,
-    start_browser_sidecar, step_binding_statuses, stop_browser_sidecar, sync_active_step,
-    teardown_runtime, unbind_step, write_terminal, ActiveStep, BrowserError, BrowserMode,
-    BrowserStartResult, DirEntry, PendingLocator, ProjectSettings, RuntimeEvent, StepBinding,
-    StepBindingStatus, TeshiEngine,
+    get_project_root, get_recent_projects, highlight_locator, list_dir, load_llm_config_public,
+    load_project_settings, open_project, reject_locator, render_feature, resize_terminal,
+    save_stored_llm_config, spawn_terminal, start_browser_sidecar, step_binding_statuses,
+    stop_browser_sidecar, sync_active_step, teardown_runtime, unbind_step, write_terminal,
+    ActiveStep, BrowserError, BrowserMode, BrowserStartResult, DirEntry, LlmConfigPublic,
+    LlmConfigWrite, PendingLocator, ProjectSettings, RuntimeEvent, StepBinding, StepBindingStatus,
+    TeshiEngine,
 };
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
@@ -74,6 +75,9 @@ pub async fn run_server(
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
+        // Configuration writes deliberately remain same-origin. In particular,
+        // allowing cross-origin PUT would let an arbitrary website redirect LLM
+        // requests (and the stored API key) to an attacker-controlled base URL.
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers(Any);
 
@@ -98,6 +102,8 @@ pub async fn run_server(
         .route("/api/v1/steps/statuses", get(api_step_statuses))
         .route("/api/v1/steps/unbind", post(api_unbind_step))
         .route("/api/v1/settings/project", get(api_project_settings))
+        .route("/api/v1/llm/config", get(api_get_llm_config))
+        .route("/api/v1/llm/config", put(api_put_llm_config))
         .route("/api/v1/locator/confirm", post(api_confirm_locator))
         .route("/api/v1/locator/reject", post(api_reject_locator))
         .route("/api/v1/locator/highlight", post(api_highlight_locator))
@@ -528,6 +534,25 @@ async fn api_project_settings(
     ))
 }
 
+async fn api_get_llm_config(
+    State(state): State<DaemonState>,
+) -> Result<Json<LlmConfigPublic>, ApiError> {
+    state.touch();
+    // Never log the stored API key; only return the masked public snapshot.
+    Ok(Json(
+        load_llm_config_public().map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
+}
+
+async fn api_put_llm_config(
+    State(state): State<DaemonState>,
+    Json(body): Json<LlmConfigWrite>,
+) -> Result<Json<LlmConfigPublic>, ApiError> {
+    state.touch();
+    let stored = save_stored_llm_config(&body).map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(teshi_engine::to_public(&stored)))
+}
+
 #[derive(Debug, Deserialize)]
 struct StepCatalogQuery {
     min_count: Option<usize>,
@@ -931,9 +956,10 @@ async fn api_requirements_generate(
         return Err("Requirements text is empty".to_string().into());
     }
 
-    // Load LLM config
-    let (api_key, base_url, model) =
-        teshi_engine::llm::llm_config_from_env().map_err(ApiError::internal)?;
+    // Prefer user-level llm-config.json (GPUI spike) over TESHI_LLM_* env alone.
+    let cfg =
+        teshi_engine::effective_llm_config().map_err(|e| ApiError::internal(e.to_string()))?;
+    let (api_key, base_url, model) = (cfg.api_key, cfg.base_url, cfg.model);
 
     // Build the system prompt
     let system_prompt = build_requirements_system_prompt();

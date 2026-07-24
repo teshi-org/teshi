@@ -1,0 +1,10 @@
+//! Shared GPUI views for teshi desktop and web shells.
+//!
+//! This crate must not depend on `teshi-engine` or `teshi-agent`. Platform I/O
+//! goes through [`LlmConfigBackend`].
+
+mod backend;
+mod llm_config_view;
+
+pub use backend::{LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate, SharedLlmBackend};
+pub use llm_config_view::{LlmConfigView, bind_llm_config_keys};

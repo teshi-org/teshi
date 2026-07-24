@@ -8,7 +8,8 @@ license = "MIT"
 publish = false
 
 [dependencies]
-gpui = "0.2"
-teshi-agent = { path = "../../crates/teshi-agent" }
-teshi-core = { path = "../../crates/teshi-core" }
-teshi-engine = { path = "../../crates/teshi-engine" }
+anyhow = { workspace = true }
+gpui = { workspace = true }
+gpui_platform = { workspace = true }
+teshi-engine = { workspace = true }
+teshi-ui = { workspace = true }

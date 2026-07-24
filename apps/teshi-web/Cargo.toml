@@ -1,0 +1,21 @@
+[package]
+name = "teshi-web"
+version = "0.1.0"
+edition = "2024"
+description = "teshi GPUI WASM shell"
+authors = ["teshi-org"]
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+console_error_panic_hook = "0.1"
+gpui = { workspace = true }
+gpui_platform = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+teshi-ui = { workspace = true }
+wasm-bindgen = "=0.2.126"
+web-sys = { version = "0.3", features = ["XmlHttpRequest"] }

@@ -1,0 +1,13 @@
+[package]
+name = "teshi-ui"
+version = "0.1.0"
+edition = "2024"
+description = "Shared GPUI views for teshi desktop and web shells"
+authors = ["teshi-org"]
+license = "MIT"
+publish = false
+
+[dependencies]
+gpui = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
