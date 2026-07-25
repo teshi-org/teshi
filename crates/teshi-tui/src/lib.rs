@@ -8,6 +8,7 @@ mod diff;
 mod editor_buffer;
 mod engine;
 mod highlight;
+mod input;
 mod keymap;
 mod llm;
 pub mod markdown;
@@ -26,7 +27,7 @@ use anyhow::Result;
 use clap::Parser;
 use crossterm::Command;
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -36,24 +37,31 @@ use ratatui::backend::CrosstermBackend;
 
 /// Enable mouse tracking for in-app selection (click, drag, scroll) using
 /// ANSI escape sequences — basic tracking (`?1000h`) for click/release,
-/// button-event tracking (`?1002h`) for drag-based selection, any-event
-/// tracking (`?1003h`) for hover detection, and SGR extended coordinates
-/// (`?1006h`) for positions > 223.
+/// any-event tracking (`?1003h`) for drag and hover detection, RXVT extended
+/// coordinates (`?1015h`) as a compatibility fallback, and SGR extended
+/// coordinates (`?1006h`) as the preferred encoding.
 ///
-/// Uses raw ANSI writes for all platforms so the same SGR mode is guaranteed.
+/// This matches Textual's widely compatible mode sequence. Any-event tracking
+/// already includes button motion, so enabling `?1002h` as well is redundant
+/// and needlessly introduces another tracking-mode transition for multiplexers.
 struct EnableAppMouseCapture;
 
 impl Command for EnableAppMouseCapture {
     fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        f.write_str("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h")
+        f.write_str("\x1b[?1000h\x1b[?1003h\x1b[?1015h\x1b[?1006h")
     }
 
     #[cfg(windows)]
     fn execute_winapi(&self) -> io::Result<()> {
-        // Modern Windows terminals (Windows Terminal, ConEmu, Alacritty,
-        // VS Code terminal) all support ANSI escape codes, so the
-        // write_ansi path works fine. This stub keeps the trait happy.
         Ok(())
+    }
+
+    #[cfg(windows)]
+    fn is_ansi_code_supported(&self) -> bool {
+        // Mouse tracking is an output protocol between teshi and the terminal
+        // (or multiplexer). Force the ANSI path even when crossterm cannot
+        // detect VT support through a Zellij pseudoterminal.
+        true
     }
 }
 
@@ -62,12 +70,53 @@ struct DisableAppMouseCapture;
 
 impl Command for DisableAppMouseCapture {
     fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        f.write_str("\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l")
+        f.write_str("\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1000l")
     }
 
     #[cfg(windows)]
     fn execute_winapi(&self) -> io::Result<()> {
         Ok(())
+    }
+
+    #[cfg(windows)]
+    fn is_ansi_code_supported(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DisableAppMouseCapture, EnableAppMouseCapture, write_diagnostic_event};
+    use crossterm::Command;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn mouse_capture_uses_multiplexer_compatible_modes() {
+        let mut enable = String::new();
+        EnableAppMouseCapture.write_ansi(&mut enable).unwrap();
+        assert_eq!(enable, "\x1b[?1000h\x1b[?1003h\x1b[?1015h\x1b[?1006h");
+
+        let mut disable = String::new();
+        DisableAppMouseCapture.write_ansi(&mut disable).unwrap();
+        assert_eq!(disable, "\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1000l");
+    }
+
+    #[test]
+    fn diagnostic_events_redact_typed_and_pasted_text() {
+        let secret = "sk-secret-value";
+        let mut output = Vec::new();
+
+        write_diagnostic_event(
+            &mut output,
+            &Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+        )
+        .unwrap();
+        write_diagnostic_event(&mut output, &Event::Paste(secret.to_string())).unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Char(<redacted>)"));
+        assert!(output.contains("Paste(<redacted>)"));
+        assert!(!output.contains(secret));
     }
 }
 
@@ -126,14 +175,28 @@ impl Drop for TerminalGuard {
     }
 }
 
+fn write_diagnostic_event(writer: &mut impl Write, event: &Event) -> io::Result<()> {
+    match event {
+        Event::Key(key_event) if matches!(key_event.code, KeyCode::Char(_)) => writeln!(
+            writer,
+            "event: Key {{ code: Char(<redacted>), modifiers: {:?}, kind: {:?}, state: {:?} }}",
+            key_event.modifiers, key_event.kind, key_event.state
+        ),
+        Event::Paste(_) => writeln!(writer, "event: Paste(<redacted>)"),
+        _ => writeln!(writer, "event: {event:?}"),
+    }
+}
+
 /// Runs the terminal application and non-daemon CLI commands.
 pub fn run() -> Result<()> {
-    if let Ok(path) = std::env::var("TESHI_DIAG_PATH")
-        && let Ok(mut file) = std::fs::OpenOptions::new()
+    let mut diag_file = std::env::var("TESHI_DIAG_PATH").ok().and_then(|path| {
+        std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
-    {
+            .open(path)
+            .ok()
+    });
+    if let Some(file) = diag_file.as_mut() {
         let _ = writeln!(file, "pid {}: entered main", std::process::id());
     }
 
@@ -205,6 +268,7 @@ pub fn run() -> Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let mut app = App::from_cli(&cli_args)?;
+    let mut event_source = input::EventSource::new()?;
 
     while !app.should_quit {
         app.poll_runner_events();
@@ -213,8 +277,12 @@ pub fn run() -> Result<()> {
         app.poll_status_message_expiry();
         terminal.draw(|frame| ui::render(frame, &mut app))?;
 
-        if event::poll(Duration::from_millis(50))? {
-            match event::read()? {
+        if let Some(terminal_event) = event_source.next(Duration::from_millis(50))? {
+            if let Some(file) = diag_file.as_mut() {
+                let _ = write_diagnostic_event(file, &terminal_event);
+                let _ = file.flush();
+            }
+            match terminal_event {
                 Event::Key(key_event) => {
                     if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                         continue;
