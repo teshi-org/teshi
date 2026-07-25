@@ -1,10 +1,18 @@
 import init, { run } from "./pkg/teshi_web.js";
 
+const STARTUP_TIMEOUT_MS = 45_000;
+
 const loading = document.getElementById("loading");
 const loadingLabel = document.getElementById("loading-label");
 const loadingDetail = document.getElementById("loading-detail");
 const loadingBarTrack = document.getElementById("loading-bar-track");
 const loadingBarFill = document.getElementById("loading-bar-fill");
+const loadingErrorMessage = document.getElementById("loading-error-message");
+const loadingErrorHint = document.getElementById("loading-error-hint");
+
+let settled = false;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let startupTimer = null;
 
 /**
  * @param {{ label: string, ratio?: number | null, detail?: string, indeterminate?: boolean }} opts
@@ -32,6 +40,81 @@ function setProgress({ label, ratio = null, detail = "", indeterminate = false }
   loadingBarTrack.classList.remove("indeterminate");
   loadingBarTrack.setAttribute("aria-valuenow", String(percent));
   loadingBarFill.style.width = `${percent}%`;
+}
+
+/**
+ * @returns {string}
+ */
+function insecureContextHint() {
+  if (window.isSecureContext) {
+    return "";
+  }
+  return (
+    "This page is not a secure context (plain HTTP on a LAN IP is not treated like localhost). " +
+    "WebGPU may be unavailable. Serve over HTTPS, open via http://127.0.0.1 on this device, " +
+    "or add this origin to chrome://flags/#unsafely-treat-insecure-origin-as-secure."
+  );
+}
+
+/**
+ * @param {unknown} err
+ * @returns {string}
+ */
+function formatError(err) {
+  if (err instanceof Error) {
+    return err.message || String(err);
+  }
+  if (typeof err === "string") {
+    return err;
+  }
+  try {
+    return String(err);
+  } catch {
+    return "Unknown error";
+  }
+}
+
+/**
+ * Show a persistent error on the loading overlay (keeps panel structure).
+ *
+ * @param {string} message
+ * @param {string} [hint]
+ */
+function showError(message, hint = "") {
+  if (settled) {
+    return;
+  }
+  settled = true;
+  if (startupTimer != null) {
+    clearTimeout(startupTimer);
+    startupTimer = null;
+  }
+
+  console.error(message, hint || undefined);
+  if (!loading) {
+    return;
+  }
+
+  loading.classList.add("error");
+  loading.removeAttribute("hidden");
+  if (loadingErrorMessage) {
+    loadingErrorMessage.textContent = message;
+  }
+  if (loadingErrorHint) {
+    loadingErrorHint.textContent = hint;
+  }
+}
+
+function hideLoading() {
+  if (settled) {
+    return;
+  }
+  settled = true;
+  if (startupTimer != null) {
+    clearTimeout(startupTimer);
+    startupTimer = null;
+  }
+  loading?.setAttribute("hidden", "");
 }
 
 /**
@@ -126,15 +209,27 @@ try {
 
   setProgress({
     label: "Starting…",
-    ratio: 1,
-    detail: "100%",
+    indeterminate: true,
+    detail: "Initializing GPU…",
   });
-  run();
-  loading?.setAttribute("hidden", "");
+
+  startupTimer = setTimeout(() => {
+    showError(
+      "Timed out while starting the UI. The GPU may be unavailable or still initializing.",
+      insecureContextHint(),
+    );
+  }, STARTUP_TIMEOUT_MS);
+
+  run(
+    () => {
+      hideLoading();
+    },
+    /** @param {string} message */
+    (message) => {
+      const hint = insecureContextHint();
+      showError(formatError(message), hint);
+    },
+  );
 } catch (err) {
-  console.error(err);
-  if (loading) {
-    loading.classList.add("error");
-    loading.textContent = `Failed to start teshi-web: ${err}`;
-  }
+  showError(`Failed to start teshi-web: ${formatError(err)}`, insecureContextHint());
 }

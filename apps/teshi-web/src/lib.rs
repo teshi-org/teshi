@@ -77,8 +77,13 @@ impl LlmConfigBackend for WasmLlmBackend {
     }
 }
 
+/// Start the GPUI web shell and report async startup outcome to JavaScript.
+///
+/// GPU initialization is asynchronous. Call `on_ready` after the window opens
+/// successfully, or `on_error` with a short English message if it fails.
+/// Callback invocation failures are logged to the browser console.
 #[wasm_bindgen]
-pub fn run() -> Result<(), JsValue> {
+pub fn run(on_ready: js_sys::Function, on_error: js_sys::Function) -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
     gpui_platform::web_init();
 
@@ -90,14 +95,25 @@ pub fn run() -> Result<(), JsValue> {
     std::mem::forget(wasm_app.0.clone());
     let app = unsafe { std::mem::transmute::<WasmApplication, gpui::Application>(wasm_app) };
 
-    app.run(|cx: &mut gpui::App| {
+    app.run(move |cx: &mut gpui::App| {
         bind_llm_config_keys(cx);
         let backend: Rc<dyn LlmConfigBackend> = Rc::new(WasmLlmBackend);
-        cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+        match cx.open_window(gpui::WindowOptions::default(), |window, cx| {
             cx.new(|cx| AppShell::new(backend.clone(), window, cx))
-        })
-        .expect("open teshi-web window");
-        cx.activate(true);
+        }) {
+            Ok(_) => {
+                cx.activate(true);
+                if let Err(err) = on_ready.call0(&JsValue::NULL) {
+                    web_sys::console::error_1(&err);
+                }
+            }
+            Err(err) => {
+                let message = format!("Failed to open window: {err:#}");
+                if let Err(cb_err) = on_error.call1(&JsValue::NULL, &JsValue::from_str(&message)) {
+                    web_sys::console::error_1(&cb_err);
+                }
+            }
+        }
     });
 
     Ok(())

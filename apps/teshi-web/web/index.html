@@ -23,12 +23,16 @@
       #loading[hidden] { display: none; }
       #loading.error {
         color: #f38ba8;
-        letter-spacing: normal;
-        text-align: center;
       }
-      #loading.error .loading-panel { display: none; }
+      #loading.error .loading-progress { display: none; }
+      #loading.error #loading-error { display: flex; }
       .loading-panel {
-        width: min(20rem, 100%);
+        width: min(22rem, 100%);
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+      .loading-progress {
         display: flex;
         flex-direction: column;
         gap: 0.75rem;
@@ -66,24 +70,59 @@
         color: #6c7086;
         min-height: 1em;
       }
+      #loading-error {
+        display: none;
+        flex-direction: column;
+        gap: 0.65rem;
+        text-align: left;
+      }
+      #loading-error-title {
+        font-size: 0.85rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: #f38ba8;
+      }
+      #loading-error-message {
+        font-size: 0.9rem;
+        line-height: 1.45;
+        color: #cdd6f4;
+        letter-spacing: normal;
+        text-transform: none;
+        word-break: break-word;
+      }
+      #loading-error-hint {
+        font-size: 0.8rem;
+        line-height: 1.45;
+        color: #a6adc8;
+        letter-spacing: normal;
+        text-transform: none;
+      }
+      #loading-error-hint:empty { display: none; }
     </style>
   </head>
   <body>
     <div id="loading" role="status" aria-live="polite">
       <div class="loading-panel">
-        <div id="loading-label" class="loading-label">Downloading…</div>
-        <div
-          id="loading-bar-track"
-          class="loading-bar-track"
-          role="progressbar"
-          aria-valuemin="0"
-          aria-valuemax="100"
-          aria-valuenow="0"
-          aria-labelledby="loading-label"
-        >
-          <div id="loading-bar-fill" class="loading-bar-fill"></div>
+        <div class="loading-progress">
+          <div id="loading-label" class="loading-label">Downloading…</div>
+          <div
+            id="loading-bar-track"
+            class="loading-bar-track"
+            role="progressbar"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow="0"
+            aria-labelledby="loading-label"
+          >
+            <div id="loading-bar-fill" class="loading-bar-fill"></div>
+          </div>
+          <div id="loading-detail" class="loading-detail">0%</div>
         </div>
-        <div id="loading-detail" class="loading-detail">0%</div>
+        <div id="loading-error" role="alert">
+          <div id="loading-error-title">Failed to start</div>
+          <div id="loading-error-message"></div>
+          <div id="loading-error-hint"></div>
+        </div>
       </div>
     </div>
     <noscript>teshi requires JavaScript and WebAssembly.</noscript>

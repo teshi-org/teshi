@@ -8253,6 +8253,7 @@ dependencies = [
  "console_error_panic_hook",
  "gpui",
  "gpui_platform",
+ "js-sys",
  "serde",
  "serde_json",
  "teshi-ui",
