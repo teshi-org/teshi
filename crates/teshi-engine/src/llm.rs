@@ -1,12 +1,13 @@
-//! Shared LLM transport — streaming chat completions over HTTP.
+//! Shared LLM transport — chat completions (and later Responses / Anthropic).
 //!
 //! This module provides a minimal, non-blocking interface for sending prompts
-//! to an OpenAI-compatible API and receiving streaming completions. It follows
-//! the same background-thread + channel pattern as `runner.rs` so the
+//! to configured LLM providers and receiving completions as [`LlmEvent`]s. It
+//! follows the same background-thread + channel pattern as `runner.rs` so the
 //! synchronous TUI event loop never blocks on network I/O.
 //!
-//! Streaming is the only mode: partial text chunks are delivered via
-//! `LlmEvent::Chunk` so the UI can render the response in real time.
+//! Streaming is the default; when `LlmConfig::stream` is false, a one-shot JSON
+//! response is synthesized into the same `Chunk` / `ToolCallRequest` / `Done`
+//! event sequence.
 //!
 //! # Tool calling
 //!
@@ -28,9 +29,13 @@ use std::sync::Arc;
 use std::thread;
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 pub use teshi_core::llm::{ChatMessage, ToolCall, ToolDefinition};
+
+use crate::model_profile::{
+    ApiStyle, PROVIDER_ANTHROPIC, PROVIDER_DEEPSEEK_OPENAI, PROVIDER_OPENAI,
+};
 
 pub fn llm_config_from_env() -> Result<(String, String, String), String> {
     let api_key = std::env::var("TESHI_LLM_API_KEY")
@@ -103,26 +108,117 @@ pub async fn call_llm_with_tool(
     serde_json::from_str(arguments).map_err(|e| format!("Failed to parse tool call arguments: {e}"))
 }
 
+/// Call the provider-aware transport and return the selected tool's arguments.
+///
+/// This is intended for one-shot daemon operations that require a structured
+/// tool result while still honoring the active profile's provider, API style,
+/// streaming mode, extra headers, and body options.
+#[allow(clippy::too_many_arguments)]
+pub async fn call_llm_with_tool_config(
+    mut config: LlmConfig,
+    system: &str,
+    user: &str,
+    tool_name: &str,
+    tool_description: &str,
+    tool_parameters: Value,
+) -> Result<Value, String> {
+    let tool_choice = if config.provider == PROVIDER_ANTHROPIC {
+        json!({"type": "tool", "name": tool_name})
+    } else if config.provider == PROVIDER_OPENAI && config.api_style == ApiStyle::Responses {
+        json!({"type": "function", "name": tool_name})
+    } else {
+        json!({"type": "function", "function": {"name": tool_name}})
+    };
+    config
+        .chat_options
+        .insert("tool_choice".into(), tool_choice);
+
+    let request = LlmRequest::Chat {
+        system: Some(system.to_string()),
+        messages: vec![ChatMessage {
+            role: "user".into(),
+            content: user.to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }],
+        tools: Some(vec![ToolDefinition {
+            name: tool_name.to_string(),
+            description: tool_description.to_string(),
+            parameters: tool_parameters,
+        }]),
+    };
+    let expected_tool_name = tool_name.to_string();
+
+    tokio::task::spawn_blocking(move || {
+        let (handle, events) = spawn_llm(config);
+        handle
+            .send(request)
+            .map_err(|e| format!("failed to submit LLM request: {e:#}"))?;
+
+        for event in events {
+            match event {
+                LlmEvent::Chunk { .. } => {}
+                LlmEvent::ToolCallRequest { tool_calls, .. } => {
+                    let tool_call = tool_calls
+                        .into_iter()
+                        .find(|call| call.name == expected_tool_name)
+                        .ok_or_else(|| {
+                            format!("LLM response did not call tool '{expected_tool_name}'")
+                        })?;
+                    return serde_json::from_str(&tool_call.arguments)
+                        .map_err(|e| format!("Failed to parse tool call arguments as JSON: {e}"));
+                }
+                LlmEvent::Done { .. } => {
+                    return Err(format!(
+                        "LLM response completed without calling tool '{expected_tool_name}'"
+                    ));
+                }
+                LlmEvent::Error { message } => return Err(message),
+            }
+        }
+        Err("LLM worker exited without a terminal event".to_string())
+    })
+    .await
+    .map_err(|e| format!("LLM worker task failed: {e}"))?
+}
+
 // ── Configuration ────────────────────────────────────────────────────────────
 
-/// LLM client configuration loaded from environment variables.
+/// LLM client configuration from a model profile or environment variables.
 ///
 /// | Variable | Required | Default |
 /// |---|---|---|
-/// | `TESHI_LLM_API_KEY` | Yes | — |
+/// | `TESHI_LLM_API_KEY` | Yes (env path) | — |
 /// | `TESHI_LLM_BASE_URL` | No | `https://api.openai.com/v1` |
 /// | `TESHI_LLM_MODEL` | No | `gpt-4o-mini` |
 /// | `TESHI_LLM_MAX_TOKENS` | No | `1024` |
 /// | `TESHI_LLM_TEMPERATURE` | No | `0.7` |
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
+    /// API key for the configured provider.
     pub api_key: String,
+    /// Resolved API base URL (provider default applied when profile base was empty).
     pub base_url: String,
+    /// Model identifier.
     pub model: String,
+    /// Maximum generation tokens.
     pub max_tokens: u32,
+    /// Sampling temperature (chat completions).
     pub temperature: f32,
+    /// Optional context window hint.
     #[allow(dead_code)]
     pub context_window: Option<u32>,
+    /// Built-in provider id (`openai`, `anthropic`, `deepseek-openai`).
+    pub provider: String,
+    /// Effective API style for routing.
+    pub api_style: ApiStyle,
+    /// When true, use the provider streaming protocol.
+    pub stream: bool,
+    /// Extra HTTP headers merged into outbound requests.
+    pub http_headers: HashMap<String, String>,
+    /// Extra JSON body fields shallow-merged into the request (core fields win).
+    pub chat_options: HashMap<String, Value>,
 }
 
 impl LlmConfig {
@@ -152,6 +248,11 @@ impl LlmConfig {
             max_tokens,
             temperature,
             context_window,
+            provider: PROVIDER_OPENAI.into(),
+            api_style: ApiStyle::ChatCompletions,
+            stream: true,
+            http_headers: HashMap::new(),
+            chat_options: HashMap::new(),
         })
     }
 
@@ -292,8 +393,8 @@ fn run_llm_worker(
 ///
 /// Retries up to 3 times with exponential backoff for transient errors
 /// (connection failures, timeouts, 5xx). Non-transient errors (4xx,
-/// client build failure) are not retried and are already reported by
-/// `chat_completion` as `LlmEvent::Error`.
+/// client build failure, malformed provider payload) are not retried and are
+/// reported here as `LlmEvent::Error` if the transport returned an error.
 async fn process_chat_request(
     config: &LlmConfig,
     system: Option<String>,
@@ -352,7 +453,7 @@ async fn process_chat_request(
                 // chat_completion returned an error
                 let err_msg = format!("{err:#}");
                 if !is_transient_error(&err_msg) {
-                    // Non-transient: error already sent by chat_completion
+                    let _ = evt_tx.send(LlmEvent::Error { message: err_msg });
                     return;
                 }
                 last_error = Some(err_msg);
@@ -446,7 +547,35 @@ fn jitter_ms(base: u64, attempt: u32) -> u64 {
 
 // ── Request body builder ─────────────────────────────────────────────────────
 
-/// Build the JSON request body for a streaming chat completion.
+/// Shallow-merge `chat_options` under `body`, then re-apply `core` so required
+/// fields always win over conflicting option keys.
+pub(crate) fn merge_chat_options(
+    body: &mut Value,
+    chat_options: &HashMap<String, Value>,
+    core: &Map<String, Value>,
+) {
+    if let Some(obj) = body.as_object_mut() {
+        for (k, v) in chat_options {
+            obj.insert(k.clone(), v.clone());
+        }
+        for (k, v) in core {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+}
+
+/// Apply profile HTTP extras onto a reqwest request builder.
+pub(crate) fn apply_extra_headers(
+    mut builder: reqwest::RequestBuilder,
+    headers: &HashMap<String, String>,
+) -> reqwest::RequestBuilder {
+    for (name, value) in headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+    builder
+}
+
+/// Build the JSON request body for a chat completion (stream or not).
 fn build_request_body(
     config: &LlmConfig,
     system: Option<String>,
@@ -458,7 +587,7 @@ fn build_request_body(
         "messages": [],
         "max_tokens": config.max_tokens,
         "temperature": config.temperature,
-        "stream": true,
+        "stream": config.stream,
     });
 
     let mut json_messages: Vec<serde_json::Value> = Vec::new();
@@ -530,12 +659,33 @@ fn build_request_body(
         body["tools"] = serde_json::Value::Array(tools_json);
     }
 
+    // Core fields must win over chat_options keys such as `model` / `stream`.
+    let mut core = Map::new();
+    core.insert("model".into(), Value::String(config.model.clone()));
+    core.insert("messages".into(), body["messages"].clone());
+    core.insert("max_tokens".into(), json!(config.max_tokens));
+    core.insert("stream".into(), Value::Bool(config.stream));
+    if body.get("tools").is_some() {
+        core.insert("tools".into(), body["tools"].clone());
+    }
+    merge_chat_options(&mut body, &config.chat_options, &core);
+
     body
+}
+
+/// Whether this config should use OpenAI-compatible `/chat/completions`.
+fn uses_chat_completions(config: &LlmConfig) -> bool {
+    match config.provider.as_str() {
+        PROVIDER_DEEPSEEK_OPENAI => true,
+        PROVIDER_OPENAI => config.api_style == ApiStyle::ChatCompletions,
+        PROVIDER_ANTHROPIC => false,
+        _ => config.api_style == ApiStyle::ChatCompletions,
+    }
 }
 
 // ── Streaming chat completion ────────────────────────────────────────────────
 
-/// Execute a streaming chat completion request.
+/// Execute a chat request for the configured provider/style.
 ///
 /// On transient errors (connection failure, stream read error, timeout, 5xx),
 /// returns `Err(...)` so the caller can retry. On non-transient errors
@@ -549,11 +699,42 @@ async fn chat_completion(
     evt_tx: &Sender<LlmEvent>,
     cancel: &Arc<AtomicBool>,
 ) -> Result<()> {
-    let request_body = build_request_body(config, system, &messages, tools.as_deref());
+    if config.provider == PROVIDER_ANTHROPIC {
+        return crate::llm_anthropic::anthropic_messages_request(
+            config, system, messages, tools, evt_tx, cancel,
+        )
+        .await;
+    }
+    if config.provider == PROVIDER_OPENAI && config.api_style == ApiStyle::Responses {
+        return crate::llm_responses::responses_request(
+            config, system, messages, tools, evt_tx, cancel,
+        )
+        .await;
+    }
+    if uses_chat_completions(config) {
+        return chat_completions_request(config, system, messages, tools, evt_tx, cancel).await;
+    }
 
+    let _ = evt_tx.send(LlmEvent::Error {
+        message: format!(
+            "LLM transport for provider '{}' / api_style {:?} is not supported",
+            config.provider, config.api_style
+        ),
+    });
+    Ok(())
+}
+
+async fn chat_completions_request(
+    config: &LlmConfig,
+    system: Option<String>,
+    messages: Vec<ChatMessage>,
+    tools: Option<Vec<ToolDefinition>>,
+    evt_tx: &Sender<LlmEvent>,
+    cancel: &Arc<AtomicBool>,
+) -> Result<()> {
+    let request_body = build_request_body(config, system, &messages, tools.as_deref());
     let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
 
-    // Non-transient: HTTP client build failure
     let client = match reqwest::Client::builder().build() {
         Ok(c) => c,
         Err(e) => {
@@ -564,18 +745,20 @@ async fn chat_completion(
         }
     };
 
-    let response = match client
+    let mut builder = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", config.api_key))
-        .header("Content-Type", "application/json")
-        .header("Accept", "text/event-stream")
-        .json(&request_body)
-        .send()
-        .await
-    {
+        .header("Content-Type", "application/json");
+    if config.stream {
+        builder = builder.header("Accept", "text/event-stream");
+    } else {
+        builder = builder.header("Accept", "application/json");
+    }
+    builder = apply_extra_headers(builder, &config.http_headers);
+
+    let response = match builder.json(&request_body).send().await {
         Ok(r) => r,
         Err(e) => {
-            // Connection failures are transient
             return Err(anyhow::anyhow!("HTTP request failed: {e}"));
         }
     };
@@ -585,14 +768,91 @@ async fn chat_completion(
         let body = response.text().await.unwrap_or_default();
         let err_msg = format!("API returned {status}: {body}");
         if status.is_server_error() {
-            // 5xx is transient
             return Err(anyhow::anyhow!("{err_msg}"));
         }
-        // 4xx is non-transient
         let _ = evt_tx.send(LlmEvent::Error { message: err_msg });
         return Ok(());
     }
 
+    if config.stream {
+        read_chat_completions_sse(response, evt_tx, cancel).await
+    } else {
+        let body: Value = response
+            .json()
+            .await
+            .context("parse non-streaming chat completions JSON")?;
+        emit_chat_completions_json(&body, evt_tx);
+        Ok(())
+    }
+}
+
+/// Emit `LlmEvent`s from a non-streaming chat-completions JSON body.
+pub(crate) fn emit_chat_completions_json(body: &Value, evt_tx: &Sender<LlmEvent>) {
+    let model_name = body["model"].as_str().unwrap_or("").to_string();
+    let input_tokens = body["usage"]["prompt_tokens"].as_u64().map(|n| n as u32);
+    let output_tokens = body["usage"]["completion_tokens"]
+        .as_u64()
+        .map(|n| n as u32);
+
+    let message = body["choices"]
+        .as_array()
+        .and_then(|c| c.first())
+        .map(|c| &c["message"]);
+
+    let Some(message) = message else {
+        let _ = evt_tx.send(LlmEvent::Error {
+            message: "chat completions response missing choices[0].message".into(),
+        });
+        return;
+    };
+
+    let reasoning = message["reasoning_content"]
+        .as_str()
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+
+    if let Some(tc_array) = message["tool_calls"].as_array() {
+        if !tc_array.is_empty() {
+            let tool_calls: Vec<ToolCall> = tc_array
+                .iter()
+                .map(|tc| ToolCall {
+                    id: tc["id"].as_str().unwrap_or("").to_string(),
+                    name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
+                    arguments: tc["function"]["arguments"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                    execution_duration_ms: None,
+                })
+                .collect();
+            let _ = evt_tx.send(LlmEvent::ToolCallRequest {
+                tool_calls,
+                reasoning_content: reasoning,
+            });
+            return;
+        }
+    }
+
+    let full_text = message["content"].as_str().unwrap_or("").to_string();
+    if !full_text.is_empty() {
+        let _ = evt_tx.send(LlmEvent::Chunk {
+            content: full_text.clone(),
+        });
+    }
+    let _ = evt_tx.send(LlmEvent::Done {
+        full_text,
+        reasoning_content: reasoning,
+        input_tokens,
+        output_tokens,
+        model: model_name,
+    });
+}
+
+async fn read_chat_completions_sse(
+    response: reqwest::Response,
+    evt_tx: &Sender<LlmEvent>,
+    cancel: &Arc<AtomicBool>,
+) -> Result<()> {
     // Stream SSE chunks
     let mut full_text = String::new();
     let mut full_reasoning = String::new();
@@ -748,4 +1008,278 @@ async fn chat_completion(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn base_config() -> LlmConfig {
+        LlmConfig {
+            api_key: "sk-test".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            model: "gpt-4o-mini".into(),
+            max_tokens: 100,
+            temperature: 0.5,
+            context_window: None,
+            provider: PROVIDER_OPENAI.into(),
+            api_style: ApiStyle::ChatCompletions,
+            stream: true,
+            http_headers: HashMap::new(),
+            chat_options: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_chat_options_do_not_override_model() {
+        let mut config = base_config();
+        config
+            .chat_options
+            .insert("model".into(), Value::String("should-not-win".into()));
+        config.chat_options.insert("top_p".into(), json!(0.9));
+        let body = build_request_body(&config, None, &[], None);
+        assert_eq!(body["model"], "gpt-4o-mini");
+        assert_eq!(body["top_p"], 0.9);
+        assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn test_stream_false_in_request_body() {
+        let mut config = base_config();
+        config.stream = false;
+        let body = build_request_body(&config, None, &[], None);
+        assert_eq!(body["stream"], false);
+    }
+
+    #[test]
+    fn test_deepseek_uses_chat_completions() {
+        let mut config = base_config();
+        config.provider = PROVIDER_DEEPSEEK_OPENAI.into();
+        config.api_style = ApiStyle::Responses;
+        assert!(uses_chat_completions(&config));
+    }
+
+    #[test]
+    fn test_emit_non_stream_done_with_reasoning() {
+        let (tx, rx) = mpsc::channel();
+        let body = json!({
+            "model": "deepseek-chat",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "hello",
+                    "reasoning_content": "think"
+                }
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 2 }
+        });
+        emit_chat_completions_json(&body, &tx);
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(matches!(events[0], LlmEvent::Chunk { .. }));
+        match &events[1] {
+            LlmEvent::Done {
+                full_text,
+                reasoning_content,
+                model,
+                ..
+            } => {
+                assert_eq!(full_text, "hello");
+                assert_eq!(reasoning_content.as_deref(), Some("think"));
+                assert_eq!(model, "deepseek-chat");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_emit_non_stream_tool_calls() {
+        let (tx, rx) = mpsc::channel();
+        let body = json!({
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": { "name": "search", "arguments": "{\"q\":1}" }
+                    }]
+                }
+            }]
+        });
+        emit_chat_completions_json(&body, &tx);
+        let events: Vec<_> = rx.try_iter().collect();
+        match &events[0] {
+            LlmEvent::ToolCallRequest { tool_calls, .. } => {
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(tool_calls[0].name, "search");
+            }
+            other => panic!("expected ToolCallRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_merge_chat_options_core_wins() {
+        let mut body = json!({ "model": "a", "stream": true });
+        let mut opts = HashMap::new();
+        opts.insert("model".into(), Value::String("b".into()));
+        opts.insert("foo".into(), json!(1));
+        let mut core = Map::new();
+        core.insert("model".into(), Value::String("a".into()));
+        core.insert("stream".into(), Value::Bool(true));
+        merge_chat_options(&mut body, &opts, &core);
+        assert_eq!(body["model"], "a");
+        assert_eq!(body["foo"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_extra_http_headers_injected() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 4096];
+            let n = socket.read(&mut buf).await.expect("read");
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = br#"{"id":"1","model":"gpt-4o-mini","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                String::from_utf8_lossy(body)
+            );
+            socket.write_all(resp.as_bytes()).await.expect("write");
+            req
+        });
+
+        let mut config = base_config();
+        config.base_url = format!("http://{addr}/v1");
+        config.stream = false;
+        config.http_headers.insert("X-Test".into(), "1".into());
+
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        chat_completions_request(&config, None, vec![], None, &tx, &cancel)
+            .await
+            .expect("request");
+
+        let captured = server.await.expect("join");
+        assert!(
+            captured.to_lowercase().contains("x-test: 1"),
+            "missing X-Test header in:\n{captured}"
+        );
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(events.iter().any(|e| matches!(e, LlmEvent::Done { .. })));
+    }
+
+    #[tokio::test]
+    async fn provider_aware_tool_call_uses_responses_transport() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; 8192];
+            let n = socket.read(&mut buf).await.expect("read");
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = br#"{"id":"resp_1","model":"gpt-4.1","output":[{"type":"function_call","call_id":"call_1","name":"generate","arguments":"{\"ok\":true}"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                String::from_utf8_lossy(body)
+            );
+            socket.write_all(response.as_bytes()).await.expect("write");
+            request
+        });
+
+        let mut config = base_config();
+        config.base_url = format!("http://{addr}/v1");
+        config.api_style = ApiStyle::Responses;
+        config.stream = false;
+        config
+            .http_headers
+            .insert("X-Profile".into(), "active".into());
+        let result = call_llm_with_tool_config(
+            config,
+            "system",
+            "user",
+            "generate",
+            "Generate data",
+            json!({"type": "object"}),
+        )
+        .await
+        .expect("tool result");
+        assert_eq!(result["ok"], true);
+
+        let request = server.await.expect("join");
+        assert!(
+            request.contains("POST /v1/responses"),
+            "request:\n{request}"
+        );
+        assert!(
+            request.to_ascii_lowercase().contains("x-profile: active"),
+            "request:\n{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_non_stream_payloads_emit_errors_for_all_transports() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for (provider, style) in [
+            (PROVIDER_OPENAI, ApiStyle::ChatCompletions),
+            (PROVIDER_OPENAI, ApiStyle::Responses),
+            (PROVIDER_ANTHROPIC, ApiStyle::ChatCompletions),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let mut request = vec![0u8; 8192];
+                let _ = socket.read(&mut request).await.expect("read");
+                let body = "not-json";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.expect("write");
+            });
+
+            let mut config = base_config();
+            config.provider = provider.into();
+            config.api_style = style;
+            config.base_url = format!("http://{addr}");
+            config.stream = false;
+            let (tx, rx) = mpsc::channel();
+            let cancel = Arc::new(AtomicBool::new(false));
+            process_chat_request(&config, None, vec![], None, &tx, &cancel).await;
+            server.await.expect("join");
+
+            let events: Vec<_> = rx.try_iter().collect();
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, LlmEvent::Error { .. })),
+                "{provider}/{style:?} emitted no error: {events:?}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, LlmEvent::Done { .. })),
+                "{provider}/{style:?} reported malformed JSON as done"
+            );
+        }
+    }
 }

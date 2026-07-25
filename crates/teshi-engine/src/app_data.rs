@@ -39,13 +39,30 @@ struct RecentFile {
     paths: Vec<String>,
 }
 
-/// Returns `%APPDATA%/teshi-desktop` (or XDG equivalent).
+/// Returns the Teshi app data directory.
+///
+/// Resolution order:
+/// 1. `TESHI_APP_DATA_DIR` when set and non-empty (tests / custom installs)
+/// 2. `%APPDATA%/teshi-desktop` (or XDG equivalent)
 pub fn app_data_dir() -> Result<PathBuf> {
-    let base = dirs::data_dir().context("could not resolve data directory")?;
-    let dir = base.join("teshi-desktop");
+    let dir = if let Ok(override_dir) = std::env::var("TESHI_APP_DATA_DIR") {
+        let trimmed = override_dir.trim();
+        if !trimmed.is_empty() {
+            PathBuf::from(trimmed)
+        } else {
+            default_app_data_dir()?
+        }
+    } else {
+        default_app_data_dir()?
+    };
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     fs::create_dir_all(dir.join("logs")).ok();
     Ok(dir)
+}
+
+fn default_app_data_dir() -> Result<PathBuf> {
+    let base = dirs::data_dir().context("could not resolve data directory")?;
+    Ok(base.join("teshi-desktop"))
 }
 
 fn recent_path() -> Result<PathBuf> {

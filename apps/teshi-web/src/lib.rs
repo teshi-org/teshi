@@ -4,7 +4,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use teshi_ui::{
-    AppShell, LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate, bind_llm_config_keys,
+    AppShell, LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate, ModelProfileListSnapshot,
+    ModelProfileSnapshot, ModelProfileUpdate, bind_llm_config_keys,
 };
 use wasm_bindgen::prelude::*;
 
@@ -43,6 +44,35 @@ impl LlmConfigBackend for WasmLlmBackend {
     fn set_llm_config(&self, update: LlmConfigUpdate) -> Result<(), String> {
         let body = serde_json::to_string(&update).map_err(|e| e.to_string())?;
         let _ = Self::xhr_json("PUT", "/api/v1/llm/config", Some(&body))?;
+        Ok(())
+    }
+
+    fn list_profiles(&self) -> Result<ModelProfileListSnapshot, String> {
+        let text = Self::xhr_json("GET", "/api/v1/llm/profiles", None)?;
+        serde_json::from_str(&text).map_err(|e| e.to_string())
+    }
+
+    fn get_profile(&self, id: &str) -> Result<ModelProfileSnapshot, String> {
+        let path = format!("/api/v1/llm/profiles/{id}");
+        let text = Self::xhr_json("GET", &path, None)?;
+        serde_json::from_str(&text).map_err(|e| e.to_string())
+    }
+
+    fn save_profile(&self, update: ModelProfileUpdate) -> Result<ModelProfileSnapshot, String> {
+        let body = serde_json::to_string(&update).map_err(|e| e.to_string())?;
+        let text = Self::xhr_json("PUT", "/api/v1/llm/profiles", Some(&body))?;
+        serde_json::from_str(&text).map_err(|e| e.to_string())
+    }
+
+    fn delete_profile(&self, id: &str) -> Result<(), String> {
+        let path = format!("/api/v1/llm/profiles/{id}");
+        let _ = Self::xhr_json("DELETE", &path, None)?;
+        Ok(())
+    }
+
+    fn activate_profile(&self, id: &str) -> Result<(), String> {
+        let path = format!("/api/v1/llm/profiles/{id}/activate");
+        let _ = Self::xhr_json("POST", &path, None)?;
         Ok(())
     }
 }

@@ -12,7 +12,7 @@ use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, Method, StatusCode};
-use axum::middleware;
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
@@ -22,14 +22,16 @@ use teshi_core::{BddFeature, BddProject, FeatureRenderPayload, StepIndex};
 
 use crate::session::{Role, SessionStore};
 use teshi_engine::{
-    check_project_switch_allowed, confirm_locator, get_active_step, get_pending_locator,
-    get_project_root, get_recent_projects, highlight_locator, list_dir, load_llm_config_public,
-    load_project_settings, open_project, reject_locator, render_feature, resize_terminal,
-    save_stored_llm_config, spawn_terminal, start_browser_sidecar, step_binding_statuses,
-    stop_browser_sidecar, sync_active_step, teardown_runtime, unbind_step, write_terminal,
-    ActiveStep, BrowserError, BrowserMode, BrowserStartResult, DirEntry, LlmConfigPublic,
-    LlmConfigWrite, PendingLocator, ProjectSettings, RuntimeEvent, StepBinding, StepBindingStatus,
-    TeshiEngine,
+    check_project_switch_allowed, confirm_locator, delete_profile, get_active_step,
+    get_pending_locator, get_profile_public, get_project_root, get_recent_projects,
+    highlight_locator, list_dir, list_profiles, load_llm_config_public, load_project_settings,
+    open_project, reject_locator, render_feature, resize_terminal, save_profile,
+    save_stored_llm_config, set_active_id, spawn_terminal, start_browser_sidecar,
+    step_binding_statuses, stop_browser_sidecar, sync_active_step, teardown_runtime, unbind_step,
+    write_terminal, ActiveStep, ApiStyle, BrowserError, BrowserMode, BrowserStartResult, DirEntry,
+    LlmConfigPublic, LlmConfigWrite, ModelProfile, ModelProfileList, ModelProfilePublic,
+    PendingLocator, ProjectSettings, RuntimeEvent, StepBinding, StepBindingStatus, TeshiEngine,
+    PROVIDER_OPENAI,
 };
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
@@ -55,6 +57,42 @@ impl DaemonState {
     }
 }
 
+fn browser_cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(Any)
+        // Preserve the daemon's existing cross-origin API support. LLM config
+        // mutations are rejected separately by the explicit origin middleware.
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_headers(Any)
+}
+
+async fn same_origin_only(request: Request, next: Next) -> Response {
+    let Some(origin) = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        // Non-browser clients do not normally send Origin and remain supported.
+        return next.run(request).await;
+    };
+    let host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
+    // The daemon serves plain HTTP, so scheme is part of the same-origin check.
+    let origin_host = origin
+        .strip_prefix("http://")
+        .map(|value| value.trim_end_matches('/'));
+
+    if host.is_some_and(|host| {
+        origin_host.is_some_and(|origin_host| origin_host.eq_ignore_ascii_case(host))
+    }) {
+        next.run(request).await
+    } else {
+        StatusCode::FORBIDDEN.into_response()
+    }
+}
+
 /// Binds `addr` and serves the API plus static UI from `dist`.
 /// Returns when the server shuts down (via signal, idle timeout, or API call).
 pub async fn run_server(
@@ -73,13 +111,7 @@ pub async fn run_server(
         shutdown_token: shutdown_token.clone(),
     };
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        // Configuration writes deliberately remain same-origin. In particular,
-        // allowing cross-origin PUT would let an arbitrary website redirect LLM
-        // requests (and the stored API key) to an attacker-controlled base URL.
-        .allow_methods([Method::GET, Method::POST, Method::DELETE])
-        .allow_headers(Any);
+    let cors = browser_cors_layer();
 
     // ── Public routes (no auth required) ──────────────────────────────────────
     let public_routes = Router::new()
@@ -87,6 +119,16 @@ pub async fn run_server(
         .route("/api/v1/sessions", post(api_create_session))
         .route("/api/v1/sessions/{token}", get(api_get_session))
         .route("/api/v1/sessions/{token}", delete(api_delete_session));
+
+    let llm_mutation_routes = Router::new()
+        .route("/api/v1/llm/config", put(api_put_llm_config))
+        .route("/api/v1/llm/profiles", put(api_put_llm_profile))
+        .route("/api/v1/llm/profiles/{id}", delete(api_delete_llm_profile))
+        .route(
+            "/api/v1/llm/profiles/{id}/activate",
+            post(api_activate_llm_profile),
+        )
+        .route_layer(middleware::from_fn(same_origin_only));
 
     // ── Protected routes (checked by auth middleware) ─────────────────────────
     let protected_routes = Router::new()
@@ -103,7 +145,9 @@ pub async fn run_server(
         .route("/api/v1/steps/unbind", post(api_unbind_step))
         .route("/api/v1/settings/project", get(api_project_settings))
         .route("/api/v1/llm/config", get(api_get_llm_config))
-        .route("/api/v1/llm/config", put(api_put_llm_config))
+        .route("/api/v1/llm/profiles", get(api_list_llm_profiles))
+        .route("/api/v1/llm/profiles/{id}", get(api_get_llm_profile))
+        .merge(llm_mutation_routes)
         .route("/api/v1/locator/confirm", post(api_confirm_locator))
         .route("/api/v1/locator/reject", post(api_reject_locator))
         .route("/api/v1/locator/highlight", post(api_highlight_locator))
@@ -553,6 +597,112 @@ async fn api_put_llm_config(
     Ok(Json(teshi_engine::to_public(&stored)))
 }
 
+/// Daemon body for creating/updating a model profile (mirrors engine fields).
+#[derive(Debug, Deserialize)]
+struct ProfileWriteBody {
+    #[serde(default)]
+    id: String,
+    name: String,
+    #[serde(default = "default_provider")]
+    provider: String,
+    #[serde(default)]
+    api_style: ApiStyle,
+    #[serde(default)]
+    model_id: String,
+    #[serde(default)]
+    max_context_tokens: Option<u32>,
+    #[serde(default = "default_max_output")]
+    max_output_tokens: u32,
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    api_key: String,
+    #[serde(default = "default_true")]
+    stream: bool,
+    #[serde(default)]
+    http_headers: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    chat_options: std::collections::HashMap<String, Value>,
+}
+
+fn default_provider() -> String {
+    PROVIDER_OPENAI.to_string()
+}
+
+fn default_max_output() -> u32 {
+    1024
+}
+
+fn default_true() -> bool {
+    true
+}
+
+async fn api_list_llm_profiles(
+    State(state): State<DaemonState>,
+) -> Result<Json<ModelProfileList>, ApiError> {
+    state.touch();
+    Ok(Json(
+        list_profiles().map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
+}
+
+async fn api_get_llm_profile(
+    State(state): State<DaemonState>,
+    Path(id): Path<String>,
+) -> Result<Json<ModelProfilePublic>, ApiError> {
+    state.touch();
+    Ok(Json(
+        get_profile_public(&id).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
+}
+
+async fn api_put_llm_profile(
+    State(state): State<DaemonState>,
+    Json(body): Json<ProfileWriteBody>,
+) -> Result<Json<ModelProfilePublic>, ApiError> {
+    state.touch();
+    let id = if body.id.trim().is_empty() {
+        teshi_engine::generate_id()
+    } else {
+        body.id
+    };
+    let mut profile = ModelProfile {
+        id,
+        name: body.name,
+        provider: body.provider,
+        api_style: body.api_style,
+        model_id: body.model_id,
+        max_context_tokens: body.max_context_tokens,
+        max_output_tokens: body.max_output_tokens,
+        base_url: body.base_url,
+        api_key: body.api_key,
+        stream: body.stream,
+        http_headers: body.http_headers,
+        chat_options: body.chat_options,
+    };
+    Ok(Json(
+        save_profile(&mut profile).map_err(|e| ApiError::internal(e.to_string()))?,
+    ))
+}
+
+async fn api_delete_llm_profile(
+    State(state): State<DaemonState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.touch();
+    delete_profile(&id).map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_activate_llm_profile(
+    State(state): State<DaemonState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.touch();
+    set_active_id(&id).map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Debug, Deserialize)]
 struct StepCatalogQuery {
     min_count: Option<usize>,
@@ -956,10 +1106,8 @@ async fn api_requirements_generate(
         return Err("Requirements text is empty".to_string().into());
     }
 
-    // Prefer user-level llm-config.json (GPUI spike) over TESHI_LLM_* env alone.
     let cfg =
         teshi_engine::effective_llm_config().map_err(|e| ApiError::internal(e.to_string()))?;
-    let (api_key, base_url, model) = (cfg.api_key, cfg.base_url, cfg.model);
 
     // Build the system prompt
     let system_prompt = build_requirements_system_prompt();
@@ -1000,10 +1148,8 @@ async fn api_requirements_generate(
     });
 
     // Call LLM
-    let result = teshi_engine::llm::call_llm_with_tool(
-        &api_key,
-        &base_url,
-        &model,
+    let result = teshi_engine::llm::call_llm_with_tool_config(
+        cfg,
         &system_prompt,
         &body.requirements_text,
         "generate_testpoints",
@@ -1313,6 +1459,98 @@ mod integration {
     async fn exec_status(router: &mut Router, req: Request<Body>) -> StatusCode {
         let resp = router.clone().oneshot(req).await.unwrap();
         resp.status()
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_preserves_non_llm_post_and_delete_support() {
+        let router = Router::new()
+            .route("/mutation", post(|| async { StatusCode::NO_CONTENT }))
+            .layer(browser_cors_layer());
+
+        for method in ["GET", "POST", "DELETE"] {
+            let request = Request::builder()
+                .method("OPTIONS")
+                .uri("/mutation")
+                .header("origin", "https://attacker.example")
+                .header("access-control-request-method", method)
+                .body(Body::empty())
+                .unwrap();
+            let response = router.clone().oneshot(request).await.unwrap();
+            let allowed = response
+                .headers()
+                .get("access-control-allow-methods")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            assert!(allowed.split(',').any(|value| value.trim() == method));
+        }
+
+        let put_preflight = Request::builder()
+            .method("OPTIONS")
+            .uri("/mutation")
+            .header("origin", "https://client.example")
+            .header("access-control-request-method", "PUT")
+            .body(Body::empty())
+            .unwrap();
+        let response = router.oneshot(put_preflight).await.unwrap();
+        let allowed = response
+            .headers()
+            .get("access-control-allow-methods")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(!allowed.split(',').any(|value| value.trim() == "PUT"));
+    }
+
+    #[tokio::test]
+    async fn mutation_origin_guard_rejects_simple_cross_origin_post() {
+        let router = Router::new()
+            .route("/activate", post(|| async { StatusCode::NO_CONTENT }))
+            .route_layer(middleware::from_fn(same_origin_only));
+
+        let cross_origin = Request::builder()
+            .method("POST")
+            .uri("/activate")
+            .header("host", "127.0.0.1:3000")
+            .header("origin", "https://attacker.example")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router.clone().oneshot(cross_origin).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let wrong_scheme = Request::builder()
+            .method("POST")
+            .uri("/activate")
+            .header("host", "127.0.0.1:3000")
+            .header("origin", "https://127.0.0.1:3000")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router.clone().oneshot(wrong_scheme).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let same_origin = Request::builder()
+            .method("POST")
+            .uri("/activate")
+            .header("host", "127.0.0.1:3000")
+            .header("origin", "http://127.0.0.1:3000")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router.clone().oneshot(same_origin).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+
+        let non_browser = Request::builder()
+            .method("POST")
+            .uri("/activate")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router.oneshot(non_browser).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
     }
 
     // ── Main test ────────────────────────────────────────────────────────────

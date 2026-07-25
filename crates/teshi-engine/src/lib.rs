@@ -6,8 +6,11 @@ mod events;
 mod fs_util;
 mod gherkin;
 pub mod llm;
+mod llm_anthropic;
 pub mod llm_config_store;
+mod llm_responses;
 mod locator;
+pub mod model_profile;
 mod project;
 mod project_settings;
 mod screen;
@@ -38,7 +41,7 @@ pub use daemon::{
 pub use events::{HostEventCallback, RuntimeEvent, RuntimeEvents};
 pub use fs_util::{read_locked, write_atomic};
 pub use gherkin::{emit_feature_refresh, rebuild_and_emit_step_index, render_feature};
-pub use llm::{call_llm_with_tool, llm_config_from_env};
+pub use llm::{call_llm_with_tool, call_llm_with_tool_config, llm_config_from_env};
 pub use llm_config_store::{
     effective_llm_config, load_llm_config_public, load_stored_llm_config, save_stored_llm_config,
     to_public, LlmConfigPublic, LlmConfigWrite, StoredLlmConfig,
@@ -53,6 +56,15 @@ pub use locator::{
     update_binding_locator, wait_for_step_status, write_active_step, ActiveStep, FeatureStepRef,
     HighlightInfo, LocatorCandidate, LocatorPrimary, LocatorWatcherState, PendingLocator,
     StepBinding, StepBindingStatus, StepBindingsFile, StepWaitResult, StepWaitUntil,
+};
+pub use model_profile::{
+    default_base_url_for_provider, delete_profile, effective_api_style, ensure_migrated,
+    generate_id, get_profile_public, is_builtin_provider, list_profiles, load_active_profile,
+    load_profile, model_profiles_dir, profile_to_llm_config, read_active_id, resolve_base_url,
+    save_profile, set_active_id, to_public_profile, validate_profile, validate_profile_id,
+    ApiStyle, ModelProfile, ModelProfileList, ModelProfilePublic, DEFAULT_BASE_URL_ANTHROPIC,
+    DEFAULT_BASE_URL_DEEPSEEK, DEFAULT_BASE_URL_OPENAI, PROVIDER_ANTHROPIC,
+    PROVIDER_DEEPSEEK_OPENAI, PROVIDER_OPENAI,
 };
 pub use project::{
     check_project_switch_allowed, get_project_root, list_dir, open_project, set_browser_active,

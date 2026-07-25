@@ -51,6 +51,9 @@ impl From<teshi_engine::llm::LlmConfig> for LlmConfig {
 
 impl From<LlmConfig> for teshi_engine::llm::LlmConfig {
     fn from(value: LlmConfig) -> Self {
+        use std::collections::HashMap;
+        use teshi_engine::model_profile::{ApiStyle, PROVIDER_OPENAI};
+
         Self {
             api_key: value.api_key,
             base_url: value.base_url,
@@ -58,6 +61,11 @@ impl From<LlmConfig> for teshi_engine::llm::LlmConfig {
             max_tokens: value.max_tokens,
             temperature: value.temperature,
             context_window: value.context_window,
+            provider: PROVIDER_OPENAI.into(),
+            api_style: ApiStyle::ChatCompletions,
+            stream: true,
+            http_headers: HashMap::new(),
+            chat_options: HashMap::new(),
         }
     }
 }
