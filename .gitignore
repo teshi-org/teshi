@@ -21,8 +21,6 @@ Thumbs.db
 
 # OpenSpec change tracking (separate BDD project artifacts)
 .agents/
-# Exploration traces
-.teshi/traces/
 
 # Miscellaneous working-tree artifacts
 arch-vision.html
@@ -40,12 +38,8 @@ teshi.toml
 # If this repository is a library and you explicitly want to ignore it, uncomment:
 # Cargo.lock
 
-# --- teshi desktop agent context (local runtime state) ---
-.teshi/active-step.json
-.teshi/pending-locator.json
-.teshi/cdp-endpoint.json
-.teshi/logs/
-.teshi/daemon.json
+# Local Teshi runtime state (traces, daemon, agent context); any nesting
+.teshi/
 
 # --- teshi-tauri frontend (Tauri + Vite) ---
 apps/teshi-tauri/frontend/node_modules/
