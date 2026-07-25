@@ -18,15 +18,74 @@
         place-items: center;
         background: #1e1e2e;
         color: #a6adc8;
-        font-size: 0.85rem;
-        letter-spacing: 0.12em;
+        padding: 2rem;
       }
       #loading[hidden] { display: none; }
-      #loading.error { color: #f38ba8; letter-spacing: normal; padding: 2rem; text-align: center; }
+      #loading.error {
+        color: #f38ba8;
+        letter-spacing: normal;
+        text-align: center;
+      }
+      #loading.error .loading-panel { display: none; }
+      .loading-panel {
+        width: min(20rem, 100%);
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+      .loading-label {
+        font-size: 0.85rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+      .loading-bar-track {
+        height: 0.35rem;
+        border-radius: 999px;
+        background: #313244;
+        overflow: hidden;
+      }
+      .loading-bar-fill {
+        height: 100%;
+        width: 0%;
+        border-radius: inherit;
+        background: #89b4fa;
+        transition: width 0.12s ease-out;
+      }
+      .loading-bar-track.indeterminate .loading-bar-fill {
+        width: 35%;
+        transition: none;
+        animation: loading-indeterminate 1.1s ease-in-out infinite;
+      }
+      @keyframes loading-indeterminate {
+        0% { transform: translateX(-120%); }
+        100% { transform: translateX(320%); }
+      }
+      .loading-detail {
+        font-size: 0.75rem;
+        letter-spacing: 0.04em;
+        color: #6c7086;
+        min-height: 1em;
+      }
     </style>
   </head>
   <body>
-    <div id="loading" role="status">LOADING TESHI</div>
+    <div id="loading" role="status" aria-live="polite">
+      <div class="loading-panel">
+        <div id="loading-label" class="loading-label">Downloading…</div>
+        <div
+          id="loading-bar-track"
+          class="loading-bar-track"
+          role="progressbar"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="0"
+          aria-labelledby="loading-label"
+        >
+          <div id="loading-bar-fill" class="loading-bar-fill"></div>
+        </div>
+        <div id="loading-detail" class="loading-detail">0%</div>
+      </div>
+    </div>
     <noscript>teshi requires JavaScript and WebAssembly.</noscript>
     <script type="module" src="./main.js"></script>
   </body>

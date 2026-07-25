@@ -33,24 +33,16 @@ $BindgenText = $BindgenText.Replace(
 )
 Set-Content -Path $BindgenJs -Value $BindgenText -NoNewline
 
-$MainJs = @"
-import init, { run } from "./pkg/teshi_web.js?v=$CacheBust";
-
-const loading = document.getElementById("loading");
-
-try {
-  await init();
-  run();
-  loading?.setAttribute("hidden", "");
-} catch (err) {
-  console.error(err);
-  if (loading) {
-    loading.classList.add("error");
-    loading.textContent = "Failed to start teshi-web: " + err;
-  }
-}
-"@
-Set-Content -Path (Join-Path $OutDir "main.js") -Value $MainJs
+$MainJs = Get-Content -Raw (Join-Path $Root "apps\teshi-web\web\main.js")
+$MainJs = $MainJs.Replace(
+    'from "./pkg/teshi_web.js"',
+    "from `"./pkg/teshi_web.js?v=$CacheBust`""
+)
+$MainJs = $MainJs.Replace(
+    'teshi_web_bg.wasm',
+    "teshi_web_bg.wasm?v=$CacheBust"
+)
+Set-Content -Path (Join-Path $OutDir "main.js") -Value $MainJs -NoNewline
 
 $IndexHtml = Get-Content -Raw (Join-Path $Root "apps\teshi-web\web\index.html")
 $IndexHtml = $IndexHtml.Replace(
