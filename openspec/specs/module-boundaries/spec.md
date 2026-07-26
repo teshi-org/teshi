@@ -80,7 +80,7 @@ The `teshi-agent` crate SHALL depend only on `teshi-core`. It MUST NOT import fr
 
 ### Requirement: `teshi-engine` — no UI dependency
 
-The `teshi-engine` crate SHALL contain all effectful runtime logic (project lifecycle, terminal PTY, browser sidecar, locator persistence, file watching, LLM transport, event bus, daemon manifest utilities). It MUST NOT import from any UI or application-shell crate (`teshi-tui`, `teshi-tauri`, `teshi-desktop`, `teshi-daemon`, `teshi-terminal-sidecar`).
+The `teshi-engine` crate SHALL contain all effectful runtime logic (project lifecycle, terminal PTY, browser sidecar, locator persistence, file watching, LLM transport, event bus, daemon manifest utilities). It MUST NOT import from any UI or application-shell crate (`teshi-tui`, `teshi-desktop`, `teshi-daemon`, `teshi-terminal-sidecar`).
 
 #### Scenario: Engine has no TUI dependency
 - **WHEN** `cargo tree -p teshi-engine` is run
@@ -102,17 +102,17 @@ The daemon (`teshi-daemon`) and terminal sidecar (`teshi-terminal-sidecar`) SHAL
 - **WHEN** the target directory structure is checked
 - **THEN** `apps/teshi-terminal-sidecar/Cargo.toml` exists, `crates/teshi-terminal-sidecar/` does NOT exist
 
-### Requirement: TypeScript frontend under Tauri app
+### Requirement: React web UI for daemon
 
-The TypeScript/React frontend (currently `desktop/src/`) SHALL reside at `apps/teshi-tauri/frontend/`. The Tauri configuration SHALL reference it correctly for both development and production builds.
+The TypeScript/React web UI SHALL reside at `apps/teshi-web-ui/` and SHALL be served by `teshi-daemon` as static assets. There SHALL NOT be a Tauri-based desktop shell in the workspace.
 
-#### Scenario: Frontend directory exists under Tauri
+#### Scenario: Web UI package exists
 - **WHEN** the target directory structure is checked
-- **THEN** `apps/teshi-tauri/frontend/package.json` exists
+- **THEN** `apps/teshi-web-ui/package.json` exists
 
-#### Scenario: Tauri config references correct frontend path
-- **WHEN** `apps/teshi-tauri/tauri.conf.json` is read
-- **THEN** the `frontendDist` and `devUrl` fields point to `frontend/` (not `../src/`)
+#### Scenario: No Tauri app crate
+- **WHEN** the root `Cargo.toml` workspace `members` list is read
+- **THEN** it does NOT include `apps/teshi-tauri`
 
 ### Requirement: Workspace dependency centralisation
 
