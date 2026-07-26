@@ -36,6 +36,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("sessions", "Browse saved sessions"),
     ("approval", "Switch approval mode (Manual/Auto/Bypass)"),
     ("agent", "Switch agent profile"),
+    (
+        "generate",
+        "Start requirements → scenarios (.feature) generation",
+    ),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1708,12 +1712,13 @@ impl App {
         // Generation pipeline guidance
         prompt.push_str(
             "\n\n## Feature Generation Pipeline\n\
-             When the user asks to create or generate a feature, follow this pipeline:\n\
-             1. **Requirements Gathering** — Ask questions about what they need. Call `submit_requirements` when done.\n\
-             2. **Planning** — Design the scenario structure. Call `generate_plan` to submit your plan.\n\
-             3. **Writing** — Execute the plan using `create_feature_file` and `insert_scenario`.\n\
+             When the user asks to create or generate a feature (including `/generate`), follow this pipeline:\n\
+             1. **Requirements Gathering** — Ask questions or accept pasted requirement text. Call `submit_requirements` when done.\n\
+             2. **Planning** — Design scenarios as test points (happy path, errors, edges). Call `generate_plan`.\n\
+             3. **Writing** — Execute the plan using `create_feature_file` and `insert_scenario` (Gherkin `.feature` only).\n\
              4. **Validation** — Use `validate_feature` to check for issues.\n\
              \n\
+             Test points ARE Gherkin scenarios and steps. Do NOT produce FreeMind `.mm` files or mock HTML.\n\
              Do NOT skip steps. Start by gathering requirements.\n\
              If the user's request is already detailed, you can ask 1-2 clarifying questions then proceed.\n\
              Always check the [Project Context] to understand existing files before generating.",
@@ -4581,7 +4586,7 @@ impl App {
                     return Ok(());
                 }
 
-                let user_msg = std::mem::take(&mut self.agent_mut().input);
+                let mut user_msg = std::mem::take(&mut self.agent_mut().input);
                 self.agent_mut().input_cursor = 0;
 
                 // Intercept slash commands before sending to LLM
@@ -4642,8 +4647,23 @@ impl App {
                             "Agent profiles: a add · e edit · d delete · ↑↓ select · Enter apply · Esc close".to_string();
                         return Ok(());
                     }
-                    self.status = "Unknown slash command. Try /new, /exit, /resume, /copy, /models, /sessions, /approval, /agent".to_string();
-                    return Ok(());
+                    if cmd == "generate" || cmd.starts_with("generate ") {
+                        let rest = cmd
+                            .strip_prefix("generate")
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        user_msg = if rest.is_empty() {
+                            "I want to generate a feature from requirements. Start the Feature Generation Pipeline: gather requirements (I can paste detailed text next), plan scenarios as test points, then write Gherkin .feature files. Do not use FreeMind or mock HTML.".to_string()
+                        } else {
+                            format!(
+                                "Please generate a feature from these requirements using the Feature Generation Pipeline. Treat scenarios as test points and write Gherkin .feature files only (no FreeMind or mock HTML).\n\nRequirements:\n{rest}"
+                            )
+                        };
+                    } else {
+                        self.status = "Unknown slash command. Try /new, /exit, /resume, /copy, /models, /sessions, /approval, /agent, /generate".to_string();
+                        return Ok(());
+                    }
                 }
 
                 self.agent_mut().scroll_offset = 0;

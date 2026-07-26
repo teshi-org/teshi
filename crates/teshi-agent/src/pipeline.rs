@@ -48,9 +48,10 @@ impl GenerationStage {
             Self::Gathering => {
                 "\n\n## Current Phase: Requirements Gathering\n\
                  You are gathering requirements to create a new feature.\n\
-                 - Ask questions to understand what the user needs\n\
-                 - Ask about: feature name, user story, scenarios, edge cases, error conditions\n\
+                 - Ask questions to understand what the user needs, or accept pasted requirement text\n\
+                 - Ask about: feature name, user story, scenarios (test points), edge cases, error conditions\n\
                  - Do NOT create any files yet\n\
+                 - Do NOT produce FreeMind `.mm` or mock HTML — test points become Gherkin scenarios later\n\
                  - When you have enough information, call submit_requirements"
             }
             Self::Planning => {
