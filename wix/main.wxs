@@ -135,21 +135,14 @@
                                 Source='$(var.StagingRoot)\bin\teshi.exe'
                                 KeyPath='yes'/>
                         </Component>
-                        <Component Id='binary1' Guid='*'>
-                            <File
-                                Id='exe1'
-                                Name='teshi-desktop.exe'
-                                DiskId='1'
-                                Source='$(var.StagingRoot)\bin\teshi-desktop.exe'
-                                KeyPath='yes'/>
-                        </Component>
                         <Component Id='StartMenuShortcut' Guid='*'>
                             <Shortcut
-                                Id='TeshiDesktopStartMenuShortcut'
+                                Id='TeshiWebStartMenuShortcut'
                                 Directory='ProgramMenuDir'
-                                Name='Teshi Desktop'
-                                Description='Launch teshi desktop application'
-                                Target='[Bin]teshi-desktop.exe'
+                                Name='Teshi Web'
+                                Description='Launch teshi web UI in the browser'
+                                Target='[Bin]teshi.exe'
+                                Arguments='web'
                                 WorkingDirectory='APPLICATIONFOLDER'
                                 Advertise='no'
                                 Icon='ProductICO'/>
@@ -203,7 +196,6 @@
             <ComponentRef Id='License'/>
             
             <ComponentRef Id='binary0'/>
-            <ComponentRef Id='binary1'/>
             <ComponentRef Id='StartMenuShortcut'/>
             <ComponentRef Id='BrowserServiceScript'/>
             <ComponentRef Id='WinAppServiceScript'/>

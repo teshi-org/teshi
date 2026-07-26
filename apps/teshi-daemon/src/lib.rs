@@ -36,7 +36,7 @@ pub struct WebOptions {
     /// Do not open the system browser automatically.
     #[arg(long)]
     pub no_open: bool,
-    /// Directory of built frontend static files (`apps/teshi-tauri/frontend/dist`).
+    /// Directory of built frontend static files (`apps/teshi-web-ui/dist`).
     #[arg(long)]
     pub dist: Option<PathBuf>,
     /// Auto-start embedded browser after server starts.
@@ -93,7 +93,7 @@ pub async fn run_client(opts: WebOptions) -> Result<()> {
         .dist
         .or_else(resolve_web_dist)
         .context(
-            "frontend dist not found; install the full Windows MSI, run `npm --prefix apps/teshi-tauri/frontend run build`, or pass --dist",
+            "frontend dist not found; install the full Windows MSI, run `npm --prefix apps/teshi-web-ui run build`, or pass --dist",
         )?;
 
     // Ensure daemon is running
@@ -182,8 +182,7 @@ pub async fn run_daemon_internal(opts: DaemonInternalOptions) -> Result<()> {
     let dist = opts.dist.or_else(resolve_web_dist).unwrap_or_else(|| {
         opts.project_root
             .join("apps")
-            .join("teshi-tauri")
-            .join("frontend")
+            .join("teshi-web-ui")
             .join("dist")
     });
 
@@ -272,8 +271,8 @@ fn resolve_web_dist() -> Option<PathBuf> {
     }
 
     [
-        PathBuf::from("apps/teshi-tauri/frontend/dist"),
-        PathBuf::from("../apps/teshi-tauri/frontend/dist"),
+        PathBuf::from("apps/teshi-web-ui/dist"),
+        PathBuf::from("../apps/teshi-web-ui/dist"),
     ]
     .into_iter()
     .find(|candidate| candidate.is_dir())

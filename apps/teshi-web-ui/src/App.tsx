@@ -1,6 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
 import {
   Group,
   Panel,
@@ -12,9 +10,8 @@ import {
 import { Toaster, toast } from "sonner";
 import { AppChrome } from "./chrome/AppChrome";
 import { ProjectProvider, useProject } from "./context/ProjectContext";
-import { getRuntime, isTauriHost } from "./platform";
+import { getRuntime } from "./platform";
 import { WelcomeScreen } from "./panels/WelcomeScreen";
-import { RequirementsPage } from "./panels/RequirementsPage";
 import { ResizableWorkspace } from "./panels/ResizableWorkspace";
 import { BottomDock } from "./panels/BottomDock";
 import {
@@ -34,7 +31,6 @@ function AppShell() {
   const [browserHint, setBrowserHint] = useState<string | null>(null);
   const selectedFeatureRelativePath = state.featurePayload?.relative_path ?? null;
   const browserFullscreen = state.layoutMode === "browserFullscreen";
-  const [showRequirements, setShowRequirements] = useState(true);
   const dockGroupRef = useGroupRef();
   const dockPanelRef = usePanelRef();
   const dockSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -220,9 +216,6 @@ function AppShell() {
 
   useEffect(() => {
     const runtime = getRuntime();
-    void runtime.finalizeMainWindow?.().catch((err) => {
-      console.error("finalize window geometry failed", err);
-    });
 
     void runtime
       .getRecentProjects()
@@ -284,43 +277,7 @@ function AppShell() {
       })
       .then((u) => unsubs.push(u));
 
-    let unlistenClose: (() => void) | undefined;
-    let closing = false;
-    if (isTauriHost()) {
-      void (async () => {
-        unlistenClose = await getCurrentWindow().onCloseRequested(async (event) => {
-          if (closing) {
-            return;
-          }
-          event.preventDefault();
-          closing = true;
-          try {
-            const ok = await runtime.confirmStopRuntimeIfBusy();
-            if (!ok) {
-              closing = false;
-              return;
-            }
-            await runtime.teardownRuntime();
-          } catch (err) {
-            console.error("shutdown before close failed", err);
-          }
-          try {
-            await saveWindowState(
-              StateFlags.SIZE |
-                StateFlags.MAXIMIZED |
-                StateFlags.FULLSCREEN |
-                StateFlags.VISIBLE,
-            );
-          } catch (err) {
-            console.error("save window state failed", err);
-          }
-          await getCurrentWindow().destroy();
-        });
-      })();
-    }
-
     return () => {
-      unlistenClose?.();
       unsubs.forEach((u) => u());
     };
   }, [dispatch, openFeature, openProjectPathWithFeedback, refreshStepStatuses, selectedFeatureRelativePath, state.featurePayload?.relative_path]);
@@ -467,15 +424,6 @@ function AppShell() {
 
   return (
     <div className="app-shell">
-      {state.projectRoot && (
-        <button
-          className="mode-toggle"
-          onClick={() => setShowRequirements((prev) => !prev)}
-          title={showRequirements ? "Switch to Workspace" : "Switch to Requirements"}
-        >
-          {showRequirements ? "🔍 Workspace" : "📋 Requirements"}
-        </button>
-      )}
       {!state.projectRoot ? (
         <>
           <AppChrome {...chromeProps} />
@@ -487,56 +435,51 @@ function AppShell() {
         </>
       ) : (
         <>
-          <div style={{ display: showRequirements ? "flex" : "none", flex: 1, flexDirection: "column" }}>
-            <RequirementsPage />
-          </div>
-          <div style={{ display: showRequirements ? "none" : "flex", flex: 1, flexDirection: "column" }}>
-            <AppChrome {...chromeProps} />
-            {browserFullscreen ? (
-              <div className="workspace">{workspacePanel}</div>
-            ) : (
-              <Group
-                key={state.projectRoot}
-                id="teshi-workspace-dock-layout"
-                orientation="vertical"
-                className="workspace"
-                groupRef={dockGroupRef}
-                defaultLayout={defaultDockLayout}
-                onLayoutChanged={scheduleDockPersist}
+          <AppChrome {...chromeProps} />
+          {browserFullscreen ? (
+            <div className="workspace">{workspacePanel}</div>
+          ) : (
+            <Group
+              key={state.projectRoot}
+              id="teshi-workspace-dock-layout"
+              orientation="vertical"
+              className="workspace"
+              groupRef={dockGroupRef}
+              defaultLayout={defaultDockLayout}
+              onLayoutChanged={scheduleDockPersist}
+            >
+              <Panel id="main" defaultSize={defaultDockLayout.main} minSize={200}>
+                {workspacePanel}
+              </Panel>
+              <Separator className="resize-handle resize-handle--horizontal" />
+              <Panel
+                id="dock"
+                collapsible
+                collapsedSize="33px"
+                panelRef={dockPanelRef}
+                defaultSize={defaultDockLayout.dock}
+                minSize={120}
               >
-                <Panel id="main" defaultSize={defaultDockLayout.main} minSize={200}>
-                  {workspacePanel}
-                </Panel>
-                <Separator className="resize-handle resize-handle--horizontal" />
-                <Panel
-                  id="dock"
-                  collapsible
-                  collapsedSize="33px"
-                  panelRef={dockPanelRef}
-                  defaultSize={defaultDockLayout.dock}
-                  minSize={120}
-                >
-                  <BottomDock
-                    expanded={state.dockExpanded}
-                    activeTab={state.dockActiveTab}
-                    activeStep={state.activeStep}
-                    pendingLocator={state.pendingLocator}
-                    stepBindingStatuses={state.stepBindingStatuses}
-                    projectRoot={state.projectRoot}
-                    onToggle={() => dispatch({ type: "TOGGLE_DOCK" })}
-                    onTabChange={(tab) => dispatch({ type: "SET_DOCK_TAB", tab })}
-                    onPendingChange={(pending) => {
-                      dispatch({ type: "SET_PENDING_LOCATOR", pending });
-                      void refreshStepStatuses(selectedFeatureRelativePath);
-                    }}
-                    onBindingChanged={() => {
-                      void refreshStepStatuses(selectedFeatureRelativePath);
-                    }}
-                  />
-                </Panel>
-              </Group>
-            )}
-          </div>
+                <BottomDock
+                  expanded={state.dockExpanded}
+                  activeTab={state.dockActiveTab}
+                  activeStep={state.activeStep}
+                  pendingLocator={state.pendingLocator}
+                  stepBindingStatuses={state.stepBindingStatuses}
+                  projectRoot={state.projectRoot}
+                  onToggle={() => dispatch({ type: "TOGGLE_DOCK" })}
+                  onTabChange={(tab) => dispatch({ type: "SET_DOCK_TAB", tab })}
+                  onPendingChange={(pending) => {
+                    dispatch({ type: "SET_PENDING_LOCATOR", pending });
+                    void refreshStepStatuses(selectedFeatureRelativePath);
+                  }}
+                  onBindingChanged={() => {
+                    void refreshStepStatuses(selectedFeatureRelativePath);
+                  }}
+                />
+              </Panel>
+            </Group>
+          )}
         </>
       )}
       <Toaster theme="dark" />

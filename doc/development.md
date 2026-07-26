@@ -131,11 +131,9 @@ git push origin main && git push origin vX.Y.Z
 If you prefer to do it step by step:
 
 1. **Analyze commits** since last tag to determine bump type
-2. **Update version** in all 5 component files (must match):
+2. **Update version** in component files (must match):
    - `apps/teshi-cli/Cargo.toml`
-   - `apps/teshi-tauri/Cargo.toml`
-   - `apps/teshi-tauri/frontend/package.json`
-   - `apps/teshi-tauri/tauri.conf.json`
+   - `apps/teshi-web-ui/package.json`
    - `extension/teshi-bridge/manifest.json`
 3. **Commit and tag**: `git commit -m "chore: bump version to vX.Y.Z"` then `git tag vX.Y.Z`
 4. **Push**: `git push origin main && git push origin vX.Y.Z`
@@ -148,8 +146,8 @@ The pre-commit hook (`.githooks/pre-commit`) will verify version consistency acr
 |-------|----------|----------|
 | `teshi-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` | Linux x64 | `teshi` + README + LICENSE |
 | `teshi-vX.Y.Z-aarch64-apple-darwin.tar.gz` | macOS ARM | `teshi` + README + LICENSE |
-| `teshi-vX.Y.Z-x86_64-pc-windows-msvc.zip` | Windows x64 | `teshi.exe` + `teshi-desktop.exe` + `share/web/` + README + LICENSE |
-| `teshi-vX.Y.Z-x64.msi` | Windows x64 | Full WiX installer: CLI + desktop + web UI under `Program Files\teshi` |
+| `teshi-vX.Y.Z-x86_64-pc-windows-msvc.zip` | Windows x64 | `teshi.exe` + `share/web/` + README + LICENSE |
+| `teshi-vX.Y.Z-x64.msi` | Windows x64 | Full WiX installer: CLI + web UI under `Program Files\teshi` |
 | `teshi-bridge-vX.Y.Z.zip` | All | Chrome extension (load unpacked) |
 | `SHA256SUMS` | All | Checksums for every archive above |
 

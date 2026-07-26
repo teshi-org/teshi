@@ -81,7 +81,7 @@ class BootstrapConfig:
 
     @property
     def desktop_bin(self) -> Path:
-        name = "teshi-tauri.exe" if os.name == "nt" else "teshi-tauri"
+        name = "teshi-desktop.exe" if os.name == "nt" else "teshi-desktop"
         return self.repo_root / "target" / "debug" / name
 
     @property
@@ -440,7 +440,7 @@ def _external_teshi_pids(cfg: BootstrapConfig) -> list[tuple[int, str]]:
 def _probe_repo_versions(cfg: BootstrapConfig) -> ItemProbe:
     cargo_v = _read_toml_version(cfg.repo_root / "apps" / "teshi-cli" / "Cargo.toml")
     pkg_v = _read_json_version(
-        cfg.repo_root / "apps" / "teshi-tauri" / "frontend" / "package.json"
+        cfg.repo_root / "apps" / "teshi-web-ui" / "package.json"
     )
     ext_v = _read_json_version(cfg.repo_root / "extension" / "teshi-bridge" / "manifest.json")
     versions = {"Cargo.toml": cargo_v, "package.json": pkg_v, "manifest.json": ext_v}
@@ -535,7 +535,7 @@ def _probe_teshi_desktop(
     binary = cfg.desktop_bin
     run_v = _run_version(binary)
     build_time = _binary_build_time(binary)
-    repo_v = _read_toml_version(cfg.repo_root / "apps" / "teshi-tauri" / "Cargo.toml")
+    repo_v = _read_toml_version(cfg.repo_root / "apps" / "teshi-desktop" / "Cargo.toml")
     debug_pids = _pids_running_binary(binary)
 
     status = ItemStatus.STOPPED
@@ -543,32 +543,20 @@ def _probe_teshi_desktop(
     all_pids = debug_pids
     if debug_pids:
         status = ItemStatus.HEALTHY if len(debug_pids) == 1 else ItemStatus.DUPLICATE
-        detail = f"{len(debug_pids)} running (tauri child)"
+        detail = f"{len(debug_pids)} running (desktop child)"
     elif cfg.mode == "tauri-dev":
-        vite_mp = next(
-            (mp for mp in supervisor.processes if mp.label == "vite"), None
+        return ItemProbe(
+            name="teshi_desktop",
+            version="—",
+            status=ItemStatus.HEALTHY,
+            pids=[],
+            instances=0,
+            detail="skipped (web UI mode; use --mode separate for GPUI)",
         )
-        if vite_mp is not None:
-            code = vite_mp.popen.poll()
-            if code is None:
-                status = ItemStatus.STARTING
-                detail = "waiting for desktop (start after Vite)"
-                all_pids = []
-            else:
-                status = ItemStatus.UNHEALTHY
-                detail = f"vite exited ({code}); see bootstrap-vite.log"
-        else:
-            tauri_pids = _pids_by_cmdline("tauri dev") or _pids_by_cmdline(
-                "run tauri dev"
-            )
-            if tauri_pids:
-                status = ItemStatus.STARTING
-                detail = "npm run tauri dev"
-                all_pids = tauri_pids
 
     if run_v and repo_v and run_v != repo_v and not debug_pids:
         status = ItemStatus.STALE
-        detail = f"built {run_v}, repo {repo_v}; tauri dev will rebuild"
+        detail = f"built {run_v}, repo {repo_v}; rebuild with --build"
 
     ver = f"{run_v} @{build_time}" if run_v and build_time else (run_v or "—")
     return ItemProbe(
@@ -620,7 +608,7 @@ def _probe_vite_dev(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> Item
     listeners = _pids_listening_on(cfg.ui_port)
     ok, msg = _http_ok(f"http://127.0.0.1:{cfg.ui_port}/", require_200=True)
     pkg_v = _read_json_version(
-        cfg.repo_root / "apps" / "teshi-tauri" / "frontend" / "package.json"
+        cfg.repo_root / "apps" / "teshi-web-ui" / "package.json"
     )
 
     status = ItemStatus.STOPPED
@@ -891,7 +879,7 @@ def _preflight(cfg: BootstrapConfig) -> None:
     """Verify tools required for the selected launch mode."""
     console = Console(stderr=True)
     if cfg.mode == "tauri-dev":
-        frontend = cfg.repo_root / "apps" / "teshi-tauri" / "frontend"
+        frontend = cfg.repo_root / "apps" / "teshi-web-ui"
         if not (frontend / "node_modules").is_dir():
             console.print("[dim]Installing desktop npm dependencies...[/dim]")
             subprocess.run(
@@ -969,10 +957,6 @@ def _cleanup_before_start(cfg: BootstrapConfig, *, aggressive: bool) -> list[int
         for binary in (cfg.teshi_bin, cfg.desktop_bin):
             for pid in _pids_running_binary(binary):
                 stop_pid(pid)
-        for pid in _pids_by_cmdline("tauri dev"):
-            stop_pid(pid)
-        for pid in _pids_by_cmdline("run tauri dev"):
-            stop_pid(pid)
 
     if stopped:
         time.sleep(0.8)
@@ -1088,9 +1072,8 @@ def _build_workspace(cfg: BootstrapConfig) -> None:
     stopped = _release_teshi_exe_lock(cfg)
     if stopped:
         console.print(f"[yellow]Released lock ({len(stopped)} process(es) stopped)[/yellow]")
-    console.print("[dim]Building teshi CLI and desktop...[/dim]")
+    console.print("[dim]Building teshi CLI...[/dim]")
     _run_cargo_build(cfg, "teshi-cli")
-    _run_cargo_build(cfg, "teshi-tauri")
 
 
 def _ensure_built(cfg: BootstrapConfig) -> None:
@@ -1102,8 +1085,8 @@ def _ensure_built(cfg: BootstrapConfig) -> None:
     console.print("[dim]Building teshi CLI...[/dim]")
     _run_cargo_build(cfg, "teshi-cli")
     if cfg.mode == "separate":
-        console.print("[dim]Building teshi-tauri...[/dim]")
-        _run_cargo_build(cfg, "teshi-tauri")
+        console.print("[dim]Building teshi-desktop (GPUI)...[/dim]")
+        _run_cargo_build(cfg, "teshi-desktop")
 
 
 def _build_spawn_panel(supervisor: ProcessSupervisor) -> Text:
@@ -1142,7 +1125,7 @@ def _start_stack(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> None:
         # Vite only — skip npm `predev` (cargo build) to avoid locking teshi.exe on Windows.
         supervisor.spawn(
             [_npm_cmd(), "run", "dev", "--ignore-scripts"],
-            cwd=cfg.repo_root / "apps" / "teshi-tauri" / "frontend",
+            cwd=cfg.repo_root / "apps" / "teshi-web-ui",
             label="vite",
         )
     elif cfg.mode == "separate":
@@ -1150,7 +1133,7 @@ def _start_stack(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> None:
             raise SystemExit(f"teshi binary not found at {cfg.teshi_bin}; pass --build")
         supervisor.spawn(
             [_npm_cmd(), "run", "dev"],
-            cwd=cfg.repo_root / "apps" / "teshi-tauri" / "frontend",
+            cwd=cfg.repo_root / "apps" / "teshi-web-ui",
             label="vite",
         )
         supervisor.spawn(
@@ -1172,24 +1155,7 @@ def _maybe_start_desktop(
     *,
     desktop_started: bool,
 ) -> bool:
-    if cfg.mode != "tauri-dev":
-        return desktop_started
-    if desktop_started:
-        # Check if still alive; restart if killed (e.g. by cargo build)
-        if any(mp.label == "teshi-desktop" and mp.popen.poll() is None for mp in supervisor.processes):
-            return True
-        # dead — fall through to restart
-    elif any(mp.label == "teshi-desktop" and mp.popen.poll() is None for mp in supervisor.processes):
-        return True
-    ui_ok, _ = _http_ok(f"http://127.0.0.1:{cfg.ui_port}/", require_200=True)
-    if not ui_ok or not cfg.desktop_bin.is_file():
-        return False
-    project = str(cfg.project.resolve())
-    supervisor.spawn(
-        [str(cfg.desktop_bin), "--project", project],
-        cwd=cfg.repo_root,
-        label="teshi-desktop",
-    )
+    """Native desktop is optional (GPUI). React UI uses the browser via teshi web."""
     return True
 
 
@@ -1199,7 +1165,7 @@ def _maybe_start_web(
     *,
     web_started: bool,
 ) -> bool:
-    """Start teshi web after tauri predev + Vite are ready (avoids Windows exe lock)."""
+    """Start teshi web after Vite are ready (avoids Windows exe lock)."""
     if cfg.mode != "tauri-dev":
         return web_started
     if web_started:
@@ -1294,7 +1260,7 @@ def _parse_args(argv: list[str] | None = None) -> BootstrapConfig:
         "--mode",
         choices=("tauri-dev", "separate"),
         default="tauri-dev",
-        help="tauri-dev: vite + teshi-desktop (no npm predev); separate: desktop exe + npm run dev",
+        help="tauri-dev: vite + teshi web; separate: GPUI desktop + vite + teshi web",
     )
     parser.add_argument("--api-port", type=int, default=20253, help="teshi web API port")
     parser.add_argument("--ui-port", type=int, default=1420, help="Vite dev / SUT UI port")

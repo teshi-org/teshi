@@ -15,8 +15,8 @@ if (-not (Test-Path $heat)) {
     throw "Missing heat.exe at $heat"
 }
 
-Write-Host "==> Frontend"
-Push-Location apps/teshi-tauri/frontend
+Write-Host "==> Frontend (teshi-web-ui)"
+Push-Location apps/teshi-web-ui
 npm ci
 npm run build
 Pop-Location
@@ -24,12 +24,8 @@ Pop-Location
 Write-Host "==> teshi CLI (release)"
 cargo build --release --bin teshi
 
-Write-Host "==> teshi-tauri (release, no bundle)"
-npx --prefix apps/teshi-tauri/frontend tauri build --config apps/teshi-tauri/tauri.conf.json --no-bundle
-
 $builtExe = "target/release/teshi.exe"
-$desktopExe = "target/release/teshi-tauri.exe"
-foreach ($p in @($builtExe, $desktopExe, "apps/teshi-tauri/frontend/dist/index.html")) {
+foreach ($p in @($builtExe, "apps/teshi-web-ui/dist/index.html", "resources/browser_service.py", "resources/winapp_service.py")) {
     if (-not (Test-Path $p)) { throw "Missing $p" }
 }
 
@@ -42,10 +38,9 @@ $bridgeDir = Join-Path $stagingRoot "share/teshi-bridge"
 New-Item -ItemType Directory -Force -Path $binDir, $webDir, $bridgeDir | Out-Null
 
 Copy-Item $builtExe (Join-Path $binDir "teshi.exe") -Force
-Copy-Item $desktopExe (Join-Path $binDir "teshi-desktop.exe") -Force
-Copy-Item "apps/teshi-tauri/resources/browser_service.py" (Join-Path $shareDir "browser_service.py") -Force
-Copy-Item "apps/teshi-tauri/resources/winapp_service.py" (Join-Path $shareDir "winapp_service.py") -Force
-Copy-Item -Path "apps/teshi-tauri/frontend/dist/*" -Destination $webDir -Recurse -Force
+Copy-Item "resources/browser_service.py" (Join-Path $shareDir "browser_service.py") -Force
+Copy-Item "resources/winapp_service.py" (Join-Path $shareDir "winapp_service.py") -Force
+Copy-Item -Path "apps/teshi-web-ui/dist/*" -Destination $webDir -Recurse -Force
 Copy-Item -Path "extension/teshi-bridge/*" -Destination $bridgeDir -Recurse -Force
 
 Write-Host "==> heat web + bridge fragments"
@@ -80,19 +75,11 @@ foreach ($f in @("wix/web-files.wxs", "wix/bridge-files.wxs")) {
     Set-Content $f -Value $content -NoNewline
 }
 
-$outDir = "target/wix"
-New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-$msiPath = Join-Path $outDir "teshi-$tag-x64.msi"
-
-Write-Host "==> cargo wix -> $msiPath"
+Write-Host "==> cargo wix"
 cargo wix --package teshi-cli `
     --include wix/main.wxs `
     --include wix/web-files.wxs `
     --include wix/bridge-files.wxs `
-    --nocapture --no-build `
-    -C "-dStagingRoot=staging/msi-root" `
-    -C "-dWebRoot=staging/msi-root/share/web" `
-    -C "-dBridgeRoot=staging/msi-root/share/teshi-bridge" `
-    -o $msiPath
+    --nocapture --no-build -o "target/wix/teshi-$tag-x64.msi"
 
-Write-Host "MSI ready: $msiPath"
+Write-Host "==> Done: target/wix/teshi-$tag-x64.msi"

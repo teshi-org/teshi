@@ -68,21 +68,17 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: apps/teshi-tauri/frontend/package-lock.json
+          cache-dependency-path: apps/teshi-web-ui/package-lock.json
 
       - name: Install npm dependencies
         if: matrix.target == 'x86_64-pc-windows-msvc'
-        working-directory: apps/teshi-tauri/frontend
+        working-directory: apps/teshi-web-ui
         run: npm ci
 
-      - name: Build teshi-tauri (via tauri build)
+      - name: Build web UI
         if: matrix.target == 'x86_64-pc-windows-msvc'
-        run: npx --prefix apps/teshi-tauri/frontend tauri build --config apps/teshi-tauri/tauri.conf.json --bundles msi
-
-      - name: Remove bundled Tauri MSI (use combined cargo-wix MSI instead)
-        if: matrix.target == 'x86_64-pc-windows-msvc'
-        shell: pwsh
-        run: Remove-Item -Path "../../target/release/bundle/msi/*.msi" -Force -ErrorAction SilentlyContinue
+        working-directory: apps/teshi-web-ui
+        run: npm run build
 
       - name: Install WiX Toolset
         if: matrix.target == 'x86_64-pc-windows-msvc'
@@ -120,16 +116,14 @@ jobs:
 
           # Verify required files
           $builtExe    = "target/${{ matrix.target }}/release/teshi.exe"
-          $desktopExe  = "target/release/teshi-tauri.exe"
-          @($builtExe, $desktopExe, "apps/teshi-tauri/frontend/dist", "apps/teshi-tauri/resources/browser_service.py",
-            "apps/teshi-tauri/resources/winapp_service.py", "extension/teshi-bridge/manifest.json") |
+          @($builtExe, "apps/teshi-web-ui/dist", "resources/browser_service.py",
+            "resources/winapp_service.py", "extension/teshi-bridge/manifest.json") |
             ForEach-Object { if (-not (Test-Path $_)) { throw "Missing: $_" } }
 
           Copy-Item $builtExe   (Join-Path $binDir "teshi.exe")          -Force
-          Copy-Item $desktopExe (Join-Path $binDir "teshi-desktop.exe")  -Force
-          Copy-Item "apps/teshi-tauri/resources/browser_service.py" (Join-Path $shareDir "browser_service.py") -Force
-          Copy-Item "apps/teshi-tauri/resources/winapp_service.py"  (Join-Path $shareDir "winapp_service.py") -Force
-          Copy-Item -Path "apps/teshi-tauri/frontend/dist/*" -Destination $webDir -Recurse -Force
+          Copy-Item "resources/browser_service.py" (Join-Path $shareDir "browser_service.py") -Force
+          Copy-Item "resources/winapp_service.py"  (Join-Path $shareDir "winapp_service.py") -Force
+          Copy-Item -Path "apps/teshi-web-ui/dist/*" -Destination $webDir -Recurse -Force
           Copy-Item -Path "extension/teshi-bridge/*" -Destination $bridgeDir -Recurse -Force
 
           # Generate WiX fragments for web and bridge files
@@ -179,7 +173,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: teshi-web-dist
-          path: apps/teshi-tauri/frontend/dist
+          path: apps/teshi-web-ui/dist
           if-no-files-found: error
 
   publish:
@@ -229,8 +223,8 @@ jobs:
             if [[ "${target}" == *"windows"* ]]; then
               # Service scripts and browser extension from git checkout
               mkdir -p "${stage_dir}/share/teshi-bridge" "${stage_dir}/share/web"
-              cp "${repo_dir}/apps/teshi-tauri/resources/browser_service.py" "${stage_dir}/share/browser_service.py"
-              cp "${repo_dir}/apps/teshi-tauri/resources/winapp_service.py"  "${stage_dir}/share/winapp_service.py"
+              cp "${repo_dir}/resources/browser_service.py" "${stage_dir}/share/browser_service.py"
+              cp "${repo_dir}/resources/winapp_service.py"  "${stage_dir}/share/winapp_service.py"
               cp -r "${repo_dir}/extension/teshi-bridge/."  "${stage_dir}/share/teshi-bridge/"
               cp -r "${artifacts_dir}/teshi-web-dist/."      "${stage_dir}/share/web/"
             else

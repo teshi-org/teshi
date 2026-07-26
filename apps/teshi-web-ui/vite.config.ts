@@ -9,7 +9,7 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 1420,
     strictPort: true,
-    // Dev SUT (:1420) proxies API to `teshi web` (:1421) during bootstrap dogfooding.
+    // Dev SUT (:1420) proxies API to `teshi web` during bootstrap dogfooding.
     proxy: {
       "/api/v1": {
         target: "http://127.0.0.1:20253",
@@ -17,10 +17,10 @@ export default defineConfig({
       },
     },
   },
-  envPrefix: ["VITE_", "TAURI_"],
+  envPrefix: ["VITE_"],
   build: {
-    target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
-    minify: !process.env.TAURI_ENV_DEBUG ? "esbuild" : false,
-    sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    target: "es2020",
+    minify: "esbuild",
+    sourcemap: false,
   },
 });

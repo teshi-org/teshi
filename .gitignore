@@ -41,9 +41,9 @@ teshi.toml
 # Local Teshi runtime state (traces, daemon, agent context); any nesting
 .teshi/
 
-# --- teshi-tauri frontend (Tauri + Vite) ---
-apps/teshi-tauri/frontend/node_modules/
-apps/teshi-tauri/frontend/dist/
+# --- teshi-web-ui (Vite React frontend) ---
+apps/teshi-web-ui/node_modules/
+apps/teshi-web-ui/dist/
 
 # Local release packaging output (binaries, archives, checksums)
 release-pack/

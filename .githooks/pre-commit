@@ -60,10 +60,8 @@ fi
 echo ":: Component version sync check ..."
 MISMATCH=false
 VERSION_FILES=(
-  "Cargo.toml:^version = "
-  "desktop/src-tauri/Cargo.toml:^version = "
-  "desktop/package.json:\"version\": "
-  "desktop/src-tauri/tauri.conf.json:\"version\": "
+  "apps/teshi-cli/Cargo.toml:^version = "
+  "apps/teshi-web-ui/package.json:\"version\": "
   "extension/teshi-bridge/manifest.json:\"version\": "
 )
 for entry in "${VERSION_FILES[@]}"; do

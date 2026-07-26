@@ -4,7 +4,7 @@ Connects your **Chrome window tabs** to [teshi-desktop](../../desktop/README.md)
 
 ## Icons
 
-Toolbar and store icons are PNGs under `icons/`, generated from the same asset as teshi-desktop (`apps/teshi-tauri/icons/icon.ico`). After updating the desktop icon, regenerate sizes (16 / 32 / 48 / 128) and reload the extension in Chrome.
+Toolbar and store icons are PNGs under `icons/`. After updating brand icons, regenerate sizes (16 / 32 / 48 / 128) and reload the extension in Chrome.
 
 ## Install (unpacked)
 

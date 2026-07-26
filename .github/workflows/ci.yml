@@ -37,16 +37,16 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Compilation check
-        run: cargo check --workspace --exclude teshi-tauri --locked
+        run: cargo check --workspace --locked
 
       - name: Run tests
-        run: cargo test --workspace --exclude teshi-tauri --locked
+        run: cargo test --workspace --locked
 
       - name: Run clippy with warnings denied
-        run: cargo clippy --workspace --exclude teshi-tauri --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
 
       - name: Build doc
-        run: cargo doc --workspace --exclude teshi-tauri --locked --no-deps --document-private-items
+        run: cargo doc --workspace --locked --no-deps --document-private-items
 
   desktop:
     name: teshi-desktop build (GPUI)

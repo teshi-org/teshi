@@ -8,7 +8,7 @@ cd "$ROOT"
 TESHI="${TESHI_BIN:-cargo run --quiet --}"
 
 echo "==> build frontend"
-(cd apps/teshi-tauri/frontend && npm ci && npm run build)
+(cd apps/teshi-web-ui && npm ci && npm run build)
 
 echo "==> ensure python venv"
 if [[ ! -d .venv ]]; then

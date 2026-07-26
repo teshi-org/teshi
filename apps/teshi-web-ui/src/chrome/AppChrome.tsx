@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { isTauriHost } from "../platform";
+import { useEffect, useRef, useState } from "react";
 
 interface Props {
   projectRoot: string | null;
@@ -17,7 +16,6 @@ export function AppChrome({
   const [fileOpen, setFileOpen] = useState(false);
   const [recentOpen, setRecentOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  const desktop = isTauriHost();
 
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
@@ -40,40 +38,6 @@ export function AppChrome({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onOpenProject]);
-
-  const windowAction = useCallback(
-    async (action: "minimize" | "maximize" | "close") => {
-      if (!desktop) {
-        return;
-      }
-      const { getCurrentWindow } = await import("@tauri-apps/api/window");
-      const win = getCurrentWindow();
-      if (action === "minimize") {
-        await win.minimize();
-      } else if (action === "maximize") {
-        await win.toggleMaximize();
-      } else {
-        await win.close();
-      }
-    },
-    [desktop],
-  );
-
-  const handleTitlebarMouseDown = useCallback(
-    async (e: React.MouseEvent<HTMLDivElement>) => {
-      if (!desktop || e.button !== 0) {
-        return;
-      }
-      const { getCurrentWindow } = await import("@tauri-apps/api/window");
-      const win = getCurrentWindow();
-      if (e.detail === 2) {
-        await win.toggleMaximize();
-      } else {
-        await win.startDragging();
-      }
-    },
-    [desktop],
-  );
 
   const title = projectRoot
     ? projectRoot.replace(/^.*[/\\]/, "") || projectRoot
@@ -134,43 +98,11 @@ export function AppChrome({
           </div>
         )}
       </div>
-      <div
-        className="app-chrome-drag"
-        data-tauri-drag-region
-        onMouseDown={desktop ? (e) => void handleTitlebarMouseDown(e) : undefined}
-      >
+      <div className="app-chrome-drag">
         <span className="app-chrome-title" title={projectRoot ?? undefined}>
           {title}
         </span>
       </div>
-      {desktop && (
-        <div className="app-chrome-controls app-chrome-no-drag">
-          <button
-            type="button"
-            className="app-chrome-winbtn"
-            aria-label="Minimize"
-            onClick={() => void windowAction("minimize")}
-          >
-            ─
-          </button>
-          <button
-            type="button"
-            className="app-chrome-winbtn"
-            aria-label="Maximize"
-            onClick={() => void windowAction("maximize")}
-          >
-            □
-          </button>
-          <button
-            type="button"
-            className="app-chrome-winbtn app-chrome-winbtn-close"
-            aria-label="Close"
-            onClick={() => void windowAction("close")}
-          >
-            ✕
-          </button>
-        </div>
-      )}
     </header>
   );
 }

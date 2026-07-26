@@ -13,7 +13,6 @@ members = [
     "crates/teshi-ui",
     "apps/teshi-daemon",
     "apps/teshi-terminal-sidecar",
-    "apps/teshi-tauri",
     "apps/teshi-desktop",
     "apps/teshi-web",
 ]

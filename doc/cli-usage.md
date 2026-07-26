@@ -14,18 +14,23 @@ If no `.feature` files are found, the TUI opens an empty project buffer.
 
 ### Browser GUI (`teshi web`)
 
-Same React UI as desktop, served over loopback HTTP (no Tauri install required):
+React workspace UI served over loopback HTTP by the local daemon:
 
 ```bash
 teshi web [--project PATH] [--port 1421] [--no-open] [--dist PATH]
 ```
 
 On Windows, the full MSI and release zip bundle web assets under `share/web/` next to `teshi.exe`.
-For development from source, build the frontend first: `cd desktop && npm run build`.
+For development from source, build the frontend first:
+
+```bash
+npm --prefix apps/teshi-web-ui run build
+teshi web --dist apps/teshi-web-ui/dist
+```
 
 ### Native desktop (`teshi desktop` / `teshi-desktop`)
 
-Chrome extension locator workflow and embedded terminal:
+GPUI desktop shell (separate from the React web UI):
 
 ```bash
 teshi desktop [--project PATH]
@@ -34,9 +39,7 @@ teshi-desktop --project path/to/project
 teshi-desktop path/to/project
 ```
 
-After installing the full Windows MSI (`teshi-vX.Y.Z-x64.msi`) or release zip, `teshi-desktop.exe` is installed next to `teshi.exe`.
-
-Development: `cargo tauri dev --manifest-path apps/teshi-tauri/Cargo.toml`.
+Development: `cargo run -p teshi-desktop`.
 
 ### Run tests (headless)
 
