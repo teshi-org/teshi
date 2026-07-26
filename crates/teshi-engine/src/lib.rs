@@ -160,9 +160,9 @@ pub fn default_browser_service_script() -> PathBuf {
         }
     }
     candidates.extend([
-        PathBuf::from("apps/teshi-tauri/resources/browser_service.py"),
-        PathBuf::from("../apps/teshi-tauri/resources/browser_service.py"),
-        PathBuf::from("../../apps/teshi-tauri/resources/browser_service.py"),
+        PathBuf::from("resources/browser_service.py"),
+        PathBuf::from("../resources/browser_service.py"),
+        PathBuf::from("../../resources/browser_service.py"),
     ]);
 
     for path in &candidates {
@@ -188,9 +188,9 @@ pub fn default_winapp_service_script() -> PathBuf {
         }
     }
     candidates.extend([
-        PathBuf::from("apps/teshi-tauri/resources/winapp_service.py"),
-        PathBuf::from("../apps/teshi-tauri/resources/winapp_service.py"),
-        PathBuf::from("../../apps/teshi-tauri/resources/winapp_service.py"),
+        PathBuf::from("resources/winapp_service.py"),
+        PathBuf::from("../resources/winapp_service.py"),
+        PathBuf::from("../../resources/winapp_service.py"),
     ]);
 
     for path in &candidates {

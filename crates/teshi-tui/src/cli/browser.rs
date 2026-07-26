@@ -513,7 +513,7 @@ fn browser_error(err: teshi_engine::BrowserError) -> anyhow::Error {
 
 /// Prefers the repo `browser_service.py` so CI picks up the latest embedded flags.
 fn resolve_embedded_browser_service_script(project_root: &Path) -> PathBuf {
-    let repo_script = project_root.join("apps/teshi-tauri/resources/browser_service.py");
+    let repo_script = project_root.join("resources/browser_service.py");
     if repo_script.is_file() {
         return repo_script;
     }

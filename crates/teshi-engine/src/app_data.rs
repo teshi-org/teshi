@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 
 const RECENT_MAX: usize = 10;
 
-/// Minimum window size; must stay in sync with `tauri.conf.json` `minWidth` / `minHeight`.
+/// Minimum window width for desktop shells.
 pub const MIN_WINDOW_WIDTH: u32 = 1280;
-/// Minimum window height; must stay in sync with `tauri.conf.json` `minHeight`.
+/// Minimum window height for desktop shells.
 pub const MIN_WINDOW_HEIGHT: u32 = 720;
 
 /// Returns `(width, height)` only when both dimensions meet the configured minimum.
