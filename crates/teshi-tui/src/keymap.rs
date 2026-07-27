@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{MainTab, MindMapFocus, ViewStage};
+use crate::authoring_tab::RequirementsFocus;
 
 /// Inputs for [`Action::from_key_event`] to resolve mode-specific bindings.
 #[derive(Debug, Clone, Copy)]
@@ -35,6 +36,8 @@ pub struct KeyContext {
     pub approval_panel_active: bool,
     /// Whether the agent profile selection panel is open.
     pub agent_profile_panel_active: bool,
+    /// Active pane when the Requirements tab is selected.
+    pub requirements_focus: RequirementsFocus,
 
     /// Whether the quit confirmation panel is open.
     pub quit_pending_confirm: bool,
@@ -79,6 +82,9 @@ pub enum Action {
     Undo,
     Redo,
     PendingChar(char),
+    // Requirements tab authoring
+    ReqNewTestPoint,
+    ReqNewDocument,
     // Global
     Save,
     Quit,
@@ -508,6 +514,103 @@ impl Action {
             };
         }
 
+        // Requirements tab: three-pane navigation and plain-text editing
+        if context.active_tab == MainTab::Requirements {
+            if context.requirements_focus == RequirementsFocus::Editor {
+                return match (event.code, event.modifiers) {
+                    (KeyCode::Tab, _) => Some(Self::FocusNextColumn),
+                    (KeyCode::BackTab, _) => Some(Self::FocusPrevColumn),
+                    (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                        Some(Self::MoveLeft)
+                    }
+                    (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                        Some(Self::MoveRight)
+                    }
+                    (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                        Some(Self::MoveUp)
+                    }
+                    (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                        Some(Self::MoveDown)
+                    }
+                    (KeyCode::Enter, _) => Some(Self::Enter),
+                    (KeyCode::Backspace, _) => Some(Self::Backspace),
+                    (KeyCode::Delete, _) => Some(Self::Delete),
+                    (KeyCode::Char('n'), KeyModifiers::NONE) => Some(Self::ReqNewTestPoint),
+                    (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::ReqNewDocument),
+                    (KeyCode::Char('1'), KeyModifiers::NONE) => {
+                        Some(Self::SelectTab(MainTab::Explore))
+                    }
+                    (KeyCode::Char('2'), KeyModifiers::NONE) => {
+                        Some(Self::SelectTab(MainTab::MindMap))
+                    }
+                    (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
+                    (KeyCode::Char('4'), KeyModifiers::NONE) => {
+                        Some(Self::SelectTab(MainTab::Requirements))
+                    }
+                    (KeyCode::Char('5'), KeyModifiers::NONE) => {
+                        Some(Self::SelectTab(MainTab::TestPoints))
+                    }
+                    (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
+                    (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
+                    (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
+                    (KeyCode::Esc, _) => Some(Self::ClearInputState),
+                    (KeyCode::Char(ch), modifiers)
+                        if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
+                    {
+                        Some(Self::Insert(ch))
+                    }
+                    _ => None,
+                };
+            }
+            return match (event.code, event.modifiers) {
+                (KeyCode::Tab, _) => Some(Self::FocusNextColumn),
+                (KeyCode::BackTab, _) => Some(Self::FocusPrevColumn),
+                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                    Some(Self::FocusPrevColumn)
+                }
+                (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                    Some(Self::FocusNextColumn)
+                }
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => Some(Self::MoveUp),
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    Some(Self::MoveDown)
+                }
+                (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::ReqNewDocument),
+                (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
+                (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
+                (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
+                (KeyCode::Char('4'), KeyModifiers::NONE) => {
+                    Some(Self::SelectTab(MainTab::Requirements))
+                }
+                (KeyCode::Char('5'), KeyModifiers::NONE) => {
+                    Some(Self::SelectTab(MainTab::TestPoints))
+                }
+                (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
+                (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
+                (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
+                (KeyCode::Esc, _) => Some(Self::ClearInputState),
+                _ => None,
+            };
+        }
+
+        // Test Points tab (placeholder navigation until section 4)
+        if context.active_tab == MainTab::TestPoints {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
+                (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
+                (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
+                (KeyCode::Char('4'), KeyModifiers::NONE) => {
+                    Some(Self::SelectTab(MainTab::Requirements))
+                }
+                (KeyCode::Char('5'), KeyModifiers::NONE) => {
+                    Some(Self::SelectTab(MainTab::TestPoints))
+                }
+                (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
+                (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
+                _ => None,
+            };
+        }
+
         // Explore tab: three-column navigation
         if context.active_tab == MainTab::Explore && !context.explore_edit_mode {
             return match (event.code, event.modifiers) {
@@ -530,6 +633,12 @@ impl Action {
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
                 (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
+                (KeyCode::Char('4'), KeyModifiers::NONE) => {
+                    Some(Self::SelectTab(MainTab::Requirements))
+                }
+                (KeyCode::Char('5'), KeyModifiers::NONE) => {
+                    Some(Self::SelectTab(MainTab::TestPoints))
+                }
                 (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                 (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
@@ -545,6 +654,12 @@ impl Action {
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
                 (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
+                (KeyCode::Char('4'), KeyModifiers::NONE) => {
+                    Some(Self::SelectTab(MainTab::Requirements))
+                }
+                (KeyCode::Char('5'), KeyModifiers::NONE) => {
+                    Some(Self::SelectTab(MainTab::TestPoints))
+                }
                 (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                 (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
                 (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::AgentNew),
@@ -694,6 +809,12 @@ impl Action {
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
                 (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
+                (KeyCode::Char('4'), KeyModifiers::NONE) => {
+                    Some(Self::SelectTab(MainTab::Requirements))
+                }
+                (KeyCode::Char('5'), KeyModifiers::NONE) => {
+                    Some(Self::SelectTab(MainTab::TestPoints))
+                }
                 (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                 (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::MindMapSendToAi),
@@ -709,6 +830,10 @@ impl Action {
             (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
             (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
             (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
+            (KeyCode::Char('4'), KeyModifiers::NONE) => {
+                Some(Self::SelectTab(MainTab::Requirements))
+            }
+            (KeyCode::Char('5'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::TestPoints)),
             (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
             (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
             (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
@@ -785,6 +910,7 @@ impl Action {
 mod tests {
     use super::{Action, KeyContext};
     use crate::app::{MainTab, MindMapFocus, ViewStage};
+    use crate::authoring_tab::RequirementsFocus;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
@@ -811,6 +937,7 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            requirements_focus: RequirementsFocus::Tree,
             quit_pending_confirm: false,
         };
         let action = Action::from_key_event(
@@ -844,6 +971,7 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            requirements_focus: RequirementsFocus::Tree,
             quit_pending_confirm: false,
         };
         let action = Action::from_key_event(
@@ -877,6 +1005,7 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            requirements_focus: RequirementsFocus::Tree,
             quit_pending_confirm: false,
         };
         assert_eq!(
@@ -920,6 +1049,7 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            requirements_focus: RequirementsFocus::Tree,
             quit_pending_confirm: false,
         };
         assert_eq!(
@@ -963,6 +1093,7 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            requirements_focus: RequirementsFocus::Tree,
             quit_pending_confirm: false,
         };
         assert_eq!(
@@ -1014,6 +1145,7 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            requirements_focus: RequirementsFocus::Tree,
             quit_pending_confirm: false,
         };
         let action = Action::from_key_event(
@@ -1047,6 +1179,7 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            requirements_focus: RequirementsFocus::Tree,
             quit_pending_confirm: false,
         };
         let action = Action::from_key_event(
@@ -1080,6 +1213,7 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            requirements_focus: RequirementsFocus::Tree,
             quit_pending_confirm: false,
         };
         assert_eq!(
@@ -1137,6 +1271,7 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            requirements_focus: RequirementsFocus::Tree,
             quit_pending_confirm: false,
         };
         let copy_context = KeyContext {
@@ -1187,6 +1322,7 @@ mod tests {
             scenario_dropdown_open: false,
             approval_panel_active: false,
             agent_profile_panel_active: false,
+            requirements_focus: RequirementsFocus::Tree,
             quit_pending_confirm: false,
         };
         assert_eq!(

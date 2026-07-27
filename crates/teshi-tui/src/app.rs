@@ -44,9 +44,11 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainTab {
-    MindMap,
     Explore,
+    MindMap,
     Ai,
+    Requirements,
+    TestPoints,
 }
 
 /// A single message in the AI chat history.
@@ -504,6 +506,8 @@ pub struct App {
     pub generation_stage: teshi_agent::pipeline::GenerationStage,
     pub pipeline_requirement: Option<teshi_agent::pipeline::Requirement>,
     pub pipeline_plan: Option<teshi_agent::pipeline::GenerationPlan>,
+    /// Requirements / test-point authoring UI state.
+    pub authoring_ui: crate::authoring_tab::AuthoringUiState,
 }
 
 /// Convert a character index to the corresponding byte offset in a UTF-8 string.
@@ -663,6 +667,7 @@ impl App {
             .collect();
         let buffer_dirty = vec![false; buffers.len()];
         let tree_state = mindmap::init_tree_state(&mut mindmap_index);
+        let project_root = project.root_dir.clone();
         let (buffer, file_path, active_idx) = if buffers.is_empty() {
             (EditorBuffer::from_string(String::new()), None, None)
         } else {
@@ -788,6 +793,7 @@ impl App {
             generation_stage: teshi_agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
+            authoring_ui: crate::authoring_tab::AuthoringUiState::load_from_project(&project_root),
         };
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -817,6 +823,7 @@ impl App {
         let buffer_dirty = vec![false; buffers.len()];
         let disk_stamps = Self::capture_disk_stamps(&project);
         let tree_state = mindmap::init_tree_state(&mut mindmap_index);
+        let project_root = project.root_dir.clone();
         let mut app = Self {
             project,
             step_index,
@@ -931,6 +938,7 @@ impl App {
             generation_stage: teshi_agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
+            authoring_ui: crate::authoring_tab::AuthoringUiState::load_from_project(&project_root),
         };
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -1059,6 +1067,7 @@ impl App {
             generation_stage: teshi_agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
+            authoring_ui: crate::authoring_tab::AuthoringUiState::empty(),
         };
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -3868,13 +3877,19 @@ impl App {
         match action {
             // Explore tab navigation
             Action::FocusNextColumn => {
-                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                if self.active_tab == MainTab::Requirements {
+                    self.authoring_ui.focus_next_column();
+                    self.quit_pending_confirm = false;
+                } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     self.explore_focus_next();
                     self.quit_pending_confirm = false;
                 }
             }
             Action::FocusPrevColumn => {
-                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                if self.active_tab == MainTab::Requirements {
+                    self.authoring_ui.focus_prev_column();
+                    self.quit_pending_confirm = false;
+                } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     self.explore_focus_prev();
                     self.quit_pending_confirm = false;
                 }
@@ -4364,7 +4379,20 @@ impl App {
 
             // Editor navigation (MindMap stage 3 & legacy)
             Action::MoveUp => {
-                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                if self.active_tab == MainTab::Requirements {
+                    match self.authoring_ui.focus {
+                        crate::authoring_tab::RequirementsFocus::Tree => {
+                            self.authoring_ui.move_tree_selection(-1);
+                        }
+                        crate::authoring_tab::RequirementsFocus::LinkedTestPoints => {
+                            self.authoring_ui.move_linked_selection(-1);
+                        }
+                        crate::authoring_tab::RequirementsFocus::Editor => {
+                            self.authoring_ui.move_cursor_vertical(-1);
+                        }
+                    }
+                    self.quit_pending_confirm = false;
+                } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     self.explore_move_selection(-1);
                     self.quit_pending_confirm = false;
                 } else {
@@ -4372,7 +4400,20 @@ impl App {
                 }
             }
             Action::MoveDown => {
-                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                if self.active_tab == MainTab::Requirements {
+                    match self.authoring_ui.focus {
+                        crate::authoring_tab::RequirementsFocus::Tree => {
+                            self.authoring_ui.move_tree_selection(1);
+                        }
+                        crate::authoring_tab::RequirementsFocus::LinkedTestPoints => {
+                            self.authoring_ui.move_linked_selection(1);
+                        }
+                        crate::authoring_tab::RequirementsFocus::Editor => {
+                            self.authoring_ui.move_cursor_vertical(1);
+                        }
+                    }
+                    self.quit_pending_confirm = false;
+                } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     self.explore_move_selection(1);
                     self.quit_pending_confirm = false;
                 } else {
@@ -4394,14 +4435,22 @@ impl App {
                 }
             }
             Action::MoveLeft => {
-                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                if self.active_tab == MainTab::Requirements {
+                    if self.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor {
+                        self.authoring_ui.move_cursor_left();
+                    }
+                } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     // No-op in Explore browse mode
                 } else {
                     self.move_left();
                 }
             }
             Action::MoveRight => {
-                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                if self.active_tab == MainTab::Requirements {
+                    if self.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor {
+                        self.authoring_ui.move_cursor_right();
+                    }
+                } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     // No-op in Explore browse mode
                 } else {
                     self.move_right();
@@ -4449,19 +4498,26 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::Insert(ch) => {
-                if !self.step_input_active {
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.insert_char(ch);
+                    self.quit_pending_confirm = false;
+                } else if !self.step_input_active {
                     return Ok(());
+                } else {
+                    self.push_undo();
+                    self.buffer
+                        .insert_char(self.cursor_row, self.cursor_col, ch);
+                    self.cursor_col += 1;
+                    self.desired_col = self.cursor_col;
+                    self.mark_current_buffer_dirty();
+                    self.quit_pending_confirm = false;
                 }
-                self.push_undo();
-                self.buffer
-                    .insert_char(self.cursor_row, self.cursor_col, ch);
-                self.cursor_col += 1;
-                self.desired_col = self.cursor_col;
-                self.mark_current_buffer_dirty();
-                self.quit_pending_confirm = false;
             }
             Action::Enter => {
-                if self.step_input_active {
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.insert_newline();
+                    self.quit_pending_confirm = false;
+                } else if self.step_input_active {
                     self.step_input_active = false;
                     self.focus_slot = BddFocusSlot::Body;
                     self.status = "Edit committed".to_string();
@@ -4469,29 +4525,72 @@ impl App {
                 }
             }
             Action::Backspace => {
-                if !self.step_input_active {
-                    return Ok(());
-                }
-                if self.cursor_col <= self.step_input_min_col {
-                    return Ok(());
-                }
-                self.push_undo();
-                let (row, col, changed) = self.buffer.backspace(self.cursor_row, self.cursor_col);
-                self.cursor_row = row;
-                self.cursor_col = col;
-                self.desired_col = col;
-                if changed {
-                    self.mark_current_buffer_dirty();
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.backspace();
                     self.quit_pending_confirm = false;
+                } else if !self.step_input_active {
+                    return Ok(());
+                } else {
+                    if self.cursor_col <= self.step_input_min_col {
+                        return Ok(());
+                    }
+                    self.push_undo();
+                    let (row, col, changed) =
+                        self.buffer.backspace(self.cursor_row, self.cursor_col);
+                    self.cursor_row = row;
+                    self.cursor_col = col;
+                    self.desired_col = col;
+                    if changed {
+                        self.mark_current_buffer_dirty();
+                        self.quit_pending_confirm = false;
+                    }
                 }
             }
             Action::Delete => {
-                if !self.step_input_active {
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.delete_forward();
+                    self.quit_pending_confirm = false;
+                } else if !self.step_input_active {
                     return Ok(());
+                } else {
+                    self.push_undo();
+                    if self.buffer.delete(self.cursor_row, self.cursor_col) {
+                        self.mark_current_buffer_dirty();
+                        self.quit_pending_confirm = false;
+                    }
                 }
-                self.push_undo();
-                if self.buffer.delete(self.cursor_row, self.cursor_col) {
-                    self.mark_current_buffer_dirty();
+            }
+            Action::ReqNewTestPoint => {
+                if self.active_tab == MainTab::Requirements {
+                    if let Some(id) = self.authoring_ui.create_test_point_from_selection() {
+                        if let Some(artifacts) = self.authoring_ui.artifacts.as_ref() {
+                            teshi_engine::save_test_points(
+                                &self.project.root_dir,
+                                &artifacts.test_points,
+                            )
+                            .with_context(|| "save test points after create")?;
+                        }
+                        self.status = format!("Created proposed test point {id}");
+                    } else {
+                        self.status =
+                            "Select non-empty requirement text to create a test point".to_string();
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ReqNewDocument => {
+                if self.active_tab == MainTab::Requirements {
+                    let n = self
+                        .authoring_ui
+                        .artifacts
+                        .as_ref()
+                        .map(|a| a.index.documents.len())
+                        .unwrap_or(0)
+                        + 1;
+                    let path = format!("doc-{n}.md");
+                    let title = format!("Document {n}");
+                    self.authoring_ui.create_document(&path, &title);
+                    self.status = format!("Created requirement document {path}");
                     self.quit_pending_confirm = false;
                 }
             }
@@ -5076,6 +5175,12 @@ impl App {
     }
 
     fn save(&mut self) -> Result<()> {
+        if self.active_tab == MainTab::Requirements && self.authoring_ui.buffer_dirty {
+            self.authoring_ui
+                .save_current_document(&self.project.root_dir)?;
+            self.status = "Saved requirement document".to_string();
+            return Ok(());
+        }
         if let Some(path) = self.file_path.clone() {
             fs::write(&path, self.buffer.as_string())
                 .with_context(|| format!("failed to write {}", path.display()))?;
@@ -5108,6 +5213,10 @@ impl App {
     }
 
     fn clamp_cursor(&mut self) {
+        if self.is_requirements_editor_active() {
+            self.authoring_ui.clamp_cursor();
+            return;
+        }
         let last_row = self.buffer.line_count().saturating_sub(1);
         self.cursor_row = self.cursor_row.min(last_row);
         self.cursor_col = self.buffer.clamp_col(self.cursor_row, self.cursor_col);
@@ -5148,8 +5257,15 @@ impl App {
             MainTab::MindMap => "Switched to MindMap tab",
             MainTab::Explore => "Switched to Explore tab",
             MainTab::Ai => "Switched to AI tab",
+            MainTab::Requirements => "Switched to Requirements tab",
+            MainTab::TestPoints => "Switched to Test Points tab",
         }
         .to_string();
+    }
+
+    fn is_requirements_editor_active(&self) -> bool {
+        self.active_tab == MainTab::Requirements
+            && self.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor
     }
 
     fn clear_step_input_state(&mut self) {
@@ -5627,8 +5743,10 @@ impl App {
             let tab_bar_x = 0; // tab bar starts at column 0
             let tab_labels = [
                 (MainTab::Explore, " Explore [1] ", 0u16),
-                (MainTab::MindMap, " MindMap [2] ", 15u16),
-                (MainTab::Ai, " AI [3] ", 30u16),
+                (MainTab::MindMap, " MindMap [2] ", 13u16),
+                (MainTab::Ai, " AI [3] ", 27u16),
+                (MainTab::Requirements, " Requirements [4] ", 36u16),
+                (MainTab::TestPoints, " Test Points [5] ", 54u16),
             ];
             for &(ref tab, label, start_x) in &tab_labels {
                 let end_x = start_x + label.chars().count() as u16;
@@ -6009,6 +6127,7 @@ impl App {
     pub fn is_editor_active(&self) -> bool {
         (self.active_tab == MainTab::MindMap && self.view_stage == ViewStage::EditorAndPanel)
             || (self.active_tab == MainTab::Explore && self.explore_edit_mode)
+            || self.is_requirements_editor_active()
     }
 
     pub fn is_editor_nav_mode(&self) -> bool {
@@ -6668,6 +6787,36 @@ mod tests {
     }
 
     #[test]
+    fn test_requirements_tab_select_and_create_document() {
+        let mut app = App::from_args().expect("app init should work");
+        app.handle_action(Action::SelectTab(MainTab::Requirements))
+            .expect("select requirements");
+        assert_eq!(app.active_tab, MainTab::Requirements);
+        app.authoring_ui.create_document("new-req.md", "New Req");
+        assert!(app.authoring_ui.buffer.as_string().contains("New Req"));
+        assert!(app.authoring_ui.buffer_dirty);
+    }
+
+    #[test]
+    fn test_requirements_create_test_point_from_selection() {
+        let mut app = App::from_args().expect("app init should work");
+        app.authoring_ui.create_document("req.md", "Req");
+        app.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Editor;
+        app.authoring_ui.selection_anchor = Some((0, 0));
+        app.authoring_ui.selection_end = Some((0, 4));
+        app.active_tab = MainTab::Requirements;
+        app.handle_action(Action::ReqNewTestPoint)
+            .expect("create test point");
+        let count = app
+            .authoring_ui
+            .artifacts
+            .as_ref()
+            .map(|a| a.test_points.test_points.len())
+            .unwrap_or(0);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
     fn test_explore_focus_clamps_at_edges() {
         let mut app = App::from_args().expect("app init should work");
         app.active_tab = MainTab::Explore;
@@ -6926,6 +7075,7 @@ mod tests {
             generation_stage: teshi_agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
+            authoring_ui: crate::authoring_tab::AuthoringUiState::empty(),
         };
 
         app.handle_action(Action::ExploreRight)
@@ -7083,6 +7233,7 @@ Feature: B
             generation_stage: teshi_agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
+            authoring_ui: crate::authoring_tab::AuthoringUiState::empty(),
         };
 
         app.explore_selected_feature = 0;

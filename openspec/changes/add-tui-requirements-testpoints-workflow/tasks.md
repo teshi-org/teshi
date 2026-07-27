@@ -8,20 +8,20 @@
 
 ## 2. Text selection, anchors, and invalidation
 
-- [ ] 2.1 Add conversions between editor/runtime byte positions and persisted Unicode scalar offsets, with tests covering ASCII, CJK, emoji, combining characters, and line boundaries.
-- [ ] 2.2 Implement anchor creation from any non-empty editor selection, including exact quote, bounded prefix/suffix context, document revision, and character positions.
-- [ ] 2.3 Implement deterministic anchor resolution in position, quote, and context-disambiguation order; return stale instead of choosing an ambiguous match.
-- [ ] 2.4 Re-resolve document links after external or TUI edits and transition affected approved test points to `NeedsReview` without invalidating unrelated approvals.
-- [ ] 2.5 Add unit and integration tests for moved text, duplicate quotes, deleted text, unrelated edits, and restart/reload behavior.
+- [x] 2.1 Add conversions between editor/runtime byte positions and persisted Unicode scalar offsets, with tests covering ASCII, CJK, emoji, combining characters, and line boundaries.
+- [x] 2.2 Implement anchor creation from any non-empty editor selection, including exact quote, bounded prefix/suffix context, document revision, and character positions.
+- [x] 2.3 Implement deterministic anchor resolution in position, quote, and context-disambiguation order; return stale instead of choosing an ambiguous match.
+- [x] 2.4 Re-resolve document links after external or TUI edits and transition affected approved test points to `NeedsReview` without invalidating unrelated approvals.
+- [x] 2.5 Add unit and integration tests for moved text, duplicate quotes, deleted text, unrelated edits, and restart/reload behavior.
 
 ## 3. Requirements tab
 
-- [ ] 3.1 Extend `MainTab`, tab rendering, key handling, and help text with Requirements on direct key `4` while preserving existing `1`/`2`/`3` bindings.
-- [ ] 3.2 Build the left requirement tree from indexed document paths and support document creation, rename/move repair, selection, and missing-file diagnostics.
-- [ ] 3.3 Reuse or extend the editor buffer to render and edit requirement Markdown with arbitrary range selection, linked-range highlighting, scrolling, and safe saves.
-- [ ] 3.4 Implement the right linked-test-point pane, including document-wide results, overlap filtering for the active selection, and highlights driven by selected test points.
-- [ ] 3.5 Add the action that creates a `Proposed` test point from the active non-empty range.
-- [ ] 3.6 Add focused state/action tests and terminal rendering tests for narrow, normal, and wide layouts.
+- [x] 3.1 Extend `MainTab`, tab rendering, key handling, and help text with Requirements on direct key `4` while preserving existing `1`/`2`/`3` bindings.
+- [x] 3.2 Build the left requirement tree from indexed document paths and support document creation, rename/move repair, selection, and missing-file diagnostics.
+- [x] 3.3 Reuse or extend the editor buffer to render and edit requirement Markdown with arbitrary range selection, linked-range highlighting, scrolling, and safe saves.
+- [x] 3.4 Implement the right linked-test-point pane, including document-wide results, overlap filtering for the active selection, and highlights driven by selected test points.
+- [x] 3.5 Add the action that creates a `Proposed` test point from the active non-empty range.
+- [x] 3.6 Add focused state/action tests and terminal rendering tests for narrow, normal, and wide layouts.
 
 ## 4. Test Points tab and review workflow
 

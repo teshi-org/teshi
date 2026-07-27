@@ -1,6 +1,7 @@
 mod agent;
 mod app;
 mod auth;
+mod authoring_tab;
 mod bdd_nav;
 mod cli;
 mod config;
@@ -312,6 +313,7 @@ pub fn run() -> Result<()> {
                             scenario_dropdown_open: app.scenario_dropdown_open,
                             approval_panel_active: app.approval_panel_active,
                             agent_profile_panel_active: app.agent_profile_panel_active,
+                            requirements_focus: app.authoring_ui.focus,
                             quit_pending_confirm: app.quit_pending_confirm,
                         },
                     ) {
