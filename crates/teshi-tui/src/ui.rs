@@ -1240,7 +1240,17 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .copied()
                 .unwrap_or(RunStatus::Idle);
             let status_dot = Span::styled("●", Style::default().fg(status_color(status)));
-            let tp_ids = teshi_core::authoring::parse_teshi_tp_tags(&scenario.tags);
+            let tp_ids = app
+                .authoring_ui
+                .artifacts
+                .as_ref()
+                .map(|artifacts| {
+                    teshi_core::authoring::parse_teshi_tp_tags_for_test_points(
+                        &scenario.tags,
+                        &artifacts.test_points.test_points,
+                    )
+                })
+                .unwrap_or_else(|| teshi_core::authoring::parse_teshi_tp_tags(&scenario.tags));
             let tp_badge = if tp_ids.is_empty() {
                 String::new()
             } else {

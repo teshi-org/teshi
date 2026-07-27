@@ -24,7 +24,7 @@ pub use resolve::{
 };
 pub use scenario_links::{
     TESHI_TP_TAG_PREFIX, format_teshi_tp_tag, merge_scenario_tags, parse_teshi_tp_tags,
-    sync_scenario_refs_from_project, teshi_tp_tags,
+    parse_teshi_tp_tags_for_test_points, sync_scenario_refs_from_project, teshi_tp_tags,
 };
 pub use testpoints::{HierarchyPath, ReviewState, ScenarioRef, TestPoint, TestPointsFile};
 pub use validation::{

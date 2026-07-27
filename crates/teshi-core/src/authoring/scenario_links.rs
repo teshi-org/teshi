@@ -62,6 +62,35 @@ pub fn parse_teshi_tp_tags(tags: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Extracts IDs while preserving legacy marker-shaped IDs known to the project.
+///
+/// A tag is ignored when its raw and decoded forms identify two different test
+/// points, because that legacy/new encoding collision is inherently ambiguous.
+pub fn parse_teshi_tp_tags_for_test_points(
+    tags: &[String],
+    test_points: &[TestPoint],
+) -> Vec<String> {
+    tags.iter()
+        .filter_map(|tag| {
+            let raw = tag.trim().strip_prefix(TESHI_TP_TAG_PREFIX)?;
+            if raw.is_empty() {
+                return None;
+            }
+            let decoded = decode_test_point_id(raw);
+            let raw_exists = test_points.iter().any(|test_point| test_point.id == raw);
+            let decoded_exists = test_points
+                .iter()
+                .any(|test_point| test_point.id == decoded);
+            match (raw_exists, decoded_exists, raw == decoded) {
+                (true, true, false) => None,
+                (true, _, _) => Some(raw.to_string()),
+                (_, true, _) => Some(decoded),
+                _ => Some(decoded),
+            }
+        })
+        .collect()
+}
+
 fn decode_test_point_id(encoded: &str) -> String {
     let Some(encoded) = encoded.strip_prefix(ENCODED_ID_PREFIX) else {
         return encoded.to_string();
@@ -138,7 +167,7 @@ pub fn sync_scenario_refs_from_project(project: &BddProject, test_points: &mut [
         }
 
         for sc in all_scenarios {
-            let ids = parse_teshi_tp_tags(&sc.tags);
+            let ids = parse_teshi_tp_tags_for_test_points(&sc.tags, test_points);
             if ids.is_empty() {
                 continue;
             }
@@ -285,16 +314,16 @@ mod tests {
     }
 
     #[test]
-    fn sync_preserves_legacy_literal_percent_sequences() {
+    fn sync_preserves_legacy_marker_shaped_ids() {
         let content =
-            "Feature: Auth\n\n  @teshi-tp:discount%20code\n  Scenario: Apply\n    Given x\n";
+            "Feature: Auth\n\n  @teshi-tp:~v1~discount%20code\n  Scenario: Apply\n    Given x\n";
         let feature = parse_feature(content, PathBuf::from("/proj/auth.feature"));
         let project = BddProject {
             root_dir: PathBuf::from("/proj"),
             features: vec![feature],
         };
         let mut tps = vec![TestPoint {
-            id: "discount%20code".into(),
+            id: "~v1~discount%20code".into(),
             title: "t".into(),
             objective: "o".into(),
             preconditions: None,
@@ -308,5 +337,24 @@ mod tests {
         sync_scenario_refs_from_project(&project, &mut tps);
 
         assert_eq!(tps[0].scenario_refs.len(), 1);
+    }
+
+    #[test]
+    fn known_id_parser_ignores_ambiguous_legacy_encoding_collision() {
+        let tags = vec!["@teshi-tp:~v1~a%20b".into()];
+        let make_test_point = |id: &str| TestPoint {
+            id: id.into(),
+            title: "t".into(),
+            objective: "o".into(),
+            preconditions: None,
+            expected_outcomes: None,
+            hierarchy_path: HierarchyPath::new(vec!["A".into()]),
+            review_state: ReviewState::Approved,
+            requirement_links: vec![],
+            scenario_refs: vec![],
+        };
+        let test_points = vec![make_test_point("~v1~a%20b"), make_test_point("a b")];
+
+        assert!(parse_teshi_tp_tags_for_test_points(&tags, &test_points).is_empty());
     }
 }
