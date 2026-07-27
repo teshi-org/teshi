@@ -366,12 +366,32 @@ fn execute_get_feature_content(app: &mut crate::app::App, args_json: &str) -> Re
     Ok(out)
 }
 
+fn ensure_feature_writing_allowed(app: &crate::app::App, tool_name: &str) -> Result<()> {
+    use teshi_agent::pipeline::GenerationStage;
+
+    if matches!(
+        app.generation_stage,
+        GenerationStage::Gathering
+            | GenerationStage::GeneratingTestPoints
+            | GenerationStage::ReviewingTestPoints
+            | GenerationStage::Planning
+    ) {
+        anyhow::bail!(
+            "{tool_name} is blocked until generate_plan advances the pipeline to Feature Writing (current stage: {})",
+            app.generation_stage.label()
+        );
+    }
+    Ok(())
+}
+
 fn execute_insert_scenario(
     app: &mut crate::app::App,
     args_json: &str,
     tool_call_id: &str,
     agent_idx: usize,
 ) -> Result<String> {
+    ensure_feature_writing_allowed(app, "insert_scenario")?;
+
     let args: serde_json::Value =
         serde_json::from_str(args_json).context("invalid JSON arguments")?;
 
@@ -456,32 +476,6 @@ fn execute_insert_scenario(
             }
         )
     })?;
-
-    // Eagerly record scenario refs on matching test points (best-effort before confirm).
-    if !test_point_ids.is_empty()
-        && let Some(artifacts) = app.authoring_ui.artifacts.as_mut()
-    {
-        let scenario_ref = teshi_core::authoring::ScenarioRef {
-            feature_path: file_path.replace('\\', "/"),
-            scenario_name: Some(scenario_name.to_string()),
-            scenario_line: Some(line.saturating_add(2)), // approximate: after blank + tags
-        };
-        for id in &test_point_ids {
-            if let Some(tp) = artifacts
-                .test_points
-                .test_points
-                .iter_mut()
-                .find(|tp| &tp.id == id)
-                && !tp.scenario_refs.iter().any(|r| {
-                    r.feature_path == scenario_ref.feature_path
-                        && r.scenario_name == scenario_ref.scenario_name
-                })
-            {
-                tp.scenario_refs.push(scenario_ref.clone());
-            }
-        }
-        let _ = teshi_engine::save_test_points(&app.project.root_dir, &artifacts.test_points);
-    }
 
     let change = AgentPendingChange {
         description: format!("insert scenario \"{scenario_name}\" in {file_path}"),
@@ -606,6 +600,8 @@ fn execute_create_feature_file(
     tool_call_id: &str,
     agent_idx: usize,
 ) -> Result<String> {
+    ensure_feature_writing_allowed(app, "create_feature_file")?;
+
     let args: serde_json::Value =
         serde_json::from_str(args_json).context("invalid JSON arguments")?;
 
@@ -1262,9 +1258,28 @@ fn execute_propose_test_points(app: &mut crate::app::App, args_json: &str) -> Re
         .as_mut()
         .context("authoring artifacts unavailable")?;
 
+    let proposed = items
+        .iter()
+        .map(|item| parse_proposed_test_point(item, &artifacts.test_points.test_points))
+        .collect::<Result<Vec<_>>>()?;
+    for tp in &proposed {
+        if let Some(existing) = artifacts
+            .test_points
+            .test_points
+            .iter()
+            .find(|existing| existing.id == tp.id)
+            && existing.review_state != teshi_core::authoring::ReviewState::Proposed
+        {
+            anyhow::bail!(
+                "cannot re-propose test point '{}' after human review ({:?})",
+                tp.id,
+                existing.review_state
+            );
+        }
+    }
+
     let mut created_ids = Vec::new();
-    for item in items {
-        let tp = parse_proposed_test_point(item, &artifacts.test_points.test_points)?;
+    for tp in proposed {
         created_ids.push(tp.id.clone());
         // Replace existing id if re-proposing; otherwise append.
         if let Some(idx) = artifacts
@@ -1669,7 +1684,7 @@ mod pipeline_gate_tests {
     use teshi_agent::AgentHost;
     use teshi_agent::approval::ApprovalMode;
     use teshi_agent::pipeline::GenerationStage;
-    use teshi_core::authoring::ReviewState;
+    use teshi_core::authoring::{ReviewState, TestPointsFile};
 
     fn app_in_temp_project() -> (crate::app::App, tempfile::TempDir) {
         let dir = tempdir().expect("tempdir");
@@ -1682,6 +1697,12 @@ mod pipeline_gate_tests {
         let app = crate::app::App::from_file(&feature, crate::config::load_config().unwrap())
             .expect("open app");
         (app, dir)
+    }
+
+    fn persisted_test_points(dir: &tempfile::TempDir) -> TestPointsFile {
+        let json =
+            fs::read_to_string(dir.path().join("testpoints/testpoints.json")).expect("test points");
+        serde_json::from_str(&json).expect("valid test points")
     }
 
     #[test]
@@ -1785,6 +1806,99 @@ mod pipeline_gate_tests {
         assert!(err.to_string().contains("blocked"));
         assert_eq!(app.generation_stage, GenerationStage::ReviewingTestPoints);
         assert_eq!(app.approval_mode, ApprovalMode::Bypass);
+    }
+
+    #[test]
+    fn writing_tools_are_blocked_before_plan_even_with_bypass() {
+        let (mut app, dir) = app_in_temp_project();
+        app.approval_mode = ApprovalMode::Bypass;
+        let file_path = app.project.features[0]
+            .file_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let insert_args =
+            format!(r#"{{"file_path":"{file_path}","scenario_name":"Login","steps":["Given x"]}}"#);
+
+        for stage in [
+            GenerationStage::Gathering,
+            GenerationStage::GeneratingTestPoints,
+            GenerationStage::ReviewingTestPoints,
+            GenerationStage::Planning,
+        ] {
+            app.generation_stage = stage;
+            let insert_error = app
+                .execute_tool("insert_scenario", &insert_args, "tc-insert", 0)
+                .unwrap_err();
+            assert!(
+                insert_error.to_string().contains("blocked"),
+                "insert_scenario should be blocked during {stage:?}"
+            );
+
+            let create_error = app
+                .execute_tool(
+                    "create_feature_file",
+                    r#"{"file_name":"blocked.feature","feature_name":"Blocked"}"#,
+                    "tc-create",
+                    0,
+                )
+                .unwrap_err();
+            assert!(
+                create_error.to_string().contains("blocked"),
+                "create_feature_file should be blocked during {stage:?}"
+            );
+        }
+
+        assert!(app.pending_agent_changes.is_empty());
+        assert!(!dir.path().join("blocked.feature").exists());
+    }
+
+    #[test]
+    fn re_proposing_an_approved_test_point_is_rejected_without_mutation() {
+        let (mut app, _dir) = app_in_temp_project();
+        app.execute_tool(
+            "submit_requirements",
+            r#"{"feature_name":"Auth","scenario_descriptions":["login"]}"#,
+            "tc-1",
+            0,
+        )
+        .unwrap();
+        app.execute_tool(
+            "propose_test_points",
+            r#"{"test_points":[{"id":"tp-login","title":"Original","objective":"o","hierarchy_path":["A"]}]}"#,
+            "tc-2",
+            0,
+        )
+        .unwrap();
+        let tp = &mut app
+            .authoring_ui
+            .artifacts
+            .as_mut()
+            .unwrap()
+            .test_points
+            .test_points[0];
+        assert!(crate::test_points_tab::TestPointsUiState::approve(tp));
+
+        let error = app
+            .execute_tool(
+                "propose_test_points",
+                r#"{"test_points":[{"id":"tp-login","title":"Changed","objective":"new","hierarchy_path":["B"]}]}"#,
+                "tc-3",
+                0,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot re-propose"));
+
+        let tp = &app
+            .authoring_ui
+            .artifacts
+            .as_ref()
+            .unwrap()
+            .test_points
+            .test_points[0];
+        assert_eq!(tp.review_state, ReviewState::Approved);
+        assert_eq!(tp.title, "Original");
     }
 
     #[test]
@@ -2004,5 +2118,79 @@ mod pipeline_gate_tests {
             }
             _ => panic!("expected InsertAfterLine"),
         }
+    }
+
+    #[test]
+    fn scenario_refs_are_persisted_only_after_acceptance() {
+        let (mut app, dir) = app_in_temp_project();
+        app.execute_tool(
+            "submit_requirements",
+            r#"{"feature_name":"Auth","scenario_descriptions":["login"]}"#,
+            "tc-1",
+            0,
+        )
+        .unwrap();
+        app.execute_tool(
+            "propose_test_points",
+            r#"{"test_points":[{"id":"tp-login","title":"Login","objective":"o","hierarchy_path":["A"]}]}"#,
+            "tc-2",
+            0,
+        )
+        .unwrap();
+        let tp = &mut app
+            .authoring_ui
+            .artifacts
+            .as_mut()
+            .unwrap()
+            .test_points
+            .test_points[0];
+        assert!(crate::test_points_tab::TestPointsUiState::approve(tp));
+        app.generation_stage = GenerationStage::Writing;
+
+        let file_path = app.project.features[0]
+            .file_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let rejected_args = format!(
+            r#"{{"file_path":"{file_path}","scenario_name":"Rejected Login","steps":["Given x"],"test_point_ids":["tp-login"]}}"#
+        );
+        app.execute_tool("insert_scenario", &rejected_args, "tc-reject", 0)
+            .unwrap();
+        assert!(
+            persisted_test_points(&dir).test_points[0]
+                .scenario_refs
+                .is_empty()
+        );
+        app.reject_agent_change();
+        assert!(
+            persisted_test_points(&dir).test_points[0]
+                .scenario_refs
+                .is_empty()
+        );
+
+        let accepted_args = format!(
+            r#"{{"file_path":"{file_path}","scenario_name":"Accepted Login","steps":["Given x"],"test_point_ids":["tp-login"]}}"#
+        );
+        app.execute_tool("insert_scenario", &accepted_args, "tc-accept", 0)
+            .unwrap();
+        app.accept_agent_change().expect("accept scenario");
+
+        let in_memory = &app
+            .authoring_ui
+            .artifacts
+            .as_ref()
+            .unwrap()
+            .test_points
+            .test_points[0]
+            .scenario_refs;
+        assert_eq!(in_memory.len(), 1);
+        assert_eq!(
+            in_memory[0].scenario_name.as_deref(),
+            Some("Accepted Login")
+        );
+        let persisted = persisted_test_points(&dir);
+        assert_eq!(persisted.test_points[0].scenario_refs, *in_memory);
     }
 }

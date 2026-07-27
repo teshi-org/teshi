@@ -2655,6 +2655,8 @@ impl App {
     /// Returns `(tool_call_id, result_text)` for feeding back to the LLM.
     pub fn accept_agent_change(&mut self) -> Result<(String, String)> {
         let change = self.pending_agent_changes.remove(0);
+        let updates_scenario_refs =
+            matches!(&change.mutation, AgentMutation::InsertAfterLine { .. });
 
         // Handle CreateFile specially — it doesn't need an existing feature_idx
         if matches!(&change.mutation, AgentMutation::CreateFile { .. }) {
@@ -2797,6 +2799,11 @@ impl App {
 
         // Re-parse the project to update Gherkin AST and MindMap
         self.refresh_project_from_buffers();
+        if updates_scenario_refs && let Some(artifacts) = self.authoring_ui.artifacts.as_ref() {
+            // Scenario links become durable only after the associated buffer change is accepted.
+            teshi_engine::save_test_points(&self.project.root_dir, &artifacts.test_points)
+                .context("persist scenario refs after accepting agent change")?;
+        }
 
         // Switch to the modified buffer and move cursor to the change area
         if self.active_buffer_idx != Some(feature_idx) {
