@@ -58,6 +58,8 @@ pub struct TestPointsUiState {
     pub selected_test_point_id: Option<String>,
     pub detail_field: DetailField,
     pub selected_excerpt_index: usize,
+    /// Selected realized-scenario row in the details pane.
+    pub selected_scenario_ref_index: usize,
     pub review_filter: ReviewFilter,
     /// Scratch buffer while editing a detail field.
     pub field_buffer: String,
@@ -75,6 +77,7 @@ impl TestPointsUiState {
             selected_test_point_id: None,
             detail_field: DetailField::Title,
             selected_excerpt_index: 0,
+            selected_scenario_ref_index: 0,
             review_filter: ReviewFilter::All,
             field_buffer: String::new(),
             field_dirty: false,
@@ -116,6 +119,7 @@ impl TestPointsUiState {
     pub fn select_test_point(&mut self, tp_id: &str) {
         self.selected_test_point_id = Some(tp_id.to_string());
         self.selected_excerpt_index = 0;
+        self.selected_scenario_ref_index = 0;
         self.tree_state
             .select(vec![format!("{TREE_TP_PREFIX}{tp_id}")]);
         self.load_field_buffer();
@@ -515,6 +519,8 @@ pub fn test_points_footer_line() -> Line<'static> {
         Span::styled(" Batch [A] ", Style::default().fg(Color::DarkGray)),
         Span::raw(" "),
         Span::styled(" Continue [c] ", Style::default().fg(Color::DarkGray)),
+        Span::raw(" "),
+        Span::styled(" Open scenario [o] ", Style::default().fg(Color::DarkGray)),
         Span::raw(" "),
         Span::styled(" Filter [f] ", Style::default().fg(Color::DarkGray)),
         Span::raw(" "),

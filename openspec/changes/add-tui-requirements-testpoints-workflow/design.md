@@ -31,6 +31,18 @@ Most authoring remains in the TUI. GPUI/web remains an execution-artifact presen
 
 ## Decisions
 
+### 6. Scenario ↔ test-point encoding
+
+Gherkin scenarios retain originating test-point IDs using one tag per ID:
+
+```text
+@teshi-tp:<id>
+```
+
+Tags sit on the line immediately above `Scenario:` / `Scenario Outline:`. Multiple IDs use multiple tags (for example `@teshi-tp:tp-1 @teshi-tp:tp-login`). Comments and scenario description lines are not used because the current parser does not preserve them on `BddScenario`.
+
+---
+
 ### 1. Test points are verification intents
 
 A test point records what behavior must be verified, independently of how a runner will execute it. It contains:
@@ -144,7 +156,7 @@ Idle
 
 While reviewing, the agent loop pauses. Human review in the Test Points tab supplies the only transition to `Planning`. Rejection remains visible to the next generation attempt so the agent can avoid proposing the same unwanted intent.
 
-`generate_plan` accepts approved test-point IDs and records them on `ScenarioPlan`. It rejects unknown, unapproved, or stale IDs. Feature mutation tools carry those references into scenario metadata using a stable Teshi-owned convention that remains valid Gherkin. The exact serialization convention is selected during implementation after checking parser compatibility.
+`generate_plan` accepts approved test-point IDs and records them on `ScenarioPlan`. It rejects unknown, unapproved, or stale IDs. Feature mutation tools carry those references into scenario metadata using `@teshi-tp:<id>` tags (one tag per ID) immediately above the scenario header — a stable Teshi-owned convention that remains valid Gherkin and is preserved by the current parser.
 
 ### 7. Two TUI tabs present the same traceability graph
 

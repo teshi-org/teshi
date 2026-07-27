@@ -403,12 +403,23 @@ fn execute_insert_scenario(
                 .collect()
         })
         .unwrap_or_default();
+    let test_point_ids: Vec<String> = args
+        .get("test_point_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .filter(|s| !s.trim().is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let tags = teshi_core::authoring::merge_scenario_tags(&tags, &test_point_ids);
 
     // Build the Gherkin text block
     let mut text_block = String::new();
     // Leading blank line for separation
     text_block.push('\n');
-    // Tags
+    // Tags (including @teshi-tp:<id> for traceability)
     if !tags.is_empty() {
         text_block.push_str("  ");
         text_block.push_str(&tags.join(" "));
@@ -445,6 +456,33 @@ fn execute_insert_scenario(
             }
         )
     })?;
+
+    // Eagerly record scenario refs on matching test points (best-effort before confirm).
+    if !test_point_ids.is_empty()
+        && let Some(artifacts) = app.authoring_ui.artifacts.as_mut()
+    {
+        let scenario_ref = teshi_core::authoring::ScenarioRef {
+            feature_path: file_path.replace('\\', "/"),
+            scenario_name: Some(scenario_name.to_string()),
+            scenario_line: Some(line.saturating_add(2)), // approximate: after blank + tags
+        };
+        for id in &test_point_ids {
+            if let Some(tp) = artifacts
+                .test_points
+                .test_points
+                .iter_mut()
+                .find(|tp| &tp.id == id)
+            {
+                if !tp.scenario_refs.iter().any(|r| {
+                    r.feature_path == scenario_ref.feature_path
+                        && r.scenario_name == scenario_ref.scenario_name
+                }) {
+                    tp.scenario_refs.push(scenario_ref.clone());
+                }
+            }
+        }
+        let _ = teshi_engine::save_test_points(&app.project.root_dir, &artifacts.test_points);
+    }
 
     let change = AgentPendingChange {
         description: format!("insert scenario \"{scenario_name}\" in {file_path}"),
@@ -1458,13 +1496,8 @@ fn execute_generate_plan(app: &mut crate::app::App, args_json: &str) -> Result<S
         .as_ref()
         .map(|a| a.test_points.test_points.as_slice())
         .unwrap_or(&[]);
-    if let Err(errors) =
-        teshi_agent::pipeline::validate_plan_test_point_ids(&plan, test_points)
-    {
-        anyhow::bail!(
-            "generate_plan rejected: {}",
-            errors.join("; ")
-        );
+    if let Err(errors) = teshi_agent::pipeline::validate_plan_test_point_ids(&plan, test_points) {
+        anyhow::bail!("generate_plan rejected: {}", errors.join("; "));
     }
 
     app.pipeline_plan = Some(plan);
@@ -1633,11 +1666,11 @@ fn execute_browser_go_back(_app: &mut crate::app::App) -> Result<String> {
 #[cfg(test)]
 mod pipeline_gate_tests {
     use std::fs;
+    use tempfile::tempdir;
     use teshi_agent::AgentHost;
     use teshi_agent::approval::ApprovalMode;
     use teshi_agent::pipeline::GenerationStage;
     use teshi_core::authoring::ReviewState;
-    use tempfile::tempdir;
 
     fn app_in_temp_project() -> (crate::app::App, tempfile::TempDir) {
         let dir = tempdir().expect("tempdir");
@@ -1669,7 +1702,12 @@ mod pipeline_gate_tests {
             .expect("submit");
         assert!(result.contains("propose_test_points"));
         assert_eq!(app.generation_stage, GenerationStage::GeneratingTestPoints);
-        assert!(app.pipeline_requirement.as_ref().unwrap().has_usable_sources());
+        assert!(
+            app.pipeline_requirement
+                .as_ref()
+                .unwrap()
+                .has_usable_sources()
+        );
     }
 
     #[test]
@@ -1902,11 +1940,11 @@ mod pipeline_gate_tests {
 
     #[test]
     fn continue_key_bound_on_test_points_tab() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use crate::app::{MainTab, MindMapFocus, ViewStage};
         use crate::authoring_tab::RequirementsFocus;
         use crate::keymap::{Action, KeyContext};
         use crate::test_points_tab::TestPointsFocus;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let context = KeyContext {
             step_keyword_picker_active: false,
@@ -1935,8 +1973,37 @@ mod pipeline_gate_tests {
             quit_pending_confirm: false,
         };
         assert_eq!(
-            Action::from_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), context),
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+                context
+            ),
             Some(Action::TpContinueGeneration)
         );
+    }
+
+    #[test]
+    fn insert_scenario_encodes_teshi_tp_tags() {
+        let (mut app, _dir) = app_in_temp_project();
+        let file_path = app.project.features[0]
+            .file_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let args = format!(
+            r#"{{"file_path":"{file_path}","scenario_name":"Login","steps":["Given x"],"tags":["@smoke"],"test_point_ids":["tp-1","tp-2"]}}"#
+        );
+        app.execute_tool("insert_scenario", &args, "tc-3", 0)
+            .expect("insert");
+        let pending = &app.pending_agent_changes[0];
+        match &pending.mutation {
+            crate::app::AgentMutation::InsertAfterLine { text, .. } => {
+                assert!(text.contains("@teshi-tp:tp-1"));
+                assert!(text.contains("@teshi-tp:tp-2"));
+                assert!(text.contains("@smoke"));
+                assert!(text.contains("Scenario: Login"));
+            }
+            _ => panic!("expected InsertAfterLine"),
+        }
     }
 }

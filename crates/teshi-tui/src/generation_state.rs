@@ -7,9 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use teshi_agent::pipeline::{
-    restore_stage_after_reload, GenerationSessionState, GenerationStage,
-};
+use teshi_agent::pipeline::{GenerationSessionState, GenerationStage, restore_stage_after_reload};
 use teshi_core::authoring::TestPoint;
 
 const GENERATION_STATE_FILE: &str = "generation-state.json";
@@ -69,12 +67,12 @@ pub fn restore_generation_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
     use teshi_agent::pipeline::{GenerationStage, Requirement};
     use teshi_core::authoring::{
-        HierarchyPath, QuoteSelector, RequirementLink, ResolutionState, ReviewState, TextRange,
-        TestPoint,
+        HierarchyPath, QuoteSelector, RequirementLink, ResolutionState, ReviewState, TestPoint,
+        TextRange,
     };
-    use tempfile::tempdir;
 
     fn proposed_tp() -> TestPoint {
         TestPoint {
@@ -115,8 +113,7 @@ mod tests {
             plan: None,
         };
         save_generation_state(dir.path(), &state).unwrap();
-        let (stage, restored) =
-            restore_generation_session(dir.path(), &[proposed_tp()]).unwrap();
+        let (stage, restored) = restore_generation_session(dir.path(), &[proposed_tp()]).unwrap();
         assert_eq!(stage, GenerationStage::ReviewingTestPoints);
         let restored = restored.expect("state");
         assert_eq!(restored.stage, GenerationStage::ReviewingTestPoints);

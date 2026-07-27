@@ -1760,15 +1760,18 @@ impl App {
                 self.generation_stage = stage;
                 self.pipeline_requirement = saved.requirement;
                 self.pipeline_plan = saved.plan;
+                self.sync_test_point_scenario_refs();
                 self.test_points_ui
                     .rebuild_tree(self.authoring_ui.artifacts.as_ref());
             }
             Ok((_, None)) => {
+                self.sync_test_point_scenario_refs();
                 self.test_points_ui
                     .rebuild_tree(self.authoring_ui.artifacts.as_ref());
             }
             Err(e) => {
                 self.status = format!("Failed to restore generation state: {e}");
+                self.sync_test_point_scenario_refs();
                 self.test_points_ui
                     .rebuild_tree(self.authoring_ui.artifacts.as_ref());
             }
@@ -1787,8 +1790,7 @@ impl App {
             .unwrap_or(&[]);
         match teshi_agent::pipeline::continue_from_review(self.generation_stage, test_points) {
             Ok(next) => {
-                let approved =
-                    teshi_agent::pipeline::approved_resolved_test_point_ids(test_points);
+                let approved = teshi_agent::pipeline::approved_resolved_test_point_ids(test_points);
                 self.generation_stage = next;
                 self.persist_generation_state()?;
                 let agent_idx = self.selected_agent;
@@ -2882,6 +2884,7 @@ impl App {
         self.tree_state = mindmap::init_tree_state(&mut self.mindmap_index);
         self.mindmap_location_selection.clear();
         self.normalize_explore_selection();
+        self.sync_test_point_scenario_refs();
 
         if let Some((feature_idx, line_number)) = selected_tree_location {
             self.restore_tree_selection_from_line(feature_idx, line_number);
@@ -2897,6 +2900,17 @@ impl App {
         {
             self.rebuild_preview();
         }
+    }
+
+    /// Rebuilds test-point → scenario refs from `@teshi-tp:*` tags without changing review state.
+    fn sync_test_point_scenario_refs(&mut self) {
+        let Some(artifacts) = self.authoring_ui.artifacts.as_mut() else {
+            return;
+        };
+        teshi_core::authoring::sync_scenario_refs_from_project(
+            &self.project,
+            &mut artifacts.test_points.test_points,
+        );
     }
 
     fn restore_tree_selection_from_line(&mut self, feature_idx: usize, line_number: usize) {
@@ -4912,6 +4926,14 @@ impl App {
                 self.continue_test_point_generation()?;
                 self.quit_pending_confirm = false;
             }
+            Action::TpFollowScenario => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.navigate_to_test_point_scenario(
+                        self.test_points_ui.selected_scenario_ref_index,
+                    )?;
+                    self.quit_pending_confirm = false;
+                }
+            }
             Action::InsertNewline => {
                 if !self.step_input_active {
                     return Ok(());
@@ -5070,8 +5092,7 @@ impl App {
                             .unwrap_or("")
                             .trim()
                             .to_string();
-                        self.generation_stage =
-                            teshi_agent::pipeline::GenerationStage::Gathering;
+                        self.generation_stage = teshi_agent::pipeline::GenerationStage::Gathering;
                         let _ = self.persist_generation_state();
                         user_msg = if rest.is_empty() {
                             "I want to generate a feature from requirements. Start the Feature Generation Pipeline: gather requirements (I can paste detailed text next), propose non-Gherkin test points for human review, then plan and write Gherkin .feature files. Do not use FreeMind or mock HTML.".to_string()
@@ -5714,6 +5735,65 @@ impl App {
             }
         }
         self.status = format!("Opened requirement excerpt in {}", excerpt.document_title);
+        Ok(())
+    }
+
+    /// Opens Explore at a scenario referenced by the selected test point.
+    fn navigate_to_test_point_scenario(&mut self, scenario_ref_index: usize) -> Result<()> {
+        let sc_ref = {
+            let artifacts = self
+                .authoring_ui
+                .artifacts
+                .as_ref()
+                .context("authoring artifacts not loaded")?;
+            let tp_id = self
+                .test_points_ui
+                .selected_test_point_id
+                .clone()
+                .context("no test point selected")?;
+            let tp = artifacts
+                .test_points
+                .test_points
+                .iter()
+                .find(|tp| tp.id == tp_id)
+                .context("selected test point missing")?;
+            tp.scenario_refs
+                .get(scenario_ref_index)
+                .cloned()
+                .context("no realized scenario for this test point")?
+        };
+
+        let feature_idx = self
+            .find_feature_idx_for_file(&sc_ref.feature_path)
+            .with_context(|| format!("feature '{}' not found", sc_ref.feature_path))?;
+        self.active_tab = MainTab::Explore;
+        self.explore_set_feature(feature_idx);
+
+        if let Some(name) = sc_ref.scenario_name.as_deref() {
+            if let Some(scenario_idx) = self
+                .project
+                .features
+                .get(feature_idx)
+                .and_then(|f| f.scenarios.iter().position(|s| s.name == name))
+            {
+                self.explore_set_scenario(scenario_idx);
+            }
+        } else if let Some(line) = sc_ref.scenario_line {
+            if let Some(scenario_idx) = self
+                .project
+                .features
+                .get(feature_idx)
+                .and_then(|f| f.scenarios.iter().position(|s| s.line_number == line))
+            {
+                self.explore_set_scenario(scenario_idx);
+            }
+        }
+
+        self.status = format!(
+            "Opened scenario {} in {}",
+            sc_ref.scenario_name.as_deref().unwrap_or("(unnamed)"),
+            sc_ref.feature_path
+        );
         Ok(())
     }
 

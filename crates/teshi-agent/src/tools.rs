@@ -131,6 +131,13 @@ fn get_all_tools() -> Vec<ToolDefinition> {
                         "items": {
                             "type": "string"
                         }
+                    },
+                    "test_point_ids": {
+                        "type": "array",
+                        "description": "Approved test-point IDs this scenario realizes; encoded as @teshi-tp:<id> tags",
+                        "items": {
+                            "type": "string"
+                        }
                     }
                 },
                 "required": ["file_path", "scenario_name", "steps"]
@@ -754,10 +761,11 @@ mod tests {
     fn test_generate_plan_requires_test_point_ids_on_scenarios() {
         let tools = get_all_tools();
         let plan = tools.iter().find(|t| t.name == "generate_plan").unwrap();
-        let scenario_required = plan.parameters["properties"]["features"]["items"]["properties"]
-            ["scenarios"]["items"]["required"]
-            .as_array()
-            .unwrap();
+        let scenario_required =
+            plan.parameters["properties"]["features"]["items"]["properties"]["scenarios"]["items"]
+                ["required"]
+                .as_array()
+                .unwrap();
         assert!(scenario_required.iter().any(|v| v == "test_point_ids"));
     }
 

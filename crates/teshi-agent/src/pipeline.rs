@@ -4,9 +4,7 @@
 //! used by the AI agent to manage the multi-stage feature generation pipeline.
 
 use serde::{Deserialize, Serialize};
-use teshi_core::authoring::{
-    ResolutionState, ReviewState, TestPoint, TextRange,
-};
+use teshi_core::authoring::{ResolutionState, ReviewState, TestPoint, TextRange};
 
 /// Tracks the current generation pipeline phase.
 /// The LLM drives the process via tool calls; this just records state
@@ -101,6 +99,7 @@ impl GenerationStage {
                 "\n\n## Current Phase: Feature Writing\n\
                  Execute the approved plan by creating the feature files.\n\
                  - Use create_feature_file and insert_scenario tools\n\
+                 - Pass each scenario's test_point_ids to insert_scenario so Teshi embeds @teshi-tp:<id> tags\n\
                  - Reuse existing step patterns from Project Context\n\
                  - After writing, call validate_feature AND run_tests to verify\n\
                    that each new scenario is executable\n\
@@ -424,7 +423,10 @@ mod tests {
     fn generating_test_points_guides_propose_tool() {
         let guidance = GenerationStage::GeneratingTestPoints.prompt_guidance();
         assert!(guidance.contains("propose_test_points"));
-        assert!(!guidance.contains("generate_plan yet") || guidance.contains("Do NOT call generate_plan"));
+        assert!(
+            !guidance.contains("generate_plan yet")
+                || guidance.contains("Do NOT call generate_plan")
+        );
     }
 
     #[test]
@@ -449,6 +451,8 @@ mod tests {
         let guidance = GenerationStage::Writing.prompt_guidance();
         assert!(guidance.contains("create_feature_file"));
         assert!(guidance.contains("validate_feature"));
+        assert!(guidance.contains("test_point_ids"));
+        assert!(guidance.contains("@teshi-tp:"));
     }
 
     #[test]
@@ -506,8 +510,13 @@ mod tests {
 
     #[test]
     fn continue_from_review_requires_approved_resolved() {
-        let proposed = vec![sample_tp("tp-1", ReviewState::Proposed, ResolutionState::Resolved)];
-        let err = continue_from_review(GenerationStage::ReviewingTestPoints, &proposed).unwrap_err();
+        let proposed = vec![sample_tp(
+            "tp-1",
+            ReviewState::Proposed,
+            ResolutionState::Resolved,
+        )];
+        let err =
+            continue_from_review(GenerationStage::ReviewingTestPoints, &proposed).unwrap_err();
         assert!(err.contains("approve at least one"));
 
         let approved = vec![sample_tp(
@@ -520,8 +529,7 @@ mod tests {
             GenerationStage::Planning
         );
 
-        let wrong_stage =
-            continue_from_review(GenerationStage::Gathering, &approved).unwrap_err();
+        let wrong_stage = continue_from_review(GenerationStage::Gathering, &approved).unwrap_err();
         assert!(wrong_stage.contains("Reviewing Test Points"));
     }
 
@@ -545,11 +553,19 @@ mod tests {
             }],
         };
 
-        let proposed = vec![sample_tp("tp-1", ReviewState::Proposed, ResolutionState::Resolved)];
+        let proposed = vec![sample_tp(
+            "tp-1",
+            ReviewState::Proposed,
+            ResolutionState::Resolved,
+        )];
         let err = validate_plan_test_point_ids(&plan, &proposed).unwrap_err();
         assert!(err.iter().any(|e| e.contains("Proposed")));
 
-        let stale = vec![sample_tp("tp-1", ReviewState::Approved, ResolutionState::Stale)];
+        let stale = vec![sample_tp(
+            "tp-1",
+            ReviewState::Approved,
+            ResolutionState::Stale,
+        )];
         let err = validate_plan_test_point_ids(&plan, &stale).unwrap_err();
         assert!(err.iter().any(|e| e.contains("stale")));
 
@@ -568,7 +584,11 @@ mod tests {
             requirement: None,
             plan: None,
         };
-        let proposed = vec![sample_tp("tp-1", ReviewState::Proposed, ResolutionState::Resolved)];
+        let proposed = vec![sample_tp(
+            "tp-1",
+            ReviewState::Proposed,
+            ResolutionState::Resolved,
+        )];
         assert_eq!(
             restore_stage_after_reload(&saved, &proposed),
             GenerationStage::ReviewingTestPoints
@@ -582,7 +602,11 @@ mod tests {
             requirement: None,
             plan: None,
         };
-        let proposed = vec![sample_tp("tp-1", ReviewState::Proposed, ResolutionState::Resolved)];
+        let proposed = vec![sample_tp(
+            "tp-1",
+            ReviewState::Proposed,
+            ResolutionState::Resolved,
+        )];
         assert_eq!(
             restore_stage_after_reload(&saved, &proposed),
             GenerationStage::ReviewingTestPoints

@@ -1240,7 +1240,13 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .copied()
                 .unwrap_or(RunStatus::Idle);
             let status_dot = Span::styled("●", Style::default().fg(status_color(status)));
-            let name = Span::styled(format!(" {}", scenario.name), normal);
+            let tp_ids = teshi_core::authoring::parse_teshi_tp_tags(&scenario.tags);
+            let tp_badge = if tp_ids.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", tp_ids.join(","))
+            };
+            let name = Span::styled(format!(" {}{}", scenario.name, tp_badge), normal);
             let mut line = Line::from(vec![status_dot, name]);
             if i == app.explore_selected_scenario {
                 line = apply_line_background(line, explore_select_style(focused));
@@ -4384,6 +4390,30 @@ fn render_test_points_details(
             Span::styled(format!("{label}: "), label_style),
             Span::styled(display, value_style),
         ]));
+    }
+
+    if !tp.scenario_refs.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            "Realized scenarios [o]:",
+            Style::default().fg(Color::DarkGray),
+        ));
+        for (i, sc_ref) in tp.scenario_refs.iter().enumerate() {
+            let label = sc_ref
+                .scenario_name
+                .clone()
+                .unwrap_or_else(|| format!("line {}", sc_ref.scenario_line.unwrap_or(0)));
+            let selected = i == ui.selected_scenario_ref_index;
+            let style = if selected && focused {
+                selected_style(true)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {} — {}", label, sc_ref.feature_path),
+                style,
+            )]));
+        }
     }
 
     frame.render_widget(Paragraph::new(lines), inner);

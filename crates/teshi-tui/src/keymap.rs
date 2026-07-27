@@ -96,6 +96,8 @@ pub enum Action {
     TpFollowExcerpt,
     /// Human-only: advance from Reviewing Test Points to Planning.
     TpContinueGeneration,
+    /// Open a realized Gherkin scenario linked from the selected test point.
+    TpFollowScenario,
     // Global
     Save,
     Quit,
@@ -628,6 +630,7 @@ impl Action {
                     (KeyCode::Char('a'), KeyModifiers::SHIFT) => Some(Self::TpBatchApprove),
                     (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Self::TpReject),
                     (KeyCode::Char('f'), KeyModifiers::NONE) => Some(Self::TpReviewFilter),
+                    (KeyCode::Char('o'), KeyModifiers::NONE) => Some(Self::TpFollowScenario),
                     (KeyCode::Char('1'), KeyModifiers::NONE) => {
                         Some(Self::SelectTab(MainTab::Explore))
                     }
@@ -674,6 +677,7 @@ impl Action {
                 (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Self::TpReject),
                 (KeyCode::Char('f'), KeyModifiers::NONE) => Some(Self::TpReviewFilter),
                 (KeyCode::Char('c'), KeyModifiers::NONE) => Some(Self::TpContinueGeneration),
+                (KeyCode::Char('o'), KeyModifiers::NONE) => Some(Self::TpFollowScenario),
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
                 (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),

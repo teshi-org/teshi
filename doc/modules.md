@@ -158,12 +158,17 @@ Pure functions operating on `EditorBuffer` for BDD-aware editing:
 | `highlight_mindmap_nodes` | Applies color highlights by step text pattern | No |
 | `apply_mindmap_filter` | Filters the mind-map tree by step name | No |
 | `get_feature_content` | Returns raw file content | No |
-| `insert_scenario` | Inserts a new scenario block | **Yes** |
+| `submit_requirements` | Stores requirement sources; advances to Generating Test Points | No |
+| `propose_test_points` | Persists Proposed test points; pauses for human review | No (review gate) |
+| `generate_plan` | Accepts plan only for approved, resolved test-point IDs | No |
+| `insert_scenario` | Inserts a scenario block; embeds `@teshi-tp:<id>` tags | **Yes** |
 | `update_step` | Replaces a step line | **Yes** |
 
 ### Execution flow
 
 `execute_tool(app, name, args, tool_call_id)` dispatches to the matching implementation. Mutation tools return `ToolResult::Queued { change }` instead of applying directly. The change is applied only after user confirmation via `accept_agent_change()`.
+
+Test-point review is a separate hard gate: `ApprovalMode::{Auto, Bypass}` cannot approve test points or advance Reviewing → Planning.
 
 ---
 
@@ -174,7 +179,7 @@ Built with **ratatui 0.29**. Uses `render_stateful_widget` for tree state.
 ### Layout
 
 ```
-[0] Tab bar (Explore | Mind Map | AI)
+[0] Tab bar (Explore | Mind Map | AI | Requirements | Test Points)
 [1] Horizontal separator
 [2] Main panel → render_main_panel → dispatch by active tab
 [3] Footer (status / agent prompt / explore footer / AI footer / key hints)
@@ -185,8 +190,10 @@ Built with **ratatui 0.29**. Uses `render_stateful_widget` for tree state.
 | Panel | Layout | Description |
 |-------|--------|-------------|
 | Mind Map | 60/40 tree + AI preview | Prefix trie with category-aware coloring; AI panel shows related chat |
-| Explore | 20/30/50 three columns | Features → Scenarios → Steps; inline keyword colors, run status dots |
+| Explore | 20/30/50 three columns | Features → Scenarios → Steps; inline keyword colors, run status dots, TP badges |
 | AI | Chat history + 3-line input | Markdown rendering, streaming partial responses with cursor |
+| Requirements | Tree + Markdown + linked TPs | Requirement authoring and range linking |
+| Test Points | Hierarchy + intent + excerpts | Review, approve/reject, continue generation, open scenarios |
 | Editor | Full-width with highlights | Syntax highlighting, keyword alignment, cursor, selection |
 
 ### Overlays (rendered in priority order)

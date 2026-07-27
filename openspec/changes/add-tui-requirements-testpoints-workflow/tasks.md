@@ -44,16 +44,16 @@
 
 ## 6. Scenario realization traceability
 
-- [ ] 6.1 Evaluate valid Gherkin metadata conventions against the current parser and select a stable Teshi-owned encoding for one-or-many test-point IDs.
-- [ ] 6.2 Add test-point IDs to `ScenarioPlan` and propagate them through feature creation and scenario insertion without changing executable step semantics.
-- [ ] 6.3 Parse scenario references back into test-point records or a derived traceability index, tolerating existing scenarios with no metadata.
-- [ ] 6.4 Add navigation from a test point to every realized scenario and surface originating test-point links in existing MindMap/Explore details where space permits.
-- [ ] 6.5 Add parser, writer, round-trip, and backward-compatibility tests for unlinked, singly linked, and multiply linked scenarios.
+- [x] 6.1 Evaluate valid Gherkin metadata conventions against the current parser and select a stable Teshi-owned encoding for one-or-many test-point IDs.
+- [x] 6.2 Add test-point IDs to `ScenarioPlan` and propagate them through feature creation and scenario insertion without changing executable step semantics.
+- [x] 6.3 Parse scenario references back into test-point records or a derived traceability index, tolerating existing scenarios with no metadata.
+- [x] 6.4 Add navigation from a test point to every realized scenario and surface originating test-point links in existing MindMap/Explore details where space permits.
+- [x] 6.5 Add parser, writer, round-trip, and backward-compatibility tests for unlinked, singly linked, and multiply linked scenarios.
 
 ## 7. Documentation and verification
 
-- [ ] 7.1 Update user and keybinding documentation for the five tabs, source-controlled artifact layout, review states, hard approval gate, stale anchors, and scenario links.
-- [ ] 7.2 Update AI tool and generation-flow documentation to distinguish test points from Gherkin scenarios and remove obsolete direct Planning assumptions.
+- [x] 7.1 Update user and keybinding documentation for the five tabs, source-controlled artifact layout, review states, hard approval gate, stale anchors, and scenario links.
+- [x] 7.2 Update AI tool and generation-flow documentation to distinguish test points from Gherkin scenarios and remove obsolete direct Planning assumptions.
 - [ ] 7.3 Run `cargo fmt --all --check`.
 - [ ] 7.4 Run targeted tests for the affected core, agent, and TUI crates, then run `cargo test --workspace --exclude teshi-web --locked`; record any known pre-existing unrelated failure.
 - [ ] 7.5 Run `cargo check --workspace --exclude teshi-web --locked`.
