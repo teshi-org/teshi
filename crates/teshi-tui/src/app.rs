@@ -4821,21 +4821,20 @@ impl App {
                         return Ok(());
                     };
                     let mut approved = false;
-                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut() {
-                        if let Some(tp) = artifacts
+                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut()
+                        && let Some(tp) = artifacts
                             .test_points
                             .test_points
                             .iter_mut()
                             .find(|tp| tp.id == tp_id)
-                        {
-                            approved = crate::test_points_tab::TestPointsUiState::approve(tp);
-                            if approved {
-                                crate::test_points_tab::TestPointsUiState::save_test_points(
-                                    &self.project.root_dir,
-                                    artifacts,
-                                )?;
-                                self.test_points_ui.rebuild_tree(Some(artifacts));
-                            }
+                    {
+                        approved = crate::test_points_tab::TestPointsUiState::approve(tp);
+                        if approved {
+                            crate::test_points_tab::TestPointsUiState::save_test_points(
+                                &self.project.root_dir,
+                                artifacts,
+                            )?;
+                            self.test_points_ui.rebuild_tree(Some(artifacts));
                         }
                     }
                     self.status = if approved {
@@ -4855,21 +4854,20 @@ impl App {
                         return Ok(());
                     };
                     let mut rejected = false;
-                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut() {
-                        if let Some(tp) = artifacts
+                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut()
+                        && let Some(tp) = artifacts
                             .test_points
                             .test_points
                             .iter_mut()
                             .find(|tp| tp.id == tp_id)
-                        {
-                            rejected = crate::test_points_tab::TestPointsUiState::reject(tp);
-                            if rejected {
-                                crate::test_points_tab::TestPointsUiState::save_test_points(
-                                    &self.project.root_dir,
-                                    artifacts,
-                                )?;
-                                self.test_points_ui.rebuild_tree(Some(artifacts));
-                            }
+                    {
+                        rejected = crate::test_points_tab::TestPointsUiState::reject(tp);
+                        if rejected {
+                            crate::test_points_tab::TestPointsUiState::save_test_points(
+                                &self.project.root_dir,
+                                artifacts,
+                            )?;
+                            self.test_points_ui.rebuild_tree(Some(artifacts));
                         }
                     }
                     self.status = if rejected {
@@ -5614,15 +5612,13 @@ impl App {
             if let (Some(id), Some(artifacts)) = (
                 self.test_points_ui.selected_test_point_id.as_ref(),
                 artifacts,
-            ) {
-                if let Some(tp) = artifacts
-                    .test_points
-                    .test_points
-                    .iter()
-                    .find(|tp| &tp.id == id)
-                {
-                    self.test_points_ui.load_field_buffer_from(tp);
-                }
+            ) && let Some(tp) = artifacts
+                .test_points
+                .test_points
+                .iter()
+                .find(|tp| &tp.id == id)
+            {
+                self.test_points_ui.load_field_buffer_from(tp);
             }
         }
         self.status = match tab {
@@ -5655,20 +5651,19 @@ impl App {
         };
         let value = self.test_points_ui.field_buffer.clone();
         let field = self.test_points_ui.detail_field;
-        if let Some(artifacts) = self.authoring_ui.artifacts.as_mut() {
-            if let Some(tp) = artifacts
+        if let Some(artifacts) = self.authoring_ui.artifacts.as_mut()
+            && let Some(tp) = artifacts
                 .test_points
                 .test_points
                 .iter_mut()
                 .find(|tp| tp.id == tp_id)
-            {
-                crate::test_points_tab::TestPointsUiState::apply_field_buffer(tp, field, &value);
-                crate::test_points_tab::TestPointsUiState::save_test_points(
-                    &self.project.root_dir,
-                    artifacts,
-                )?;
-                self.test_points_ui.rebuild_tree(Some(artifacts));
-            }
+        {
+            crate::test_points_tab::TestPointsUiState::apply_field_buffer(tp, field, &value);
+            crate::test_points_tab::TestPointsUiState::save_test_points(
+                &self.project.root_dir,
+                artifacts,
+            )?;
+            self.test_points_ui.rebuild_tree(Some(artifacts));
         }
         self.test_points_ui.field_dirty = false;
         Ok(())
@@ -5710,29 +5705,27 @@ impl App {
         self.authoring_ui.highlight_test_point_id = Some(tp_id);
         self.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Editor;
 
-        if let Some(artifacts) = self.authoring_ui.artifacts.as_ref() {
-            if let Some(doc) = artifacts
+        if let Some(artifacts) = self.authoring_ui.artifacts.as_ref()
+            && let Some(doc) = artifacts
                 .documents
                 .iter()
                 .find(|d| d.meta.id == excerpt.document_id)
-            {
-                if let (Some((start_row, start_col)), Some((end_row, end_col))) = (
-                    teshi_core::authoring::char_position_to_line_col(
-                        doc.body.as_str(),
-                        excerpt.position.start,
-                    ),
-                    teshi_core::authoring::char_position_to_line_col(
-                        doc.body.as_str(),
-                        excerpt.position.end,
-                    ),
-                ) {
-                    self.authoring_ui.selection_anchor = Some((start_row, start_col));
-                    self.authoring_ui.selection_end = Some((end_row, end_col));
-                    self.authoring_ui.scroll_row = start_row.saturating_sub(2);
-                    self.authoring_ui.cursor_row = start_row;
-                    self.authoring_ui.cursor_col = start_col;
-                }
-            }
+            && let (Some((start_row, start_col)), Some((end_row, end_col))) = (
+                teshi_core::authoring::char_position_to_line_col(
+                    doc.body.as_str(),
+                    excerpt.position.start,
+                ),
+                teshi_core::authoring::char_position_to_line_col(
+                    doc.body.as_str(),
+                    excerpt.position.end,
+                ),
+            )
+        {
+            self.authoring_ui.selection_anchor = Some((start_row, start_col));
+            self.authoring_ui.selection_end = Some((end_row, end_col));
+            self.authoring_ui.scroll_row = start_row.saturating_sub(2);
+            self.authoring_ui.cursor_row = start_row;
+            self.authoring_ui.cursor_col = start_col;
         }
         self.status = format!("Opened requirement excerpt in {}", excerpt.document_title);
         Ok(())
@@ -5769,24 +5762,22 @@ impl App {
         self.active_tab = MainTab::Explore;
         self.explore_set_feature(feature_idx);
 
-        if let Some(name) = sc_ref.scenario_name.as_deref() {
-            if let Some(scenario_idx) = self
+        if let Some(name) = sc_ref.scenario_name.as_deref()
+            && let Some(scenario_idx) = self
                 .project
                 .features
                 .get(feature_idx)
                 .and_then(|f| f.scenarios.iter().position(|s| s.name == name))
-            {
-                self.explore_set_scenario(scenario_idx);
-            }
-        } else if let Some(line) = sc_ref.scenario_line {
-            if let Some(scenario_idx) = self
+        {
+            self.explore_set_scenario(scenario_idx);
+        } else if let Some(line) = sc_ref.scenario_line
+            && let Some(scenario_idx) = self
                 .project
                 .features
                 .get(feature_idx)
                 .and_then(|f| f.scenarios.iter().position(|s| s.line_number == line))
-            {
-                self.explore_set_scenario(scenario_idx);
-            }
+        {
+            self.explore_set_scenario(scenario_idx);
         }
 
         self.status = format!(

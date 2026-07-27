@@ -62,10 +62,11 @@ pub struct QuoteSelector {
 }
 
 /// Whether a requirement link currently resolves to a unique range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ResolutionState {
     /// The link resolves to exactly one range in the current document revision.
+    #[default]
     Resolved,
     /// The link cannot be uniquely resolved; human review is required.
     Stale,
@@ -85,12 +86,6 @@ pub struct RequirementLink {
     /// Current resolution outcome for this link.
     #[serde(default)]
     pub resolution: ResolutionState,
-}
-
-impl Default for ResolutionState {
-    fn default() -> Self {
-        Self::Resolved
-    }
 }
 
 #[cfg(test)]

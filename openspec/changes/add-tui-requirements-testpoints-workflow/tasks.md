@@ -54,8 +54,8 @@
 
 - [x] 7.1 Update user and keybinding documentation for the five tabs, source-controlled artifact layout, review states, hard approval gate, stale anchors, and scenario links.
 - [x] 7.2 Update AI tool and generation-flow documentation to distinguish test points from Gherkin scenarios and remove obsolete direct Planning assumptions.
-- [ ] 7.3 Run `cargo fmt --all --check`.
-- [ ] 7.4 Run targeted tests for the affected core, agent, and TUI crates, then run `cargo test --workspace --exclude teshi-web --locked`; record any known pre-existing unrelated failure.
-- [ ] 7.5 Run `cargo check --workspace --exclude teshi-web --locked`.
-- [ ] 7.6 Run `cargo clippy --workspace --exclude teshi-web --locked --all-targets --all-features -- -D warnings`; distinguish the documented pre-existing `teshi-tui` lint if it remains.
-- [ ] 7.7 Manually exercise requirement selection, linked highlighting, AI proposal, mandatory review, scenario generation, restart recovery, and bidirectional navigation in a real TTY, and capture a concise walkthrough artifact.
+- [x] 7.3 Run `cargo fmt --all --check`.
+- [x] 7.4 Run targeted tests for the affected core, agent, and TUI crates, then run `cargo test --workspace --exclude teshi-web --locked`; record any known pre-existing unrelated failure.
+- [x] 7.5 Run `cargo check --workspace --exclude teshi-web --locked`.
+- [x] 7.6 Run `cargo clippy --workspace --exclude teshi-web --locked --all-targets --all-features -- -D warnings`; distinguish the documented pre-existing `teshi-tui` lint if it remains.
+- [x] 7.7 Manually exercise requirement selection, linked highlighting, AI proposal, mandatory review, scenario generation, restart recovery, and bidirectional navigation in a real TTY, and capture a concise walkthrough artifact.

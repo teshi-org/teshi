@@ -472,13 +472,12 @@ fn execute_insert_scenario(
                 .test_points
                 .iter_mut()
                 .find(|tp| &tp.id == id)
-            {
-                if !tp.scenario_refs.iter().any(|r| {
+                && !tp.scenario_refs.iter().any(|r| {
                     r.feature_path == scenario_ref.feature_path
                         && r.scenario_name == scenario_ref.scenario_name
-                }) {
-                    tp.scenario_refs.push(scenario_ref.clone());
-                }
+                })
+            {
+                tp.scenario_refs.push(scenario_ref.clone());
             }
         }
         let _ = teshi_engine::save_test_points(&app.project.root_dir, &artifacts.test_points);

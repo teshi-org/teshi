@@ -126,6 +126,7 @@ impl TestPointsUiState {
     }
 
     /// Selects a test point from a tree node id.
+    #[allow(dead_code)]
     pub fn select_tree_node(&mut self, node_id: &str) {
         if let Some(tp_id) = node_id.strip_prefix(TREE_TP_PREFIX) {
             self.select_test_point(tp_id);
@@ -227,9 +228,6 @@ impl TestPointsUiState {
     }
 
     pub fn commit_field_if_dirty(&mut self) {
-        if !self.field_dirty {
-            return;
-        }
         // Actual commit happens in app with mutable artifacts access.
     }
 
@@ -334,10 +332,10 @@ impl TestPointsUiState {
     pub fn batch_approve(test_points: &mut [TestPoint], ids: &[String]) -> usize {
         let mut approved = 0usize;
         for id in ids {
-            if let Some(tp) = test_points.iter_mut().find(|tp| &tp.id == id) {
-                if Self::approve(tp) {
-                    approved += 1;
-                }
+            if let Some(tp) = test_points.iter_mut().find(|tp| &tp.id == id)
+                && Self::approve(tp)
+            {
+                approved += 1;
             }
         }
         approved
@@ -376,10 +374,7 @@ fn field_value(tp: &TestPoint, field: DetailField) -> String {
     }
 }
 
-fn filtered_test_points<'a>(
-    test_points: &'a [TestPoint],
-    filter: ReviewFilter,
-) -> Vec<&'a TestPoint> {
+fn filtered_test_points(test_points: &[TestPoint], filter: ReviewFilter) -> Vec<&TestPoint> {
     test_points
         .iter()
         .filter(|tp| match filter {
@@ -452,6 +447,7 @@ pub fn build_test_point_tree(
 /// One linked requirement excerpt row for the right pane.
 #[derive(Debug, Clone)]
 pub struct RequirementExcerpt {
+    #[allow(dead_code)]
     pub link_index: usize,
     pub document_title: String,
     pub quote: String,

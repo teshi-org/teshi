@@ -53,11 +53,11 @@ pub fn resolve_requirement_link(
 ) -> RequirementLink {
     let mut resolved = link.clone();
 
-    if link.document_revision == current_revision {
-        if position_matches_quote(text, link.position, &link.quote.quote) {
-            resolved.resolution = ResolutionState::Resolved;
-            return resolved;
-        }
+    if link.document_revision == current_revision
+        && position_matches_quote(text, link.position, &link.quote.quote)
+    {
+        resolved.resolution = ResolutionState::Resolved;
+        return resolved;
     }
 
     let matches = find_quote_matches(text, &link.quote.quote);

@@ -4,12 +4,12 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use teshi_core::authoring::{
-    AuthoringArtifacts, AuthoringDiagnostic, AuthoringSeverity, HierarchyPath,
-    RequirementDocumentMeta, ResolutionState, ReviewState, TestPoint, TextRange,
-    create_requirement_link, line_col_range_to_char_range, re_resolve_document_links,
+    AuthoringArtifacts, AuthoringDiagnostic, HierarchyPath, RequirementDocumentMeta,
+    ResolutionState, ReviewState, TestPoint, TextRange, create_requirement_link,
+    line_col_range_to_char_range, re_resolve_document_links,
 };
 use teshi_engine::{
     compute_document_revision, load_authoring_artifacts, save_requirement_markdown,
@@ -107,11 +107,11 @@ impl AuthoringUiState {
             .cloned()
             .unwrap_or_default();
         self.tree_items = build_requirement_tree(&index);
-        if self.tree_state.selected().is_empty() {
-            if let Some(doc) = index.documents.first() {
-                self.tree_state
-                    .select(vec![format!("{TREE_DOC_PREFIX}{}", doc.id)]);
-            }
+        if self.tree_state.selected().is_empty()
+            && let Some(doc) = index.documents.first()
+        {
+            self.tree_state
+                .select(vec![format!("{TREE_DOC_PREFIX}{}", doc.id)]);
         }
     }
 
@@ -127,12 +127,12 @@ impl AuthoringUiState {
         self.desired_col = 0;
         self.scroll_row = 0;
 
-        if let Some(artifacts) = self.artifacts.as_ref() {
-            if let Some(doc) = artifacts.documents.iter().find(|d| d.meta.id == doc_id) {
-                self.buffer = EditorBuffer::from_string(doc.body.clone());
-                self.buffer_dirty = false;
-                return;
-            }
+        if let Some(artifacts) = self.artifacts.as_ref()
+            && let Some(doc) = artifacts.documents.iter().find(|d| d.meta.id == doc_id)
+        {
+            self.buffer = EditorBuffer::from_string(doc.body.clone());
+            self.buffer_dirty = false;
+            return;
         }
         self.buffer = EditorBuffer::from_string(String::new());
         self.buffer_dirty = false;
