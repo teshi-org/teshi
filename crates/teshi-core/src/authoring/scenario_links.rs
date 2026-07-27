@@ -14,17 +14,21 @@ pub const TESHI_TP_TAG_PREFIX: &str = "@teshi-tp:";
 
 /// Formats a single test-point ID as a Gherkin tag.
 ///
-/// IDs must not contain whitespace or `@`; invalid characters are replaced with `-`
-/// so `collect_tags` keeps a single token.
+/// Whitespace, `@`, and `%` are percent-encoded so the tag remains one token
+/// without losing the original ID.
 pub fn format_teshi_tp_tag(id: &str) -> String {
-    let sanitized: String = id
-        .chars()
-        .map(|c| match c {
-            c if c.is_whitespace() || c == '@' => '-',
-            c => c,
-        })
-        .collect();
-    format!("{TESHI_TP_TAG_PREFIX}{sanitized}")
+    let mut encoded = String::new();
+    for character in id.chars() {
+        if character.is_whitespace() || character == '@' || character == '%' {
+            let mut buffer = [0; 4];
+            for byte in character.encode_utf8(&mut buffer).as_bytes() {
+                encoded.push_str(&format!("%{byte:02X}"));
+            }
+        } else {
+            encoded.push(character);
+        }
+    }
+    format!("{TESHI_TP_TAG_PREFIX}{encoded}")
 }
 
 /// Converts test-point IDs into `@teshi-tp:<id>` tags.
@@ -42,10 +46,29 @@ pub fn parse_teshi_tp_tags(tags: &[String]) -> Vec<String> {
             let trimmed = tag.trim();
             trimmed
                 .strip_prefix(TESHI_TP_TAG_PREFIX)
-                .map(|id| id.to_string())
+                .map(decode_test_point_id)
                 .filter(|id| !id.is_empty())
         })
         .collect()
+}
+
+fn decode_test_point_id(encoded: &str) -> String {
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let Ok(value) = u8::from_str_radix(&encoded[index + 1..index + 3], 16)
+        {
+            decoded.push(value);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| encoded.to_string())
 }
 
 /// Merges caller tags with test-point tags, preserving order and deduplicating.
@@ -172,8 +195,18 @@ mod tests {
     }
 
     #[test]
-    fn sanitizes_whitespace_in_ids() {
-        assert_eq!(format_teshi_tp_tag("tp 1"), "@teshi-tp:tp-1");
+    fn special_characters_roundtrip_without_changing_id() {
+        let ids = vec!["tp 1".into(), "owner@example".into(), "100%".into()];
+        let tags = teshi_tp_tags(&ids);
+        assert_eq!(
+            tags,
+            vec![
+                "@teshi-tp:tp%201",
+                "@teshi-tp:owner%40example",
+                "@teshi-tp:100%25"
+            ]
+        );
+        assert_eq!(parse_teshi_tp_tags(&tags), ids);
     }
 
     #[test]
@@ -211,5 +244,31 @@ mod tests {
             tps[0].scenario_refs[0].scenario_name.as_deref(),
             Some("Login")
         );
+    }
+
+    #[test]
+    fn sync_scenario_refs_matches_encoded_test_point_id() {
+        let content =
+            "Feature: Auth\n\n  @teshi-tp:tp%201%40owner\n  Scenario: Login\n    Given x\n";
+        let feature = parse_feature(content, PathBuf::from("/proj/auth.feature"));
+        let project = BddProject {
+            root_dir: PathBuf::from("/proj"),
+            features: vec![feature],
+        };
+        let mut tps = vec![TestPoint {
+            id: "tp 1@owner".into(),
+            title: "t".into(),
+            objective: "o".into(),
+            preconditions: None,
+            expected_outcomes: None,
+            hierarchy_path: HierarchyPath::new(vec!["A".into()]),
+            review_state: ReviewState::Approved,
+            requirement_links: vec![],
+            scenario_refs: vec![],
+        }];
+
+        sync_scenario_refs_from_project(&project, &mut tps);
+
+        assert_eq!(tps[0].scenario_refs.len(), 1);
     }
 }

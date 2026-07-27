@@ -5,6 +5,7 @@
 //! file-modifying tools (e.g. `insert_scenario`) queue changes for user confirmation.
 
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 
 use crate::app::{AgentMutation, AgentPendingChange};
 use teshi_core::gherkin_lang::StructuralType;
@@ -429,10 +430,12 @@ fn execute_insert_scenario(
         .map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str().map(String::from))
-                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
                 .collect()
         })
         .unwrap_or_default();
+    validate_insert_scenario_traceability(app, file_path, scenario_name, &test_point_ids)?;
     let tags = teshi_core::authoring::merge_scenario_tags(&tags, &test_point_ids);
 
     // Build the Gherkin text block
@@ -498,6 +501,82 @@ fn execute_insert_scenario(
     Ok(format!(
         "Scenario \"{scenario_name}\" queued for insertion in {file_path} at line {line}. Awaiting user confirmation."
     ))
+}
+
+fn validate_insert_scenario_traceability(
+    app: &crate::app::App,
+    file_path: &str,
+    scenario_name: &str,
+    test_point_ids: &[String],
+) -> Result<()> {
+    if test_point_ids.is_empty() {
+        anyhow::bail!("insert_scenario requires at least one approved test_point_id");
+    }
+    let unique_ids: HashSet<&str> = test_point_ids.iter().map(String::as_str).collect();
+    if unique_ids.len() != test_point_ids.len() {
+        anyhow::bail!("insert_scenario test_point_ids must not contain duplicates");
+    }
+
+    let plan = app
+        .pipeline_plan
+        .as_ref()
+        .context("insert_scenario requires an accepted generation plan")?;
+    let feature = plan
+        .features
+        .iter()
+        .find(|feature| {
+            feature.file_name == file_path
+                || std::path::Path::new(file_path)
+                    .file_name()
+                    .is_some_and(|name| name == std::ffi::OsStr::new(&feature.file_name))
+        })
+        .with_context(|| {
+            format!("insert_scenario file '{file_path}' is not in the accepted plan")
+        })?;
+    let scenario = feature
+        .scenarios
+        .iter()
+        .find(|scenario| scenario.name == scenario_name)
+        .with_context(|| {
+            format!(
+                "insert_scenario scenario '{scenario_name}' is not planned for '{}'",
+                feature.file_name
+            )
+        })?;
+    let planned_ids: HashSet<&str> = scenario.test_point_ids.iter().map(String::as_str).collect();
+    if unique_ids != planned_ids {
+        anyhow::bail!(
+            "insert_scenario test_point_ids for '{}' must exactly match the accepted plan",
+            scenario_name
+        );
+    }
+
+    let test_points = app
+        .authoring_ui
+        .artifacts
+        .as_ref()
+        .map(|artifacts| artifacts.test_points.test_points.as_slice())
+        .unwrap_or(&[]);
+    for id in test_point_ids {
+        let test_point = test_points
+            .iter()
+            .find(|test_point| test_point.id == *id)
+            .with_context(|| format!("insert_scenario references unknown test point '{id}'"))?;
+        if test_point.review_state != teshi_core::authoring::ReviewState::Approved {
+            anyhow::bail!(
+                "insert_scenario test point '{id}' is {:?} (must be Approved)",
+                test_point.review_state
+            );
+        }
+        if test_point
+            .requirement_links
+            .iter()
+            .any(|link| link.resolution != teshi_core::authoring::ResolutionState::Resolved)
+        {
+            anyhow::bail!("insert_scenario test point '{id}' has stale requirement links");
+        }
+    }
+    Ok(())
 }
 
 fn execute_update_step(
@@ -1258,10 +1337,21 @@ fn execute_propose_test_points(app: &mut crate::app::App, args_json: &str) -> Re
         .as_mut()
         .context("authoring artifacts unavailable")?;
 
-    let proposed = items
-        .iter()
-        .map(|item| parse_proposed_test_point(item, &artifacts.test_points.test_points))
-        .collect::<Result<Vec<_>>>()?;
+    let mut id_allocation_pool = artifacts.test_points.test_points.clone();
+    let mut proposed = Vec::with_capacity(items.len());
+    let mut proposed_ids = HashSet::new();
+    for item in items {
+        let test_point =
+            parse_proposed_test_point(item, &id_allocation_pool, &artifacts.documents)?;
+        if !proposed_ids.insert(test_point.id.clone()) {
+            anyhow::bail!(
+                "propose_test_points contains duplicate id '{}'",
+                test_point.id
+            );
+        }
+        id_allocation_pool.push(test_point.clone());
+        proposed.push(test_point);
+    }
     for tp in &proposed {
         if let Some(existing) = artifacts
             .test_points
@@ -1288,7 +1378,10 @@ fn execute_propose_test_points(app: &mut crate::app::App, args_json: &str) -> Re
             .iter()
             .position(|existing| existing.id == tp.id)
         {
-            artifacts.test_points.test_points[idx] = tp;
+            let mut replacement = tp;
+            replacement.scenario_refs =
+                std::mem::take(&mut artifacts.test_points.test_points[idx].scenario_refs);
+            artifacts.test_points.test_points[idx] = replacement;
         } else {
             artifacts.test_points.test_points.push(tp);
         }
@@ -1323,6 +1416,7 @@ fn ensure_authoring_artifacts(app: &mut crate::app::App) {
 fn parse_proposed_test_point(
     item: &serde_json::Value,
     existing: &[teshi_core::authoring::TestPoint],
+    documents: &[teshi_core::authoring::RequirementDocumentContent],
 ) -> Result<teshi_core::authoring::TestPoint> {
     let title = item
         .get("title")
@@ -1372,7 +1466,7 @@ fn parse_proposed_test_point(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let requirement_links = parse_requirement_links(item.get("requirement_links"))?;
+    let requirement_links = parse_requirement_links(item.get("requirement_links"), documents)?;
 
     Ok(teshi_core::authoring::TestPoint {
         id,
@@ -1400,6 +1494,7 @@ fn next_agent_test_point_id(existing: &[teshi_core::authoring::TestPoint]) -> St
 
 fn parse_requirement_links(
     value: Option<&serde_json::Value>,
+    documents: &[teshi_core::authoring::RequirementDocumentContent],
 ) -> Result<Vec<teshi_core::authoring::RequirementLink>> {
     let Some(arr) = value.and_then(|v| v.as_array()) else {
         return Ok(Vec::new());
@@ -1410,23 +1505,48 @@ fn parse_requirement_links(
             .get("document_id")
             .and_then(|v| v.as_str())
             .context("requirement_links[].document_id is required")?
+            .trim()
             .to_string();
+        if document_id.is_empty() {
+            anyhow::bail!("requirement_links[].document_id must be non-empty");
+        }
+        let document = documents
+            .iter()
+            .find(|document| document.meta.id == document_id)
+            .with_context(|| {
+                format!("requirement link references unknown document '{document_id}'")
+            })?;
         let document_revision = item
             .get("document_revision")
             .and_then(|v| v.as_str())
             .context("requirement_links[].document_revision is required")?
+            .trim()
             .to_string();
+        if document_revision != document.meta.revision.as_str() {
+            anyhow::bail!(
+                "requirement link revision '{}' does not match current revision '{}' for document '{}'",
+                document_revision,
+                document.meta.revision.as_str(),
+                document_id
+            );
+        }
         let position = item
             .get("position")
             .context("requirement_links[].position is required")?;
-        let start = position
-            .get("start")
-            .and_then(|v| v.as_u64())
-            .context("requirement_links[].position.start is required")? as u32;
-        let end = position
-            .get("end")
-            .and_then(|v| v.as_u64())
-            .context("requirement_links[].position.end is required")? as u32;
+        let start = u32::try_from(
+            position
+                .get("start")
+                .and_then(|v| v.as_u64())
+                .context("requirement_links[].position.start is required")?,
+        )
+        .context("requirement_links[].position.start exceeds u32")?;
+        let end = u32::try_from(
+            position
+                .get("end")
+                .and_then(|v| v.as_u64())
+                .context("requirement_links[].position.end is required")?,
+        )
+        .context("requirement_links[].position.end exceeds u32")?;
         if start >= end {
             anyhow::bail!("requirement_links[].position must be non-empty");
         }
@@ -1441,6 +1561,20 @@ fn parse_requirement_links(
         if quote.is_empty() {
             anyhow::bail!("requirement_links[].quote.quote must be non-empty");
         }
+        let range = teshi_core::authoring::TextRange::new(start, end);
+        let selected_quote = teshi_core::authoring::slice_by_char_range(&document.body, range)
+            .with_context(|| {
+                format!(
+                    "requirement link range [{start}, {end}) is outside document '{}'",
+                    document_id
+                )
+            })?;
+        if selected_quote != quote {
+            anyhow::bail!(
+                "requirement link quote does not match range [{start}, {end}) in document '{}'",
+                document_id
+            );
+        }
         let prefix = quote_obj
             .get("prefix")
             .and_then(|v| v.as_str())
@@ -1454,7 +1588,7 @@ fn parse_requirement_links(
         links.push(teshi_core::authoring::RequirementLink {
             document_id,
             document_revision,
-            position: teshi_core::authoring::TextRange::new(start, end),
+            position: range,
             quote: teshi_core::authoring::QuoteSelector {
                 quote,
                 prefix,
@@ -1684,7 +1818,10 @@ mod pipeline_gate_tests {
     use teshi_agent::AgentHost;
     use teshi_agent::approval::ApprovalMode;
     use teshi_agent::pipeline::GenerationStage;
-    use teshi_core::authoring::{ReviewState, TestPointsFile};
+    use teshi_core::authoring::{
+        DocumentRevision, QuoteSelector, RequirementDocumentContent, RequirementDocumentMeta,
+        RequirementLink, ResolutionState, ReviewState, ScenarioRef, TestPointsFile, TextRange,
+    };
 
     fn app_in_temp_project() -> (crate::app::App, tempfile::TempDir) {
         let dir = tempdir().expect("tempdir");
@@ -1703,6 +1840,30 @@ mod pipeline_gate_tests {
         let json =
             fs::read_to_string(dir.path().join("testpoints/testpoints.json")).expect("test points");
         serde_json::from_str(&json).expect("valid test points")
+    }
+
+    fn set_writing_plan(app: &mut crate::app::App, file_path: &str, scenarios: &[(&str, &[&str])]) {
+        let scenarios: Vec<_> = scenarios
+            .iter()
+            .map(|(name, ids)| {
+                serde_json::json!({
+                    "name": name,
+                    "steps": ["Given x"],
+                    "test_point_ids": ids,
+                })
+            })
+            .collect();
+        app.pipeline_plan = Some(
+            serde_json::from_value(serde_json::json!({
+                "features": [{
+                    "file_name": file_path,
+                    "feature_name": "Sample",
+                    "scenarios": scenarios,
+                }]
+            }))
+            .expect("generation plan"),
+        );
+        app.generation_stage = GenerationStage::Writing;
     }
 
     #[test]
@@ -1765,6 +1926,107 @@ mod pipeline_gate_tests {
             .test_points[0];
         assert_eq!(tp.review_state, ReviewState::Proposed);
         assert!(dir.path().join("testpoints/testpoints.json").is_file());
+    }
+
+    #[test]
+    fn proposal_allocates_unique_ids_for_every_omitted_id() {
+        let (mut app, dir) = app_in_temp_project();
+        app.execute_tool(
+            "submit_requirements",
+            r#"{"feature_name":"Auth","scenario_descriptions":["login"]}"#,
+            "tc-1",
+            0,
+        )
+        .unwrap();
+
+        app.execute_tool(
+            "propose_test_points",
+            r#"{"test_points":[
+                {"title":"First","objective":"o1","hierarchy_path":["A"]},
+                {"title":"Second","objective":"o2","hierarchy_path":["A"]},
+                {"title":"Third","objective":"o3","hierarchy_path":["A"]}
+            ]}"#,
+            "tc-2",
+            0,
+        )
+        .unwrap();
+
+        let ids: Vec<_> = persisted_test_points(&dir)
+            .test_points
+            .into_iter()
+            .map(|test_point| test_point.id)
+            .collect();
+        assert_eq!(ids, vec!["tp-1", "tp-2", "tp-3"]);
+    }
+
+    #[test]
+    fn proposal_rejects_invalid_requirement_links() {
+        let document = RequirementDocumentContent {
+            meta: RequirementDocumentMeta {
+                id: "doc-1".into(),
+                path: "auth.md".into(),
+                title: "Auth".into(),
+                revision: DocumentRevision::new("rev-1"),
+            },
+            body: "Login required".into(),
+        };
+        let documents = vec![document];
+        let cases = [
+            (
+                serde_json::json!([{
+                    "document_id": "missing",
+                    "document_revision": "rev-1",
+                    "position": {"start": 0, "end": 5},
+                    "quote": {"quote": "Login"}
+                }]),
+                "unknown document",
+            ),
+            (
+                serde_json::json!([{
+                    "document_id": "doc-1",
+                    "document_revision": "old",
+                    "position": {"start": 0, "end": 5},
+                    "quote": {"quote": "Login"}
+                }]),
+                "does not match current revision",
+            ),
+            (
+                serde_json::json!([{
+                    "document_id": "doc-1",
+                    "document_revision": "rev-1",
+                    "position": {"start": 0, "end": 50},
+                    "quote": {"quote": "Login"}
+                }]),
+                "outside document",
+            ),
+            (
+                serde_json::json!([{
+                    "document_id": "doc-1",
+                    "document_revision": "rev-1",
+                    "position": {"start": 0, "end": 5},
+                    "quote": {"quote": "Logout"}
+                }]),
+                "does not match range",
+            ),
+        ];
+
+        for (value, expected) in cases {
+            let error = super::parse_requirement_links(Some(&value), &documents).unwrap_err();
+            assert!(
+                error.to_string().contains(expected),
+                "expected '{expected}' in '{error}'"
+            );
+        }
+
+        let valid = serde_json::json!([{
+            "document_id": "doc-1",
+            "document_revision": "rev-1",
+            "position": {"start": 0, "end": 5},
+            "quote": {"quote": "Login"}
+        }]);
+        let links = super::parse_requirement_links(Some(&valid), &documents).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].resolution, ResolutionState::Resolved);
     }
 
     #[test]
@@ -1899,6 +2161,59 @@ mod pipeline_gate_tests {
             .test_points[0];
         assert_eq!(tp.review_state, ReviewState::Approved);
         assert_eq!(tp.title, "Original");
+    }
+
+    #[test]
+    fn re_proposing_preserves_existing_scenario_references() {
+        let (mut app, _dir) = app_in_temp_project();
+        app.execute_tool(
+            "submit_requirements",
+            r#"{"feature_name":"Auth","scenario_descriptions":["login"]}"#,
+            "tc-1",
+            0,
+        )
+        .unwrap();
+        app.execute_tool(
+            "propose_test_points",
+            r#"{"test_points":[{"id":"tp-login","title":"Original","objective":"o","hierarchy_path":["A"]}]}"#,
+            "tc-2",
+            0,
+        )
+        .unwrap();
+        app.authoring_ui
+            .artifacts
+            .as_mut()
+            .unwrap()
+            .test_points
+            .test_points[0]
+            .scenario_refs
+            .push(ScenarioRef {
+                feature_path: "sample.feature".into(),
+                scenario_name: Some("Login".into()),
+                scenario_line: Some(2),
+            });
+
+        app.execute_tool(
+            "propose_test_points",
+            r#"{"test_points":[{"id":"tp-login","title":"Updated","objective":"new","hierarchy_path":["B"]}]}"#,
+            "tc-3",
+            0,
+        )
+        .unwrap();
+
+        let test_point = &app
+            .authoring_ui
+            .artifacts
+            .as_ref()
+            .unwrap()
+            .test_points
+            .test_points[0];
+        assert_eq!(test_point.title, "Updated");
+        assert_eq!(test_point.scenario_refs.len(), 1);
+        assert_eq!(
+            test_point.scenario_refs[0].scenario_name.as_deref(),
+            Some("Login")
+        );
     }
 
     #[test]
@@ -2097,12 +2412,40 @@ mod pipeline_gate_tests {
     #[test]
     fn insert_scenario_encodes_teshi_tp_tags() {
         let (mut app, _dir) = app_in_temp_project();
+        app.execute_tool(
+            "submit_requirements",
+            r#"{"feature_name":"Auth","scenario_descriptions":["login"]}"#,
+            "tc-1",
+            0,
+        )
+        .unwrap();
+        app.execute_tool(
+            "propose_test_points",
+            r#"{"test_points":[
+                {"id":"tp-1","title":"First","objective":"o","hierarchy_path":["A"]},
+                {"id":"tp-2","title":"Second","objective":"o","hierarchy_path":["A"]}
+            ]}"#,
+            "tc-2",
+            0,
+        )
+        .unwrap();
+        for test_point in &mut app
+            .authoring_ui
+            .artifacts
+            .as_mut()
+            .unwrap()
+            .test_points
+            .test_points
+        {
+            test_point.review_state = ReviewState::Approved;
+        }
         let file_path = app.project.features[0]
             .file_path
             .file_name()
             .unwrap()
             .to_string_lossy()
             .to_string();
+        set_writing_plan(&mut app, &file_path, &[("Login", &["tp-1", "tp-2"])]);
         let args = format!(
             r#"{{"file_path":"{file_path}","scenario_name":"Login","steps":["Given x"],"tags":["@smoke"],"test_point_ids":["tp-1","tp-2"]}}"#
         );
@@ -2118,6 +2461,74 @@ mod pipeline_gate_tests {
             }
             _ => panic!("expected InsertAfterLine"),
         }
+    }
+
+    #[test]
+    fn insert_scenario_rechecks_plan_and_current_test_point_state() {
+        let (mut app, _dir) = app_in_temp_project();
+        app.execute_tool(
+            "submit_requirements",
+            r#"{"feature_name":"Auth","scenario_descriptions":["login"]}"#,
+            "tc-1",
+            0,
+        )
+        .unwrap();
+        app.execute_tool(
+            "propose_test_points",
+            r#"{"test_points":[{"id":"tp-login","title":"Login","objective":"o","hierarchy_path":["A"]}]}"#,
+            "tc-2",
+            0,
+        )
+        .unwrap();
+        let file_path = app.project.features[0]
+            .file_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        set_writing_plan(&mut app, &file_path, &[("Login", &["tp-login"])]);
+
+        let unplanned = format!(
+            r#"{{"file_path":"{file_path}","scenario_name":"Login","steps":["Given x"],"test_point_ids":["arbitrary"]}}"#
+        );
+        let error = app
+            .execute_tool("insert_scenario", &unplanned, "tc-unplanned", 0)
+            .unwrap_err();
+        assert!(error.to_string().contains("exactly match"));
+
+        let planned = format!(
+            r#"{{"file_path":"{file_path}","scenario_name":"Login","steps":["Given x"],"test_point_ids":["tp-login"]}}"#
+        );
+        let error = app
+            .execute_tool("insert_scenario", &planned, "tc-proposed", 0)
+            .unwrap_err();
+        assert!(error.to_string().contains("must be Approved"));
+
+        let test_point = &mut app
+            .authoring_ui
+            .artifacts
+            .as_mut()
+            .unwrap()
+            .test_points
+            .test_points[0];
+        test_point.review_state = ReviewState::Approved;
+        test_point.requirement_links.push(RequirementLink {
+            document_id: "doc-1".into(),
+            document_revision: "rev-1".into(),
+            position: TextRange::new(0, 5),
+            quote: QuoteSelector {
+                quote: "Login".into(),
+                prefix: String::new(),
+                suffix: String::new(),
+            },
+            resolution: ResolutionState::Stale,
+        });
+
+        let error = app
+            .execute_tool("insert_scenario", &planned, "tc-stale", 0)
+            .unwrap_err();
+        assert!(error.to_string().contains("stale requirement links"));
+        assert!(app.pending_agent_changes.is_empty());
     }
 
     #[test]
@@ -2145,7 +2556,6 @@ mod pipeline_gate_tests {
             .test_points
             .test_points[0];
         assert!(crate::test_points_tab::TestPointsUiState::approve(tp));
-        app.generation_stage = GenerationStage::Writing;
 
         let file_path = app.project.features[0]
             .file_path
@@ -2153,6 +2563,14 @@ mod pipeline_gate_tests {
             .unwrap()
             .to_string_lossy()
             .to_string();
+        set_writing_plan(
+            &mut app,
+            &file_path,
+            &[
+                ("Rejected Login", &["tp-login"]),
+                ("Accepted Login", &["tp-login"]),
+            ],
+        );
         let rejected_args = format!(
             r#"{{"file_path":"{file_path}","scenario_name":"Rejected Login","steps":["Given x"],"test_point_ids":["tp-login"]}}"#
         );
