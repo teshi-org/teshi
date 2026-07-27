@@ -35,7 +35,7 @@ pub fn format_teshi_tp_tag(id: &str) -> String {
 pub fn teshi_tp_tags(ids: &[String]) -> Vec<String> {
     ids.iter()
         .filter(|id| !id.trim().is_empty())
-        .map(|id| format_teshi_tp_tag(id.trim()))
+        .map(|id| format_teshi_tp_tag(id))
         .collect()
 }
 
@@ -46,29 +46,10 @@ pub fn parse_teshi_tp_tags(tags: &[String]) -> Vec<String> {
             let trimmed = tag.trim();
             trimmed
                 .strip_prefix(TESHI_TP_TAG_PREFIX)
-                .map(decode_test_point_id)
+                .map(str::to_string)
                 .filter(|id| !id.is_empty())
         })
         .collect()
-}
-
-fn decode_test_point_id(encoded: &str) -> String {
-    let bytes = encoded.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%'
-            && index + 2 < bytes.len()
-            && let Ok(value) = u8::from_str_radix(&encoded[index + 1..index + 3], 16)
-        {
-            decoded.push(value);
-            index += 3;
-        } else {
-            decoded.push(bytes[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8(decoded).unwrap_or_else(|_| encoded.to_string())
 }
 
 /// Merges caller tags with test-point tags, preserving order and deduplicating.
@@ -135,13 +116,16 @@ pub fn sync_scenario_refs_from_project(project: &BddProject, test_points: &mut [
                 scenario_line: Some(sc.line_number),
             };
             for id in ids {
-                if let Some(tp) = test_points.iter_mut().find(|tp| tp.id == id)
-                    && !tp.scenario_refs.iter().any(|r| {
-                        r.feature_path == scenario_ref.feature_path
-                            && r.scenario_name == scenario_ref.scenario_name
-                            && r.scenario_line == scenario_ref.scenario_line
-                    })
-                {
+                if let Some(tp) = test_points.iter_mut().find(|tp| {
+                    tp.id == id
+                        || format_teshi_tp_tag(&tp.id)
+                            .strip_prefix(TESHI_TP_TAG_PREFIX)
+                            .is_some_and(|encoded| encoded == id)
+                }) && !tp.scenario_refs.iter().any(|r| {
+                    r.feature_path == scenario_ref.feature_path
+                        && r.scenario_name == scenario_ref.scenario_name
+                        && r.scenario_line == scenario_ref.scenario_line
+                }) {
                     tp.scenario_refs.push(scenario_ref.clone());
                 }
             }
@@ -195,18 +179,21 @@ mod tests {
     }
 
     #[test]
-    fn special_characters_roundtrip_without_changing_id() {
-        let ids = vec!["tp 1".into(), "owner@example".into(), "100%".into()];
+    fn special_characters_are_encoded_without_trimming() {
+        let ids = vec![" tp 1 ".into(), "owner@example".into(), "100%".into()];
         let tags = teshi_tp_tags(&ids);
         assert_eq!(
             tags,
             vec![
-                "@teshi-tp:tp%201",
+                "@teshi-tp:%20tp%201%20",
                 "@teshi-tp:owner%40example",
                 "@teshi-tp:100%25"
             ]
         );
-        assert_eq!(parse_teshi_tp_tags(&tags), ids);
+        assert_eq!(
+            parse_teshi_tp_tags(&tags),
+            vec!["%20tp%201%20", "owner%40example", "100%25"]
+        );
     }
 
     #[test]
@@ -249,14 +236,40 @@ mod tests {
     #[test]
     fn sync_scenario_refs_matches_encoded_test_point_id() {
         let content =
-            "Feature: Auth\n\n  @teshi-tp:tp%201%40owner\n  Scenario: Login\n    Given x\n";
+            "Feature: Auth\n\n  @teshi-tp:%20tp%201%40owner%20\n  Scenario: Login\n    Given x\n";
         let feature = parse_feature(content, PathBuf::from("/proj/auth.feature"));
         let project = BddProject {
             root_dir: PathBuf::from("/proj"),
             features: vec![feature],
         };
         let mut tps = vec![TestPoint {
-            id: "tp 1@owner".into(),
+            id: " tp 1@owner ".into(),
+            title: "t".into(),
+            objective: "o".into(),
+            preconditions: None,
+            expected_outcomes: None,
+            hierarchy_path: HierarchyPath::new(vec!["A".into()]),
+            review_state: ReviewState::Approved,
+            requirement_links: vec![],
+            scenario_refs: vec![],
+        }];
+
+        sync_scenario_refs_from_project(&project, &mut tps);
+
+        assert_eq!(tps[0].scenario_refs.len(), 1);
+    }
+
+    #[test]
+    fn sync_preserves_legacy_literal_percent_sequences() {
+        let content =
+            "Feature: Auth\n\n  @teshi-tp:discount%20code\n  Scenario: Apply\n    Given x\n";
+        let feature = parse_feature(content, PathBuf::from("/proj/auth.feature"));
+        let project = BddProject {
+            root_dir: PathBuf::from("/proj"),
+            features: vec![feature],
+        };
+        let mut tps = vec![TestPoint {
+            id: "discount%20code".into(),
             title: "t".into(),
             objective: "o".into(),
             preconditions: None,

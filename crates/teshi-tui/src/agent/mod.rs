@@ -430,8 +430,7 @@ fn execute_insert_scenario(
         .map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str().map(String::from))
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
+                .filter(|s| !s.trim().is_empty())
                 .collect()
         })
         .unwrap_or_default();
@@ -488,6 +487,7 @@ fn execute_insert_scenario(
             text: text_block.clone(),
         },
         scenario_name: scenario_name.to_string(),
+        test_point_ids,
         tool_call_id: tool_call_id.to_string(),
         old_buffer_snapshot: app
             .buffers
@@ -503,7 +503,7 @@ fn execute_insert_scenario(
     ))
 }
 
-fn validate_insert_scenario_traceability(
+pub(crate) fn validate_insert_scenario_traceability(
     app: &crate::app::App,
     file_path: &str,
     scenario_name: &str,
@@ -521,15 +521,17 @@ fn validate_insert_scenario_traceability(
         .pipeline_plan
         .as_ref()
         .context("insert_scenario requires an accepted generation plan")?;
+    let requested_path = std::path::Path::new(file_path);
+    let relative_path = requested_path
+        .strip_prefix(&app.project.root_dir)
+        .unwrap_or(requested_path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let relative_path = relative_path.strip_prefix("./").unwrap_or(&relative_path);
     let feature = plan
         .features
         .iter()
-        .find(|feature| {
-            feature.file_name == file_path
-                || std::path::Path::new(file_path)
-                    .file_name()
-                    .is_some_and(|name| name == std::ffi::OsStr::new(&feature.file_name))
-        })
+        .find(|feature| feature.file_name.replace('\\', "/") == relative_path)
         .with_context(|| {
             format!("insert_scenario file '{file_path}' is not in the accepted plan")
         })?;
@@ -655,6 +657,7 @@ fn execute_update_step(
             new_text: new_line,
         },
         scenario_name: scenario_name.to_string(),
+        test_point_ids: Vec::new(),
         tool_call_id: tool_call_id.to_string(),
         old_buffer_snapshot: app
             .buffers
@@ -758,6 +761,7 @@ fn execute_create_feature_file(
             text: content.clone(),
         },
         scenario_name: feature_name.to_string(),
+        test_point_ids: Vec::new(),
         tool_call_id: tool_call_id.to_string(),
         old_buffer_snapshot: String::new(),
         agent_idx,
@@ -850,6 +854,7 @@ fn execute_delete_scenario(
             end_row_0based: end_row,
         },
         scenario_name: scenario_name.to_string(),
+        test_point_ids: Vec::new(),
         tool_call_id: tool_call_id.to_string(),
         old_buffer_snapshot: app.buffers[feature_idx].as_string(),
         agent_idx,
@@ -918,6 +923,7 @@ fn execute_rename_scenario(
             new_text: new_line,
         },
         scenario_name: new_name.to_string(),
+        test_point_ids: Vec::new(),
         tool_call_id: tool_call_id.to_string(),
         old_buffer_snapshot: app.buffers[feature_idx].as_string(),
         agent_idx,
@@ -1022,6 +1028,7 @@ fn execute_reorder_steps(
             new_text,
         },
         scenario_name: scenario_name.to_string(),
+        test_point_ids: Vec::new(),
         tool_call_id: tool_call_id.to_string(),
         old_buffer_snapshot: app.buffers[feature_idx].as_string(),
         agent_idx,
@@ -1496,9 +1503,12 @@ fn parse_requirement_links(
     value: Option<&serde_json::Value>,
     documents: &[teshi_core::authoring::RequirementDocumentContent],
 ) -> Result<Vec<teshi_core::authoring::RequirementLink>> {
-    let Some(arr) = value.and_then(|v| v.as_array()) else {
+    let Some(value) = value else {
         return Ok(Vec::new());
     };
+    let arr = value
+        .as_array()
+        .context("requirement_links must be an array")?;
     let mut links = Vec::new();
     for item in arr {
         let document_id = item
@@ -1972,6 +1982,10 @@ mod pipeline_gate_tests {
         };
         let documents = vec![document];
         let cases = [
+            (
+                serde_json::json!({"document_id": "doc-1"}),
+                "must be an array",
+            ),
             (
                 serde_json::json!([{
                     "document_id": "missing",
@@ -2496,6 +2510,14 @@ mod pipeline_gate_tests {
             .unwrap_err();
         assert!(error.to_string().contains("exactly match"));
 
+        let off_plan_path = format!(
+            r#"{{"file_path":"nested/{file_path}","scenario_name":"Login","steps":["Given x"],"test_point_ids":["tp-login"]}}"#
+        );
+        let error = app
+            .execute_tool("insert_scenario", &off_plan_path, "tc-off-plan", 0)
+            .unwrap_err();
+        assert!(error.to_string().contains("not in the accepted plan"));
+
         let planned = format!(
             r#"{{"file_path":"{file_path}","scenario_name":"Login","steps":["Given x"],"test_point_ids":["tp-login"]}}"#
         );
@@ -2593,6 +2615,27 @@ mod pipeline_gate_tests {
         );
         app.execute_tool("insert_scenario", &accepted_args, "tc-accept", 0)
             .unwrap();
+        app.authoring_ui
+            .artifacts
+            .as_mut()
+            .unwrap()
+            .test_points
+            .test_points[0]
+            .review_state = ReviewState::Proposed;
+        let error = app.accept_agent_change().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("traceability changed while awaiting acceptance")
+        );
+        assert_eq!(app.pending_agent_changes.len(), 1);
+        app.authoring_ui
+            .artifacts
+            .as_mut()
+            .unwrap()
+            .test_points
+            .test_points[0]
+            .review_state = ReviewState::Approved;
         app.accept_agent_change().expect("accept scenario");
 
         let in_memory = &app

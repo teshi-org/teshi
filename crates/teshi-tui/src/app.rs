@@ -345,6 +345,8 @@ pub struct AgentPendingChange {
     pub mutation: AgentMutation,
     /// Short scenario name for status messages.
     pub scenario_name: String,
+    /// Planned test-point IDs to revalidate immediately before a scenario insertion is accepted.
+    pub test_point_ids: Vec<String>,
     /// The tool call ID this change responds to (for feeding back to the LLM).
     pub tool_call_id: String,
     /// Snapshot of buffer content before the change (for diff computation).
@@ -2654,6 +2656,17 @@ impl App {
     ///
     /// Returns `(tool_call_id, result_text)` for feeding back to the LLM.
     pub fn accept_agent_change(&mut self) -> Result<(String, String)> {
+        if let Some(change) = self.pending_agent_changes.first()
+            && matches!(&change.mutation, AgentMutation::InsertAfterLine { .. })
+        {
+            crate::agent::validate_insert_scenario_traceability(
+                self,
+                &change.file_path,
+                &change.scenario_name,
+                &change.test_point_ids,
+            )
+            .context("scenario traceability changed while awaiting acceptance")?;
+        }
         let change = self.pending_agent_changes.remove(0);
         let updates_scenario_refs =
             matches!(&change.mutation, AgentMutation::InsertAfterLine { .. });
