@@ -12,14 +12,24 @@ use crate::gherkin::BddProject;
 /// Prefix for Teshi test-point tags embedded in Gherkin.
 pub const TESHI_TP_TAG_PREFIX: &str = "@teshi-tp:";
 
+const ENCODED_ID_PREFIX: &str = "~v1~";
+
 /// Formats a single test-point ID as a Gherkin tag.
 ///
-/// Whitespace, `@`, and `%` are percent-encoded so the tag remains one token
-/// without losing the original ID.
+/// IDs containing token-breaking or encoding characters are versioned and
+/// percent-encoded so the tag remains one lossless token.
 pub fn format_teshi_tp_tag(id: &str) -> String {
+    let needs_encoding = id.starts_with(ENCODED_ID_PREFIX)
+        || id.chars().any(|character| {
+            character.is_whitespace() || character == '@' || character == '%' || character == '~'
+        });
+    if !needs_encoding {
+        return format!("{TESHI_TP_TAG_PREFIX}{id}");
+    }
+
     let mut encoded = String::new();
     for character in id.chars() {
-        if character.is_whitespace() || character == '@' || character == '%' {
+        if character.is_whitespace() || character == '@' || character == '%' || character == '~' {
             let mut buffer = [0; 4];
             for byte in character.encode_utf8(&mut buffer).as_bytes() {
                 encoded.push_str(&format!("%{byte:02X}"));
@@ -28,7 +38,7 @@ pub fn format_teshi_tp_tag(id: &str) -> String {
             encoded.push(character);
         }
     }
-    format!("{TESHI_TP_TAG_PREFIX}{encoded}")
+    format!("{TESHI_TP_TAG_PREFIX}{ENCODED_ID_PREFIX}{encoded}")
 }
 
 /// Converts test-point IDs into `@teshi-tp:<id>` tags.
@@ -46,10 +56,32 @@ pub fn parse_teshi_tp_tags(tags: &[String]) -> Vec<String> {
             let trimmed = tag.trim();
             trimmed
                 .strip_prefix(TESHI_TP_TAG_PREFIX)
-                .map(str::to_string)
+                .map(decode_test_point_id)
                 .filter(|id| !id.is_empty())
         })
         .collect()
+}
+
+fn decode_test_point_id(encoded: &str) -> String {
+    let Some(encoded) = encoded.strip_prefix(ENCODED_ID_PREFIX) else {
+        return encoded.to_string();
+    };
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let Ok(value) = u8::from_str_radix(&encoded[index + 1..index + 3], 16)
+        {
+            decoded.push(value);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| encoded.to_string())
 }
 
 /// Merges caller tags with test-point tags, preserving order and deduplicating.
@@ -116,16 +148,13 @@ pub fn sync_scenario_refs_from_project(project: &BddProject, test_points: &mut [
                 scenario_line: Some(sc.line_number),
             };
             for id in ids {
-                if let Some(tp) = test_points.iter_mut().find(|tp| {
-                    tp.id == id
-                        || format_teshi_tp_tag(&tp.id)
-                            .strip_prefix(TESHI_TP_TAG_PREFIX)
-                            .is_some_and(|encoded| encoded == id)
-                }) && !tp.scenario_refs.iter().any(|r| {
-                    r.feature_path == scenario_ref.feature_path
-                        && r.scenario_name == scenario_ref.scenario_name
-                        && r.scenario_line == scenario_ref.scenario_line
-                }) {
+                if let Some(tp) = test_points.iter_mut().find(|tp| tp.id == id)
+                    && !tp.scenario_refs.iter().any(|r| {
+                        r.feature_path == scenario_ref.feature_path
+                            && r.scenario_name == scenario_ref.scenario_name
+                            && r.scenario_line == scenario_ref.scenario_line
+                    })
+                {
                     tp.scenario_refs.push(scenario_ref.clone());
                 }
             }
@@ -185,15 +214,12 @@ mod tests {
         assert_eq!(
             tags,
             vec![
-                "@teshi-tp:%20tp%201%20",
-                "@teshi-tp:owner%40example",
-                "@teshi-tp:100%25"
+                "@teshi-tp:~v1~%20tp%201%20",
+                "@teshi-tp:~v1~owner%40example",
+                "@teshi-tp:~v1~100%25"
             ]
         );
-        assert_eq!(
-            parse_teshi_tp_tags(&tags),
-            vec!["%20tp%201%20", "owner%40example", "100%25"]
-        );
+        assert_eq!(parse_teshi_tp_tags(&tags), ids);
     }
 
     #[test]
@@ -235,8 +261,7 @@ mod tests {
 
     #[test]
     fn sync_scenario_refs_matches_encoded_test_point_id() {
-        let content =
-            "Feature: Auth\n\n  @teshi-tp:%20tp%201%40owner%20\n  Scenario: Login\n    Given x\n";
+        let content = "Feature: Auth\n\n  @teshi-tp:~v1~%20tp%201%40owner%20\n  Scenario: Login\n    Given x\n";
         let feature = parse_feature(content, PathBuf::from("/proj/auth.feature"));
         let project = BddProject {
             root_dir: PathBuf::from("/proj"),
