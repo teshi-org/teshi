@@ -514,6 +514,8 @@ pub fn test_points_footer_line() -> Line<'static> {
         Span::raw(" "),
         Span::styled(" Batch [A] ", Style::default().fg(Color::DarkGray)),
         Span::raw(" "),
+        Span::styled(" Continue [c] ", Style::default().fg(Color::DarkGray)),
+        Span::raw(" "),
         Span::styled(" Filter [f] ", Style::default().fg(Color::DarkGray)),
         Span::raw(" "),
         Span::styled(" Save [s] ", Style::default().fg(Color::DarkGray)),

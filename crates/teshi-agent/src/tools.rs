@@ -323,9 +323,10 @@ fn get_all_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "submit_requirements".into(),
-            description: "Submit gathered requirements for a new feature and advance to the \
-                          planning phase. Call this after asking the user enough questions \
-                          to understand what they want to build."
+            description: "Submit gathered requirements for a new feature and advance to \
+                          test-point generation. Provide source_refs for persisted requirement \
+                          documents/ranges and/or scenario_descriptions for pasted conversational \
+                          text. Call this after gathering enough information."
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -341,7 +342,30 @@ fn get_all_tools() -> Vec<ToolDefinition> {
                     "scenario_descriptions": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Short descriptions of each scenario to include"
+                        "description": "Compatibility: free-text verification intents from pasted conversational input"
+                    },
+                    "source_refs": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "document_id": {
+                                    "type": "string",
+                                    "description": "Stable requirement document ID from requirements/_teshi.json"
+                                },
+                                "range": {
+                                    "type": "object",
+                                    "properties": {
+                                        "start": { "type": "integer", "description": "Unicode scalar start offset" },
+                                        "end": { "type": "integer", "description": "Unicode scalar end offset (exclusive)" }
+                                    },
+                                    "required": ["start", "end"],
+                                    "description": "Optional character range; omit for whole-document source"
+                                }
+                            },
+                            "required": ["document_id"]
+                        },
+                        "description": "Persisted requirement document/range identities used as generation sources"
                     },
                     "tags": {
                         "type": "array",
@@ -349,14 +373,79 @@ fn get_all_tools() -> Vec<ToolDefinition> {
                         "description": "Optional tags for the feature (e.g. ['@auth', '@smoke'])"
                     }
                 },
-                "required": ["feature_name", "scenario_descriptions"]
+                "required": ["feature_name"]
+            }),
+        },
+        ToolDefinition {
+            name: "propose_test_points".into(),
+            description: "Propose non-Gherkin test points from submitted requirements and \
+                          persist them as Proposed for mandatory human review. Do not include \
+                          Given/When/Then steps. After a successful call the agent loop pauses \
+                          until the user approves test points and continues generation."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "test_points": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {
+                                    "type": "string",
+                                    "description": "Optional stable ID; generated when omitted"
+                                },
+                                "title": { "type": "string" },
+                                "objective": { "type": "string" },
+                                "preconditions": { "type": "string" },
+                                "expected_outcomes": { "type": "string" },
+                                "hierarchy_path": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Non-empty business hierarchy segments"
+                                },
+                                "requirement_links": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "document_id": { "type": "string" },
+                                            "document_revision": { "type": "string" },
+                                            "position": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "start": { "type": "integer" },
+                                                    "end": { "type": "integer" }
+                                                },
+                                                "required": ["start", "end"]
+                                            },
+                                            "quote": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "quote": { "type": "string" },
+                                                    "prefix": { "type": "string" },
+                                                    "suffix": { "type": "string" }
+                                                },
+                                                "required": ["quote"]
+                                            }
+                                        },
+                                        "required": ["document_id", "document_revision", "position", "quote"]
+                                    }
+                                }
+                            },
+                            "required": ["title", "objective", "hierarchy_path"]
+                        }
+                    }
+                },
+                "required": ["test_points"]
             }),
         },
         ToolDefinition {
             name: "generate_plan".into(),
-            description: "Submit a complete scenario plan based on gathered requirements. \
-                          Call this AFTER submit_requirements to propose the full structure \
-                          including file names, scenarios, steps, and Examples tables."
+            description: "Submit a complete scenario plan based on approved test points. \
+                          Call this ONLY after human approval advances the pipeline to Planning. \
+                          Every scenario must include test_point_ids referencing approved, \
+                          resolved test points."
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -383,9 +472,14 @@ fn get_all_tools() -> Vec<ToolDefinition> {
                                             "examples_rows": {
                                                 "type": "array",
                                                 "items": { "type": "array", "items": { "type": "string" } }
+                                            },
+                                            "test_point_ids": {
+                                                "type": "array",
+                                                "items": { "type": "string" },
+                                                "description": "Approved test-point IDs this scenario realizes"
                                             }
                                         },
-                                        "required": ["name", "steps"]
+                                        "required": ["name", "steps", "test_point_ids"]
                                     }
                                 }
                             },
@@ -641,5 +735,43 @@ mod tests {
                 tool.name
             );
         }
+    }
+
+    #[test]
+    fn test_propose_test_points_schema_requires_test_points() {
+        let tools = get_all_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"propose_test_points"));
+        let propose = tools
+            .iter()
+            .find(|t| t.name == "propose_test_points")
+            .unwrap();
+        let required = propose.parameters["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "test_points"));
+    }
+
+    #[test]
+    fn test_generate_plan_requires_test_point_ids_on_scenarios() {
+        let tools = get_all_tools();
+        let plan = tools.iter().find(|t| t.name == "generate_plan").unwrap();
+        let scenario_required = plan.parameters["properties"]["features"]["items"]["properties"]
+            ["scenarios"]["items"]["required"]
+            .as_array()
+            .unwrap();
+        assert!(scenario_required.iter().any(|v| v == "test_point_ids"));
+    }
+
+    #[test]
+    fn test_submit_requirements_allows_source_refs() {
+        let tools = get_all_tools();
+        let submit = tools
+            .iter()
+            .find(|t| t.name == "submit_requirements")
+            .unwrap();
+        let props = submit.parameters["properties"].as_object().unwrap();
+        assert!(props.contains_key("source_refs"));
+        let required = submit.parameters["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "feature_name"));
+        assert!(!required.iter().any(|v| v == "scenario_descriptions"));
     }
 }

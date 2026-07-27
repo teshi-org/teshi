@@ -71,6 +71,7 @@ fn execute_tool_impl(
         "search_features" => execute_search_features(app, args_json),
         "run_tests" => execute_run_tests(app, args_json),
         "submit_requirements" => execute_submit_requirements(app, args_json),
+        "propose_test_points" => execute_propose_test_points(app, args_json),
         "generate_plan" => execute_generate_plan(app, args_json),
         "validate_feature" => execute_validate_feature(app, args_json),
         // Browser agent exploration tools
@@ -1117,10 +1118,14 @@ fn execute_submit_requirements(app: &mut crate::app::App, args_json: &str) -> Re
     let scenario_descriptions: Vec<String> = args
         .get("scenario_descriptions")
         .and_then(|v| v.as_array())
-        .context("missing 'scenario_descriptions'")?
-        .iter()
-        .map(|v| v.as_str().unwrap_or("").to_string())
-        .collect();
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .filter(|s| !s.trim().is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let source_refs = parse_source_refs(args.get("source_refs"))?;
     let tags: Vec<String> = args
         .get("tags")
         .and_then(|v| v.as_array())
@@ -1135,18 +1140,296 @@ fn execute_submit_requirements(app: &mut crate::app::App, args_json: &str) -> Re
         feature_name,
         description,
         scenario_descriptions,
+        source_refs,
         tags,
     };
+    if !requirement.has_usable_sources() {
+        anyhow::bail!(
+            "submit_requirements requires source_refs and/or scenario_descriptions (pasted text)"
+        );
+    }
 
     app.pipeline_requirement = Some(requirement);
-    app.generation_stage = teshi_agent::pipeline::GenerationStage::Planning;
+    app.generation_stage = teshi_agent::pipeline::GenerationStage::GeneratingTestPoints;
+    app.persist_generation_state()?;
 
-    Ok("Requirements collected. Now call `generate_plan` to design the scenario structure.".into())
+    Ok(
+        "Requirements collected. Now call `propose_test_points` with non-Gherkin verification intents."
+            .into(),
+    )
+}
+
+fn parse_source_refs(
+    value: Option<&serde_json::Value>,
+) -> Result<Vec<teshi_agent::pipeline::RequirementSourceRef>> {
+    let Some(arr) = value.and_then(|v| v.as_array()) else {
+        return Ok(Vec::new());
+    };
+    let mut refs = Vec::new();
+    for item in arr {
+        let document_id = item
+            .get("document_id")
+            .and_then(|v| v.as_str())
+            .context("source_refs[].document_id is required")?
+            .to_string();
+        let range = if let Some(range_val) = item.get("range") {
+            let start = range_val
+                .get("start")
+                .and_then(|v| v.as_u64())
+                .context("source_refs[].range.start is required")? as u32;
+            let end = range_val
+                .get("end")
+                .and_then(|v| v.as_u64())
+                .context("source_refs[].range.end is required")? as u32;
+            if start >= end {
+                anyhow::bail!("source_refs[].range must be non-empty (start < end)");
+            }
+            Some(teshi_core::authoring::TextRange::new(start, end))
+        } else {
+            None
+        };
+        refs.push(teshi_agent::pipeline::RequirementSourceRef { document_id, range });
+    }
+    Ok(refs)
+}
+
+// ── propose_test_points ───────────────────────────────────────────────────────
+
+fn execute_propose_test_points(app: &mut crate::app::App, args_json: &str) -> Result<String> {
+    if app.pipeline_requirement.is_none()
+        && !matches!(
+            app.generation_stage,
+            teshi_agent::pipeline::GenerationStage::GeneratingTestPoints
+                | teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
+        )
+    {
+        anyhow::bail!(
+            "propose_test_points requires submitted requirements (call submit_requirements first)"
+        );
+    }
+
+    let args: serde_json::Value =
+        serde_json::from_str(args_json).context("invalid JSON arguments")?;
+    let items = args
+        .get("test_points")
+        .and_then(|v| v.as_array())
+        .context("missing 'test_points' array")?;
+    if items.is_empty() {
+        anyhow::bail!("propose_test_points requires at least one test point");
+    }
+
+    ensure_authoring_artifacts(app);
+    let artifacts = app
+        .authoring_ui
+        .artifacts
+        .as_mut()
+        .context("authoring artifacts unavailable")?;
+
+    let mut created_ids = Vec::new();
+    for item in items {
+        let tp = parse_proposed_test_point(item, &artifacts.test_points.test_points)?;
+        created_ids.push(tp.id.clone());
+        // Replace existing id if re-proposing; otherwise append.
+        if let Some(idx) = artifacts
+            .test_points
+            .test_points
+            .iter()
+            .position(|existing| existing.id == tp.id)
+        {
+            artifacts.test_points.test_points[idx] = tp;
+        } else {
+            artifacts.test_points.test_points.push(tp);
+        }
+    }
+
+    teshi_engine::save_test_points(&app.project.root_dir, &artifacts.test_points)
+        .context("persist proposed test points")?;
+    app.test_points_ui.rebuild_tree(Some(artifacts));
+
+    app.generation_stage = teshi_agent::pipeline::GenerationStage::ReviewingTestPoints;
+    app.persist_generation_state()?;
+
+    Ok(format!(
+        "Persisted {} Proposed test point(s): {}. Pipeline paused for human review in the Test Points tab (key 5). Do NOT call generate_plan until the user continues generation.",
+        created_ids.len(),
+        created_ids.join(", ")
+    ))
+}
+
+fn ensure_authoring_artifacts(app: &mut crate::app::App) {
+    if app.authoring_ui.artifacts.is_none() {
+        app.authoring_ui.artifacts = Some(teshi_core::authoring::AuthoringArtifacts {
+            index: Default::default(),
+            documents: Vec::new(),
+            test_points: Default::default(),
+            diagnostics: Vec::new(),
+        });
+        app.authoring_ui.discovered = true;
+    }
+}
+
+fn parse_proposed_test_point(
+    item: &serde_json::Value,
+    existing: &[teshi_core::authoring::TestPoint],
+) -> Result<teshi_core::authoring::TestPoint> {
+    let title = item
+        .get("title")
+        .and_then(|v| v.as_str())
+        .context("test_points[].title is required")?
+        .trim()
+        .to_string();
+    if title.is_empty() {
+        anyhow::bail!("test_points[].title must be non-empty");
+    }
+    let objective = item
+        .get("objective")
+        .and_then(|v| v.as_str())
+        .context("test_points[].objective is required")?
+        .trim()
+        .to_string();
+    if objective.is_empty() {
+        anyhow::bail!("test_points[].objective must be non-empty");
+    }
+    let hierarchy_segments: Vec<String> = item
+        .get("hierarchy_path")
+        .and_then(|v| v.as_array())
+        .context("test_points[].hierarchy_path is required")?
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if hierarchy_segments.is_empty() {
+        anyhow::bail!("test_points[].hierarchy_path must contain at least one non-empty segment");
+    }
+
+    let id = item
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| next_agent_test_point_id(existing));
+
+    let preconditions = item
+        .get("preconditions")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let expected_outcomes = item
+        .get("expected_outcomes")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let requirement_links = parse_requirement_links(item.get("requirement_links"))?;
+
+    Ok(teshi_core::authoring::TestPoint {
+        id,
+        title,
+        objective,
+        preconditions,
+        expected_outcomes,
+        hierarchy_path: teshi_core::authoring::HierarchyPath::new(hierarchy_segments),
+        // Hard gate: agent proposals are always Proposed; never Approved.
+        review_state: teshi_core::authoring::ReviewState::Proposed,
+        requirement_links,
+        scenario_refs: Vec::new(),
+    })
+}
+
+fn next_agent_test_point_id(existing: &[teshi_core::authoring::TestPoint]) -> String {
+    let mut max_n = 0u64;
+    for tp in existing {
+        if let Some(n) = tp.id.strip_prefix("tp-").and_then(|s| s.parse().ok()) {
+            max_n = max_n.max(n);
+        }
+    }
+    format!("tp-{}", max_n + 1)
+}
+
+fn parse_requirement_links(
+    value: Option<&serde_json::Value>,
+) -> Result<Vec<teshi_core::authoring::RequirementLink>> {
+    let Some(arr) = value.and_then(|v| v.as_array()) else {
+        return Ok(Vec::new());
+    };
+    let mut links = Vec::new();
+    for item in arr {
+        let document_id = item
+            .get("document_id")
+            .and_then(|v| v.as_str())
+            .context("requirement_links[].document_id is required")?
+            .to_string();
+        let document_revision = item
+            .get("document_revision")
+            .and_then(|v| v.as_str())
+            .context("requirement_links[].document_revision is required")?
+            .to_string();
+        let position = item
+            .get("position")
+            .context("requirement_links[].position is required")?;
+        let start = position
+            .get("start")
+            .and_then(|v| v.as_u64())
+            .context("requirement_links[].position.start is required")? as u32;
+        let end = position
+            .get("end")
+            .and_then(|v| v.as_u64())
+            .context("requirement_links[].position.end is required")? as u32;
+        if start >= end {
+            anyhow::bail!("requirement_links[].position must be non-empty");
+        }
+        let quote_obj = item
+            .get("quote")
+            .context("requirement_links[].quote is required")?;
+        let quote = quote_obj
+            .get("quote")
+            .and_then(|v| v.as_str())
+            .context("requirement_links[].quote.quote is required")?
+            .to_string();
+        if quote.is_empty() {
+            anyhow::bail!("requirement_links[].quote.quote must be non-empty");
+        }
+        let prefix = quote_obj
+            .get("prefix")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let suffix = quote_obj
+            .get("suffix")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        links.push(teshi_core::authoring::RequirementLink {
+            document_id,
+            document_revision,
+            position: teshi_core::authoring::TextRange::new(start, end),
+            quote: teshi_core::authoring::QuoteSelector {
+                quote,
+                prefix,
+                suffix,
+            },
+            resolution: teshi_core::authoring::ResolutionState::Resolved,
+        });
+    }
+    Ok(links)
 }
 
 // ── generate_plan ───────────────────────────────────────────────────────────
 
 fn execute_generate_plan(app: &mut crate::app::App, args_json: &str) -> Result<String> {
+    if matches!(
+        app.generation_stage,
+        teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
+            | teshi_agent::pipeline::GenerationStage::GeneratingTestPoints
+            | teshi_agent::pipeline::GenerationStage::Gathering
+            | teshi_agent::pipeline::GenerationStage::Idle
+    ) {
+        anyhow::bail!(
+            "generate_plan is blocked until human approval advances the pipeline to Planning (current stage: {})",
+            app.generation_stage.label()
+        );
+    }
+
     let plan: teshi_agent::pipeline::GenerationPlan = serde_json::from_str(args_json)
         .context("invalid plan JSON — expected a GenerationPlan object with a 'features' array")?;
 
@@ -1169,8 +1452,24 @@ fn execute_generate_plan(app: &mut crate::app::App, args_json: &str) -> Result<S
         }
     }
 
+    let test_points = app
+        .authoring_ui
+        .artifacts
+        .as_ref()
+        .map(|a| a.test_points.test_points.as_slice())
+        .unwrap_or(&[]);
+    if let Err(errors) =
+        teshi_agent::pipeline::validate_plan_test_point_ids(&plan, test_points)
+    {
+        anyhow::bail!(
+            "generate_plan rejected: {}",
+            errors.join("; ")
+        );
+    }
+
     app.pipeline_plan = Some(plan);
     app.generation_stage = teshi_agent::pipeline::GenerationStage::Writing;
+    app.persist_generation_state()?;
 
     Ok("Plan accepted. Now use `create_feature_file` and `insert_scenario` to generate the feature files.".into())
 }
@@ -1226,6 +1525,7 @@ fn execute_validate_feature(app: &mut crate::app::App, args_json: &str) -> Resul
 
     if issues.is_empty() {
         app.generation_stage = teshi_agent::pipeline::GenerationStage::Complete;
+        app.persist_generation_state()?;
     }
 
     Ok(teshi_agent::validator::format_validation_result(&issues))
@@ -1328,4 +1628,315 @@ fn execute_browser_assert(_app: &mut crate::app::App, args_json: &str) -> Result
 
 fn execute_browser_go_back(_app: &mut crate::app::App) -> Result<String> {
     send_browser_command("go_back", serde_json::json!({}))
+}
+
+#[cfg(test)]
+mod pipeline_gate_tests {
+    use std::fs;
+    use teshi_agent::AgentHost;
+    use teshi_agent::approval::ApprovalMode;
+    use teshi_agent::pipeline::GenerationStage;
+    use teshi_core::authoring::ReviewState;
+    use tempfile::tempdir;
+
+    fn app_in_temp_project() -> (crate::app::App, tempfile::TempDir) {
+        let dir = tempdir().expect("tempdir");
+        let feature = dir.path().join("sample.feature");
+        fs::write(
+            &feature,
+            "Feature: Sample\n  Scenario: placeholder\n    Given noop\n",
+        )
+        .expect("write feature");
+        let app = crate::app::App::from_file(&feature, crate::config::load_config().unwrap())
+            .expect("open app");
+        (app, dir)
+    }
+
+    #[test]
+    fn submit_requirements_advances_to_generating_test_points() {
+        let (mut app, _dir) = app_in_temp_project();
+        let result = app
+            .execute_tool(
+                "submit_requirements",
+                r#"{
+                    "feature_name": "Auth",
+                    "scenario_descriptions": ["user can log in"],
+                    "source_refs": [{"document_id": "doc-1"}]
+                }"#,
+                "tc-1",
+                0,
+            )
+            .expect("submit");
+        assert!(result.contains("propose_test_points"));
+        assert_eq!(app.generation_stage, GenerationStage::GeneratingTestPoints);
+        assert!(app.pipeline_requirement.as_ref().unwrap().has_usable_sources());
+    }
+
+    #[test]
+    fn propose_pauses_in_review_as_proposed_only() {
+        let (mut app, dir) = app_in_temp_project();
+        app.execute_tool(
+            "submit_requirements",
+            r#"{"feature_name":"Auth","scenario_descriptions":["login"]}"#,
+            "tc-1",
+            0,
+        )
+        .unwrap();
+        let result = app
+            .execute_tool(
+                "propose_test_points",
+                r#"{
+                    "test_points": [{
+                        "title": "Valid login",
+                        "objective": "User authenticates successfully",
+                        "hierarchy_path": ["Auth", "Login"]
+                    }]
+                }"#,
+                "tc-2",
+                0,
+            )
+            .expect("propose");
+        assert!(result.contains("Proposed"));
+        assert_eq!(app.generation_stage, GenerationStage::ReviewingTestPoints);
+        let tp = &app
+            .authoring_ui
+            .artifacts
+            .as_ref()
+            .unwrap()
+            .test_points
+            .test_points[0];
+        assert_eq!(tp.review_state, ReviewState::Proposed);
+        assert!(dir.path().join("testpoints/testpoints.json").is_file());
+    }
+
+    #[test]
+    fn generate_plan_blocked_during_review_even_with_bypass() {
+        let (mut app, _dir) = app_in_temp_project();
+        app.approval_mode = ApprovalMode::Bypass;
+        app.execute_tool(
+            "submit_requirements",
+            r#"{"feature_name":"Auth","scenario_descriptions":["login"]}"#,
+            "tc-1",
+            0,
+        )
+        .unwrap();
+        app.execute_tool(
+            "propose_test_points",
+            r#"{"test_points":[{"title":"t","objective":"o","hierarchy_path":["A"]}]}"#,
+            "tc-2",
+            0,
+        )
+        .unwrap();
+        let err = app
+            .execute_tool(
+                "generate_plan",
+                r#"{
+                    "features": [{
+                        "file_name": "auth.feature",
+                        "feature_name": "Auth",
+                        "scenarios": [{
+                            "name": "Login",
+                            "steps": ["Given x"],
+                            "test_point_ids": ["tp-1"]
+                        }]
+                    }]
+                }"#,
+                "tc-3",
+                0,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("blocked"));
+        assert_eq!(app.generation_stage, GenerationStage::ReviewingTestPoints);
+        assert_eq!(app.approval_mode, ApprovalMode::Bypass);
+    }
+
+    #[test]
+    fn approve_continue_then_generate_plan_accepts_approved_ids() {
+        let (mut app, _dir) = app_in_temp_project();
+        app.approval_mode = ApprovalMode::Auto;
+        app.execute_tool(
+            "submit_requirements",
+            r#"{"feature_name":"Auth","scenario_descriptions":["login"]}"#,
+            "tc-1",
+            0,
+        )
+        .unwrap();
+        app.execute_tool(
+            "propose_test_points",
+            r#"{"test_points":[{"id":"tp-login","title":"t","objective":"o","hierarchy_path":["A"]}]}"#,
+            "tc-2",
+            0,
+        )
+        .unwrap();
+
+        // Reject generate_plan while still Proposed
+        let err = app
+            .execute_tool(
+                "generate_plan",
+                r#"{"features":[{"file_name":"a.feature","feature_name":"A","scenarios":[{"name":"S","steps":["Given x"],"test_point_ids":["tp-login"]}]}]}"#,
+                "tc-x",
+                0,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("blocked"));
+
+        // Human approve via UI helper
+        let artifacts = app.authoring_ui.artifacts.as_mut().unwrap();
+        let tp = artifacts
+            .test_points
+            .test_points
+            .iter_mut()
+            .find(|tp| tp.id == "tp-login")
+            .unwrap();
+        assert!(crate::test_points_tab::TestPointsUiState::approve(tp));
+
+        // Human continue (Auto mode must not matter)
+        app.active_tab = crate::app::MainTab::TestPoints;
+        app.handle_action(crate::keymap::Action::TpContinueGeneration)
+            .unwrap();
+        assert_eq!(app.generation_stage, GenerationStage::Planning);
+
+        let ok = app
+            .execute_tool(
+                "generate_plan",
+                r#"{"features":[{"file_name":"a.feature","feature_name":"A","scenarios":[{"name":"S","steps":["Given x"],"test_point_ids":["tp-login"]}]}]}"#,
+                "tc-3",
+                0,
+            )
+            .expect("plan after approval");
+        assert!(ok.contains("Plan accepted"));
+        assert_eq!(app.generation_stage, GenerationStage::Writing);
+    }
+
+    #[test]
+    fn generate_plan_rejects_unknown_and_rejected_ids() {
+        let (mut app, _dir) = app_in_temp_project();
+        app.execute_tool(
+            "submit_requirements",
+            r#"{"feature_name":"Auth","scenario_descriptions":["login"]}"#,
+            "tc-1",
+            0,
+        )
+        .unwrap();
+        app.execute_tool(
+            "propose_test_points",
+            r#"{"test_points":[{"id":"tp-1","title":"t","objective":"o","hierarchy_path":["A"]}]}"#,
+            "tc-2",
+            0,
+        )
+        .unwrap();
+        let artifacts = app.authoring_ui.artifacts.as_mut().unwrap();
+        let tp = &mut artifacts.test_points.test_points[0];
+        assert!(crate::test_points_tab::TestPointsUiState::approve(tp));
+        app.generation_stage = GenerationStage::Planning;
+
+        let err = app
+            .execute_tool(
+                "generate_plan",
+                r#"{"features":[{"file_name":"a.feature","feature_name":"A","scenarios":[{"name":"S","steps":["Given x"],"test_point_ids":["missing"]}]}]}"#,
+                "tc-3",
+                0,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+
+        // Reject then try plan
+        let tp = &mut app
+            .authoring_ui
+            .artifacts
+            .as_mut()
+            .unwrap()
+            .test_points
+            .test_points[0];
+        tp.review_state = ReviewState::Rejected;
+        let err = app
+            .execute_tool(
+                "generate_plan",
+                r#"{"features":[{"file_name":"a.feature","feature_name":"A","scenarios":[{"name":"S","steps":["Given x"],"test_point_ids":["tp-1"]}]}]}"#,
+                "tc-4",
+                0,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("Rejected") || err.to_string().contains("rejected"));
+    }
+
+    #[test]
+    fn restart_restores_review_without_approving() {
+        let (mut app, dir) = app_in_temp_project();
+        app.execute_tool(
+            "submit_requirements",
+            r#"{"feature_name":"Auth","scenario_descriptions":["login"]}"#,
+            "tc-1",
+            0,
+        )
+        .unwrap();
+        app.execute_tool(
+            "propose_test_points",
+            r#"{"test_points":[{"id":"tp-1","title":"t","objective":"o","hierarchy_path":["A"]}]}"#,
+            "tc-2",
+            0,
+        )
+        .unwrap();
+        assert_eq!(app.generation_stage, GenerationStage::ReviewingTestPoints);
+
+        // Simulate restart by reopening the same project root
+        let feature = dir.path().join("sample.feature");
+        let restored =
+            crate::app::App::from_file(&feature, crate::config::load_config().unwrap()).unwrap();
+        assert_eq!(
+            restored.generation_stage,
+            GenerationStage::ReviewingTestPoints
+        );
+        let tp = &restored
+            .authoring_ui
+            .artifacts
+            .as_ref()
+            .unwrap()
+            .test_points
+            .test_points
+            .iter()
+            .find(|tp| tp.id == "tp-1")
+            .unwrap();
+        assert_eq!(tp.review_state, ReviewState::Proposed);
+    }
+
+    #[test]
+    fn continue_key_bound_on_test_points_tab() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use crate::app::{MainTab, MindMapFocus, ViewStage};
+        use crate::authoring_tab::RequirementsFocus;
+        use crate::keymap::{Action, KeyContext};
+        use crate::test_points_tab::TestPointsFocus;
+
+        let context = KeyContext {
+            step_keyword_picker_active: false,
+            step_input_active: false,
+            external_change_prompt_active: false,
+            agent_change_prompt_active: false,
+            active_tab: MainTab::TestPoints,
+            view_stage: ViewStage::TreeOnly,
+            explore_edit_mode: false,
+            pending_char: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: false,
+            ai_input_focused: false,
+            slash_suggestion_active: false,
+            auth_panel_active: false,
+            model_panel_active: false,
+            model_panel_adding: false,
+            session_panel_active: false,
+            change_summary_visible: false,
+            ai_status_waiting: false,
+            scenario_dropdown_open: false,
+            approval_panel_active: false,
+            agent_profile_panel_active: false,
+            requirements_focus: RequirementsFocus::Tree,
+            test_points_focus: TestPointsFocus::Tree,
+            quit_pending_confirm: false,
+        };
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), context),
+            Some(Action::TpContinueGeneration)
+        );
+    }
 }

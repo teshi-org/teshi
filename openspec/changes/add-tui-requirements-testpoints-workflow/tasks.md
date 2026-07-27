@@ -34,13 +34,13 @@
 
 ## 5. Agent test-point generation and hard gate
 
-- [ ] 5.1 Extend `GenerationStage` with Generating Test Points and Reviewing Test Points, including labels, prompt guidance, resume behavior, and transition tests.
-- [ ] 5.2 Replace scenario descriptions in gathered requirements with source-document/range references while retaining compatibility for pasted conversational input.
-- [ ] 5.3 Define and register `propose_test_points`, validate its structured arguments, persist only `Proposed` test points, and stop the agent loop in review.
-- [ ] 5.4 Implement the human-only transition from Reviewing Test Points to Planning and ensure `ApprovalMode::Auto` and `ApprovalMode::Bypass` cannot trigger it.
-- [ ] 5.5 Update `generate_plan` to require approved, resolved test-point IDs and reject unknown, rejected, proposed, stale, or invalid records.
-- [ ] 5.6 Persist and restore the active generation source, review phase, and plan without granting approval during restart.
-- [ ] 5.7 Add end-to-end agent-tool tests for propose, pause, reject/edit, approve, resume, restart, and blocked-bypass paths using deterministic mocked LLM responses.
+- [x] 5.1 Extend `GenerationStage` with Generating Test Points and Reviewing Test Points, including labels, prompt guidance, resume behavior, and transition tests.
+- [x] 5.2 Replace scenario descriptions in gathered requirements with source-document/range references while retaining compatibility for pasted conversational input.
+- [x] 5.3 Define and register `propose_test_points`, validate its structured arguments, persist only `Proposed` test points, and stop the agent loop in review.
+- [x] 5.4 Implement the human-only transition from Reviewing Test Points to Planning and ensure `ApprovalMode::Auto` and `ApprovalMode::Bypass` cannot trigger it.
+- [x] 5.5 Update `generate_plan` to require approved, resolved test-point IDs and reject unknown, rejected, proposed, stale, or invalid records.
+- [x] 5.6 Persist and restore the active generation source, review phase, and plan without granting approval during restart.
+- [x] 5.7 Add end-to-end agent-tool tests for propose, pause, reject/edit, approve, resume, restart, and blocked-bypass paths using deterministic mocked LLM responses.
 
 ## 6. Scenario realization traceability
 

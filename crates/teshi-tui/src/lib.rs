@@ -8,6 +8,7 @@ mod config;
 mod diff;
 mod editor_buffer;
 mod engine;
+mod generation_state;
 mod highlight;
 mod input;
 mod keymap;

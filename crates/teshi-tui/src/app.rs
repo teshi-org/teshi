@@ -38,7 +38,11 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("agent", "Switch agent profile"),
     (
         "generate",
-        "Start requirements → scenarios (.feature) generation",
+        "Start requirements → test points → scenarios generation",
+    ),
+    (
+        "continue",
+        "Continue generation after approving test points",
     ),
 ];
 
@@ -798,6 +802,7 @@ impl App {
             authoring_ui: crate::authoring_tab::AuthoringUiState::load_from_project(&project_root),
             test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
         };
+        app.restore_generation_session_from_disk();
         app.spawn_llm_if_configured();
         app.activate_active_profile();
         app.mindmap_index.apply_highlight_categories("root");
@@ -808,7 +813,7 @@ impl App {
         Ok(app)
     }
 
-    fn from_file(path: &PathBuf, config: AppConfig) -> Result<Self> {
+    pub(crate) fn from_file(path: &PathBuf, config: AppConfig) -> Result<Self> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
         let feature = gherkin::parse_feature(&content, path.clone());
@@ -944,6 +949,7 @@ impl App {
             authoring_ui: crate::authoring_tab::AuthoringUiState::load_from_project(&project_root),
             test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
         };
+        app.restore_generation_session_from_disk();
         app.spawn_llm_if_configured();
         app.activate_active_profile();
         app.sync_cursor_to_first_node();
@@ -1514,6 +1520,16 @@ impl App {
                                     );
                                 }
                             }
+                        } else if self.generation_stage.is_human_review_gate() {
+                            // Hard business gate: pause for human test-point review.
+                            // ApprovalMode::{Auto, Bypass} must not advance this stage.
+                            self.agents[i].partial_response.clear();
+                            self.agents[i].status = AiStatus::Idle;
+                            self.agents[i].tool_status = None;
+                            self.agents[i].agent_loop_count = 0;
+                            if i == self.selected_agent {
+                                self.status = "Review proposed test points in Test Points tab [5], then press c to continue generation".to_string();
+                            }
                         } else if self.project.features.is_empty() {
                             self.agents[i].partial_response.clear();
                             self.agents[i].status = AiStatus::Idle;
@@ -1713,6 +1729,117 @@ impl App {
         msgs
     }
 
+    /// Persists the active generation stage, requirement sources, and plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the `.teshi/generation-state.json` write fails.
+    pub(crate) fn persist_generation_state(&self) -> Result<()> {
+        let state = teshi_agent::pipeline::GenerationSessionState {
+            stage: self.generation_stage,
+            requirement: self.pipeline_requirement.clone(),
+            plan: self.pipeline_plan.clone(),
+        };
+        crate::generation_state::save_generation_state(&self.project.root_dir, &state)
+            .context("persist generation session state")
+    }
+
+    /// Restores generation stage/sources/plan from disk without granting approvals.
+    fn restore_generation_session_from_disk(&mut self) {
+        let test_points = self
+            .authoring_ui
+            .artifacts
+            .as_ref()
+            .map(|a| a.test_points.test_points.as_slice())
+            .unwrap_or(&[]);
+        match crate::generation_state::restore_generation_session(
+            &self.project.root_dir,
+            test_points,
+        ) {
+            Ok((stage, Some(saved))) => {
+                self.generation_stage = stage;
+                self.pipeline_requirement = saved.requirement;
+                self.pipeline_plan = saved.plan;
+                self.test_points_ui
+                    .rebuild_tree(self.authoring_ui.artifacts.as_ref());
+            }
+            Ok((_, None)) => {
+                self.test_points_ui
+                    .rebuild_tree(self.authoring_ui.artifacts.as_ref());
+            }
+            Err(e) => {
+                self.status = format!("Failed to restore generation state: {e}");
+                self.test_points_ui
+                    .rebuild_tree(self.authoring_ui.artifacts.as_ref());
+            }
+        }
+    }
+
+    /// Human-only transition from Reviewing Test Points to Planning.
+    ///
+    /// Intentionally ignores `approval_mode`: Auto/Bypass cannot trigger this gate.
+    fn continue_test_point_generation(&mut self) -> Result<()> {
+        let test_points = self
+            .authoring_ui
+            .artifacts
+            .as_ref()
+            .map(|a| a.test_points.test_points.as_slice())
+            .unwrap_or(&[]);
+        match teshi_agent::pipeline::continue_from_review(self.generation_stage, test_points) {
+            Ok(next) => {
+                let approved =
+                    teshi_agent::pipeline::approved_resolved_test_point_ids(test_points);
+                self.generation_stage = next;
+                self.persist_generation_state()?;
+                let agent_idx = self.selected_agent;
+                let summary = format!(
+                    "Human approved test points [{}] and continued generation. Call `generate_plan` using only these approved test_point_ids.",
+                    approved.join(", ")
+                );
+                self.agents[agent_idx].messages.push(AiChatMessage {
+                    role: AiRole::User,
+                    content: summary.clone(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning_content: None,
+                    source: None,
+                });
+                self.status = format!(
+                    "Advanced to Scenario Planning with {} approved test point(s)",
+                    approved.len()
+                );
+                // Resume the agent loop when an LLM handle is available.
+                if self.agents[agent_idx].llm_handle.is_some() {
+                    self.agents[agent_idx].status = AiStatus::Waiting;
+                    self.agents[agent_idx].agent_loop_count = 0;
+                    self.compact_context_if_needed(agent_idx);
+                    let messages = self.build_chat_messages_for_agent(agent_idx);
+                    let profile = self.agent_profile(agent_idx);
+                    let allowed: Option<&[String]> = profile.and_then(|p| match &p.tools {
+                        teshi_agent::definition::ToolPermission::All => None,
+                        teshi_agent::definition::ToolPermission::None => Some(&[] as &[String]),
+                        teshi_agent::definition::ToolPermission::Whitelist(list) => {
+                            Some(list.as_slice())
+                        }
+                    });
+                    let tools = Some(teshi_agent::get_tools(allowed));
+                    let _ = self.agents[agent_idx].llm_handle.as_ref().unwrap().send(
+                        crate::llm::LlmRequest::Chat {
+                            system: Some(self.ai_system_prompt(None, agent_idx)),
+                            messages,
+                            tools,
+                        },
+                    );
+                }
+                Ok(())
+            }
+            Err(msg) => {
+                self.status = msg;
+                Ok(())
+            }
+        }
+    }
+
     /// The system prompt used for all AI chat requests.
     /// Uses the active agent profile's instructions as the base, then appends
     /// pipeline guidance.
@@ -1727,13 +1854,16 @@ impl App {
         prompt.push_str(
             "\n\n## Feature Generation Pipeline\n\
              When the user asks to create or generate a feature (including `/generate`), follow this pipeline:\n\
-             1. **Requirements Gathering** — Ask questions or accept pasted requirement text. Call `submit_requirements` when done.\n\
-             2. **Planning** — Design scenarios as test points (happy path, errors, edges). Call `generate_plan`.\n\
-             3. **Writing** — Execute the plan using `create_feature_file` and `insert_scenario` (Gherkin `.feature` only).\n\
-             4. **Validation** — Use `validate_feature` to check for issues.\n\
+             1. **Requirements Gathering** — Ask questions or accept pasted requirement text. Prefer `source_refs` to persisted requirement documents/ranges when available. Call `submit_requirements` when done.\n\
+             2. **Generating Test Points** — Call `propose_test_points` with non-Gherkin verification intents (title, objective, hierarchy). Do NOT write Given/When/Then inside test points.\n\
+             3. **Reviewing Test Points** — Stop and wait. Humans approve/reject in the Test Points tab. Do NOT call `generate_plan` and do NOT treat Auto/Bypass file approval as test-point approval.\n\
+             4. **Planning** — After the user continues generation, design Gherkin scenarios. Every scenario must include `test_point_ids` for approved test points. Call `generate_plan`.\n\
+             5. **Writing** — Execute the plan using `create_feature_file` and `insert_scenario` (Gherkin `.feature` only).\n\
+             6. **Validation** — Use `validate_feature` to check for issues.\n\
              \n\
-             Test points ARE Gherkin scenarios and steps. Do NOT produce FreeMind `.mm` files or mock HTML.\n\
-             Do NOT skip steps. Start by gathering requirements.\n\
+             Test points are durable verification intents, NOT Gherkin scenarios. Scenarios realize approved test points.\n\
+             Do NOT produce FreeMind `.mm` files or mock HTML.\n\
+             Do NOT skip the human review gate. Start by gathering requirements.\n\
              If the user's request is already detailed, you can ask 1-2 clarifying questions then proceed.\n\
              Always check the [Project Context] to understand existing files before generating.",
         );
@@ -4778,6 +4908,10 @@ impl App {
                     self.quit_pending_confirm = false;
                 }
             }
+            Action::TpContinueGeneration => {
+                self.continue_test_point_generation()?;
+                self.quit_pending_confirm = false;
+            }
             Action::InsertNewline => {
                 if !self.step_input_active {
                     return Ok(());
@@ -4936,15 +5070,20 @@ impl App {
                             .unwrap_or("")
                             .trim()
                             .to_string();
+                        self.generation_stage =
+                            teshi_agent::pipeline::GenerationStage::Gathering;
+                        let _ = self.persist_generation_state();
                         user_msg = if rest.is_empty() {
-                            "I want to generate a feature from requirements. Start the Feature Generation Pipeline: gather requirements (I can paste detailed text next), plan scenarios as test points, then write Gherkin .feature files. Do not use FreeMind or mock HTML.".to_string()
+                            "I want to generate a feature from requirements. Start the Feature Generation Pipeline: gather requirements (I can paste detailed text next), propose non-Gherkin test points for human review, then plan and write Gherkin .feature files. Do not use FreeMind or mock HTML.".to_string()
                         } else {
                             format!(
-                                "Please generate a feature from these requirements using the Feature Generation Pipeline. Treat scenarios as test points and write Gherkin .feature files only (no FreeMind or mock HTML).\n\nRequirements:\n{rest}"
+                                "Please generate a feature from these requirements using the Feature Generation Pipeline. Propose non-Gherkin test points for human review before planning scenarios. Write Gherkin .feature files only (no FreeMind or mock HTML).\n\nRequirements:\n{rest}"
                             )
                         };
+                    } else if cmd == "continue" || cmd == "continue-generation" {
+                        return self.continue_test_point_generation();
                     } else {
-                        self.status = "Unknown slash command. Try /new, /exit, /resume, /copy, /models, /sessions, /approval, /agent, /generate".to_string();
+                        self.status = "Unknown slash command. Try /new, /exit, /resume, /copy, /models, /sessions, /approval, /agent, /generate, /continue".to_string();
                         return Ok(());
                     }
                 }

@@ -94,6 +94,8 @@ pub enum Action {
     TpBatchApprove,
     TpReviewFilter,
     TpFollowExcerpt,
+    /// Human-only: advance from Reviewing Test Points to Planning.
+    TpContinueGeneration,
     // Global
     Save,
     Quit,
@@ -671,6 +673,7 @@ impl Action {
                 (KeyCode::Char('A'), KeyModifiers::SHIFT) => Some(Self::TpBatchApprove),
                 (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Self::TpReject),
                 (KeyCode::Char('f'), KeyModifiers::NONE) => Some(Self::TpReviewFilter),
+                (KeyCode::Char('c'), KeyModifiers::NONE) => Some(Self::TpContinueGeneration),
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
                 (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
