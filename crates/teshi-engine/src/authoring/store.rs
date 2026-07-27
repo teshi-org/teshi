@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use teshi_core::authoring::{
-    requirements_root, testpoints_file, validate_loaded_artifacts, AuthoringArtifacts,
-    AuthoringDiagnostic, AuthoringSeverity, DocumentRevision, RequirementDocumentContent,
-    RequirementDocumentIndex, TestPointsFile,
+    re_resolve_document_links, requirements_root, testpoints_file, validate_loaded_artifacts,
+    AuthoringArtifacts, AuthoringDiagnostic, AuthoringSeverity, DocumentRevision,
+    RequirementDocumentContent, RequirementDocumentIndex, TestPointsFile,
 };
 
 use crate::fs_util::write_atomic;
@@ -118,6 +118,7 @@ pub fn load_authoring_artifacts(project_root: &Path) -> Result<AuthoringLoadResu
     let validation_issues = validate_loaded_artifacts(&artifacts, project_root);
     let mut merged = artifacts;
     merged.diagnostics.extend(validation_issues);
+    refresh_link_resolutions(&mut merged);
 
     Ok(AuthoringLoadResult {
         artifacts: Some(merged),
@@ -185,6 +186,17 @@ pub fn save_test_points(project_root: &Path, file: &TestPointsFile) -> Result<()
     sorted.test_points.sort_by(|a, b| a.id.cmp(&b.id));
 
     write_atomic(&path, &sorted).with_context(|| format!("write {}", path.display()))
+}
+
+fn refresh_link_resolutions(artifacts: &mut AuthoringArtifacts) {
+    for doc in &artifacts.documents {
+        re_resolve_document_links(
+            &doc.body,
+            &doc.meta.id,
+            doc.meta.revision.as_str(),
+            &mut artifacts.test_points.test_points,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -304,6 +316,34 @@ mod tests {
         let reloaded = fs::read_to_string(&path).unwrap();
         let parsed: TestPointsFile = serde_json::from_str(&reloaded).unwrap();
         assert_eq!(parsed.test_points[0].title, "Updated");
+    }
+
+    #[test]
+    fn reload_marks_stale_links_after_external_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        write_sample_project(dir.path());
+
+        fs::write(
+            requirements_root(dir.path()).join("auth.md"),
+            "changed body",
+        )
+        .unwrap();
+        let index_path = requirements_root(dir.path()).join(REQUIREMENTS_INDEX_FILE);
+        let mut index: RequirementDocumentIndex =
+            serde_json::from_str(&fs::read_to_string(&index_path).unwrap()).unwrap();
+        index.documents[0].revision = compute_document_revision("changed body");
+        save_requirement_document_index(dir.path(), &index).unwrap();
+
+        let loaded = load_authoring_artifacts(dir.path()).unwrap();
+        let artifacts = loaded.artifacts.expect("artifacts");
+        assert_eq!(
+            artifacts.test_points.test_points[0].requirement_links[0].resolution,
+            teshi_core::authoring::ResolutionState::Stale
+        );
+        assert_eq!(
+            artifacts.test_points.test_points[0].review_state,
+            teshi_core::authoring::ReviewState::Proposed
+        );
     }
 
     #[test]
