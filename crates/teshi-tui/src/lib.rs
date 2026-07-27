@@ -17,6 +17,7 @@ mod mindmap;
 mod profiles;
 mod runner;
 mod session;
+mod test_points_tab;
 mod ui;
 
 use std::fmt;
@@ -314,6 +315,7 @@ pub fn run() -> Result<()> {
                             approval_panel_active: app.approval_panel_active,
                             agent_profile_panel_active: app.agent_profile_panel_active,
                             requirements_focus: app.authoring_ui.focus,
+                            test_points_focus: app.test_points_ui.focus,
                             quit_pending_confirm: app.quit_pending_confirm,
                         },
                     ) {

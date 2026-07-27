@@ -306,12 +306,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     } else if app.active_tab == MainTab::Requirements {
         frame.render_widget(crate::authoring_tab::requirements_footer_line(), chunks[3]);
     } else if app.active_tab == MainTab::TestPoints {
-        let hints = Line::from(vec![
-            footer_pill(" Requirements [4] "),
-            Span::raw(" "),
-            footer_pill(" Test Points review — section 4 "),
-        ]);
-        frame.render_widget(Paragraph::new(hints), chunks[3]);
+        frame.render_widget(crate::test_points_tab::test_points_footer_line(), chunks[3]);
     } else {
         let key_hints = footer_hints(app);
         frame.render_widget(Paragraph::new(key_hints), chunks[3]);
@@ -353,7 +348,7 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         MainTab::Explore => render_explore_panel(frame, app, area),
         MainTab::Ai => render_ai_panel(frame, app, area),
         MainTab::Requirements => render_requirements_panel(frame, app, area),
-        MainTab::TestPoints => render_test_points_placeholder(frame, app, area),
+        MainTab::TestPoints => render_test_points_panel(frame, app, area),
     }
 }
 
@@ -3090,11 +3085,7 @@ fn footer_hints(app: &App) -> Line<'static> {
             footer_pill(" Quit [q] "),
         ]),
         (MainTab::Requirements, _) => crate::authoring_tab::requirements_footer_line(),
-        (MainTab::TestPoints, _) => Line::from(vec![
-            footer_pill(" Requirements [4] "),
-            Span::raw(" "),
-            footer_pill(" Section 4 pending "),
-        ]),
+        (MainTab::TestPoints, _) => crate::test_points_tab::test_points_footer_line(),
     }
 }
 
@@ -4182,23 +4173,290 @@ fn render_requirements_linked(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_test_points_placeholder(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let block = Block::default().borders(Borders::ALL).title("Test Points");
+fn render_test_points_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    if area.width < 20 || area.height < 3 {
+        return;
+    }
+    let layout = if area.width < 60 {
+        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).split(area)
+    } else if area.width < 100 {
+        Layout::horizontal([
+            Constraint::Percentage(22),
+            Constraint::Percentage(48),
+            Constraint::Percentage(30),
+        ])
+        .split(area)
+    } else {
+        Layout::horizontal([
+            Constraint::Percentage(20),
+            Constraint::Percentage(50),
+            Constraint::Percentage(30),
+        ])
+        .split(area)
+    };
+
+    let ui = &mut app.test_points_ui;
+    let artifacts = app.authoring_ui.artifacts.as_ref();
+    let tree_focused = ui.focus == crate::test_points_tab::TestPointsFocus::Tree;
+    render_test_points_tree(frame, ui, artifacts, layout[0], tree_focused);
+
+    if layout.len() == 2 {
+        render_test_points_details(frame, ui, artifacts, layout[1], true);
+        return;
+    }
+
+    let details_focused = ui.focus == crate::test_points_tab::TestPointsFocus::Details;
+    let excerpts_focused = ui.focus == crate::test_points_tab::TestPointsFocus::Excerpts;
+    render_test_points_details(frame, ui, artifacts, layout[1], details_focused);
+    render_test_points_excerpts(frame, ui, artifacts, layout[2], excerpts_focused);
+}
+
+fn render_test_points_tree(
+    frame: &mut Frame<'_>,
+    ui: &mut crate::test_points_tab::TestPointsUiState,
+    artifacts: Option<&teshi_core::authoring::AuthoringArtifacts>,
+    area: Rect,
+    focused: bool,
+) {
+    let filter_label = match ui.review_filter {
+        crate::test_points_tab::ReviewFilter::All => "all",
+        crate::test_points_tab::ReviewFilter::Proposed => "proposed",
+        crate::test_points_tab::ReviewFilter::Approved => "approved",
+        crate::test_points_tab::ReviewFilter::Rejected => "rejected",
+        crate::test_points_tab::ReviewFilter::NeedsReview => "needs review",
+    };
+    let title = format!("Test points ({filter_label})");
+    let title_style = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_style(title_style);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let count = app
-        .authoring_ui
-        .artifacts
-        .as_ref()
-        .map(|a| a.test_points.test_points.len())
-        .unwrap_or(0);
-    frame.render_widget(
-        Paragraph::new(format!(
-            "Test Points tab (section 4).\n{count} test point(s) loaded.\nPress 4 for Requirements."
-        ))
-        .style(Style::default().fg(Color::DarkGray)),
-        inner,
-    );
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    if artifacts.is_none() || ui.tree_items.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No test points yet. Create links from Requirements [4].")
+                .style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    }
+
+    let highlight_style = selected_style(focused);
+    let tree = Tree::new(&ui.tree_items)
+        .expect("test point tree")
+        .highlight_style(highlight_style);
+    frame.render_stateful_widget(tree, inner, &mut ui.tree_state);
+}
+
+fn render_test_points_details(
+    frame: &mut Frame<'_>,
+    ui: &mut crate::test_points_tab::TestPointsUiState,
+    artifacts: Option<&teshi_core::authoring::AuthoringArtifacts>,
+    area: Rect,
+    focused: bool,
+) {
+    let title_style = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Intent & review")
+        .title_style(title_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let Some(tp_id) = ui.selected_test_point_id.as_ref() else {
+        frame.render_widget(
+            Paragraph::new("Select a test point in the tree.")
+                .style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    };
+    let Some(tp) =
+        artifacts.and_then(|a| a.test_points.test_points.iter().find(|tp| &tp.id == tp_id))
+    else {
+        frame.render_widget(
+            Paragraph::new("Selected test point is unavailable.")
+                .style(Style::default().fg(Color::Red)),
+            inner,
+        );
+        return;
+    };
+
+    let fields = [
+        (
+            crate::test_points_tab::DetailField::Title,
+            "Title",
+            if ui.detail_field == crate::test_points_tab::DetailField::Title && ui.field_dirty {
+                ui.field_buffer.clone()
+            } else {
+                tp.title.clone()
+            },
+        ),
+        (
+            crate::test_points_tab::DetailField::Objective,
+            "Objective",
+            if ui.detail_field == crate::test_points_tab::DetailField::Objective && ui.field_dirty {
+                ui.field_buffer.clone()
+            } else {
+                tp.objective.clone()
+            },
+        ),
+        (
+            crate::test_points_tab::DetailField::Preconditions,
+            "Preconditions",
+            if ui.detail_field == crate::test_points_tab::DetailField::Preconditions
+                && ui.field_dirty
+            {
+                ui.field_buffer.clone()
+            } else {
+                tp.preconditions.clone().unwrap_or_default()
+            },
+        ),
+        (
+            crate::test_points_tab::DetailField::ExpectedOutcomes,
+            "Expected",
+            if ui.detail_field == crate::test_points_tab::DetailField::ExpectedOutcomes
+                && ui.field_dirty
+            {
+                ui.field_buffer.clone()
+            } else {
+                tp.expected_outcomes.clone().unwrap_or_default()
+            },
+        ),
+        (
+            crate::test_points_tab::DetailField::Hierarchy,
+            "Hierarchy",
+            if ui.detail_field == crate::test_points_tab::DetailField::Hierarchy && ui.field_dirty {
+                ui.field_buffer.clone()
+            } else {
+                tp.hierarchy_path.segments().join(" / ")
+            },
+        ),
+    ];
+
+    let mut lines = Vec::new();
+    let badge = crate::authoring_tab::review_state_label(tp.review_state);
+    let badge_style = crate::authoring_tab::review_state_style(tp.review_state);
+    lines.push(Line::from(vec![
+        Span::styled(format!("[{badge}] "), badge_style),
+        Span::styled(
+            crate::test_points_tab::review_state_name(tp.review_state),
+            Style::default().fg(Color::White),
+        ),
+        Span::raw(format!("  id: {}", tp.id)),
+    ]));
+
+    for (field, label, value) in fields {
+        let active = ui.detail_field == field;
+        let label_style = if active && focused {
+            selected_style(true)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let value_style = if active && focused {
+            selected_style(true)
+        } else {
+            Style::default()
+        };
+        let display =
+            truncate_string_to_cols(&value, inner.width.saturating_sub(label.len() as u16 + 3));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{label}: "), label_style),
+            Span::styled(display, value_style),
+        ]));
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_test_points_excerpts(
+    frame: &mut Frame<'_>,
+    ui: &mut crate::test_points_tab::TestPointsUiState,
+    artifacts: Option<&teshi_core::authoring::AuthoringArtifacts>,
+    area: Rect,
+    focused: bool,
+) {
+    let title_style = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Requirement excerpts")
+        .title_style(title_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let excerpts = match (ui.selected_test_point_id.as_ref(), artifacts) {
+        (Some(tp_id), Some(artifacts)) => artifacts
+            .test_points
+            .test_points
+            .iter()
+            .find(|tp| &tp.id == tp_id)
+            .map(|tp| crate::test_points_tab::excerpts_for_test_point(tp, artifacts))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    if excerpts.is_empty() {
+        lines.push(Line::styled(
+            " (no linked excerpts)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        for (i, excerpt) in excerpts.iter().enumerate() {
+            let res_label = match excerpt.resolution {
+                teshi_core::authoring::ResolutionState::Resolved => "ok",
+                teshi_core::authoring::ResolutionState::Stale => "stale",
+            };
+            let res_style = crate::test_points_tab::excerpt_resolution_style(excerpt.resolution);
+            let doc =
+                truncate_string_to_cols(&excerpt.document_title, inner.width.saturating_sub(8));
+            let quote = truncate_string_to_cols(&excerpt.quote, inner.width.saturating_sub(4));
+            let row_style = if i == ui.selected_excerpt_index {
+                selected_style(focused)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("[{res_label}] "), res_style),
+                Span::styled(doc, row_style),
+            ]));
+            lines.push(Line::from(vec![Span::styled(
+                format!("  \"{quote}\""),
+                row_style,
+            )]));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 #[cfg(test)]

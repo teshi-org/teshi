@@ -25,12 +25,12 @@
 
 ## 4. Test Points tab and review workflow
 
-- [ ] 4.1 Extend tab rendering, key handling, and help text with Test Points on direct key `5`.
-- [ ] 4.2 Implement the explicit business hierarchy tree with grouping, status indicators, filtering, and stable test-point selection.
-- [ ] 4.3 Implement center-pane editing for title, objective, preconditions, expected outcomes, hierarchy, and review state, resetting approval only for meaning-bearing changes.
-- [ ] 4.4 Implement the requirement-excerpt pane with resolved/stale indicators and cross-navigation to the exact highlighted range in Requirements.
-- [ ] 4.5 Add explicit approve, reject, and batch-approve actions; prevent implicit approval through focus, selection, or agent tool execution.
-- [ ] 4.6 Add state-transition tests covering Proposed, Approved, Rejected, and NeedsReview, including hierarchy-only edits and meaningful edits.
+- [x] 4.1 Extend tab rendering, key handling, and help text with Test Points on direct key `5`.
+- [x] 4.2 Implement the explicit business hierarchy tree with grouping, status indicators, filtering, and stable test-point selection.
+- [x] 4.3 Implement center-pane editing for title, objective, preconditions, expected outcomes, hierarchy, and review state, resetting approval only for meaning-bearing changes.
+- [x] 4.4 Implement the requirement-excerpt pane with resolved/stale indicators and cross-navigation to the exact highlighted range in Requirements.
+- [x] 4.5 Add explicit approve, reject, and batch-approve actions; prevent implicit approval through focus, selection, or agent tool execution.
+- [x] 4.6 Add state-transition tests covering Proposed, Approved, Rejected, and NeedsReview, including hierarchy-only edits and meaningful edits.
 
 ## 5. Agent test-point generation and hard gate
 

@@ -508,6 +508,8 @@ pub struct App {
     pub pipeline_plan: Option<teshi_agent::pipeline::GenerationPlan>,
     /// Requirements / test-point authoring UI state.
     pub authoring_ui: crate::authoring_tab::AuthoringUiState,
+    /// Test Points tab UI state.
+    pub test_points_ui: crate::test_points_tab::TestPointsUiState,
 }
 
 /// Convert a character index to the corresponding byte offset in a UTF-8 string.
@@ -794,6 +796,7 @@ impl App {
             pipeline_requirement: None,
             pipeline_plan: None,
             authoring_ui: crate::authoring_tab::AuthoringUiState::load_from_project(&project_root),
+            test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
         };
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -939,6 +942,7 @@ impl App {
             pipeline_requirement: None,
             pipeline_plan: None,
             authoring_ui: crate::authoring_tab::AuthoringUiState::load_from_project(&project_root),
+            test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
         };
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -1068,6 +1072,7 @@ impl App {
             pipeline_requirement: None,
             pipeline_plan: None,
             authoring_ui: crate::authoring_tab::AuthoringUiState::empty(),
+            test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
         };
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -3880,6 +3885,10 @@ impl App {
                 if self.active_tab == MainTab::Requirements {
                     self.authoring_ui.focus_next_column();
                     self.quit_pending_confirm = false;
+                } else if self.active_tab == MainTab::TestPoints {
+                    self.test_points_ui.focus_next_column();
+                    self.reload_test_point_field_buffer();
+                    self.quit_pending_confirm = false;
                 } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     self.explore_focus_next();
                     self.quit_pending_confirm = false;
@@ -3888,6 +3897,10 @@ impl App {
             Action::FocusPrevColumn => {
                 if self.active_tab == MainTab::Requirements {
                     self.authoring_ui.focus_prev_column();
+                    self.quit_pending_confirm = false;
+                } else if self.active_tab == MainTab::TestPoints {
+                    self.test_points_ui.focus_prev_column();
+                    self.reload_test_point_field_buffer();
                     self.quit_pending_confirm = false;
                 } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     self.explore_focus_prev();
@@ -4392,6 +4405,23 @@ impl App {
                         }
                     }
                     self.quit_pending_confirm = false;
+                } else if self.active_tab == MainTab::TestPoints {
+                    match self.test_points_ui.focus {
+                        crate::test_points_tab::TestPointsFocus::Tree => {
+                            self.test_points_ui.move_tree_selection(-1);
+                            self.reload_test_point_field_buffer();
+                        }
+                        crate::test_points_tab::TestPointsFocus::Details => {
+                            self.commit_test_point_field_edit()?;
+                            self.test_points_ui.move_detail_field(-1);
+                            self.reload_test_point_field_buffer();
+                        }
+                        crate::test_points_tab::TestPointsFocus::Excerpts => {
+                            let count = self.current_excerpt_count();
+                            self.test_points_ui.move_excerpt_selection(-1, count);
+                        }
+                    }
+                    self.quit_pending_confirm = false;
                 } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     self.explore_move_selection(-1);
                     self.quit_pending_confirm = false;
@@ -4410,6 +4440,23 @@ impl App {
                         }
                         crate::authoring_tab::RequirementsFocus::Editor => {
                             self.authoring_ui.move_cursor_vertical(1);
+                        }
+                    }
+                    self.quit_pending_confirm = false;
+                } else if self.active_tab == MainTab::TestPoints {
+                    match self.test_points_ui.focus {
+                        crate::test_points_tab::TestPointsFocus::Tree => {
+                            self.test_points_ui.move_tree_selection(1);
+                            self.reload_test_point_field_buffer();
+                        }
+                        crate::test_points_tab::TestPointsFocus::Details => {
+                            self.commit_test_point_field_edit()?;
+                            self.test_points_ui.move_detail_field(1);
+                            self.reload_test_point_field_buffer();
+                        }
+                        crate::test_points_tab::TestPointsFocus::Excerpts => {
+                            let count = self.current_excerpt_count();
+                            self.test_points_ui.move_excerpt_selection(1, count);
                         }
                     }
                     self.quit_pending_confirm = false;
@@ -4439,6 +4486,11 @@ impl App {
                     if self.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor {
                         self.authoring_ui.move_cursor_left();
                     }
+                } else if self.active_tab == MainTab::TestPoints {
+                    if self.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Details
+                    {
+                        // Character-level editing within the active field.
+                    }
                 } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     // No-op in Explore browse mode
                 } else {
@@ -4449,6 +4501,11 @@ impl App {
                 if self.active_tab == MainTab::Requirements {
                     if self.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor {
                         self.authoring_ui.move_cursor_right();
+                    }
+                } else if self.active_tab == MainTab::TestPoints {
+                    if self.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Details
+                    {
+                        // Character-level editing within the active field.
                     }
                 } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     // No-op in Explore browse mode
@@ -4501,6 +4558,9 @@ impl App {
                 if self.is_requirements_editor_active() {
                     self.authoring_ui.insert_char(ch);
                     self.quit_pending_confirm = false;
+                } else if self.is_test_points_details_active() {
+                    self.test_points_ui.insert_char(ch);
+                    self.quit_pending_confirm = false;
                 } else if !self.step_input_active {
                     return Ok(());
                 } else {
@@ -4514,7 +4574,15 @@ impl App {
                 }
             }
             Action::Enter => {
-                if self.is_requirements_editor_active() {
+                if self.active_tab == MainTab::TestPoints
+                    && self.test_points_ui.focus
+                        == crate::test_points_tab::TestPointsFocus::Excerpts
+                {
+                    self.navigate_to_requirement_excerpt(
+                        self.test_points_ui.selected_excerpt_index,
+                    )?;
+                    self.quit_pending_confirm = false;
+                } else if self.is_requirements_editor_active() {
                     self.authoring_ui.insert_newline();
                     self.quit_pending_confirm = false;
                 } else if self.step_input_active {
@@ -4527,6 +4595,9 @@ impl App {
             Action::Backspace => {
                 if self.is_requirements_editor_active() {
                     self.authoring_ui.backspace();
+                    self.quit_pending_confirm = false;
+                } else if self.is_test_points_details_active() {
+                    self.test_points_ui.backspace();
                     self.quit_pending_confirm = false;
                 } else if !self.step_input_active {
                     return Ok(());
@@ -4549,6 +4620,9 @@ impl App {
             Action::Delete => {
                 if self.is_requirements_editor_active() {
                     self.authoring_ui.delete_forward();
+                    self.quit_pending_confirm = false;
+                } else if self.is_test_points_details_active() {
+                    self.test_points_ui.delete_forward();
                     self.quit_pending_confirm = false;
                 } else if !self.step_input_active {
                     return Ok(());
@@ -4591,6 +4665,116 @@ impl App {
                     let title = format!("Document {n}");
                     self.authoring_ui.create_document(&path, &title);
                     self.status = format!("Created requirement document {path}");
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpApprove => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.commit_test_point_field_edit()?;
+                    let Some(tp_id) = self.test_points_ui.selected_test_point_id.clone() else {
+                        self.status = "Select a test point to approve".to_string();
+                        self.quit_pending_confirm = false;
+                        return Ok(());
+                    };
+                    let mut approved = false;
+                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut() {
+                        if let Some(tp) = artifacts
+                            .test_points
+                            .test_points
+                            .iter_mut()
+                            .find(|tp| tp.id == tp_id)
+                        {
+                            approved = crate::test_points_tab::TestPointsUiState::approve(tp);
+                            if approved {
+                                crate::test_points_tab::TestPointsUiState::save_test_points(
+                                    &self.project.root_dir,
+                                    artifacts,
+                                )?;
+                                self.test_points_ui.rebuild_tree(Some(artifacts));
+                            }
+                        }
+                    }
+                    self.status = if approved {
+                        format!("Approved test point {tp_id}")
+                    } else {
+                        "Cannot approve: resolve stale links or review state".to_string()
+                    };
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpReject => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.commit_test_point_field_edit()?;
+                    let Some(tp_id) = self.test_points_ui.selected_test_point_id.clone() else {
+                        self.status = "Select a test point to reject".to_string();
+                        self.quit_pending_confirm = false;
+                        return Ok(());
+                    };
+                    let mut rejected = false;
+                    if let Some(artifacts) = self.authoring_ui.artifacts.as_mut() {
+                        if let Some(tp) = artifacts
+                            .test_points
+                            .test_points
+                            .iter_mut()
+                            .find(|tp| tp.id == tp_id)
+                        {
+                            rejected = crate::test_points_tab::TestPointsUiState::reject(tp);
+                            if rejected {
+                                crate::test_points_tab::TestPointsUiState::save_test_points(
+                                    &self.project.root_dir,
+                                    artifacts,
+                                )?;
+                                self.test_points_ui.rebuild_tree(Some(artifacts));
+                            }
+                        }
+                    }
+                    self.status = if rejected {
+                        format!("Rejected test point {tp_id}")
+                    } else {
+                        "Cannot reject this test point".to_string()
+                    };
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpBatchApprove => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.commit_test_point_field_edit()?;
+                    let ids = self.test_points_ui.visible_leaf_ids.clone();
+                    let count = if let Some(artifacts) = self.authoring_ui.artifacts.as_mut() {
+                        let approved = crate::test_points_tab::TestPointsUiState::batch_approve(
+                            &mut artifacts.test_points.test_points,
+                            &ids,
+                        );
+                        if approved > 0 {
+                            crate::test_points_tab::TestPointsUiState::save_test_points(
+                                &self.project.root_dir,
+                                artifacts,
+                            )?;
+                            self.test_points_ui.rebuild_tree(Some(artifacts));
+                        }
+                        approved
+                    } else {
+                        0
+                    };
+                    self.status = format!("Batch approved {count} test point(s)");
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpReviewFilter => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.test_points_ui.cycle_review_filter();
+                    let artifacts = self.authoring_ui.artifacts.as_ref();
+                    self.test_points_ui.rebuild_tree(artifacts);
+                    self.reload_test_point_field_buffer();
+                    self.status = "Cycled test-point review filter".to_string();
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::TpFollowExcerpt => {
+                if self.active_tab == MainTab::TestPoints {
+                    self.navigate_to_requirement_excerpt(
+                        self.test_points_ui.selected_excerpt_index,
+                    )?;
                     self.quit_pending_confirm = false;
                 }
             }
@@ -5181,6 +5365,17 @@ impl App {
             self.status = "Saved requirement document".to_string();
             return Ok(());
         }
+        if self.active_tab == MainTab::TestPoints {
+            self.commit_test_point_field_edit()?;
+            if let Some(artifacts) = self.authoring_ui.artifacts.as_ref() {
+                crate::test_points_tab::TestPointsUiState::save_test_points(
+                    &self.project.root_dir,
+                    artifacts,
+                )?;
+                self.status = "Saved test points".to_string();
+            }
+            return Ok(());
+        }
         if let Some(path) = self.file_path.clone() {
             fs::write(&path, self.buffer.as_string())
                 .with_context(|| format!("failed to write {}", path.display()))?;
@@ -5253,6 +5448,23 @@ impl App {
         if self.active_tab == MainTab::Ai {
             self.ai_input_focused = false;
         }
+        if self.active_tab == MainTab::TestPoints {
+            let artifacts = self.authoring_ui.artifacts.as_ref();
+            self.test_points_ui.rebuild_tree(artifacts);
+            if let (Some(id), Some(artifacts)) = (
+                self.test_points_ui.selected_test_point_id.as_ref(),
+                artifacts,
+            ) {
+                if let Some(tp) = artifacts
+                    .test_points
+                    .test_points
+                    .iter()
+                    .find(|tp| &tp.id == id)
+                {
+                    self.test_points_ui.load_field_buffer_from(tp);
+                }
+            }
+        }
         self.status = match tab {
             MainTab::MindMap => "Switched to MindMap tab",
             MainTab::Explore => "Switched to Explore tab",
@@ -5266,6 +5478,139 @@ impl App {
     fn is_requirements_editor_active(&self) -> bool {
         self.active_tab == MainTab::Requirements
             && self.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor
+    }
+
+    fn is_test_points_details_active(&self) -> bool {
+        self.active_tab == MainTab::TestPoints
+            && self.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Details
+    }
+
+    fn commit_test_point_field_edit(&mut self) -> Result<()> {
+        if !self.test_points_ui.field_dirty {
+            return Ok(());
+        }
+        let Some(tp_id) = self.test_points_ui.selected_test_point_id.clone() else {
+            self.test_points_ui.field_dirty = false;
+            return Ok(());
+        };
+        let value = self.test_points_ui.field_buffer.clone();
+        let field = self.test_points_ui.detail_field;
+        if let Some(artifacts) = self.authoring_ui.artifacts.as_mut() {
+            if let Some(tp) = artifacts
+                .test_points
+                .test_points
+                .iter_mut()
+                .find(|tp| tp.id == tp_id)
+            {
+                crate::test_points_tab::TestPointsUiState::apply_field_buffer(tp, field, &value);
+                crate::test_points_tab::TestPointsUiState::save_test_points(
+                    &self.project.root_dir,
+                    artifacts,
+                )?;
+                self.test_points_ui.rebuild_tree(Some(artifacts));
+            }
+        }
+        self.test_points_ui.field_dirty = false;
+        Ok(())
+    }
+
+    fn navigate_to_requirement_excerpt(&mut self, excerpt_index: usize) -> Result<()> {
+        let (tp_id, excerpt) = {
+            let artifacts = self
+                .authoring_ui
+                .artifacts
+                .as_ref()
+                .context("authoring artifacts not loaded")?;
+            let tp_id = self
+                .test_points_ui
+                .selected_test_point_id
+                .clone()
+                .context("no test point selected")?;
+            let tp = artifacts
+                .test_points
+                .test_points
+                .iter()
+                .find(|tp| tp.id == tp_id)
+                .context("selected test point missing")?;
+            let excerpts = crate::test_points_tab::excerpts_for_test_point(tp, artifacts);
+            let excerpt = excerpts
+                .get(excerpt_index)
+                .context("requirement excerpt not found")?
+                .clone();
+            if excerpt.resolution != teshi_core::authoring::ResolutionState::Resolved {
+                self.status = "Requirement link is stale — resolve in Requirements tab".to_string();
+                return Ok(());
+            }
+            (tp_id, excerpt)
+        };
+
+        self.active_tab = MainTab::Requirements;
+        self.authoring_ui
+            .select_document_by_id(&excerpt.document_id);
+        self.authoring_ui.highlight_test_point_id = Some(tp_id);
+        self.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Editor;
+
+        if let Some(artifacts) = self.authoring_ui.artifacts.as_ref() {
+            if let Some(doc) = artifacts
+                .documents
+                .iter()
+                .find(|d| d.meta.id == excerpt.document_id)
+            {
+                if let (Some((start_row, start_col)), Some((end_row, end_col))) = (
+                    teshi_core::authoring::char_position_to_line_col(
+                        doc.body.as_str(),
+                        excerpt.position.start,
+                    ),
+                    teshi_core::authoring::char_position_to_line_col(
+                        doc.body.as_str(),
+                        excerpt.position.end,
+                    ),
+                ) {
+                    self.authoring_ui.selection_anchor = Some((start_row, start_col));
+                    self.authoring_ui.selection_end = Some((end_row, end_col));
+                    self.authoring_ui.scroll_row = start_row.saturating_sub(2);
+                    self.authoring_ui.cursor_row = start_row;
+                    self.authoring_ui.cursor_col = start_col;
+                }
+            }
+        }
+        self.status = format!("Opened requirement excerpt in {}", excerpt.document_title);
+        Ok(())
+    }
+
+    fn reload_test_point_field_buffer(&mut self) {
+        let Some(tp_id) = self.test_points_ui.selected_test_point_id.clone() else {
+            self.test_points_ui.load_field_buffer();
+            return;
+        };
+        if let Some(tp) = self
+            .authoring_ui
+            .artifacts
+            .as_ref()
+            .and_then(|a| a.test_points.test_points.iter().find(|tp| tp.id == tp_id))
+        {
+            self.test_points_ui.load_field_buffer_from(tp);
+        } else {
+            self.test_points_ui.load_field_buffer();
+        }
+    }
+
+    fn current_excerpt_count(&self) -> usize {
+        let Some(tp_id) = self.test_points_ui.selected_test_point_id.as_ref() else {
+            return 0;
+        };
+        let Some(artifacts) = self.authoring_ui.artifacts.as_ref() else {
+            return 0;
+        };
+        let Some(tp) = artifacts
+            .test_points
+            .test_points
+            .iter()
+            .find(|tp| &tp.id == tp_id)
+        else {
+            return 0;
+        };
+        crate::test_points_tab::excerpts_for_test_point(tp, artifacts).len()
     }
 
     fn clear_step_input_state(&mut self) {
@@ -6798,6 +7143,58 @@ mod tests {
     }
 
     #[test]
+    fn test_test_points_review_state_transitions() {
+        use crate::test_points_tab::{DetailField, TestPointsUiState};
+        use teshi_core::authoring::{HierarchyPath, QuoteSelector, ReviewState, TestPoint};
+
+        let mut tp = TestPoint {
+            id: "tp-1".into(),
+            title: "Login".into(),
+            objective: "Verify login".into(),
+            preconditions: None,
+            expected_outcomes: None,
+            hierarchy_path: HierarchyPath::new(vec!["Auth".into()]),
+            review_state: ReviewState::Proposed,
+            requirement_links: vec![teshi_core::authoring::RequirementLink {
+                document_id: "doc-1".into(),
+                document_revision: "rev".into(),
+                position: teshi_core::authoring::TextRange::new(0, 5),
+                quote: QuoteSelector {
+                    quote: "login".into(),
+                    prefix: String::new(),
+                    suffix: String::new(),
+                },
+                resolution: teshi_core::authoring::ResolutionState::Resolved,
+            }],
+            scenario_refs: Vec::new(),
+        };
+
+        assert!(TestPointsUiState::approve(&mut tp));
+        assert_eq!(tp.review_state, ReviewState::Approved);
+
+        TestPointsUiState::apply_field_buffer(&mut tp, DetailField::Objective, "Changed objective");
+        assert_eq!(tp.review_state, ReviewState::Proposed);
+
+        assert!(TestPointsUiState::reject(&mut tp));
+        assert_eq!(tp.review_state, ReviewState::Rejected);
+
+        tp.review_state = ReviewState::NeedsReview;
+        assert!(TestPointsUiState::approve(&mut tp));
+        assert_eq!(tp.review_state, ReviewState::Approved);
+
+        TestPointsUiState::apply_field_buffer(&mut tp, DetailField::Hierarchy, "Billing");
+        assert_eq!(tp.review_state, ReviewState::Approved);
+    }
+
+    #[test]
+    fn test_test_points_tab_select() {
+        let mut app = App::from_args().expect("app init should work");
+        app.handle_action(Action::SelectTab(MainTab::TestPoints))
+            .expect("select test points");
+        assert_eq!(app.active_tab, MainTab::TestPoints);
+    }
+
+    #[test]
     fn test_requirements_create_test_point_from_selection() {
         let mut app = App::from_args().expect("app init should work");
         app.authoring_ui.create_document("req.md", "Req");
@@ -7076,6 +7473,7 @@ mod tests {
             pipeline_requirement: None,
             pipeline_plan: None,
             authoring_ui: crate::authoring_tab::AuthoringUiState::empty(),
+            test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
         };
 
         app.handle_action(Action::ExploreRight)
@@ -7234,6 +7632,7 @@ Feature: B
             pipeline_requirement: None,
             pipeline_plan: None,
             authoring_ui: crate::authoring_tab::AuthoringUiState::empty(),
+            test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
         };
 
         app.explore_selected_feature = 0;
