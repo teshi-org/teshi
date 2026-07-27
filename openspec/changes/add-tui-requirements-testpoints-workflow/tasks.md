@@ -1,10 +1,10 @@
 ## 1. Authoring domain model and persistence
 
-- [ ] 1.1 Add documented shared models for requirement-document metadata, Unicode character positions, quote selectors, requirement links, test points, hierarchy paths, review states, and scenario references.
-- [ ] 1.2 Implement readers and validators for `requirements/_teshi.json`, requirement Markdown files, and `testpoints/testpoints.json`, including duplicate-ID, missing-file, invalid-range, empty-hierarchy, and invalid-reference diagnostics.
-- [ ] 1.3 Implement deterministic, atomic writers for requirement metadata and test points, preserving the last complete file when replacement fails.
-- [ ] 1.4 Add project-loading integration that discovers authoring artifacts when present and leaves existing feature-only projects unchanged.
-- [ ] 1.5 Add table-driven unit tests for valid round trips and every validation failure path.
+- [x] 1.1 Add documented shared models for requirement-document metadata, Unicode character positions, quote selectors, requirement links, test points, hierarchy paths, review states, and scenario references.
+- [x] 1.2 Implement readers and validators for `requirements/_teshi.json`, requirement Markdown files, and `testpoints/testpoints.json`, including duplicate-ID, missing-file, invalid-range, empty-hierarchy, and invalid-reference diagnostics.
+- [x] 1.3 Implement deterministic, atomic writers for requirement metadata and test points, preserving the last complete file when replacement fails.
+- [x] 1.4 Add project-loading integration that discovers authoring artifacts when present and leaves existing feature-only projects unchanged.
+- [x] 1.5 Add table-driven unit tests for valid round trips and every validation failure path.
 
 ## 2. Text selection, anchors, and invalidation
 

@@ -1,6 +1,7 @@
 //! Shared BDD runtime for teshi desktop and web hosts.
 
 mod app_data;
+mod authoring;
 mod daemon;
 mod events;
 mod fs_util;
@@ -33,6 +34,11 @@ pub use app_data::{
     app_data_dir, get_recent_projects as load_recent_projects, load_settings,
     open_dialog_default_dir, save_settings, validated_window_size, AppSettings, MIN_WINDOW_HEIGHT,
     MIN_WINDOW_WIDTH,
+};
+pub use authoring::{
+    compute_document_revision, load_authoring_artifacts, save_requirement_document_index,
+    save_requirement_markdown, save_test_points, AuthoringLoadResult, DEFAULT_REQUIREMENTS_DIR,
+    DEFAULT_TESTPOINTS_DIR, REQUIREMENTS_INDEX_FILE,
 };
 pub use daemon::{
     find_project_root, pick_free_port, remove_daemon_manifest, spawn_daemon_background,
@@ -67,8 +73,9 @@ pub use model_profile::{
     PROVIDER_DEEPSEEK_OPENAI, PROVIDER_OPENAI,
 };
 pub use project::{
-    check_project_switch_allowed, get_project_root, list_dir, open_project, set_browser_active,
-    set_terminal_active, teardown_runtime, DirEntry, ProjectState,
+    check_project_switch_allowed, get_authoring_artifacts, get_project_root, list_dir,
+    open_project, set_browser_active, set_terminal_active, teardown_runtime, DirEntry,
+    ProjectState,
 };
 pub use project_settings::{
     load_project_settings, ProjectSettings, DEFAULT_LOCATOR_AUTO_CONFIRM_SEC,
