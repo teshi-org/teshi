@@ -7,6 +7,8 @@
 | `1` | Explore |
 | `2` | MindMap |
 | `3` | AI |
+| `4` | Requirements |
+| `5` | Test Points |
 
 ## Navigation (Explore / MindMap)
 
@@ -18,6 +20,29 @@
 | `BackTab` / `←` / `h` | Move to previous column |
 | `Home` / `End` | First / last node or line |
 | `PageUp` / `PageDown` | Scroll ~10 nodes or lines |
+
+## Requirements tab
+
+| Key | Action |
+|-----|--------|
+| `Tab` | Cycle tree / editor / linked test-point panes |
+| `n` | Create a Proposed test point from the active non-empty selection |
+| `Ctrl+n` | Create a new requirement Markdown document |
+| `s` | Save the current requirement document |
+
+## Test Points tab
+
+| Key | Action |
+|-----|--------|
+| `Tab` | Cycle tree / details / excerpts panes |
+| `a` | Approve the selected test point (resolved links only) |
+| `A` | Batch-approve visible eligible test points |
+| `r` | Reject the selected test point |
+| `c` | Continue generation after approving test points (human-only gate) |
+| `o` | Open a realized Gherkin scenario linked from the selected test point |
+| `f` | Cycle review-state filter |
+| `s` | Save test-point edits |
+| `Enter` | Follow the selected requirement excerpt into Requirements |
 
 ## Editing (editor / step body mode)
 

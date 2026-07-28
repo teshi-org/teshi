@@ -2,14 +2,14 @@
 
 ## Tabs
 
-teshi has three core tabs:
+teshi has five core tabs:
 
 ### Explore
 
 Three-column browser: **features** → **scenarios** → **steps**.
 
 - **Features column** — list of `.feature` files. `j`/`k` or `↑`/`↓` to move; `e` to enter the editor for the selected file.
-- **Scenarios column** — scenarios within the selected feature. Shows test run status (pending / running / passed / failed / skipped). `r` to run the selected scenario.
+- **Scenarios column** — scenarios within the selected feature. Shows test run status (pending / running / passed / failed / skipped). Linked test-point IDs appear as compact `[tp-…]` badges when scenarios carry `@teshi-tp:<id>` tags. `r` to run the selected scenario.
 - **Steps column** — steps of the selected scenario with test case status. `Enter` toggles failure detail on failed steps.
 
 Column navigation: `Tab` / `→` to move right, `BackTab` / `←` / `h` to move left.
@@ -36,12 +36,57 @@ Chat interface with an LLM-powered function-calling agent. The agent can inspect
 | `get_feature_content` | Full parsed content of a `.feature` file |
 | `highlight_mindmap_nodes` | Highlight MindMap nodes matching a condition |
 | `apply_mindmap_filter` | Filter the MindMap tree by node name |
-| `insert_scenario` | Insert a new scenario (queues for user approval) |
+| `submit_requirements` | Record gathered requirements / document sources; advances to test-point proposal |
+| `propose_test_points` | Persist Proposed non-Gherkin test points and pause for human review |
+| `generate_plan` | Record a scenario plan from **approved** test-point IDs only |
+| `insert_scenario` | Insert a new scenario (queues for user approval; embeds `@teshi-tp:<id>` tags) |
 | `update_step` | Update a step body (queues for user approval) |
 
-Editing tools queue changes for your approval: `Y` to accept, `N`/`Esc` to reject, `D` to view a diff.
+Editing tools queue file changes for your approval: `Y` to accept, `N`/`Esc` to reject, `D` to view a diff.
+
+**Test-point approval is a separate hard gate.** `ApprovalMode` Auto/Bypass only affects file-change queues; it never approves test points or skips Reviewing Test Points.
+
+Slash helpers:
+
+- `/generate` — start requirements gathering
+- `/continue` — continue generation after approving test points (same as `c` on the Test Points tab)
 
 The AI tab is hidden when no LLM credentials are configured. Type `/auth` in the chat to manage credentials.
+
+### Requirements
+
+Authoring tab for durable requirement Markdown under `requirements/`:
+
+- **Tree** — indexed documents from `requirements/_teshi.json`
+- **Editor** — Markdown body with range selection and linked-range highlights
+- **Linked test points** — filtered by the active selection when present
+
+Select text and press `n` to create a `Proposed` test point linked to that exact range. Press `Ctrl+n` for a new document.
+
+### Test Points
+
+Review tab for non-Gherkin verification intents stored in `testpoints/testpoints.json`:
+
+- **Tree** — business hierarchy with review-state indicators (`f` cycles filters)
+- **Details** — title, objective, preconditions, expected outcomes, hierarchy, review state, and realized scenarios
+- **Excerpts** — linked requirement ranges (`Enter` opens Requirements at the highlight)
+
+Review actions: `a` approve, `A` batch approve, `r` reject. After at least one eligible approval, press `c` (or `/continue`) to advance the AI pipeline to Scenario Planning. Press `o` to open a realized Gherkin scenario.
+
+Review states: `Proposed` → `Approved` / `Rejected`; approved points with stale anchors become `NeedsReview`.
+
+## Feature generation pipeline
+
+When you ask the AI to create a feature (including `/generate`), the authoritative flow is:
+
+1. **Requirements Gathering** — conversational paste and/or persisted document/range sources via `submit_requirements`
+2. **Generating Test Points** — agent calls `propose_test_points` (no Given/When/Then inside test points)
+3. **Reviewing Test Points** — agent pauses; humans approve in the Test Points tab
+4. **Planning** — `generate_plan` with approved, resolved `test_point_ids`
+5. **Writing** — `create_feature_file` / `insert_scenario` write Gherkin; scenarios keep `@teshi-tp:<id>` tags
+6. **Validation** — `validate_feature` / tests as applicable
+
+Restarting the TUI restores the review phase and artifacts from disk without implicitly approving anything.
 
 ## External Test Runner
 
@@ -73,7 +118,7 @@ See [WinUI3 / Native Windows app mode](winapp-modes.md) for setup and limitation
 
 - Gherkin headers (`Feature`, `Scenario`, `Scenario Outline`, `Examples`, `Background`)
 - Steps (`Given`, `When`, `Then`, `And`, `But`)
-- Tags (`@tag`)
+- Tags (`@tag`, including Teshi `@teshi-tp:<id>` links)
 - Comments (`# ...`)
 - Strings (`"..."`)
 - Tables and doc string markers (`|`, `"""`)

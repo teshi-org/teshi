@@ -4,8 +4,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
+use teshi_core::authoring::AuthoringArtifacts;
 
 use crate::app_data::{add_recent_project, remember_project_parent};
+use crate::authoring::load_authoring_artifacts;
 use crate::locator::start_locator_watch;
 use crate::TeshiEngine;
 
@@ -14,6 +16,8 @@ pub struct ProjectState {
     pub root: Mutex<Option<PathBuf>>,
     pub browser_active: Mutex<bool>,
     pub terminal_active: Mutex<bool>,
+    /// Loaded requirement/test-point artifacts when present; `None` for feature-only projects.
+    pub authoring: Mutex<Option<AuthoringArtifacts>>,
 }
 
 impl Default for ProjectState {
@@ -29,6 +33,7 @@ impl ProjectState {
             root: Mutex::new(None),
             browser_active: Mutex::new(false),
             terminal_active: Mutex::new(false),
+            authoring: Mutex::new(None),
         }
     }
 
@@ -87,6 +92,16 @@ pub async fn open_project(rt: Arc<TeshiEngine>, path: String) -> Result<(), Stri
     *rt.project.root.lock().unwrap() = Some(canonical.clone());
     *rt.project.browser_active.lock().unwrap() = false;
     *rt.project.terminal_active.lock().unwrap() = false;
+
+    match load_authoring_artifacts(&canonical) {
+        Ok(result) => {
+            *rt.project.authoring.lock().unwrap() = result.artifacts;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not load authoring artifacts");
+            *rt.project.authoring.lock().unwrap() = None;
+        }
+    }
 
     // User-level recent-project preferences are ancillary state. A read-only
     // profile, sandbox, or unavailable data directory must not prevent the
@@ -150,6 +165,11 @@ pub fn list_dir(rt: &TeshiEngine, path: String) -> Result<Vec<DirEntry>, String>
             .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(entries)
+}
+
+/// Returns loaded authoring artifacts for the open project, if any.
+pub fn get_authoring_artifacts(rt: &TeshiEngine) -> Option<AuthoringArtifacts> {
+    rt.project.authoring.lock().unwrap().clone()
 }
 
 /// Returns the canonical project root path when a project is open.

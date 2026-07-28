@@ -249,11 +249,15 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         Line::from(" Explore [1] "),
         Line::from(" MindMap [2] "),
         Line::from(" AI [3] "),
+        Line::from(" Requirements [4] "),
+        Line::from(" Test Points [5] "),
     ])
     .select(match app.active_tab {
         MainTab::Explore => 0,
         MainTab::MindMap => 1,
         MainTab::Ai => 2,
+        MainTab::Requirements => 3,
+        MainTab::TestPoints => 4,
     })
     .style(Style::default().fg(Color::DarkGray))
     .highlight_style(
@@ -271,6 +275,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         .push(ClickableRegion::Tab(MainTab::MindMap));
     app.clickable_regions
         .push(ClickableRegion::Tab(MainTab::Ai));
+    app.clickable_regions
+        .push(ClickableRegion::Tab(MainTab::Requirements));
+    app.clickable_regions
+        .push(ClickableRegion::Tab(MainTab::TestPoints));
 
     let divider_w = chunks[1].width as usize;
     let divider_line = "─".repeat(divider_w.max(1));
@@ -295,6 +303,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         render_explore_footer(frame, app, chunks[3]);
     } else if app.active_tab == MainTab::Ai {
         render_ai_footer(frame, app, chunks[3]);
+    } else if app.active_tab == MainTab::Requirements {
+        frame.render_widget(crate::authoring_tab::requirements_footer_line(), chunks[3]);
+    } else if app.active_tab == MainTab::TestPoints {
+        frame.render_widget(crate::test_points_tab::test_points_footer_line(), chunks[3]);
     } else {
         let key_hints = footer_hints(app);
         frame.render_widget(Paragraph::new(key_hints), chunks[3]);
@@ -335,6 +347,8 @@ fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         MainTab::MindMap => render_mindmap_panel(frame, app, area),
         MainTab::Explore => render_explore_panel(frame, app, area),
         MainTab::Ai => render_ai_panel(frame, app, area),
+        MainTab::Requirements => render_requirements_panel(frame, app, area),
+        MainTab::TestPoints => render_test_points_panel(frame, app, area),
     }
 }
 
@@ -1226,7 +1240,23 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .copied()
                 .unwrap_or(RunStatus::Idle);
             let status_dot = Span::styled("●", Style::default().fg(status_color(status)));
-            let name = Span::styled(format!(" {}", scenario.name), normal);
+            let tp_ids = app
+                .authoring_ui
+                .artifacts
+                .as_ref()
+                .map(|artifacts| {
+                    teshi_core::authoring::parse_teshi_tp_tags_for_test_points(
+                        &scenario.tags,
+                        &artifacts.test_points.test_points,
+                    )
+                })
+                .unwrap_or_else(|| teshi_core::authoring::parse_teshi_tp_tags(&scenario.tags));
+            let tp_badge = if tp_ids.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", tp_ids.join(","))
+            };
+            let name = Span::styled(format!(" {}{}", scenario.name, tp_badge), normal);
             let mut line = Line::from(vec![status_dot, name]);
             if i == app.explore_selected_scenario {
                 line = apply_line_background(line, explore_select_style(focused));
@@ -3070,6 +3100,8 @@ fn footer_hints(app: &App) -> Line<'static> {
             Span::raw(" "),
             footer_pill(" Quit [q] "),
         ]),
+        (MainTab::Requirements, _) => crate::authoring_tab::requirements_footer_line(),
+        (MainTab::TestPoints, _) => crate::test_points_tab::test_points_footer_line(),
     }
 }
 
@@ -3843,6 +3875,628 @@ fn hatched_empty_lines(height: usize, label: &str) -> Vec<Line<'static>> {
         }
     }
     lines
+}
+
+/// Requirements tab: tree, Markdown editor, and linked test points.
+fn render_requirements_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    if area.width < 20 || area.height < 3 {
+        return;
+    }
+    let layout = if area.width < 60 {
+        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).split(area)
+    } else if area.width < 100 {
+        Layout::horizontal([
+            Constraint::Percentage(22),
+            Constraint::Percentage(48),
+            Constraint::Percentage(30),
+        ])
+        .split(area)
+    } else {
+        Layout::horizontal([
+            Constraint::Percentage(20),
+            Constraint::Percentage(50),
+            Constraint::Percentage(30),
+        ])
+        .split(area)
+    };
+
+    let ui = &mut app.authoring_ui;
+    let tree_focused = ui.focus == crate::authoring_tab::RequirementsFocus::Tree;
+    render_requirements_tree(frame, ui, layout[0], tree_focused);
+
+    if layout.len() == 2 {
+        render_requirements_editor(frame, ui, layout[1], true);
+        return;
+    }
+
+    let editor_focused = ui.focus == crate::authoring_tab::RequirementsFocus::Editor;
+    let linked_focused = ui.focus == crate::authoring_tab::RequirementsFocus::LinkedTestPoints;
+    render_requirements_editor(frame, ui, layout[1], editor_focused);
+    render_requirements_linked(frame, ui, layout[2], linked_focused);
+}
+
+fn render_requirements_tree(
+    frame: &mut Frame<'_>,
+    ui: &mut crate::authoring_tab::AuthoringUiState,
+    area: Rect,
+    focused: bool,
+) {
+    let title_style = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Requirements")
+        .title_style(title_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    if !ui.discovered {
+        frame.render_widget(
+            Paragraph::new("No requirement artifacts. Ctrl+n to create.")
+                .style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    }
+
+    let highlight_style = selected_style(focused);
+    let tree = Tree::new(&ui.tree_items)
+        .expect("requirement tree")
+        .highlight_style(highlight_style);
+    frame.render_stateful_widget(tree, inner, &mut ui.tree_state);
+
+    let diag_lines: Vec<Line> = ui
+        .visible_diagnostics()
+        .iter()
+        .take(3)
+        .map(|d| Line::styled(format!("! {}", d.message), Style::default().fg(Color::Red)))
+        .collect();
+    if !diag_lines.is_empty() {
+        let diag_height = diag_lines.len() as u16;
+        let y = inner.y + inner.height.saturating_sub(diag_height);
+        frame.render_widget(
+            Paragraph::new(diag_lines),
+            Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: diag_height,
+            },
+        );
+    }
+}
+
+fn render_requirements_editor(
+    frame: &mut Frame<'_>,
+    ui: &mut crate::authoring_tab::AuthoringUiState,
+    area: Rect,
+    focused: bool,
+) {
+    let title = ui
+        .current_document_meta()
+        .map(|m| m.title.clone())
+        .unwrap_or_else(|| "Source".to_string());
+    let missing = ui.current_document_missing();
+    let display_title = if missing {
+        format!("{title} (missing file)")
+    } else if ui.buffer_dirty {
+        format!("{title} *")
+    } else {
+        title
+    };
+    let title_style = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(display_title)
+        .title_style(title_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    frame.render_widget(Clear, inner);
+
+    if missing {
+        frame.render_widget(
+            Paragraph::new("Indexed document file is missing on disk.")
+                .style(Style::default().fg(Color::Red)),
+            inner,
+        );
+        return;
+    }
+
+    let buffer = &ui.buffer;
+    let cursor_row = ui.cursor_row;
+    let visible_lines = inner.height as usize;
+    let line_count = buffer.line_count();
+    let max_scroll = line_count.saturating_sub(visible_lines);
+    let scroll_row = ui.scroll_row.min(max_scroll);
+
+    let highlight_ranges = ui
+        .highlight_test_point_id
+        .as_ref()
+        .map(|id| ui.highlight_ranges_for_test_point(id))
+        .unwrap_or_default();
+
+    let mut lines = Vec::with_capacity(visible_lines);
+    for visible_idx in 0..visible_lines {
+        let row = scroll_row + visible_idx;
+        if row >= line_count {
+            lines.push(Line::raw(""));
+            continue;
+        }
+        let line_text = buffer.line(row);
+        let mut styled = Line::from(line_text.clone());
+
+        for range in &highlight_ranges {
+            styled = apply_char_range_highlight(
+                styled,
+                range,
+                buffer,
+                row,
+                Style::default().fg(Color::Cyan),
+            );
+        }
+
+        if let (Some(anchor), Some(end)) = (ui.selection_anchor, ui.selection_end) {
+            let sel_lo = anchor.0.min(end.0);
+            let sel_hi = anchor.0.max(end.0);
+            if row >= sel_lo && row <= sel_hi {
+                let line_len = line_text.chars().count();
+                let (lo_col, hi_col) = if sel_lo == sel_hi {
+                    (anchor.1.min(end.1), anchor.1.max(end.1).min(line_len))
+                } else if row == sel_lo {
+                    let col = if anchor.0 < end.0 { anchor.1 } else { end.1 };
+                    (col, line_len)
+                } else if row == sel_hi {
+                    let col = if anchor.0 > end.0 { anchor.1 } else { end.1 }.min(line_len);
+                    (0, col)
+                } else {
+                    (0, line_len)
+                };
+                if lo_col < hi_col {
+                    styled = apply_col_range_highlight(
+                        styled,
+                        lo_col,
+                        hi_col,
+                        Style::default().bg(SELECTION_BG).fg(SELECTION_FG),
+                    );
+                }
+            }
+        }
+
+        if focused && row == cursor_row {
+            let line_len = line_text.chars().count();
+            let cursor_col = ui.cursor_col.min(line_len);
+            let cursor_style = Style::default().fg(Color::White).bg(SELECTION_BG);
+            if line_len == 0 {
+                styled = Line::from(vec![Span::styled(" ", cursor_style)]);
+            } else if cursor_col < line_len {
+                styled =
+                    apply_col_range_highlight(styled, cursor_col, cursor_col + 1, cursor_style);
+            } else {
+                let mut spans = styled.spans;
+                spans.push(Span::styled(" ", cursor_style));
+                styled = Line::from(spans);
+            }
+        }
+
+        styled = truncate_line_to_cols(styled, inner.width);
+        styled = pad_line_to_width(styled, inner.width, Style::default());
+        lines.push(styled);
+    }
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
+fn apply_col_range_highlight(
+    line: Line<'static>,
+    lo_col: usize,
+    hi_col: usize,
+    patch: Style,
+) -> Line<'static> {
+    apply_patch_to_char_range(line, lo_col..hi_col, patch)
+}
+
+fn apply_char_range_highlight(
+    line: Line<'static>,
+    range: &teshi_core::authoring::TextRange,
+    buffer: &crate::editor_buffer::EditorBuffer,
+    row: usize,
+    patch: Style,
+) -> Line<'static> {
+    let body = buffer.as_string();
+    let start_lc = teshi_core::authoring::char_position_to_line_col(body.as_str(), range.start);
+    let end_lc = teshi_core::authoring::char_position_to_line_col(body.as_str(), range.end);
+    if let (Some((start_line, start_col)), Some((end_line, end_col))) = (start_lc, end_lc) {
+        if row < start_line || row > end_line {
+            return line;
+        }
+        let lo = if row == start_line { start_col } else { 0 };
+        let hi = if row == end_line {
+            end_col
+        } else {
+            buffer.line(row).chars().count()
+        };
+        if lo < hi {
+            return apply_col_range_highlight(line, lo, hi, patch);
+        }
+    }
+    line
+}
+
+fn render_requirements_linked(
+    frame: &mut Frame<'_>,
+    ui: &mut crate::authoring_tab::AuthoringUiState,
+    area: Rect,
+    focused: bool,
+) {
+    let title_style = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Linked test points")
+        .title_style(title_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let linked = ui.filtered_linked_test_points();
+    let mut lines: Vec<Line> = Vec::new();
+    if linked.is_empty() {
+        lines.push(Line::styled(
+            " (no linked test points)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        for (i, tp) in linked.iter().enumerate() {
+            let badge = crate::authoring_tab::review_state_label(tp.review_state);
+            let badge_style = crate::authoring_tab::review_state_style(tp.review_state);
+            let label = truncate_string_to_cols(&tp.title, inner.width.saturating_sub(4));
+            let style = if i == ui.selected_linked_index {
+                selected_style(focused)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("[{badge}] "), badge_style),
+                Span::styled(label, style),
+            ]));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_test_points_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    if area.width < 20 || area.height < 3 {
+        return;
+    }
+    let layout = if area.width < 60 {
+        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).split(area)
+    } else if area.width < 100 {
+        Layout::horizontal([
+            Constraint::Percentage(22),
+            Constraint::Percentage(48),
+            Constraint::Percentage(30),
+        ])
+        .split(area)
+    } else {
+        Layout::horizontal([
+            Constraint::Percentage(20),
+            Constraint::Percentage(50),
+            Constraint::Percentage(30),
+        ])
+        .split(area)
+    };
+
+    let ui = &mut app.test_points_ui;
+    let artifacts = app.authoring_ui.artifacts.as_ref();
+    let tree_focused = ui.focus == crate::test_points_tab::TestPointsFocus::Tree;
+    render_test_points_tree(frame, ui, artifacts, layout[0], tree_focused);
+
+    if layout.len() == 2 {
+        render_test_points_details(frame, ui, artifacts, layout[1], true);
+        return;
+    }
+
+    let details_focused = ui.focus == crate::test_points_tab::TestPointsFocus::Details;
+    let excerpts_focused = ui.focus == crate::test_points_tab::TestPointsFocus::Excerpts;
+    render_test_points_details(frame, ui, artifacts, layout[1], details_focused);
+    render_test_points_excerpts(frame, ui, artifacts, layout[2], excerpts_focused);
+}
+
+fn render_test_points_tree(
+    frame: &mut Frame<'_>,
+    ui: &mut crate::test_points_tab::TestPointsUiState,
+    artifacts: Option<&teshi_core::authoring::AuthoringArtifacts>,
+    area: Rect,
+    focused: bool,
+) {
+    let filter_label = match ui.review_filter {
+        crate::test_points_tab::ReviewFilter::All => "all",
+        crate::test_points_tab::ReviewFilter::Proposed => "proposed",
+        crate::test_points_tab::ReviewFilter::Approved => "approved",
+        crate::test_points_tab::ReviewFilter::Rejected => "rejected",
+        crate::test_points_tab::ReviewFilter::NeedsReview => "needs review",
+    };
+    let title = format!("Test points ({filter_label})");
+    let title_style = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_style(title_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    if artifacts.is_none() || ui.tree_items.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No test points yet. Create links from Requirements [4].")
+                .style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    }
+
+    let highlight_style = selected_style(focused);
+    let tree = Tree::new(&ui.tree_items)
+        .expect("test point tree")
+        .highlight_style(highlight_style);
+    frame.render_stateful_widget(tree, inner, &mut ui.tree_state);
+}
+
+fn render_test_points_details(
+    frame: &mut Frame<'_>,
+    ui: &mut crate::test_points_tab::TestPointsUiState,
+    artifacts: Option<&teshi_core::authoring::AuthoringArtifacts>,
+    area: Rect,
+    focused: bool,
+) {
+    let title_style = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Intent & review")
+        .title_style(title_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let Some(tp_id) = ui.selected_test_point_id.as_ref() else {
+        frame.render_widget(
+            Paragraph::new("Select a test point in the tree.")
+                .style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    };
+    let Some(tp) =
+        artifacts.and_then(|a| a.test_points.test_points.iter().find(|tp| &tp.id == tp_id))
+    else {
+        frame.render_widget(
+            Paragraph::new("Selected test point is unavailable.")
+                .style(Style::default().fg(Color::Red)),
+            inner,
+        );
+        return;
+    };
+
+    let fields = [
+        (
+            crate::test_points_tab::DetailField::Title,
+            "Title",
+            if ui.detail_field == crate::test_points_tab::DetailField::Title && ui.field_dirty {
+                ui.field_buffer.clone()
+            } else {
+                tp.title.clone()
+            },
+        ),
+        (
+            crate::test_points_tab::DetailField::Objective,
+            "Objective",
+            if ui.detail_field == crate::test_points_tab::DetailField::Objective && ui.field_dirty {
+                ui.field_buffer.clone()
+            } else {
+                tp.objective.clone()
+            },
+        ),
+        (
+            crate::test_points_tab::DetailField::Preconditions,
+            "Preconditions",
+            if ui.detail_field == crate::test_points_tab::DetailField::Preconditions
+                && ui.field_dirty
+            {
+                ui.field_buffer.clone()
+            } else {
+                tp.preconditions.clone().unwrap_or_default()
+            },
+        ),
+        (
+            crate::test_points_tab::DetailField::ExpectedOutcomes,
+            "Expected",
+            if ui.detail_field == crate::test_points_tab::DetailField::ExpectedOutcomes
+                && ui.field_dirty
+            {
+                ui.field_buffer.clone()
+            } else {
+                tp.expected_outcomes.clone().unwrap_or_default()
+            },
+        ),
+        (
+            crate::test_points_tab::DetailField::Hierarchy,
+            "Hierarchy",
+            if ui.detail_field == crate::test_points_tab::DetailField::Hierarchy && ui.field_dirty {
+                ui.field_buffer.clone()
+            } else {
+                tp.hierarchy_path.segments().join(" / ")
+            },
+        ),
+    ];
+
+    let mut lines = Vec::new();
+    let badge = crate::authoring_tab::review_state_label(tp.review_state);
+    let badge_style = crate::authoring_tab::review_state_style(tp.review_state);
+    lines.push(Line::from(vec![
+        Span::styled(format!("[{badge}] "), badge_style),
+        Span::styled(
+            crate::test_points_tab::review_state_name(tp.review_state),
+            Style::default().fg(Color::White),
+        ),
+        Span::raw(format!("  id: {}", tp.id)),
+    ]));
+
+    for (field, label, value) in fields {
+        let active = ui.detail_field == field;
+        let label_style = if active && focused {
+            selected_style(true)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let value_style = if active && focused {
+            selected_style(true)
+        } else {
+            Style::default()
+        };
+        let display =
+            truncate_string_to_cols(&value, inner.width.saturating_sub(label.len() as u16 + 3));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{label}: "), label_style),
+            Span::styled(display, value_style),
+        ]));
+    }
+
+    if !tp.scenario_refs.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            "Realized scenarios [o]:",
+            Style::default().fg(Color::DarkGray),
+        ));
+        for (i, sc_ref) in tp.scenario_refs.iter().enumerate() {
+            let label = sc_ref
+                .scenario_name
+                .clone()
+                .unwrap_or_else(|| format!("line {}", sc_ref.scenario_line.unwrap_or(0)));
+            let selected = i == ui.selected_scenario_ref_index;
+            let style = if selected && focused {
+                selected_style(true)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {} — {}", label, sc_ref.feature_path),
+                style,
+            )]));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_test_points_excerpts(
+    frame: &mut Frame<'_>,
+    ui: &mut crate::test_points_tab::TestPointsUiState,
+    artifacts: Option<&teshi_core::authoring::AuthoringArtifacts>,
+    area: Rect,
+    focused: bool,
+) {
+    let title_style = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Requirement excerpts")
+        .title_style(title_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let excerpts = match (ui.selected_test_point_id.as_ref(), artifacts) {
+        (Some(tp_id), Some(artifacts)) => artifacts
+            .test_points
+            .test_points
+            .iter()
+            .find(|tp| &tp.id == tp_id)
+            .map(|tp| crate::test_points_tab::excerpts_for_test_point(tp, artifacts))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    if excerpts.is_empty() {
+        lines.push(Line::styled(
+            " (no linked excerpts)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        for (i, excerpt) in excerpts.iter().enumerate() {
+            let res_label = match excerpt.resolution {
+                teshi_core::authoring::ResolutionState::Resolved => "ok",
+                teshi_core::authoring::ResolutionState::Stale => "stale",
+            };
+            let res_style = crate::test_points_tab::excerpt_resolution_style(excerpt.resolution);
+            let doc =
+                truncate_string_to_cols(&excerpt.document_title, inner.width.saturating_sub(8));
+            let quote = truncate_string_to_cols(&excerpt.quote, inner.width.saturating_sub(4));
+            let row_style = if i == ui.selected_excerpt_index {
+                selected_style(focused)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("[{res_label}] "), res_style),
+                Span::styled(doc, row_style),
+            ]));
+            lines.push(Line::from(vec![Span::styled(
+                format!("  \"{quote}\""),
+                row_style,
+            )]));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 #[cfg(test)]

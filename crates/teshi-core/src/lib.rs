@@ -1,5 +1,6 @@
 //! Shared Gherkin parsing, language support, highlighting, and desktop render payloads.
 
+pub mod authoring;
 pub mod daemon;
 pub mod diff;
 pub mod events;
