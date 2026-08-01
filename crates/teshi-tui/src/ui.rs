@@ -585,10 +585,12 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let greeting = Line::raw("Welcome to AI Chat! Type a message below and press Enter.");
         chat_lines.push(greeting);
         chat_lines.push(Line::raw(""));
-        if !crate::llm::LlmConfig::is_configured() {
+        if !crate::llm::is_configured() {
             chat_lines.push(
-                Line::raw("Note: Set TESHI_LLM_API_KEY to enable AI responses.")
-                    .style(Style::default().fg(Color::Yellow)),
+                Line::raw(
+                    "Note: Run 'teshi auth login' or set TESHI_LLM_API_KEY to enable AI responses.",
+                )
+                .style(Style::default().fg(Color::Yellow)),
             );
         }
     }
@@ -2144,10 +2146,12 @@ pub(crate) fn render_agent_chat_inner(
     if app.agent().messages.is_empty() {
         chat_lines.push(Line::raw("Welcome to AI Chat!"));
         chat_lines.push(Line::raw(""));
-        if !crate::llm::LlmConfig::is_configured() {
+        if !crate::llm::is_configured() {
             chat_lines.push(
-                Line::raw("Note: Set TESHI_LLM_API_KEY to enable AI responses.")
-                    .style(Style::default().fg(Color::Yellow)),
+                Line::raw(
+                    "Note: Run 'teshi auth login' or set TESHI_LLM_API_KEY to enable AI responses.",
+                )
+                .style(Style::default().fg(Color::Yellow)),
             );
         }
     }

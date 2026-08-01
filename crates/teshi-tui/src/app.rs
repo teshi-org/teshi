@@ -4116,7 +4116,7 @@ impl App {
                     if !crate::llm::is_configured() {
                         self.agent_mut().messages.push(AiChatMessage {
                                 role: AiRole::Assistant,
-                                content: "AI is not configured. Set TESHI_LLM_API_KEY in your environment to enable AI responses.".to_string(),
+                                content: "AI is not configured. Run 'teshi auth login', open the model panel, or set TESHI_LLM_API_KEY in your environment.".to_string(),
                                 tool_calls: None,
                                 tool_call_id: None,
                                 reasoning_content: None,
@@ -5146,10 +5146,10 @@ impl App {
                 self.status = "Sending message to AI...".to_string();
 
                 // If the LLM is not configured, add a mock response
-                if !crate::llm::is_configured() && self.config.default_provider_config().is_none() {
+                if !crate::llm::is_configured() {
                     self.agent_mut().messages.push(AiChatMessage {
                         role: AiRole::Assistant,
-                        content: "AI is not configured. Run 'teshi auth login' to configure a provider, or set TESHI_LLM_API_KEY in your environment.".to_string(),
+                        content: "AI is not configured. Run 'teshi auth login', open the model panel, or set TESHI_LLM_API_KEY in your environment.".to_string(),
                         tool_calls: None,
                         tool_call_id: None,
                         reasoning_content: None,

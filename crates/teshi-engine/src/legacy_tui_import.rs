@@ -111,8 +111,10 @@ pub fn ensure_tui_legacy_imported_at(
         return Ok(());
     }
 
-    let existing = list_json_profile_count(profiles_dir)?;
-    if existing > 0 {
+    // Only skip import when the store already has at least one profile with a real key.
+    // A keyless Default profile (created by the llm-config migration) must NOT block
+    // importing credentials from TUI auth sources.
+    if has_keyed_profiles(profiles_dir)? {
         write_marker(&marker)?;
         return Ok(());
     }
@@ -126,9 +128,12 @@ pub fn ensure_tui_legacy_imported_at(
         return Ok(());
     }
 
+    // Snapshot existing profiles once for duplicate detection on partial-import retry.
+    let existing = load_all_profiles(profiles_dir);
+
     let mut imported = import_toml_models(profiles_dir, &config_dir.join("models"))?;
     if imported.is_empty() {
-        imported = import_from_providers_and_auth(profiles_dir, config_dir)?;
+        imported = import_from_providers_and_auth(profiles_dir, config_dir, &existing)?;
     }
 
     // Prefer the legacy active pointer when it matches an imported id.
@@ -140,6 +145,8 @@ pub fn ensure_tui_legacy_imported_at(
         set_active_id_in(profiles_dir, first)?;
     }
 
+    // Write marker only after a fully successful pass (including deliberate no-ops).
+    // On error (propagated via `?` above) the marker is NOT written, so retry can finish.
     write_marker(&marker)?;
     Ok(())
 }
@@ -148,18 +155,49 @@ fn write_marker(path: &Path) -> Result<()> {
     fs::write(path, b"1").with_context(|| format!("write {}", path.display()))
 }
 
-fn list_json_profile_count(dir: &Path) -> Result<usize> {
+/// Returns true when `dir` contains at least one profile JSON with a non-empty `api_key`.
+///
+/// Used to distinguish a store that is genuinely configured (skip import) from one that
+/// only has keyless placeholder profiles created by the llm-config migration.
+fn has_keyed_profiles(dir: &Path) -> Result<bool> {
     if !dir.exists() {
-        return Ok(0);
+        return Ok(false);
     }
-    let mut count = 0;
     for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
         let entry = entry?;
-        if entry.path().extension().and_then(|e| e.to_str()) == Some("json") {
-            count += 1;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(profile) = serde_json::from_str::<ModelProfile>(&content) {
+                if !profile.api_key.trim().is_empty() {
+                    return Ok(true);
+                }
+            }
         }
     }
-    Ok(count)
+    Ok(false)
+}
+
+/// Load all parseable [`ModelProfile`] entries from `dir`, silently skipping
+/// non-JSON files and files that fail to parse.
+fn load_all_profiles(dir: &Path) -> Vec<ModelProfile> {
+    if !dir.exists() {
+        return Vec::new();
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|ex| ex.to_str()) == Some("json"))
+        .filter_map(|e| {
+            fs::read_to_string(e.path())
+                .ok()
+                .and_then(|c| serde_json::from_str::<ModelProfile>(&c).ok())
+        })
+        .collect()
 }
 
 fn read_legacy_active_id(config_dir: &Path) -> Option<String> {
@@ -194,6 +232,11 @@ fn import_toml_models(profiles_dir: &Path, models_dir: &Path) -> Result<Vec<Stri
         }
         let mut profile = toml_to_engine_profile(legacy);
         let id = profile.id.clone();
+        // Skip profiles already written by a prior partial-import attempt.
+        if profiles_dir.join(format!("{id}.json")).exists() {
+            ids.push(id);
+            continue;
+        }
         save_profile_in(profiles_dir, &mut profile)?;
         ids.push(id);
     }
@@ -230,7 +273,11 @@ fn toml_to_engine_profile(legacy: LegacyTomlProfile) -> ModelProfile {
     }
 }
 
-fn import_from_providers_and_auth(profiles_dir: &Path, config_dir: &Path) -> Result<Vec<String>> {
+fn import_from_providers_and_auth(
+    profiles_dir: &Path,
+    config_dir: &Path,
+    existing: &[ModelProfile],
+) -> Result<Vec<String>> {
     let auth = load_auth_keys(&config_dir.join("auth.json"))?;
     let config = load_app_config(&config_dir.join("config.toml"))?;
 
@@ -252,6 +299,14 @@ fn import_from_providers_and_auth(profiles_dir: &Path, config_dir: &Path) -> Res
             continue;
         }
         let engine_provider = map_legacy_provider_id(name);
+        // Skip if a keyed profile for this provider was already written on a prior
+        // partial-import attempt to avoid duplicates.
+        if existing
+            .iter()
+            .any(|p| p.provider == engine_provider && !p.api_key.trim().is_empty())
+        {
+            continue;
+        }
         let mut profile = ModelProfile::new(name.clone());
         profile.provider = engine_provider;
         profile.model_id = provider
@@ -280,8 +335,16 @@ fn import_from_providers_and_auth(profiles_dir: &Path, config_dir: &Path) -> Res
         if config.providers.contains_key(name) || key.trim().is_empty() {
             continue;
         }
+        let engine_provider = map_legacy_provider_id(name);
+        // Skip if a keyed profile for this provider was already written.
+        if existing
+            .iter()
+            .any(|p| p.provider == engine_provider && !p.api_key.trim().is_empty())
+        {
+            continue;
+        }
         let mut profile = ModelProfile::new(name.clone());
-        profile.provider = map_legacy_provider_id(name);
+        profile.provider = engine_provider;
         profile.api_key = key.clone();
         let id = profile.id.clone();
         save_profile_in(profiles_dir, &mut profile)?;
@@ -455,6 +518,79 @@ api_key = "sk-x"
 
         ensure_tui_legacy_imported_at(&profiles, Some(&config)).unwrap();
         assert!(!profiles.join("p1.json").exists());
+        assert!(profiles.join(TUI_IMPORT_MARKER).is_file());
+    }
+
+    #[test]
+    fn test_keyless_profile_does_not_block_tui_import() {
+        // A keyless Default profile (from llm-config migration) must not prevent
+        // importing credentials from TUI config sources.
+        let tmp = TempDir::new().unwrap();
+        let profiles = tmp.path().join("model-profiles");
+        fs::create_dir_all(&profiles).unwrap();
+        fs::write(
+            profiles.join("default.json"),
+            r#"{"id":"default","name":"Default","provider":"openai","model_id":"gpt-4o-mini","api_key":""}"#,
+        )
+        .unwrap();
+
+        let config = tmp.path().join("teshi");
+        let models = config.join("models");
+        fs::create_dir_all(&models).unwrap();
+        fs::write(
+            models.join("real.toml"),
+            r#"
+id = "real"
+name = "Real"
+provider = "openai"
+model = "gpt-4o"
+api_key = "sk-real"
+"#,
+        )
+        .unwrap();
+
+        ensure_tui_legacy_imported_at(&profiles, Some(&config)).unwrap();
+        assert!(
+            profiles.join("real.json").exists(),
+            "import must proceed past keyless placeholder"
+        );
+        assert!(profiles.join(TUI_IMPORT_MARKER).is_file());
+    }
+
+    #[test]
+    fn test_partial_keyless_profiles_without_marker_import_continues() {
+        // Simulate: keyless profiles exist (no marker), e.g. from a failed prior import
+        // or llm-config migration. Import must continue and add the keyed TOML profile.
+        let tmp = TempDir::new().unwrap();
+        let profiles = tmp.path().join("model-profiles");
+        fs::create_dir_all(&profiles).unwrap();
+        // Partial state: a keyless profile from a previous step, no marker.
+        fs::write(
+            profiles.join("partial.json"),
+            r#"{"id":"partial","name":"Partial","provider":"openai","model_id":"","api_key":""}"#,
+        )
+        .unwrap();
+
+        let config = tmp.path().join("teshi");
+        let models = config.join("models");
+        fs::create_dir_all(&models).unwrap();
+        fs::write(
+            models.join("newprofile.toml"),
+            r#"
+id = "newprofile"
+name = "New"
+provider = "anthropic"
+model = "claude-3-haiku-20240307"
+api_key = "sk-ant-test"
+"#,
+        )
+        .unwrap();
+
+        ensure_tui_legacy_imported_at(&profiles, Some(&config)).unwrap();
+        assert!(
+            profiles.join("newprofile.json").exists(),
+            "import must continue past partial keyless state"
+        );
         assert!(profiles.join(TUI_IMPORT_MARKER).is_file());
     }
 }
