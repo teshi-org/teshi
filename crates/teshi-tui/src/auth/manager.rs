@@ -16,7 +16,12 @@ pub struct CredentialEntry {
     pub key: String,
 }
 
-/// Manages credential storage at `~/.teshi/auth.json`.
+/// Legacy credential storage at `<config_dir>/teshi/auth.json`.
+///
+/// Runtime LLM credentials now live on shared engine model profiles.
+/// This manager remains only so `${auth:provider}` placeholders in older
+/// `config.toml` files can still resolve during layered config load, and so
+/// one-time import can read existing keys.
 ///
 /// Handles read/write with `0600` file permissions on Unix.
 /// Reading a file with unsafe permissions produces a warning but does not fail.
@@ -57,6 +62,7 @@ impl CredentialManager {
     ///
     /// On Unix, sets file permissions to `0o600` after writing.
     /// On other platforms, no permission changes are applied.
+    #[allow(dead_code)] // retained for tests and rare legacy repair paths
     pub fn save(&self, credentials: &HashMap<String, CredentialEntry>) -> Result<()> {
         let dir = self
             .path
@@ -92,11 +98,13 @@ impl CredentialManager {
     }
 
     /// Returns the path to the auth store.
+    #[allow(dead_code)] // retained for tests and status helpers
     pub fn path(&self) -> &PathBuf {
         &self.path
     }
 
     /// Masks an API key for display: shows first 4 and last 4 characters.
+    #[allow(dead_code)] // retained for tests
     pub fn mask_key(key: &str) -> String {
         if key.len() <= 8 {
             return "*".repeat(key.len());

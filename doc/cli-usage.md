@@ -103,16 +103,29 @@ Environment:
 
 ---
 
-### Auth management
+### LLM profiles (`teshi auth`)
+
+TUI, CLI, Desktop, and the daemon share one model-profile store under the Teshi app data directory:
+
+| Platform | Default path |
+|----------|----------------|
+| Windows | `%APPDATA%\teshi\model-profiles\` |
+| Linux / macOS | `$XDG_DATA_HOME/teshi/model-profiles` (often `~/.local/share/teshi/model-profiles`) |
+
+Override the root with `TESHI_APP_DATA_DIR`. Legacy `%APPDATA%\teshi-desktop` data and older TUI `config.toml` / `auth.json` / `models/*.toml` are imported once automatically.
 
 ```bash
-teshi auth login                    # interactive: choose provider + enter key
-teshi auth login --provider openai  # specify provider
-teshi auth list                     # show stored providers (keys masked)
-teshi auth remove openai            # delete credentials
-teshi auth status                   # show config paths and credential status
-teshi auth migrate                  # import from env vars (TESHI_OPENAI_API_KEY, etc.)
+teshi auth login                    # interactive: provider + key → profile (activated)
+teshi auth login --provider openai  # specify built-in provider id
+teshi auth list                     # list profiles (keys masked)
+teshi auth remove openai            # clear API key on matching provider profile(s)
+teshi auth status                   # show app-data paths and profile status
+teshi auth migrate                  # import keys from TESHI_* / OPENAI_* env vars into profiles
 ```
+
+Built-in provider ids: `openai`, `anthropic`, `deepseek-openai`. For Ollama or other OpenAI-compatible servers, use `openai` with a custom base URL (the login flow offers an Ollama shortcut).
+
+In the TUI, press `m` to open the model panel (same store). `/auth` shows a read-only overview.
 
 ---
 
@@ -122,51 +135,21 @@ teshi auth migrate                  # import from env vars (TESHI_OPENAI_API_KEY
 
 | Scope | Path |
 |-------|------|
-| Global | `~/.teshi/config.toml` |
+| LLM profiles (shared) | `<app_data>/teshi/model-profiles/*.json` + `active` pointer |
+| Global (legacy / non-LLM) | `<config_dir>/teshi/config.toml` |
 | Project | `./.teshi/config.toml` |
 | Runner | `./teshi.toml` (working directory) |
 
-### Format (TOML)
+### Runner format (`teshi.toml`)
 
 ```toml
-# Default AI provider
-default_provider = "deepseek"
-
-# Provider definitions
-[providers.deepseek]
-base_url = "https://api.deepseek.com"
-model = "deepseek-chat"
-api_key = "${auth:deepseek}"   # resolves from ~/.teshi/auth.json
-
-[providers.openai]
-base_url = "https://api.openai.com/v1"
-model = "gpt-4o"
-api_key = "${auth:openai}"
-
-# Custom provider (Ollama, etc.)
-[providers.ollama]
-base_url = "http://localhost:11434/v1"
-model = "llama3"
-api_key = "ollama"              # Ollama doesn't need a real key
-
-# Runner configuration (teshi.toml)
 [runner]
 cmd = "teshi-runner"
 args = ["--bin", "runner"]
 cwd = "."
-
-# LLM settings
-[llm]
-max_tokens = 4096
-temperature = 0.7
 ```
 
-### Placeholders
-
-- `${auth:provider}` — loads API key from `~/.teshi/auth.json`
-- `${env:VAR}` — loads from environment variable
-
-API keys should **never** be written directly in config files. Use `teshi auth login` or `${env:VAR}` instead.
+Older `[providers.*]` blocks and `${auth:…}` placeholders in `config.toml` are no longer the runtime LLM source of truth; they are only imported once into model profiles when the shared store is empty.
 
 ---
 
@@ -174,12 +157,12 @@ API keys should **never** be written directly in config files. Use `teshi auth l
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `TESHI_DEFAULT_PROVIDER` | — | Override default LLM provider |
-| `TESHI_LLM_API_KEY` | — | LLM API key |
-| `TESHI_LLM_BASE_URL` | `https://api.openai.com/v1` | LLM API base URL |
-| `TESHI_LLM_MODEL` | `gpt-4o-mini` | LLM model name |
-| `TESHI_LLM_MAX_TOKENS` | `1024` | Max tokens per completion |
-| `TESHI_LLM_TEMPERATURE` | `0.7` | Sampling temperature |
+| `TESHI_APP_DATA_DIR` | OS data dir + `teshi` | Override shared app-data root (profiles, settings, recent) |
+| `TESHI_LLM_API_KEY` | — | Fallback LLM API key when no active profile has a key |
+| `TESHI_LLM_BASE_URL` | `https://api.openai.com/v1` | Fallback LLM API base URL |
+| `TESHI_LLM_MODEL` | `gpt-4o-mini` | Fallback LLM model name |
+| `TESHI_LLM_MAX_TOKENS` | `1024` | Max tokens per completion (env fallback) |
+| `TESHI_LLM_TEMPERATURE` | `0.7` | Sampling temperature (env fallback) |
 | `TESHI_RUNNER_CMD` | — | Override runner command |
 | `TESHI_RUNNER_ARGS` | — | Override runner args (space-separated) |
 | `TESHI_RUNNER_CWD` | current dir | Override runner working directory |
@@ -258,23 +241,12 @@ See [desktop/README.md](../desktop/README.md) for development setup.
 
 ---
 
-## Auth storage
+## LLM profile storage
 
-Credentials are stored in `~/.teshi/auth.json` with `0600` permissions:
+Each profile is a JSON file under `<app_data>/teshi/model-profiles/{id}.json`. The active profile id is stored in `model-profiles/active`.
 
-```json
-{
-  "deepseek": {
-    "api_key": "sk-abc123...",
-    "added_at": "2026-01-15T10:30:00Z"
-  },
-  "openai": {
-    "api_key": "sk-xyz789...",
-    "added_at": "2026-02-20T14:00:00Z"
-  }
-}
-```
+Typical fields: `id`, `name`, `provider`, `api_style`, `model_id`, `base_url`, `api_key`, `max_output_tokens`, `stream`, `http_headers`, `chat_options`.
 
-- Atomic writes via temp file + rename
-- Warning displayed if file permissions are not `0600`
-- `teshi auth list` masks keys: shows first 4 + last 4 characters only
+- Desktop Settings, TUI model panel (`m`), `teshi auth`, and daemon `/api/v1/llm/profiles` all read/write this store.
+- Public listings mask API keys; empty key on save preserves the previously stored key.
+- When no active profile has a key, runtime falls back to `TESHI_LLM_*`.

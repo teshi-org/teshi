@@ -779,8 +779,8 @@ impl App {
             status_message_deadline: None,
             config,
             auth_panel_active: false,
-            model_profiles: crate::profiles::ModelProfile::load_all(),
-            model_active_id: crate::profiles::ModelProfile::read_active_id(),
+            model_profiles: crate::profiles::load_all(),
+            model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
             model_panel_selection: 0,
             model_panel_mode: ModelPanelMode::List,
@@ -923,8 +923,8 @@ impl App {
             status_message_deadline: None,
             config,
             auth_panel_active: false,
-            model_profiles: crate::profiles::ModelProfile::load_all(),
-            model_active_id: crate::profiles::ModelProfile::read_active_id(),
+            model_profiles: crate::profiles::load_all(),
+            model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
             model_panel_selection: 0,
             model_panel_mode: ModelPanelMode::List,
@@ -1057,8 +1057,8 @@ impl App {
             status_message_deadline: None,
             config,
             auth_panel_active: false,
-            model_profiles: crate::profiles::ModelProfile::load_all(),
-            model_active_id: crate::profiles::ModelProfile::read_active_id(),
+            model_profiles: crate::profiles::load_all(),
+            model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
             model_panel_selection: 0,
             model_panel_mode: ModelPanelMode::List,
@@ -1217,42 +1217,31 @@ impl App {
         }
     }
 
-    /// Spawn the LLM worker thread if `TESHI_LLM_API_KEY` is set and no handle exists yet.
+    /// Spawn the LLM worker when the shared profile store or `TESHI_LLM_*` is usable.
     pub fn spawn_llm_if_configured(&mut self) {
         if self.agent_mut().llm_handle.is_some() {
             return;
         }
-        // Try the new config-based approach first
-        if let Some((name, provider)) = self.config.default_provider_config() {
-            match crate::llm::LlmConfig::from_provider_config(name, provider) {
-                Ok(config) => {
-                    self.active_model_label = Some(format!("{name} ({})", config.model));
-                    self.status = format!(
-                        "LLM configured: model={}, base_url={}",
-                        config.model, config.base_url
-                    );
-                    let (handle, rx) = crate::llm::spawn_llm(config);
-                    self.agent_mut().llm_handle = Some(handle);
-                    self.agent_mut().llm_rx = Some(rx);
-                    return;
-                }
-                Err(e) => {
-                    self.status = format!("LLM not configured: {e}");
-                    return;
-                }
-            }
-        }
-        // Fall back to legacy env-var config
-        match crate::llm::LlmConfig::from_env() {
-            Ok(config) => {
-                self.active_model_label = Some(format!("env: {}", config.model));
+        match crate::llm::effective_config() {
+            Ok(config) if !config.api_key.trim().is_empty() => {
+                let label = teshi_engine::load_active_profile()
+                    .ok()
+                    .flatten()
+                    .map(|p| format!("{} ({})", p.name, config.model))
+                    .unwrap_or_else(|| format!("env: {}", config.model));
+                self.active_model_label = Some(label);
                 self.status = format!(
-                    "LLM configured: model={}, base_url={}",
-                    config.model, config.base_url
+                    "LLM configured: model={}, base_url={}, provider={}",
+                    config.model, config.base_url, config.provider
                 );
                 let (handle, rx) = crate::llm::spawn_llm(config);
                 self.agent_mut().llm_handle = Some(handle);
                 self.agent_mut().llm_rx = Some(rx);
+            }
+            Ok(_) => {
+                self.status =
+                    "LLM not configured: set an API key on a model profile or TESHI_LLM_API_KEY"
+                        .to_string();
             }
             Err(e) => {
                 self.status = format!("LLM not configured: {e}");
@@ -1273,20 +1262,26 @@ impl App {
         self.activate_model_profile(&profile);
     }
 
-    /// Respawn the LLM worker thread using the given model profile's configuration.
+    /// Respawn the LLM worker thread using the given shared model profile.
     fn activate_model_profile(&mut self, profile: &crate::profiles::ModelProfile) {
-        let config = crate::llm::LlmConfig {
-            api_key: profile.api_key.clone(),
-            base_url: profile.base_url.clone(),
-            model: profile.model.clone(),
-            max_tokens: profile.max_tokens,
-            temperature: profile.temperature,
-            context_window: None,
+        let config = match teshi_engine::profile_to_llm_config(profile) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                self.status = format!("Failed to activate profile: {e}");
+                return;
+            }
         };
+        if config.api_key.trim().is_empty() {
+            self.status = format!(
+                "Profile '{}' has no API key; set one or use TESHI_LLM_API_KEY",
+                profile.name
+            );
+            return;
+        }
         let (handle, rx) = crate::llm::spawn_llm(config);
         self.agent_mut().llm_handle = Some(handle);
         self.agent_mut().llm_rx = Some(rx);
-        self.active_model_label = Some(format!("{} ({})", profile.name, profile.model));
+        self.active_model_label = Some(format!("{} ({})", profile.name, profile.model_id));
         self.status = format!("Switched to model: {}", profile.name);
     }
 
@@ -2298,9 +2293,23 @@ impl App {
         self.set_status_message("AI cleared filter".into());
     }
 
-    /// Get the context window size from the active provider config.
-    /// Falls back to 128000 if not configured.
+    /// Get the context window size, preferring the active model profile's setting.
+    ///
+    /// Resolution order:
+    /// 1. `max_context_tokens` from the in-memory active model profile (when set).
+    /// 2. `context_window` from config.toml provider settings.
+    /// 3. Hard-coded default of 128 000.
     fn active_context_window(&self) -> u32 {
+        // Prefer the active profile's max_context_tokens when available.
+        if let Some(profile) = self
+            .model_profiles
+            .iter()
+            .find(|p| self.model_active_id.as_deref() == Some(p.id.as_str()))
+            && let Some(tokens) = profile.max_context_tokens
+        {
+            return tokens;
+        }
+        // Fall back to config.toml provider setting.
         self.config
             .default_provider_config()
             .and_then(|(_, p)| p.context_window)
@@ -4121,10 +4130,10 @@ impl App {
                     self.agent_mut().agent_loop_count = 0;
                     self.status = "Sending MindMap context to AI...".to_string();
 
-                    if !crate::llm::LlmConfig::is_configured() {
+                    if !crate::llm::is_configured() {
                         self.agent_mut().messages.push(AiChatMessage {
                                 role: AiRole::Assistant,
-                                content: "AI is not configured. Set TESHI_LLM_API_KEY in your environment to enable AI responses.".to_string(),
+                                content: "AI is not configured. Run 'teshi auth login', open the model panel, or set TESHI_LLM_API_KEY in your environment.".to_string(),
                                 tool_calls: None,
                                 tool_call_id: None,
                                 reasoning_content: None,
@@ -4243,7 +4252,7 @@ impl App {
                 self.model_panel_active = true;
                 self.model_panel_selection = 0;
                 self.model_panel_mode = ModelPanelMode::List;
-                self.model_profiles = crate::profiles::ModelProfile::load_all();
+                self.model_profiles = crate::profiles::load_all();
                 self.status =
                     "Model profiles [m]. a add · e edit · ↑↓ select · Enter activate · Esc close"
                         .to_string();
@@ -4268,7 +4277,7 @@ impl App {
             Action::ModelPanelActivate => {
                 if let Some(profile) = self.model_profiles.get(self.model_panel_selection).cloned()
                 {
-                    if let Err(e) = crate::profiles::ModelProfile::write_active_id(&profile.id) {
+                    if let Err(e) = crate::profiles::write_active_id(&profile.id) {
                         self.status = format!("Failed to save active profile: {e}");
                     } else {
                         self.model_active_id = Some(profile.id.clone());
@@ -4298,13 +4307,14 @@ impl App {
                     self.model_form_editing_id = Some(profile.id.clone());
                     self.model_panel_mode = ModelPanelMode::Editing;
                     self.model_form_focus = 0;
+                    self.model_form_temperature =
+                        crate::profiles::profile_temperature(&profile).to_string();
                     self.model_form_name = profile.name;
                     self.model_form_provider = profile.provider;
-                    self.model_form_model = profile.model;
+                    self.model_form_model = profile.model_id;
                     self.model_form_base_url = profile.base_url;
                     self.model_form_api_key = profile.api_key;
-                    self.model_form_max_tokens = profile.max_tokens.to_string();
-                    self.model_form_temperature = profile.temperature.to_string();
+                    self.model_form_max_tokens = profile.max_output_tokens.to_string();
                     self.status = "Edit the fields and press Enter to save.".to_string();
                 }
                 self.quit_pending_confirm = false;
@@ -4313,19 +4323,30 @@ impl App {
                 if let Some(profile) = self.model_profiles.get(self.model_panel_selection).cloned()
                 {
                     let name = profile.name.clone();
-                    if let Err(e) = profile.delete_from_disk() {
+                    let deleted_id = profile.id.clone();
+                    if let Err(e) = crate::profiles::delete_profile(&deleted_id) {
                         self.status = format!("Failed to delete profile: {e}");
                     } else {
-                        self.model_profiles = crate::profiles::ModelProfile::load_all();
+                        self.model_profiles = crate::profiles::load_all();
+                        self.model_active_id = crate::profiles::read_active_id();
                         if self.model_panel_selection >= self.model_profiles.len() {
                             self.model_panel_selection =
                                 self.model_profiles.len().saturating_sub(1);
                         }
-                        // If the deleted profile was active, clear the active state
-                        if self.model_active_id.as_deref() == Some(&profile.id) {
-                            self.model_active_id = None;
+                        // Engine may have activated a sibling; respawn from the new active.
+                        self.agent_mut().llm_handle = None;
+                        self.agent_mut().llm_rx = None;
+                        if let Some(id) = self.model_active_id.clone() {
+                            if let Some(p) =
+                                self.model_profiles.iter().find(|p| p.id == id).cloned()
+                            {
+                                self.activate_model_profile(&p);
+                            } else {
+                                self.active_model_label = None;
+                                self.spawn_llm_if_configured();
+                            }
+                        } else {
                             self.active_model_label = None;
-                            // Fall back to env-var config
                             self.spawn_llm_if_configured();
                         }
                         self.status = format!("Deleted profile: {name}");
@@ -4390,9 +4411,9 @@ impl App {
                     return Ok(());
                 }
                 let provider = if self.model_form_provider.trim().is_empty() {
-                    "openai".to_string()
+                    teshi_engine::PROVIDER_OPENAI.to_string()
                 } else {
-                    self.model_form_provider.trim().to_string()
+                    crate::profiles::normalize_provider(self.model_form_provider.trim())
                 };
                 let model = self.model_form_model.trim().to_string();
                 if model.is_empty() {
@@ -4400,20 +4421,16 @@ impl App {
                     self.quit_pending_confirm = false;
                     return Ok(());
                 }
-                let base_url = if self.model_form_base_url.trim().is_empty() {
-                    "https://api.openai.com/v1".to_string()
-                } else {
-                    self.model_form_base_url.trim().to_string()
-                };
+                let base_url = self.model_form_base_url.trim().to_string();
                 let api_key = self.model_form_api_key.trim().to_string();
                 let max_tokens: u32 = self.model_form_max_tokens.trim().parse().unwrap_or(4096);
                 let temperature: f32 = self.model_form_temperature.trim().parse().unwrap_or(0.7);
 
                 let is_editing = self.model_form_editing_id.is_some();
 
-                let profile = if let Some(ref edit_id) = self.model_form_editing_id {
+                let mut profile = if let Some(ref edit_id) = self.model_form_editing_id {
                     // Editing existing profile — preserve the original ID.
-                    let mut p = match self
+                    match self
                         .model_profiles
                         .iter()
                         .find(|p| p.id == *edit_id)
@@ -4425,26 +4442,19 @@ impl App {
                             self.quit_pending_confirm = false;
                             return Ok(());
                         }
-                    };
-                    p.name = name;
-                    p.provider = provider;
-                    p.model = model;
-                    p.base_url = base_url;
-                    p.api_key = api_key;
-                    p.max_tokens = max_tokens;
-                    p.temperature = temperature;
-                    p
+                    }
                 } else {
-                    // Adding new profile.
-                    let mut p =
-                        crate::profiles::ModelProfile::new(&name, &provider, &model, &base_url);
-                    p.api_key = api_key;
-                    p.max_tokens = max_tokens;
-                    p.temperature = temperature;
-                    p
+                    teshi_engine::ModelProfile::new(name.clone())
                 };
+                profile.name = name;
+                profile.provider = provider;
+                profile.model_id = model;
+                profile.base_url = base_url;
+                profile.api_key = api_key;
+                profile.max_output_tokens = max_tokens;
+                crate::profiles::set_profile_temperature(&mut profile, temperature);
 
-                if let Err(e) = profile.save_to_disk() {
+                if let Err(e) = crate::profiles::save(&mut profile) {
                     self.status = format!("Failed to save profile: {e}");
                     self.quit_pending_confirm = false;
                     return Ok(());
@@ -4452,23 +4462,19 @@ impl App {
 
                 if is_editing {
                     self.status = format!("Updated profile: {}", profile.name);
-                    // Re-activate if the edited profile was active
                     if self.model_active_id.as_deref() == Some(&profile.id) {
                         self.activate_model_profile(&profile);
                     }
+                } else if let Err(e) = crate::profiles::write_active_id(&profile.id) {
+                    self.status = format!("Profile saved but failed to activate: {e}");
                 } else {
-                    // Auto-activate the new profile
-                    if let Err(e) = crate::profiles::ModelProfile::write_active_id(&profile.id) {
-                        self.status = format!("Profile saved but failed to activate: {e}");
-                    } else {
-                        self.model_active_id = Some(profile.id.clone());
-                        self.activate_model_profile(&profile);
-                        self.status = format!("Added and activated profile: {}", profile.name);
-                    }
+                    self.model_active_id = Some(profile.id.clone());
+                    self.activate_model_profile(&profile);
+                    self.status = format!("Added and activated profile: {}", profile.name);
                 }
 
                 self.model_form_editing_id = None;
-                self.model_profiles = crate::profiles::ModelProfile::load_all();
+                self.model_profiles = crate::profiles::load_all();
                 self.model_panel_mode = ModelPanelMode::List;
                 self.model_panel_selection = 0;
                 self.quit_pending_confirm = false;
@@ -5157,12 +5163,10 @@ impl App {
                 self.status = "Sending message to AI...".to_string();
 
                 // If the LLM is not configured, add a mock response
-                if !crate::llm::LlmConfig::is_configured()
-                    && self.config.default_provider_config().is_none()
-                {
+                if !crate::llm::is_configured() {
                     self.agent_mut().messages.push(AiChatMessage {
                         role: AiRole::Assistant,
-                        content: "AI is not configured. Run 'teshi auth login' to configure a provider, or set TESHI_LLM_API_KEY in your environment.".to_string(),
+                        content: "AI is not configured. Run 'teshi auth login', open the model panel, or set TESHI_LLM_API_KEY in your environment.".to_string(),
                         tool_calls: None,
                         tool_call_id: None,
                         reasoning_content: None,
@@ -7086,7 +7090,7 @@ impl App {
         self.model_panel_active = true;
         self.model_panel_selection = 0;
         self.model_panel_mode = ModelPanelMode::List;
-        self.model_profiles = crate::profiles::ModelProfile::load_all();
+        self.model_profiles = crate::profiles::load_all();
         self.status = "Model profiles [m]. a add · e edit · ↑↓ select · Enter activate · Esc close"
             .to_string();
         Ok(())
@@ -7788,8 +7792,8 @@ mod tests {
             status_message_deadline: None,
             config: crate::config::load_config().unwrap(),
             auth_panel_active: false,
-            model_profiles: crate::profiles::ModelProfile::load_all(),
-            model_active_id: crate::profiles::ModelProfile::read_active_id(),
+            model_profiles: crate::profiles::load_all(),
+            model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
             model_panel_selection: 0,
             active_model_label: None,
@@ -7947,8 +7951,8 @@ Feature: B
             status_message_deadline: None,
             config: crate::config::load_config().unwrap(),
             auth_panel_active: false,
-            model_profiles: crate::profiles::ModelProfile::load_all(),
-            model_active_id: crate::profiles::ModelProfile::read_active_id(),
+            model_profiles: crate::profiles::load_all(),
+            model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
             model_panel_selection: 0,
             active_model_label: None,
