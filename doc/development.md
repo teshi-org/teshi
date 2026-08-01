@@ -155,6 +155,26 @@ Workflow: [`.github/workflows/release.yml`](../.github/workflows/release.yml)
 
 WinGet submission (CLI MSI only) runs automatically when `WINGET_TOKEN` is configured. Legacy standalone workflow: [`.github/workflows/winget.yml`](../.github/workflows/winget.yml).
 
+### Nightly (pre-release) builds
+
+Nightly builds publish the same asset set as stable releases, but from the `dev` branch as GitHub **pre-releases** (no WinGet submission).
+
+| Trigger | Workflow |
+|---------|----------|
+| Push to `dev` | [`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml) |
+| Daily 06:00 UTC | same (rebuilds `dev` tip if not already published) |
+| Manual | `gh workflow run nightly.yml` |
+
+Tag format: `v{semver}-nightly.{YYYYMMDD}.{short_sha}` (for example `v0.7.9-nightly.20260801.dc6c942`), derived from `apps/teshi-cli/Cargo.toml` version + UTC date + commit.
+
+```powershell
+gh run list --workflow=nightly.yml --limit 3
+gh release list --prerelease
+gh release download v0.7.9-nightly.20260801.dc6c942 --dir ./nightly-check
+```
+
+Stable releases remain tag-driven on `main` (`vX.Y.Z`). Merge `dev` → `main` and run `scripts/release.py` for production releases.
+
 Windows installer source: `wix/` (WiX Toolset).
 
 Local full MSI build (Windows, matches CI): install [WiX Toolset](https://wixtoolset.org/) and `cargo install cargo-wix --locked --version 0.3.9`, stage `staging/msi-root/bin`, `share/web`, and `share/teshi-bridge`, run `heat` on both trees into `wix/web-files.wxs` and `wix/bridge-files.wxs`, then:

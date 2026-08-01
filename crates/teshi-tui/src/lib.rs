@@ -87,42 +87,6 @@ impl Command for DisableAppMouseCapture {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{DisableAppMouseCapture, EnableAppMouseCapture, write_diagnostic_event};
-    use crossterm::Command;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-
-    #[test]
-    fn mouse_capture_uses_multiplexer_compatible_modes() {
-        let mut enable = String::new();
-        EnableAppMouseCapture.write_ansi(&mut enable).unwrap();
-        assert_eq!(enable, "\x1b[?1000h\x1b[?1003h\x1b[?1015h\x1b[?1006h");
-
-        let mut disable = String::new();
-        DisableAppMouseCapture.write_ansi(&mut disable).unwrap();
-        assert_eq!(disable, "\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1000l");
-    }
-
-    #[test]
-    fn diagnostic_events_redact_typed_and_pasted_text() {
-        let secret = "sk-secret-value";
-        let mut output = Vec::new();
-
-        write_diagnostic_event(
-            &mut output,
-            &Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
-        )
-        .unwrap();
-        write_diagnostic_event(&mut output, &Event::Paste(secret.to_string())).unwrap();
-
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("Char(<redacted>)"));
-        assert!(output.contains("Paste(<redacted>)"));
-        assert!(!output.contains(secret));
-    }
-}
-
 use app::App;
 use keymap::{Action, KeyContext};
 
@@ -340,4 +304,40 @@ pub fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DisableAppMouseCapture, EnableAppMouseCapture, write_diagnostic_event};
+    use crossterm::Command;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn mouse_capture_uses_multiplexer_compatible_modes() {
+        let mut enable = String::new();
+        EnableAppMouseCapture.write_ansi(&mut enable).unwrap();
+        assert_eq!(enable, "\x1b[?1000h\x1b[?1003h\x1b[?1015h\x1b[?1006h");
+
+        let mut disable = String::new();
+        DisableAppMouseCapture.write_ansi(&mut disable).unwrap();
+        assert_eq!(disable, "\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1000l");
+    }
+
+    #[test]
+    fn diagnostic_events_redact_typed_and_pasted_text() {
+        let secret = "sk-secret-value";
+        let mut output = Vec::new();
+
+        write_diagnostic_event(
+            &mut output,
+            &Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+        )
+        .unwrap();
+        write_diagnostic_event(&mut output, &Event::Paste(secret.to_string())).unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Char(<redacted>)"));
+        assert!(output.contains("Paste(<redacted>)"));
+        assert!(!output.contains(secret));
+    }
 }

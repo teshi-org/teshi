@@ -18,20 +18,107 @@ on:
         options:
           - full
           - windows-only
+  workflow_call:
+    inputs:
+      release_tag:
+        description: "Release tag to publish (for example: v0.7.9-nightly.20260801.abc1234)"
+        required: true
+        type: string
+      source_ref:
+        description: "Git ref to build (branch, tag, or SHA). Defaults to release_tag."
+        required: false
+        type: string
+        default: ""
+      prerelease:
+        description: "Mark the GitHub release as a pre-release"
+        required: false
+        type: boolean
+        default: false
+      skip_winget:
+        description: "Skip WinGet manifest submission"
+        required: false
+        type: boolean
+        default: false
+      run_scope:
+        description: "Workflow scope: full release or windows-only retry"
+        required: false
+        type: string
+        default: full
 
 concurrency:
-  group: release-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+  group: release-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.event_name == 'workflow_call' && inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
   contents: write
 
-env:
-  RESOLVED_REF: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref }}
-
 jobs:
+  resolve:
+    name: Resolve release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      source_ref: ${{ steps.meta.outputs.source_ref }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      skip_winget: ${{ steps.meta.outputs.skip_winget }}
+      run_scope: ${{ steps.meta.outputs.run_scope }}
+    steps:
+      - name: Resolve tag and build ref
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          event="${{ github.event_name }}"
+          if [ "${event}" = "workflow_call" ]; then
+            tag="${{ inputs.release_tag }}"
+            source_ref="${{ inputs.source_ref }}"
+            if [ -z "${source_ref}" ]; then
+              source_ref="${tag}"
+            fi
+            prerelease="${{ inputs.prerelease }}"
+            skip_winget="${{ inputs.skip_winget }}"
+            run_scope="${{ inputs.run_scope }}"
+          elif [ "${event}" = "workflow_dispatch" ]; then
+            tag="${{ github.event.inputs.release_tag }}"
+            source_ref="${tag}"
+            if echo "${tag}" | grep -q -- '-nightly'; then
+              prerelease=true
+              skip_winget=true
+            else
+              prerelease=false
+              skip_winget=false
+            fi
+            run_scope="${{ github.event.inputs.run_scope }}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+            source_ref="${{ github.ref }}"
+            if echo "${tag}" | grep -q -- '-nightly'; then
+              prerelease=true
+              skip_winget=true
+            else
+              prerelease=false
+              skip_winget=false
+            fi
+            run_scope=full
+          fi
+
+          if [[ ! "${tag}" =~ ^v.+$ ]]; then
+            echo "Tag must start with 'v' (got: ${tag})." >&2
+            exit 1
+          fi
+
+          {
+            echo "tag=${tag}"
+            echo "source_ref=${source_ref}"
+            echo "prerelease=${prerelease}"
+            echo "skip_winget=${skip_winget}"
+            echo "run_scope=${run_scope}"
+          } >> "${GITHUB_OUTPUT}"
+
   build:
     name: Build (${{ matrix.target }})
+    needs: resolve
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -48,7 +135,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.RESOLVED_REF }}
+          ref: ${{ needs.resolve.outputs.source_ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -100,11 +187,10 @@ jobs:
       - name: Build combined MSI installer
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
         run: |
-          $tag = "${{ github.ref_name }}"
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $tag = "${{ github.event.inputs.release_tag }}"
-          }
+          $tag = $env:RELEASE_TAG
           if (-not $tag.StartsWith("v")) { throw "Release tag must start with 'v' (got: $tag)." }
 
           $stagingRoot = "staging/msi-root"
@@ -179,34 +265,25 @@ jobs:
   publish:
     name: Publish Release Assets
     runs-on: ubuntu-latest
-    needs: build
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_scope != 'windows-only' }}
+    needs: [build, resolve]
+    if: ${{ needs.resolve.outputs.run_scope != 'windows-only' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.RESOLVED_REF }}
+          ref: ${{ needs.resolve.outputs.source_ref }}
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Resolve release tag
-        id: release_meta
-        shell: bash
-        run: |
-          tag="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}"
-          if [[ ! "${tag}" =~ ^v.+$ ]]; then echo "Tag must start with 'v' (got: ${tag})." >&2; exit 1; fi
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "tag_sha=$(git rev-list -n 1 "${tag}")" >> "$GITHUB_OUTPUT"
-
       - name: Package release assets
         shell: bash
         run: |
           set -euo pipefail
-          version="${{ steps.release_meta.outputs.tag }}"
+          version="${{ needs.resolve.outputs.tag }}"
           mkdir -p dist
 
           artifacts_dir="${{ github.workspace }}/artifacts"
@@ -248,8 +325,10 @@ jobs:
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.release_meta.outputs.tag }}
-          generate_release_notes: true
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          target_commitish: ${{ needs.resolve.outputs.source_ref }}
+          prerelease: ${{ needs.resolve.outputs.prerelease == 'true' }}
+          generate_release_notes: ${{ needs.resolve.outputs.prerelease != 'true' }}
           files: |
             dist/*.zip
             dist/*.tar.gz
@@ -259,8 +338,8 @@ jobs:
   submit_winget:
     name: Submit WinGet manifest
     runs-on: windows-latest
-    needs: publish
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_scope != 'windows-only' }}
+    needs: [publish, resolve]
+    if: ${{ needs.resolve.outputs.run_scope != 'windows-only' && needs.resolve.outputs.skip_winget != 'true' }}
 
     steps:
       - name: Install wingetcreate
@@ -270,14 +349,14 @@ jobs:
       - name: Submit MSI to winget-pkgs
         shell: pwsh
         env:
-          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:WINGET_TOKEN)) {
             Write-Host "Skipping WinGet submission: WINGET_TOKEN not configured."
             exit 0
           }
 
-          $tag = "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}"
+          $tag = $env:RELEASE_TAG
           $version = $tag.TrimStart('v')
           $msiUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/teshi-$tag-x64.msi"
           $prTitle = "Add teshi $version"

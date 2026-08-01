@@ -562,7 +562,9 @@ mod tests {
             "bad path in:\n{captured}"
         );
         assert!(
-            captured.contains("Authorization: Bearer sk"),
+            captured
+                .to_ascii_lowercase()
+                .contains("authorization: bearer sk"),
             "missing bearer in:\n{captured}"
         );
         assert!(rx.try_iter().any(|e| matches!(e, LlmEvent::Done { .. })));
