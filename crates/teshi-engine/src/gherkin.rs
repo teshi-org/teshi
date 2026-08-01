@@ -88,10 +88,10 @@ pub fn rebuild_and_emit_step_index(events: &RuntimeEvents, project_root: &Path) 
                         let f = &project.features[loc.feature_idx];
                         let scenario = if loc.scenario_idx == usize::MAX {
                             "<Background>".to_string()
-                        } else if loc.scenario_idx < f.scenarios.len() {
-                            f.scenarios[loc.scenario_idx].name.clone()
                         } else {
-                            format!("<Rule-{}>", loc.scenario_idx)
+                            f.scenario_at(loc.scenario_idx)
+                                .map(|s| s.name.clone())
+                                .unwrap_or_else(|| format!("<unknown-{}>", loc.scenario_idx))
                         };
                         serde_json::json!({
                             "feature": f.file_path.strip_prefix(project_root).unwrap_or(&f.file_path).to_string_lossy(),

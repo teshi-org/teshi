@@ -156,17 +156,7 @@ pub fn sync_scenario_refs_from_project(project: &BddProject, test_points: &mut [
             .to_string_lossy()
             .replace('\\', "/");
 
-        let mut all_scenarios = Vec::new();
-        for sc in &feature.scenarios {
-            all_scenarios.push(sc);
-        }
-        for rule in &feature.rules {
-            for sc in &rule.scenarios {
-                all_scenarios.push(sc);
-            }
-        }
-
-        for sc in all_scenarios {
+        for sc in feature.all_scenarios() {
             let ids = parse_teshi_tp_tags_for_test_points(&sc.tags, test_points);
             if ids.is_empty() {
                 continue;

@@ -1269,9 +1269,9 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .project
         .features
         .get(app.explore_selected_feature)
-        .map(|f| &f.scenarios);
+        .map(|f| f.all_scenarios());
 
-    if scenarios.is_none_or(|s| s.is_empty()) {
+    if scenarios.as_ref().is_none_or(|s| s.is_empty()) {
         lines.push(Line::styled(
             " (no scenarios)",
             Style::default().fg(Color::DarkGray),
@@ -1323,7 +1323,7 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .project
         .features
         .get(app.explore_selected_feature)
-        .map(|f| &f.scenarios)
+        .map(|f| f.all_scenarios())
     {
         for (i, _scenario) in scenarios.iter().enumerate() {
             app.clickable_regions
@@ -1342,7 +1342,7 @@ fn explore_scenarios_title(app: &App) -> String {
         .project
         .features
         .get(app.explore_selected_feature)
-        .map(|f| f.scenarios.len())
+        .map(|f| f.scenario_count())
         .unwrap_or(0);
     format!("Scenarios ({count})")
 }
@@ -1368,7 +1368,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
 
         let feature = app.project.features.get(app.explore_selected_feature);
-        let scenario = feature.and_then(|f| f.scenarios.get(app.explore_selected_scenario));
+        let scenario = feature.and_then(|f| f.scenario_at(app.explore_selected_scenario));
         let scenario_steps = scenario.map(|s| s.steps.as_slice()).unwrap_or(&[]);
 
         // Determine line-number range of the current scenario's steps
@@ -1440,7 +1440,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut line_idx = inner.y;
 
     let feature = app.project.features.get(app.explore_selected_feature);
-    let scenario = feature.and_then(|f| f.scenarios.get(app.explore_selected_scenario));
+    let scenario = feature.and_then(|f| f.scenario_at(app.explore_selected_scenario));
     let background_steps = feature
         .and_then(|f| f.background.as_ref())
         .map(|bg| bg.steps.as_slice())
@@ -1640,7 +1640,7 @@ fn render_failure_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(feature) = app.project.features.get(fi) else {
         return;
     };
-    let Some(scenario) = feature.scenarios.get(si) else {
+    let Some(scenario) = feature.scenario_at(si) else {
         return;
     };
 
@@ -2015,7 +2015,7 @@ fn render_scenario_dropdown(
                     .project
                     .features
                     .get(loc.feature_idx)
-                    .and_then(|f| f.scenarios.get(sci))
+                    .and_then(|f| f.scenario_at(sci))
                     .map(|s| s.name.as_str())
                     .unwrap_or("?");
                 format!("{}: Scenario: {}", feature_name, scenario_name)
@@ -2883,7 +2883,7 @@ fn render_reserved_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .project
             .features
             .get(app.explore_selected_feature)
-            .and_then(|f| f.scenarios.get(app.explore_selected_scenario))
+            .and_then(|f| f.scenario_at(app.explore_selected_scenario))
             .map(|s| s.name.as_str())
             .unwrap_or("-");
         truncate_lines(build_case_detail_lines(scenario_name, detail), inner.width)
@@ -3003,7 +3003,7 @@ fn render_explore_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .project
         .features
         .get(app.explore_selected_feature)
-        .and_then(|f| f.scenarios.get(app.explore_selected_scenario))
+        .and_then(|f| f.scenario_at(app.explore_selected_scenario))
         .map(|s| s.name.clone())
         .unwrap_or_else(|| "-".to_string());
     let left = format!("{feature_name}  {scenario_name}");
@@ -3012,7 +3012,7 @@ fn render_explore_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .project
         .features
         .get(app.explore_selected_feature)
-        .map(|f| f.scenarios.len())
+        .map(|f| f.scenario_count())
         .unwrap_or(0);
     let right = if let Some(summary) = &app.explore_run_summary {
         format!(
@@ -4594,6 +4594,25 @@ mod truncate_tests {
         app.project.features = vec![feature];
         app.explore_selected_feature = 0;
         assert_eq!(explore_scenarios_title(&app), "Scenarios (2)");
+    }
+
+    #[test]
+    fn test_explore_scenarios_title_counts_rule_nested_scenarios() {
+        let mut app = App::from_args().expect("app init should work");
+        let feature = gherkin::parse_feature(
+            "\
+Feature: Rule only
+  Rule: R1
+    Scenario: Nested
+      Given a
+",
+            PathBuf::from("rule.feature"),
+        );
+        assert!(feature.scenarios.is_empty());
+        assert_eq!(feature.scenario_count(), 1);
+        app.project.features = vec![feature];
+        app.explore_selected_feature = 0;
+        assert_eq!(explore_scenarios_title(&app), "Scenarios (1)");
     }
 
     #[test]

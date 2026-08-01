@@ -720,11 +720,10 @@ async fn api_step_catalog(
                         json!({
                             "feature": feature.file_path.strip_prefix(&root).unwrap_or(&feature.file_path).to_string_lossy(),
                             "scenario": if loc.scenario_idx == usize::MAX { "<Background>".to_string() } else {
-                                if loc.scenario_idx < feature.scenarios.len() {
-                                    feature.scenarios[loc.scenario_idx].name.clone()
-                                } else {
-                                    format!("<Rule-{}>", loc.scenario_idx)
-                                }
+                                feature
+                                    .scenario_at(loc.scenario_idx)
+                                    .map(|s| s.name.clone())
+                                    .unwrap_or_else(|| format!("<unknown-{}>", loc.scenario_idx))
                             },
                             "line": loc.step_idx,
                         })
@@ -933,7 +932,7 @@ async fn api_run(
     if feature_path.is_dir() {
         let project = teshi_core::parse_project(&feature_path);
         for (fi, feature) in project.features.iter().enumerate() {
-            for (si, scenario) in feature.scenarios.iter().enumerate() {
+            for (si, scenario) in feature.all_scenarios().into_iter().enumerate() {
                 if let Some(ref name) = body.scenario {
                     if scenario.name != *name {
                         continue;
@@ -953,7 +952,7 @@ async fn api_run(
         let content = std::fs::read_to_string(&feature_path)
             .map_err(|e| ApiError::internal(format!("read feature: {e}")))?;
         let feature = teshi_core::parse_feature(&content, feature_path.clone());
-        for (si, scenario) in feature.scenarios.iter().enumerate() {
+        for (si, scenario) in feature.all_scenarios().into_iter().enumerate() {
             if let Some(ref name) = body.scenario {
                 if scenario.name != *name {
                     continue;

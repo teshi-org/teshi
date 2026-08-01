@@ -176,13 +176,16 @@ fn execute_get_project_info(app: &crate::app::App) -> Result<String> {
         ));
     }
 
-    let total_scenarios: usize = project.features.iter().map(|f| f.scenarios.len()).sum();
+    let total_scenarios: usize = project.features.iter().map(|f| f.scenario_count()).sum();
     let total_steps: usize = project
         .features
         .iter()
         .map(|f| {
             f.background.as_ref().map(|bg| bg.steps.len()).unwrap_or(0)
-                + f.scenarios.iter().map(|s| s.steps.len()).sum::<usize>()
+                + f.all_scenarios()
+                    .iter()
+                    .map(|s| s.steps.len())
+                    .sum::<usize>()
         })
         .sum();
     let total_backgrounds: usize = project

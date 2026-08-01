@@ -1115,7 +1115,8 @@ impl App {
         if self.explore_selected_feature >= feature_len {
             self.explore_selected_feature = feature_len - 1;
         }
-        let scenarios = &self.project.features[self.explore_selected_feature].scenarios;
+        let feature = &self.project.features[self.explore_selected_feature];
+        let scenarios = feature.all_scenarios();
         if scenarios.is_empty() {
             self.explore_selected_scenario = 0;
             self.explore_selected_step = 0;
@@ -1626,8 +1627,12 @@ impl App {
 
         for f in &self.project.features {
             let path = f.file_path.to_string_lossy();
-            let sc_count = f.scenarios.len();
-            let st_count: usize = f.scenarios.iter().map(|s| s.steps.len()).sum::<usize>()
+            let sc_count = f.scenario_count();
+            let st_count: usize = f
+                .all_scenarios()
+                .iter()
+                .map(|s| s.steps.len())
+                .sum::<usize>()
                 + f.background.as_ref().map(|bg| bg.steps.len()).unwrap_or(0);
             ctx.push_str(&format!(
                 "  {path}: {sc_count} scenario(s), {st_count} step(s)"
@@ -3220,7 +3225,7 @@ impl App {
         };
         match self.explore_focus {
             ColumnFocus::Feature => {
-                for (si, scenario) in feature.scenarios.iter().enumerate() {
+                for (si, scenario) in feature.all_scenarios().into_iter().enumerate() {
                     cases.push(build_case(
                         self.explore_selected_feature,
                         si,
@@ -3230,7 +3235,7 @@ impl App {
                 }
             }
             ColumnFocus::Scenario | ColumnFocus::Step => {
-                if let Some(scenario) = feature.scenarios.get(self.explore_selected_scenario) {
+                if let Some(scenario) = feature.scenario_at(self.explore_selected_scenario) {
                     cases.push(build_case(
                         self.explore_selected_feature,
                         self.explore_selected_scenario,
@@ -3341,7 +3346,7 @@ impl App {
                     .project
                     .features
                     .get(self.explore_selected_feature)
-                    .map(|f| f.scenarios.len())
+                    .map(|f| f.scenario_count())
                     .unwrap_or(0);
                 let next = clamp_idx(self.explore_selected_scenario as isize + delta, scenarios);
                 if next != self.explore_selected_scenario {
@@ -3353,7 +3358,7 @@ impl App {
                     .project
                     .features
                     .get(self.explore_selected_feature)
-                    .and_then(|f| f.scenarios.get(self.explore_selected_scenario))
+                    .and_then(|f| f.scenario_at(self.explore_selected_scenario))
                     .map(|s| s.steps.len())
                     .unwrap_or(0);
                 let next = clamp_idx(self.explore_selected_step as isize + delta, steps);
@@ -3387,9 +3392,9 @@ impl App {
             }
             ColumnFocus::Scenario => {
                 if let Some(f) = self.project.features.get(self.explore_selected_feature)
-                    && !f.scenarios.is_empty()
+                    && f.scenario_count() > 0
                 {
-                    self.explore_set_scenario(f.scenarios.len() - 1);
+                    self.explore_set_scenario(f.scenario_count() - 1);
                 }
             }
             ColumnFocus::Step => {
@@ -3397,7 +3402,7 @@ impl App {
                     .project
                     .features
                     .get(self.explore_selected_feature)
-                    .and_then(|f| f.scenarios.get(self.explore_selected_scenario))
+                    .and_then(|f| f.scenario_at(self.explore_selected_scenario))
                     && !s.steps.is_empty()
                 {
                     self.explore_selected_step = s.steps.len() - 1;
@@ -3431,7 +3436,7 @@ impl App {
 
     fn explore_selected_step_line(&self) -> Option<usize> {
         let feature = self.project.features.get(self.explore_selected_feature)?;
-        let scenario = feature.scenarios.get(self.explore_selected_scenario)?;
+        let scenario = feature.scenario_at(self.explore_selected_scenario)?;
         let step = scenario.steps.get(self.explore_selected_step)?;
         Some(step.line_number)
     }
@@ -3449,7 +3454,7 @@ impl App {
             .project
             .features
             .get(self.explore_selected_feature)
-            .and_then(|f| f.scenarios.get(self.explore_selected_scenario))
+            .and_then(|f| f.scenario_at(self.explore_selected_scenario))
         {
             // scenario.line_number is 1-based, convert to 0-based row
             let scenario_row = scenario.line_number.saturating_sub(1);
@@ -3557,7 +3562,7 @@ impl App {
 
         let (mut start_line, mut end_line, title) = match loc.context {
             mindmap::LocationContext::Scenario(sci) => {
-                let Some(scenario) = feature.scenarios.get(sci) else {
+                let Some(scenario) = feature.scenario_at(sci) else {
                     self.set_empty_preview();
                     return;
                 };
@@ -3577,7 +3582,7 @@ impl App {
                 }
 
                 let mut end = buffer_lines;
-                if let Some(next_sc) = feature.scenarios.get(sci + 1) {
+                if let Some(next_sc) = feature.scenario_at(sci + 1) {
                     end = next_sc.line_number.saturating_sub(1).max(1);
                 }
                 if end < start {
@@ -3601,7 +3606,7 @@ impl App {
                 };
                 let start = bg.line_number.max(1);
                 let mut end = buffer_lines;
-                if let Some(first_sc) = feature.scenarios.first() {
+                if let Some(first_sc) = feature.all_scenarios().into_iter().next() {
                     end = first_sc.line_number.saturating_sub(1).max(1);
                 }
                 if end < start {
@@ -5794,15 +5799,15 @@ impl App {
                 .project
                 .features
                 .get(feature_idx)
-                .and_then(|f| f.scenarios.iter().position(|s| s.name == name))
+                .and_then(|f| f.all_scenarios().into_iter().position(|s| s.name == name))
         {
             self.explore_set_scenario(scenario_idx);
         } else if let Some(line) = sc_ref.scenario_line
-            && let Some(scenario_idx) = self
-                .project
-                .features
-                .get(feature_idx)
-                .and_then(|f| f.scenarios.iter().position(|s| s.line_number == line))
+            && let Some(scenario_idx) = self.project.features.get(feature_idx).and_then(|f| {
+                f.all_scenarios()
+                    .into_iter()
+                    .position(|s| s.line_number == line)
+            })
         {
             self.explore_set_scenario(scenario_idx);
         }
@@ -5911,7 +5916,7 @@ impl App {
         let feature = self.project.features.get(feature_idx)?;
         let line_number = self.cursor_row + 1;
         let mut selected = None;
-        for (scenario_idx, scenario) in feature.scenarios.iter().enumerate() {
+        for (scenario_idx, scenario) in feature.all_scenarios().into_iter().enumerate() {
             if scenario.line_number <= line_number {
                 selected = Some(scenario_idx);
             } else {
