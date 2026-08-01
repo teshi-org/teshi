@@ -529,7 +529,10 @@ fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
 /// A clickable region registered during rendering for mouse hit-testing.
 #[derive(Debug, Clone)]
 pub enum ClickableRegion {
-    Tab(MainTab),
+    Tab {
+        tab: MainTab,
+        rect: ratatui::layout::Rect,
+    },
     Tree,
     /// Approval mode badge in the chat panel title bar (click to open picker).
     ApprovalBadge {
@@ -6313,32 +6316,12 @@ impl App {
 
     /// Find the first clickable region that contains `pos`.
     fn hit_test(&self, pos: &ratatui::layout::Position) -> Option<&ClickableRegion> {
-        // Tab bar: row is always 0, check x-position against known label widths
-        if pos.y == 0 {
-            let tab_bar_x = 0; // tab bar starts at column 0
-            let tab_labels = [
-                (MainTab::Explore, " Explore [1] ", 0u16),
-                (MainTab::MindMap, " MindMap [2] ", 13u16),
-                (MainTab::Ai, " AI [3] ", 27u16),
-                (MainTab::Requirements, " Requirements [4] ", 36u16),
-                (MainTab::TestPoints, " Test Points [5] ", 54u16),
-            ];
-            for &(ref tab, label, start_x) in &tab_labels {
-                let end_x = start_x + label.chars().count() as u16;
-                if pos.x >= tab_bar_x + start_x && pos.x < tab_bar_x + end_x {
-                    // Return a matching Tab region from clickable_regions
-                    return self
-                        .clickable_regions
-                        .iter()
-                        .find(|r| matches!(r, ClickableRegion::Tab(t) if *t == *tab));
-                }
-            }
-        }
-
         for region in &self.clickable_regions {
             match region {
-                ClickableRegion::Tab(_) => {
-                    // Already handled above
+                ClickableRegion::Tab { rect, .. } => {
+                    if rect.contains(*pos) {
+                        return Some(region);
+                    }
                 }
                 ClickableRegion::Tree => {
                     if let Some(rect) = self.tree_panel_rect
@@ -6440,9 +6423,8 @@ impl App {
         pos: &ratatui::layout::Position,
     ) -> Result<()> {
         match region {
-            ClickableRegion::Tab(tab) => {
-                self.active_tab = *tab;
-                self.status = format!("Switched to {tab:?} tab");
+            ClickableRegion::Tab { tab, .. } => {
+                self.select_tab(*tab);
             }
             ClickableRegion::Tree => {
                 // tui-tree-widget uses absolute terminal coordinates internally
@@ -7128,12 +7110,15 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
-        AgentPanelMode, AgentThread, App, BddFocusSlot, ColumnFocus, MainTab, MindMapFocus,
-        ModelPanelMode, ViewStage, current_step_keyword_index, replace_step_keyword_line,
+        AgentPanelMode, AgentThread, App, BddFocusSlot, ClickableRegion, ColumnFocus, MainTab,
+        MindMapFocus, ModelPanelMode, ViewStage, current_step_keyword_index,
+        replace_step_keyword_line,
     };
     use crate::bdd_nav::step_edit_start_col;
     use crate::editor_buffer::EditorBuffer;
     use crate::keymap::Action;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
     use teshi_core::StepIndex;
     use teshi_core::gherkin_lang::GherkinLanguages;
 
@@ -7147,6 +7132,14 @@ mod tests {
         app.active_tab = MainTab::MindMap;
         app.view_stage = ViewStage::EditorAndPanel;
         app
+    }
+
+    fn render_test_app(app: &mut App, width: u16) {
+        let backend = TestBackend::new(width, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+        terminal
+            .draw(|frame| crate::ui::render(frame, app))
+            .expect("test UI should render");
     }
 
     fn temp_feature_path(name: &str) -> PathBuf {
@@ -7422,6 +7415,124 @@ mod tests {
         app.handle_action(Action::SelectTab(MainTab::TestPoints))
             .expect("select test points");
         assert_eq!(app.active_tab, MainTab::TestPoints);
+    }
+
+    #[test]
+    fn test_rendered_tab_titles_are_clickable_across_their_full_width() {
+        let mut app = App::from_args().expect("app init should work");
+        render_test_app(&mut app, 100);
+
+        let expected = [
+            (MainTab::Explore, Rect::new(1, 0, 13, 1)),
+            (MainTab::MindMap, Rect::new(17, 0, 13, 1)),
+            (MainTab::Ai, Rect::new(33, 0, 8, 1)),
+            (MainTab::Requirements, Rect::new(44, 0, 18, 1)),
+            (MainTab::TestPoints, Rect::new(65, 0, 17, 1)),
+        ];
+        let actual = app
+            .clickable_regions
+            .iter()
+            .filter_map(|region| match region {
+                ClickableRegion::Tab { tab, rect } => Some((*tab, *rect)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+
+        for (tab, rect) in expected {
+            for x in [rect.left(), rect.left() + rect.width / 2, rect.right() - 1] {
+                app.active_tab = if tab == MainTab::Explore {
+                    MainTab::Ai
+                } else {
+                    MainTab::Explore
+                };
+                app.handle_mouse_event(
+                    MouseEventKind::Down(MouseButton::Left),
+                    x,
+                    rect.top(),
+                    KeyModifiers::NONE,
+                )
+                .expect("tab click should succeed");
+                assert_eq!(app.active_tab, tab, "click at column {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_clipped_tab_title_only_registers_visible_columns() {
+        let mut app = App::from_args().expect("app init should work");
+        render_test_app(&mut app, 70);
+
+        let test_points_rect = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::Tab {
+                    tab: MainTab::TestPoints,
+                    rect,
+                } => Some(*rect),
+                _ => None,
+            })
+            .expect("partially visible Test Points tab should be registered");
+        assert_eq!(test_points_rect, Rect::new(65, 0, 5, 1));
+
+        for x in test_points_rect.left()..test_points_rect.right() {
+            app.active_tab = MainTab::Explore;
+            app.handle_mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                x,
+                0,
+                KeyModifiers::NONE,
+            )
+            .expect("visible clipped tab click should succeed");
+            assert_eq!(app.active_tab, MainTab::TestPoints);
+        }
+
+        app.active_tab = MainTab::Explore;
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            64,
+            0,
+            KeyModifiers::NONE,
+        )
+        .expect("padding click should succeed");
+        assert_eq!(app.active_tab, MainTab::Explore);
+    }
+
+    #[test]
+    fn test_mouse_tab_selection_uses_standard_state_transition() {
+        let mut app = App::from_args().expect("app init should work");
+        app.active_tab = MainTab::Explore;
+        app.view_stage = ViewStage::EditorAndPanel;
+        app.mindmap_focus = MindMapFocus::AiPanel;
+        app.ai_input_focused = true;
+        app.scenario_dropdown_open = true;
+        app.explore_edit_mode = true;
+        app.explore_detail_open = true;
+        app.explore_detail_case = Some((0, 0));
+        app.pending_char = Some('g');
+        app.quit_pending_confirm = true;
+        render_test_app(&mut app, 100);
+
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            17,
+            0,
+            KeyModifiers::NONE,
+        )
+        .expect("MindMap tab click should succeed");
+
+        assert_eq!(app.active_tab, MainTab::MindMap);
+        assert_eq!(app.view_stage, ViewStage::TreeOnly);
+        assert_eq!(app.mindmap_focus, MindMapFocus::Main);
+        assert!(!app.ai_input_focused);
+        assert!(!app.scenario_dropdown_open);
+        assert!(!app.explore_edit_mode);
+        assert!(!app.explore_detail_open);
+        assert!(app.explore_detail_case.is_none());
+        assert!(app.pending_char.is_none());
+        assert!(!app.quit_pending_confirm);
+        assert_eq!(app.status, "Switched to MindMap tab");
     }
 
     #[test]

@@ -41,6 +41,58 @@ const SELECTION_BG: Color = Color::Rgb(64, 96, 160);
 const SELECTION_FG: Color = Color::White;
 const HIGHLIGHT_SELECTED_FG: Color = Color::Yellow;
 const HIGHLIGHT_UNFOCUSED_FG: Color = Color::Cyan;
+const MAIN_TABS: &[(MainTab, &str)] = &[
+    (MainTab::Explore, " Explore [1] "),
+    (MainTab::MindMap, " MindMap [2] "),
+    (MainTab::Ai, " AI [3] "),
+    (MainTab::Requirements, " Requirements [4] "),
+    (MainTab::TestPoints, " Test Points [5] "),
+];
+const TAB_PADDING_LEFT: &str = " ";
+const TAB_PADDING_RIGHT: &str = " ";
+const TAB_DIVIDER: &str = " ";
+
+fn register_tab_regions(app: &mut App, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+
+    // Mirror `ratatui::Tabs` rendering: left padding, visible title, right
+    // padding, then a divider. Keeping these values beside `MAIN_TABS` and
+    // applying them explicitly to the widget keeps rendering and hit-testing
+    // on the same coordinate system.
+    let mut x = area.left();
+    let right = area.right();
+    let padding_left_width = TAB_PADDING_LEFT.width() as u16;
+    let padding_right_width = TAB_PADDING_RIGHT.width() as u16;
+    let divider_width = TAB_DIVIDER.width() as u16;
+
+    for (index, &(tab, title)) in MAIN_TABS.iter().enumerate() {
+        x = x.saturating_add(padding_left_width.min(right.saturating_sub(x)));
+        if x >= right {
+            break;
+        }
+
+        let width = (title.width() as u16).min(right.saturating_sub(x));
+        if width == 0 {
+            break;
+        }
+        app.clickable_regions.push(ClickableRegion::Tab {
+            tab,
+            rect: Rect::new(x, area.top(), width, 1),
+        });
+        x = x.saturating_add(width);
+        if x >= right {
+            break;
+        }
+
+        x = x.saturating_add(padding_right_width.min(right.saturating_sub(x)));
+        if x >= right || index == MAIN_TABS.len() - 1 {
+            break;
+        }
+        x = x.saturating_add(divider_width.min(right.saturating_sub(x)));
+    }
+}
 
 /// Braille spinner frames for the thinking indicator.
 fn spinner_frame() -> &'static str {
@@ -245,13 +297,12 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         ])
         .split(frame.area());
 
-    let top_tabs = Tabs::new(vec![
-        Line::from(" Explore [1] "),
-        Line::from(" MindMap [2] "),
-        Line::from(" AI [3] "),
-        Line::from(" Requirements [4] "),
-        Line::from(" Test Points [5] "),
-    ])
+    let top_tabs = Tabs::new(
+        MAIN_TABS
+            .iter()
+            .map(|&(_, title)| Line::from(title))
+            .collect::<Vec<_>>(),
+    )
     .select(match app.active_tab {
         MainTab::Explore => 0,
         MainTab::MindMap => 1,
@@ -265,20 +316,11 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
     )
-    .divider(" ");
+    .padding(TAB_PADDING_LEFT, TAB_PADDING_RIGHT)
+    .divider(TAB_DIVIDER);
     frame.render_widget(top_tabs, chunks[0]);
 
-    // Push tab regions for click/hover tracking
-    app.clickable_regions
-        .push(ClickableRegion::Tab(MainTab::Explore));
-    app.clickable_regions
-        .push(ClickableRegion::Tab(MainTab::MindMap));
-    app.clickable_regions
-        .push(ClickableRegion::Tab(MainTab::Ai));
-    app.clickable_regions
-        .push(ClickableRegion::Tab(MainTab::Requirements));
-    app.clickable_regions
-        .push(ClickableRegion::Tab(MainTab::TestPoints));
+    register_tab_regions(app, chunks[0]);
 
     let divider_w = chunks[1].width as usize;
     let divider_line = "─".repeat(divider_w.max(1));
