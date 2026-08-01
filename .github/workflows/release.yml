@@ -44,9 +44,19 @@ on:
         required: false
         type: string
         default: full
+      invoked_via_call:
+        description: "True when this workflow runs as a reusable workflow caller"
+        required: false
+        type: boolean
+        default: false
+      release_body:
+        description: "Optional GitHub release description (overrides auto-generated notes when set)"
+        required: false
+        type: string
+        default: ""
 
 concurrency:
-  group: release-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.event_name == 'workflow_call' && inputs.release_tag || github.ref_name }}
+  group: release-${{ inputs.release_tag || github.event.inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -62,23 +72,40 @@ jobs:
       prerelease: ${{ steps.meta.outputs.prerelease }}
       skip_winget: ${{ steps.meta.outputs.skip_winget }}
       run_scope: ${{ steps.meta.outputs.run_scope }}
+      release_body: ${{ steps.meta.outputs.release_body }}
     steps:
       - name: Resolve tag and build ref
         id: meta
+        env:
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+          INPUT_SKIP_WINGET: ${{ inputs.skip_winget }}
+          INPUT_RUN_SCOPE: ${{ inputs.run_scope }}
+          INPUT_INVOKED_VIA_CALL: ${{ inputs.invoked_via_call }}
+          INPUT_RELEASE_BODY: ${{ inputs.release_body }}
         shell: bash
         run: |
           set -euo pipefail
 
           event="${{ github.event_name }}"
-          if [ "${event}" = "workflow_call" ]; then
-            tag="${{ inputs.release_tag }}"
-            source_ref="${{ inputs.source_ref }}"
+          release_body=""
+          # Reusable workflows inherit the caller's github.event_name (e.g. push), not
+          # workflow_call. Use an explicit caller flag instead of github.event_name.
+          if [ "${INPUT_INVOKED_VIA_CALL}" = "true" ]; then
+            tag="${INPUT_RELEASE_TAG}"
+            if [ -z "${tag}" ]; then
+              echo "workflow_call requires release_tag input." >&2
+              exit 1
+            fi
+            source_ref="${INPUT_SOURCE_REF}"
             if [ -z "${source_ref}" ]; then
               source_ref="${tag}"
             fi
-            prerelease="${{ inputs.prerelease }}"
-            skip_winget="${{ inputs.skip_winget }}"
-            run_scope="${{ inputs.run_scope }}"
+            prerelease="${INPUT_PRERELEASE}"
+            skip_winget="${INPUT_SKIP_WINGET}"
+            run_scope="${INPUT_RUN_SCOPE:-full}"
+            release_body="${INPUT_RELEASE_BODY}"
           elif [ "${event}" = "workflow_dispatch" ]; then
             tag="${{ github.event.inputs.release_tag }}"
             source_ref="${tag}"
@@ -90,9 +117,9 @@ jobs:
               skip_winget=false
             fi
             run_scope="${{ github.event.inputs.run_scope }}"
-          else
+          elif [ "${event}" = "push" ] && [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             tag="${GITHUB_REF#refs/tags/}"
-            source_ref="${{ github.ref }}"
+            source_ref="${GITHUB_REF}"
             if echo "${tag}" | grep -q -- '-nightly'; then
               prerelease=true
               skip_winget=true
@@ -101,6 +128,9 @@ jobs:
               skip_winget=false
             fi
             run_scope=full
+          else
+            echo "Unsupported release trigger: event=${event}, ref=${GITHUB_REF}" >&2
+            exit 1
           fi
 
           if [[ ! "${tag}" =~ ^v.+$ ]]; then
@@ -115,6 +145,14 @@ jobs:
             echo "skip_winget=${skip_winget}"
             echo "run_scope=${run_scope}"
           } >> "${GITHUB_OUTPUT}"
+
+          if [ -n "${release_body}" ]; then
+            {
+              echo "release_body<<EOF"
+              printf '%s\n' "${release_body}"
+              echo "EOF"
+            } >> "${GITHUB_OUTPUT}"
+          fi
 
   build:
     name: Build (${{ matrix.target }})
@@ -329,6 +367,7 @@ jobs:
           target_commitish: ${{ needs.resolve.outputs.source_ref }}
           prerelease: ${{ needs.resolve.outputs.prerelease == 'true' }}
           generate_release_notes: ${{ needs.resolve.outputs.prerelease != 'true' }}
+          body: ${{ needs.resolve.outputs.release_body }}
           files: |
             dist/*.zip
             dist/*.tar.gz

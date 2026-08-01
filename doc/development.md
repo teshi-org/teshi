@@ -162,7 +162,7 @@ Nightly builds publish the same asset set as stable releases, but from the `dev`
 | Trigger | Workflow |
 |---------|----------|
 | Push to `dev` | [`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml) |
-| Daily 06:00 UTC | same (rebuilds `dev` tip if not already published) |
+| Daily 06:00 UTC | same (uses workflow file on the **default branch**; sync `dev` → `main` to keep schedule active) |
 | Manual | `gh workflow run nightly.yml` |
 
 Tag format: `v{semver}-nightly.{YYYYMMDD}.{short_sha}` (for example `v0.7.9-nightly.20260801.dc6c942`), derived from `apps/teshi-cli/Cargo.toml` version + UTC date + commit.
