@@ -119,11 +119,32 @@ fn copy_if_exists(src_root: &Path, dst_root: &Path, name: &str) -> Result<()> {
         return Ok(());
     }
     let dst = dst_root.join(name);
-    if dst.exists() {
-        // Prefer anything already present in the new root.
+    if dst.is_dir() {
+        // Destination directory already exists: merge missing files from source so that
+        // an empty or partially-filled directory gets completed. Files already present
+        // in dst are never overwritten, preserving any data the user has set up.
+        merge_dir_into(&src, &dst)?;
         return Ok(());
     }
     copy_dir_recursive(&src, &dst)
+}
+
+/// Copy files from `src` into `dst`, skipping files that already exist in `dst`.
+fn merge_dir_into(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst).with_context(|| format!("create {}", dst.display()))?;
+    for entry in fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            merge_dir_into(&from, &to)?;
+        } else if file_type.is_file() && !to.exists() {
+            fs::copy(&from, &to)
+                .with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn copy_file_if_exists(src_root: &Path, dst_root: &Path, name: &str) -> Result<()> {
@@ -289,7 +310,9 @@ mod tests {
     }
 
     #[test]
-    fn test_migrate_skips_when_new_root_already_has_profiles_dir() {
+    fn test_migrate_merges_missing_profiles_when_dst_dir_exists() {
+        // When dst model-profiles/ already has some profiles, legacy profiles that are
+        // missing from dst must be merged in (not skipped). Existing dst files are kept.
         let tmp = TempDir::new().unwrap();
         let legacy = tmp.path().join("teshi-desktop");
         let neu = tmp.path().join("teshi");
@@ -299,6 +322,7 @@ mod tests {
             r#"{"id":"old","name":"Old","provider":"openai","model_id":"a","api_key":"k"}"#,
         )
         .unwrap();
+        // dst already has a different profile.
         fs::create_dir_all(neu.join("model-profiles")).unwrap();
         fs::write(
             neu.join("model-profiles/keep.json"),
@@ -307,7 +331,33 @@ mod tests {
         .unwrap();
 
         ensure_migrated_from_teshi_desktop_at(&neu, Some(&legacy)).unwrap();
+        // Existing profile must be preserved.
         assert!(neu.join("model-profiles/keep.json").is_file());
-        assert!(!neu.join("model-profiles/old.json").exists());
+        // Missing legacy profile must be merged in.
+        assert!(neu.join("model-profiles/old.json").is_file());
+        assert!(neu.join(DESKTOP_MIGRATION_MARKER).is_file());
+    }
+
+    #[test]
+    fn test_migrate_copies_into_empty_dst_profiles_dir() {
+        // An empty dst model-profiles/ must receive all legacy profiles.
+        let tmp = TempDir::new().unwrap();
+        let legacy = tmp.path().join("teshi-desktop");
+        let neu = tmp.path().join("teshi");
+        fs::create_dir_all(legacy.join("model-profiles")).unwrap();
+        fs::write(
+            legacy.join("model-profiles/abc.json"),
+            r#"{"id":"abc","name":"Leg","provider":"openai","model_id":"gpt-4o","api_key":"sk-l"}"#,
+        )
+        .unwrap();
+        // Empty dst dir exists.
+        fs::create_dir_all(neu.join("model-profiles")).unwrap();
+
+        ensure_migrated_from_teshi_desktop_at(&neu, Some(&legacy)).unwrap();
+        assert!(
+            neu.join("model-profiles/abc.json").is_file(),
+            "empty dst must receive legacy profiles"
+        );
+        assert!(neu.join(DESKTOP_MIGRATION_MARKER).is_file());
     }
 }

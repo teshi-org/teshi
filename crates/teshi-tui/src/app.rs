@@ -2290,9 +2290,23 @@ impl App {
         self.set_status_message("AI cleared filter".into());
     }
 
-    /// Get the context window size from the active provider config.
-    /// Falls back to 128000 if not configured.
+    /// Get the context window size, preferring the active model profile's setting.
+    ///
+    /// Resolution order:
+    /// 1. `max_context_tokens` from the in-memory active model profile (when set).
+    /// 2. `context_window` from config.toml provider settings.
+    /// 3. Hard-coded default of 128 000.
     fn active_context_window(&self) -> u32 {
+        // Prefer the active profile's max_context_tokens when available.
+        if let Some(profile) = self
+            .model_profiles
+            .iter()
+            .find(|p| self.model_active_id.as_deref() == Some(p.id.as_str()))
+            && let Some(tokens) = profile.max_context_tokens
+        {
+            return tokens;
+        }
+        // Fall back to config.toml provider setting.
         self.config
             .default_provider_config()
             .and_then(|(_, p)| p.context_window)

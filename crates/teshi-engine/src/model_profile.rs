@@ -375,10 +375,14 @@ fn ensure_migrated_at(app_root: &Path) -> Result<()> {
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     if !migration_marker_path(&dir).exists() {
         let existing = list_raw_profiles_in(&dir)?;
-        if !existing.is_empty() {
-            // Profiles already present — mark migrated so we never import over them.
+        let has_any_keyed = existing.iter().any(|p| !p.api_key.trim().is_empty());
+        if has_any_keyed {
+            // At least one keyed profile already present — assume store is configured.
             write_migration_marker(&dir)?;
         } else {
+            // No keyed profiles — attempt to import from legacy llm-config.json.
+            // This covers both the empty-store case and the case where a prior migration
+            // or desktop copy left only keyless placeholder profiles.
             let legacy_path = app_root.join("llm-config.json");
             let legacy = if legacy_path.exists() {
                 let content = fs::read_to_string(&legacy_path)
@@ -392,7 +396,14 @@ fn ensure_migrated_at(app_root: &Path) -> Result<()> {
                 || !legacy.base_url.trim().is_empty()
                 || !legacy.model.trim().is_empty();
             if usable {
-                let mut profile = ModelProfile::new(DEFAULT_PROFILE_NAME);
+                // Reuse an existing keyless Default profile when available so that any
+                // previously created placeholder is updated rather than duplicated.
+                let default_profile = existing
+                    .iter()
+                    .find(|p| p.name == DEFAULT_PROFILE_NAME)
+                    .cloned();
+                let mut profile =
+                    default_profile.unwrap_or_else(|| ModelProfile::new(DEFAULT_PROFILE_NAME));
                 profile.base_url = legacy.base_url;
                 profile.model_id = if legacy.model.is_empty() {
                     "gpt-4o-mini".into()
@@ -904,6 +915,57 @@ mod tests {
         ensure_migrated_at(app).unwrap();
         let list2 = list_profiles_in(&dir).unwrap();
         assert_eq!(list2.profiles.len(), 1);
+    }
+
+    #[test]
+    fn test_keyless_profiles_do_not_block_llm_config_import() {
+        // When only keyless profiles exist (e.g. from desktop migration) and
+        // llm-config.json has a usable api_key, the key must be imported into
+        // the Default profile rather than being silently skipped.
+        let tmp = temp_store();
+        let app = tmp.path();
+        let dir = app.join("model-profiles");
+        fs::create_dir_all(&dir).unwrap();
+
+        // Prevent TUI import from running against the real developer config dir.
+        fs::write(
+            dir.join(crate::legacy_tui_import::TUI_IMPORT_MARKER_FOR_TEST),
+            b"1",
+        )
+        .unwrap();
+
+        // Pre-existing keyless profile (e.g. written by desktop copy migration).
+        let keyless = serde_json::json!({
+            "id": "default",
+            "name": DEFAULT_PROFILE_NAME,
+            "provider": "openai",
+            "model_id": "gpt-4o-mini",
+            "api_key": ""
+        });
+        fs::write(dir.join("default.json"), keyless.to_string()).unwrap();
+
+        // llm-config.json with a usable api_key.
+        let legacy = crate::llm_config_store::StoredLlmConfig {
+            base_url: "https://api.openai.com/v1".into(),
+            model: "gpt-4o".into(),
+            api_key: "sk-from-llm-config".into(),
+        };
+        fs::write(
+            app.join("llm-config.json"),
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        ensure_migrated_at(app).unwrap();
+
+        let profiles = list_raw_profiles_in(&dir).unwrap();
+        assert_eq!(profiles.len(), 1, "must not duplicate the Default profile");
+        assert_eq!(
+            profiles[0].api_key, "sk-from-llm-config",
+            "keyless Default must be filled with llm-config api_key"
+        );
+        assert_eq!(profiles[0].model_id, "gpt-4o");
+        assert!(dir.join(MIGRATION_MARKER).is_file());
     }
 
     #[test]

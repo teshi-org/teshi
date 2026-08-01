@@ -21,6 +21,10 @@ use crate::model_profile::{
 
 const TUI_IMPORT_MARKER: &str = ".migrated-from-tui-config";
 
+/// Exported for use in tests that need to pre-seed the TUI import marker.
+#[cfg(test)]
+pub(crate) const TUI_IMPORT_MARKER_FOR_TEST: &str = TUI_IMPORT_MARKER;
+
 #[derive(Debug, Deserialize)]
 struct LegacyTomlProfile {
     #[serde(default)]
@@ -95,7 +99,12 @@ pub fn legacy_tui_config_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|base| base.join("teshi"))
 }
 
-/// Import legacy TUI LLM settings into `profiles_dir` when empty.
+/// Import legacy TUI LLM settings into `profiles_dir` when no migration marker exists.
+///
+/// The marker `.migrated-from-tui-config` is the sole signal that a full successful
+/// pass completed. Existing keyed profiles do NOT skip the import — they are left in
+/// place while TOML sources are deduplicated by id and auth/provider sources are
+/// deduplicated by provider + base_url.
 ///
 /// # Errors
 ///
@@ -111,19 +120,13 @@ pub fn ensure_tui_legacy_imported_at(
         return Ok(());
     }
 
-    // Only skip import when the store already has at least one profile with a real key.
-    // A keyless Default profile (created by the llm-config migration) must NOT block
-    // importing credentials from TUI auth sources.
-    if has_keyed_profiles(profiles_dir)? {
-        write_marker(&marker)?;
-        return Ok(());
-    }
-
     let Some(config_dir) = tui_config_dir else {
+        // No TUI config dir available — deliberate no-op, still mark complete.
         write_marker(&marker)?;
         return Ok(());
     };
     if !config_dir.is_dir() {
+        // TUI config dir does not exist — deliberate no-op, still mark complete.
         write_marker(&marker)?;
         return Ok(());
     }
@@ -153,31 +156,6 @@ pub fn ensure_tui_legacy_imported_at(
 
 fn write_marker(path: &Path) -> Result<()> {
     fs::write(path, b"1").with_context(|| format!("write {}", path.display()))
-}
-
-/// Returns true when `dir` contains at least one profile JSON with a non-empty `api_key`.
-///
-/// Used to distinguish a store that is genuinely configured (skip import) from one that
-/// only has keyless placeholder profiles created by the llm-config migration.
-fn has_keyed_profiles(dir: &Path) -> Result<bool> {
-    if !dir.exists() {
-        return Ok(false);
-    }
-    for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(profile) = serde_json::from_str::<ModelProfile>(&content) {
-                if !profile.api_key.trim().is_empty() {
-                    return Ok(true);
-                }
-            }
-        }
-    }
-    Ok(false)
 }
 
 /// Load all parseable [`ModelProfile`] entries from `dir`, silently skipping
@@ -299,12 +277,20 @@ fn import_from_providers_and_auth(
             continue;
         }
         let engine_provider = map_legacy_provider_id(name);
-        // Skip if a keyed profile for this provider was already written on a prior
-        // partial-import attempt to avoid duplicates.
-        if existing
-            .iter()
-            .any(|p| p.provider == engine_provider && !p.api_key.trim().is_empty())
-        {
+        let new_base = provider
+            .base_url
+            .as_deref()
+            .unwrap_or("")
+            .trim_end_matches('/')
+            .to_lowercase();
+        // Skip only when an existing keyed profile covers the same provider AND base_url
+        // so that multiple OpenAI-compatible hosts with different base_urls each get
+        // their own profile rather than being blocked by the first one found.
+        if existing.iter().any(|p| {
+            p.provider == engine_provider
+                && !p.api_key.trim().is_empty()
+                && p.base_url.trim_end_matches('/').to_lowercase() == new_base
+        }) {
             continue;
         }
         let mut profile = ModelProfile::new(name.clone());
@@ -336,11 +322,13 @@ fn import_from_providers_and_auth(
             continue;
         }
         let engine_provider = map_legacy_provider_id(name);
-        // Skip if a keyed profile for this provider was already written.
-        if existing
-            .iter()
-            .any(|p| p.provider == engine_provider && !p.api_key.trim().is_empty())
-        {
+        // Auth-only entries have no custom base_url; skip if a keyed profile for the
+        // same provider with an empty (default) base_url is already present.
+        if existing.iter().any(|p| {
+            p.provider == engine_provider
+                && !p.api_key.trim().is_empty()
+                && p.base_url.trim().is_empty()
+        }) {
             continue;
         }
         let mut profile = ModelProfile::new(name.clone());
@@ -492,7 +480,9 @@ api_key = "${auth:openai}"
     }
 
     #[test]
-    fn test_existing_profiles_skip_import() {
+    fn test_existing_keyed_profiles_do_not_block_toml_import() {
+        // Existing keyed profiles must NOT block TOML import of different-id profiles.
+        // Only the marker is the signal that a full pass has completed.
         let tmp = TempDir::new().unwrap();
         let profiles = tmp.path().join("model-profiles");
         fs::create_dir_all(&profiles).unwrap();
@@ -508,7 +498,7 @@ api_key = "${auth:openai}"
             models.join("p1.toml"),
             r#"
 id = "p1"
-name = "ShouldNotImport"
+name = "Additional"
 provider = "openai"
 model = "gpt-4o"
 api_key = "sk-x"
@@ -517,7 +507,10 @@ api_key = "sk-x"
         .unwrap();
 
         ensure_tui_legacy_imported_at(&profiles, Some(&config)).unwrap();
-        assert!(!profiles.join("p1.json").exists());
+        // p1 is a different id — it should be imported alongside keep.
+        assert!(profiles.join("p1.json").exists());
+        // keep.json must not be removed or overwritten.
+        assert!(profiles.join("keep.json").is_file());
         assert!(profiles.join(TUI_IMPORT_MARKER).is_file());
     }
 
@@ -590,6 +583,99 @@ api_key = "sk-ant-test"
         assert!(
             profiles.join("newprofile.json").exists(),
             "import must continue past partial keyless state"
+        );
+        assert!(profiles.join(TUI_IMPORT_MARKER).is_file());
+    }
+
+    #[test]
+    fn test_different_base_urls_produce_separate_profiles() {
+        // Two OpenAI-compatible provider entries with different base_urls must each
+        // produce their own profile rather than the second being dropped by dedup.
+        let tmp = TempDir::new().unwrap();
+        let profiles = tmp.path().join("model-profiles");
+        let config = tmp.path().join("teshi");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(
+            config.join("config.toml"),
+            r#"
+[providers.openai]
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+api_key = "sk-openai"
+
+[providers.ollama]
+base_url = "http://localhost:11434/v1"
+model = "llama3"
+api_key = "ollama-key"
+"#,
+        )
+        .unwrap();
+
+        ensure_tui_legacy_imported_at(&profiles, Some(&config)).unwrap();
+
+        let mut found_openai = false;
+        let mut found_ollama = false;
+        for entry in fs::read_dir(&profiles).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let profile: ModelProfile =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            if profile.api_key == "sk-openai" {
+                found_openai = true;
+            }
+            if profile.api_key == "ollama-key" {
+                found_ollama = true;
+            }
+        }
+        assert!(found_openai, "openai profile must be imported");
+        assert!(
+            found_ollama,
+            "ollama profile (different base_url) must be imported separately"
+        );
+        assert!(profiles.join(TUI_IMPORT_MARKER).is_file());
+    }
+
+    #[test]
+    fn test_same_provider_and_base_url_not_duplicated_on_retry() {
+        // On retry, a keyed profile with the same provider+base_url must not be duplicated.
+        let tmp = TempDir::new().unwrap();
+        let profiles = tmp.path().join("model-profiles");
+        fs::create_dir_all(&profiles).unwrap();
+        fs::write(
+            profiles.join("existing.json"),
+            r#"{"id":"existing","name":"Existing","provider":"openai","model_id":"gpt-4o","api_key":"sk-openai","base_url":"https://api.openai.com/v1"}"#,
+        )
+        .unwrap();
+
+        let config = tmp.path().join("teshi");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(
+            config.join("config.toml"),
+            r#"
+[providers.openai]
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+api_key = "sk-openai"
+"#,
+        )
+        .unwrap();
+
+        ensure_tui_legacy_imported_at(&profiles, Some(&config)).unwrap();
+
+        let count = fs::read_dir(&profiles)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .ok()
+                    .and_then(|e| e.path().extension().map(|x| x == "json"))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(
+            count, 1,
+            "no duplicate profile must be created for same provider+base_url"
         );
         assert!(profiles.join(TUI_IMPORT_MARKER).is_file());
     }
