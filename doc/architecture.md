@@ -133,17 +133,12 @@ The test runner is an **external subprocess** communicating via NDJSON:
 
 ## Configuration layering
 
-**LLM settings** use a single shared store (Chrys-style model profiles):
-
-1. Active profile under `<app_data>/teshi/model-profiles/` (same for TUI, CLI, Desktop, daemon)
-2. Environment fallback (`TESHI_LLM_API_KEY`, `TESHI_LLM_BASE_URL`, `TESHI_LLM_MODEL`, …) when the active profile has no API key
-3. Optional override of the app-data root via `TESHI_APP_DATA_DIR`
-
-The default app-data directory is the OS data dir joined with `teshi` (for example `%APPDATA%\teshi`). A one-time migration copies legacy `teshi-desktop` app data and, when the profile store is empty, imports older TUI `config.toml` / `auth.json` / `models/*.toml`.
-
-**Runner and other non-LLM settings** still layer as:
+Configuration is resolved from five sources in priority order (highest wins):
 
 1. CLI flags (`--runner-cmd`, `--runner-cwd`)
-2. Environment variables (`TESHI_RUNNER_CMD`, …)
-3. Project-level `.teshi/config.toml` / `teshi.toml`
-4. Hardcoded defaults
+2. Environment variables (`TESHI_RUNNER_CMD`, `TESHI_LLM_API_KEY`, etc.)
+3. Project-level `.teshi/config.toml`
+4. User-level `~/.teshi/config.toml`
+5. Hardcoded defaults (DeepSeek and OpenAI provider definitions)
+
+API keys support `${auth:provider}` placeholders that resolve against `~/.config/teshi/auth.json` (stored with `0600` permissions), keeping secrets out of project config files.

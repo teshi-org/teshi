@@ -276,26 +276,30 @@ Used primarily for AI chat message rendering.
 
 ---
 
-## LLM profiles (shared via `teshi-engine`)
+## `config/mod.rs` + `config/types.rs` — Configuration (~305 lines total)
 
-Runtime LLM settings live in `<app_data>/teshi/model-profiles/` (JSON), shared by TUI, CLI, Desktop, and daemon. See `doc/cli-usage.md` and `openspec/specs/llm-model-profiles/spec.md`.
+### Resolution order
 
-TUI helpers: `profiles/` wraps engine CRUD; `llm.rs` calls `effective_llm_config()`.
+1. Hardcoded defaults: DeepSeek (`deepseek-chat`) and OpenAI (`gpt-4o`)
+2. `~/.teshi/config.toml` — user overrides
+3. `.teshi/config.toml` — project overrides
+4. Environment variables
 
-## `config/mod.rs` + `config/types.rs` — Configuration
+### Placeholder system
 
-Layered TOML for non-LLM / legacy settings. `[providers.*]` is no longer the LLM source of truth; empty profile stores may still one-time-import from it.
-
-### Placeholder system (legacy)
-
-- `${auth:provider}` — resolves against `<config_dir>/teshi/auth.json` during config load
+- `${auth:provider}` — resolves against `~/.config/teshi/auth.json`
 - `${env:VAR}` — resolves from environment
+- `resolve_all_placeholders()` runs after merging all layers
 
 ---
 
-## `auth/manager.rs` — Legacy credential file
+## `auth/manager.rs` — Credential storage (~203 lines)
 
-`CredentialManager` can still read `<config_dir>/teshi/auth.json` for placeholder resolution and one-time import. New credentials are written to model profiles via `teshi auth` / the TUI model panel.
+`CredentialManager` stores `HashMap<String, CredentialEntry>` in `~/.config/teshi/auth.json`:
+
+- Atomic writes via temp file + rename
+- Unix `0o600` permissions, warns on insecure permissions
+- `mask_key()` preserves first 4 + last 4 characters for display
 
 ---
 
@@ -307,11 +311,11 @@ Subcommands:
 - `teshi web [--project]` — browser GUI (loopback HTTP)
 - `teshi desktop [--project]` — spawn native `teshi-desktop`
 - `teshi run [PATH] [--scenario] [--runner-cmd] [--runner-cwd]` — headless BDD runs
-- `teshi auth login [--provider]` — create/update a shared model profile + API key
-- `teshi auth list` — list profiles (keys masked)
-- `teshi auth remove <provider>` — clear API key on matching profile(s)
-- `teshi auth status` — show app-data paths and profile status
-- `teshi auth migrate` — scan env vars and import keys into profiles
+- `teshi auth login [--provider]` — interactive credential entry
+- `teshi auth list` — show stored providers
+- `teshi auth remove <provider>` — delete credentials
+- `teshi auth status` — show config and credential paths
+- `teshi auth migrate` — scan env vars and import to auth.json
 
 ---
 
