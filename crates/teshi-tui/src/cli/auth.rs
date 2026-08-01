@@ -293,6 +293,19 @@ fn migrate_from_env() -> Result<()> {
     Ok(())
 }
 
+/// Dispatches an `AuthCommand` to its implementation.
+pub fn handle_auth_command(cmd: &crate::cli::AuthCommand) -> Result<()> {
+    // Ensure desktop→teshi and TUI legacy imports have run before CLI edits.
+    let _ = list_profiles();
+    match cmd {
+        crate::cli::AuthCommand::Login { provider } => interactive_login(provider.clone()),
+        crate::cli::AuthCommand::List => list_credentials(),
+        crate::cli::AuthCommand::Remove { provider } => remove_credential(provider),
+        crate::cli::AuthCommand::Status => show_status(),
+        crate::cli::AuthCommand::Migrate => migrate_from_env(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,18 +331,5 @@ mod tests {
             normalize_base_url("https://example.com/v1///"),
             "https://example.com/v1"
         );
-    }
-}
-
-/// Dispatches an `AuthCommand` to its implementation.
-pub fn handle_auth_command(cmd: &crate::cli::AuthCommand) -> Result<()> {
-    // Ensure desktop→teshi and TUI legacy imports have run before CLI edits.
-    let _ = list_profiles();
-    match cmd {
-        crate::cli::AuthCommand::Login { provider } => interactive_login(provider.clone()),
-        crate::cli::AuthCommand::List => list_credentials(),
-        crate::cli::AuthCommand::Remove { provider } => remove_credential(provider),
-        crate::cli::AuthCommand::Status => show_status(),
-        crate::cli::AuthCommand::Migrate => migrate_from_env(),
     }
 }
