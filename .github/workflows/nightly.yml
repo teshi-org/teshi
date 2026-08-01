@@ -1,0 +1,65 @@
+name: Nightly
+
+on:
+  push:
+    branches: [dev]
+  schedule:
+    # Daily pre-release build from dev (06:00 UTC).
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-dev
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare nightly tag
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      source_ref: ${{ steps.meta.outputs.source_ref }}
+      skip: ${{ steps.meta.outputs.skip }}
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Compute nightly tag
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version=$(grep -m1 '^version = ' apps/teshi-cli/Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          date=$(date -u +%Y%m%d)
+          sha=$(git rev-parse --short=7 HEAD)
+          tag="v${version}-nightly.${date}.${sha}"
+
+          if git rev-parse "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Tag ${tag} already exists; skipping nightly publish."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+          echo "release_tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "source_ref=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+          echo "Nightly tag: ${tag}"
+
+  nightly:
+    name: Build and publish nightly
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      release_tag: ${{ needs.prepare.outputs.release_tag }}
+      source_ref: ${{ needs.prepare.outputs.source_ref }}
+      prerelease: true
+      skip_winget: true
+    secrets: inherit
