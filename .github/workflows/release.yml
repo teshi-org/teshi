@@ -65,20 +65,28 @@ jobs:
     steps:
       - name: Resolve tag and build ref
         id: meta
+        env:
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+          INPUT_SKIP_WINGET: ${{ inputs.skip_winget }}
+          INPUT_RUN_SCOPE: ${{ inputs.run_scope }}
         shell: bash
         run: |
           set -euo pipefail
 
           event="${{ github.event_name }}"
-          if [ "${event}" = "workflow_call" ]; then
-            tag="${{ inputs.release_tag }}"
-            source_ref="${{ inputs.source_ref }}"
+          # Reusable workflows inherit the caller's github.event_name (e.g. push), not
+          # workflow_call. Detect workflow_call by a non-empty workflow_call input.
+          if [ -n "${INPUT_RELEASE_TAG}" ]; then
+            tag="${INPUT_RELEASE_TAG}"
+            source_ref="${INPUT_SOURCE_REF}"
             if [ -z "${source_ref}" ]; then
               source_ref="${tag}"
             fi
-            prerelease="${{ inputs.prerelease }}"
-            skip_winget="${{ inputs.skip_winget }}"
-            run_scope="${{ inputs.run_scope }}"
+            prerelease="${INPUT_PRERELEASE}"
+            skip_winget="${INPUT_SKIP_WINGET}"
+            run_scope="${INPUT_RUN_SCOPE:-full}"
           elif [ "${event}" = "workflow_dispatch" ]; then
             tag="${{ github.event.inputs.release_tag }}"
             source_ref="${tag}"
@@ -90,9 +98,9 @@ jobs:
               skip_winget=false
             fi
             run_scope="${{ github.event.inputs.run_scope }}"
-          else
+          elif [ "${event}" = "push" ] && [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             tag="${GITHUB_REF#refs/tags/}"
-            source_ref="${{ github.ref }}"
+            source_ref="${GITHUB_REF}"
             if echo "${tag}" | grep -q -- '-nightly'; then
               prerelease=true
               skip_winget=true
@@ -101,6 +109,9 @@ jobs:
               skip_winget=false
             fi
             run_scope=full
+          else
+            echo "Unsupported release trigger: event=${event}, ref=${GITHUB_REF}" >&2
+            exit 1
           fi
 
           if [[ ! "${tag}" =~ ^v.+$ ]]; then
