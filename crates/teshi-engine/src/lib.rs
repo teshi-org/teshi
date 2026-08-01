@@ -6,6 +6,7 @@ mod daemon;
 mod events;
 mod fs_util;
 mod gherkin;
+mod legacy_tui_import;
 pub mod llm;
 mod llm_anthropic;
 pub mod llm_config_store;
@@ -31,9 +32,9 @@ pub mod python_env {
 }
 
 pub use app_data::{
-    app_data_dir, get_recent_projects as load_recent_projects, load_settings,
-    open_dialog_default_dir, save_settings, validated_window_size, AppSettings, MIN_WINDOW_HEIGHT,
-    MIN_WINDOW_WIDTH,
+    app_data_dir, ensure_migrated_from_teshi_desktop_at,
+    get_recent_projects as load_recent_projects, load_settings, open_dialog_default_dir,
+    save_settings, validated_window_size, AppSettings, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH,
 };
 pub use authoring::{
     compute_document_revision, load_authoring_artifacts, save_requirement_document_index,
@@ -47,6 +48,9 @@ pub use daemon::{
 pub use events::{HostEventCallback, RuntimeEvent, RuntimeEvents};
 pub use fs_util::{read_locked, write_atomic};
 pub use gherkin::{emit_feature_refresh, rebuild_and_emit_step_index, render_feature};
+pub use legacy_tui_import::{
+    ensure_tui_legacy_imported_at, legacy_tui_config_dir, map_legacy_provider_id,
+};
 pub use llm::{call_llm_with_tool, call_llm_with_tool_config, llm_config_from_env};
 pub use llm_config_store::{
     effective_llm_config, load_llm_config_public, load_stored_llm_config, save_stored_llm_config,

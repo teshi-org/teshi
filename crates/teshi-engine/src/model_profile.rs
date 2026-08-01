@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::app_data::app_data_dir;
+use crate::legacy_tui_import::{ensure_tui_legacy_imported_at, legacy_tui_config_dir};
 use crate::llm_config_store::mask_api_key;
 
 /// Built-in OpenAI provider id.
@@ -372,45 +373,51 @@ pub fn ensure_migrated() -> Result<()> {
 fn ensure_migrated_at(app_root: &Path) -> Result<()> {
     let dir = app_root.join("model-profiles");
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    if migration_marker_path(&dir).exists() {
-        return Ok(());
-    }
-    let existing = list_raw_profiles_in(&dir)?;
-    if !existing.is_empty() {
-        // Profiles already present — mark migrated so we never import over them.
-        write_migration_marker(&dir)?;
-        return Ok(());
+    if !migration_marker_path(&dir).exists() {
+        let existing = list_raw_profiles_in(&dir)?;
+        if !existing.is_empty() {
+            // Profiles already present — mark migrated so we never import over them.
+            write_migration_marker(&dir)?;
+        } else {
+            let legacy_path = app_root.join("llm-config.json");
+            let legacy = if legacy_path.exists() {
+                let content = fs::read_to_string(&legacy_path)
+                    .with_context(|| format!("read {}", legacy_path.display()))?;
+                serde_json::from_str(&content)
+                    .with_context(|| format!("parse {}", legacy_path.display()))?
+            } else {
+                crate::llm_config_store::StoredLlmConfig::default()
+            };
+            let usable = !legacy.api_key.is_empty()
+                || !legacy.base_url.trim().is_empty()
+                || !legacy.model.trim().is_empty();
+            if usable {
+                let mut profile = ModelProfile::new(DEFAULT_PROFILE_NAME);
+                profile.base_url = legacy.base_url;
+                profile.model_id = if legacy.model.is_empty() {
+                    "gpt-4o-mini".into()
+                } else {
+                    legacy.model
+                };
+                profile.api_key = legacy.api_key;
+                profile.provider = PROVIDER_OPENAI.into();
+                save_profile_in(&dir, &mut profile)?;
+                set_active_id_in(&dir, &profile.id)?;
+            }
+            write_migration_marker(&dir)?;
+        }
     }
 
-    let legacy_path = app_root.join("llm-config.json");
-    let legacy = if legacy_path.exists() {
-        let content = fs::read_to_string(&legacy_path)
-            .with_context(|| format!("read {}", legacy_path.display()))?;
-        serde_json::from_str(&content)
-            .with_context(|| format!("parse {}", legacy_path.display()))?
-    } else {
-        crate::llm_config_store::StoredLlmConfig::default()
-    };
-    let usable = !legacy.api_key.is_empty()
-        || !legacy.base_url.trim().is_empty()
-        || !legacy.model.trim().is_empty();
-    if !usable {
-        write_migration_marker(&dir)?;
-        return Ok(());
+    // After llm-config migration, import empty stores from legacy TUI paths.
+    // Skip when TESHI_APP_DATA_DIR is overridden (tests / custom installs) so we
+    // do not pull the developer's real config_dir into a temp store.
+    let using_override = std::env::var("TESHI_APP_DATA_DIR")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    if !using_override {
+        let tui_dir = legacy_tui_config_dir();
+        ensure_tui_legacy_imported_at(&dir, tui_dir.as_deref())?;
     }
-
-    let mut profile = ModelProfile::new(DEFAULT_PROFILE_NAME);
-    profile.base_url = legacy.base_url;
-    profile.model_id = if legacy.model.is_empty() {
-        "gpt-4o-mini".into()
-    } else {
-        legacy.model
-    };
-    profile.api_key = legacy.api_key;
-    profile.provider = PROVIDER_OPENAI.into();
-    save_profile_in(&dir, &mut profile)?;
-    set_active_id_in(&dir, &profile.id)?;
-    write_migration_marker(&dir)?;
     Ok(())
 }
 
@@ -469,7 +476,7 @@ pub fn set_active_id(id: &str) -> Result<()> {
     set_active_id_in(&model_profiles_dir()?, id)
 }
 
-fn set_active_id_in(dir: &Path, id: &str) -> Result<()> {
+pub(crate) fn set_active_id_in(dir: &Path, id: &str) -> Result<()> {
     let path = profile_path(dir, id)?;
     if !path.exists() {
         bail!("profile not found: {id}");
@@ -562,7 +569,10 @@ pub fn save_profile(profile: &mut ModelProfile) -> Result<ModelProfilePublic> {
     save_profile_in(&model_profiles_dir()?, profile)
 }
 
-fn save_profile_in(dir: &Path, profile: &mut ModelProfile) -> Result<ModelProfilePublic> {
+pub(crate) fn save_profile_in(
+    dir: &Path,
+    profile: &mut ModelProfile,
+) -> Result<ModelProfilePublic> {
     validate_profile(profile)?;
     let path = profile_path(dir, &profile.id)?;
     if path.exists() {
@@ -650,12 +660,19 @@ pub fn profile_to_llm_config(profile: &ModelProfile) -> Result<crate::llm::LlmCo
     } else {
         profile.model_id.clone()
     };
+    // Prefer an explicit chat_options temperature so TUI/Desktop round-trips preserve it.
+    let temperature = profile
+        .chat_options
+        .get("temperature")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32)
+        .unwrap_or(0.7);
     Ok(crate::llm::LlmConfig {
         api_key: profile.api_key.clone(),
         base_url,
         model,
         max_tokens: profile.max_output_tokens,
-        temperature: 0.7,
+        temperature,
         context_window: profile.max_context_tokens,
         provider: profile.provider.clone(),
         api_style: effective_api_style(&profile.provider, profile.api_style),
@@ -701,6 +718,19 @@ mod tests {
     fn test_stream_defaults_to_true() {
         let p = ModelProfile::new("x");
         assert!(p.stream);
+    }
+
+    #[test]
+    fn test_profile_to_llm_config_prefers_chat_options_temperature() {
+        let mut p = ModelProfile::new("Temp");
+        p.provider = PROVIDER_OPENAI.into();
+        p.model_id = "gpt-4o-mini".into();
+        p.api_key = "sk-test".into();
+        p.chat_options
+            .insert("temperature".into(), serde_json::json!(0.25));
+        let cfg = profile_to_llm_config(&p).unwrap();
+        assert!((cfg.temperature - 0.25).abs() < 1e-5);
+        assert_eq!(cfg.provider, PROVIDER_OPENAI);
     }
 
     #[test]
