@@ -61,8 +61,9 @@ fn interactive_login(provider_arg: Option<String>) -> Result<()> {
         .prompt()
         .unwrap_or_else(|_| model_default.to_string());
 
-    // Prefer updating an existing profile with the same provider + empty/matching model.
-    let mut profile = find_profile_for_provider(&provider)?.unwrap_or_else(|| {
+    // Prefer updating an existing profile whose provider AND base_url match the input.
+    // Using base_url here prevents a different-host openai profile from being overwritten.
+    let mut profile = find_profile_for_provider(&provider, &base_url)?.unwrap_or_else(|| {
         let mut p = ModelProfile::new(format!("{provider} ({model})"));
         p.provider = provider.clone();
         p
@@ -85,10 +86,36 @@ fn interactive_login(provider_arg: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn find_profile_for_provider(provider: &str) -> Result<Option<ModelProfile>> {
+/// Normalize a base URL for comparison: strip trailing slashes and lowercase.
+fn normalize_base_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_lowercase()
+}
+
+/// Find an existing profile matching `provider` and `base_url`.
+///
+/// When `base_url` is non-empty, requires an exact normalized match.
+/// When `base_url` is empty, prefers the first profile with an empty base_url
+/// for that provider (i.e. the provider-default endpoint).
+fn find_profile_for_provider(provider: &str, base_url: &str) -> Result<Option<ModelProfile>> {
+    let normalized_input = normalize_base_url(base_url);
     let list = list_profiles()?;
-    for public in list.profiles {
-        if public.provider == provider {
+
+    if !normalized_input.is_empty() {
+        // Non-empty base_url: require an exact normalized match to avoid overwriting a
+        // profile that points at a different host.
+        for public in &list.profiles {
+            if public.provider == provider
+                && normalize_base_url(&public.base_url) == normalized_input
+            {
+                return Ok(Some(load_profile(&public.id)?));
+            }
+        }
+        return Ok(None);
+    }
+
+    // Empty base_url: prefer the first profile with an empty (provider-default) base_url.
+    for public in &list.profiles {
+        if public.provider == provider && public.base_url.trim().is_empty() {
             return Ok(Some(load_profile(&public.id)?));
         }
     }
@@ -233,7 +260,7 @@ fn migrate_from_env() -> Result<()> {
         if val.trim().is_empty() {
             continue;
         }
-        if let Some(existing) = find_profile_for_provider(provider)? {
+        if let Some(existing) = find_profile_for_provider(provider, "")? {
             if !existing.api_key.is_empty() {
                 println!("  skipping {provider} (env var {env_var}): profile already has a key");
                 continue;
@@ -264,6 +291,34 @@ fn migrate_from_env() -> Result<()> {
     );
     println!("You should now remove the original environment variables for security.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_base_url_strips_slash_and_lowercases() {
+        assert_eq!(
+            normalize_base_url("https://api.openai.com/v1/"),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            normalize_base_url("HTTPS://API.OPENAI.COM/V1"),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(normalize_base_url("  https://x.com/  "), "https://x.com");
+        assert_eq!(normalize_base_url(""), "");
+        assert_eq!(normalize_base_url("  "), "");
+    }
+
+    #[test]
+    fn test_normalize_base_url_multiple_trailing_slashes() {
+        assert_eq!(
+            normalize_base_url("https://example.com/v1///"),
+            "https://example.com/v1"
+        );
+    }
 }
 
 /// Dispatches an `AuthCommand` to its implementation.

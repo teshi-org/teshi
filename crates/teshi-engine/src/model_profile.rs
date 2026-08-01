@@ -427,7 +427,7 @@ fn ensure_migrated_at(app_root: &Path) -> Result<()> {
         .unwrap_or(false);
     if !using_override {
         let tui_dir = legacy_tui_config_dir();
-        ensure_tui_legacy_imported_at(&dir, tui_dir.as_deref())?;
+        ensure_tui_legacy_imported_at(&dir, tui_dir.as_deref(), None)?;
     }
     Ok(())
 }

@@ -87,6 +87,10 @@ fn legacy_desktop_app_data_dir() -> Result<Option<PathBuf>> {
 /// Copies `model-profiles/`, `llm-config.json`, `settings.json`, and
 /// `recent.json` when present. Never deletes the legacy directory.
 ///
+/// The migration marker is written **only** when `legacy_root` exists and is a
+/// directory. When `legacy_root` is `None` or the directory has not appeared yet,
+/// the marker is withheld so a future call can migrate once the directory exists.
+///
 /// # Errors
 ///
 /// Returns an error when directory or file I/O fails.
@@ -100,15 +104,22 @@ pub fn ensure_migrated_from_teshi_desktop_at(
         return Ok(());
     }
 
-    if let Some(legacy) = legacy_root {
-        if legacy.is_dir() && legacy != new_root {
-            copy_if_exists(legacy, new_root, "model-profiles")?;
-            copy_file_if_exists(legacy, new_root, "llm-config.json")?;
-            copy_file_if_exists(legacy, new_root, "settings.json")?;
-            copy_file_if_exists(legacy, new_root, "recent.json")?;
-        }
+    let Some(legacy) = legacy_root else {
+        // No legacy path provided — withhold marker so migration runs when it appears.
+        return Ok(());
+    };
+    if !legacy.is_dir() {
+        // Legacy path not yet a directory — withhold marker.
+        return Ok(());
     }
 
+    if legacy != new_root {
+        copy_if_exists(legacy, new_root, "model-profiles")?;
+        copy_file_if_exists(legacy, new_root, "llm-config.json")?;
+        copy_file_if_exists(legacy, new_root, "settings.json")?;
+        copy_file_if_exists(legacy, new_root, "recent.json")?;
+    }
+    // Legacy dir exists (copy/merge completed, or same-dir intentional no-op) — mark done.
     fs::write(&marker, b"1").with_context(|| format!("write {}", marker.display()))?;
     Ok(())
 }
@@ -359,5 +370,50 @@ mod tests {
             "empty dst must receive legacy profiles"
         );
         assert!(neu.join(DESKTOP_MIGRATION_MARKER).is_file());
+    }
+
+    #[test]
+    fn test_no_desktop_marker_when_legacy_is_none() {
+        // When no legacy path is provided the marker must NOT be written so a future
+        // call can still migrate when the directory appears.
+        let tmp = TempDir::new().unwrap();
+        let neu = tmp.path().join("teshi");
+
+        ensure_migrated_from_teshi_desktop_at(&neu, None).unwrap();
+        assert!(
+            !neu.join(DESKTOP_MIGRATION_MARKER).exists(),
+            "marker must not be written when legacy_root is None"
+        );
+
+        // Once the legacy dir appears the migration should complete.
+        let legacy = tmp.path().join("teshi-desktop");
+        fs::create_dir_all(legacy.join("model-profiles")).unwrap();
+        fs::write(
+            legacy.join("model-profiles/late.json"),
+            r#"{"id":"late","name":"Late","provider":"openai","model_id":"gpt-4o","api_key":"sk-l"}"#,
+        )
+        .unwrap();
+        ensure_migrated_from_teshi_desktop_at(&neu, Some(&legacy)).unwrap();
+        assert!(
+            neu.join(DESKTOP_MIGRATION_MARKER).exists(),
+            "marker must be written after legacy dir appears"
+        );
+        assert!(neu.join("model-profiles/late.json").is_file());
+    }
+
+    #[test]
+    fn test_no_desktop_marker_when_legacy_path_not_a_dir() {
+        // A path that is not a directory must also withhold the marker.
+        let tmp = TempDir::new().unwrap();
+        let neu = tmp.path().join("teshi");
+        let legacy = tmp.path().join("teshi-desktop");
+        // legacy exists as a file, not a dir.
+        fs::write(&legacy, b"not-a-dir").unwrap();
+
+        ensure_migrated_from_teshi_desktop_at(&neu, Some(&legacy)).unwrap();
+        assert!(
+            !neu.join(DESKTOP_MIGRATION_MARKER).exists(),
+            "marker must not be written when legacy path is not a directory"
+        );
     }
 }
