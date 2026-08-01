@@ -51,7 +51,7 @@ Slash helpers:
 - `/generate` — start requirements gathering
 - `/continue` — continue generation after approving test points (same as `c` on the Test Points tab)
 
-The AI tab is hidden when no LLM credentials are configured. Press `m` to manage shared model profiles, or type `/auth` for a status overview. From the shell, use `teshi auth login` (same store as Desktop Settings).
+The AI tab is hidden when no LLM credentials are configured. Type `/auth` in the chat to manage credentials.
 
 ### Requirements
 

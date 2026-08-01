@@ -51,7 +51,7 @@ Invoke-RestMethod http://127.0.0.1:<port>/api/v1/llm/config
 cargo run -p teshi-desktop
 ```
 
-Uses the shared user-level store: `%APPDATA%/teshi/model-profiles/` (or XDG data-home equivalent; override with `TESHI_APP_DATA_DIR`).
+Uses the same user-level store: `%APPDATA%/teshi-desktop/llm-config.json` (or XDG equivalent).
 
 ## Crate rules
 

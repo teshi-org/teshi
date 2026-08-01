@@ -6783,7 +6783,6 @@ dependencies = [
  "tempfile",
  "teshi-core",
  "tokio",
- "toml 0.8.23",
  "tracing",
  "tungstenite 0.24.0",
  "vte",
