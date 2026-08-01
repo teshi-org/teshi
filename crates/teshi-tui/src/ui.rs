@@ -585,10 +585,12 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let greeting = Line::raw("Welcome to AI Chat! Type a message below and press Enter.");
         chat_lines.push(greeting);
         chat_lines.push(Line::raw(""));
-        if !crate::llm::LlmConfig::is_configured() {
+        if !crate::llm::is_configured() {
             chat_lines.push(
-                Line::raw("Note: Set TESHI_LLM_API_KEY to enable AI responses.")
-                    .style(Style::default().fg(Color::Yellow)),
+                Line::raw(
+                    "Note: Run 'teshi auth login' or set TESHI_LLM_API_KEY to enable AI responses.",
+                )
+                .style(Style::default().fg(Color::Yellow)),
             );
         }
     }
@@ -2144,10 +2146,12 @@ pub(crate) fn render_agent_chat_inner(
     if app.agent().messages.is_empty() {
         chat_lines.push(Line::raw("Welcome to AI Chat!"));
         chat_lines.push(Line::raw(""));
-        if !crate::llm::LlmConfig::is_configured() {
+        if !crate::llm::is_configured() {
             chat_lines.push(
-                Line::raw("Note: Set TESHI_LLM_API_KEY to enable AI responses.")
-                    .style(Style::default().fg(Color::Yellow)),
+                Line::raw(
+                    "Note: Run 'teshi auth login' or set TESHI_LLM_API_KEY to enable AI responses.",
+                )
+                .style(Style::default().fg(Color::Yellow)),
             );
         }
     }
@@ -3151,45 +3155,49 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
             ));
         }
         _ => {
-            // Default: show provider overview
+            // Default: show shared model-profile overview
             lines.push(Line::styled(
-                "Configured Providers",
+                "Model Profiles (shared store)",
                 Style::default().add_modifier(Modifier::BOLD),
             ));
             lines.push(Line::raw(""));
 
-            if app.config.providers.is_empty() {
-                lines.push(Line::raw("  No providers configured."));
+            if app.model_profiles.is_empty() {
+                lines.push(Line::raw("  No model profiles configured."));
+                lines.push(Line::raw("  Use 'teshi auth login' or press m to add one."));
             } else {
-                for (name, provider) in &app.config.providers {
-                    let model = provider.model.as_deref().unwrap_or("-");
-                    let has_key = provider
-                        .api_key
-                        .as_ref()
-                        .filter(|k| !k.is_empty())
-                        .is_some();
+                for profile in &app.model_profiles {
+                    let has_key = !profile.api_key.is_empty();
                     let key_status = if has_key { "✓" } else { "✗" };
                     let key_color = if has_key { Color::Green } else { Color::Red };
+                    let active = if app.model_active_id.as_deref() == Some(profile.id.as_str()) {
+                        " *"
+                    } else {
+                        ""
+                    };
                     lines.push(Line::from(vec![
                         Span::raw("  "),
                         Span::styled(
-                            format!("{:<14}", name),
+                            format!("{:<14}", profile.name),
                             Style::default().add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             format!(" key: {}", key_status),
                             Style::default().fg(key_color),
                         ),
-                        Span::raw(format!("  model: {}", model)),
+                        Span::raw(format!(
+                            "  {} / {}{}",
+                            profile.provider, profile.model_id, active
+                        )),
                     ]));
                 }
             }
 
-            if let Some(ref default) = app.config.default_provider {
+            if let Some(ref active) = app.model_active_id {
                 lines.push(Line::raw(""));
                 lines.push(Line::from(vec![
-                    Span::raw("  Default: "),
-                    Span::styled(default.as_str(), Style::default().fg(Color::Cyan)),
+                    Span::raw("  Active id: "),
+                    Span::styled(active.as_str(), Style::default().fg(Color::Cyan)),
                 ]));
             }
         }
@@ -3273,7 +3281,7 @@ fn render_model_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Span::styled(format!("{:<20}", profile.name), style),
                 Span::raw("  "),
                 Span::styled(
-                    format!("{} | {}", profile.provider, profile.model),
+                    format!("{} | {}", profile.provider, profile.model_id),
                     Style::default().fg(Color::Cyan),
                 ),
                 Span::styled(active_mark, Style::default().fg(Color::Green)),

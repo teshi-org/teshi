@@ -1,9 +1,11 @@
-//! Model profile management — storage, loading, and active-profile tracking.
+//! TUI helpers over the shared `teshi-engine` model-profile store.
 //!
-//! Profiles are stored as individual TOML files under
-//! `~/.config/teshi/models/{id}.toml`. The active profile ID is persisted
-//! in `~/.config/teshi/model_profile`.
+//! Persistence lives under app data `model-profiles/` (same as Desktop/daemon).
 
-pub mod schema;
+mod helpers;
 
-pub use schema::ModelProfile;
+pub use helpers::{
+    delete_profile, load_all, normalize_provider, profile_temperature, read_active_id, save,
+    set_profile_temperature, write_active_id,
+};
+pub use teshi_engine::ModelProfile;
