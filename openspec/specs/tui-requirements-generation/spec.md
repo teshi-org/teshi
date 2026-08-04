@@ -2,43 +2,70 @@
 
 ## Purpose
 
-Requirements gathering and test-point generation happen in the TUI. Test points are Gherkin scenarios and steps written to `.feature` files via the Agent generation pipeline, browsable in the TUI Gherkin MindMap. FreeMind `.mm` and mock HTML are not generation products.
+Requirements gathering and test-point generation happen in the TUI. Test points are durable, non-Gherkin verification intents proposed by the agent and explicitly approved by a human before Gherkin scenario planning. The staged pipeline runs Gathering → Generating Test Points → Reviewing Test Points → Planning → Writing. FreeMind `.mm` and mock HTML are not generation products.
 
 ## Requirements
 
 ### Requirement: TUI owns requirements gathering for feature generation
 
-The TUI SHALL support gathering free-text or conversational requirements via the AI Agent generation pipeline. When the user asks to create or generate a feature, the agent SHALL follow the staged pipeline (requirements gathering, planning, writing) and SHALL call `submit_requirements` before planning and writing.
+The TUI SHALL support gathering free-text or conversational requirements through the AI Agent generation pipeline. When the user asks to create or generate a feature, the agent SHALL gather requirements, propose non-Gherkin test points, wait for explicit human test-point approval, plan scenarios from approved test points, and only then write `.feature` files.
 
 #### Scenario: User starts generation from chat
 
 - **WHEN** the user asks the TUI agent to create a feature from requirements
-- **THEN** the agent SHALL enter requirements gathering and SHALL NOT skip directly to writing files without submitting requirements
+- **THEN** the agent SHALL enter requirements gathering
+- **AND** it SHALL NOT skip directly to test-point proposal, scenario planning, or file writing without submitting requirements
 
 #### Scenario: Requirements can include pasted text
 
 - **WHEN** the user pastes multi-line requirement text into the TUI AI input
 - **THEN** the system SHALL accept the paste and make the text available to the agent conversation
+- **AND** the user SHALL be able to persist the accepted text as a requirement document
 
-### Requirement: Test points are Gherkin scenarios and steps
+#### Scenario: Requirements are selected from project documents
 
-The system SHALL treat generated test points as Gherkin scenarios and steps written to `.feature` files. The system SHALL NOT require FreeMind `.mm` documents or mock HTML as generation products. Users SHALL be able to browse generated scenarios in the TUI Gherkin MindMap after features are written and reloaded.
-
-#### Scenario: Generation writes feature files
-
-- **WHEN** the generation pipeline completes the writing stage successfully
-- **THEN** the project SHALL contain one or more `.feature` files reflecting the planned scenarios
-
-#### Scenario: No FreeMind product required
-
-- **WHEN** the user completes requirements-to-test-point generation in the TUI
-- **THEN** the system SHALL NOT require writing `requirements.mm` or `mock.html` under `.teshi/testpoints/`
+- **WHEN** the user starts generation from one or more persisted requirement documents or ranges
+- **THEN** the pipeline SHALL retain those document and range identities as generation sources
 
 ### Requirement: Generation pipeline stages remain authoritative
 
-The TUI Agent generation pipeline SHALL remain the authoritative path from requirements to executable scenarios: Gathering → Planning → Writing (with confirmation/validation as implemented). Intermediate structured plans SHALL use the existing pipeline tools (`submit_requirements`, `generate_plan`, feature mutation tools), not a FreeMind XML tool.
+The TUI Agent generation pipeline SHALL remain the authoritative path from requirements to executable scenarios. Its ordered phases SHALL be Gathering → Generating Test Points → Reviewing Test Points → Planning → Writing, followed by confirmation and validation as applicable. Intermediate test points and plans SHALL use Teshi's structured pipeline tools and persisted authoring artifacts, not FreeMind XML or generated mock HTML.
 
-#### Scenario: Plan follows requirements submission
+#### Scenario: Test-point proposal follows requirements submission
 
 - **WHEN** `submit_requirements` has been recorded
-- **THEN** the pipeline stage SHALL advance toward planning and the agent SHALL be guided to call `generate_plan` before writing features
+- **THEN** the pipeline SHALL advance to test-point generation
+- **AND** the agent SHALL be guided to call `propose_test_points`
+
+#### Scenario: Proposed test points await human review
+
+- **WHEN** `propose_test_points` persists a valid proposal
+- **THEN** the pipeline SHALL enter Reviewing Test Points
+- **AND** the agent SHALL not call `generate_plan` until the TUI records explicit human approval
+
+#### Scenario: Approved test points advance to planning
+
+- **WHEN** a human explicitly approves at least one valid test point and chooses to continue generation
+- **THEN** the pipeline SHALL advance to Planning
+- **AND** planning SHALL be limited to approved test-point identifiers
+
+#### Scenario: Scenario plan follows approved test points
+
+- **WHEN** `generate_plan` receives only approved, resolved test-point identifiers
+- **THEN** the pipeline SHALL record their scenario realizations and advance toward Writing
+
+### Requirement: Generation state survives TUI restart
+
+The TUI SHALL reconstruct the current requirement selection, proposed and reviewed test points, and the latest generation plan from persisted project artifacts and resumable agent-session state. Restarting SHALL NOT implicitly approve test points or skip a required review phase.
+
+#### Scenario: TUI closes during test-point review
+
+- **WHEN** the project is reopened while proposed test points remain unresolved
+- **THEN** the TUI SHALL restore the Reviewing Test Points phase
+- **AND** the same proposed test points SHALL remain unapproved
+
+#### Scenario: Requirement changes before generation resumes
+
+- **WHEN** persisted requirement content changes after test-point approval but before scenario planning
+- **THEN** the system SHALL resolve affected anchors again
+- **AND** it SHALL return affected test points to human review when required
