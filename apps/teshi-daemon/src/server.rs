@@ -16,6 +16,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use teshi_core::{BddFeature, BddProject, FeatureRenderPayload, StepIndex};
@@ -79,9 +80,18 @@ async fn same_origin_only(request: Request, next: Next) -> Response {
         .headers()
         .get(header::HOST)
         .and_then(|value| value.to_str().ok());
-    // The daemon serves plain HTTP, so scheme is part of the same-origin check.
+    // Direct daemon traffic is HTTP. A TLS reverse proxy can report the
+    // externally visible scheme so HTTPS deployments remain same-origin.
+    let scheme = request
+        .headers()
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .unwrap_or("http");
+    let prefix = format!("{scheme}://");
     let origin_host = origin
-        .strip_prefix("http://")
+        .strip_prefix(&prefix)
         .map(|value| value.trim_end_matches('/'));
 
     if host.is_some_and(|host| {
@@ -130,6 +140,10 @@ pub async fn run_server(
         )
         .route_layer(middleware::from_fn(same_origin_only));
 
+    let preview_routes = Router::new()
+        .route("/api/v1/browser/stream", get(browser_stream_ws))
+        .route_layer(middleware::from_fn(same_origin_only));
+
     // ── Protected routes (checked by auth middleware) ─────────────────────────
     let protected_routes = Router::new()
         .route("/api/v1/projects/open", post(api_open_project))
@@ -153,6 +167,7 @@ pub async fn run_server(
         .route("/api/v1/locator/highlight", post(api_highlight_locator))
         .route("/api/v1/browser/start", post(api_browser_start))
         .route("/api/v1/browser/stop", post(api_browser_stop))
+        .merge(preview_routes)
         .route("/api/v1/terminal/spawn", post(api_terminal_spawn))
         .route("/api/v1/terminal/stop", post(api_terminal_stop))
         .route("/api/v1/terminal/resize", post(api_terminal_resize))
@@ -271,6 +286,174 @@ async fn handle_events_socket(
             }
         }
     }
+}
+
+#[derive(Debug)]
+enum PreviewRelayMessage {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+fn is_preview_frame(text: &str) -> bool {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_owned))
+        .is_some_and(|kind| kind == "frame")
+}
+
+async fn browser_stream_ws(State(state): State<DaemonState>, ws: WebSocketUpgrade) -> Response {
+    state.touch();
+    let Some(ws_url) = state.rt.sidecar.browser_ws_url() else {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "WinApp sidecar is not running" })),
+        )
+            .into_response();
+    };
+    if state.rt.sidecar.browser_mode() != Some(BrowserMode::WinApp) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "active sidecar is not in WinApp mode" })),
+        )
+            .into_response();
+    }
+
+    let process_name = std::env::var("TESHI_WINAPP_PROCESS")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "TargetApp.exe".into());
+    let active_ws = state.active_ws.clone();
+    ws.on_upgrade(move |socket| {
+        handle_browser_stream_socket(ws_url, process_name, active_ws, socket)
+    })
+}
+
+async fn handle_browser_stream_socket(
+    ws_url: String,
+    process_name: String,
+    active_ws: Arc<AtomicUsize>,
+    mut downstream: WebSocket,
+) {
+    active_ws.fetch_add(1, Ordering::Relaxed);
+    let _guard = WsGuard(active_ws);
+
+    let mut upstream = match tokio_tungstenite::connect_async(&ws_url).await {
+        Ok((socket, _)) => socket,
+        Err(error) => {
+            let payload = json!({
+                "type": "frame_error",
+                "error": format!("connect to WinApp sidecar: {error}"),
+            });
+            let _ = downstream
+                .send(Message::Text(payload.to_string().into()))
+                .await;
+            return;
+        }
+    };
+
+    let attach = json!({
+        "cmd": "attach_window",
+        "request_id": "gpui-preview-attach",
+        "process_name": process_name,
+    });
+    if let Err(error) = upstream
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            attach.to_string().into(),
+        ))
+        .await
+    {
+        let payload = json!({
+            "type": "frame_error",
+            "error": format!("attach to target application: {error}"),
+        });
+        let _ = downstream
+            .send(Message::Text(payload.to_string().into()))
+            .await;
+        return;
+    }
+
+    let (frame_tx, mut frame_rx) = tokio::sync::watch::channel(None::<String>);
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::channel::<PreviewRelayMessage>(8);
+    let upstream_reader = tokio::spawn(async move {
+        while let Some(message) = upstream.next().await {
+            match message {
+                Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
+                    let text = text.to_string();
+                    if is_preview_frame(&text) {
+                        frame_tx.send_replace(Some(text));
+                    } else if control_tx
+                        .send(PreviewRelayMessage::Text(text))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(tokio_tungstenite::tungstenite::Message::Binary(bytes)) => {
+                    if control_tx
+                        .send(PreviewRelayMessage::Binary(bytes.to_vec()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(tokio_tungstenite::tungstenite::Message::Ping(payload)) => {
+                    if upstream
+                        .send(tokio_tungstenite::tungstenite::Message::Pong(payload))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+    });
+
+    let mut frames_open = true;
+    let mut controls_open = true;
+    loop {
+        tokio::select! {
+            changed = frame_rx.changed(), if frames_open => {
+                if changed.is_err() {
+                    frames_open = false;
+                } else {
+                    let frame = { frame_rx.borrow_and_update().clone() };
+                    if let Some(frame) = frame {
+                        if downstream.send(Message::Text(frame.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            control = control_rx.recv(), if controls_open => {
+                let message = match control {
+                    Some(PreviewRelayMessage::Text(text)) => Message::Text(text.into()),
+                    Some(PreviewRelayMessage::Binary(bytes)) => Message::Binary(bytes.into()),
+                    None => {
+                        controls_open = false;
+                        if !frames_open { break; }
+                        continue;
+                    }
+                };
+                if downstream.send(message).await.is_err() {
+                    break;
+                }
+            }
+            incoming = downstream.recv() => {
+                if incoming.is_none() || matches!(incoming, Some(Ok(Message::Close(_)))) {
+                    break;
+                }
+            }
+        }
+        if !frames_open && !controls_open {
+            break;
+        }
+    }
+    upstream_reader.abort();
 }
 
 // ── Auth middleware ─────────────────────────────────────────────────────────
@@ -1281,6 +1464,50 @@ mod integration {
             router.oneshot(non_browser).await.unwrap().status(),
             StatusCode::NO_CONTENT
         );
+    }
+
+    #[tokio::test]
+    async fn preview_origin_guard_accepts_forwarded_https_same_origin() {
+        let router = Router::new()
+            .route(
+                "/preview",
+                get(|| async { StatusCode::SWITCHING_PROTOCOLS }),
+            )
+            .route_layer(middleware::from_fn(same_origin_only));
+
+        let same_origin = Request::builder()
+            .uri("/preview")
+            .header("host", "teshi.example:443")
+            .header("origin", "https://teshi.example:443")
+            .header("x-forwarded-proto", "https")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router.clone().oneshot(same_origin).await.unwrap().status(),
+            StatusCode::SWITCHING_PROTOCOLS
+        );
+
+        let cross_origin = Request::builder()
+            .uri("/preview")
+            .header("host", "teshi.example:443")
+            .header("origin", "https://attacker.example")
+            .header("x-forwarded-proto", "https")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router.oneshot(cross_origin).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn preview_frame_classifier_only_selects_frame_messages() {
+        assert!(is_preview_frame(r#"{"type":"frame","data":"jpeg"}"#));
+        assert!(!is_preview_frame(
+            r#"{"type":"response","request_id":"gpui-preview-attach"}"#
+        ));
+        assert!(!is_preview_frame(r#"{"type":"frame_error"}"#));
+        assert!(!is_preview_frame("not json"));
     }
 
     // ── Main test ────────────────────────────────────────────────────────────

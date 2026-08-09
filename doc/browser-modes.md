@@ -15,7 +15,7 @@ teshi-desktop supports two browser backends for BDD locator recording. Both expo
         ▼                                                            ▼
 ┌─────────────────┐                                       ┌──────────────────────┐
 │  Your web app   │                                       │  teshi-desktop       │
-│  (e.g. enhook)  │                                       │  preview + agents    │
+│  target web app │                                       │  preview + agents    │
 └─────────────────┘                                       └──────────────────────┘
 ```
 

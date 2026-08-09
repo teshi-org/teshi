@@ -1232,7 +1232,7 @@ class ChromeBridge:
                 "ok": False,
                 "error": (
                     "Chrome extension not connected (no heartbeat). Keep the "
-                    "feedback.enhook.com tab active in Chrome and ensure "
+                    "target application tab active in Chrome and ensure "
                     "teshi-bridge is loaded — it polls every second while the bridge runs."
                 ),
             }

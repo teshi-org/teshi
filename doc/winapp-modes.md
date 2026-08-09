@@ -54,6 +54,24 @@ Or launch an executable and wait for its first visible window:
 teshi winapp launch "C:\path\to\MyApp.exe"
 ```
 
+## GPUI preview prototype
+
+The native and WASM GPUI shells show the same latest-frame preview on their main surface. The prototype automatically starts WinApp mode and attaches to a visible target application window.
+
+For native GPUI, install the project Python dependencies, keep the target application visible, and launch the shell from the project root:
+
+```powershell
+uv venv .venv
+uv pip install -r python/requirements.txt
+cargo run -p teshi-desktop
+```
+
+The default target is `TargetApp.exe`. Set `TESHI_WINAPP_PROCESS` to the executable name you want to preview. Set `TESHI_WINAPP_WS_URL` to reuse an already running WinApp sidecar instead of starting one.
+
+For GPUI WASM, build `apps/teshi-web/dist` with `scripts/build-teshi-web.ps1`, then serve it through `teshi web`. The shell starts WinApp mode through `/api/v1/browser/start`, then receives frames from the daemon's same-origin `/api/v1/browser/stream` WebSocket. The Python sidecar stays on the Teshi host's loopback interface, so the preview also works when the page is opened from another machine on the LAN. For diagnostics, `?winapp_ws=<url-encoded-websocket-url>` overrides the proxy endpoint.
+
+The prototype uses screen-rectangle capture. The target application must remain restored, visible, and unobscured. The proxy fixes transport reachability but does not change WebGPU's secure-context requirement: plain HTTP on a LAN address may still fail before the preview opens. Use HTTPS, localhost on the browser machine, or Chromium's development-only `unsafely-treat-insecure-origin-as-secure` setting. When TLS terminates at a reverse proxy, forward `X-Forwarded-Proto: https` so the daemon's same-origin guard accepts the WebSocket upgrade.
+
 ## Locator selectors
 
 WinApp mode stores confirmed bindings in `.teshi/step-bindings/{feature}.json` with `strategy: "uia"`.

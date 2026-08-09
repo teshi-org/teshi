@@ -1,4 +1,4 @@
-//! Shared root shell: empty main surface plus settings host.
+//! Shared root shell: WinApp preview main surface plus settings host.
 
 use gpui::{
     App, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight, InteractiveElement,
@@ -8,18 +8,19 @@ use gpui::{
 
 use crate::backend::SharedLlmBackend;
 use crate::llm_config_view::LlmConfigView;
+use crate::winapp_preview::WinAppPreview;
 
 /// Which primary surface the shell is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ShellSurface {
-    /// Default landing surface (empty / placeholder).
+    /// Default landing surface (WinApp preview).
     #[default]
     Main,
     /// Settings host (LLM config and future panels).
     Settings,
 }
 
-/// Root GPUI view for desktop and web: main placeholder + settings navigation.
+/// Root GPUI view for desktop and web: WinApp preview + settings navigation.
 ///
 /// Construct with a [`SharedLlmBackend`]; the shell injects it into the
 /// settings-hosted [`LlmConfigView`]. Default surface is [`ShellSurface::Main`].
@@ -27,6 +28,7 @@ pub struct AppShell {
     surface: ShellSurface,
     focus_handle: FocusHandle,
     llm_config: Entity<LlmConfigView>,
+    winapp_preview: Entity<WinAppPreview>,
 }
 
 impl AppShell {
@@ -34,7 +36,12 @@ impl AppShell {
     ///
     /// Does not focus the LLM form until the user opens settings, so the main
     /// surface remains the initial keyboard target.
-    pub fn new(backend: SharedLlmBackend, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        backend: SharedLlmBackend,
+        winapp_preview: Entity<WinAppPreview>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
         let llm_config = cx.new(|cx| LlmConfigView::new(backend, window, cx));
@@ -42,6 +49,7 @@ impl AppShell {
             surface: ShellSurface::Main,
             focus_handle,
             llm_config,
+            winapp_preview,
         }
     }
 
@@ -111,25 +119,7 @@ impl AppShell {
     }
 
     fn render_main(&self) -> impl IntoElement {
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(8.))
-            .child(
-                div()
-                    .text_color(rgb(0x6c7086))
-                    .text_sm()
-                    .child("Main surface — product panels will appear here."),
-            )
-            .child(
-                div()
-                    .text_color(rgb(0x585b70))
-                    .text_sm()
-                    .child("Open Settings to configure the LLM."),
-            )
+        div().size_full().child(self.winapp_preview.clone())
     }
 }
 

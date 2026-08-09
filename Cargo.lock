@@ -6743,6 +6743,7 @@ dependencies = [
  "teshi-core",
  "teshi-engine",
  "tokio",
+ "tokio-tungstenite 0.24.0",
  "tokio-util",
  "toml 0.8.23",
  "tower",
@@ -6758,10 +6759,14 @@ name = "teshi-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "gpui",
  "gpui_platform",
+ "serde_json",
  "teshi-engine",
  "teshi-ui",
+ "tokio",
+ "tungstenite 0.24.0",
 ]
 
 [[package]]
@@ -6848,6 +6853,7 @@ dependencies = [
 name = "teshi-web"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "console_error_panic_hook",
  "gpui",
  "gpui_platform",

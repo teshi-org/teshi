@@ -2,12 +2,190 @@
 
 use std::rc::Rc;
 
-use gpui::prelude::*;
+use base64::Engine as _;
+use gpui::{AppCell, Entity, prelude::*};
 use teshi_ui::{
     AppShell, LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate, ModelProfileListSnapshot,
-    ModelProfileSnapshot, ModelProfileUpdate, bind_llm_config_keys,
+    ModelProfileSnapshot, ModelProfileUpdate, WinAppPreview, bind_llm_config_keys,
 };
 use wasm_bindgen::prelude::*;
+
+fn query_parameter(name: &str) -> Option<String> {
+    let search = web_sys::window()?.location().search().ok()?;
+    let params = web_sys::UrlSearchParams::new_with_str(&search).ok()?;
+    params.get(name).filter(|value| !value.trim().is_empty())
+}
+
+fn same_origin_preview_ws_url() -> Result<String, String> {
+    let location = web_sys::window()
+        .ok_or_else(|| "browser window is unavailable".to_string())?
+        .location();
+    let protocol = location
+        .protocol()
+        .map_err(|error| format!("page protocol: {error:?}"))?;
+    let scheme = match protocol.as_str() {
+        "http:" => "ws",
+        "https:" => "wss",
+        _ => return Err(format!("unsupported page protocol {protocol}")),
+    };
+    let host = location
+        .host()
+        .map_err(|error| format!("page host: {error:?}"))?;
+    Ok(format!("{scheme}://{host}/api/v1/browser/stream"))
+}
+
+fn update_preview(
+    app: &Rc<AppCell>,
+    preview: &Entity<WinAppPreview>,
+    update: impl FnOnce(&mut WinAppPreview, &mut gpui::Context<WinAppPreview>),
+) {
+    // Browser callbacks run on the same thread as GPUI. If GPUI is already in
+    // an update, dropping this superseded event is preferable to re-entrant borrowing.
+    if let Ok(mut cx) = app.try_borrow_mut() {
+        let app: &mut gpui::App = std::ops::DerefMut::deref_mut(&mut cx);
+        preview.update(app, update);
+    }
+}
+
+fn start_wasm_preview(preview: Entity<WinAppPreview>, app: Rc<AppCell>, cx: &mut gpui::App) {
+    let ws_url = if let Some(ws_url) = query_parameter("winapp_ws") {
+        ws_url
+    } else {
+        match WasmLlmBackend::xhr_json(
+            "POST",
+            "/api/v1/browser/start",
+            Some(r#"{"mode":"winapp"}"#),
+        )
+        .and_then(|_| same_origin_preview_ws_url())
+        {
+            Ok(ws_url) => ws_url,
+            Err(error) => {
+                preview.update(cx, |preview, cx| {
+                    preview.set_error(format!("start WinApp sidecar: {error}"), cx);
+                });
+                return;
+            }
+        }
+    };
+
+    let socket = match web_sys::WebSocket::new(&ws_url) {
+        Ok(socket) => socket,
+        Err(error) => {
+            preview.update(cx, |preview, cx| {
+                preview.set_error(format!("open {ws_url}: {error:?}"), cx);
+            });
+            return;
+        }
+    };
+
+    let open_app = Rc::clone(&app);
+    let open_preview = preview.clone();
+    let on_open = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
+        update_preview(&open_app, &open_preview, |preview, cx| {
+            preview.set_waiting(
+                "Connected through daemon; attaching to target application…",
+                cx,
+            );
+        });
+    });
+    socket.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+    on_open.forget();
+
+    let message_app = Rc::clone(&app);
+    let message_preview = preview.clone();
+    let on_message =
+        Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+            let Some(text) = event.data().as_string() else {
+                return;
+            };
+            let Ok(payload) = serde_json::from_str::<serde_json::Value>(&text) else {
+                return;
+            };
+            match payload.get("type").and_then(|value| value.as_str()) {
+                Some("frame") => {
+                    let Some(data) = payload.get("data").and_then(|value| value.as_str()) else {
+                        return;
+                    };
+                    match base64::engine::general_purpose::STANDARD.decode(data) {
+                        Ok(jpeg) => {
+                            update_preview(&message_app, &message_preview, |preview, cx| {
+                                preview.set_jpeg(jpeg, cx);
+                            })
+                        }
+                        Err(error) => {
+                            update_preview(&message_app, &message_preview, |preview, cx| {
+                                preview.set_error(format!("invalid JPEG frame: {error}"), cx);
+                            });
+                        }
+                    }
+                }
+                Some("frame_error") => {
+                    let error = payload
+                        .get("error")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("WinApp capture failed")
+                        .to_string();
+                    update_preview(&message_app, &message_preview, |preview, cx| {
+                        preview.set_error(error, cx);
+                    });
+                }
+                Some("response")
+                    if payload.get("request_id").and_then(|value| value.as_str())
+                        == Some("gpui-preview-attach") =>
+                {
+                    if payload.get("ok").and_then(|value| value.as_bool()) == Some(true) {
+                        update_preview(&message_app, &message_preview, |preview, cx| {
+                            preview.set_waiting("Attached; waiting for first frame…", cx);
+                        });
+                    } else {
+                        let error = payload
+                            .get("error")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("could not attach to target application")
+                            .to_string();
+                        update_preview(&message_app, &message_preview, |preview, cx| {
+                            preview.set_error(error, cx);
+                        });
+                    }
+                }
+                _ => {}
+            }
+        });
+    socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    on_message.forget();
+
+    let error_app = Rc::clone(&app);
+    let error_preview = preview.clone();
+    let on_error =
+        Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(move |event: web_sys::ErrorEvent| {
+            let detail = if event.message().is_empty() {
+                "browser rejected the WinApp preview WebSocket".to_string()
+            } else {
+                event.message()
+            };
+            update_preview(&error_app, &error_preview, |preview, cx| {
+                preview.set_error(detail, cx);
+            });
+        });
+    socket.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+    on_error.forget();
+
+    let close_app = app;
+    let close_preview = preview;
+    let on_close =
+        Closure::<dyn FnMut(web_sys::CloseEvent)>::new(move |event: web_sys::CloseEvent| {
+            let detail = if event.reason().is_empty() {
+                format!("preview WebSocket closed ({})", event.code())
+            } else {
+                format!("preview WebSocket closed: {}", event.reason())
+            };
+            update_preview(&close_app, &close_preview, |preview, cx| {
+                preview.set_error(detail, cx);
+            });
+        });
+    socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+    on_close.forget();
+}
 
 /// Sync XHR backend so [`LlmConfigBackend`] matches the native sync trait.
 struct WasmLlmBackend;
@@ -92,17 +270,20 @@ pub fn run(on_ready: js_sys::Function, on_error: js_sys::Function) -> Result<(),
     // Keep the web Application's Rc alive for the page lifetime (upstream pattern).
     struct WasmApplication(Rc<gpui::AppCell>);
     let wasm_app = unsafe { std::mem::transmute::<gpui::Application, WasmApplication>(app) };
-    std::mem::forget(wasm_app.0.clone());
+    let app_cell = wasm_app.0.clone();
+    std::mem::forget(app_cell.clone());
     let app = unsafe { std::mem::transmute::<WasmApplication, gpui::Application>(wasm_app) };
 
     app.run(move |cx: &mut gpui::App| {
         bind_llm_config_keys(cx);
         let backend: Rc<dyn LlmConfigBackend> = Rc::new(WasmLlmBackend);
+        let preview = cx.new(|_| WinAppPreview::new("target application"));
         match cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-            cx.new(|cx| AppShell::new(backend.clone(), window, cx))
+            cx.new(|cx| AppShell::new(backend.clone(), preview.clone(), window, cx))
         }) {
             Ok(_) => {
                 cx.activate(true);
+                start_wasm_preview(preview, app_cell.clone(), cx);
                 if let Err(err) = on_ready.call0(&JsValue::NULL) {
                     web_sys::console::error_1(&err);
                 }

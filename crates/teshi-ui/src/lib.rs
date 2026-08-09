@@ -6,6 +6,7 @@
 mod app_shell;
 mod backend;
 mod llm_config_view;
+mod winapp_preview;
 
 pub use app_shell::{AppShell, ShellSurface};
 pub use backend::{
@@ -13,3 +14,4 @@ pub use backend::{
     ModelProfileSnapshot, ModelProfileUpdate, SharedLlmBackend,
 };
 pub use llm_config_view::{LlmConfigView, bind_llm_config_keys};
+pub use winapp_preview::{PreviewStatus, WinAppPreview};

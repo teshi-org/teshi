@@ -97,7 +97,7 @@ Before replay:
 
 ```bash
 $TESHI winapp list-windows
-$TESHI winapp attach --title 'Enhook'   # or --hwnd / --process-name
+$TESHI winapp attach --title 'Target App'   # or --hwnd / --process-name
 # optional one-shot:
 $TESHI winapp replay --feature '<feature>' --launch 'C:\path\to\App.exe' --yes
 ```
