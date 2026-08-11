@@ -1,13 +1,13 @@
-# GPUI web LLM config spike (Path 1)
+# GPUI WASM web shell
 
-Minimal closed loop: shared GPUI `teshi-ui` (LLM settings only), native `teshi-desktop`, WASM `teshi-web`, and `teshi-daemon` same-origin hosting.
+Supported web product path: shared GPUI `teshi-ui`, native `teshi-desktop`, WASM `teshi-web`, and `teshi-daemon` same-origin hosting.
 
 ## Scope
 
-- **In:** LLM config UI (base URL, model, API key), `GET/PUT /api/v1/llm/config`, daemon `--dist` serving GPUI assets.
-- **Out:** React/Tauri replacement, Hugo `/app` publish, WebSocket events, feature editor, agent chat.
+- **In:** browser-profile discovery and explicit selection, LLM configuration, daemon same-origin APIs, and `--dist` serving GPUI assets.
+- **Out:** Hugo `/app` publish, the full feature editor, and agent chat.
 
-Marketing site remains Hugo (`teshi-org.github.io`). React remains the default production `dist` until a later migration.
+Marketing remains Hugo (`teshi-org.github.io`). The retired React/Vite application has been removed and is not served or shipped by `teshi web`.
 
 ## Prerequisites
 
@@ -31,13 +31,13 @@ Output: `apps/teshi-web/dist/`.
 
 ## Path 1 run (daemon hosts GPUI)
 
-Point the existing web host at the GPUI dist (React default resolver unchanged):
+The daemon resolves the GPUI dist by default; `--dist` is useful for an explicit build path:
 
 ```powershell
 cargo run -p teshi-cli -- web --no-open --dist "apps/teshi-web/dist"
 ```
 
-Open the printed `http://127.0.0.1:<port>/` URL. Save LLM settings in the GPUI form; reload and confirm status shows configured (masked key).
+Open the printed `http://127.0.0.1:<port>/` URL. The initial surface is Browser Profiles; Settings opens the shared LLM profile form.
 
 API check:
 
@@ -56,4 +56,4 @@ Uses the shared user-level store: `%APPDATA%/teshi/model-profiles/` (or XDG data
 ## Crate rules
 
 - `teshi-ui` / `teshi-web` must not depend on `teshi-engine` or `teshi-agent`.
-- Desktop may use `teshi-engine` only for the native config store backend.
+- Desktop may use `teshi-engine` and direct loopback adapters for native platform I/O.

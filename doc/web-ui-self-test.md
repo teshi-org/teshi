@@ -1,106 +1,51 @@
-# teshi web UI self-test (bootstrap)
+# GPUI WASM web UI self-test
 
-teshi can dogfood its own GUI by treating **teshi desktop** as the test IDE and **teshi web** on loopback as the application under test (AUT). Both hosts load the same React bundle from `desktop/dist`.
+`teshi web` serves the GPUI WASM shell from `apps/teshi-web/dist`. The retired
+React/Vite frontend has been removed; GPUI WASM is the only runtime, release
+artifact, and frontend quality gate.
 
-## Two browser contexts
+## Build and run
 
-| Context | Role | URL / surface |
-|---------|------|----------------|
-| **Host (IDE)** | Recording shell: Gherkin, Locator, embedded terminal, Browser panel controls | teshi desktop (Tauri) or teshi web when used as IDE |
-| **SUT (AUT)** | Page under test inside the Browser panel preview | `http://127.0.0.1:1420` (Vite dev) or `http://127.0.0.1:1421` (stable dist) |
-
-Do not confuse them:
-
-- **Start Embedded** in the Browser panel attaches Playwright to the **SUT** preview stream.
-- `teshi web --no-open` in the terminal starts the **SUT API/runtime** on port 1421.
-
-## One-command bootstrap (recommended)
-
-From the repo root, a single command starts the full dev stack and opens a live status dashboard (version, health, duplicate-instance warnings):
-
-```powershell
-pip install -r scripts/requirements-dev.txt
-python scripts/bootstrap_dev.py --project . --build
-```
-
-Shorthand:
-
-```powershell
-py scripts/bootstrap_dev.py .
-```
-
-The script builds **teshi** + **teshi-desktop**, starts **Vite** (`:1420`), **teshi-desktop**, **teshi web** (`:1421`), and **serve-embedded**. It avoids `npm run tauri dev` predev so Windows does not lock `teshi.exe`. Do **not** run `Stop-Process -Name teshi` before bootstrap; use `--stop-existing` only.
-
-Logs: `.teshi/logs/bootstrap-*.log`
-
-Flags: `--mode separate` (desktop exe + npm instead of tauri dev), `--no-embedded`, `--api-port`, `--ui-port`, `--stop-existing` (stop locked debug binaries before build/start).
-
-See also [`.teshi/skills/web-ui-bootstrap/SKILL.md`](../.teshi/skills/web-ui-bootstrap/SKILL.md).
-
-## Dev workflow (HMR — manual)
-
-| Terminal | Command |
-|----------|---------|
-| 1 | `teshi web --project . --port 1421 --no-open` |
-| 2 | `cd desktop && npm run dev` (Vite on 1420) |
-
-1. Open the repo: `teshi desktop --project .`
-2. Start both terminals above.
-3. Browser panel: **Start Embedded** → navigate to `http://127.0.0.1:1420/?e2e=1` (include `http://` and `?e2e=1` for automation teardown).
-4. Health check before record/replay:
+From the repository root:
 
 ```bash
-teshi browser doctor || teshi browser reconnect
-teshi browser doctor
+bash scripts/build-teshi-web.sh
+cargo build -p teshi-cli
+./target/debug/teshi web --project . --host 127.0.0.1 --port 20253 --no-open
 ```
 
-5. Record bindings with **bdd-locator** (RVP verification) or follow **agent-web-ui-flow**.
-6. Replay: `teshi browser replay --non-interactive --yes`
+On Windows, use `scripts/build-teshi-web.ps1` and `target\debug\teshi.exe`.
+The daemon auto-resolves `apps/teshi-web/dist` from a source checkout. Installed
+packages resolve the bundled `share/web` directory.
 
-Use stable `[data-testid="..."]` selectors (see `apps/teshi-web-ui/src/panels/` and **web-ui-bootstrap** skill).
-
-## Stable workflow (CI / smoke)
-
-1. `cd desktop && npm run build`
-2. `teshi web --project . --port 1421 --no-open`
-3. Embedded preview: `http://127.0.0.1:1421`
-
-## Sidecar lifecycle
-
-After killing/restarting `teshi web` or Vite dev server:
+## Automated smoke gate
 
 ```bash
-teshi browser doctor
-teshi browser reconnect   # embedded mode only
-teshi browser doctor
+bash scripts/run-web-ui-smoke.sh
 ```
 
-Set `TESHI_BROWSER_AUTO_RECONNECT=0` to disable automatic reconnect before browser CLI commands.
+The gate builds the wasm32 GPUI target, runs `wasm-bindgen`, verifies the runtime
+marker and non-empty `.wasm` output, and rejects React/Vite runtime markers.
 
-## CI headless workflow
+## Browser-agent validation
 
-1. Build the frontend: `cd desktop && npm run build`
-2. Start the web host: `teshi web --port 1421 --no-open` (add `--project .` for project-panel scenarios)
-3. Start the embedded sidecar: `teshi browser serve-embedded --navigate http://127.0.0.1:1421`
-4. Run scenarios: `teshi run tests/feature/web-ui/`
+1. Load the Teshi Bridge extension in one or more Chrome profiles.
+2. Start the Chrome bridge with `teshi browser start --mode chrome`.
+3. Open `http://127.0.0.1:20253/` in a leased target tab.
+4. Confirm the page title is `teshi — GPUI Web` and the page displays the GPUI
+   Browser Profiles canvas.
+5. With multiple profiles connected, confirm no profile is selected automatically.
+   Select a profile explicitly before inspecting or activating one of its tabs.
 
-Ensure `.teshi/cdp-endpoint.json` exists (written by `serve-embedded`) and step-bindings are committed under `.teshi/step-bindings/`.
+Useful checks:
 
-## Test assets
+```bash
+curl --noproxy '*' http://127.0.0.1:20253/
+curl --noproxy '*' http://127.0.0.1:20253/api/v1/browser/sessions
+teshi browser sessions
+```
 
-| Path | Purpose |
-|------|---------|
-| `tests/feature/web-ui/*.feature` | Gherkin scenarios for the web UI |
-| `.teshi/step-bindings/tests__feature__web-ui__*.json` | Confirmed DOM bindings |
-| `.teshi/skills/agent-web-ui-flow/SKILL.md` | End-to-end external agent playbook |
-| `.teshi/skills/web-ui-bootstrap/SKILL.md` | Host + SUT setup |
-| `.teshi/skills/bdd-feature-author/SKILL.md` | Write `.feature` files |
-| `.teshi/skills/bdd-locator/SKILL.md` | RVP + `steps propose` |
-| `.teshi/skills/bdd-replay/SKILL.md` | Replay validation |
-
-## Out of scope
-
-- Tauri shell–specific behavior (native file dialog, window chrome, `invoke` paths)
-- WinApp UIA against `teshi-desktop.exe` (WinApp mode targets WinUI3 apps under test)
-
-Web UI E2E covers the shared React panels used by both desktop and web hosts.
+The HTML response must contain
+`<meta name="teshi-ui-runtime" content="gpui-wasm">`. Browser operations with
+several live profiles must include the session/window/tab target and a valid lease;
+ambiguous operations fail without mutating browser state.

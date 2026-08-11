@@ -14,11 +14,12 @@ use teshi_engine::{
     default_winapp_service_script, open_project, start_browser_sidecar,
 };
 use teshi_ui::{
-    ApiStyleDto, AppShell, LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate,
-    ModelProfileListSnapshot, ModelProfileSnapshot, ModelProfileUpdate, WinAppPreview,
-    bind_llm_config_keys,
+    ApiStyleDto, AppShell, BrowserSessionListSnapshot, BrowserSessionsBackend, BrowserTabTarget,
+    LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate, ModelProfileListSnapshot,
+    ModelProfileSnapshot, ModelProfileUpdate, WinAppPreview, bind_llm_config_keys,
 };
 
+#[cfg_attr(not(windows), allow(dead_code))]
 enum PreviewEvent {
     Waiting(String),
     Frame(Vec<u8>),
@@ -188,7 +189,7 @@ fn poll_preview_events(preview: Entity<WinAppPreview>, slot: LatestPreviewEvent,
     .detach();
 }
 
-struct NativeLlmBackend;
+struct NativePlatformBackend;
 
 fn map_api_style(style: ApiStyle) -> ApiStyleDto {
     match style {
@@ -230,7 +231,7 @@ fn map_list(list: ModelProfileList) -> ModelProfileListSnapshot {
     }
 }
 
-impl LlmConfigBackend for NativeLlmBackend {
+impl LlmConfigBackend for NativePlatformBackend {
     fn get_llm_config(&self) -> Result<LlmConfigSnapshot, String> {
         let public = teshi_engine::load_llm_config_public().map_err(|e| e.to_string())?;
         Ok(LlmConfigSnapshot {
@@ -298,24 +299,109 @@ impl LlmConfigBackend for NativeLlmBackend {
     }
 }
 
+impl NativePlatformBackend {
+    fn browser_client() -> Result<reqwest::blocking::Client, String> {
+        reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .map_err(|error| error.to_string())
+    }
+
+    fn browser_bridge_value(&self) -> Result<serde_json::Value, String> {
+        Self::browser_client()?
+            .get("http://127.0.0.1:17373/v1/bridge")
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .map_err(|error| error.to_string())?
+            .json()
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl BrowserSessionsBackend for NativePlatformBackend {
+    fn start_browser_bridge(&self) -> Result<(), String> {
+        self.browser_bridge_value().map(|_| ()).map_err(|_| {
+            "the native shell does not own a Chrome bridge yet; start it through `teshi web` or the browser CLI, then Refresh".into()
+        })
+    }
+
+    fn list_browser_sessions(&self) -> Result<BrowserSessionListSnapshot, String> {
+        serde_json::from_value(self.browser_bridge_value()?)
+            .map_err(|error| format!("decode browser sessions: {error}"))
+    }
+
+    fn activate_browser_tab(&self, target: &BrowserTabTarget) -> Result<(), String> {
+        let bridge = self.browser_bridge_value()?;
+        let project_root = bridge
+            .get("project_root")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "browser bridge did not report its project root".to_string())?;
+        let body = serde_json::json!({
+            "project_root": project_root,
+            "extension_instance_id": target.extension_instance_id,
+            "window_id": target.window_id,
+            "tab_id": target.tab_id,
+        });
+        let response = Self::browser_client()?
+            .post("http://127.0.0.1:17373/v1/bridge/activate_tab")
+            .json(&body)
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .map_err(|error| error.to_string())?
+            .json::<serde_json::Value>()
+            .map_err(|error| error.to_string())?;
+        if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            Ok(())
+        } else {
+            Err(response
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("browser broker rejected tab activation")
+                .to_string())
+        }
+    }
+}
+
 fn main() {
     gpui_platform::application().run(|cx: &mut App| {
         bind_llm_config_keys(cx);
         let bounds = Bounds::centered(None, size(px(960.0), px(720.0)), cx);
-        let backend: Rc<dyn LlmConfigBackend> = Rc::new(NativeLlmBackend);
+        let platform = Rc::new(NativePlatformBackend);
+        let llm_backend: Rc<dyn LlmConfigBackend> = platform.clone();
+        let browser_backend: Rc<dyn BrowserSessionsBackend> = platform;
         let process_name = std::env::var("TESHI_WINAPP_PROCESS")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "TargetApp.exe".into());
         let preview = cx.new(|_| WinAppPreview::new(process_name.clone()));
-        let events = start_native_preview(process_name);
-        poll_preview_events(preview.clone(), events, cx);
+        if std::env::var("TESHI_WINAPP_AUTOSTART").as_deref() == Ok("1") {
+            let events = start_native_preview(process_name);
+            poll_preview_events(preview.clone(), events, cx);
+        } else {
+            preview.update(cx, |preview, cx| {
+                preview.set_waiting(
+                    "WinApp preview is opt-in; set TESHI_WINAPP_AUTOSTART=1 before launch.",
+                    cx,
+                );
+            });
+        }
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| AppShell::new(backend.clone(), preview.clone(), window, cx)),
+            |window, cx| {
+                cx.new(|cx| {
+                    AppShell::new(
+                        llm_backend.clone(),
+                        browser_backend.clone(),
+                        preview.clone(),
+                        window,
+                        cx,
+                    )
+                })
+            },
         )
         .expect("open teshi-desktop window");
         cx.activate(true);

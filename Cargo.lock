@@ -6762,6 +6762,7 @@ dependencies = [
  "base64",
  "gpui",
  "gpui_platform",
+ "reqwest",
  "serde_json",
  "teshi-engine",
  "teshi-ui",

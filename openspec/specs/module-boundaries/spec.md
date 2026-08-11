@@ -102,15 +102,22 @@ The daemon (`teshi-daemon`) and terminal sidecar (`teshi-terminal-sidecar`) SHAL
 - **WHEN** the target directory structure is checked
 - **THEN** `apps/teshi-terminal-sidecar/Cargo.toml` exists, `crates/teshi-terminal-sidecar/` does NOT exist
 
-### Requirement: React web UI for daemon
+### Requirement: GPUI WASM web UI for daemon
 
-The TypeScript/React web UI SHALL reside at `apps/teshi-web-ui/` and SHALL be served by `teshi-daemon` as static assets. There SHALL NOT be a Tauri-based desktop shell in the workspace.
+The GPUI WASM web UI SHALL reside at `apps/teshi-web/`, share product views through `crates/teshi-ui`, and SHALL be served by `teshi-daemon` as static assets. The retired TypeScript/React application directory `apps/teshi-web-ui/` SHALL NOT exist. There SHALL NOT be a Tauri-based desktop shell in the workspace.
 
-#### Scenario: Web UI package exists
+#### Scenario: GPUI web package exists
+
 - **WHEN** the target directory structure is checked
-- **THEN** `apps/teshi-web-ui/package.json` exists
+- **THEN** `apps/teshi-web/Cargo.toml` and `apps/teshi-web/web/index.html` exist
+
+#### Scenario: React web package is absent
+
+- **WHEN** the target directory structure is checked
+- **THEN** `apps/teshi-web-ui` does NOT exist
 
 #### Scenario: No Tauri app crate
+
 - **WHEN** the root `Cargo.toml` workspace `members` list is read
 - **THEN** it does NOT include `apps/teshi-tauri`
 

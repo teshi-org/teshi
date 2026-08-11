@@ -37,12 +37,27 @@ VERSION_FILES: list[tuple[str, str, re.Pattern, str]] = [
     ("apps/teshi-cli/Cargo.toml", "apps/teshi-cli/Cargo.toml",
      re.compile(r'^version = "(\d+\.\d+\.\d+)"', re.MULTILINE),
      'version = "{version}"'),
-    ("apps/teshi-web-ui/package.json", "apps/teshi-web-ui/package.json",
-     re.compile(r'"version": "(\d+\.\d+\.\d+)"'),
-     '"version": "{version}"'),
     ("extension/teshi-bridge/manifest.json", "extension/teshi-bridge/manifest.json",
      re.compile(r'"version": "(\d+\.\d+\.\d+)"'),
      '"version": "{version}"'),
+    ("browser-testing plugin", "agent-packages/teshi-browser-testing/.codex-plugin/plugin.json",
+     re.compile(r'"version": "(\d+\.\d+\.\d+)"'),
+     '"version": "{version}"'),
+    ("browser-testing compatibility package", "agent-packages/teshi-browser-testing/compatibility.json",
+     re.compile(r'"package_version": "(\d+\.\d+\.\d+)"'),
+     '"package_version": "{version}"'),
+    ("browser-testing compatibility CLI", "agent-packages/teshi-browser-testing/compatibility.json",
+     re.compile(r'"teshi_cli": ">=(\d+\.\d+\.\d+) <0\.8\.0"'),
+     '"teshi_cli": ">={version} <0.8.0"'),
+    ("browser-testing compatibility extension", "agent-packages/teshi-browser-testing/compatibility.json",
+     re.compile(r'"extension": ">=(\d+\.\d+\.\d+) <0\.8\.0"'),
+     '"extension": ">={version} <0.8.0"'),
+    ("playwright-locator CLI compatibility", "agent-packages/teshi-browser-testing/skills/playwright-locator/references/compatibility.md",
+     re.compile(r'\| Teshi CLI \| `>=(\d+\.\d+\.\d+) <0\.8\.0` \|'),
+     '| Teshi CLI | `>={version} <0.8.0` |'),
+    ("playwright-locator extension compatibility", "agent-packages/teshi-browser-testing/skills/playwright-locator/references/compatibility.md",
+     re.compile(r'\| teshi-bridge extension \| `>=(\d+\.\d+\.\d+) <0\.8\.0` \|'),
+     '| teshi-bridge extension | `>={version} <0.8.0` |'),
 ]
 
 CHANGELOG_PATH = "CHANGELOG.md"
@@ -191,6 +206,17 @@ def validate_release_artifacts() -> bool:
         except Exception as e:
             print(f"  ❌ Cargo.lock read error: {e}")
             ok = False
+
+    # 3. Prove the agent package works after being copied outside the checkout.
+    smoke = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "test-browser-agent-package.py")],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if smoke.returncode != 0:
+        print(f"  ❌ browser-agent package smoke test failed:\n{smoke.stdout}{smoke.stderr}")
+        ok = False
 
     return ok
 

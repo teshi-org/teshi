@@ -7,6 +7,8 @@ import asyncio
 import base64
 import json
 import os
+import re
+import socket
 import sys
 import time
 import urllib.error
@@ -14,6 +16,16 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from typing import Any
+
+from browser_agent_broker import (
+    PROTOCOL_VERSION,
+    SCHEMA_VERSION,
+    BrokerError,
+    BrowserSessionBroker,
+    apply_verification_results,
+    generate_playwright_candidates,
+    operation_success,
+)
 
 DEFAULT_DISCOVERY_PORT = 17373
 # Extension is considered connected if heartbeat POST was received within this window.
@@ -45,13 +57,22 @@ def debug_log(project_root: Path | None, event: str, payload: dict[str, Any]) ->
         return
 
 
+def _without_windows_extended_prefix(value: str) -> str:
+    """Return the ordinary spelling of a Windows extended-length path."""
+    if value.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + value[8:]
+    if value.startswith("\\\\?\\"):
+        return value[4:]
+    return value
+
+
 def paths_equal(got: str, expected: Path) -> bool:
-    """Compare project roots (case-insensitive on Windows)."""
+    """Compare project roots, including equivalent Windows path spellings."""
     if not got or not str(got).strip():
         return True
     try:
-        a = Path(got).resolve()
-        b = expected.resolve()
+        a = Path(_without_windows_extended_prefix(got)).resolve()
+        b = Path(_without_windows_extended_prefix(str(expected))).resolve()
         if a == b:
             return True
         return str(a).casefold() == str(b).casefold()
@@ -292,6 +313,20 @@ def build_frame_out_sync(meta: dict[str, Any], jpeg: bytes) -> dict[str, Any]:
             frame_out["tab_id"] = int(raw_tab)
         except (TypeError, ValueError):
             pass
+    instance_id = str(meta.get("extension_instance_id", "")).strip()
+    raw_window = meta.get("window_id")
+    if instance_id and raw_window is not None and raw_tab is not None:
+        try:
+            frame_out["extension_instance_id"] = instance_id
+            frame_out["target"] = {
+                "extension_instance_id": instance_id,
+                "window_id": int(raw_window),
+                "tab_id": int(raw_tab),
+            }
+        except (TypeError, ValueError):
+            pass
+    if meta.get("request_id"):
+        frame_out["request_id"] = str(meta["request_id"])
     return frame_out
 
 
@@ -535,6 +570,15 @@ class EmbeddedSession:
                 tree = {"error": str(exc)}
 
             buttons = await self.page.evaluate(INTERACTIVE_EVAL)
+            revision = await self.page.evaluate(
+                """() => {
+                    if (!globalThis.__teshiPageContextRevision) {
+                        globalThis.__teshiPageContextRevision =
+                            (globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`);
+                    }
+                    return globalThis.__teshiPageContextRevision;
+                }"""
+            )
 
             # Also inject __teshiMakeShortSelector if not already present
             try:
@@ -544,7 +588,113 @@ class EmbeddedSession:
             except Exception:
                 await self.page.evaluate(MAKE_SHORT_SELECTOR_JS)
 
-            return normalize_snapshot(url, title, tree, buttons)
+            snapshot = normalize_snapshot(url, title, tree, buttons)
+            snapshot["page_context_revision"] = str(revision)
+            return snapshot
+
+    async def verify_playwright_candidates(
+        self,
+        candidates: list[dict[str, Any]],
+        expected_revision: str,
+    ) -> dict[str, Any]:
+        """Evaluate structured Playwright candidates in the current document."""
+        async with self._lock:
+            if self.page is None:
+                return {"ok": False, "code": "browser_unavailable", "error": "browser not ready"}
+            current_revision = str(
+                await self.page.evaluate(
+                    """() => globalThis.__teshiPageContextRevision || ''"""
+                )
+            )
+            if expected_revision and current_revision != expected_revision:
+                return {
+                    "ok": False,
+                    "code": "stale_page_context",
+                    "error": "page changed after the locator snapshot was acquired",
+                    "page_context_revision": current_revision,
+                }
+            verification: list[dict[str, Any]] = []
+            for candidate in candidates:
+                expression = str(candidate.get("expression", ""))
+                try:
+                    locator = self._playwright_locator(candidate)
+                    count = await locator.count()
+                    visible = count > 0 and await locator.first.is_visible()
+                    enabled = count > 0 and await locator.first.is_enabled()
+                    verification.append(
+                        {
+                            "expression": expression,
+                            "match_count": count,
+                            "visible": visible,
+                            "enabled": enabled,
+                        }
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    verification.append(
+                        {
+                            "expression": expression,
+                            "match_count": 0,
+                            "visible": False,
+                            "enabled": False,
+                            "error": str(exc),
+                        }
+                    )
+            return {
+                "ok": True,
+                "page_context_revision": current_revision,
+                "verification": verification,
+            }
+
+    def _playwright_locator(self, candidate: dict[str, Any]) -> Any:
+        """Build a Playwright locator from structured arguments without eval."""
+        if self.page is None:
+            raise RuntimeError("browser not ready")
+        context: Any = self.page
+        locator_context = candidate.get("context")
+        frame_hint = (
+            str(locator_context.get("frame", ""))
+            if isinstance(locator_context, dict)
+            else ""
+        )
+        if frame_hint:
+            matched = next(
+                (
+                    frame
+                    for frame in self.page.frames
+                    if frame_hint in frame.url or frame.name == frame_hint
+                ),
+                None,
+            )
+            if matched is not None:
+                context = matched
+        kind = str(candidate.get("kind", ""))
+        arguments = candidate.get("arguments")
+        args = arguments if isinstance(arguments, dict) else {}
+        if kind == "role":
+            return context.get_by_role(
+                str(args.get("role", "")),
+                name=str(args.get("name", "")),
+                exact=bool(args.get("exact", True)),
+            )
+        if kind == "label":
+            return context.get_by_label(
+                str(args.get("text", "")), exact=bool(args.get("exact", True))
+            )
+        if kind == "placeholder":
+            return context.get_by_placeholder(
+                str(args.get("text", "")), exact=bool(args.get("exact", True))
+            )
+        if kind in {"test_id", "attribute"}:
+            attribute = str(args.get("attribute", "data-testid"))
+            value = str(args.get("value", ""))
+            return context.locator(f"[{attribute}={json.dumps(value)}]")
+        if kind == "text":
+            return context.get_by_text(
+                str(args.get("text", "")), exact=bool(args.get("exact", True))
+            )
+        if kind == "css":
+            return context.locator(str(args.get("selector", "")))
+        raise ValueError(f"unsupported Playwright locator kind: {kind}")
 
     async def smart_enhance_locator(self, selector: str) -> dict[str, Any]:
         """Probe an element for the best-priority locator.
@@ -734,10 +884,204 @@ class EmbeddedSession:
 
 
 async def handle_embedded_command(
-    session: EmbeddedSession, data: dict[str, Any]
+    session: EmbeddedSession,
+    data: dict[str, Any],
+    broker: BrowserSessionBroker | None = None,
+    project_root: Path | None = None,
 ) -> dict[str, Any]:
     cmd = data.get("cmd")
     request_id = data.get("request_id")
+
+    if broker is not None:
+        record = broker.register_heartbeat(
+            {
+                "extension_instance_id": "embedded-session",
+                "profile_label": "Embedded Chromium",
+                "extension_version": "embedded",
+                "protocol_version": PROTOCOL_VERSION,
+                "browser": {"name": "Chromium", "version": "", "platform": sys.platform},
+                "active_window_id": 0,
+                "active_tab_id": 1,
+                "url": session.current_url(),
+                "title": "Embedded Chromium",
+                "windows": [
+                    {
+                        "id": 0,
+                        "focused": True,
+                        "tabs": [
+                            {
+                                "id": 1,
+                                "window_id": 0,
+                                "url": session.current_url(),
+                                "title": "Embedded Chromium",
+                                "active": True,
+                                "debuggable": True,
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+        if cmd == "list_browser_sessions":
+            return operation_success(
+                str(cmd), str(request_id or ""), sessions=broker.list_sessions()
+            )
+        if cmd == "list_browser_tabs":
+            try:
+                tabs = broker.list_tabs(str(data.get("extension_instance_id") or ""))
+                return operation_success(str(cmd), str(request_id or ""), **tabs)
+            except BrokerError as exc:
+                return exc.response(str(request_id or ""), str(cmd))
+        if cmd == "acquire_browser_lease":
+            try:
+                lease = broker.acquire_lease(
+                    str(data.get("extension_instance_id") or ""),
+                    str(data.get("owner_label") or "external-agent"),
+                    data.get("ttl_secs"),
+                )
+                return operation_success(str(cmd), str(request_id or ""), lease=lease)
+            except BrokerError as exc:
+                return exc.response(str(request_id or ""), str(cmd))
+        if cmd == "renew_browser_lease":
+            try:
+                lease = broker.renew_lease(
+                    str(data.get("extension_instance_id") or ""),
+                    str(data.get("lease_token") or ""),
+                    data.get("ttl_secs"),
+                )
+                return operation_success(str(cmd), str(request_id or ""), lease=lease)
+            except BrokerError as exc:
+                return exc.response(str(request_id or ""), str(cmd))
+        if cmd == "release_browser_lease":
+            try:
+                released = broker.release_lease(
+                    str(data.get("extension_instance_id") or ""),
+                    str(data.get("lease_token") or ""),
+                )
+                return operation_success(str(cmd), str(request_id or ""), **released)
+            except BrokerError as exc:
+                return exc.response(str(request_id or ""), str(cmd))
+        if cmd in {
+            "resolve_playwright_locator",
+            "verify_playwright_locator",
+            "capture_browser_evidence",
+        } or (cmd == "get_page_snapshot" and data.get("target") is not None):
+            try:
+                _record, target, _ephemeral = broker.authorize_command(
+                    data, legacy_compatibility=False
+                )
+                if cmd == "get_page_snapshot":
+                    snapshot = await session.get_page_snapshot()
+                    return operation_success(
+                        str(cmd),
+                        str(request_id or ""),
+                        target=target,
+                        **{key: value for key, value in snapshot.items() if key != "ok"},
+                    )
+                if cmd == "resolve_playwright_locator":
+                    snapshot = await session.get_page_snapshot()
+                    intent = data.get("intent") if isinstance(data.get("intent"), dict) else {}
+                    configured_ids = data.get("test_id_attributes")
+                    element, candidates = generate_playwright_candidates(
+                        snapshot,
+                        intent,
+                        configured_ids if isinstance(configured_ids, list) else None,
+                    )
+                    revision = str(snapshot.get("page_context_revision") or "")
+                    observed = await session.verify_playwright_candidates(
+                        candidates, revision
+                    )
+                    if not observed.get("ok"):
+                        return {
+                            **observed,
+                            "schema_version": SCHEMA_VERSION,
+                            "operation": str(cmd),
+                            "request_id": str(request_id or ""),
+                            "target": target,
+                        }
+                    ranked = apply_verification_results(
+                        candidates, observed.get("verification", [])
+                    )
+                    recommended = next(
+                        (
+                            candidate
+                            for candidate in ranked
+                            if candidate.get("verification") == "verified"
+                        ),
+                        None,
+                    )
+                    return operation_success(
+                        str(cmd),
+                        str(request_id or ""),
+                        target=target,
+                        page_context_revision=revision,
+                        url=str(snapshot.get("url") or ""),
+                        title=str(snapshot.get("title") or ""),
+                        element=element,
+                        recommended=recommended,
+                        candidates=ranked,
+                    )
+                if cmd == "verify_playwright_locator":
+                    candidate = data.get("candidate")
+                    if not isinstance(candidate, dict):
+                        raise BrokerError(
+                            "invalid_browser_operation", "candidate is required"
+                        )
+                    revision = str(data.get("page_context_revision") or "")
+                    observed = await session.verify_playwright_candidates(
+                        [candidate], revision
+                    )
+                    if not observed.get("ok"):
+                        return {
+                            **observed,
+                            "schema_version": SCHEMA_VERSION,
+                            "operation": str(cmd),
+                            "request_id": str(request_id or ""),
+                            "target": target,
+                        }
+                    merged = apply_verification_results(
+                        [candidate], observed.get("verification", [])
+                    )
+                    return operation_success(
+                        str(cmd),
+                        str(request_id or ""),
+                        target=target,
+                        page_context_revision=revision,
+                        candidate=merged[0],
+                    )
+                revision = str(data.get("page_context_revision") or "")
+                current = await session.get_page_snapshot()
+                current_revision = str(current.get("page_context_revision") or "")
+                if revision and revision != current_revision:
+                    raise BrokerError(
+                        "stale_page_context",
+                        "page changed before screenshot evidence could be captured",
+                    )
+                screenshot = await session.screenshot_jpeg_b64()
+                reference = f"inline:{request_id}"
+                if project_root is not None:
+                    safe_request = re.sub(
+                        r"[^A-Za-z0-9._-]+", "-", str(request_id or "evidence")
+                    )[:120]
+                    evidence_dir = project_root / ".teshi" / "evidence"
+                    evidence_dir.mkdir(parents=True, exist_ok=True)
+                    path = evidence_dir / f"{safe_request}.jpg"
+                    path.write_bytes(base64.b64decode(screenshot))
+                    reference = str(path)
+                return operation_success(
+                    str(cmd),
+                    str(request_id or ""),
+                    target=target,
+                    evidence={
+                        "request_id": str(request_id or ""),
+                        "target": target,
+                        "media_type": "image/jpeg",
+                        "reference": reference,
+                        "page_context_revision": current_revision,
+                    },
+                )
+            except BrokerError as exc:
+                return exc.response(str(request_id or ""), str(cmd))
 
     if cmd == "navigate":
         await session.navigate(data.get("url", "about:blank"))
@@ -818,6 +1162,7 @@ async def run_embedded(
 
     session = EmbeddedSession()
     await session.start(cdp_port)
+    agent_broker = BrowserSessionBroker(HEARTBEAT_TTL_SEC)
     cdp_meta: dict[str, Any] = {}
     if project_root is not None:
         try:
@@ -855,7 +1200,9 @@ async def run_embedded(
                         },
                     )
                     try:
-                        reply = await handle_embedded_command(session, data)
+                        reply = await handle_embedded_command(
+                            session, data, agent_broker, project_root
+                        )
                     except Exception as exc:  # noqa: BLE001
                         print(
                             f"embedded command failed: {data.get('cmd')}: {exc}",
@@ -939,7 +1286,7 @@ async def run_embedded(
 # --- Chrome extension backend ---
 
 
-class ChromeBridge:
+class _LegacyChromeBridge:
     """Chrome mode: extension talks HTTP heartbeat; agents use WebSocket."""
 
     def __init__(
@@ -1289,6 +1636,685 @@ class ChromeBridge:
             }
 
 
+class ChromeBridge:
+    """Chrome mode multi-session broker with a legacy single-session projection."""
+
+    def __init__(
+        self,
+        project_root: Path,
+        ws_url: str,
+        discovery_port: int,
+        extension_frame_ws_url: str,
+        frame_callback: Any | None = None,
+        event_callback: Any | None = None,
+    ) -> None:
+        self.project_root = project_root.resolve()
+        self.ws_url = ws_url
+        self.discovery_port = discovery_port
+        self.extension_frame_ws_url = extension_frame_ws_url
+        self.broker = BrowserSessionBroker(HEARTBEAT_TTL_SEC)
+        self._frame_callback = frame_callback
+        self._event_callback = event_callback
+        self._last_frame: dict[str, Any] | None = None
+        self._stream_restart_instances: set[str] = set()
+        self._deprecated_json_frame_warned = False
+
+    @property
+    def last_frame_error(self) -> str:
+        """Return the sole live session's frame error for legacy UI consumers."""
+        info = self.broker.bridge_info()
+        return str(info.get("last_frame_error", ""))
+
+    @last_frame_error.setter
+    def last_frame_error(self, value: str) -> None:
+        """Apply a stream error only when one session can be selected safely."""
+        try:
+            record, _target, _explicit = self.broker.resolve_target(None)
+        except BrokerError:
+            return
+        record.last_frame_error = str(value)[:1000]
+
+    def extension_alive(self) -> bool:
+        """Return whether at least one compatible extension session is live."""
+        return bool(
+            self.broker.bridge_info().get("extension_connected")
+        )
+
+    def bridge_info(self) -> dict[str, Any]:
+        """Return versioned discovery plus the legacy single-session fields."""
+        return {
+            "ws_url": self.ws_url,
+            "extension_frame_ws_url": self.extension_frame_ws_url,
+            "project_root": str(self.project_root),
+            "mode": "chrome",
+            "transport": "http-heartbeat+ws-screencast",
+            **self.broker.bridge_info(),
+        }
+
+    def write_endpoint(self) -> None:
+        """Refresh legacy `.teshi/cdp-endpoint.json` discovery metadata."""
+        info = self.bridge_info()
+        write_cdp_endpoint_file(
+            self.project_root,
+            mode="chrome",
+            ws_url=self.ws_url,
+            page_url=str(info.get("page_url") or "about:blank"),
+            discovery_port=self.discovery_port,
+            extension_connected=bool(info.get("extension_connected")),
+            extension_frame_ws_url=self.extension_frame_ws_url,
+        )
+
+    def debug_log(self, event: str, payload: dict[str, Any]) -> None:
+        """Persist opt-in broker diagnostics without page payloads or secrets."""
+        debug_log(self.project_root, event, payload)
+
+    async def handle_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Register one extension instance and return only its queued command."""
+        got = str(payload.get("project_root", ""))
+        if not paths_equal(got, self.project_root):
+            return BrokerError(
+                "invalid_browser_operation",
+                f"project_root mismatch: expected {self.project_root}",
+            ).response()
+        record = self.broker.register_heartbeat(payload)
+        response = self.broker.heartbeat_response(record)
+        restart = record.extension_instance_id in self._stream_restart_instances
+        self._stream_restart_instances.discard(record.extension_instance_id)
+        response["stream_restart"] = restart
+        response["force_capture"] = restart
+        if not record.compatible():
+            response.update(
+                {
+                    "ok": False,
+                    "code": "incompatible_browser_session",
+                    "error": (
+                        f"extension protocol {record.protocol_version} is incompatible; "
+                        f"protocol {PROTOCOL_VERSION} is required"
+                    ),
+                }
+            )
+        self.write_endpoint()
+        return response
+
+    def validate_stream_hello(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Authenticate a preview stream to one registered extension instance."""
+        got = str(payload.get("project_root", ""))
+        if not paths_equal(got, self.project_root):
+            return {
+                "type": "stream_hello_ack",
+                "ok": False,
+                "code": "invalid_browser_operation",
+                "error": f"project_root mismatch: expected {self.project_root}",
+            }
+        instance_id = str(payload.get("extension_instance_id", "")).strip()
+        if not instance_id:
+            # Legacy preview is accepted only when its heartbeat is the sole session.
+            try:
+                record, _target, _explicit = self.broker.resolve_target(None)
+                instance_id = record.extension_instance_id
+            except BrokerError as exc:
+                return {
+                    "type": "stream_hello_ack",
+                    "ok": False,
+                    "code": exc.code,
+                    "error": exc.message,
+                }
+        try:
+            record = self.broker.require_session(instance_id)
+        except BrokerError as exc:
+            return {
+                "type": "stream_hello_ack",
+                "ok": False,
+                "code": exc.code,
+                "error": exc.message,
+            }
+        return {
+            "type": "stream_hello_ack",
+            "ok": True,
+            "schema_version": SCHEMA_VERSION,
+            "protocol_version": PROTOCOL_VERSION,
+            "extension_instance_id": record.extension_instance_id,
+        }
+
+    async def handle_extension_binary(
+        self,
+        data: bytes,
+        stream_instance_id: str,
+    ) -> None:
+        """Route one binary preview frame to its authenticated session."""
+        parsed = parse_tsh1_frame(data)
+        if parsed is None:
+            return
+        meta, jpeg = parsed
+        if not jpeg:
+            return
+        meta_instance = str(meta.get("extension_instance_id", "")).strip()
+        if meta_instance and meta_instance != stream_instance_id:
+            self.debug_log(
+                "frame_target_mismatch",
+                {
+                    "stream_instance_id": stream_instance_id,
+                    "frame_instance_id": meta_instance,
+                },
+            )
+            return
+        meta["extension_instance_id"] = stream_instance_id
+        frame_out = await asyncio.to_thread(build_frame_out_sync, meta, jpeg)
+        target = frame_out.get("target")
+        if not isinstance(target, dict):
+            try:
+                record = self.broker.require_session(stream_instance_id)
+                target = record.active_target()
+            except BrokerError:
+                return
+        if not isinstance(target, dict):
+            return
+        try:
+            self.broker.update_frame(stream_instance_id, target, frame_out)
+        except BrokerError as exc:
+            self.debug_log("frame_rejected", {"code": exc.code})
+            return
+        self._last_frame = frame_out
+        self.write_endpoint()
+        if self._frame_callback is not None:
+            await self._frame_callback(frame_out)
+
+    async def handle_extension_response(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Correlate a JSON response without allowing cross-session delivery."""
+        instance_id = str(payload.get("extension_instance_id", "")).strip()
+        if payload.get("type") == "frame_error":
+            if not instance_id:
+                try:
+                    record, _target, _explicit = self.broker.resolve_target(None)
+                    instance_id = record.extension_instance_id
+                except BrokerError as exc:
+                    return exc.response()
+            record = self.broker.sessions.get(instance_id)
+            if record is None:
+                return BrokerError(
+                    "browser_target_not_found",
+                    f"browser session not found: {instance_id}",
+                ).response()
+            record.last_frame_error = str(
+                payload.get("error", "screenshot failed")
+            )[:1000]
+            self.write_endpoint()
+            await self._emit_event(
+                {
+                    "type": "frame_error",
+                    "extension_instance_id": instance_id,
+                    "error": record.last_frame_error,
+                }
+            )
+            return {"ok": True, "schema_version": SCHEMA_VERSION}
+
+        if payload.get("type") == "frame":
+            if not self._deprecated_json_frame_warned:
+                self._deprecated_json_frame_warned = True
+                print(
+                    "warning: JSON frame on POST /v1/bridge/response is deprecated; "
+                    "use extension WebSocket screencast (/extension/frames)",
+                    file=sys.stderr,
+                )
+            return {"ok": True, "deprecated": True, "ignored": True}
+
+        try:
+            pending = self.broker.accept_response(payload)
+        except BrokerError as exc:
+            self.debug_log(
+                "extension_response_rejected",
+                {
+                    "request_id": payload.get("request_id"),
+                    "code": exc.code,
+                },
+            )
+            return exc.response(str(payload.get("request_id", "")))
+        if pending is not None:
+            record = self.broker.sessions.get(pending.extension_instance_id)
+            if record is not None and payload.get("ok"):
+                if payload.get("url"):
+                    record.page_url = str(payload["url"])
+                if payload.get("title"):
+                    record.page_title = str(payload["title"])
+                target = pending.target
+                record.active_window_id = int(target["window_id"])
+                record.active_tab_id = int(target["tab_id"])
+            self.debug_log(
+                "extension_response",
+                {
+                    "cmd": pending.operation,
+                    "request_id": pending.request_id,
+                    "extension_instance_id": pending.extension_instance_id,
+                    "ok": payload.get("ok"),
+                    "code": payload.get("code"),
+                },
+            )
+        self.write_endpoint()
+        return {"ok": True, "schema_version": SCHEMA_VERSION}
+
+    async def handle_activate_tab_http(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Queue legacy UI tab activation with explicit session disambiguation."""
+        got = str(payload.get("project_root", ""))
+        if not paths_equal(got, self.project_root):
+            return BrokerError(
+                "invalid_browser_operation",
+                f"project_root mismatch: expected {self.project_root}",
+            ).response()
+        instance_id = str(
+            payload.get("extension_instance_id") or payload.get("session") or ""
+        ).strip()
+        tab_id = payload.get("tab_id")
+        window_id = payload.get("window_id")
+        raw_target: dict[str, Any] | None = None
+        if instance_id:
+            record = self.broker.sessions.get(instance_id)
+            if record is None:
+                return BrokerError(
+                    "browser_target_not_found",
+                    f"browser session not found: {instance_id}",
+                ).response()
+            if window_id is None:
+                matching = [
+                    tab
+                    for tab in record.iter_tabs()
+                    if str(tab.get("id")) == str(tab_id)
+                ]
+                if len(matching) == 1:
+                    window_id = matching[0].get("window_id")
+            raw_target = {
+                "extension_instance_id": instance_id,
+                "window_id": window_id,
+                "tab_id": tab_id,
+            }
+        data = {
+            "cmd": "activate_tab",
+            "request_id": f"ui-activate-{time.monotonic_ns()}",
+            "target": raw_target,
+            "tab_id": tab_id,
+        }
+        ui_ephemeral_token: str | None = None
+        try:
+            if raw_target is not None:
+                # The local browser panel is a compatibility UI, not an external
+                # lease owner. Give its explicit session selection a short lease
+                # so it cannot race an agent that already owns the profile.
+                record, normalized_target, _explicit = self.broker.resolve_target(
+                    raw_target
+                )
+                lease = self.broker.acquire_lease(
+                    record.extension_instance_id,
+                    "teshi-browser-panel",
+                    15,
+                )
+                ui_ephemeral_token = str(lease["lease_token"])
+                data["target"] = normalized_target
+                data["lease_token"] = ui_ephemeral_token
+            record, target, ephemeral = self.broker.authorize_command(
+                data, legacy_compatibility=True
+            )
+            data["tab_id"] = target["tab_id"]
+            data["window_id"] = target["window_id"]
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[dict[str, Any]] = loop.create_future()
+            self.broker.queue_command(
+                record,
+                target,
+                data,
+                future,
+                ephemeral_lease_token=ephemeral or ui_ephemeral_token,
+                front=True,
+            )
+            async def expire_ui_activation() -> None:
+                try:
+                    await asyncio.wait_for(asyncio.shield(future), timeout=15)
+                except asyncio.TimeoutError:
+                    self.broker.cancel_request(
+                        str(data["request_id"]),
+                        BrokerError(
+                            "browser_operation_timeout",
+                            "browser tab activation timed out; retry after checking extension health",
+                        ),
+                    )
+
+            asyncio.create_task(expire_ui_activation())
+            self._stream_restart_instances.add(record.extension_instance_id)
+            return operation_success(
+                "activate_tab",
+                str(data["request_id"]),
+                target=target,
+                queued=True,
+            )
+        except BrokerError as exc:
+            if ui_ephemeral_token and instance_id:
+                try:
+                    self.broker.release_lease(instance_id, ui_ephemeral_token)
+                except BrokerError:
+                    pass
+            return exc.response(str(data["request_id"]), "activate_tab")
+
+    async def handle_capture_now_http(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Request preview restart for one explicit or unambiguous session."""
+        got = str(payload.get("project_root", ""))
+        if not paths_equal(got, self.project_root):
+            return BrokerError(
+                "invalid_browser_operation",
+                f"project_root mismatch: expected {self.project_root}",
+            ).response()
+        instance_id = str(
+            payload.get("extension_instance_id") or payload.get("session") or ""
+        ).strip()
+        try:
+            if instance_id:
+                record = self.broker.require_session(instance_id)
+            else:
+                record, _target, _explicit = self.broker.resolve_target(None)
+            self._stream_restart_instances.add(record.extension_instance_id)
+            return operation_success(
+                "capture_now",
+                f"capture-{time.monotonic_ns()}",
+                extension_instance_id=record.extension_instance_id,
+                queued=True,
+            )
+        except BrokerError as exc:
+            return exc.response(operation="capture_now")
+
+    async def forward_command(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Execute one local broker or targeted extension operation."""
+        operation = str(data.get("cmd") or "")
+        request_id = str(data.get("request_id") or f"browser-{time.monotonic_ns()}")
+        data = dict(data)
+        data["request_id"] = request_id
+        started = time.monotonic()
+        self.debug_log(
+            "chrome_command_start",
+            {"cmd": operation, "request_id": request_id},
+        )
+        try:
+            if operation == "list_browser_sessions":
+                return operation_success(
+                    operation,
+                    request_id,
+                    sessions=self.broker.list_sessions(),
+                )
+            if operation == "list_browser_tabs":
+                result = self.broker.list_tabs(
+                    str(data.get("extension_instance_id") or "")
+                )
+                return operation_success(operation, request_id, **result)
+            if operation == "acquire_browser_lease":
+                lease = self.broker.acquire_lease(
+                    str(data.get("extension_instance_id") or ""),
+                    str(data.get("owner_label") or "external-agent"),
+                    data.get("ttl_secs"),
+                )
+                return operation_success(operation, request_id, lease=lease)
+            if operation == "renew_browser_lease":
+                lease = self.broker.renew_lease(
+                    str(data.get("extension_instance_id") or ""),
+                    str(data.get("lease_token") or ""),
+                    data.get("ttl_secs"),
+                )
+                return operation_success(operation, request_id, lease=lease)
+            if operation == "release_browser_lease":
+                result = self.broker.release_lease(
+                    str(data.get("extension_instance_id") or ""),
+                    str(data.get("lease_token") or ""),
+                )
+                return operation_success(operation, request_id, **result)
+            if operation == "resolve_playwright_locator":
+                return await self._resolve_playwright_locator(data)
+            if operation == "verify_playwright_locator":
+                return await self._verify_playwright_locator(data)
+            if operation == "capture_browser_evidence":
+                return await self._capture_browser_evidence(data)
+            return await self._forward_extension_command(data)
+        except BrokerError as exc:
+            response = exc.response(request_id, operation)
+            self.debug_log(
+                "chrome_command_error",
+                {"cmd": operation, "request_id": request_id, "code": exc.code},
+            )
+            return response
+        finally:
+            self.debug_log(
+                "chrome_command_end",
+                {
+                    "cmd": operation,
+                    "request_id": request_id,
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                },
+            )
+
+    async def _forward_extension_command(
+        self,
+        data: dict[str, Any],
+        *,
+        authorized: tuple[Any, dict[str, Any], str | None] | None = None,
+        timeout: float = 45.0,
+    ) -> dict[str, Any]:
+        if authorized is None:
+            authorized = self.broker.authorize_command(data)
+        record, target, ephemeral = authorized
+        if not record.compatible():
+            raise BrokerError(
+                "incompatible_browser_session",
+                "selected extension protocol is incompatible",
+            )
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        command = dict(data)
+        command["target"] = target
+        self.broker.queue_command(
+            record,
+            target,
+            command,
+            future,
+            ephemeral_lease_token=ephemeral,
+            front=str(data.get("cmd")) in {"get_page_snapshot", "highlight_selector"},
+        )
+        request_id = str(data["request_id"])
+        try:
+            result = await asyncio.wait_for(future, timeout=timeout)
+            return result
+        except asyncio.TimeoutError as exc:
+            error = BrokerError(
+                "browser_operation_timeout",
+                "extension did not respond before the operation timeout",
+                {"extension_instance_id": record.extension_instance_id},
+            )
+            self.broker.cancel_request(request_id, error)
+            raise error from exc
+
+    async def _resolve_playwright_locator(
+        self,
+        data: dict[str, Any],
+    ) -> dict[str, Any]:
+        record, target, ephemeral = self.broker.authorize_command(
+            data, legacy_compatibility=False
+        )
+        if record.is_legacy():
+            raise BrokerError(
+                "incompatible_browser_session",
+                "Playwright locator acquisition requires a protocol-v1 extension",
+                {"required_protocol_version": PROTOCOL_VERSION},
+            )
+        request_id = str(data["request_id"])
+        snapshot_request = {
+            "cmd": "get_page_snapshot",
+            "request_id": f"{request_id}:snapshot",
+            "target": target,
+        }
+        snapshot = await self._forward_extension_command(
+            snapshot_request,
+            authorized=(record, target, None),
+        )
+        if not snapshot.get("ok"):
+            return {
+                **snapshot,
+                "request_id": request_id,
+                "operation": "resolve_playwright_locator",
+            }
+        intent = data.get("intent") if isinstance(data.get("intent"), dict) else {}
+        test_ids = data.get("test_id_attributes")
+        element, candidates = generate_playwright_candidates(
+            snapshot,
+            intent,
+            test_ids if isinstance(test_ids, list) else None,
+        )
+        revision = str(snapshot.get("page_context_revision") or "")
+        verify_request = {
+            "cmd": "verify_playwright_locators",
+            "request_id": f"{request_id}:verify",
+            "target": target,
+            "page_context_revision": revision,
+            "candidates": candidates,
+        }
+        verified = await self._forward_extension_command(
+            verify_request,
+            authorized=(record, target, ephemeral),
+        )
+        if not verified.get("ok"):
+            return {
+                **verified,
+                "request_id": request_id,
+                "operation": "resolve_playwright_locator",
+                "target": target,
+            }
+        verification = (
+            verified.get("verification")
+            if isinstance(verified.get("verification"), list)
+            else []
+        )
+        ranked = apply_verification_results(candidates, verification)
+        recommended = next(
+            (
+                candidate
+                for candidate in ranked
+                if candidate.get("verification") == "verified"
+            ),
+            None,
+        )
+        return operation_success(
+            "resolve_playwright_locator",
+            request_id,
+            target=target,
+            page_context_revision=revision,
+            url=str(snapshot.get("url") or ""),
+            title=str(snapshot.get("title") or ""),
+            element=element,
+            recommended=recommended,
+            candidates=ranked,
+        )
+
+    async def _verify_playwright_locator(
+        self,
+        data: dict[str, Any],
+    ) -> dict[str, Any]:
+        record, target, ephemeral = self.broker.authorize_command(
+            data, legacy_compatibility=False
+        )
+        candidate = data.get("candidate")
+        if not isinstance(candidate, dict):
+            raise BrokerError(
+                "invalid_browser_operation", "candidate is required"
+            )
+        request_id = str(data["request_id"])
+        command = {
+            "cmd": "verify_playwright_locators",
+            "request_id": f"{request_id}:verify",
+            "target": target,
+            "page_context_revision": data.get("page_context_revision"),
+            "candidates": [candidate],
+        }
+        result = await self._forward_extension_command(
+            command,
+            authorized=(record, target, ephemeral),
+        )
+        if not result.get("ok"):
+            return {
+                **result,
+                "request_id": request_id,
+                "operation": "verify_playwright_locator",
+                "target": target,
+            }
+        verification = (
+            result.get("verification")
+            if isinstance(result.get("verification"), list)
+            else []
+        )
+        merged = apply_verification_results([candidate], verification)
+        return operation_success(
+            "verify_playwright_locator",
+            request_id,
+            target=target,
+            page_context_revision=data.get("page_context_revision"),
+            candidate=merged[0],
+        )
+
+    async def _capture_browser_evidence(
+        self,
+        data: dict[str, Any],
+    ) -> dict[str, Any]:
+        record, target, ephemeral = self.broker.authorize_command(
+            data, legacy_compatibility=False
+        )
+        request_id = str(data["request_id"])
+        command = {
+            "cmd": "capture_browser_evidence",
+            "request_id": f"{request_id}:capture",
+            "target": target,
+            "page_context_revision": data.get("page_context_revision"),
+        }
+        result = await self._forward_extension_command(
+            command,
+            authorized=(record, target, ephemeral),
+        )
+        if not result.get("ok"):
+            return {
+                **result,
+                "request_id": request_id,
+                "operation": "capture_browser_evidence",
+                "target": target,
+            }
+        screenshot = result.get("screenshot")
+        if not isinstance(screenshot, str) or not screenshot:
+            raise BrokerError(
+                "browser_operation_failed",
+                "browser returned no screenshot evidence",
+            )
+        safe_request = re.sub(r"[^A-Za-z0-9._-]+", "-", request_id)[:120]
+        evidence_dir = self.project_root / ".teshi" / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        evidence_path = evidence_dir / f"{safe_request}.jpg"
+        try:
+            evidence_path.write_bytes(base64.b64decode(screenshot, validate=True))
+        except (OSError, ValueError) as exc:
+            raise BrokerError(
+                "browser_operation_failed",
+                f"could not persist browser evidence: {exc}",
+            ) from exc
+        return operation_success(
+            "capture_browser_evidence",
+            request_id,
+            target=target,
+            evidence={
+                "request_id": request_id,
+                "target": target,
+                "media_type": "image/jpeg",
+                "reference": str(evidence_path),
+                "page_context_revision": str(
+                    result.get("page_context_revision")
+                    or data.get("page_context_revision")
+                    or ""
+                ),
+            },
+        )
+
+    async def _emit_event(self, event: dict[str, Any]) -> None:
+        if self._event_callback is not None:
+            await self._event_callback(event)
+
+
 def _http_response(status: int, body: bytes, content_type: str = "application/json") -> bytes:
     reason = "OK" if status == 200 else "Not Found"
     header = (
@@ -1318,7 +2344,12 @@ async def _read_http_request(
             key, value = decoded.split(":", 1)
             headers[key.strip().lower()] = value.strip()
     length = int(headers.get("content-length", "0") or "0")
-    body = await reader.read(length) if length > 0 else b""
+    if length < 0 or length > 64 * 1024 * 1024:
+        raise ValueError("HTTP request body exceeds the 64 MiB bridge limit")
+    # StreamReader.read(n) may legally return fewer than n bytes. Extension
+    # snapshot/response payloads are often split across TCP packets, so wait
+    # for the complete Content-Length body before decoding JSON.
+    body = await reader.readexactly(length) if length > 0 else b""
     return request_line, headers, body
 
 
@@ -1378,6 +2409,21 @@ def _websocket_path(websocket: Any) -> str:
     return str(getattr(websocket, "path", "/") or "/")
 
 
+def _bind_websocket_listener(host: str, port: int) -> tuple[socket.socket, int]:
+    """Bind once so an ephemeral port is known before discovery is published."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    listener = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((host, port))
+        listener.listen()
+        listener.setblocking(False)
+        return listener, int(listener.getsockname()[1])
+    except Exception:
+        listener.close()
+        raise
+
+
 async def run_chrome(
     host: str,
     port: int,
@@ -1386,25 +2432,42 @@ async def run_chrome(
 ) -> None:
     import websockets
 
-    ws_url = f"ws://{host}:{port}"
-    extension_frame_ws_url = f"ws://{host}:{port}{EXTENSION_FRAME_WS_PATH}"
-    clients: set[Any] = set()
+    listener, actual_port = _bind_websocket_listener(host, port)
+    ws_url = f"ws://{host}:{actual_port}"
+    extension_frame_ws_url = (
+        f"ws://{host}:{actual_port}{EXTENSION_FRAME_WS_PATH}"
+    )
+    clients: dict[Any, str | None] = {}
 
     async def broadcast_ws_message(message: dict[str, Any]) -> None:
         if not clients:
             return
         payload = json.dumps(message)
         dead: list[Any] = []
+        message_instance = str(
+            message.get("extension_instance_id")
+            or (message.get("target") or {}).get("extension_instance_id")
+            or ""
+        )
+        default_instance = str(
+            bridge.bridge_info().get("selected_session_id") or ""
+        )
 
-        async def send_one(ws: Any) -> None:
+        async def send_one(ws: Any, selected_instance: str | None) -> None:
+            if message_instance:
+                effective = selected_instance or default_instance
+                if not effective or effective != message_instance:
+                    return
             try:
                 await ws.send(payload)
             except Exception:
                 dead.append(ws)
 
-        await asyncio.gather(*(send_one(ws) for ws in list(clients)))
+        await asyncio.gather(
+            *(send_one(ws, selected) for ws, selected in list(clients.items()))
+        )
         for ws in dead:
-            clients.discard(ws)
+            clients.pop(ws, None)
 
     async def broadcast_frame(frame_payload: dict[str, Any]) -> None:
         await broadcast_ws_message(frame_payload)
@@ -1423,6 +2486,7 @@ async def run_chrome(
 
     async def handle_extension_websocket(websocket: Any) -> None:
         stream_authenticated = False
+        stream_instance_id = ""
         try:
             async for message in websocket:
                 if isinstance(message, str):
@@ -1433,41 +2497,89 @@ async def run_chrome(
                     if data.get("type") == "stream_hello":
                         ack = bridge.validate_stream_hello(data)
                         stream_authenticated = bool(ack.get("ok"))
+                        stream_instance_id = str(
+                            ack.get("extension_instance_id") or ""
+                        )
                         await websocket.send(json.dumps(ack))
                     elif data.get("type") == "frame_error":
-                        bridge.last_frame_error = str(
-                            data.get("error", "extension stream error")
-                        )
-                        bridge.write_endpoint()
-                        bridge._schedule_stream_event(
+                        await bridge.handle_extension_response(
                             {
                                 "type": "frame_error",
-                                "error": bridge.last_frame_error,
+                                "extension_instance_id": stream_instance_id,
+                                "error": data.get(
+                                    "error", "extension stream error"
+                                ),
                             }
                         )
-                elif isinstance(message, bytes) and stream_authenticated:
-                    await bridge.handle_extension_binary(message)
+                elif (
+                    isinstance(message, bytes)
+                    and stream_authenticated
+                    and stream_instance_id
+                ):
+                    await bridge.handle_extension_binary(message, stream_instance_id)
         except Exception as exc:  # noqa: BLE001
             print(f"extension frame websocket closed: {exc}", file=sys.stderr)
 
     async def handle_desktop_websocket(websocket: Any) -> None:
-        clients.add(websocket)
-        if bridge._last_frame is not None:
+        clients[websocket] = None
+        default_instance = str(
+            bridge.bridge_info().get("selected_session_id") or ""
+        )
+        initial_frame = bridge._last_frame
+        initial_instance = str(
+            (initial_frame or {}).get("extension_instance_id")
+            or ((initial_frame or {}).get("target") or {}).get(
+                "extension_instance_id"
+            )
+            or ""
+        )
+        if initial_frame is not None and initial_instance == default_instance:
             try:
-                await websocket.send(json.dumps(bridge._last_frame))
+                await websocket.send(json.dumps(initial_frame))
             except Exception:
-                clients.discard(websocket)
+                clients.pop(websocket, None)
         try:
             async for message in websocket:
                 try:
                     data = json.loads(message)
                 except json.JSONDecodeError:
                     continue
+                if data.get("cmd") == "subscribe_browser_session":
+                    instance_id = str(
+                        data.get("extension_instance_id") or ""
+                    ).strip()
+                    try:
+                        record = bridge.broker.require_session(instance_id)
+                    except BrokerError as exc:
+                        await websocket.send(
+                            json.dumps(
+                                exc.response(
+                                    str(data.get("request_id") or ""),
+                                    "subscribe_browser_session",
+                                )
+                            )
+                        )
+                        continue
+                    clients[websocket] = instance_id
+                    await websocket.send(
+                        json.dumps(
+                            operation_success(
+                                "subscribe_browser_session",
+                                str(data.get("request_id") or ""),
+                                extension_instance_id=instance_id,
+                            )
+                        )
+                    )
+                    if record.latest_frame is not None:
+                        await websocket.send(json.dumps(record.latest_frame))
+                    continue
                 if data.get("type") == "frame" and data.get("data"):
                     frame_out: dict[str, Any] = {
                         "type": "frame",
                         "data": data.get("data", ""),
-                        "url": str(data.get("url", bridge.page_url)),
+                        "url": str(
+                            data.get("url", bridge.bridge_info().get("page_url", ""))
+                        ),
                     }
                     raw_tab = data.get("tab_id")
                     if raw_tab is not None:
@@ -1475,13 +2587,33 @@ async def run_chrome(
                             frame_out["tab_id"] = int(raw_tab)
                         except (TypeError, ValueError):
                             pass
-                    await bridge._emit_frame(frame_out)
+                    # Desktop-originated frames are legacy-only and cannot be
+                    # routed safely when several extension sessions are live.
+                    if bridge.bridge_info().get("ambiguous_browser_target"):
+                        continue
+                    default_instance = str(
+                        bridge.bridge_info().get("selected_session_id") or ""
+                    )
+                    if default_instance:
+                        try:
+                            record, target, _explicit = bridge.broker.resolve_target(
+                                None
+                            )
+                            frame_out["extension_instance_id"] = default_instance
+                            frame_out["target"] = target
+                            bridge.broker.update_frame(
+                                record.extension_instance_id, target, frame_out
+                            )
+                            bridge._last_frame = frame_out
+                            await broadcast_frame(frame_out)
+                        except BrokerError:
+                            pass
                     continue
                 if "cmd" in data:
                     reply = await bridge.forward_command(data)
                     await websocket.send(json.dumps(reply))
         finally:
-            clients.discard(websocket)
+            clients.pop(websocket, None)
 
     async def connection_handler(websocket: Any) -> None:
         path = _websocket_path(websocket)
@@ -1490,8 +2622,7 @@ async def run_chrome(
             return
         await handle_desktop_websocket(websocket)
 
-    async with websockets.serve(connection_handler, host, port) as server:
-        actual_port = server.sockets[0].getsockname()[1]
+    async with websockets.serve(connection_handler, sock=listener):
         print(actual_port, flush=True)
         await asyncio.gather(http_task, asyncio.Future())
 

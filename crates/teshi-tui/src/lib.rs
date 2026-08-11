@@ -203,6 +203,9 @@ pub fn run() -> Result<()> {
         Some(cli::Command::Browser { action }) => {
             return cli::browser::handle_browser_command(&action);
         }
+        Some(cli::Command::Mcp { action }) => {
+            return cli::mcp::handle_mcp_command(&action);
+        }
         Some(cli::Command::Trace { action }) => {
             return cli::trace::handle_trace_command(&action);
         }

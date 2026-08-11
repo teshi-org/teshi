@@ -133,7 +133,6 @@ If you prefer to do it step by step:
 1. **Analyze commits** since last tag to determine bump type
 2. **Update version** in component files (must match):
    - `apps/teshi-cli/Cargo.toml`
-   - `apps/teshi-web-ui/package.json`
    - `extension/teshi-bridge/manifest.json`
 3. **Commit and tag**: `git commit -m "chore: bump version to vX.Y.Z"` then `git tag vX.Y.Z`
 4. **Push**: `git push origin main && git push origin vX.Y.Z`
@@ -146,8 +145,8 @@ The pre-commit hook (`.githooks/pre-commit`) will verify version consistency acr
 |-------|----------|----------|
 | `teshi-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` | Linux x64 | `teshi` + README + LICENSE |
 | `teshi-vX.Y.Z-aarch64-apple-darwin.tar.gz` | macOS ARM | `teshi` + README + LICENSE |
-| `teshi-vX.Y.Z-x86_64-pc-windows-msvc.zip` | Windows x64 | `teshi.exe` + `share/web/` + README + LICENSE |
-| `teshi-vX.Y.Z-x64.msi` | Windows x64 | Full WiX installer: CLI + web UI under `Program Files\teshi` |
+| `teshi-vX.Y.Z-x86_64-pc-windows-msvc.zip` | Windows x64 | `teshi.exe` + GPUI WASM `share/web/` + README + LICENSE |
+| `teshi-vX.Y.Z-x64.msi` | Windows x64 | Full WiX installer: CLI + GPUI WASM web UI under `Program Files\teshi` |
 | `teshi-bridge-vX.Y.Z.zip` | All | Chrome extension (load unpacked) |
 | `SHA256SUMS` | All | Checksums for every archive above |
 
@@ -222,7 +221,7 @@ gh run watch
 ### Post-release checks
 
 - `gh release view vX.Y.Z` lists 6 assets (2 tar.gz, 1 win zip, 1 msi, 1 bridge zip, SHA256SUMS)
-- Windows zip / MSI: `teshi web` and `teshi desktop` work without a separate frontend build
+- Windows zip / MSI: `teshi web` loads the bundled GPUI WASM UI and `teshi desktop` works without a separate frontend build
 - Extension zip loads in `chrome://extensions` via **Load unpacked**
 - `SHA256SUMS` verifies with `sha256sum -c SHA256SUMS` (Linux) or equivalent on other platforms
 

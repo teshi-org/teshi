@@ -14,23 +14,23 @@ If no `.feature` files are found, the TUI opens an empty project buffer.
 
 ### Browser GUI (`teshi web`)
 
-React workspace UI served over loopback HTTP by the local daemon:
+GPUI WASM workspace UI served over loopback HTTP by the local daemon:
 
 ```bash
-teshi web [--project PATH] [--port 1421] [--no-open] [--dist PATH]
+teshi web [--project PATH] [--port 20253] [--no-open] [--dist PATH]
 ```
 
 On Windows, the full MSI and release zip bundle web assets under `share/web/` next to `teshi.exe`.
 For development from source, build the frontend first:
 
 ```bash
-npm --prefix apps/teshi-web-ui run build
-teshi web --dist apps/teshi-web-ui/dist
+bash scripts/build-teshi-web.sh
+teshi web --dist apps/teshi-web/dist
 ```
 
 ### Native desktop (`teshi desktop` / `teshi-desktop`)
 
-GPUI desktop shell (separate from the React web UI):
+GPUI desktop shell sharing its browser-session and settings views with GPUI Web:
 
 ```bash
 teshi desktop [--project PATH]
@@ -55,11 +55,10 @@ teshi run --runner-cmd "behat" --runner-cwd /app path/
 
 Configure the runner in `teshi.toml` (see below). CLI flags override file and env settings.
 
-For web UI self-test CI, start the embedded sidecar and replay bindings:
+For the supported GPUI WASM web UI smoke gate:
 
 ```bash
-teshi browser serve-embedded --navigate http://127.0.0.1:1421
-teshi run tests/feature/web-ui/welcome_smoke.feature
+bash scripts/run-web-ui-smoke.sh
 ```
 
 See [web-ui-self-test.md](web-ui-self-test.md) and `scripts/run-web-ui-smoke.sh`.
@@ -71,6 +70,11 @@ Commands for locator recording, replay, and sidecar health (see [browser-modes.m
 ```bash
 teshi browser doctor              # TCP + snapshot probe; exit 1 if stale
 teshi browser reconnect           # Restart embedded sidecar (refresh cdp-endpoint.json)
+teshi browser sessions            # Versioned browser-profile discovery JSON
+teshi browser tabs --session <id> # Windows/tabs scoped to one profile
+teshi browser lease acquire --session <id> --owner <label> [--ttl 60]
+teshi browser lease renew --session <id> --lease-token <token> [--ttl 60]
+teshi browser lease release --session <id> --lease-token <token>
 teshi browser snapshot            # Page accessibility tree
 teshi browser navigate <url>      # Navigate active tab
 teshi browser highlight <selector>
@@ -78,7 +82,26 @@ teshi browser execute --selector <css> --action <action> [--value-arg <text>]
 teshi browser verify --step-line N --selector <css> --action <action> [--value-arg <text>]
 teshi browser replay [--until-line N] [--non-interactive] [--yes]
 teshi browser serve-embedded [--navigate <url>]
+teshi browser locator --session <id> --window <id> --tab <id> --lease-token <token> \
+  [--purpose <text>] [--role <role>] [--text <text>] [--element-ref <ref>] \
+  [--gherkin-step <text>] [--test-id-attribute <name>]
+teshi browser locator-verify --session <id> --window <id> --tab <id> \
+  --lease-token <token> --page-revision <revision> --candidate-json '<json>'
+teshi browser evidence --session <id> --window <id> --tab <id> \
+  --lease-token <token> --page-revision <revision>
 ```
+
+Explicit agent operations require the composite session/window/tab target and an exclusive profile lease. Existing commands may omit them only when one eligible target exists. When several profiles are live, omission fails with `ambiguous_browser_target` and performs no mutation. Machine-readable failures contain a stable `code`, actionable `error`, and non-sensitive `recovery` object and exit non-zero.
+
+Project locator configuration lives in `.teshi/settings.json`; `playwright_test_id_attributes` defaults to `["data-testid"]` and may contain project-specific alternatives.
+
+### Local MCP browser-agent server
+
+```bash
+teshi mcp serve --stdio [--project PATH]
+```
+
+The newline-delimited JSON-RPC server exposes the same discovery, lease, snapshot, locator, verification, and evidence operations as the CLI. It supports current `server/discover` negotiation and legacy `initialize`, writes protocol messages only to stdout, and operates only against the same-host Teshi broker. The release package includes `.mcp.json` metadata under `share/teshi-browser-testing`.
 
 **Actions** for `execute`, `verify`, and `steps propose --action`:
 

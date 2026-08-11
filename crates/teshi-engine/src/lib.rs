@@ -2,6 +2,7 @@
 
 mod app_data;
 mod authoring;
+mod browser_agent;
 mod daemon;
 mod events;
 mod fs_util;
@@ -40,6 +41,15 @@ pub use authoring::{
     compute_document_revision, load_authoring_artifacts, save_requirement_document_index,
     save_requirement_markdown, save_test_points, AuthoringLoadResult, DEFAULT_REQUIREMENTS_DIR,
     DEFAULT_TESTPOINTS_DIR, REQUIREMENTS_INDEX_FILE,
+};
+pub use browser_agent::{
+    AccessibleElement, BrowserAgentError, BrowserAgentErrorCode, BrowserEvidenceReference,
+    BrowserLease, BrowserLeaseSummary, BrowserMetadata, BrowserOperation, BrowserOperationResponse,
+    BrowserOperations, BrowserPageSnapshot, BrowserSession, BrowserSessionHealth, BrowserTab,
+    BrowserTarget, BrowserWindow, ExtensionIdentity, LocatorContext, LocatorIntent,
+    LocatorVerificationStatus, PageContextRevision, PlaywrightLocatorCandidate,
+    PlaywrightLocatorKind, PlaywrightLocatorResult, BROWSER_AGENT_SCHEMA_VERSION,
+    BROWSER_BROKER_PROTOCOL_VERSION, DEFAULT_BROWSER_LEASE_TTL_SECS,
 };
 pub use daemon::{
     find_project_root, pick_free_port, remove_daemon_manifest, spawn_daemon_background,
@@ -83,6 +93,7 @@ pub use project::{
 };
 pub use project_settings::{
     load_project_settings, ProjectSettings, DEFAULT_LOCATOR_AUTO_CONFIRM_SEC,
+    DEFAULT_PLAYWRIGHT_TEST_ID_ATTRIBUTE,
 };
 pub use screen::{Cell, Color, ProcessState, ScreenGrid};
 pub use sidecar::{
@@ -156,10 +167,34 @@ impl TeshiEngine {
     }
 }
 
-/// Resolves `browser_service.py` from `TESHI_BROWSER_SERVICE`, installed layouts, or dev paths.
+fn source_checkout_resource(name: &str) -> Option<PathBuf> {
+    for root in [
+        PathBuf::from("."),
+        PathBuf::from(".."),
+        PathBuf::from("../.."),
+    ] {
+        if root.join("Cargo.toml").is_file()
+            && root.join("crates/teshi-engine/Cargo.toml").is_file()
+        {
+            let resource = root.join("resources").join(name);
+            if resource.is_file() {
+                return Some(resource);
+            }
+        }
+    }
+    None
+}
+
+/// Resolves `browser_service.py` from an override, a source checkout, or installed layouts.
 pub fn default_browser_service_script() -> PathBuf {
     if let Ok(path) = std::env::var("TESHI_BROWSER_SERVICE") {
         return PathBuf::from(path);
+    }
+
+    // A debug executable can retain a stale target/debug/resources copy. When
+    // launched inside this workspace, use the checked-out source of truth.
+    if let Some(path) = source_checkout_resource("browser_service.py") {
+        return path;
     }
 
     let mut candidates = vec![];
@@ -170,24 +205,25 @@ pub fn default_browser_service_script() -> PathBuf {
             candidates.push(exe_dir.join("resources").join("browser_service.py"));
         }
     }
-    candidates.extend([
-        PathBuf::from("resources/browser_service.py"),
-        PathBuf::from("../resources/browser_service.py"),
-        PathBuf::from("../../resources/browser_service.py"),
-    ]);
-
     for path in &candidates {
         if path.is_file() {
             return path.clone();
         }
     }
-    candidates[0].clone()
+    candidates
+        .first()
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("resources/browser_service.py"))
 }
 
-/// Resolves `winapp_service.py` from `TESHI_WINAPP_SERVICE`, installed layouts, or dev paths.
+/// Resolves `winapp_service.py` from an override, a source checkout, or installed layouts.
 pub fn default_winapp_service_script() -> PathBuf {
     if let Ok(path) = std::env::var("TESHI_WINAPP_SERVICE") {
         return PathBuf::from(path);
+    }
+
+    if let Some(path) = source_checkout_resource("winapp_service.py") {
+        return path;
     }
 
     let mut candidates = vec![];
@@ -198,18 +234,15 @@ pub fn default_winapp_service_script() -> PathBuf {
             candidates.push(exe_dir.join("resources").join("winapp_service.py"));
         }
     }
-    candidates.extend([
-        PathBuf::from("resources/winapp_service.py"),
-        PathBuf::from("../resources/winapp_service.py"),
-        PathBuf::from("../../resources/winapp_service.py"),
-    ]);
-
     for path in &candidates {
         if path.is_file() {
             return path.clone();
         }
     }
-    candidates[0].clone()
+    candidates
+        .first()
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("resources/winapp_service.py"))
 }
 
 /// Resolves the `teshi` CLI binary for embedded terminal agents (`TESHI_CLI`).

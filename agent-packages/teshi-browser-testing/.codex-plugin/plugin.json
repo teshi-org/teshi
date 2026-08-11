@@ -1,0 +1,37 @@
+{
+  "name": "teshi-browser-testing",
+  "version": "0.7.9",
+  "description": "Acquire verified Playwright locators from explicitly selected local Chromium profiles through Teshi.",
+  "author": {
+    "name": "teshi-org",
+    "url": "https://github.com/teshi-org"
+  },
+  "homepage": "https://github.com/teshi-org/teshi/tree/main/doc",
+  "repository": "https://github.com/teshi-org/teshi",
+  "license": "MIT",
+  "keywords": [
+    "teshi",
+    "playwright",
+    "chromium",
+    "browser-testing",
+    "locators",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Teshi Browser Testing",
+    "shortDescription": "Verified Playwright locators from local Chrome",
+    "longDescription": "Discover explicitly selected Teshi browser-profile sessions, acquire exclusive leases, and generate browser-verified Playwright locator candidates without inventing or executing test actions.",
+    "developerName": "teshi-org",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive"
+    ],
+    "websiteURL": "https://github.com/teshi-org/teshi",
+    "defaultPrompt": [
+      "Acquire a verified Playwright locator for an element in my connected Chrome profile"
+    ],
+    "brandColor": "#2563EB"
+  }
+}

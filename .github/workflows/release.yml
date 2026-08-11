@@ -187,23 +187,29 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} --bin teshi
 
       # Windows-only: build teshi-desktop + combined MSI installer
-      - name: Setup Node.js
+      - name: Install nightly WASM target
         if: matrix.target == 'x86_64-pc-windows-msvc'
-        uses: actions/setup-node@v4
+        shell: pwsh
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup target add wasm32-unknown-unknown --toolchain nightly
+
+      - name: Cache wasm-bindgen CLI
+        id: cache_wasm_bindgen
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/cache@v4
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: apps/teshi-web-ui/package-lock.json
+          path: ~/.cargo/bin/wasm-bindgen.exe
+          key: ${{ runner.os }}-wasm-bindgen-0.2.126
 
-      - name: Install npm dependencies
-        if: matrix.target == 'x86_64-pc-windows-msvc'
-        working-directory: apps/teshi-web-ui
-        run: npm ci
+      - name: Install wasm-bindgen CLI
+        if: matrix.target == 'x86_64-pc-windows-msvc' && steps.cache_wasm_bindgen.outputs.cache-hit != 'true'
+        run: cargo install wasm-bindgen-cli --locked --version 0.2.126
 
-      - name: Build web UI
+      - name: Build GPUI WASM web UI
         if: matrix.target == 'x86_64-pc-windows-msvc'
-        working-directory: apps/teshi-web-ui
-        run: npm run build
+        shell: pwsh
+        run: ./scripts/build-teshi-web.ps1
 
       - name: Install WiX Toolset
         if: matrix.target == 'x86_64-pc-windows-msvc'
@@ -236,32 +242,44 @@ jobs:
           $shareDir  = Join-Path $stagingRoot "share"
           $webDir    = Join-Path $stagingRoot "share/web"
           $bridgeDir = Join-Path $stagingRoot "share/teshi-bridge"
-          New-Item -ItemType Directory -Force -Path $binDir, $webDir, $bridgeDir | Out-Null
+          $agentDir  = Join-Path $stagingRoot "share/teshi-browser-testing"
+          $agentBridgeDir = Join-Path $agentDir "extension/teshi-bridge"
+          New-Item -ItemType Directory -Force -Path $binDir, $webDir, $bridgeDir, $agentBridgeDir | Out-Null
 
           # Verify required files
           $builtExe    = "target/${{ matrix.target }}/release/teshi.exe"
-          @($builtExe, "apps/teshi-web-ui/dist", "resources/browser_service.py",
-            "resources/winapp_service.py", "extension/teshi-bridge/manifest.json") |
+          @($builtExe, "apps/teshi-web/dist", "apps/teshi-web/dist/pkg/teshi_web_bg.wasm", "resources/browser_service.py",
+            "resources/browser_agent_broker.py", "resources/winapp_service.py",
+            "extension/teshi-bridge/manifest.json",
+            "agent-packages/teshi-browser-testing/.codex-plugin/plugin.json") |
             ForEach-Object { if (-not (Test-Path $_)) { throw "Missing: $_" } }
 
           Copy-Item $builtExe   (Join-Path $binDir "teshi.exe")          -Force
           Copy-Item "resources/browser_service.py" (Join-Path $shareDir "browser_service.py") -Force
+          Copy-Item "resources/browser_agent_broker.py" (Join-Path $shareDir "browser_agent_broker.py") -Force
           Copy-Item "resources/winapp_service.py"  (Join-Path $shareDir "winapp_service.py") -Force
-          Copy-Item -Path "apps/teshi-web-ui/dist/*" -Destination $webDir -Recurse -Force
+          Copy-Item -Path "apps/teshi-web/dist/*" -Destination $webDir -Recurse -Force
           Copy-Item -Path "extension/teshi-bridge/*" -Destination $bridgeDir -Recurse -Force
+          Copy-Item -Path "agent-packages/teshi-browser-testing/*" -Destination $agentDir -Recurse -Force
+          Copy-Item -Path "agent-packages/teshi-browser-testing/.codex-plugin" -Destination $agentDir -Recurse -Force
+          Copy-Item -Path "agent-packages/teshi-browser-testing/.mcp.json" -Destination $agentDir -Force
+          Copy-Item -Path "extension/teshi-bridge/*" -Destination $agentBridgeDir -Recurse -Force
 
-          # Generate WiX fragments for web and bridge files
+          # Generate WiX fragments for web, bridge, and browser-agent files
           $heat = Join-Path $env:WIX "bin/heat.exe"
           & $heat dir $webDir    -out wix/web-files.wxs    -gg -sfrag -srd -dr ShareWebDir    -cg WebFiles    -var var.WebRoot
           & $heat dir $bridgeDir -out wix/bridge-files.wxs -gg -sfrag -srd -dr ShareTeshiBridgeDir -cg BridgeFiles -var var.BridgeRoot
+          & $heat dir $agentDir  -out wix/browser-agent-files.wxs -gg -sfrag -srd -dr ShareTeshiAgentDir -cg BrowserAgentFiles -var var.AgentRoot
 
           # Add fallback defines to heat-generated files (avoid here-string to prevent YAML backtick issues)
           $webDirFull = (Resolve-Path $webDir).Path
           $bridgeDirFull = (Resolve-Path $bridgeDir).Path
+          $agentDirFull = (Resolve-Path $agentDir).Path
           $defaultBlock = "`n" +
             '<?ifndef WebRoot ?><?define WebRoot = "' + $webDirFull + '"?><?endif ?>' + "`n" +
-            '<?ifndef BridgeRoot ?><?define BridgeRoot = "' + $bridgeDirFull + '"?><?endif ?>' + "`n"
-          foreach ($f in @("wix/web-files.wxs", "wix/bridge-files.wxs")) {
+            '<?ifndef BridgeRoot ?><?define BridgeRoot = "' + $bridgeDirFull + '"?><?endif ?>' + "`n" +
+            '<?ifndef AgentRoot ?><?define AgentRoot = "' + $agentDirFull + '"?><?endif ?>' + "`n"
+          foreach ($f in @("wix/web-files.wxs", "wix/bridge-files.wxs", "wix/browser-agent-files.wxs")) {
             $content = Get-Content $f -Raw
             $idx = $content.IndexOf("`n")
             if ($idx -ge 0) {
@@ -273,6 +291,7 @@ jobs:
             --include wix/main.wxs `
             --include wix/web-files.wxs `
             --include wix/bridge-files.wxs `
+            --include wix/browser-agent-files.wxs `
             --nocapture --no-build -o "target/wix/teshi-$tag-x64.msi"
 
       - name: Upload binary artifact
@@ -297,7 +316,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: teshi-web-dist
-          path: apps/teshi-web-ui/dist
+          path: apps/teshi-web/dist
           if-no-files-found: error
 
   publish:
@@ -317,6 +336,9 @@ jobs:
         with:
           path: artifacts
 
+      - name: Smoke-test browser-agent package
+        run: python3 scripts/test-browser-agent-package.py
+
       - name: Package release assets
         shell: bash
         run: |
@@ -332,16 +354,20 @@ jobs:
             [[ "${target}" == *"windows"* ]] && binary_name="teshi.exe"
 
             stage_dir="dist/teshi-${version}-${target}"
-            mkdir -p "${stage_dir}"
+            mkdir -p "${stage_dir}/share/teshi-bridge"
+            mkdir -p "${stage_dir}/share/teshi-browser-testing/extension/teshi-bridge"
             cp "${artifacts_dir}/teshi-${target}/${binary_name}" "${stage_dir}/"
 
+            cp "${repo_dir}/resources/browser_service.py" "${stage_dir}/share/browser_service.py"
+            cp "${repo_dir}/resources/browser_agent_broker.py" "${stage_dir}/share/browser_agent_broker.py"
+            cp -a "${repo_dir}/extension/teshi-bridge/." "${stage_dir}/share/teshi-bridge/"
+            cp -a "${repo_dir}/agent-packages/teshi-browser-testing/." "${stage_dir}/share/teshi-browser-testing/"
+            cp -a "${repo_dir}/extension/teshi-bridge/." "${stage_dir}/share/teshi-browser-testing/extension/teshi-bridge/"
+
             if [[ "${target}" == *"windows"* ]]; then
-              # Service scripts and browser extension from git checkout
-              mkdir -p "${stage_dir}/share/teshi-bridge" "${stage_dir}/share/web"
-              cp "${repo_dir}/resources/browser_service.py" "${stage_dir}/share/browser_service.py"
+              mkdir -p "${stage_dir}/share/web"
               cp "${repo_dir}/resources/winapp_service.py"  "${stage_dir}/share/winapp_service.py"
-              cp -r "${repo_dir}/extension/teshi-bridge/."  "${stage_dir}/share/teshi-bridge/"
-              cp -r "${artifacts_dir}/teshi-web-dist/."      "${stage_dir}/share/web/"
+              cp -a "${artifacts_dir}/teshi-web-dist/."      "${stage_dir}/share/web/"
             else
               chmod +x "${stage_dir}/teshi"
             fi
@@ -354,6 +380,14 @@ jobs:
           done
 
           (cd "${repo_dir}/extension/teshi-bridge" && zip -r "${repo_dir}/dist/teshi-bridge-${version}.zip" .)
+
+          agent_stage="dist/teshi-browser-testing-${version}"
+          mkdir -p "${agent_stage}/extension/teshi-bridge" "${agent_stage}/runtime"
+          cp -a "${repo_dir}/agent-packages/teshi-browser-testing/." "${agent_stage}/"
+          cp -a "${repo_dir}/extension/teshi-bridge/." "${agent_stage}/extension/teshi-bridge/"
+          cp "${repo_dir}/resources/browser_service.py" "${agent_stage}/runtime/browser_service.py"
+          cp "${repo_dir}/resources/browser_agent_broker.py" "${agent_stage}/runtime/browser_agent_broker.py"
+          (cd dist && zip -r "teshi-browser-testing-${version}.zip" "teshi-browser-testing-${version}")
 
           cp "${artifacts_dir}/teshi-msi/"*.msi dist/
           cd dist

@@ -208,3 +208,165 @@ pub trait LlmConfigBackend {
 
 /// Shared backend handle used by [`crate::AppShell`] / [`crate::LlmConfigView`].
 pub type SharedLlmBackend = Rc<dyn LlmConfigBackend>;
+
+/// Non-sensitive browser-extension identity shown by the shared GPUI shell.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserSessionIdentitySnapshot {
+    /// Stable opaque identifier scoped to one extension installation/profile.
+    pub extension_instance_id: String,
+    /// Optional user-provided display label; never used for routing.
+    #[serde(default)]
+    pub profile_label: Option<String>,
+    /// Installed extension version.
+    #[serde(default)]
+    pub extension_version: String,
+    /// Broker protocol version spoken by this extension.
+    #[serde(default)]
+    pub protocol_version: u32,
+}
+
+/// Browser product metadata reported by an extension session.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserMetadataSnapshot {
+    /// Browser product name.
+    #[serde(default)]
+    pub name: String,
+    /// Browser product version.
+    #[serde(default)]
+    pub version: String,
+    /// Browser-reported platform.
+    #[serde(default)]
+    pub platform: Option<String>,
+}
+
+/// Public lease state. The secret lease token is intentionally absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserLeaseSnapshot {
+    /// Display-only owner label.
+    #[serde(default)]
+    pub owner_label: String,
+    /// Wall-clock expiry as Unix milliseconds.
+    #[serde(default)]
+    pub expires_at_ms: i64,
+}
+
+/// One browser tab reported by an extension session.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserTabSnapshot {
+    /// Browser-local tab id.
+    pub id: i64,
+    /// Browser-local window id. Old extensions may omit it on the tab itself.
+    #[serde(default)]
+    pub window_id: Option<i64>,
+    /// Current page title.
+    #[serde(default)]
+    pub title: String,
+    /// Current page URL.
+    #[serde(default)]
+    pub url: String,
+    /// Whether this is the window's active tab.
+    #[serde(default)]
+    pub active: bool,
+    /// Whether the extension can attach the debugger to this page.
+    #[serde(default = "default_true")]
+    pub debuggable: bool,
+}
+
+/// One browser window and its tabs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserWindowSnapshot {
+    /// Browser-local window id.
+    pub id: i64,
+    /// Whether Chrome reports this window focused.
+    #[serde(default)]
+    pub focused: bool,
+    /// Tabs belonging to the window.
+    #[serde(default)]
+    pub tabs: Vec<BrowserTabSnapshot>,
+}
+
+/// Public discovery record for one browser-extension instance.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserSessionSnapshot {
+    /// Versioned extension identity.
+    pub identity: BrowserSessionIdentitySnapshot,
+    /// Browser product metadata.
+    #[serde(default)]
+    pub browser: BrowserMetadataSnapshot,
+    /// Stable health state (`ready`, `stale`, `disconnected`, ...).
+    #[serde(default)]
+    pub health: String,
+    /// Age of the last extension heartbeat.
+    #[serde(default)]
+    pub last_heartbeat_age_ms: u64,
+    /// Current window/tab inventory.
+    #[serde(default)]
+    pub windows: Vec<BrowserWindowSnapshot>,
+    /// Public lease summary when another local actor owns this session.
+    #[serde(default)]
+    pub lease: Option<BrowserLeaseSnapshot>,
+}
+
+impl BrowserSessionSnapshot {
+    /// Return whether this session is eligible for compatibility auto-selection.
+    pub fn is_eligible(&self) -> bool {
+        self.health == "ready"
+            && self
+                .windows
+                .iter()
+                .flat_map(|window| &window.tabs)
+                .any(|tab| tab.debuggable)
+    }
+}
+
+/// Discovery response returned by the loopback broker or daemon adapter.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserSessionListSnapshot {
+    /// Whether at least one compatible extension session is live.
+    #[serde(default)]
+    pub extension_connected: bool,
+    /// Whether legacy implicit targeting would be ambiguous.
+    #[serde(default)]
+    pub ambiguous_browser_target: bool,
+    /// All retained session records, including recently disconnected ones.
+    #[serde(default)]
+    pub sessions: Vec<BrowserSessionSnapshot>,
+}
+
+/// Composite target used when the GPUI shell activates a browser tab.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserTabTarget {
+    /// Stable extension/profile identity.
+    pub extension_instance_id: String,
+    /// Browser-local window id.
+    pub window_id: i64,
+    /// Browser-local tab id.
+    pub tab_id: i64,
+}
+
+/// Platform I/O required by the shared browser-session panel.
+pub trait BrowserSessionsBackend {
+    /// Ensure the local Chrome broker is running.
+    ///
+    /// # Errors
+    ///
+    /// Returns an actionable error when this host cannot start the broker.
+    fn start_browser_bridge(&self) -> Result<(), String>;
+
+    /// Read the latest browser-extension session inventory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an actionable error when the broker is unavailable or malformed.
+    fn list_browser_sessions(&self) -> Result<BrowserSessionListSnapshot, String>;
+
+    /// Activate one explicitly selected tab.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the target disappeared, is busy, or cannot be debugged.
+    fn activate_browser_tab(&self, target: &BrowserTabTarget) -> Result<(), String>;
+}
+
+/// Shared backend handle used by [`crate::BrowserSessionsView`].
+pub type SharedBrowserSessionsBackend = Rc<dyn BrowserSessionsBackend>;

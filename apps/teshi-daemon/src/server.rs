@@ -142,6 +142,11 @@ pub async fn run_server(
 
     let preview_routes = Router::new()
         .route("/api/v1/browser/stream", get(browser_stream_ws))
+        .route("/api/v1/browser/sessions", get(api_browser_sessions))
+        .route(
+            "/api/v1/browser/activate-tab",
+            post(api_browser_activate_tab),
+        )
         .route_layer(middleware::from_fn(same_origin_only));
 
     // ── Protected routes (checked by auth middleware) ─────────────────────────
@@ -358,7 +363,7 @@ async fn handle_browser_stream_socket(
     });
     if let Err(error) = upstream
         .send(tokio_tungstenite::tungstenite::Message::Text(
-            attach.to_string().into(),
+            attach.to_string(),
         ))
         .await
     {
@@ -1000,6 +1005,116 @@ async fn api_highlight_locator(
 #[derive(Deserialize)]
 struct BrowserStartBody {
     mode: Option<String>,
+}
+
+const BROWSER_BROKER_DISCOVERY_URL: &str = "http://127.0.0.1:17373/v1/bridge";
+
+fn browser_broker_client() -> Result<reqwest::Client, ApiError> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|error| ApiError::internal(format!("create browser broker client: {error}")))
+}
+
+fn browser_broker_unavailable(error: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "ok": false,
+            "code": "browser_unavailable",
+            "error": format!(
+                "local Chrome bridge is unavailable: {error}; click Connect Chrome and reload teshi-bridge"
+            ),
+        })),
+    )
+}
+
+async fn api_browser_sessions(
+    State(state): State<DaemonState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    state.touch();
+    let client =
+        browser_broker_client().map_err(|error| browser_broker_unavailable(error.message))?;
+    let response = client
+        .get(BROWSER_BROKER_DISCOVERY_URL)
+        .send()
+        .await
+        .map_err(browser_broker_unavailable)?;
+    if !response.status().is_success() {
+        return Err(browser_broker_unavailable(format!(
+            "broker returned HTTP {}",
+            response.status()
+        )));
+    }
+    response.json::<Value>().await.map(Json).map_err(|error| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "ok": false,
+                "code": "invalid_browser_response",
+                "error": format!("decode browser broker discovery response: {error}"),
+            })),
+        )
+    })
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BrowserActivateTabBody {
+    extension_instance_id: String,
+    window_id: i64,
+    tab_id: i64,
+}
+
+async fn api_browser_activate_tab(
+    State(state): State<DaemonState>,
+    Json(body): Json<BrowserActivateTabBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    state.touch();
+    let project_root = get_project_root(&state.rt).ok_or_else(|| {
+        (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "code": "browser_unavailable",
+                "error": "no project is open in the daemon",
+            })),
+        )
+    })?;
+    let client =
+        browser_broker_client().map_err(|error| browser_broker_unavailable(error.message))?;
+    let response = client
+        .post(format!("{BROWSER_BROKER_DISCOVERY_URL}/activate_tab"))
+        .json(&json!({
+            "project_root": project_root,
+            "extension_instance_id": body.extension_instance_id,
+            "window_id": body.window_id,
+            "tab_id": body.tab_id,
+        }))
+        .send()
+        .await
+        .map_err(browser_broker_unavailable)?;
+    if !response.status().is_success() {
+        return Err(browser_broker_unavailable(format!(
+            "broker returned HTTP {}",
+            response.status()
+        )));
+    }
+    let payload = response.json::<Value>().await.map_err(|error| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "ok": false,
+                "code": "invalid_browser_response",
+                "error": format!("decode browser tab activation response: {error}"),
+            })),
+        )
+    })?;
+    if payload.get("ok").and_then(Value::as_bool) == Some(true) {
+        Ok(Json(payload))
+    } else {
+        Err((StatusCode::CONFLICT, Json(payload)))
+    }
 }
 
 async fn api_browser_start(

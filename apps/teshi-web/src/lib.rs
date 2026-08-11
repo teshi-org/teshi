@@ -5,7 +5,8 @@ use std::rc::Rc;
 use base64::Engine as _;
 use gpui::{AppCell, Entity, prelude::*};
 use teshi_ui::{
-    AppShell, LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate, ModelProfileListSnapshot,
+    AppShell, BrowserSessionListSnapshot, BrowserSessionsBackend, BrowserTabTarget,
+    LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate, ModelProfileListSnapshot,
     ModelProfileSnapshot, ModelProfileUpdate, WinAppPreview, bind_llm_config_keys,
 };
 use wasm_bindgen::prelude::*;
@@ -51,7 +52,7 @@ fn start_wasm_preview(preview: Entity<WinAppPreview>, app: Rc<AppCell>, cx: &mut
     let ws_url = if let Some(ws_url) = query_parameter("winapp_ws") {
         ws_url
     } else {
-        match WasmLlmBackend::xhr_json(
+        match WasmBackend::xhr_json(
             "POST",
             "/api/v1/browser/start",
             Some(r#"{"mode":"winapp"}"#),
@@ -187,10 +188,10 @@ fn start_wasm_preview(preview: Entity<WinAppPreview>, app: Rc<AppCell>, cx: &mut
     on_close.forget();
 }
 
-/// Sync XHR backend so [`LlmConfigBackend`] matches the native sync trait.
-struct WasmLlmBackend;
+/// Same-origin sync XHR adapter for shared GPUI backend traits.
+struct WasmBackend;
 
-impl WasmLlmBackend {
+impl WasmBackend {
     fn xhr_json(method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
         let xhr = web_sys::XmlHttpRequest::new().map_err(|e| format!("{e:?}"))?;
         xhr.open_with_async(method, path, false)
@@ -213,7 +214,7 @@ impl WasmLlmBackend {
     }
 }
 
-impl LlmConfigBackend for WasmLlmBackend {
+impl LlmConfigBackend for WasmBackend {
     fn get_llm_config(&self) -> Result<LlmConfigSnapshot, String> {
         let text = Self::xhr_json("GET", "/api/v1/llm/config", None)?;
         serde_json::from_str(&text).map_err(|e| e.to_string())
@@ -255,6 +256,28 @@ impl LlmConfigBackend for WasmLlmBackend {
     }
 }
 
+impl BrowserSessionsBackend for WasmBackend {
+    fn start_browser_bridge(&self) -> Result<(), String> {
+        let _ = Self::xhr_json(
+            "POST",
+            "/api/v1/browser/start",
+            Some(r#"{"mode":"chrome"}"#),
+        )?;
+        Ok(())
+    }
+
+    fn list_browser_sessions(&self) -> Result<BrowserSessionListSnapshot, String> {
+        let text = Self::xhr_json("GET", "/api/v1/browser/sessions", None)?;
+        serde_json::from_str(&text).map_err(|error| format!("decode browser sessions: {error}"))
+    }
+
+    fn activate_browser_tab(&self, target: &BrowserTabTarget) -> Result<(), String> {
+        let body = serde_json::to_string(target).map_err(|error| error.to_string())?;
+        let _ = Self::xhr_json("POST", "/api/v1/browser/activate-tab", Some(&body))?;
+        Ok(())
+    }
+}
+
 /// Start the GPUI web shell and report async startup outcome to JavaScript.
 ///
 /// GPU initialization is asynchronous. Call `on_ready` after the window opens
@@ -276,14 +299,30 @@ pub fn run(on_ready: js_sys::Function, on_error: js_sys::Function) -> Result<(),
 
     app.run(move |cx: &mut gpui::App| {
         bind_llm_config_keys(cx);
-        let backend: Rc<dyn LlmConfigBackend> = Rc::new(WasmLlmBackend);
+        let platform = Rc::new(WasmBackend);
+        let llm_backend: Rc<dyn LlmConfigBackend> = platform.clone();
+        let browser_backend: Rc<dyn BrowserSessionsBackend> = platform;
         let preview = cx.new(|_| WinAppPreview::new("target application"));
         match cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-            cx.new(|cx| AppShell::new(backend.clone(), preview.clone(), window, cx))
+            cx.new(|cx| {
+                AppShell::new(
+                    llm_backend.clone(),
+                    browser_backend.clone(),
+                    preview.clone(),
+                    window,
+                    cx,
+                )
+            })
         }) {
             Ok(_) => {
                 cx.activate(true);
-                start_wasm_preview(preview, app_cell.clone(), cx);
+                // WinApp capture is opt-in. Starting it unconditionally would replace
+                // an active Chrome bridge while the default Browser surface loads.
+                if query_parameter("winapp_preview").is_some()
+                    || query_parameter("winapp_ws").is_some()
+                {
+                    start_wasm_preview(preview, app_cell.clone(), cx);
+                }
                 if let Err(err) = on_ready.call0(&JsValue::NULL) {
                     web_sys::console::error_1(&err);
                 }

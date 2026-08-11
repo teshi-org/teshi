@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "legacy": {
+    "heartbeat": {
+      "project_root": "/work/project",
+      "url": "https://example.test/dashboard",
+      "title": "Dashboard",
+      "active_tab_id": 42,
+      "tabs": [
+        {
+          "id": 42,
+          "title": "Dashboard",
+          "url": "https://example.test/dashboard",
+          "active": true,
+          "favIconUrl": "",
+          "debuggable": true
+        }
+      ],
+      "frame_error": ""
+    },
+    "command": {
+      "type": "cmd",
+      "request_id": "legacy-snapshot-1",
+      "cmd": "get_page_snapshot"
+    },
+    "response": {
+      "type": "response",
+      "request_id": "legacy-snapshot-1",
+      "cmd": "get_page_snapshot",
+      "ok": true,
+      "url": "https://example.test/dashboard",
+      "title": "Dashboard",
+      "tab_id": 42,
+      "accessibility_tree": {},
+      "interactive_elements": []
+    },
+    "frame_meta": {
+      "tab_id": 42,
+      "url": "https://example.test/dashboard",
+      "seq": 1
+    },
+    "cdp_endpoint": {
+      "mode": "chrome",
+      "ws_url": "ws://127.0.0.1:20254",
+      "page_url": "https://example.test/dashboard",
+      "bridge": "python",
+      "extension_connected": true,
+      "discovery_url": "http://127.0.0.1:17373/v1/bridge"
+    }
+  }
+}

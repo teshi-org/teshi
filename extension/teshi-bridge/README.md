@@ -1,6 +1,6 @@
 # teshi-bridge (Chrome extension)
 
-Connects your **Chrome window tabs** to [teshi-desktop](../../desktop/README.md) for BDD locator recording with real login sessions. One active tab is mirrored at a time; teshi-desktop can list tabs and switch which tab is active.
+Connects a Chromium browser profile and its tabs to Teshi for BDD recording and verified Playwright locator acquisition with real login sessions. Every installed profile persists a random opaque instance ID; an optional popup label helps humans distinguish profiles, but routing always uses the opaque ID plus window/tab IDs.
 
 ## Icons
 
@@ -12,16 +12,18 @@ Toolbar and store icons are PNGs under `icons/`. After updating brand icons, reg
 2. Enable **Developer mode** (top right).
 3. Click **Load unpacked** and select:
    - Installed MSI path (recommended): `C:\Program Files\teshi\share\teshi-bridge`
+   - Browser-testing package: `teshi-browser-testing/extension/teshi-bridge`
    - Repo path (development): `extension/teshi-bridge`
 4. Pin the extension if you want to see when it is active (optional).
 
 ## Use with teshi-desktop
 
-1. In **Google Chrome** (or another Chromium browser), open the tabs you need in one window on an **http(s)** page.
+1. In **Google Chrome** (or another Chromium browser), open the tabs you need on an **http(s)** page. Use one dedicated browser profile per concurrent agent.
 2. In teshi-desktop, open your project and click **Connect Chrome** in the Browser panel.
-3. The extension sends **metadata heartbeats** (~1.5 s) to `127.0.0.1:17373` and a **screencast** preview (frames when the page repaints) over **WebSocket** (`extension_frame_ws_url` from `GET /v1/bridge`). The Python bridge broadcasts frames to teshi-desktop over the agent WebSocket.
-4. When connected, use the **tab strip** in the Browser panel to switch tabs, or activate tabs in Chrome directly. Optional: click the extension icon → **Connect to teshi** to wake the service worker and restart the stream.
-5. Select a Gherkin step and run the **bdd-locator** agent skill in the terminal.
+3. Open the extension popup, set an optional profile label such as `agent-a`, then click **Connect to teshi**. The popup reports the persisted instance ID, extension/protocol versions, and actionable disconnected/incompatible/debugger/stale status.
+4. The extension sends **metadata heartbeats** to `127.0.0.1:17373` and a session-authenticated **screencast** over WebSocket. The broker keeps command queues, pending requests, frames, diagnostics, and leases isolated by extension instance.
+5. When connected, explicitly select the profile and tab in the Browser panel. The panel never projects tabs or frames from several profiles into one implicit selection.
+6. Select a Gherkin step and run the **bdd-locator** agent skill in the terminal, or use the packaged **playwright-locator** Skill for observational locator acquisition.
 
 After changing extension files, click **Reload** on `chrome://extensions` for teshi-bridge, then **Disconnect / Connect Chrome** in teshi-desktop so `browser_service.py` restarts if needed.
 
@@ -39,18 +41,21 @@ If the preview is idle or stalled:
 - **tabs** — list tabs in the current window and activate a tab when teshi-desktop requests it.
 - **activeTab** — limit scope to user-visible browsing.
 - **alarms** — periodic wake for MV3 service worker.
+- **storage** — persist the opaque extension instance ID and optional display label in this browser profile.
 - **127.0.0.1 / ws://127.0.0.1** — local bridge discovery, heartbeat, and extension frame WebSocket.
 - **http(s)://\*** — pages that can be debugged and screencast.
 
 ## Protocol (extension ↔ bridge)
 
-**Metadata** — `POST /v1/bridge/heartbeat` every ~1.5 s with `project_root`, `url`, `title`, `active_tab_id`, and `tabs[]` (`id`, `title`, `url`, `active`, `favIconUrl`, `debuggable`). The response may include a `cmd` object and `stream_restart`.
+Protocol version 1 is the current contract. Legacy single-profile heartbeats remain accepted only through the bounded compatibility adapter.
+
+**Metadata** — `POST /v1/bridge/heartbeat` with `extension_instance_id`, optional `profile_label`, extension/protocol versions, browser metadata, all windows/tabs, active target, and project metadata. The response includes the same instance ID, compatibility preflight, only that instance's next `cmd`, and optional `stream_restart`.
 
 **Preview (primary)** — CDP `Page.startScreencast` → binary **TSH1** WebSocket uplink to `extension_frame_ws_url`:
 
 - `[4B magic 'TSH1'][4B meta_len LE][meta JSON][JPEG bytes]`
-- `stream_hello` JSON with `project_root` on connect; bridge replies `stream_hello_ack`.
+- `stream_hello` JSON with `project_root`, `extension_instance_id`, and protocol version; the bridge authenticates the session before accepting binary frames.
 
-**Commands** (on heartbeat response `cmd`) — `get_page_snapshot`, `highlight_selector`, `clear_highlight`, `activate_tab` (with `tab_id`). Replies are posted to `/v1/bridge/response` (JSON only; no large frames). Locator commands pause screencast until they finish.
+**Commands** (on heartbeat response `cmd`) carry a unique request ID and composite instance/window/tab target. In addition to legacy snapshot/highlight/execute commands, protocol 1 verifies batches of structured Playwright candidates and captures request-scoped evidence. Replies echo the request, instance, and target and are quarantined when correlation does not match.
 
-**Desktop discovery** — `GET /v1/bridge` includes `extension_frame_ws_url`, `last_frame_error`, and `last_frame_age_ms` for stream health.
+**Discovery** — `GET /v1/bridge` includes `sessions[]` with identities, health, browser versions, windows/tabs, public lease state, `extension_frame_ws_url`, and stream diagnostics. Legacy flat fields are populated only when exactly one eligible target exists.

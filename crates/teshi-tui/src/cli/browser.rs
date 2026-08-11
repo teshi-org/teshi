@@ -7,9 +7,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow};
 use serde_json::json;
 use teshi_engine::{
-    BrowserMode, RuntimeConfig, StepBinding, TeshiEngine, default_browser_service_script,
-    default_winapp_service_script, open_project, read_active_step, resolve_step_bindings,
-    send_sidecar_command_with_timeout, start_browser_sidecar, stop_browser_sidecar,
+    BrowserMode, BrowserOperation, BrowserOperations, BrowserTarget, LocatorIntent,
+    PageContextRevision, PlaywrightLocatorCandidate, RuntimeConfig, StepBinding, TeshiEngine,
+    default_browser_service_script, default_winapp_service_script, load_project_settings,
+    open_project, read_active_step, resolve_step_bindings, send_sidecar_command_with_timeout,
+    start_browser_sidecar, stop_browser_sidecar,
 };
 
 use super::browser_endpoint::{
@@ -21,9 +23,10 @@ use super::replay_screenshots::{
     ReplayScreenshotEntry, capture_and_save_screenshot, iso_now, load_or_create_index, save_index,
 };
 use super::{
-    BrowserCommand, BrowserExecuteArgs, BrowserNavigateArgs, BrowserReconnectArgs,
+    BrowserCommand, BrowserEvidenceArgs, BrowserExecuteArgs, BrowserLeaseCommand,
+    BrowserLocatorArgs, BrowserLocatorVerifyArgs, BrowserNavigateArgs, BrowserReconnectArgs,
     BrowserReplayArgs, BrowserSelectorArgs, BrowserServeEmbeddedArgs, BrowserSnapshotArgs,
-    BrowserVerifyArgs,
+    BrowserTargetArgs, BrowserVerifyArgs,
 };
 
 /// Handles `teshi browser ...` subcommands.
@@ -31,10 +34,23 @@ pub fn handle_browser_command(action: &BrowserCommand) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let project_root = resolve_browser_project_root(&cwd).unwrap_or(cwd);
     match action {
+        BrowserCommand::Sessions => run_typed_operation(
+            &project_root,
+            BrowserOperation::ListBrowserSessions,
+            Duration::from_secs(15),
+        ),
+        BrowserCommand::Tabs(args) => run_typed_operation(
+            &project_root,
+            BrowserOperation::ListBrowserTabs {
+                extension_instance_id: args.session.clone(),
+            },
+            Duration::from_secs(15),
+        ),
+        BrowserCommand::Lease { action } => lease(&project_root, action),
         BrowserCommand::Snapshot(args) => snapshot(&project_root, args),
         BrowserCommand::Navigate(args) => navigate(&project_root, args),
         BrowserCommand::Highlight(args) => highlight(&project_root, args),
-        BrowserCommand::ClearHighlight => clear_highlight(&project_root),
+        BrowserCommand::ClearHighlight(target) => clear_highlight(&project_root, target),
         BrowserCommand::Execute(args) => execute(&project_root, args),
         BrowserCommand::Replay(args) => replay(&project_root, args),
         BrowserCommand::ServeEmbedded(args) => serve_embedded(args),
@@ -43,6 +59,107 @@ pub fn handle_browser_command(action: &BrowserCommand) -> Result<()> {
         BrowserCommand::Verify(args) => verify(&project_root, args),
         BrowserCommand::Enhance(args) => enhance(&project_root, args),
         BrowserCommand::HealExecute(args) => heal_execute(&project_root, args),
+        BrowserCommand::Locator(args) => locator(&project_root, args),
+        BrowserCommand::LocatorVerify(args) => locator_verify(&project_root, args),
+        BrowserCommand::Evidence(args) => evidence(&project_root, args),
+    }
+}
+
+fn lease(project_root: &Path, action: &BrowserLeaseCommand) -> Result<()> {
+    let operation = match action {
+        BrowserLeaseCommand::Acquire(args) => BrowserOperation::AcquireBrowserLease {
+            extension_instance_id: args.session.clone(),
+            owner_label: args.owner.clone(),
+            ttl_secs: args.ttl,
+        },
+        BrowserLeaseCommand::Renew(args) => BrowserOperation::RenewBrowserLease {
+            extension_instance_id: args.session.clone(),
+            lease_token: args.lease_token.clone(),
+            ttl_secs: args.ttl,
+        },
+        BrowserLeaseCommand::Release(args) => BrowserOperation::ReleaseBrowserLease {
+            extension_instance_id: args.session.clone(),
+            lease_token: args.lease_token.clone(),
+        },
+    };
+    run_typed_operation(project_root, operation, Duration::from_secs(15))
+}
+
+fn locator(project_root: &Path, args: &BrowserLocatorArgs) -> Result<()> {
+    let operation = locator_operation(project_root, args)?;
+    run_typed_operation(
+        project_root,
+        operation,
+        Duration::from_millis(args.timeout_ms),
+    )
+}
+
+pub(crate) fn locator_operation(
+    project_root: &Path,
+    args: &BrowserLocatorArgs,
+) -> Result<BrowserOperation> {
+    let (target, lease_token) = required_target(&args.target)?;
+    let configured = if args.test_id_attributes.is_empty() {
+        load_project_settings(project_root)?.playwright_test_id_attributes
+    } else {
+        args.test_id_attributes.clone()
+    };
+    Ok(BrowserOperation::ResolvePlaywrightLocator {
+        target,
+        lease_token,
+        intent: LocatorIntent {
+            purpose: args.purpose.clone(),
+            text: args.text.clone(),
+            role: args.role.clone(),
+            element_ref: args.element_ref.clone(),
+            gherkin_step: args.gherkin_step.clone(),
+        },
+        test_id_attributes: configured,
+    })
+}
+
+fn locator_verify(project_root: &Path, args: &BrowserLocatorVerifyArgs) -> Result<()> {
+    let (target, lease_token) = required_target(&args.target)?;
+    let candidate: PlaywrightLocatorCandidate = serde_json::from_str(&args.candidate_json)
+        .context("parse --candidate-json as a Playwright locator candidate")?;
+    run_typed_operation(
+        project_root,
+        BrowserOperation::VerifyPlaywrightLocator {
+            target,
+            lease_token,
+            candidate,
+            page_context_revision: PageContextRevision(args.page_revision.clone()),
+        },
+        Duration::from_millis(args.timeout_ms),
+    )
+}
+
+fn evidence(project_root: &Path, args: &BrowserEvidenceArgs) -> Result<()> {
+    let (target, lease_token) = required_target(&args.target)?;
+    run_typed_operation(
+        project_root,
+        BrowserOperation::CaptureBrowserEvidence {
+            target,
+            lease_token,
+            page_context_revision: PageContextRevision(args.page_revision.clone()),
+        },
+        Duration::from_millis(args.timeout_ms),
+    )
+}
+
+fn run_typed_operation(
+    project_root: &Path,
+    operation: BrowserOperation,
+    timeout: Duration,
+) -> Result<()> {
+    let endpoint = read_cdp_endpoint(project_root)?;
+    let client = BrowserOperations::new(endpoint.ws_url, timeout);
+    match client.execute(&operation) {
+        Ok(response) => print_json_response(response.payload),
+        Err(error) => {
+            eprintln!("{}", serde_json::to_string_pretty(&error.to_wire_value())?);
+            Err(error.into())
+        }
     }
 }
 
@@ -76,13 +193,17 @@ fn reconnect(project_root: &Path, args: &BrowserReconnectArgs) -> Result<()> {
 
 fn verify(project_root: &Path, args: &BrowserVerifyArgs) -> Result<()> {
     let timeout = command_timeout_for_ms(args.timeout_ms);
-    let highlight = send_browser_command(
-        project_root,
+    let highlight_command = apply_targeting(
         json!({
             "cmd": "highlight_selector",
             "request_id": "browser-verify-highlight",
             "selector": args.selector
         }),
+        &args.target,
+    )?;
+    let highlight = send_browser_command(
+        project_root,
+        highlight_command,
         Duration::from_secs(20),
         false,
     )?;
@@ -93,6 +214,7 @@ fn verify(project_root: &Path, args: &BrowserVerifyArgs) -> Result<()> {
             args.value_arg.as_deref().unwrap_or(&args.selector),
             timeout,
             "browser-verify-open-project",
+            Some(&args.target),
         )?
     } else if args.action == "navigate" {
         let url = args
@@ -107,6 +229,7 @@ fn verify(project_root: &Path, args: &BrowserVerifyArgs) -> Result<()> {
             timeout,
             "browser-verify-navigate",
             false,
+            Some(&args.target),
         )?
     } else {
         execute_locator(
@@ -118,6 +241,7 @@ fn verify(project_root: &Path, args: &BrowserVerifyArgs) -> Result<()> {
                 timeout_ms: args.timeout_ms,
                 request_id: "browser-verify-execute",
                 health_check: false,
+                target: Some(&args.target),
             },
             timeout,
         )?
@@ -160,6 +284,7 @@ fn navigate(project_root: &Path, args: &BrowserNavigateArgs) -> Result<()> {
         timeout,
         "browser-navigate",
         true,
+        Some(&args.target),
     )?;
     ensure_ok(&response)?;
     print_json_response(response)
@@ -167,6 +292,17 @@ fn navigate(project_root: &Path, args: &BrowserNavigateArgs) -> Result<()> {
 
 fn snapshot(project_root: &Path, args: &BrowserSnapshotArgs) -> Result<()> {
     let timeout = Duration::from_millis(args.timeout_ms);
+    if args.target.session.is_some() {
+        let (target, lease_token) = required_target(&args.target)?;
+        return run_typed_operation(
+            project_root,
+            BrowserOperation::GetPageSnapshot {
+                target,
+                lease_token,
+            },
+            timeout,
+        );
+    }
     let response = send_browser_command(
         project_root,
         json!({ "cmd": "get_page_snapshot", "request_id": "browser-snapshot" }),
@@ -177,26 +313,24 @@ fn snapshot(project_root: &Path, args: &BrowserSnapshotArgs) -> Result<()> {
 }
 
 fn highlight(project_root: &Path, args: &BrowserSelectorArgs) -> Result<()> {
-    let response = send_browser_command(
-        project_root,
+    let command = apply_targeting(
         json!({
             "cmd": "highlight_selector",
             "request_id": "browser-highlight",
             "selector": args.selector
         }),
-        Duration::from_secs(20),
-        false,
+        &args.target,
     )?;
+    let response = send_browser_command(project_root, command, Duration::from_secs(20), false)?;
     print_json_response(response)
 }
 
-fn clear_highlight(project_root: &Path) -> Result<()> {
-    let response = send_browser_command(
-        project_root,
+fn clear_highlight(project_root: &Path, target: &BrowserTargetArgs) -> Result<()> {
+    let command = apply_targeting(
         json!({ "cmd": "clear_highlight", "request_id": "browser-clear-highlight" }),
-        Duration::from_secs(10),
-        false,
+        target,
     )?;
+    let response = send_browser_command(project_root, command, Duration::from_secs(10), false)?;
     print_json_response(response)
 }
 
@@ -211,6 +345,7 @@ fn execute(project_root: &Path, args: &BrowserExecuteArgs) -> Result<()> {
             timeout_ms: args.timeout_ms,
             request_id: "browser-execute",
             health_check: true,
+            target: Some(&args.target),
         },
         timeout,
     )?;
@@ -220,16 +355,15 @@ fn execute(project_root: &Path, args: &BrowserExecuteArgs) -> Result<()> {
 
 fn enhance(project_root: &Path, args: &BrowserSelectorArgs) -> Result<()> {
     let timeout = command_timeout_for_ms(10_000);
-    let response = send_browser_command(
-        project_root,
+    let command = apply_targeting(
         json!({
             "cmd": "enhance_locator",
             "request_id": "browser-enhance",
             "selector": args.selector,
         }),
-        timeout,
-        true,
+        &args.target,
     )?;
+    let response = send_browser_command(project_root, command, timeout, true)?;
     let ok = response
         .get("ok")
         .and_then(|v| v.as_bool())
@@ -246,8 +380,7 @@ fn enhance(project_root: &Path, args: &BrowserSelectorArgs) -> Result<()> {
 
 fn heal_execute(project_root: &Path, args: &BrowserExecuteArgs) -> Result<()> {
     let timeout = command_timeout_for_ms(args.timeout_ms + 15_000);
-    let response = send_browser_command(
-        project_root,
+    let command = apply_targeting(
         json!({
             "cmd": "heal_execute_locator",
             "request_id": "browser-heal-execute",
@@ -256,9 +389,9 @@ fn heal_execute(project_root: &Path, args: &BrowserExecuteArgs) -> Result<()> {
             "value": args.value_arg,
             "timeout_ms": args.timeout_ms,
         }),
-        timeout,
-        true,
+        &args.target,
     )?;
+    let response = send_browser_command(project_root, command, timeout, true)?;
     let ok = response
         .get("ok")
         .and_then(|v| v.as_bool())
@@ -346,6 +479,7 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                 command_timeout_for_ms(timeout_ms),
                 &format!("browser-replay-{}", idx + 1),
                 true,
+                Some(&args.target),
             )?
         } else if step.primary.action == "open_project" {
             let path = step
@@ -360,6 +494,7 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                 path,
                 command_timeout_for_ms(timeout_ms),
                 &format!("browser-replay-{}", idx + 1),
+                Some(&args.target),
             )?
         } else {
             let timeout_ms = 5_000;
@@ -372,6 +507,7 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                     timeout_ms,
                     request_id: &format!("browser-replay-{}", idx + 1),
                     health_check: true,
+                    target: Some(&args.target),
                 },
                 command_timeout_for_ms(timeout_ms),
             )?
@@ -490,6 +626,7 @@ async fn serve_embedded_async(args: &BrowserServeEmbeddedArgs) -> Result<()> {
             command_timeout_for_ms(timeout_ms),
             "serve-embedded-navigate",
             false,
+            None,
         )?;
         ensure_ok(&response).with_context(|| format!("navigate to {url}"))?;
         eprintln!("navigated to {url}");
@@ -537,6 +674,55 @@ fn command_timeout_for_ms(timeout_ms: u64) -> Duration {
     Duration::from_secs(secs.max(15))
 }
 
+fn required_target(args: &BrowserTargetArgs) -> Result<(BrowserTarget, String)> {
+    let session = args
+        .session
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow!("--session is required for this browser operation"))?;
+    let window_id = args
+        .window
+        .ok_or_else(|| anyhow!("--window is required for this browser operation"))?;
+    let tab_id = args
+        .tab
+        .ok_or_else(|| anyhow!("--tab is required for this browser operation"))?;
+    let lease_token = args
+        .lease_token
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow!("--lease-token is required for this browser operation"))?;
+    Ok((
+        BrowserTarget {
+            extension_instance_id: session.to_string(),
+            window_id,
+            tab_id,
+        },
+        lease_token.to_string(),
+    ))
+}
+
+fn apply_targeting(
+    mut command: serde_json::Value,
+    args: &BrowserTargetArgs,
+) -> Result<serde_json::Value> {
+    let supplied = [
+        args.session.is_some(),
+        args.window.is_some(),
+        args.tab.is_some(),
+        args.lease_token.is_some(),
+    ];
+    if supplied.iter().all(|value| !value) {
+        return Ok(command);
+    }
+    let (target, lease_token) = required_target(args)?;
+    let object = command
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("browser command must be a JSON object"))?;
+    object.insert("target".to_string(), serde_json::to_value(target)?);
+    object.insert("lease_token".to_string(), json!(lease_token));
+    Ok(command)
+}
+
 fn navigate_to_url(
     project_root: &Path,
     url: &str,
@@ -544,15 +730,20 @@ fn navigate_to_url(
     sidecar_timeout: Duration,
     request_id: &str,
     health_check: bool,
+    target: Option<&BrowserTargetArgs>,
 ) -> Result<serde_json::Value> {
+    let command = json!({
+        "cmd": "navigate",
+        "request_id": request_id,
+        "url": url,
+        "timeout_ms": timeout_ms
+    });
     send_browser_command(
         project_root,
-        json!({
-            "cmd": "navigate",
-            "request_id": request_id,
-            "url": url,
-            "timeout_ms": timeout_ms
-        }),
+        match target {
+            Some(target) => apply_targeting(command, target)?,
+            None => command,
+        },
         sidecar_timeout,
         health_check,
     )
@@ -563,14 +754,19 @@ fn open_project_via_sidecar(
     path: &str,
     sidecar_timeout: Duration,
     request_id: &str,
+    target: Option<&BrowserTargetArgs>,
 ) -> Result<serde_json::Value> {
+    let command = json!({
+        "cmd": "open_project",
+        "request_id": request_id,
+        "path": path
+    });
     send_browser_command(
         project_root,
-        json!({
-            "cmd": "open_project",
-            "request_id": request_id,
-            "path": path
-        }),
+        match target {
+            Some(target) => apply_targeting(command, target)?,
+            None => command,
+        },
         sidecar_timeout,
         true,
     )
@@ -584,6 +780,7 @@ struct ExecuteLocatorParams<'a> {
     timeout_ms: u64,
     request_id: &'a str,
     health_check: bool,
+    target: Option<&'a BrowserTargetArgs>,
 }
 
 fn execute_locator(
@@ -591,16 +788,20 @@ fn execute_locator(
     params: ExecuteLocatorParams<'_>,
     sidecar_timeout: Duration,
 ) -> Result<serde_json::Value> {
+    let command = json!({
+        "cmd": "execute_locator",
+        "request_id": params.request_id,
+        "selector": params.selector,
+        "action": params.action,
+        "value": params.value,
+        "timeout_ms": params.timeout_ms
+    });
     send_browser_command(
         project_root,
-        json!({
-            "cmd": "execute_locator",
-            "request_id": params.request_id,
-            "selector": params.selector,
-            "action": params.action,
-            "value": params.value,
-            "timeout_ms": params.timeout_ms
-        }),
+        match params.target {
+            Some(target) => apply_targeting(command, target)?,
+            None => command,
+        },
         sidecar_timeout,
         params.health_check,
     )
@@ -684,7 +885,25 @@ fn ensure_ok(response: &serde_json::Value) -> Result<()> {
 
 fn print_json_response(response: serde_json::Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&response)?);
+    if let Some(error) = json_response_error(&response) {
+        return Err(anyhow!(error));
+    }
     Ok(())
+}
+
+fn json_response_error(response: &serde_json::Value) -> Option<String> {
+    if response.get("ok").and_then(|value| value.as_bool()) == Some(false) {
+        let code = response
+            .get("code")
+            .and_then(|value| value.as_str())
+            .unwrap_or("browser_operation_failed");
+        let error = response
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("browser operation failed");
+        return Some(format!("{code}: {error}"));
+    }
+    None
 }
 
 fn debug_log(project_root: &Path, mut payload: serde_json::Value) {
@@ -705,5 +924,28 @@ fn debug_log(project_root: &Path, mut payload: serde_json::Value) {
     let path = log_dir.join("cli-browser.log");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "{}", payload);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_json_operation_failure_becomes_a_cli_error() {
+        let response = json!({
+            "ok": false,
+            "code": "ambiguous_browser_target",
+            "error": "select a browser profile",
+        });
+        assert_eq!(
+            json_response_error(&response).as_deref(),
+            Some("ambiguous_browser_target: select a browser profile")
+        );
+    }
+
+    #[test]
+    fn successful_json_operation_has_no_cli_error() {
+        assert_eq!(json_response_error(&json!({"ok": true})), None);
     }
 }

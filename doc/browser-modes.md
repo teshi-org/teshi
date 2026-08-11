@@ -1,6 +1,6 @@
 # Browser modes (teshi-desktop)
 
-teshi-desktop supports two browser backends for BDD locator recording. Both expose the same WebSocket commands (`navigate`, `get_page_snapshot`, `highlight_selector`, `clear_highlight`, `execute_locator`; Chrome mode also supports `activate_tab`) and write `.teshi/cdp-endpoint.json` for agents.
+teshi-desktop supports two browser backends for BDD locator recording. Both write `.teshi/cdp-endpoint.json`; Chrome mode additionally exposes a versioned multi-profile broker and typed operations for external agents.
 
 ## How Chrome mode communicates
 
@@ -29,6 +29,22 @@ Chrome may show **“Chrome is being controlled by automated test software”** 
 
 The popup **Connect to teshi** button sends one heartbeat immediately and refreshes status text. The green **OK** badge means the last heartbeat succeeded.
 
+## Chrome profile identity, targets, and leases
+
+Each extension installation persists an opaque `extension_instance_id` in that Chromium profile. Heartbeats advertise the optional display label, extension/protocol versions, browser metadata, and every window/tab. Labels, URLs, and titles help selection but are never routing keys. The canonical target is:
+
+```json
+{
+  "extension_instance_id": "opaque-profile-id",
+  "window_id": 7,
+  "tab_id": 42
+}
+```
+
+The broker isolates health, commands, pending requests, preview frames, diagnostics, and an exclusive bounded lease for every extension instance. Different agents may lease different profiles concurrently. A second owner targeting the same profile receives `browser_session_busy`; expired leases recover automatically. Explicit locator and mutation operations require the complete target and lease token. Legacy commands omit them only when exactly one eligible target exists; otherwise they fail with `ambiguous_browser_target` before mutation.
+
+For concurrent work, create one dedicated Chromium profile per agent, install the extension separately, and assign labels such as `agent-a` and `agent-b` in each popup. All profiles use the same loopback broker port.
+
 ## Connect Chrome (default for locators)
 
 Use a **dedicated recording Chrome profile** with real login sessions (SSO, cookies). Install `teshi-bridge` only in that profile so daily browsing and other browser automation tools do not attach to the same debugger target.
@@ -50,8 +66,27 @@ While waiting for the extension, the panel shows setup steps only (no stream). O
 
 Chrome mode allows agent-driven navigation only for explicit URL steps, for example a Background step that says to open `https://example.com`. Skills should call `teshi browser navigate <url>` only when the URL is present in the step text; they should not invent hidden navigation. Other page changes should happen through confirmed step bindings or direct user action.
 
-Discovery: `GET http://127.0.0.1:17373/v1/bridge` returns `tabs`, `active_tab_id`, `page_url`, `extension_connected`, `extension_frame_ws_url`, `last_frame_error`, and `last_frame_age_ms`.  
+Discovery: `GET http://127.0.0.1:17373/v1/bridge` returns versioned `sessions[]`, health and public lease metadata, `extension_frame_ws_url`, and stream diagnostics. Flat `tabs`, `active_tab_id`, and `page_url` fields exist only for an unambiguous single session.
 `cdp-endpoint.json` includes `"mode": "chrome"` and `extension_frame_ws_url` when available.
+
+## External coding agents
+
+The installed `teshi-browser-testing` package contains the `playwright-locator` Skill, compatible extension bundle, MCP metadata, and a machine-readable compatibility declaration. It is installed under `share/teshi-browser-testing` in Teshi release archives/MSI and is also published as a standalone zip. Its Skill may be copied unchanged to a consumer repository's `.agents/skills/playwright-locator` directory.
+
+Use JSON CLI operations or the equivalent local STDIO MCP tools:
+
+```bash
+teshi browser sessions
+teshi browser tabs --session <instance-id>
+teshi browser lease acquire --session <instance-id> --owner agent-a --ttl 60
+teshi browser locator --session <instance-id> --window 7 --tab 42 \
+  --lease-token <token> --role button --text Save
+teshi browser lease release --session <instance-id> --lease-token <token>
+
+teshi mcp serve --stdio
+```
+
+Locator results include a page-context revision, structured Playwright expression/arguments, frame or shadow context, match count, visibility/actionability, verification state, stability rationale, warnings, and alternatives. The resolver prefers role/name, label, placeholder, project-configured test IDs (default `data-testid`), and stable attributes before CSS fallback. It does not execute or invent a test action. MCP is a same-host process and exposes only profiles registered with that local user's broker.
 
 ## Step bindings
 
@@ -69,7 +104,7 @@ teshi browser reconnect   # Spawn detached serve-embedded; refresh cdp-endpoint.
 teshi browser verify --step-line N --selector <css> --action <action> [--value-arg <text>]
 ```
 
-Before snapshot/replay in embedded mode, run `doctor` (or rely on auto-reconnect). After restarting the SUT (`teshi web` or Vite dev), run `reconnect`.
+Before snapshot/replay in embedded mode, run `doctor` (or rely on auto-reconnect). After restarting the SUT or `teshi web`, run `reconnect`.
 
 Set `TESHI_BROWSER_AUTO_RECONNECT=0` to disable automatic reconnect. Set `TESHI_LOCATOR_STRICT=1` to require `browser verify` before `steps propose`.
 
@@ -85,9 +120,9 @@ Launches **headless Playwright Chromium** with a live JPEG stream in the panel (
 
 `cdp-endpoint.json` includes `"mode": "embedded"`.
 
-## Mutual exclusion
+## Backend mutual exclusion
 
-Only one session runs at a time. Starting Chrome disconnects Embedded and vice versa.
+Only one backend mode runs at a time. Starting Chrome disconnects Embedded and vice versa; within Chrome mode, multiple isolated extension-profile sessions may be connected simultaneously.
 
 ## CI / replay
 
@@ -96,7 +131,7 @@ Use `teshi browser replay --non-interactive` for CI-style browser setup from con
 For headless CI without the desktop UI, start the embedded sidecar with:
 
 ```bash
-teshi browser serve-embedded --navigate http://127.0.0.1:1421
+teshi browser serve-embedded --navigate http://127.0.0.1:20253
 ```
 
 This writes `.teshi/cdp-endpoint.json` and keeps Playwright running until Ctrl+C. Pair with `teshi web --no-open` when testing the teshi web UI (see [web-ui-self-test.md](web-ui-self-test.md)).

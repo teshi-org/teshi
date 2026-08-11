@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "package_version": "0.7.9",
+  "teshi_cli": ">=0.7.9 <0.8.0",
+  "browser_agent_schema": 1,
+  "broker_protocol": 1,
+  "extension": ">=0.7.9 <0.8.0",
+  "chromium": ">=116 (Chrome, Edge, or compatible Chromium with Manifest V3 and chrome.debugger)",
+  "operating_systems": [
+    "Windows 10/11 x86_64",
+    "Linux x86_64",
+    "macOS 13+ arm64"
+  ],
+  "mcp_protocols": [
+    "2026-07-28",
+    "2025-11-25",
+    "2025-06-18",
+    "2024-11-05"
+  ],
+  "transport": "same-host STDIO MCP and loopback browser broker only"
+}

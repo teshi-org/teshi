@@ -5,6 +5,7 @@ pub mod daemon;
 pub mod desktop;
 pub mod export;
 pub mod locator_verify;
+pub mod mcp;
 pub mod replay_screenshots;
 pub mod steps;
 pub mod terminal;
@@ -89,6 +90,11 @@ pub enum Command {
     Browser {
         #[command(subcommand)]
         action: BrowserCommand,
+    },
+    /// Serve Teshi's local agent integrations through Model Context Protocol
+    Mcp {
+        #[command(subcommand)]
+        action: McpCommand,
     },
     /// Inspect and execute locators through the WinUI3 bridge
     #[command(name = "winapp", alias = "win-app")]
@@ -308,6 +314,15 @@ pub enum WaitUntilArg {
 
 #[derive(Debug, Subcommand)]
 pub enum BrowserCommand {
+    /// List registered browser-profile sessions and health
+    Sessions,
+    /// List windows and tabs for one browser-profile session
+    Tabs(BrowserSessionArgs),
+    /// Acquire, renew, or release an exclusive browser-session lease
+    Lease {
+        #[command(subcommand)]
+        action: BrowserLeaseCommand,
+    },
     /// Read page accessibility and interactive element snapshot
     Snapshot(BrowserSnapshotArgs),
     /// Navigate the active browser tab to an explicit URL
@@ -315,7 +330,7 @@ pub enum BrowserCommand {
     /// Highlight a selector in the active browser
     Highlight(BrowserSelectorArgs),
     /// Clear active browser highlight
-    ClearHighlight,
+    ClearHighlight(BrowserTargetArgs),
     /// Execute one locator action in the active browser
     Execute(BrowserExecuteArgs),
     /// Replay confirmed step bindings
@@ -332,6 +347,81 @@ pub enum BrowserCommand {
     Enhance(BrowserSelectorArgs),
     /// Execute a locator with automatic self-healing retry chain
     HealExecute(BrowserExecuteArgs),
+    /// Generate and verify ranked Playwright locator candidates
+    Locator(BrowserLocatorArgs),
+    /// Re-verify one structured Playwright locator candidate
+    LocatorVerify(BrowserLocatorVerifyArgs),
+    /// Capture screenshot evidence tied to a target and page revision
+    Evidence(BrowserEvidenceArgs),
+}
+
+#[derive(Debug, Args, Default)]
+pub struct BrowserTargetArgs {
+    /// Opaque browser extension session identifier
+    #[arg(long)]
+    pub session: Option<String>,
+    /// Browser-local window identifier
+    #[arg(long, requires = "session")]
+    pub window: Option<i64>,
+    /// Browser-local tab identifier
+    #[arg(long, requires = "session")]
+    pub tab: Option<i64>,
+    /// Exclusive browser-session lease token
+    #[arg(long, requires = "session", allow_hyphen_values = true)]
+    pub lease_token: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserSessionArgs {
+    /// Opaque browser extension session identifier
+    #[arg(long)]
+    pub session: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BrowserLeaseCommand {
+    /// Acquire an exclusive browser-profile lease
+    Acquire(BrowserLeaseAcquireArgs),
+    /// Renew a matching browser-profile lease
+    Renew(BrowserLeaseRenewArgs),
+    /// Release a matching browser-profile lease
+    Release(BrowserLeaseReleaseArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserLeaseAcquireArgs {
+    /// Opaque browser extension session identifier
+    #[arg(long)]
+    pub session: String,
+    /// Display-only lease owner label
+    #[arg(long, default_value = "teshi-cli")]
+    pub owner: String,
+    /// Requested lease lifetime in seconds (bounded by the broker)
+    #[arg(long, default_value_t = 60)]
+    pub ttl: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserLeaseRenewArgs {
+    /// Opaque browser extension session identifier
+    #[arg(long)]
+    pub session: String,
+    /// Secret lease token returned by acquisition
+    #[arg(long, allow_hyphen_values = true)]
+    pub lease_token: String,
+    /// Requested lease lifetime in seconds (bounded by the broker)
+    #[arg(long, default_value_t = 60)]
+    pub ttl: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserLeaseReleaseArgs {
+    /// Opaque browser extension session identifier
+    #[arg(long)]
+    pub session: String,
+    /// Secret lease token returned by acquisition
+    #[arg(long, allow_hyphen_values = true)]
+    pub lease_token: String,
 }
 
 #[derive(Debug, Args)]
@@ -339,6 +429,8 @@ pub struct BrowserSnapshotArgs {
     /// Timeout in milliseconds waiting for the sidecar response
     #[arg(long, default_value_t = 60_000)]
     pub timeout_ms: u64,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
 }
 
 #[derive(Debug, Args)]
@@ -348,12 +440,16 @@ pub struct BrowserNavigateArgs {
     /// Timeout in milliseconds
     #[arg(long, default_value_t = 15000)]
     pub timeout_ms: u64,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
 }
 
 #[derive(Debug, Args)]
 pub struct BrowserSelectorArgs {
     /// CSS selector to highlight
     pub selector: String,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
 }
 
 #[derive(Debug, Args)]
@@ -370,6 +466,8 @@ pub struct BrowserExecuteArgs {
     /// Timeout in milliseconds
     #[arg(long, default_value_t = 5000)]
     pub timeout_ms: u64,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
 }
 
 #[derive(Debug, Args)]
@@ -389,6 +487,8 @@ pub struct BrowserReplayArgs {
     /// Alias for --non-interactive
     #[arg(long)]
     pub yes: bool,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
 }
 
 #[derive(Debug, Args)]
@@ -428,6 +528,78 @@ pub struct BrowserVerifyArgs {
     /// Timeout in milliseconds
     #[arg(long, default_value_t = 5000)]
     pub timeout_ms: u64,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserLocatorArgs {
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+    /// Human-readable element purpose
+    #[arg(long)]
+    pub purpose: Option<String>,
+    /// Expected visible or accessible text
+    #[arg(long)]
+    pub text: Option<String>,
+    /// Expected accessible role
+    #[arg(long)]
+    pub role: Option<String>,
+    /// Snapshot-local element reference
+    #[arg(long)]
+    pub element_ref: Option<String>,
+    /// Selected Gherkin step text
+    #[arg(long)]
+    pub gherkin_step: Option<String>,
+    /// Override a project test-id attribute (repeatable)
+    #[arg(long = "test-id-attribute")]
+    pub test_id_attributes: Vec<String>,
+    /// Operation timeout in milliseconds
+    #[arg(long, default_value_t = 60_000)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserLocatorVerifyArgs {
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+    /// Structured locator candidate JSON returned by `browser locator`
+    #[arg(long)]
+    pub candidate_json: String,
+    /// Expected page-context revision
+    #[arg(long)]
+    pub page_revision: String,
+    /// Operation timeout in milliseconds
+    #[arg(long, default_value_t = 30_000)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserEvidenceArgs {
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+    /// Expected page-context revision
+    #[arg(long)]
+    pub page_revision: String,
+    /// Operation timeout in milliseconds
+    #[arg(long, default_value_t = 30_000)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum McpCommand {
+    /// Serve the browser-agent tools over newline-delimited JSON-RPC on STDIO
+    Serve(McpServeArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct McpServeArgs {
+    /// Use standard input/output as the local MCP transport
+    #[arg(long, default_value_t = false)]
+    pub stdio: bool,
+    /// Project root containing `.teshi/cdp-endpoint.json`
+    #[arg(long)]
+    pub project: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -734,6 +906,112 @@ mod tests {
             msg.contains("value") || msg.contains("unexpected"),
             "unexpected error: {msg}"
         );
+    }
+
+    #[test]
+    fn browser_locator_accepts_explicit_target_lease_and_intent() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "browser",
+            "locator",
+            "--session",
+            "profile-a",
+            "--window",
+            "7",
+            "--tab",
+            "42",
+            "--lease-token",
+            "lease-a",
+            "--role",
+            "button",
+            "--text",
+            "Save",
+            "--test-id-attribute",
+            "data-qa",
+        ])
+        .expect("parse browser locator");
+        let Some(Command::Browser {
+            action: BrowserCommand::Locator(args),
+        }) = cli.command
+        else {
+            panic!("expected browser locator subcommand");
+        };
+        assert_eq!(args.target.session.as_deref(), Some("profile-a"));
+        assert_eq!(args.target.window, Some(7));
+        assert_eq!(args.target.tab, Some(42));
+        assert_eq!(args.target.lease_token.as_deref(), Some("lease-a"));
+        assert_eq!(args.role.as_deref(), Some("button"));
+        assert_eq!(args.test_id_attributes, ["data-qa"]);
+    }
+
+    #[test]
+    fn browser_lease_acquire_has_bounded_owner_inputs() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "browser",
+            "lease",
+            "acquire",
+            "--session",
+            "profile-b",
+            "--owner",
+            "agent-two",
+            "--ttl",
+            "45",
+        ])
+        .expect("parse browser lease acquire");
+        let Some(Command::Browser {
+            action:
+                BrowserCommand::Lease {
+                    action: BrowserLeaseCommand::Acquire(args),
+                },
+        }) = cli.command
+        else {
+            panic!("expected browser lease acquire subcommand");
+        };
+        assert_eq!(args.session, "profile-b");
+        assert_eq!(args.owner, "agent-two");
+        assert_eq!(args.ttl, 45);
+    }
+
+    #[test]
+    fn browser_locator_accepts_legacy_hyphen_leading_lease_token() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "browser",
+            "locator",
+            "--session",
+            "profile-a",
+            "--window",
+            "7",
+            "--tab",
+            "42",
+            "--lease-token",
+            "-legacy-token",
+            "--role",
+            "button",
+        ])
+        .expect("parse a lease token beginning with a hyphen");
+        let Some(Command::Browser {
+            action: BrowserCommand::Locator(args),
+        }) = cli.command
+        else {
+            panic!("expected browser locator subcommand");
+        };
+        assert_eq!(args.target.lease_token.as_deref(), Some("-legacy-token"));
+    }
+
+    #[test]
+    fn mcp_stdio_server_accepts_project_root() {
+        let cli = Cli::try_parse_from(["teshi", "mcp", "serve", "--stdio", "--project", "."])
+            .expect("parse MCP server command");
+        let Some(Command::Mcp {
+            action: McpCommand::Serve(args),
+        }) = cli.command
+        else {
+            panic!("expected mcp serve subcommand");
+        };
+        assert!(args.stdio);
+        assert_eq!(args.project.as_deref(), Some(std::path::Path::new(".")));
     }
 
     #[test]

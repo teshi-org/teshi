@@ -13,18 +13,16 @@ conventions are in `CLAUDE.md`. Only the non-obvious, environment-specific notes
   Runs in a real TTY (e.g. tmux). `1`/`2`/`3` switch the Explore/MindMap/AI tabs;
   `e` opens the file editor, `s` saves. See `doc/keybindings.md`.
 - `teshi web` (served by `apps/teshi-daemon`): browser GUI. Defaults to `127.0.0.1:20253`.
-  It serves the prebuilt **React** frontend from `apps/teshi-web-ui/dist` (see below).
-  Flags: `--project PATH`, `--port`, `--host`, `--no-open`, `--dist PATH`. The HTTP API under
-  `/api/v1/*` uses session auth (`POST /api/v1/sessions`); the React app handles this itself.
-- `apps/teshi-web-ui` (React/Vite): the frontend for `teshi web`. Not a Rust crate.
-  Test with `npm --prefix apps/teshi-web-ui test` (vitest).
+  It serves the prebuilt **GPUI WASM** frontend from `apps/teshi-web/dist` (see below).
+  Flags: `--project PATH`, `--port`, `--host`, `--no-open`, `--dist PATH`.
 - `teshi-desktop` (`apps/teshi-desktop`, GPUI) is a Windows-primary native shell; only
   `cargo check`s on this Linux VM (a full build links GPUI — see gotcha below).
-- `teshi-web` (`apps/teshi-web`) is a **wasm32-only** GPUI-in-browser shell (an experimental
-  alternative to the React UI, built by `scripts/build-teshi-web.sh`). It does **not** compile on
+- `teshi-web` (`apps/teshi-web`) is the only web frontend and the official **wasm32-only**
+  GPUI-in-browser shell. The retired React/Vite application has been removed. Build it with
+  `scripts/build-teshi-web.sh`. It does **not** compile on
   the native host and must be excluded from native workspace commands (see below). Building it
   needs the nightly toolchain + `wasm32-unknown-unknown` target + the `wasm-bindgen` CLI, none of
-  which are installed by default; it is optional and not part of the standard dev loop.
+  which are installed by default.
 
 ### Build / lint / test (native Linux)
 
@@ -60,16 +58,15 @@ Do not "fix" these as part of environment setup; call them out if they block a t
 
 ### Running `teshi web`
 
-The `dist` bundle is a build artifact and must be built once before use (the update script only
-installs npm deps, it does not build):
+The `dist` bundle is a build artifact and must be built once before use:
 
 ```
-npm --prefix apps/teshi-web-ui run build
+bash scripts/build-teshi-web.sh
 ```
 
-Then: `./target/debug/teshi web --project <dir> --host 127.0.0.1 --port 20253 --no-open --dist apps/teshi-web-ui/dist`.
-Without `dist`, the daemon errors with "frontend dist not found". The daemon can also auto-resolve
-`apps/teshi-web-ui/dist` when run from the repo root, so `--dist` is optional there.
+Then: `./target/debug/teshi web --project <dir> --host 127.0.0.1 --port 20253 --no-open --dist apps/teshi-web/dist`.
+Without `dist`, the daemon errors with "GPUI WASM dist not found". The daemon auto-resolves
+`apps/teshi-web/dist` when run from the repo root, so `--dist` is optional there.
 
 ### Git hooks
 

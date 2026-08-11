@@ -1,0 +1,4 @@
+interface:
+  display_name: "Playwright Locator"
+  short_description: "Acquire verified Playwright locators from Chrome"
+  default_prompt: "Use $playwright-locator to acquire a verified locator for the element I describe."

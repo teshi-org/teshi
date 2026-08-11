@@ -5,6 +5,8 @@
 const DISCOVERY_URL = "http://127.0.0.1:17373/v1/bridge";
 const HEARTBEAT_URL = "http://127.0.0.1:17373/v1/bridge/heartbeat";
 const RESPONSE_URL = "http://127.0.0.1:17373/v1/bridge/response";
+const PROTOCOL_VERSION = 1;
+const IDENTITY_STORAGE_KEY = "teshiBridgeIdentity";
 /** Metadata heartbeat (tabs, URL) — no screenshot. */
 const HEARTBEAT_MS = 1500;
 /** Target ~10 fps via screencastFrameAck throttling. */
@@ -51,6 +53,62 @@ let streamSessionTabId = null;
 let streamSeq = 0;
 let lastScreencastPublishAt = 0;
 let screencastListenerRegistered = false;
+let lastBridgeStatus = {
+  connected: false,
+  error: "Bridge has not been contacted yet.",
+};
+/** @type {Promise<{extension_instance_id: string, profile_label: string}> | null} */
+let identityPromise = null;
+
+function randomInstanceId() {
+  if (typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+async function getExtensionIdentity() {
+  if (identityPromise) {
+    return identityPromise;
+  }
+  identityPromise = (async () => {
+    const stored = await chrome.storage.local.get(IDENTITY_STORAGE_KEY);
+    const value = stored?.[IDENTITY_STORAGE_KEY];
+    const extension_instance_id =
+      typeof value?.extension_instance_id === "string" && value.extension_instance_id
+        ? value.extension_instance_id
+        : randomInstanceId();
+    const profile_label =
+      typeof value?.profile_label === "string" ? value.profile_label.slice(0, 120) : "";
+    const identity = { extension_instance_id, profile_label };
+    await chrome.storage.local.set({ [IDENTITY_STORAGE_KEY]: identity });
+    return identity;
+  })();
+  return identityPromise;
+}
+
+async function setProfileLabel(rawLabel) {
+  const identity = await getExtensionIdentity();
+  const next = {
+    ...identity,
+    profile_label: String(rawLabel ?? "").trim().slice(0, 120),
+  };
+  await chrome.storage.local.set({ [IDENTITY_STORAGE_KEY]: next });
+  identityPromise = Promise.resolve(next);
+  return next;
+}
+
+function browserMetadata() {
+  const ua = navigator.userAgent || "";
+  const match = ua.match(/(Edg|Chrome|Chromium)\/([^\s]+)/);
+  const product = match?.[1] === "Edg" ? "Microsoft Edge" : match?.[1] || "Chromium";
+  return {
+    name: product,
+    version: match?.[2] || "",
+    platform: navigator.platform || "",
+  };
+}
 
 function isTabDebuggable(url) {
   if (!url) {
@@ -80,6 +138,7 @@ async function listWindowTabs() {
     active_tab_id: active?.id ?? null,
     tabs: tabs.map((t) => ({
       id: t.id,
+      window_id: t.windowId,
       title: (t.title || t.url || "Untitled").slice(0, 200),
       url: t.url ?? "",
       active: Boolean(t.active),
@@ -87,6 +146,45 @@ async function listWindowTabs() {
       debuggable: isTabDebuggable(t.url),
     })),
   };
+}
+
+async function listBrowserWindows() {
+  const windows = await chrome.windows.getAll({
+    populate: true,
+    windowTypes: ["normal"],
+  });
+  return windows.map((windowInfo) => ({
+    id: windowInfo.id,
+    focused: Boolean(windowInfo.focused),
+    tabs: (windowInfo.tabs ?? []).map((tab) => ({
+      id: tab.id,
+      window_id: tab.windowId,
+      title: (tab.title || tab.url || "Untitled").slice(0, 200),
+      url: tab.url ?? "",
+      active: Boolean(tab.active),
+      favIconUrl: tab.favIconUrl ?? "",
+      debuggable: isTabDebuggable(tab.url),
+    })),
+  }));
+}
+
+async function resolveCommandTab(target) {
+  if (!target || target.tab_id == null) {
+    return getActiveTab();
+  }
+  const tabId = Number(target.tab_id);
+  const windowId = Number(target.window_id);
+  if (!Number.isInteger(tabId) || !Number.isInteger(windowId)) {
+    throw new Error("target requires numeric window_id and tab_id");
+  }
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab || tab.windowId !== windowId) {
+    throw new Error("target tab is stale or belongs to another browser window");
+  }
+  if (!isTabDebuggable(tab.url)) {
+    throw new Error("target tab cannot be debugged (use an http(s) or file page)");
+  }
+  return tab;
 }
 
 async function detachIfNeeded() {
@@ -178,13 +276,17 @@ async function connectStreamWebSocket() {
     let settled = false;
     const ws = new WebSocket(extensionFrameWsUrl);
     ws.binaryType = "arraybuffer";
-    ws.onopen = () => {
+    ws.onopen = async () => {
       streamWs = ws;
       streamWsReconnectDelay = STREAM_WS_RECONNECT_BASE_MS;
+      const identity = await getExtensionIdentity();
       ws.send(
         JSON.stringify({
           type: "stream_hello",
           project_root: cachedProjectRoot,
+          extension_instance_id: identity.extension_instance_id,
+          protocol_version: PROTOCOL_VERSION,
+          extension_version: chrome.runtime.getManifest().version,
         }),
       );
       if (!settled) {
@@ -233,7 +335,11 @@ async function connectStreamWebSocket() {
 }
 
 async function publishScreencastFrame(jpegBytes, tabId, url) {
+  const identity = await getExtensionIdentity();
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
   const meta = {
+    extension_instance_id: identity.extension_instance_id,
+    window_id: tab?.windowId ?? 0,
     tab_id: tabId,
     url,
     seq: (streamSeq += 1),
@@ -397,8 +503,8 @@ async function resumeScreencast() {
   await startStreamSession({ tabId, force: true });
 }
 
-async function attachActiveTab() {
-  const tab = await getActiveTab();
+async function attachActiveTab(target = null) {
+  const tab = await resolveCommandTab(target);
   if (!tab?.id) {
     throw new Error("no active tab in the current window");
   }
@@ -480,19 +586,46 @@ async function collectInteractiveElements(tabId) {
       }
 
       const sel = "button, [role='button'], input, input[type='submit'], select, a[href], [role='link'], textarea";
-      const elements = Array.from(document.querySelectorAll(sel));
-      return elements.slice(0, 60).map(el => ({
-        tag: el.tagName.toLowerCase(),
-        text: (el.innerText || el.value || el.getAttribute('aria-label') || '').trim().slice(0, 120),
-        id: el.id || null,
-        testId: el.getAttribute('data-testid'),
-        role: el.getAttribute('role'),
-        classes: el.className || null,
-        shortSelector: makeShortSelector(el),
-        ariaLabel: el.getAttribute('aria-label'),
-        placeholder: el.getAttribute('placeholder'),
-        name: el.getAttribute('name'),
-      }));
+      function collect(root, framePath = null, shadowPath = null, output = []) {
+        let elements = [];
+        try { elements = Array.from(root.querySelectorAll(sel)); } catch { elements = []; }
+        for (const el of elements) {
+          if (output.length >= 200) break;
+          const attrs = {};
+          for (const name of (el.getAttributeNames?.() ?? [])) {
+            const value = el.getAttribute(name);
+            if (value != null && value.length <= 500) attrs[name] = value;
+          }
+          output.push({
+            element_ref: 'e' + (output.length + 1),
+            tag: el.tagName.toLowerCase(),
+            text: (el.innerText || el.value || el.getAttribute('aria-label') || '').trim().slice(0, 120),
+            id: el.id || null,
+            testId: el.getAttribute('data-testid'),
+            role: el.getAttribute('role'),
+            classes: el.className || null,
+            shortSelector: makeShortSelector(el),
+            ariaLabel: el.getAttribute('aria-label'),
+            accessible_name: el.getAttribute('aria-label') || (el.labels?.[0]?.textContent || '').trim() || (el.innerText || el.value || '').trim().slice(0, 120) || null,
+            label: (el.labels?.[0]?.textContent || '').trim() || null,
+            placeholder: el.getAttribute('placeholder'),
+            name: el.getAttribute('name'),
+            attributes: attrs,
+            visible: Boolean(el.getClientRects().length),
+            context: { frame: framePath, shadow_root: shadowPath },
+          });
+          if (el.shadowRoot) collect(el.shadowRoot, framePath, makeShortSelector(el), output);
+        }
+        let frames = [];
+        try { frames = Array.from(root.querySelectorAll('iframe,frame')); } catch { frames = []; }
+        for (const frame of frames) {
+          try {
+            if (frame.contentDocument) collect(frame.contentDocument, frame.src || frame.name || 'iframe', shadowPath, output);
+          } catch { /* Cross-origin frames are represented by AX data only. */ }
+        }
+        return output;
+      }
+      return collect(document);
     })()`,
     returnByValue: true,
   });
@@ -542,8 +675,22 @@ function truncateAccessibilityTree(tree) {
   return out;
 }
 
-async function getPageSnapshot() {
-  const tab = await attachActiveTab();
+async function pageContextRevision(tabId) {
+  const { result } = await cdp(tabId, "Runtime.evaluate", {
+    expression: `(() => {
+      if (!globalThis.__teshiPageContextRevision) {
+        globalThis.__teshiPageContextRevision =
+          (globalThis.crypto?.randomUUID?.() || String(Date.now()) + '-' + Math.random());
+      }
+      return globalThis.__teshiPageContextRevision;
+    })()`,
+    returnByValue: true,
+  });
+  return String(result?.value || "");
+}
+
+async function getPageSnapshot(target = null) {
+  const tab = await attachActiveTab(target);
   let accessibility_tree;
   try {
     const raw = await cdp(tab.id, "Accessibility.getFullAXTree", {});
@@ -552,21 +699,24 @@ async function getPageSnapshot() {
     accessibility_tree = { error: String(err) };
   }
   const interactive_elements = await collectInteractiveElements(tab.id);
+  const revision = await pageContextRevision(tab.id);
   return {
     ok: true,
     url: tab.url ?? "",
     title: tab.title ?? "",
     tab_id: tab.id,
+    window_id: tab.windowId,
+    page_context_revision: revision,
     accessibility_tree,
     interactive_elements,
   };
 }
 
-async function highlightSelector(selector) {
+async function highlightSelector(selector, target = null) {
   if (!selector) {
     return { ok: false, error: "selector is required" };
   }
-  const tab = await attachActiveTab();
+  const tab = await attachActiveTab(target);
   await cdp(tab.id, "Overlay.hideHighlight", {});
   const { result } = await cdp(tab.id, "Runtime.evaluate", {
     expression: `document.querySelector(${JSON.stringify(selector)})`,
@@ -587,12 +737,12 @@ async function highlightSelector(selector) {
   return { ok: true, selector, node_id: nodeId };
 }
 
-async function clearHighlight() {
-  if (attachedTabId === null) {
-    return { ok: true };
-  }
+async function clearHighlight(target = null) {
+  const targetTab = target ? await attachActiveTab(target) : null;
+  const tabId = targetTab?.id ?? attachedTabId;
+  if (tabId === null) return { ok: true };
   try {
-    await cdp(attachedTabId, "Overlay.hideHighlight", {});
+    await cdp(tabId, "Overlay.hideHighlight", {});
   } catch {
     // ignore
   }
@@ -608,7 +758,7 @@ function isExplicitNavigableUrl(url) {
   }
 }
 
-async function navigateToUrl(url, timeoutMs = 15000) {
+async function navigateToUrl(url, timeoutMs = 15000, target = null) {
   if (!url || !isExplicitNavigableUrl(url)) {
     return {
       ok: false,
@@ -616,7 +766,7 @@ async function navigateToUrl(url, timeoutMs = 15000) {
       code: "invalid_url",
     };
   }
-  const tab = await getActiveTab();
+  const tab = await resolveCommandTab(target);
   if (!tab?.id) {
     return { ok: false, error: "no active tab in the current window", code: "no_active_tab" };
   }
@@ -639,7 +789,7 @@ async function navigateToUrl(url, timeoutMs = 15000) {
   };
 }
 
-async function executeLocator({ selector, action, value, timeoutMs = 5000 }) {
+async function executeLocator({ selector, action, value, timeoutMs = 5000, target = null }) {
   if (!selector) {
     return { ok: false, error: "selector is required", code: "invalid_selector" };
   }
@@ -666,7 +816,7 @@ async function executeLocator({ selector, action, value, timeoutMs = 5000 }) {
     };
   }
 
-  const tab = await attachActiveTab();
+  const tab = await attachActiveTab(target);
   const expression = `(() => {
     const selector = ${JSON.stringify(selector)};
     const action = ${JSON.stringify(action)};
@@ -749,7 +899,7 @@ async function waitForTabReady(tabId, timeoutMs = 3500) {
   return chrome.tabs.get(tabId);
 }
 
-async function activateTab(tabId) {
+async function activateTab(tabId, windowId = null) {
   const id = Number(tabId);
   if (!Number.isFinite(id) || id <= 0) {
     return { ok: false, error: "tab_id is required" };
@@ -758,12 +908,16 @@ async function activateTab(tabId) {
   if (!existing) {
     return { ok: false, error: `tab not found: ${id}` };
   }
+  if (windowId != null && existing.windowId !== Number(windowId)) {
+    return { ok: false, error: "tab does not belong to the requested window", code: "stale_browser_target" };
+  }
   if (!isTabDebuggable(existing.url)) {
     return {
       ok: false,
       error: "tab cannot be captured (chrome:// and extension pages are not supported)",
     };
   }
+  await chrome.windows.update(existing.windowId, { focused: true }).catch(() => null);
   await chrome.tabs.update(id, { active: true });
   const active = await waitForTabReady(id);
   return {
@@ -771,6 +925,139 @@ async function activateTab(tabId) {
     tab_id: id,
     url: active.url ?? "",
     title: active.title ?? "",
+  };
+}
+
+async function verifyPlaywrightLocators(
+  candidates,
+  expectedRevision,
+  target = null,
+) {
+  const tab = await attachActiveTab(target);
+  const currentRevision = await pageContextRevision(tab.id);
+  if (expectedRevision && currentRevision !== String(expectedRevision)) {
+    return {
+      ok: false,
+      code: "stale_page_context",
+      error: "page changed after the locator snapshot was acquired",
+      page_context_revision: currentRevision,
+      verification: (candidates ?? []).map((candidate) => ({
+        expression: candidate.expression,
+        match_count: 0,
+        visible: false,
+        enabled: false,
+        stale_page_context: true,
+      })),
+    };
+  }
+  const expression = `(() => {
+    const candidates = ${JSON.stringify(Array.isArray(candidates) ? candidates : [])};
+    const implicitRole = (el) => {
+      const explicit = el.getAttribute?.('role');
+      if (explicit) return explicit;
+      const tag = (el.tagName || '').toLowerCase();
+      const type = (el.getAttribute?.('type') || '').toLowerCase();
+      if (tag === 'button' || (tag === 'input' && ['button','submit','reset'].includes(type))) return 'button';
+      if (tag === 'a' && el.hasAttribute('href')) return 'link';
+      if (tag === 'textarea') return 'textbox';
+      if (tag === 'input') return type === 'checkbox' ? 'checkbox' : type === 'radio' ? 'radio' : 'textbox';
+      if (tag === 'select') return 'combobox';
+      return '';
+    };
+    const accessibleName = (el) => {
+      const labelledBy = (el.getAttribute?.('aria-labelledby') || '').trim();
+      if (labelledBy) {
+        const text = labelledBy.split(/\\s+/).map((id) => document.getElementById(id)?.textContent || '').join(' ').trim();
+        if (text) return text;
+      }
+      return (el.getAttribute?.('aria-label') || el.labels?.[0]?.textContent || el.getAttribute?.('alt') || el.getAttribute?.('title') || el.innerText || el.value || el.textContent || '').trim();
+    };
+    const collect = (root, output = []) => {
+      let elements = [];
+      try { elements = Array.from(root.querySelectorAll('*')); } catch { elements = []; }
+      for (const el of elements) {
+        output.push(el);
+        if (el.shadowRoot) collect(el.shadowRoot, output);
+      }
+      let frames = [];
+      try { frames = Array.from(root.querySelectorAll('iframe,frame')); } catch { frames = []; }
+      for (const frame of frames) {
+        try { if (frame.contentDocument) collect(frame.contentDocument, output); } catch { /* cross origin */ }
+      }
+      return output;
+    };
+    const all = collect(document);
+    const visible = (el) => {
+      const style = getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || '1') > 0 && rect.width > 0 && rect.height > 0;
+    };
+    const matches = (candidate) => {
+      const args = candidate.arguments || {};
+      if (candidate.kind === 'role') {
+        return all.filter((el) => implicitRole(el) === args.role && accessibleName(el) === String(args.name || ''));
+      }
+      if (candidate.kind === 'label') {
+        return all.filter((el) => (el.labels?.[0]?.textContent || el.getAttribute?.('aria-label') || '').trim() === String(args.text || ''));
+      }
+      if (candidate.kind === 'placeholder') {
+        return all.filter((el) => (el.getAttribute?.('placeholder') || '') === String(args.text || ''));
+      }
+      if (candidate.kind === 'test_id' || candidate.kind === 'attribute') {
+        return all.filter((el) => (el.getAttribute?.(String(args.attribute || 'data-testid')) || '') === String(args.value || ''));
+      }
+      if (candidate.kind === 'text') {
+        return all.filter((el) => (el.innerText || el.textContent || '').trim() === String(args.text || ''));
+      }
+      if (candidate.kind === 'css') {
+        try { return Array.from(document.querySelectorAll(String(args.selector || ''))); } catch { return []; }
+      }
+      return [];
+    };
+    return candidates.map((candidate) => {
+      const found = matches(candidate);
+      const first = found[0];
+      return {
+        expression: candidate.expression,
+        match_count: found.length,
+        visible: Boolean(first && visible(first)),
+        enabled: Boolean(first && !first.disabled && first.getAttribute?.('aria-disabled') !== 'true'),
+      };
+    });
+  })()`;
+  const { result } = await cdp(tab.id, "Runtime.evaluate", {
+    expression,
+    returnByValue: true,
+  });
+  return {
+    ok: true,
+    page_context_revision: currentRevision,
+    verification: Array.isArray(result?.value) ? result.value : [],
+  };
+}
+
+async function captureBrowserEvidence(expectedRevision, target = null) {
+  const tab = await attachActiveTab(target);
+  const currentRevision = await pageContextRevision(tab.id);
+  if (expectedRevision && currentRevision !== String(expectedRevision)) {
+    return {
+      ok: false,
+      code: "stale_page_context",
+      error: "page changed before screenshot evidence could be captured",
+      page_context_revision: currentRevision,
+    };
+  }
+  const result = await cdp(tab.id, "Page.captureScreenshot", {
+    format: "jpeg",
+    quality: 80,
+    fromSurface: true,
+  });
+  return {
+    ok: true,
+    screenshot: result?.data || "",
+    page_context_revision: currentRevision,
+    url: tab.url ?? "",
+    title: tab.title ?? "",
   };
 }
 
@@ -826,9 +1113,11 @@ async function bridgePost(url, payload) {
 async function postFrameError(error) {
   const message =
     typeof error === "string" ? error : captureErrorMessage(error);
+  const identity = await getExtensionIdentity();
   try {
     await bridgePost(RESPONSE_URL, {
       type: "frame_error",
+      extension_instance_id: identity.extension_instance_id,
       error: message,
     });
   } catch {
@@ -836,9 +1125,11 @@ async function postFrameError(error) {
   }
   if (streamWs?.readyState === WebSocket.OPEN) {
     try {
-      streamWs.send(
-        JSON.stringify({ type: "frame_error", error: message }),
-      );
+      streamWs.send(JSON.stringify({
+        type: "frame_error",
+        extension_instance_id: identity.extension_instance_id,
+        error: message,
+      }));
     } catch {
       // ignore
     }
@@ -851,10 +1142,13 @@ const COMMANDS_PAUSING_STREAM = new Set([
   "clear_highlight",
   "execute_locator",
   "navigate",
+  "verify_playwright_locators",
+  "capture_browser_evidence",
 ]);
 
 async function handleCmd(msg) {
   const { cmd, request_id: requestId, selector, tab_id: tabId } = msg;
+  const target = msg.target ?? null;
   const pausesStream = COMMANDS_PAUSING_STREAM.has(cmd);
   if (pausesStream) {
     streamPaused = true;
@@ -863,38 +1157,58 @@ async function handleCmd(msg) {
   let body;
   try {
     if (cmd === "get_page_snapshot") {
-      body = await getPageSnapshot();
+      body = await getPageSnapshot(target);
     } else if (cmd === "highlight_selector") {
-      body = await highlightSelector(selector);
+      body = await highlightSelector(selector, target);
     } else if (cmd === "clear_highlight") {
-      body = await clearHighlight();
+      body = await clearHighlight(target);
     } else if (cmd === "execute_locator") {
       body = await executeLocator({
         selector,
         action: msg.action,
         value: msg.value,
         timeoutMs: msg.timeout_ms,
+        target,
       });
     } else if (cmd === "activate_tab") {
-      body = await activateTab(tabId);
+      body = await activateTab(tabId, target?.window_id ?? msg.window_id);
       if (body.ok) {
         streamSessionTabId = body.tab_id;
       }
     } else if (cmd === "navigate") {
-      body = await navigateToUrl(msg.url, msg.timeout_ms);
+      body = await navigateToUrl(msg.url, msg.timeout_ms, target);
       if (body.ok) {
         streamSessionTabId = body.tab_id;
       }
+    } else if (cmd === "verify_playwright_locators") {
+      body = await verifyPlaywrightLocators(
+        msg.candidates,
+        msg.page_context_revision,
+        target,
+      );
+    } else if (cmd === "capture_browser_evidence") {
+      body = await captureBrowserEvidence(msg.page_context_revision, target);
     } else {
-      body = { ok: false, error: `unknown cmd: ${cmd}` };
+      body = {
+        ok: false,
+        code: "invalid_browser_operation",
+        error: `unknown cmd: ${cmd}`,
+      };
     }
   } catch (err) {
+    const message = String(err);
     body = {
       ok: false,
-      error: String(err),
+      code: message.toLowerCase().includes("debugger")
+        ? "debugger_conflict"
+        : "browser_operation_failed",
+      error: message,
       hint: "Close DevTools on this tab if attach fails.",
     };
   } finally {
+    if (target?.tab_id != null && pausesStream) {
+      streamSessionTabId = Number(target.tab_id);
+    }
     if (pausesStream) {
       streamPaused = false;
       await resumeScreencast();
@@ -902,7 +1216,17 @@ async function handleCmd(msg) {
       await startStreamSession({ tabId: body.tab_id, force: true });
     }
   }
-  return { type: "response", request_id: requestId, cmd, ...body };
+  const identity = await getExtensionIdentity();
+  return {
+    type: "response",
+    schema_version: 1,
+    protocol_version: PROTOCOL_VERSION,
+    extension_instance_id: identity.extension_instance_id,
+    target,
+    request_id: requestId,
+    cmd,
+    ...body,
+  };
 }
 
 function setBadge(connected) {
@@ -957,10 +1281,16 @@ async function heartbeatOnce(options = {}) {
   const projectRoot = await ensureProjectRoot();
   if (!projectRoot) {
     setBadge(false);
+    lastBridgeStatus = {
+      connected: false,
+      error: "Local Teshi broker is not running.",
+    };
     return;
   }
   const tab = await getActiveTab();
   const windowTabs = await listWindowTabs();
+  const windows = await listBrowserWindows();
+  const identity = await getExtensionIdentity();
 
   let res;
   try {
@@ -968,21 +1298,37 @@ async function heartbeatOnce(options = {}) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        schema_version: 1,
+        protocol_version: PROTOCOL_VERSION,
+        extension_version: chrome.runtime.getManifest().version,
+        extension_instance_id: identity.extension_instance_id,
+        profile_label: identity.profile_label,
+        browser: browserMetadata(),
         project_root: projectRoot,
         url: tab?.url ?? "",
         title: tab?.title ?? "",
+        active_window_id: tab?.windowId ?? null,
         active_tab_id: windowTabs.active_tab_id,
         tabs: windowTabs.tabs,
+        windows,
         frame_error: "",
       }),
     });
   } catch {
     setBadge(false);
+    lastBridgeStatus = {
+      connected: false,
+      error: "Cannot reach the local Teshi broker on 127.0.0.1:17373.",
+    };
     return;
   }
   if (!res.ok) {
     setBadge(false);
     cachedProjectRoot = "";
+    lastBridgeStatus = {
+      connected: false,
+      error: `Broker heartbeat failed with HTTP ${res.status}.`,
+    };
     return;
   }
   let data;
@@ -990,14 +1336,31 @@ async function heartbeatOnce(options = {}) {
     data = await res.json();
   } catch {
     setBadge(false);
+    lastBridgeStatus = {
+      connected: false,
+      error: "Broker heartbeat returned invalid JSON.",
+    };
     return;
   }
   if (!data.ok) {
     setBadge(false);
     cachedProjectRoot = "";
+    lastBridgeStatus = {
+      connected: false,
+      error: data.error || "Broker rejected the extension heartbeat.",
+      code: data.code,
+      required_protocol_version: data.required_protocol_version,
+    };
     return;
   }
   setBadge(true);
+  lastBridgeStatus = {
+    connected: true,
+    extension_instance_id: identity.extension_instance_id,
+    profile_label: identity.profile_label,
+    compatible: data.compatible !== false,
+    required_protocol_version: data.required_protocol_version,
+  };
 
   if (data.cmd) {
     const reply = await handleCmd(data.cmd);
@@ -1052,6 +1415,27 @@ async function heartbeatLoop(options = {}) {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "get_bridge_status") {
+    void (async () => {
+      const identity = await getExtensionIdentity();
+      sendResponse({
+        ok: true,
+        identity,
+        protocol_version: PROTOCOL_VERSION,
+        extension_version: chrome.runtime.getManifest().version,
+        ...lastBridgeStatus,
+      });
+    })();
+    return true;
+  }
+  if (message?.type === "set_profile_label") {
+    void (async () => {
+      const identity = await setProfileLabel(message.profile_label);
+      await heartbeatOnce();
+      sendResponse({ ok: true, identity });
+    })();
+    return true;
+  }
   if (message?.type === "connect_now") {
     cachedProjectRoot = "";
     extensionFrameWsUrl = "";
@@ -1069,6 +1453,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
+  void getExtensionIdentity();
   void heartbeatLoop({ forceStream: true });
 });
 
