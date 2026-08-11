@@ -8,7 +8,7 @@ via CDP script injection, enabling the LLM agent to reference elements by ID.
 Provide a consistent, LLM-friendly way to identify and reference interactive
 elements in the browser during autonomous exploration.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Interactive element identification
 The system SHALL traverse the DOM at page load and assign a `teshi-id` attribute to every interactive element.

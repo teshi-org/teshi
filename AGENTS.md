@@ -41,20 +41,13 @@ Gotchas:
   `libxkbcommon-x11-dev libwayland-dev libvulkan-dev` (and the CI list of
   xcb/gtk/glib/pango/cairo/atk/graphene dev libs).
 
-### Known pre-existing failures on `main` (not environment issues)
+### CI / validation notes
 
-CI (`.github/workflows/ci.yml`) runs `cargo check --workspace --locked` **without** excluding
-`teshi-web`, so it currently fails at the check step and never reaches the later gates. As a result
-the following latent defects exist on `main` and are unrelated to environment setup:
-
-- `cargo check --workspace` (no exclude) fails: `teshi-web` uses `gpui_platform::web_init` /
-  `single_threaded_web`, both gated behind the `wasm` target. Use `--exclude teshi-web` on native.
-- `teshi-engine` test `llm_responses::tests::test_responses_bearer_and_url` asserts the header name
-  `Authorization`, but hyper/reqwest emit the canonical lowercase `authorization:`, so it fails
-  (value `Bearer sk` is correct; only the header-name case differs).
-- `teshi-tui` clippy `items_after_test_module` fires with `--all-targets`, failing the clippy gate.
-
-Do not "fix" these as part of environment setup; call them out if they block a task.
+- Linux CI uses the native workspace commands above and excludes the wasm-only `teshi-web` crate.
+- Validate `teshi-web` separately with `scripts/run-web-ui-smoke.sh`; a native workspace check is
+  not a valid gate for that crate.
+- There are no allowlisted Rust test or clippy failures. Treat failures from the listed quality
+  gates as regressions unless a task documents a new, specific exception.
 
 ### Running `teshi web`
 
