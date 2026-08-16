@@ -1,5 +1,6 @@
 //! Local STDIO MCP adapter for Teshi browser-agent operations.
 
+use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -33,7 +34,40 @@ fn serve(args: &McpServeArgs) -> Result<()> {
         ));
     }
     let project_root = resolve_project_root(args.project.as_deref())?;
-    serve_stdio(&project_root)
+    validate_privileged_allowlist(&project_root, &args.allow_privileged_capabilities)?;
+    serve_stdio(&project_root, args.allow_browser_mutations)
+}
+
+fn validate_privileged_allowlist(project_root: &Path, requested: &[String]) -> Result<()> {
+    if requested.is_empty() {
+        return Ok(());
+    }
+    let path = project_root.join(".teshi").join("browser-policy.json");
+    let payload: Value = serde_json::from_slice(
+        &std::fs::read(&path)
+            .with_context(|| "privileged MCP allowlist requires .teshi/browser-policy.json")?,
+    )
+    .context("parse privileged browser policy")?;
+    let allowed: BTreeSet<&str> = payload
+        .pointer("/privileged/allow")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let denied: Vec<&str> = requested
+        .iter()
+        .map(String::as_str)
+        .filter(|capability| !allowed.contains(capability))
+        .collect();
+    if denied.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "privileged MCP allowlist exceeds effective project policy: {}",
+            denied.join(", ")
+        ))
+    }
 }
 
 fn resolve_project_root(configured: Option<&Path>) -> Result<PathBuf> {
@@ -47,7 +81,7 @@ fn resolve_project_root(configured: Option<&Path>) -> Result<PathBuf> {
     Ok(resolve_browser_project_root(&canonical).unwrap_or(canonical))
 }
 
-fn serve_stdio(project_root: &Path) -> Result<()> {
+fn serve_stdio(project_root: &Path, allow_mutations: bool) -> Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -56,7 +90,7 @@ fn serve_stdio(project_root: &Path) -> Result<()> {
             continue;
         }
         let response = match serde_json::from_str::<Value>(&line) {
-            Ok(request) => dispatch_request(project_root, &request),
+            Ok(request) => dispatch_request(project_root, &request, allow_mutations),
             Err(error) => Some(rpc_error(
                 Value::Null,
                 -32700,
@@ -73,7 +107,7 @@ fn serve_stdio(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn dispatch_request(project_root: &Path, request: &Value) -> Option<Value> {
+fn dispatch_request(project_root: &Path, request: &Value, allow_mutations: bool) -> Option<Value> {
     let id = request.get("id").cloned();
     let method = request.get("method").and_then(Value::as_str);
     if request.get("jsonrpc").and_then(Value::as_str) != Some("2.0") || method.is_none() {
@@ -89,11 +123,11 @@ fn dispatch_request(project_root: &Path, request: &Value) -> Option<Value> {
         "initialize" => Ok(initialize_result(&params)),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({
-            "tools": tool_definitions(),
+            "tools": tool_definitions(allow_mutations),
             "ttlMs": TOOL_CACHE_TTL_MS,
             "cacheScope": "session"
         })),
-        "tools/call" => call_tool(project_root, &params),
+        "tools/call" => call_tool(project_root, &params, allow_mutations),
         _ => {
             return Some(rpc_error(
                 id,
@@ -157,8 +191,13 @@ fn server_instructions() -> &'static str {
     "This is a same-host browser integration. Install and connect the compatible Teshi Chrome extension, list sessions and tabs, acquire one exclusive profile lease, and pass the explicit target plus lease token to every snapshot, locator, verification, and evidence call. Locator acquisition is observational and does not invent or execute test actions. Release the lease when finished. Browser URLs, titles, page content, and screenshot references are local user data; request only what the task requires. If DevTools owns the debugger, close it or choose another dedicated browser profile."
 }
 
-fn call_tool(project_root: &Path, params: &Value) -> Result<Value> {
+fn call_tool(project_root: &Path, params: &Value, allow_mutations: bool) -> Result<Value> {
     let name = required_string(params, "name")?;
+    if name == "execute_browser_action" && !allow_mutations {
+        return Err(anyhow!(
+            "safe browser mutation tools are disabled; restart with --allow-browser-mutations"
+        ));
+    }
     let arguments = params
         .get("arguments")
         .cloned()
@@ -301,6 +340,54 @@ fn parse_tool_operation(
                 required_string(arguments, "page_context_revision")?.into(),
             ),
         },
+        "execute_browser_action" => BrowserOperation::ExecuteBrowserAction {
+            target: parse_target(arguments)?,
+            lease_token: required_string(arguments, "lease_token")?.into(),
+            action: serde_json::from_value(
+                arguments
+                    .get("action")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("missing required parameter `action`"))?,
+            )
+            .context("action does not match the canonical browser action enum")?,
+            element: serde_json::from_value(
+                arguments
+                    .get("element")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("missing required parameter `element`"))?,
+            )
+            .context("element does not match the canonical browser element input")?,
+            value: arguments
+                .get("value")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            files: arguments
+                .get("files")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            wait: arguments
+                .get("wait")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .context("wait does not match the canonical typed wait schema")?,
+            timeout_ms: timeout.as_millis() as u64,
+            focus: arguments
+                .get("focus")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            monitor: arguments
+                .get("monitor")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        },
         _ => return Err(anyhow!("unknown Teshi MCP tool `{name}`")),
     };
     Ok((operation, timeout))
@@ -324,7 +411,7 @@ fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| anyhow!("missing required string parameter `{key}`"))
 }
 
-fn tool_definitions() -> Vec<Value> {
+fn tool_definitions(allow_mutations: bool) -> Vec<Value> {
     let target = target_schema();
     let timeout = json!({
         "type": "integer",
@@ -332,7 +419,7 @@ fn tool_definitions() -> Vec<Value> {
         "maximum": 300000,
         "default": 60000
     });
-    vec![
+    let mut tools = vec![
         tool(
             "list_browser_sessions",
             "List local browser-extension sessions, health, leases, windows, and tabs.",
@@ -448,7 +535,26 @@ fn tool_definitions() -> Vec<Value> {
                 &["page_context_revision"],
             ),
         ),
-    ]
+    ];
+    if allow_mutations {
+        tools.push(tool(
+            "execute_browser_action",
+            "Execute one lease-scoped canonical P0 action with exactly one element input and optional typed wait.",
+            targeted_schema(
+                target_schema(),
+                json!({ "type": "integer", "minimum": 1000, "maximum": 300000, "default": 5000 }),
+                json!({
+                    "action": { "type": "string", "enum": ["click", "pointer_click", "fill", "type", "select", "press_key", "assert_visible", "assert_text"] },
+                    "element": { "type": "object" },
+                    "value": { "type": "string" },
+                    "wait": { "type": "object" },
+                    "focus": { "type": "boolean", "default": false }
+                }),
+                &["action", "element"],
+            ),
+        ));
+    }
+    tools
 }
 
 fn target_schema() -> Value {
@@ -519,7 +625,7 @@ mod tests {
 
     #[test]
     fn advertises_one_tool_for_every_typed_browser_operation() {
-        let names: Vec<_> = tool_definitions()
+        let names: Vec<_> = tool_definitions(false)
             .into_iter()
             .map(|tool| tool["name"].as_str().unwrap().to_string())
             .collect();
@@ -540,10 +646,33 @@ mod tests {
     }
 
     #[test]
+    fn safe_mutation_tool_is_disabled_by_default_and_explicitly_opt_in() {
+        let default_names: Vec<_> = tool_definitions(false)
+            .into_iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            !default_names
+                .iter()
+                .any(|name| name == "execute_browser_action")
+        );
+        let enabled_names: Vec<_> = tool_definitions(true)
+            .into_iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            enabled_names
+                .iter()
+                .any(|name| name == "execute_browser_action")
+        );
+    }
+
+    #[test]
     fn current_discovery_and_legacy_initialize_are_both_supported() {
         let discovery = dispatch_request(
             Path::new("."),
             &json!({ "jsonrpc": "2.0", "id": 1, "method": "server/discover" }),
+            false,
         )
         .unwrap();
         assert_eq!(discovery["result"]["resultType"], "complete");
@@ -560,6 +689,7 @@ mod tests {
                 "method": "initialize",
                 "params": { "protocolVersion": "2025-06-18" }
             }),
+            false,
         )
         .unwrap();
         assert_eq!(initialize["result"]["protocolVersion"], "2025-06-18");

@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import getpass
+import hashlib
 import json
+import os
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 SCHEMA_VERSION = 1
 PROTOCOL_VERSION = 1
@@ -20,6 +26,112 @@ DEFAULT_HEARTBEAT_TTL_SEC = 8.0
 DISCONNECTED_RETENTION_SEC = 60.0
 MAX_COMMAND_QUEUE = 64
 MAX_PENDING_REQUESTS = 128
+MAX_ELEMENT_REFERENCES_PER_SESSION = 512
+ELEMENT_REFERENCE_TTL_SEC = 120.0
+DEFAULT_CONSOLE_MAX_AGE_MS = 300_000
+DEFAULT_CONSOLE_MAX_ENTRIES = 500
+DEFAULT_CONSOLE_MAX_BYTES = 1_048_576
+MAX_CONSOLE_MAX_AGE_MS = 3_600_000
+MAX_CONSOLE_MAX_ENTRIES = 5_000
+MAX_CONSOLE_MAX_BYTES = 8_388_608
+MAX_CONSOLE_EVENT_TEXT_BYTES = 16_384
+KNOWN_CONSOLE_LEVELS = {"debug", "log", "info", "warn", "error"}
+DEFAULT_NETWORK_MAX_AGE_MS = 300_000
+DEFAULT_NETWORK_MAX_ENTRIES = 1_000
+DEFAULT_NETWORK_MAX_BYTES = 2_097_152
+DEFAULT_NETWORK_MAX_BODY_BYTES = 262_144
+MAX_NETWORK_MAX_AGE_MS = 3_600_000
+MAX_NETWORK_MAX_ENTRIES = 10_000
+MAX_NETWORK_MAX_BYTES = 16_777_216
+MAX_NETWORK_MAX_BODY_BYTES = 2_097_152
+DEFAULT_SENSITIVE_DIAGNOSTIC_FIELDS = {
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "proxy-authorization",
+    "x-api-key",
+    "api-key",
+    "token",
+    "access-token",
+    "refresh-token",
+    "password",
+    "passwd",
+    "secret",
+}
+REDACTION_MARKER = "[REDACTED]"
+DEFAULT_CAPABILITY_GRANT_TTL_SEC = 300
+MIN_CAPABILITY_GRANT_TTL_SEC = 30
+MAX_CAPABILITY_GRANT_TTL_SEC = 3600
+MAX_PRIVILEGED_AUDIT_RECORDS = 1000
+PRIVILEGED_CAPABILITIES = {
+    "javascript",
+    "raw-cdp",
+    "cookies",
+    "cookie-values",
+    "content-settings",
+    "extension-management",
+}
+
+KNOWN_FEATURE_IDS = {
+    "p0.control",
+    "p1.observability_artifacts",
+    "p2.javascript",
+    "p2.raw_cdp",
+    "p2.cookies",
+    "p2.content_settings",
+    "p2.extension_management",
+}
+KNOWN_ACTIONS = {
+    "click",
+    "pointer_click",
+    "fill",
+    "type",
+    "select",
+    "press_key",
+    "assert_visible",
+    "assert_text",
+    "navigate",
+    "go_back",
+    "upload",
+}
+KNOWN_BROWSER_OPERATIONS = {
+    "capture_browser_screenshot",
+    "generate_browser_pdf",
+    "start_console_capture",
+    "list_console_events",
+    "clear_console_capture",
+    "stop_console_capture",
+    "start_network_capture",
+    "list_network_requests",
+    "get_network_request_detail",
+    "clear_network_capture",
+    "stop_network_capture",
+    "execute_privileged_javascript",
+    "execute_privileged_cdp",
+    "list_browser_cookies",
+    "access_browser_content_setting",
+    "list_browser_extensions",
+}
+P1_BROWSER_OPERATIONS = {
+    "capture_browser_screenshot",
+    "generate_browser_pdf",
+    "start_console_capture",
+    "list_console_events",
+    "clear_console_capture",
+    "stop_console_capture",
+    "start_network_capture",
+    "list_network_requests",
+    "get_network_request_detail",
+    "clear_network_capture",
+    "stop_network_capture",
+}
+P2_BROWSER_OPERATION_FEATURES = {
+    "execute_privileged_javascript": "p2.javascript",
+    "execute_privileged_cdp": "p2.raw_cdp",
+    "list_browser_cookies": "p2.cookies",
+    "access_browser_content_setting": "p2.content_settings",
+    "list_browser_extensions": "p2.extension_management",
+}
 
 MUTATING_COMMANDS = {
     "get_page_snapshot",
@@ -30,11 +142,33 @@ MUTATING_COMMANDS = {
     "highlight_selector",
     "clear_highlight",
     "execute_locator",
+    "execute_browser_action",
     "heal_execute_locator",
     "enhance_locator",
     "navigate",
     "activate_tab",
+    "open_tab",
+    "close_tab",
+    "create_window",
+    "group_tabs",
     "open_project",
+    "start_console_capture",
+    "clear_console_capture",
+    "stop_console_capture",
+    "start_network_capture",
+    "clear_network_capture",
+    "stop_network_capture",
+}
+
+LEASE_REQUIRED_COMMANDS = MUTATING_COMMANDS | {
+    "list_console_events",
+    "list_network_requests",
+    "get_network_request_detail",
+    "execute_privileged_javascript",
+    "execute_privileged_cdp",
+    "list_browser_cookies",
+    "access_browser_content_setting",
+    "list_browser_extensions",
 }
 
 
@@ -69,7 +203,7 @@ class BrokerError(Exception):
         if operation:
             response["operation"] = operation
         if self.recovery:
-            response["recovery"] = self.recovery
+            response["recovery"] = _sanitize_public_value(self.recovery)
         return response
 
 
@@ -106,14 +240,109 @@ class LeaseState:
 
 
 @dataclass
+class ElementReferenceRecord:
+    """Revision-bound presentation alias isolated to one complete target."""
+
+    alias: str
+    target: dict[str, Any]
+    snapshot_id: str
+    page_context_revision: str
+    context: dict[str, Any]
+    element: dict[str, Any]
+    created_at: float
+
+
+@dataclass
+class ConsoleEventRecord:
+    """One bounded console event retained with a monotonic eviction clock."""
+
+    value: dict[str, Any]
+    created_at: float
+    byte_size: int
+
+
+@dataclass
+class ConsoleCaptureState:
+    """Target-scoped console capture state owned by one extension session."""
+
+    target: dict[str, Any]
+    levels: set[str]
+    max_age_ms: int
+    max_entries: int
+    max_bytes: int
+    sensitive_fields: set[str]
+    events: list[ConsoleEventRecord] = field(default_factory=list)
+    byte_size: int = 0
+
+
+@dataclass
+class NetworkRequestRecord:
+    """One request/response metadata record retained without a response body."""
+
+    value: dict[str, Any]
+    created_at: float
+    byte_size: int
+
+
+@dataclass
+class NetworkCaptureState:
+    """Target-scoped bounded network capture configuration and metadata."""
+
+    target: dict[str, Any]
+    max_age_ms: int
+    max_entries: int
+    max_bytes: int
+    max_body_bytes: int
+    sensitive_fields: set[str]
+    requests: dict[str, NetworkRequestRecord] = field(default_factory=dict)
+    byte_size: int = 0
+
+
+@dataclass
+class CapabilityGrant:
+    """Short-lived privileged authorization bound to one broker and Profile."""
+
+    grant_id: str
+    token_hash: str
+    capability: str
+    extension_instance_id: str
+    project_root: str
+    caller_label: str
+    local_user: str
+    broker_instance_id: str
+    issued_wall_time: float
+    expires_monotonic: float
+    expires_wall_time: float
+    revoked: bool = False
+
+    def public_summary(self) -> dict[str, Any]:
+        """Return non-reusable grant metadata."""
+        return {
+            "grant_id": self.grant_id,
+            "capability": self.capability,
+            "extension_instance_id": self.extension_instance_id,
+            "project_root": self.project_root,
+            "caller_label": self.caller_label,
+            "issued_at_ms": int(self.issued_wall_time * 1000),
+            "expires_at_ms": int(self.expires_wall_time * 1000),
+            "revoked": self.revoked,
+        }
+
+
+@dataclass
 class SessionRecord:
     """Mutable broker state for one extension installation."""
 
     extension_instance_id: str
     profile_label: str = ""
+    profile_label_managed: bool = False
     extension_version: str = "legacy"
     protocol_version: int = LEGACY_PROTOCOL_VERSION
     browser: dict[str, Any] = field(default_factory=dict)
+    features: list[dict[str, Any]] = field(default_factory=list)
+    supported_actions: list[str] = field(default_factory=list)
+    supported_operations: list[str] = field(default_factory=list)
+    optional_permissions: dict[str, bool] = field(default_factory=dict)
     windows: list[dict[str, Any]] = field(default_factory=list)
     active_window_id: int | None = None
     active_tab_id: int | None = None
@@ -125,6 +354,11 @@ class SessionRecord:
     command_queue: list[dict[str, Any]] = field(default_factory=list)
     lease: LeaseState | None = None
     latest_frame: dict[str, Any] | None = None
+    element_references: dict[str, ElementReferenceRecord] = field(
+        default_factory=dict
+    )
+    console_captures: dict[str, ConsoleCaptureState] = field(default_factory=dict)
+    network_captures: dict[str, NetworkCaptureState] = field(default_factory=dict)
 
     def is_legacy(self) -> bool:
         """Return whether this record came from the pre-versioned heartbeat."""
@@ -202,6 +436,12 @@ class SessionRecord:
                 0, int((now - self.last_heartbeat) * 1000)
             ),
             "windows": self.windows,
+            "capabilities": {
+                "features": self.features,
+                "supported_actions": self.supported_actions,
+                "supported_operations": self.supported_operations,
+                "optional_permissions": self.optional_permissions,
+            },
         }
         if self.lease is not None and not self.lease.expired(now):
             contract["lease"] = self.lease.public_summary()
@@ -223,11 +463,202 @@ class PendingRequest:
 class BrowserSessionBroker:
     """Instance-indexed registry, router, lease manager, and response correlator."""
 
-    def __init__(self, heartbeat_ttl: float = DEFAULT_HEARTBEAT_TTL_SEC) -> None:
+    def __init__(
+        self,
+        heartbeat_ttl: float = DEFAULT_HEARTBEAT_TTL_SEC,
+        *,
+        broker_instance_id: str | None = None,
+        local_user: str | None = None,
+    ) -> None:
         self.heartbeat_ttl = heartbeat_ttl
+        self.broker_instance_id = broker_instance_id or secrets.token_hex(16)
+        self.local_user = (local_user or getpass.getuser() or "local-user")[:120]
         self.sessions: dict[str, SessionRecord] = {}
         self.pending: dict[str, PendingRequest] = {}
         self.quarantined_responses: list[dict[str, Any]] = []
+        self.capability_grants: dict[str, CapabilityGrant] = {}
+        self.privileged_audit: list[dict[str, Any]] = []
+
+    def create_capability_grant(
+        self,
+        *,
+        extension_instance_id: str,
+        lease_token: str,
+        capability: Any,
+        project_root: Any,
+        caller_label: Any,
+        ttl_secs: Any = DEFAULT_CAPABILITY_GRANT_TTL_SEC,
+        interactive_confirmed: bool = False,
+        non_interactive: bool = False,
+        acknowledged_capability: Any = "",
+        policy_capabilities: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Issue one explicit grant after lease, confirmation, and policy gates."""
+        record = self.require_session(extension_instance_id)
+        self.validate_lease(record, lease_token)
+        name = _clean_text(capability).lower()
+        if name not in PRIVILEGED_CAPABILITIES:
+            raise BrokerError(
+                "invalid_browser_operation",
+                "unknown privileged browser capability",
+                {"supported_capabilities": sorted(PRIVILEGED_CAPABILITIES)},
+            )
+        project = _canonical_project_root(project_root)
+        caller = _clean_text(caller_label)[:120]
+        if not project or not caller:
+            raise BrokerError(
+                "invalid_browser_operation",
+                "project_root and caller_label are required for a capability grant",
+            )
+        if non_interactive:
+            if _clean_text(acknowledged_capability).lower() != name:
+                raise BrokerError(
+                    "browser_capability_denied",
+                    "non-interactive grant requires an exact capability acknowledgement",
+                )
+            if policy_capabilities is None or name not in policy_capabilities:
+                raise BrokerError(
+                    "browser_capability_denied",
+                    "effective browser policy denies this non-interactive capability",
+                    {"capability": name, "policy": "default-deny"},
+                )
+        elif not interactive_confirmed:
+            raise BrokerError(
+                "browser_capability_denied",
+                "interactive capability grant requires explicit confirmation",
+                {"capability": name},
+            )
+        ttl = _bounded_capability_ttl(ttl_secs)
+        now = time.monotonic()
+        wall_now = time.time()
+        token = f"grant_{secrets.token_urlsafe(32)}"
+        grant_id = f"cap_{secrets.token_hex(12)}"
+        grant = CapabilityGrant(
+            grant_id=grant_id,
+            token_hash=_token_hash(token),
+            capability=name,
+            extension_instance_id=record.extension_instance_id,
+            project_root=project,
+            caller_label=caller,
+            local_user=self.local_user,
+            broker_instance_id=self.broker_instance_id,
+            issued_wall_time=wall_now,
+            expires_monotonic=now + ttl,
+            expires_wall_time=wall_now + ttl,
+        )
+        self.capability_grants[grant_id] = grant
+        return {**grant.public_summary(), "grant_token": token}
+
+    def list_capability_grants(
+        self, *, project_root: Any, extension_instance_id: Any = ""
+    ) -> list[dict[str, Any]]:
+        """List current grant metadata without reusable tokens."""
+        self.expire_capability_grants()
+        project = _canonical_project_root(project_root)
+        instance = _clean_text(extension_instance_id)
+        return [
+            grant.public_summary()
+            for grant in self.capability_grants.values()
+            if grant.project_root == project
+            and (not instance or grant.extension_instance_id == instance)
+        ]
+
+    def revoke_capability_grant(self, grant_id: Any, *, project_root: Any) -> dict[str, Any]:
+        """Revoke one project-bound grant by its non-secret identifier."""
+        grant = self.capability_grants.get(_clean_text(grant_id))
+        if grant is None or grant.project_root != _canonical_project_root(project_root):
+            raise BrokerError("browser_capability_denied", "capability grant is unavailable")
+        grant.revoked = True
+        return {"grant_id": grant.grant_id, "revoked": True}
+
+    def validate_capability_grant(
+        self,
+        *,
+        token: Any,
+        capability: Any,
+        extension_instance_id: Any,
+        project_root: Any,
+        caller_label: Any,
+    ) -> CapabilityGrant:
+        """Validate every binding of one privileged grant."""
+        name = _clean_text(capability).lower()
+        token_hash = _token_hash(_clean_text(token))
+        now = time.monotonic()
+        candidates = [
+            grant
+            for grant in self.capability_grants.values()
+            if secrets.compare_digest(grant.token_hash, token_hash)
+        ]
+        if not candidates:
+            raise BrokerError("browser_capability_denied", "a valid capability grant is required")
+        grant = candidates[0]
+        if grant.revoked:
+            raise BrokerError("browser_capability_denied", "capability grant was revoked")
+        if now >= grant.expires_monotonic:
+            self.capability_grants.pop(grant.grant_id, None)
+            raise BrokerError("browser_capability_denied", "capability grant expired")
+        bindings_match = (
+            grant.capability == name
+            and grant.extension_instance_id == _clean_text(extension_instance_id)
+            and grant.project_root == _canonical_project_root(project_root)
+            and grant.caller_label == _clean_text(caller_label)[:120]
+            and grant.local_user == self.local_user
+            and grant.broker_instance_id == self.broker_instance_id
+        )
+        if not bindings_match:
+            raise BrokerError("browser_capability_denied", "capability grant scope does not match this request")
+        return grant
+
+    def expire_capability_grants(self, now: float | None = None) -> None:
+        """Remove expired grants without retaining their secret hashes."""
+        current = time.monotonic() if now is None else now
+        for grant_id, grant in list(self.capability_grants.items()):
+            if current >= grant.expires_monotonic:
+                self.capability_grants.pop(grant_id, None)
+
+    def append_privileged_audit(
+        self,
+        *,
+        capability: Any,
+        caller_label: Any,
+        target: dict[str, Any] | None,
+        request_id: Any,
+        outcome: Any,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Retain one bounded metadata-only privileged audit record."""
+        record = {
+            "timestamp_ms": int(time.time() * 1000),
+            "capability": _clean_text(capability)[:80],
+            "caller_label": _clean_text(caller_label)[:120],
+            "target": _sanitize_public_value(target or {}),
+            "request_id": _clean_text(request_id)[:160],
+            "outcome": _clean_text(outcome)[:80],
+            "arguments": _sanitize_public_value(
+                _redact_mapping(
+                    arguments or {}, set(DEFAULT_SENSITIVE_DIAGNOSTIC_FIELDS)
+                )
+            ),
+        }
+        self.privileged_audit.append(record)
+        del self.privileged_audit[:-MAX_PRIVILEGED_AUDIT_RECORDS]
+        return record
+
+    def list_privileged_audit(self, limit: Any = 100) -> list[dict[str, Any]]:
+        """Return newest bounded audit metadata."""
+        bounded = max(1, min(int(limit or 100), MAX_PRIVILEGED_AUDIT_RECORDS))
+        return list(self.privileged_audit[-bounded:])
+
+    @staticmethod
+    def require_optional_permission(record: SessionRecord, permission: Any) -> None:
+        """Fail closed until the extension advertises the exact optional permission."""
+        name = _clean_text(permission)
+        if not record.optional_permissions.get(name, False):
+            raise BrokerError(
+                "browser_capability_unavailable",
+                "required Chromium optional permission is not approved",
+                {"permission": name, "approval": "extension-popup"},
+            )
 
     def register_heartbeat(self, payload: dict[str, Any]) -> SessionRecord:
         """Register or refresh one extension session from a heartbeat."""
@@ -242,7 +673,8 @@ class BrowserSessionBroker:
         if record is None:
             record = SessionRecord(extension_instance_id=instance_id)
             self.sessions[instance_id] = record
-        record.profile_label = _clean_text(payload.get("profile_label"))[:120]
+        if not record.profile_label_managed:
+            record.profile_label = _clean_text(payload.get("profile_label"))[:120]
         record.extension_version = (
             _clean_text(payload.get("extension_version")) or "legacy"
         )[:64]
@@ -257,7 +689,49 @@ class BrowserSessionBroker:
             if isinstance(raw_browser, dict)
             else {"name": "Chromium", "version": "", "platform": None}
         )
+        record.features = _sanitize_feature_availability(payload.get("features"))
+        record.supported_actions = _sanitize_supported_actions(
+            payload.get("supported_actions")
+        )
+        record.supported_operations = _sanitize_supported_operations(
+            payload.get("supported_operations")
+        )
+        record.optional_permissions = _sanitize_optional_permissions(
+            payload.get("optional_permissions")
+        )
+        previous_urls = {
+            (_as_int(tab.get("window_id")), _as_int(tab.get("id"))): _clean_text(
+                tab.get("url")
+            )
+            for tab in record.iter_tabs()
+        }
         record.windows = _normalize_windows(payload)
+        current_tabs = record.iter_tabs()
+        current_keys = {
+            (_as_int(tab.get("window_id")), _as_int(tab.get("id")))
+            for tab in current_tabs
+        }
+        for (window_id, tab_id), previous_url in previous_urls.items():
+            current_url = next(
+                (
+                    _clean_text(tab.get("url"))
+                    for tab in current_tabs
+                    if _as_int(tab.get("window_id")) == window_id
+                    and _as_int(tab.get("id")) == tab_id
+                ),
+                "",
+            )
+            if (window_id, tab_id) not in current_keys or (
+                previous_url and current_url and previous_url != current_url
+            ):
+                self.clear_element_references(
+                    record,
+                    target={
+                        "extension_instance_id": record.extension_instance_id,
+                        "window_id": window_id,
+                        "tab_id": tab_id,
+                    },
+                )
         record.active_window_id = _as_int(payload.get("active_window_id"))
         record.active_tab_id = _as_int(payload.get("active_tab_id"))
         record.page_url = _clean_text(payload.get("url"))[:4096]
@@ -279,8 +753,65 @@ class BrowserSessionBroker:
             "extension_instance_id": record.extension_instance_id,
             "compatible": record.compatible(),
             "required_protocol_version": PROTOCOL_VERSION,
+            "command_transports": ["direct-ws", "heartbeat"],
+            "accepted_features": record.features,
             "cmd": command,
         }
+
+    def lookup_sessions(
+        self,
+        *,
+        extension_instance_id: str = "",
+        profile_label: str = "",
+        browser_name: str = "",
+        tab_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Find sessions by typed public identity without assuming tab IDs are global."""
+        matches: list[dict[str, Any]] = []
+        for record in self.sessions.values():
+            if extension_instance_id and record.extension_instance_id != extension_instance_id:
+                continue
+            if profile_label and record.profile_label != profile_label:
+                continue
+            if browser_name and _clean_text(record.browser.get("name")).casefold() != browser_name.casefold():
+                continue
+            tabs = record.iter_tabs()
+            if tab_id is not None and not any(_as_int(tab.get("id")) == tab_id for tab in tabs):
+                continue
+            matches.append(record.public_contract(time.monotonic(), self.heartbeat_ttl))
+        return matches
+
+    def set_profile_label(self, extension_instance_id: str, label: str) -> str:
+        """Set a unique live display alias while opaque identity remains authoritative."""
+        record = self.require_session(extension_instance_id)
+        normalized = _clean_text(label)[:120]
+        if not normalized:
+            raise BrokerError("invalid_browser_operation", "profile label is required")
+        now = time.monotonic()
+        duplicate = next(
+            (
+                item
+                for item in self.sessions.values()
+                if item.extension_instance_id != extension_instance_id
+                and item.alive(now, self.heartbeat_ttl)
+                and item.profile_label.casefold() == normalized.casefold()
+            ),
+            None,
+        )
+        if duplicate is not None:
+            raise BrokerError(
+                "ambiguous_browser_target",
+                f"profile label is already used by another live session: {normalized}",
+                {"profile_label": normalized},
+            )
+        record.profile_label = normalized
+        record.profile_label_managed = True
+        return normalized
+
+    def clear_profile_label(self, extension_instance_id: str) -> None:
+        record = self.require_session(extension_instance_id)
+        record.profile_label = ""
+        record.profile_label_managed = True
 
     def list_sessions(self, include_disconnected: bool = True) -> list[dict[str, Any]]:
         """Return stable, non-sensitive session discovery contracts."""
@@ -489,12 +1020,44 @@ class BrowserSessionBroker:
         """Resolve a command target and enforce exclusive ownership."""
         operation = _clean_text(data.get("cmd"))
         record, target, explicit = self.resolve_target(data.get("target"))
+        required_feature = _clean_text(data.get("required_feature"))
+        if operation in P1_BROWSER_OPERATIONS:
+            required_feature = "p1.observability_artifacts"
+        elif operation in P2_BROWSER_OPERATION_FEATURES:
+            required_feature = P2_BROWSER_OPERATION_FEATURES[operation]
+        if required_feature:
+            availability = next(
+                (
+                    item
+                    for item in record.features
+                    if item.get("feature") == required_feature
+                ),
+                None,
+            )
+            if availability is None or not availability.get("available"):
+                recovery: dict[str, Any] = {"required_feature": required_feature}
+                if availability and availability.get("reason"):
+                    recovery["reason"] = availability["reason"]
+                raise BrokerError(
+                    "browser_capability_unavailable",
+                    f"selected browser session does not provide {required_feature}",
+                    recovery,
+                )
+        if operation in (P1_BROWSER_OPERATIONS | set(P2_BROWSER_OPERATION_FEATURES)) and operation not in record.supported_operations:
+            raise BrokerError(
+                "browser_capability_unavailable",
+                f"selected browser session does not advertise operation {operation}",
+                {
+                    "operation": operation,
+                    "supported_operations": record.supported_operations,
+                },
+            )
         ephemeral_token: str | None = None
-        if operation in MUTATING_COMMANDS:
+        if operation in LEASE_REQUIRED_COMMANDS:
             supplied = _clean_text(data.get("lease_token"))
             if supplied:
                 self.validate_lease(record, supplied)
-            elif not explicit and legacy_compatibility:
+            elif operation in MUTATING_COMMANDS and not explicit and legacy_compatibility:
                 now = time.monotonic()
                 self._release_expired_lease(record, now)
                 if record.lease is not None:
@@ -515,7 +1078,7 @@ class BrowserSessionBroker:
             else:
                 raise BrokerError(
                     "invalid_browser_lease",
-                    "explicit browser mutation requires a valid lease_token",
+                    "browser operation requires a valid lease_token",
                     {"extension_instance_id": record.extension_instance_id},
                 )
         return record, target, ephemeral_token
@@ -539,7 +1102,10 @@ class BrowserSessionBroker:
             )
         if request_id in self.pending:
             raise BrokerError(
-                "invalid_browser_operation", f"duplicate request_id: {request_id}"
+                "duplicate_browser_mutation"
+                if operation in MUTATING_COMMANDS
+                else "invalid_browser_operation",
+                f"duplicate request_id: {request_id}",
             )
         if len(self.pending) >= MAX_PENDING_REQUESTS:
             raise BrokerError(
@@ -572,6 +1138,615 @@ class BrowserSessionBroker:
         else:
             record.command_queue.append(command)
         return command
+
+    def cache_snapshot_references(
+        self,
+        record: SessionRecord,
+        target: dict[str, Any],
+        response: dict[str, Any],
+    ) -> None:
+        """Publish deterministic aliases while retaining opaque locator recipes."""
+        raw_elements = response.get("interactive_elements")
+        if not isinstance(raw_elements, list):
+            return
+        now = time.monotonic()
+        snapshot_id = _clean_text(response.get("snapshot_id")) or _clean_text(
+            response.get("request_id")
+        )
+        revision = _clean_text(response.get("page_context_revision"))
+        response["snapshot_id"] = snapshot_id
+        target_prefix = _reference_target_prefix(target)
+        self.clear_element_references(record, target=target)
+        published: list[dict[str, Any]] = []
+        for index, raw in enumerate(raw_elements[:MAX_ELEMENT_REFERENCES_PER_SESSION]):
+            if not isinstance(raw, dict):
+                continue
+            alias = f"@e{len(published) + 1}"
+            element = dict(raw)
+            context = element.get("context")
+            normalized_context = dict(context) if isinstance(context, dict) else {}
+            record.element_references[f"{target_prefix}:{alias}"] = (
+                ElementReferenceRecord(
+                    alias=alias,
+                    target=dict(target),
+                    snapshot_id=snapshot_id,
+                    page_context_revision=revision,
+                    context=normalized_context,
+                    element=element,
+                    created_at=now,
+                )
+            )
+            element["ref"] = alias
+            element["snapshot_id"] = snapshot_id
+            element["page_context_revision"] = revision
+            published.append(element)
+        response["interactive_elements"] = published
+        self._evict_element_references(record, now)
+
+    def resolve_element_reference(
+        self,
+        extension_instance_id: str,
+        target: dict[str, Any],
+        alias: str,
+        *,
+        page_context_revision: str = "",
+        snapshot_id: str = "",
+    ) -> ElementReferenceRecord:
+        """Resolve one alias only within its target, revision, snapshot, age, and cache."""
+        record = self.require_session(extension_instance_id)
+        now = time.monotonic()
+        self._evict_element_references(record, now)
+        key = f"{_reference_target_prefix(target)}:{_clean_text(alias)}"
+        reference = record.element_references.get(key)
+        stale = (
+            reference is None
+            or not _targets_equal(reference.target, target)
+            or now - reference.created_at > ELEMENT_REFERENCE_TTL_SEC
+            or (
+                bool(page_context_revision)
+                and reference.page_context_revision != page_context_revision
+            )
+            or (bool(snapshot_id) and reference.snapshot_id != snapshot_id)
+        )
+        if stale:
+            raise BrokerError(
+                "stale_element_reference",
+                f"element reference {_clean_text(alias) or '<empty>'} is stale or belongs to another target",
+                {
+                    "extension_instance_id": extension_instance_id,
+                    "target": _sanitize_public_value(target),
+                    "retry": "request a new snapshot and use its revision-bound reference",
+                },
+            )
+        return reference
+
+    def clear_element_references(
+        self,
+        record: SessionRecord,
+        *,
+        target: dict[str, Any] | None = None,
+    ) -> None:
+        """Clear all aliases or only aliases owned by one complete target."""
+        if target is None:
+            record.element_references.clear()
+            return
+        prefix = f"{_reference_target_prefix(target)}:"
+        record.element_references = {
+            key: value
+            for key, value in record.element_references.items()
+            if not key.startswith(prefix)
+        }
+
+    def start_console_capture(
+        self,
+        record: SessionRecord,
+        target: dict[str, Any],
+        *,
+        levels: Any = None,
+        max_age_ms: Any = None,
+        max_entries: Any = None,
+        max_bytes: Any = None,
+        sensitive_fields: Any = None,
+    ) -> dict[str, Any]:
+        """Start or replace one bounded target-scoped console capture."""
+        normalized_levels = _normalize_console_levels(levels)
+        state = ConsoleCaptureState(
+            target=dict(target),
+            levels=normalized_levels,
+            max_age_ms=_bounded_int(
+                max_age_ms,
+                DEFAULT_CONSOLE_MAX_AGE_MS,
+                1_000,
+                MAX_CONSOLE_MAX_AGE_MS,
+                "max_age_ms",
+            ),
+            max_entries=_bounded_int(
+                max_entries,
+                DEFAULT_CONSOLE_MAX_ENTRIES,
+                1,
+                MAX_CONSOLE_MAX_ENTRIES,
+                "max_entries",
+            ),
+            max_bytes=_bounded_int(
+                max_bytes,
+                DEFAULT_CONSOLE_MAX_BYTES,
+                1_024,
+                MAX_CONSOLE_MAX_BYTES,
+                "max_bytes",
+            ),
+            sensitive_fields=_normalize_sensitive_fields(sensitive_fields),
+        )
+        record.console_captures[_reference_target_prefix(target)] = state
+        return _console_capture_summary(state)
+
+    def record_console_event(
+        self,
+        extension_instance_id: str,
+        target: dict[str, Any],
+        raw_event: Any,
+    ) -> bool:
+        """Retain a console event only for its active session and target."""
+        record = self.sessions.get(extension_instance_id)
+        if record is None or not isinstance(target, dict):
+            return False
+        if target.get("extension_instance_id") != extension_instance_id:
+            return False
+        state = record.console_captures.get(_reference_target_prefix(target))
+        if state is None or not _targets_equal(state.target, target):
+            return False
+        event = _sanitize_console_event(raw_event, state.sensitive_fields)
+        if event is None or event["level"] not in state.levels:
+            return False
+        now = time.monotonic()
+        self._evict_console_events(state, now)
+        encoded = json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        if len(encoded) > state.max_bytes:
+            event["text"] = _truncate_utf8(
+                str(event.get("text", "")),
+                max(0, state.max_bytes - 512),
+            )
+            event["truncated"] = True
+            encoded = json.dumps(
+                event, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+        if len(encoded) > state.max_bytes:
+            return False
+        item = ConsoleEventRecord(event, now, len(encoded))
+        state.events.append(item)
+        state.byte_size += item.byte_size
+        self._evict_console_events(state, now)
+        return True
+
+    def list_console_events(
+        self,
+        record: SessionRecord,
+        target: dict[str, Any],
+        *,
+        levels: Any = None,
+        max_age_ms: Any = None,
+        max_entries: Any = None,
+        max_bytes: Any = None,
+    ) -> dict[str, Any]:
+        """List a bounded view without weakening the capture's retention limits."""
+        state = self._require_console_capture(record, target)
+        now = time.monotonic()
+        self._evict_console_events(state, now)
+        selected_levels = (
+            _normalize_console_levels(levels) if levels is not None else state.levels
+        )
+        age_limit = min(
+            state.max_age_ms,
+            _bounded_int(
+                max_age_ms,
+                state.max_age_ms,
+                0,
+                state.max_age_ms,
+                "max_age_ms",
+            ),
+        )
+        entry_limit = min(
+            state.max_entries,
+            _bounded_int(
+                max_entries,
+                state.max_entries,
+                1,
+                state.max_entries,
+                "max_entries",
+            ),
+        )
+        byte_limit = min(
+            state.max_bytes,
+            _bounded_int(
+                max_bytes,
+                state.max_bytes,
+                1,
+                state.max_bytes,
+                "max_bytes",
+            ),
+        )
+        selected: list[dict[str, Any]] = []
+        selected_bytes = 0
+        for item in reversed(state.events):
+            if (now - item.created_at) * 1000 > age_limit:
+                continue
+            if item.value.get("level") not in selected_levels:
+                continue
+            if len(selected) >= entry_limit or selected_bytes + item.byte_size > byte_limit:
+                break
+            selected.append(dict(item.value))
+            selected_bytes += item.byte_size
+        selected.reverse()
+        return {
+            **_console_capture_summary(state),
+            "events": selected,
+            "returned_entries": len(selected),
+            "returned_bytes": selected_bytes,
+        }
+
+    def clear_console_capture(
+        self, record: SessionRecord, target: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Clear retained events while leaving capture active."""
+        state = self._require_console_capture(record, target)
+        removed_entries = len(state.events)
+        removed_bytes = state.byte_size
+        state.events.clear()
+        state.byte_size = 0
+        return {
+            **_console_capture_summary(state),
+            "removed_entries": removed_entries,
+            "removed_bytes": removed_bytes,
+        }
+
+    def stop_console_capture(
+        self, record: SessionRecord, target: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Stop capture and discard its in-memory diagnostic data."""
+        key = _reference_target_prefix(target)
+        state = record.console_captures.pop(key, None)
+        if state is None:
+            return {"target": dict(target), "active": False, "removed_entries": 0}
+        return {
+            "target": dict(target),
+            "active": False,
+            "removed_entries": len(state.events),
+            "removed_bytes": state.byte_size,
+        }
+
+    def _require_console_capture(
+        self, record: SessionRecord, target: dict[str, Any]
+    ) -> ConsoleCaptureState:
+        state = record.console_captures.get(_reference_target_prefix(target))
+        if state is None or not _targets_equal(state.target, target):
+            raise BrokerError(
+                "invalid_browser_operation",
+                "console capture is not active for the selected target",
+            )
+        return state
+
+    @staticmethod
+    def _evict_console_events(state: ConsoleCaptureState, now: float) -> None:
+        while state.events and (
+            (now - state.events[0].created_at) * 1000 > state.max_age_ms
+            or len(state.events) > state.max_entries
+            or state.byte_size > state.max_bytes
+        ):
+            removed = state.events.pop(0)
+            state.byte_size -= removed.byte_size
+
+    def start_network_capture(
+        self,
+        record: SessionRecord,
+        target: dict[str, Any],
+        *,
+        max_age_ms: Any = None,
+        max_entries: Any = None,
+        max_bytes: Any = None,
+        max_body_bytes: Any = None,
+        sensitive_fields: Any = None,
+    ) -> dict[str, Any]:
+        """Start or replace bounded metadata-only network capture."""
+        state = NetworkCaptureState(
+            target=dict(target),
+            max_age_ms=_bounded_int(
+                max_age_ms,
+                DEFAULT_NETWORK_MAX_AGE_MS,
+                1_000,
+                MAX_NETWORK_MAX_AGE_MS,
+                "max_age_ms",
+            ),
+            max_entries=_bounded_int(
+                max_entries,
+                DEFAULT_NETWORK_MAX_ENTRIES,
+                1,
+                MAX_NETWORK_MAX_ENTRIES,
+                "max_entries",
+            ),
+            max_bytes=_bounded_int(
+                max_bytes,
+                DEFAULT_NETWORK_MAX_BYTES,
+                2_048,
+                MAX_NETWORK_MAX_BYTES,
+                "max_bytes",
+            ),
+            max_body_bytes=_bounded_int(
+                max_body_bytes,
+                DEFAULT_NETWORK_MAX_BODY_BYTES,
+                1_024,
+                MAX_NETWORK_MAX_BODY_BYTES,
+                "max_body_bytes",
+            ),
+            sensitive_fields=_normalize_sensitive_fields(sensitive_fields),
+        )
+        record.network_captures[_reference_target_prefix(target)] = state
+        return _network_capture_summary(state)
+
+    def record_network_event(
+        self,
+        extension_instance_id: str,
+        target: dict[str, Any],
+        raw_event: Any,
+    ) -> bool:
+        """Merge one CDP network event into its isolated metadata record."""
+        record = self.sessions.get(extension_instance_id)
+        if record is None or not isinstance(target, dict) or not isinstance(raw_event, dict):
+            return False
+        if target.get("extension_instance_id") != extension_instance_id:
+            return False
+        state = record.network_captures.get(_reference_target_prefix(target))
+        if state is None or not _targets_equal(state.target, target):
+            return False
+        request_id = _clean_text(raw_event.get("request_id"))[:256]
+        event_type = _clean_text(raw_event.get("event_type"))
+        if not request_id or event_type not in {
+            "request",
+            "response",
+            "finished",
+            "failed",
+        }:
+            return False
+        now = time.monotonic()
+        self._evict_network_requests(state, now)
+        previous = state.requests.get(request_id)
+        value = dict(previous.value) if previous is not None else {
+            "request_id": request_id,
+            "timestamp_ms": _as_int(raw_event.get("timestamp_ms"))
+            or int(time.time() * 1000),
+        }
+        if event_type == "request":
+            value.update(
+                {
+                    "url": _redact_url(
+                        _clean_text(raw_event.get("url"))[:8192],
+                        state.sensitive_fields,
+                    ),
+                    "method": _clean_text(raw_event.get("method"))[:32],
+                    "resource_type": _clean_text(raw_event.get("resource_type"))[:64],
+                    "request_headers": _redact_mapping(
+                        raw_event.get("headers"), state.sensitive_fields
+                    ),
+                }
+            )
+        elif event_type == "response":
+            value.update(
+                {
+                    "status": _as_int(raw_event.get("status")) or 0,
+                    "status_text": _clean_text(raw_event.get("status_text"))[:256],
+                    "mime_type": _clean_text(raw_event.get("mime_type"))[:256],
+                    "protocol": _clean_text(raw_event.get("protocol"))[:64],
+                    "from_cache": bool(raw_event.get("from_cache")),
+                    "response_headers": _redact_mapping(
+                        raw_event.get("headers"), state.sensitive_fields
+                    ),
+                }
+            )
+        elif event_type == "finished":
+            value.update(
+                {
+                    "finished": True,
+                    "encoded_data_length": max(
+                        0, _as_int(raw_event.get("encoded_data_length")) or 0
+                    ),
+                }
+            )
+        else:
+            value.update(
+                {
+                    "finished": True,
+                    "failed": True,
+                    "error_text": _clean_text(raw_event.get("error_text"))[:1024],
+                    "canceled": bool(raw_event.get("canceled")),
+                }
+            )
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+        if len(encoded) > state.max_bytes:
+            return False
+        if previous is not None:
+            state.byte_size -= previous.byte_size
+        state.requests.pop(request_id, None)
+        state.requests[request_id] = NetworkRequestRecord(value, now, len(encoded))
+        state.byte_size += len(encoded)
+        self._evict_network_requests(state, now)
+        return request_id in state.requests
+
+    def list_network_requests(
+        self,
+        record: SessionRecord,
+        target: dict[str, Any],
+        *,
+        max_age_ms: Any = None,
+        max_entries: Any = None,
+        max_bytes: Any = None,
+    ) -> dict[str, Any]:
+        state = self._require_network_capture(record, target)
+        now = time.monotonic()
+        self._evict_network_requests(state, now)
+        age_limit = min(
+            state.max_age_ms,
+            _bounded_int(max_age_ms, state.max_age_ms, 0, state.max_age_ms, "max_age_ms"),
+        )
+        entry_limit = min(
+            state.max_entries,
+            _bounded_int(max_entries, state.max_entries, 1, state.max_entries, "max_entries"),
+        )
+        byte_limit = min(
+            state.max_bytes,
+            _bounded_int(max_bytes, state.max_bytes, 1, state.max_bytes, "max_bytes"),
+        )
+        selected: list[dict[str, Any]] = []
+        selected_bytes = 0
+        for item in reversed(list(state.requests.values())):
+            if (now - item.created_at) * 1000 > age_limit:
+                continue
+            if len(selected) >= entry_limit or selected_bytes + item.byte_size > byte_limit:
+                break
+            selected.append(_network_summary(item.value))
+            selected_bytes += item.byte_size
+        selected.reverse()
+        return {
+            **_network_capture_summary(state),
+            "requests": selected,
+            "returned_entries": len(selected),
+            "returned_bytes": selected_bytes,
+        }
+
+    def get_network_request_detail(
+        self,
+        record: SessionRecord,
+        target: dict[str, Any],
+        request_id: Any,
+    ) -> dict[str, Any]:
+        state = self._require_network_capture(record, target)
+        self._evict_network_requests(state, time.monotonic())
+        normalized = _clean_text(request_id)
+        item = state.requests.get(normalized)
+        if item is None:
+            raise BrokerError(
+                "browser_target_not_found",
+                "captured network request was not found or has expired",
+                {"request_id": normalized[:256]},
+            )
+        return {
+            **_network_capture_summary(state),
+            "request": dict(item.value),
+        }
+
+    def bound_network_body(
+        self,
+        record: SessionRecord,
+        target: dict[str, Any],
+        request_id: Any,
+        body: Any,
+        base64_encoded: Any,
+        requested_max_bytes: Any = None,
+    ) -> dict[str, Any]:
+        """Return only an explicitly requested, size-bounded response body."""
+        state = self._require_network_capture(record, target)
+        detail = self.get_network_request_detail(record, target, request_id)
+        limit = min(
+            state.max_body_bytes,
+            _bounded_int(
+                requested_max_bytes,
+                state.max_body_bytes,
+                1,
+                state.max_body_bytes,
+                "max_body_bytes",
+            ),
+        )
+        encoded_body = _clean_text(body)
+        is_base64 = bool(base64_encoded)
+        if is_base64:
+            try:
+                raw = base64.b64decode(encoded_body, validate=True)
+            except (ValueError, TypeError) as exc:
+                raise BrokerError(
+                    "browser_operation_failed", "browser returned an invalid base64 body"
+                ) from exc
+            original_size = len(raw)
+            truncated = original_size > limit
+            output = base64.b64encode(raw[:limit]).decode("ascii")
+        else:
+            raw = encoded_body.encode("utf-8")
+            original_size = len(raw)
+            truncated = original_size > limit
+            output = raw[:limit].decode("utf-8", errors="ignore")
+        return {
+            **detail,
+            "body": output,
+            "base64_encoded": is_base64,
+            "truncated": truncated,
+            "original_size": original_size,
+            "returned_size": min(original_size, limit),
+        }
+
+    def clear_network_capture(
+        self, record: SessionRecord, target: dict[str, Any]
+    ) -> dict[str, Any]:
+        state = self._require_network_capture(record, target)
+        removed_entries = len(state.requests)
+        removed_bytes = state.byte_size
+        state.requests.clear()
+        state.byte_size = 0
+        return {
+            **_network_capture_summary(state),
+            "removed_entries": removed_entries,
+            "removed_bytes": removed_bytes,
+        }
+
+    def stop_network_capture(
+        self, record: SessionRecord, target: dict[str, Any]
+    ) -> dict[str, Any]:
+        state = record.network_captures.pop(_reference_target_prefix(target), None)
+        if state is None:
+            return {"target": dict(target), "active": False, "removed_entries": 0}
+        return {
+            "target": dict(target),
+            "active": False,
+            "removed_entries": len(state.requests),
+            "removed_bytes": state.byte_size,
+        }
+
+    def _require_network_capture(
+        self, record: SessionRecord, target: dict[str, Any]
+    ) -> NetworkCaptureState:
+        state = record.network_captures.get(_reference_target_prefix(target))
+        if state is None or not _targets_equal(state.target, target):
+            raise BrokerError(
+                "invalid_browser_operation",
+                "network capture is not active for the selected target",
+            )
+        return state
+
+    @staticmethod
+    def _evict_network_requests(state: NetworkCaptureState, now: float) -> None:
+        while state.requests:
+            first_key = next(iter(state.requests))
+            first = state.requests[first_key]
+            if not (
+                (now - first.created_at) * 1000 > state.max_age_ms
+                or len(state.requests) > state.max_entries
+                or state.byte_size > state.max_bytes
+            ):
+                break
+            state.requests.pop(first_key)
+            state.byte_size -= first.byte_size
+
+    def _evict_element_references(
+        self, record: SessionRecord, now: float
+    ) -> None:
+        live = [
+            (key, reference)
+            for key, reference in record.element_references.items()
+            if now - reference.created_at <= ELEMENT_REFERENCE_TTL_SEC
+        ]
+        live.sort(key=lambda item: item[1].created_at, reverse=True)
+        record.element_references = dict(
+            live[:MAX_ELEMENT_REFERENCES_PER_SESSION]
+        )
 
     def accept_response(self, payload: dict[str, Any]) -> PendingRequest | None:
         """Deliver only a response matching its request, session, and target."""
@@ -606,10 +1781,44 @@ class BrowserSessionBroker:
         response["operation"] = pending.operation
         response["extension_instance_id"] = pending.extension_instance_id
         response["target"] = pending.target
+        record = self.sessions.get(pending.extension_instance_id)
+        if record is not None and response.get("ok"):
+            if pending.operation == "get_page_snapshot":
+                self.cache_snapshot_references(record, pending.target, response)
+            elif pending.operation in {"navigate", "close_tab"}:
+                self.clear_element_references(record, target=pending.target)
         if not pending.future.done():
             pending.future.set_result(response)
         self._release_ephemeral_lease(pending)
         return pending
+
+    def take_queued_command(
+        self, extension_instance_id: str, request_id: str
+    ) -> dict[str, Any] | None:
+        """Atomically claim one queued command for a negotiated direct transport."""
+        record = self.sessions.get(extension_instance_id)
+        if record is None:
+            return None
+        for index, command in enumerate(record.command_queue):
+            if str(command.get("request_id") or "") == request_id:
+                return record.command_queue.pop(index)
+        return None
+
+    def restore_queued_command(
+        self, extension_instance_id: str, command: dict[str, Any]
+    ) -> None:
+        """Restore a direct-send failure to bounded heartbeat fallback once."""
+        request_id = _clean_text(command.get("request_id"))
+        pending = self.pending.get(request_id)
+        record = self.sessions.get(extension_instance_id)
+        if pending is None or record is None:
+            return
+        if any(
+            queued.get("request_id") == request_id
+            for queued in record.command_queue
+        ):
+            return
+        record.command_queue.insert(0, command)
 
     def cancel_request(self, request_id: str, error: BrokerError) -> None:
         """Fail and remove one pending request and its queued command."""
@@ -630,12 +1839,16 @@ class BrowserSessionBroker:
     def expire_stale(self, now: float | None = None) -> None:
         """Expire sessions, pending requests, queues, and leases deterministically."""
         current = time.monotonic() if now is None else now
+        self.expire_capability_grants(current)
         for record in list(self.sessions.values()):
             self._release_expired_lease(record, current)
             if record.alive(current, self.heartbeat_ttl):
                 continue
             record.command_queue.clear()
             record.lease = None
+            record.element_references.clear()
+            record.console_captures.clear()
+            record.network_captures.clear()
             for request_id, pending in list(self.pending.items()):
                 if pending.extension_instance_id != record.extension_instance_id:
                     continue
@@ -1126,6 +2339,80 @@ def _sanitize_browser_metadata(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _sanitize_feature_availability(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    features: dict[str, dict[str, Any]] = {}
+    for item in raw[:64]:
+        if not isinstance(item, dict):
+            continue
+        feature = _clean_text(item.get("feature"))
+        if feature not in KNOWN_FEATURE_IDS:
+            continue
+        entry: dict[str, Any] = {
+            "feature": feature,
+            "available": bool(item.get("available")),
+        }
+        reason = _clean_text(item.get("reason"))[:200]
+        if reason:
+            entry["reason"] = reason
+        features[feature] = entry
+    return [features[name] for name in sorted(features)]
+
+
+def _sanitize_supported_actions(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    return sorted(
+        {
+            action
+            for value in raw[:64]
+            if (action := _clean_text(value)) in KNOWN_ACTIONS
+        }
+    )
+
+
+def _sanitize_supported_operations(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    return sorted(
+        {
+            operation
+            for value in raw[:128]
+            if (operation := _clean_text(value)) in KNOWN_BROWSER_OPERATIONS
+        }
+    )
+
+
+def _sanitize_optional_permissions(raw: Any) -> dict[str, bool]:
+    if not isinstance(raw, dict):
+        return {}
+    allowed = {"cookies", "content_settings", "extension_management"}
+    return {
+        key: bool(value)
+        for key, value in sorted(raw.items())
+        if key in allowed
+    }
+
+
+def _sanitize_public_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, nested in value.items():
+            normalized = str(key).lower().replace("-", "_")
+            if normalized in {
+                "lease_token",
+                "capability_grant",
+                "capability_grant_token",
+            } or normalized.endswith("_secret"):
+                continue
+            result[str(key)] = _sanitize_public_value(nested)
+        return result
+    if isinstance(value, list):
+        return [_sanitize_public_value(item) for item in value]
+    return value
+
+
 def _normalize_element(index: int, raw: dict[str, Any]) -> dict[str, Any]:
     element = dict(raw)
     element["element_ref"] = _clean_text(
@@ -1241,9 +2528,241 @@ def _targets_equal(left: Any, right: Any) -> bool:
     )
 
 
+def _reference_target_prefix(target: dict[str, Any]) -> str:
+    """Build a stable non-secret cache namespace for a complete browser target."""
+    return ":".join(
+        [
+            _clean_text(target.get("extension_instance_id")),
+            str(_as_int(target.get("window_id")) or 0),
+            str(_as_int(target.get("tab_id")) or 0),
+        ]
+    )
+
+
+def _normalize_console_levels(value: Any) -> set[str]:
+    if value is None:
+        return set(KNOWN_CONSOLE_LEVELS)
+    if not isinstance(value, list):
+        raise BrokerError("invalid_browser_operation", "levels must be an array")
+    levels = {_clean_text(item).lower() for item in value}
+    unknown = sorted(levels - KNOWN_CONSOLE_LEVELS)
+    if unknown:
+        raise BrokerError(
+            "invalid_browser_operation",
+            "unsupported console level filter",
+            {"unsupported_levels": unknown, "supported_levels": sorted(KNOWN_CONSOLE_LEVELS)},
+        )
+    if not levels:
+        raise BrokerError("invalid_browser_operation", "levels must not be empty")
+    return levels
+
+
+def _bounded_int(
+    value: Any,
+    default: int,
+    minimum: int,
+    maximum: int,
+    field_name: str,
+) -> int:
+    if value is None:
+        return default
+    parsed = _as_int(value)
+    if parsed is None or parsed < minimum or parsed > maximum:
+        raise BrokerError(
+            "invalid_browser_operation",
+            f"{field_name} must be between {minimum} and {maximum}",
+        )
+    return parsed
+
+
+def _truncate_utf8(value: str, max_bytes: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _sanitize_console_event(
+    raw: Any, sensitive_fields: set[str]
+) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    level = _clean_text(raw.get("level")).lower()
+    if level == "warning":
+        level = "warn"
+    if level not in KNOWN_CONSOLE_LEVELS:
+        level = "log"
+    timestamp_ms = _as_int(raw.get("timestamp_ms")) or int(time.time() * 1000)
+    event: dict[str, Any] = {
+        "timestamp_ms": timestamp_ms,
+        "level": level,
+        "text": _truncate_utf8(
+            _redact_console_text(_clean_text(raw.get("text")), sensitive_fields),
+            MAX_CONSOLE_EVENT_TEXT_BYTES,
+        ),
+    }
+    source = _clean_text(raw.get("source"))[:120]
+    url = _clean_text(raw.get("url"))[:4096]
+    line_number = _as_int(raw.get("line_number"))
+    if source:
+        event["source"] = source
+    if url:
+        event["url"] = url
+    if line_number is not None and line_number >= 0:
+        event["line_number"] = line_number
+    if len(_clean_text(raw.get("text")).encode("utf-8")) > MAX_CONSOLE_EVENT_TEXT_BYTES:
+        event["truncated"] = True
+    return event
+
+
+def _console_capture_summary(state: ConsoleCaptureState) -> dict[str, Any]:
+    return {
+        "target": dict(state.target),
+        "active": True,
+        "levels": sorted(state.levels),
+        "retention": {
+            "max_age_ms": state.max_age_ms,
+            "max_entries": state.max_entries,
+            "max_bytes": state.max_bytes,
+        },
+        "retained_entries": len(state.events),
+        "retained_bytes": state.byte_size,
+    }
+
+
+def _normalize_sensitive_fields(value: Any) -> set[str]:
+    fields = set(DEFAULT_SENSITIVE_DIAGNOSTIC_FIELDS)
+    if value is None:
+        return fields
+    if not isinstance(value, list):
+        raise BrokerError(
+            "invalid_browser_operation", "sensitive_fields must be an array"
+        )
+    for item in value[:128]:
+        normalized = _clean_text(item).lower()[:128]
+        if normalized:
+            fields.add(normalized)
+    return fields
+
+
+def _is_sensitive_field(name: str, sensitive_fields: set[str]) -> bool:
+    normalized = name.lower().replace("_", "-")
+    return normalized in sensitive_fields or any(
+        marker in normalized for marker in ("token", "password", "passwd", "secret")
+    )
+
+
+def _redact_mapping(value: Any, sensitive_fields: set[str]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for raw_name, raw_value in list(value.items())[:256]:
+        name = str(raw_name)[:256]
+        if _is_sensitive_field(name, sensitive_fields):
+            result[name] = REDACTION_MARKER
+        elif isinstance(raw_value, dict):
+            result[name] = _redact_mapping(raw_value, sensitive_fields)
+        elif isinstance(raw_value, list):
+            result[name] = [
+                REDACTION_MARKER
+                if isinstance(item, dict)
+                else _clean_text(item)[:4096]
+                for item in raw_value[:128]
+            ]
+        else:
+            result[name] = _clean_text(raw_value)[:4096]
+    return result
+
+
+def _redact_console_text(value: str, sensitive_fields: set[str]) -> str:
+    redacted = value
+    for field_name in sorted(sensitive_fields, key=len, reverse=True):
+        field = re.escape(field_name)
+        pattern = re.compile(
+            rf"(?i)([\"']?{field}[\"']?\s*[:=]\s*)([^,;\n}}]+)"
+        )
+        redacted = pattern.sub(rf"\1{REDACTION_MARKER}", redacted)
+    return redacted
+
+
+def _redact_url(value: str, sensitive_fields: set[str]) -> str:
+    try:
+        parts = urlsplit(value)
+        if not parts.query:
+            return value
+        query = urlencode(
+            [
+                (name, REDACTION_MARKER if _is_sensitive_field(name, sensitive_fields) else item)
+                for name, item in parse_qsl(parts.query, keep_blank_values=True)
+            ],
+            doseq=True,
+        )
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+    except ValueError:
+        return value
+
+
+def _network_capture_summary(state: NetworkCaptureState) -> dict[str, Any]:
+    return {
+        "target": dict(state.target),
+        "active": True,
+        "retention": {
+            "max_age_ms": state.max_age_ms,
+            "max_entries": state.max_entries,
+            "max_bytes": state.max_bytes,
+            "max_body_bytes": state.max_body_bytes,
+        },
+        "retained_entries": len(state.requests),
+        "retained_bytes": state.byte_size,
+    }
+
+
+def _network_summary(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value[key]
+        for key in (
+            "request_id",
+            "timestamp_ms",
+            "url",
+            "method",
+            "resource_type",
+            "status",
+            "status_text",
+            "mime_type",
+            "protocol",
+            "from_cache",
+            "finished",
+            "failed",
+            "error_text",
+            "canceled",
+            "encoded_data_length",
+        )
+        if key in value
+    }
+
+
 def _bounded_ttl(value: Any) -> int:
     parsed = _as_int(value) or DEFAULT_LEASE_TTL_SEC
     return max(MIN_LEASE_TTL_SEC, min(MAX_LEASE_TTL_SEC, parsed))
+
+
+def _bounded_capability_ttl(value: Any) -> int:
+    parsed = _as_int(value) or DEFAULT_CAPABILITY_GRANT_TTL_SEC
+    return max(
+        MIN_CAPABILITY_GRANT_TTL_SEC,
+        min(MAX_CAPABILITY_GRANT_TTL_SEC, parsed),
+    )
+
+
+def _canonical_project_root(value: Any) -> str:
+    raw = _clean_text(value)
+    if not raw:
+        return ""
+    return os.path.normcase(os.path.realpath(os.path.abspath(raw)))
+
+
+def _token_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _as_int(value: Any) -> int | None:

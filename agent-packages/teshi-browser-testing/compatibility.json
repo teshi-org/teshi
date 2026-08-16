@@ -4,6 +4,85 @@
   "teshi_cli": ">=0.7.9 <0.8.0",
   "browser_agent_schema": 1,
   "broker_protocol": 1,
+  "phases": {
+    "p0.control": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "embedded": true,
+      "skill": true,
+      "mcp": "mutations require --allow-browser-mutations"
+    },
+    "p1.observability_artifacts": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "operations": [
+        "capture_browser_screenshot",
+        "generate_browser_pdf",
+        "start_console_capture",
+        "list_console_events",
+        "clear_console_capture",
+        "stop_console_capture",
+        "start_network_capture",
+        "list_network_requests",
+        "get_network_request_detail",
+        "clear_network_capture",
+        "stop_network_capture"
+      ],
+      "supported_actions": [
+        "upload"
+      ],
+      "monitoring": "optional bounded before/after summary around one mutation",
+      "window_focus": "explicit opt-in",
+      "tab_grouping": "optional and non-fatal",
+      "network_bodies": "explicit and bounded",
+      "redaction": "enabled by default"
+    },
+    "p2.javascript": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "default_enabled": false,
+      "requires": ["profile lease", "short-lived javascript grant"],
+      "mcp": false
+    },
+    "p2.raw_cdp": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "default_enabled": false,
+      "requires": ["profile lease", "short-lived raw-cdp grant", "project method allowlist"],
+      "mcp": false
+    },
+    "p2.cookies": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "default_enabled": false,
+      "requires": ["profile lease", "short-lived cookies grant", "optional cookies permission"],
+      "values_require": "separate short-lived cookie-values grant",
+      "mcp": false
+    },
+    "p2.content_settings": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "default_enabled": false,
+      "requires": ["profile lease", "short-lived content-settings grant", "optional contentSettings permission"],
+      "scope": "selected tab origin and fixed setting allowlist",
+      "mcp": false
+    },
+    "p2.extension_management": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "default_enabled": false,
+      "requires": ["profile lease", "short-lived extension-management grant", "optional management permission"],
+      "mutations": false,
+      "mcp": false
+    }
+  },
   "extension": ">=0.7.9 <0.8.0",
   "chromium": ">=116 (Chrome, Edge, or compatible Chromium with Manifest V3 and chrome.debugger)",
   "operating_systems": [

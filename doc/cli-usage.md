@@ -72,13 +72,23 @@ teshi browser doctor              # TCP + snapshot probe; exit 1 if stale
 teshi browser reconnect           # Restart embedded sidecar (refresh cdp-endpoint.json)
 teshi browser sessions            # Versioned browser-profile discovery JSON
 teshi browser tabs --session <id> # Windows/tabs scoped to one profile
+teshi browser lookup [--session <id>] [--label <name>] [--browser-name Chromium] [--tab <id>]
+teshi browser profile-label set --session <id> --label <unique-name>
+teshi browser profile-label clear --session <id>
 teshi browser lease acquire --session <id> --owner <label> [--ttl 60]
 teshi browser lease renew --session <id> --lease-token <token> [--ttl 60]
 teshi browser lease release --session <id> --lease-token <token>
 teshi browser snapshot            # Page accessibility tree
 teshi browser navigate <url>      # Navigate active tab
 teshi browser highlight <selector>
-teshi browser execute --selector <css> --action <action> [--value-arg <text>]
+teshi browser execute (--reference @e1 | --candidate-json '<json>' | --selector <css>) \
+  --action <action> [--value-arg <text>] [--page-revision <revision>] \
+  [--file <project-relative-path>] [--monitor] \
+  [--wait-url <part> | --wait-text <text> | --wait-state <state> | --wait-load]
+teshi browser tab open <url> --session <id> --window <id> --tab <id> --lease-token <token>
+teshi browser tab close --session <id> --window <id> --tab <id> --lease-token <token>
+teshi browser tab activate [--focus-window] --session <id> --window <id> --tab <id> --lease-token <token>
+teshi browser tab new-window <url> --session <id> --window <id> --tab <id> --lease-token <token>
 teshi browser verify --step-line N --selector <css> --action <action> [--value-arg <text>]
 teshi browser replay [--until-line N] [--non-interactive] [--yes]
 teshi browser serve-embedded [--navigate <url>]
@@ -89,19 +99,59 @@ teshi browser locator-verify --session <id> --window <id> --tab <id> \
   --lease-token <token> --page-revision <revision> --candidate-json '<json>'
 teshi browser evidence --session <id> --window <id> --tab <id> \
   --lease-token <token> --page-revision <revision>
+teshi browser screenshot --session <id> --window <id> --tab <id> --lease-token <token> [--full-page]
+teshi browser pdf --session <id> --window <id> --tab <id> --lease-token <token> [--paper A4]
+teshi browser console start --session <id> --window <id> --tab <id> --lease-token <token> \
+  [--level info,error] [--max-age-ms N] [--max-entries N] [--max-bytes N]
+teshi browser console list|clear|stop --session <id> --window <id> --tab <id> --lease-token <token>
+teshi browser network start --session <id> --window <id> --tab <id> --lease-token <token> \
+  [--max-age-ms N] [--max-entries N] [--max-bytes N] [--max-body-bytes N]
+teshi browser network list --session <id> --window <id> --tab <id> --lease-token <token>
+teshi browser network detail <request-id> [--include-body] [--max-body-bytes N] \
+  --session <id> --window <id> --tab <id> --lease-token <token>
+teshi browser network clear|stop --session <id> --window <id> --tab <id> --lease-token <token>
 ```
 
 Explicit agent operations require the composite session/window/tab target and an exclusive profile lease. Existing commands may omit them only when one eligible target exists. When several profiles are live, omission fails with `ambiguous_browser_target` and performs no mutation. Machine-readable failures contain a stable `code`, actionable `error`, and non-sensitive `recovery` object and exit non-zero.
 
 Project locator configuration lives in `.teshi/settings.json`; `playwright_test_id_attributes` defaults to `["data-testid"]` and may contain project-specific alternatives.
 
+P1 diagnostic commands appear in session discovery under `capabilities.supported_operations`; upload is advertised in `capabilities.supported_actions`. Console and network buffers are target-scoped, lease-protected, and bounded by age, entry count, and bytes. Network lists are metadata-only; response bodies require the explicit `network detail --include-body` flag and return encoding, truncation, original-size, and returned-size metadata. Authorization, Cookie, token, password, secret, and caller-configured sensitive fields are redacted by default.
+
+Add `--monitor` to `navigate` or a mutating `execute` call to capture one bounded before/after summary and structured diff around the single action dispatch. Upload uses `--action upload` with one or more repeatable `--file` arguments. Files must already exist inside the selected project root and satisfy count and size limits; failed validation returns only the failing argument index and policy reason, never a directory listing or unauthorized full path.
+
+Activating a tab changes the active tab but does not focus its browser window unless `--focus-window` is supplied. Tab grouping is optional organization: an unavailable grouping API returns `organized: false` and a `tab_group_unavailable` warning while leaving the tabs open.
+
+### Privileged browser capabilities (P2)
+
+P2 is denied by default. Start with a dedicated browser Profile, acquire its lease, and approve only the exact optional permission in the `teshi-bridge` popup. Then create a short-lived grant; interactive creation requires `--yes`. Non-interactive grants additionally require `.teshi/browser-policy.json` and an exact `--acknowledge-capability`.
+
+```powershell
+teshi browser grant create --capability cookies --yes --session <id> --window <id> --tab <id> --lease-token <lease>
+teshi browser cookies --grant-token <cookies-grant> --session <id> --window <id> --tab <id> --lease-token <lease>
+
+# Values require both metadata and value grants.
+teshi browser grant create --capability cookie-values --yes --session <id> --window <id> --tab <id> --lease-token <lease>
+teshi browser cookies --include-values --grant-token <cookies-grant> --value-grant-token <value-grant> --session <id> --window <id> --tab <id> --lease-token <lease>
+
+teshi browser content-setting notifications --grant-token <settings-grant> --session <id> --window <id> --tab <id> --lease-token <lease>
+teshi browser content-setting notifications --value block --grant-token <settings-grant> --session <id> --window <id> --tab <id> --lease-token <lease>
+teshi browser extensions --grant-token <management-grant> --session <id> --window <id> --tab <id> --lease-token <lease>
+```
+
+Cookie queries are bound to the selected tab URL, return metadata with values omitted by default, preserve partition metadata, and enforce entry/byte limits. Content settings are limited to `notifications`, `popups`, `geolocation`, `camera`, `microphone`, and `automatic_downloads`, always scoped to the selected origin. Extension management returns only bounded metadata; mutations remain disabled.
+
+Use `teshi browser grant list`, `grant revoke <grant-id>`, `grant expire`, and `audit --limit N` for lifecycle and metadata-only audit inspection. Grant tokens, lease tokens, JavaScript source, CDP bodies, and Cookie values are excluded from discovery/audit. P2 MCP tools are absent by default even when the CLI supports them.
+
+Grants and audit records live only in the current broker process; they are not written to the project. A broker restart invalidates all grants and clears the bounded audit ring. Browser artifacts are separate files under `.teshi/artifacts/browser` and remain until an explicit `artifact-cleanup` request or manual project cleanup.
+
 ### Local MCP browser-agent server
 
 ```bash
-teshi mcp serve --stdio [--project PATH]
+teshi mcp serve --stdio [--project PATH] [--allow-browser-mutations]
 ```
 
-The newline-delimited JSON-RPC server exposes the same discovery, lease, snapshot, locator, verification, and evidence operations as the CLI. It supports current `server/discover` negotiation and legacy `initialize`, writes protocol messages only to stdout, and operates only against the same-host Teshi broker. The release package includes `.mcp.json` metadata under `share/teshi-browser-testing`.
+The newline-delimited JSON-RPC server exposes the same typed contracts as the CLI. Safe mutation tools are omitted unless `--allow-browser-mutations` is present. It supports current `server/discover` negotiation and legacy `initialize`, writes protocol messages only to stdout, and operates only against the same-host Teshi broker.
 
 **Actions** for `execute`, `verify`, and `steps propose --action`:
 
@@ -109,7 +159,8 @@ The newline-delimited JSON-RPC server exposes the same discovery, lease, snapsho
 |--------|-------------|
 | `click` | Click element |
 | `fill` | Fill input (no Enter) |
-| `type` | Fill + Enter (xterm terminal) |
+| `type` | Type sequentially without clearing or pressing Enter |
+| `pointer_click` | Verified CDP pointer click; add `--focus` only when focus is intended |
 | `assert_visible` | Element must be visible |
 | `assert_text` | Element text must match `--value-arg` |
 | `select` | Select option |

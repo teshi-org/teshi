@@ -3,6 +3,7 @@ const connectBtn = document.getElementById("connect");
 const labelInput = document.getElementById("profile-label");
 const saveLabelBtn = document.getElementById("save-label");
 const detailsEl = document.getElementById("details");
+const permissionButtons = Array.from(document.querySelectorAll("[data-permission]"));
 
 function sendRuntimeMessage(message) {
   return new Promise((resolve, reject) => {
@@ -24,6 +25,14 @@ async function refreshStatus() {
       ? info.identity.extension_instance_id.slice(0, 8)
       : "unknown";
     detailsEl.textContent = `Session ${suffix} · extension ${info.extension_version || "unknown"} · protocol ${info.protocol_version || "unknown"}`;
+    const permissionStatus = info.optional_permissions || {};
+    for (const button of permissionButtons) {
+      const key = button.dataset.permission;
+      const statusKey = key === "contentSettings" ? "content_settings" : key === "management" ? "extension_management" : key;
+      const allowed = Boolean(permissionStatus[statusKey]);
+      button.textContent = allowed ? `${button.textContent.replace(/^Allowed: |^Allow /, "")} (allowed)` : button.textContent.replace(/ \(allowed\)$/, "");
+      button.disabled = allowed;
+    }
     if (info.connected && info.compatible !== false) {
       statusEl.textContent = `Connected${info.identity?.profile_label ? ` · ${info.identity.profile_label}` : ""}`;
       connectBtn.textContent = "Connected";
@@ -55,6 +64,22 @@ connectBtn.addEventListener("click", async () => {
     connectBtn.disabled = false;
   }
 });
+
+for (const button of permissionButtons) {
+  button.addEventListener("click", async () => {
+    const permission = button.dataset.permission;
+    button.disabled = true;
+    try {
+      const granted = await chrome.permissions.request({ permissions: [permission] });
+      statusEl.textContent = granted ? `Allowed ${permission}` : `Permission denied: ${permission}`;
+      await sendRuntimeMessage({ type: "connect_now" });
+      await refreshStatus();
+    } catch (err) {
+      statusEl.textContent = `Permission request failed: ${err}`;
+      button.disabled = false;
+    }
+  });
+}
 
 saveLabelBtn.addEventListener("click", async () => {
   saveLabelBtn.disabled = true;

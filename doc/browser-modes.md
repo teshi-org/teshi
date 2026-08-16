@@ -19,10 +19,10 @@ teshi-desktop supports two browser backends for BDD locator recording. Both writ
 └─────────────────┘                                       └──────────────────────┘
 ```
 
-- **Extension control plane**: HTTP `POST /v1/bridge/heartbeat` (~1.5 s) for `project_root`, tabs, and queued `cmd` objects. Small replies go to `POST /v1/bridge/response`.
+- **Extension control plane**: HTTP `POST /v1/bridge/heartbeat` (~1.5 s) for `project_root`, tabs, and queued `cmd` objects. Small replies go to `POST /v1/bridge/response`. Every POST carries the random broker-start token discovered from `ws_url`; unauthenticated requests and browser-page CORS access are rejected.
 - **Extension preview data plane**: WebSocket `extension_frame_ws_url` from `GET /v1/bridge` (same host/port as agent `ws_url`, path `/extension/frames`). Binary **TSH1** packets: magic + JSON meta (`tab_id`, `url`, `seq`) + raw JPEG. The bridge base64-encodes once in a thread pool and broadcasts `{"type":"frame","data":"..."}` to teshi-desktop (same agent WebSocket protocol as before).
 - **Preview capture**: CDP `Page.startScreencast` only (JPEG quality **70**, fit inside **1920×1080**, no upscaling). Frames are sent when the page repaints (scroll, animation, etc.); a static page keeps the last frame and the panel may show **Preview idle**. Locator commands pause screencast briefly, then resume. If screencast cannot start, the extension reports `frame_error` (no HTTP capture fallback). Large JSON frames on `/v1/bridge/response` are deprecated.
-- **Agent ↔ bridge**: WebSocket (`ws_url` in `.teshi/cdp-endpoint.json`).
+- **Agent ↔ bridge**: token-authenticated WebSocket (`ws_url` in `.teshi/cdp-endpoint.json`); ordinary web-page origins are rejected.
 - **Desktop**: starts/stops the Python process; polls discovery; `POST /v1/bridge/activate_tab` to switch Chrome tabs.
 
 Chrome may show **“Chrome is being controlled by automated test software”** while screencast runs (debugger attached). This is expected for CDP-based live preview. Keep the active tab on **http(s)**.
@@ -49,10 +49,12 @@ For concurrent work, create one dedicated Chromium profile per agent, install th
 
 Use a **dedicated recording Chrome profile** with real login sessions (SSO, cookies). Install `teshi-bridge` only in that profile so daily browsing and other browser automation tools do not attach to the same debugger target.
 
+Privileged P2 access adds two independent gates: a short-lived Teshi grant bound to the current user, broker, project, caller, and Profile; plus a popup-approved Chromium optional permission where required. Discovery reports public availability only and never exposes grants, lease tokens, Cookie values, or privileged results. Revoking either gate fails closed without disabling P0/P1.
+
 1. Start the dedicated recording Chrome profile manually.
 2. Install the unpacked extension from `C:\Program Files\teshi\share\teshi-bridge` (or `extension/teshi-bridge` in repo for development; see [extension README](../extension/teshi-bridge/README.md)).
 3. Open the app under test in Chrome and select the target **tab**.
-4. In teshi-desktop, click **Connect Chrome** in the Browser panel.
+4. Run `teshi browser sessions` or click **Connect Chrome**. Both attach to the same per-user broker; the CLI starts it when absent.
 5. Wait until the live stream appears (extension connected; check the status dot tooltip if needed).
 6. Select a Gherkin step and run the **bdd-locator** skill in the agent terminal.
 
@@ -66,8 +68,8 @@ While waiting for the extension, the panel shows setup steps only (no stream). O
 
 Chrome mode allows agent-driven navigation only for explicit URL steps, for example a Background step that says to open `https://example.com`. Skills should call `teshi browser navigate <url>` only when the URL is present in the step text; they should not invent hidden navigation. Other page changes should happen through confirmed step bindings or direct user action.
 
-Discovery: `GET http://127.0.0.1:17373/v1/bridge` returns versioned `sessions[]`, health and public lease metadata, `extension_frame_ws_url`, and stream diagnostics. Flat `tabs`, `active_tab_id`, and `page_url` fields exist only for an unambiguous single session.
-`cdp-endpoint.json` includes `"mode": "chrome"` and `extension_frame_ws_url` when available.
+Discovery: `GET http://127.0.0.1:17373/v1/bridge` returns broker PID/start identity, protocol, negotiated direct-command transport, versioned `sessions[]`, health, public capabilities/lease metadata, and loopback endpoints. Desktop detach does not stop the shared broker. An incompatible listener is reported and left untouched.
+`cdp-endpoint.json` is project compatibility data and includes the shared broker identity and endpoints; project root is request context, not broker ownership.
 
 ## External coding agents
 
@@ -81,6 +83,9 @@ teshi browser tabs --session <instance-id>
 teshi browser lease acquire --session <instance-id> --owner agent-a --ttl 60
 teshi browser locator --session <instance-id> --window 7 --tab 42 \
   --lease-token <token> --role button --text Save
+teshi browser execute --session <instance-id> --window 7 --tab 42 \
+  --lease-token <token> --reference @e1 --page-revision <revision> \
+  --action click --wait-text Saved
 teshi browser lease release --session <instance-id> --lease-token <token>
 
 teshi mcp serve --stdio
@@ -92,9 +97,9 @@ Locator results include a page-context revision, structured Playwright expressio
 
 Confirmed locators are stored in `.teshi/step-bindings/{feature}.json` and should be committed with the project. The older `{feature}.locators.md` files are deprecated and are no longer written or read by the recording/replay workflow.
 
-`navigate` bindings store the URL and are replayed as first-class setup actions. `open_project` bindings call the SUT runtime API to open a project folder (no DOM selector). `execute_locator` supports `click`, `fill`, `type`, `assert_visible`, `assert_text`, `select`, and `press_key`. Unknown actions fail with `unsupported_action`; missing values for value-based actions fail with `missing_value`.
+Step-binding format 2 can store revision-bound refs and structured candidates; the reader remains compatible with format 1 CSS bindings. Replay routes explicit targets through the canonical action/wait contract. `navigate` remains a first-class setup action and `open_project` calls the SUT runtime API.
 
-Use `type` (not `fill`) for xterm terminal input (`.xterm-helper-textarea`); `type` submits Enter after filling.
+`fill` replaces the current value; `type` appends sequential input. Use a separate `press_key` action when Enter is intended.
 
 ### Sidecar health
 
@@ -122,7 +127,7 @@ Launches **headless Playwright Chromium** with a live JPEG stream in the panel (
 
 ## Backend mutual exclusion
 
-Only one backend mode runs at a time. Starting Chrome disconnects Embedded and vice versa; within Chrome mode, multiple isolated extension-profile sessions may be connected simultaneously.
+Embedded remains project-owned. Chrome uses one loopback broker per OS user session, shared by CLI and Desktop, with multiple isolated extension Profiles connected simultaneously.
 
 ## CI / replay
 

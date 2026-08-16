@@ -15,6 +15,7 @@
         padding: 8px;
         cursor: pointer;
       }
+      .permission { margin-top: 6px; }
       label {
         display: block;
         margin: 10px 0 4px;
@@ -41,6 +42,10 @@
     <input id="profile-label" maxlength="120" placeholder="e.g. QA account" />
     <button type="button" id="save-label">Save profile label</button>
     <button type="button" id="connect">Connect to teshi</button>
+    <label>Optional privileged permissions</label>
+    <button class="permission" data-permission="cookies" type="button">Allow Cookie metadata</button>
+    <button class="permission" data-permission="contentSettings" type="button">Allow content settings</button>
+    <button class="permission" data-permission="management" type="button">Allow extension management</button>
     <p id="details">Open your app tab in Chrome, then click Connect in teshi.</p>
     <script src="popup.js"></script>
   </body>

@@ -19,28 +19,76 @@ fn resolve_sidecar_ws_url() -> Option<String> {
     payload.get("ws_url")?.as_str().map(|s| s.to_string())
 }
 
-fn send_browser_command(cmd: &str, args: serde_json::Value) -> Result<String> {
+fn execute_typed_browser_operation(
+    build: impl FnOnce(teshi_engine::BrowserTarget, String) -> teshi_engine::BrowserOperation,
+) -> Result<serde_json::Value> {
     use std::time::Duration;
     let ws_url = resolve_sidecar_ws_url().ok_or_else(|| {
         anyhow::anyhow!("no browser sidecar connected; start Embedded or connect Chrome first")
     })?;
-
-    let mut command = args.clone();
-    let request_id = format!(
-        "agent-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    );
-    command["cmd"] = serde_json::json!(cmd);
-    command["request_id"] = serde_json::json!(request_id);
-
-    let response =
-        teshi_engine::send_sidecar_command_with_timeout(&ws_url, command, Duration::from_secs(15))
-            .map_err(|e| anyhow::anyhow!("browser command failed: {e}"))?;
-
-    Ok(serde_json::to_string_pretty(&response)?)
+    let client = teshi_engine::BrowserOperations::new(ws_url, Duration::from_secs(30))
+        .with_caller_label("teshi-tui-agent");
+    let sessions = client
+        .execute(&teshi_engine::BrowserOperation::ListBrowserSessions)?
+        .payload;
+    let records = sessions
+        .get("sessions")
+        .and_then(serde_json::Value::as_array)
+        .context("browser session discovery returned no sessions array")?;
+    let eligible: Vec<_> = records
+        .iter()
+        .filter(|record| record.get("health").and_then(|value| value.as_str()) == Some("ready"))
+        .collect();
+    if eligible.len() != 1 {
+        anyhow::bail!(
+            "legacy browser agent tool requires exactly one ready Profile; found {}. Use the typed CLI/MCP surface for explicit multi-Profile targeting",
+            eligible.len()
+        );
+    }
+    let record = eligible[0];
+    let instance_id = record
+        .pointer("/identity/extension_instance_id")
+        .and_then(serde_json::Value::as_str)
+        .context("browser session missing extension identity")?
+        .to_string();
+    let tab = record
+        .get("windows")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|windows| {
+            windows.iter().find_map(|window| {
+                let window_id = window.get("id")?.as_i64()?;
+                window
+                    .get("tabs")?
+                    .as_array()?
+                    .iter()
+                    .find(|tab| tab.get("active").and_then(|value| value.as_bool()) == Some(true))
+                    .and_then(|tab| Some((window_id, tab.get("id")?.as_i64()?)))
+            })
+        })
+        .context("ready browser session has no active tab")?;
+    let target = teshi_engine::BrowserTarget {
+        extension_instance_id: instance_id.clone(),
+        window_id: tab.0,
+        tab_id: tab.1,
+    };
+    let lease = client
+        .execute(&teshi_engine::BrowserOperation::AcquireBrowserLease {
+            extension_instance_id: instance_id.clone(),
+            owner_label: "teshi-tui-agent".into(),
+            ttl_secs: 30,
+        })?
+        .payload;
+    let lease_token = lease
+        .pointer("/lease/lease_token")
+        .and_then(serde_json::Value::as_str)
+        .context("browser lease response missing token")?
+        .to_string();
+    let result = client.execute(&build(target, lease_token.clone()));
+    let _ = client.execute(&teshi_engine::BrowserOperation::ReleaseBrowserLease {
+        extension_instance_id: instance_id,
+        lease_token,
+    });
+    Ok(result?.payload)
 }
 
 /// Execute a named tool with the given JSON arguments and return the result
@@ -1728,7 +1776,13 @@ fn execute_validate_feature(app: &mut crate::app::App, args_json: &str) -> Resul
 // ── Browser agent exploration tool handlers ──
 
 fn execute_browser_snapshot(_app: &mut crate::app::App) -> Result<String> {
-    send_browser_command("get_structured_snapshot", serde_json::json!({}))
+    let response = execute_typed_browser_operation(|target, lease_token| {
+        teshi_engine::BrowserOperation::GetPageSnapshot {
+            target,
+            lease_token,
+        }
+    })?;
+    Ok(serde_json::to_string_pretty(&response)?)
 }
 
 fn execute_browser_click(_app: &mut crate::app::App, args_json: &str) -> Result<String> {
@@ -1738,7 +1792,29 @@ fn execute_browser_click(_app: &mut crate::app::App, args_json: &str) -> Result<
         .get("ref")
         .and_then(|v| v.as_str())
         .context("missing 'ref'")?;
-    send_browser_command("click_ref", serde_json::json!({"ref": ref_id}))
+    let reference = if ref_id.starts_with('@') {
+        ref_id.to_string()
+    } else {
+        format!("@{ref_id}")
+    };
+    let response = execute_typed_browser_operation(|target, lease_token| {
+        teshi_engine::BrowserOperation::ExecuteBrowserAction {
+            target,
+            lease_token,
+            action: teshi_engine::BrowserAction::Click,
+            element: teshi_engine::BrowserElementInput {
+                reference: Some(reference),
+                ..Default::default()
+            },
+            value: None,
+            files: vec![],
+            wait: None,
+            timeout_ms: 15_000,
+            focus: false,
+            monitor: false,
+        }
+    })?;
+    Ok(serde_json::to_string_pretty(&response)?)
 }
 
 fn execute_browser_type(_app: &mut crate::app::App, args_json: &str) -> Result<String> {
@@ -1752,7 +1828,29 @@ fn execute_browser_type(_app: &mut crate::app::App, args_json: &str) -> Result<S
         .get("text")
         .and_then(|v| v.as_str())
         .context("missing 'text'")?;
-    send_browser_command("type_ref", serde_json::json!({"ref": ref_id, "text": text}))
+    let reference = if ref_id.starts_with('@') {
+        ref_id.to_string()
+    } else {
+        format!("@{ref_id}")
+    };
+    let response = execute_typed_browser_operation(|target, lease_token| {
+        teshi_engine::BrowserOperation::ExecuteBrowserAction {
+            target,
+            lease_token,
+            action: teshi_engine::BrowserAction::Type,
+            element: teshi_engine::BrowserElementInput {
+                reference: Some(reference),
+                ..Default::default()
+            },
+            value: Some(text.to_string()),
+            files: vec![],
+            wait: None,
+            timeout_ms: 15_000,
+            focus: false,
+            monitor: false,
+        }
+    })?;
+    Ok(serde_json::to_string_pretty(&response)?)
 }
 
 fn execute_browser_assert(_app: &mut crate::app::App, args_json: &str) -> Result<String> {
@@ -1770,10 +1868,15 @@ fn execute_browser_assert(_app: &mut crate::app::App, args_json: &str) -> Result
     match condition_type {
         "text_visible" => {
             // Get snapshot and check for text in the page
-            let snap = send_browser_command("get_structured_snapshot", serde_json::json!({}))?;
-            let snap_val: serde_json::Value = serde_json::from_str(&snap)?;
-            if let Some(snapshot) = snap_val.get("snapshot")
-                && let Some(elements) = snapshot.get("elements").and_then(|v| v.as_array())
+            let snap_val = execute_typed_browser_operation(|target, lease_token| {
+                teshi_engine::BrowserOperation::GetPageSnapshot {
+                    target,
+                    lease_token,
+                }
+            })?;
+            if let Some(elements) = snap_val
+                .get("interactive_elements")
+                .and_then(|v| v.as_array())
             {
                 for el in elements {
                     if let Some(text) = el.get("text").and_then(|v| v.as_str())
@@ -1797,11 +1900,13 @@ fn execute_browser_assert(_app: &mut crate::app::App, args_json: &str) -> Result
             ))
         }
         "url_match" => {
-            let snap = send_browser_command("get_structured_snapshot", serde_json::json!({}))?;
-            let snap_val: serde_json::Value = serde_json::from_str(&snap)?;
-            if let Some(snapshot) = snap_val.get("snapshot")
-                && let Some(url) = snapshot.get("url").and_then(|v| v.as_str())
-            {
+            let snap_val = execute_typed_browser_operation(|target, lease_token| {
+                teshi_engine::BrowserOperation::GetPageSnapshot {
+                    target,
+                    lease_token,
+                }
+            })?;
+            if let Some(url) = snap_val.get("url").and_then(|v| v.as_str()) {
                 let matches = url.contains(value) || url.starts_with(value);
                 if matches {
                     return Ok(format!(
@@ -1821,7 +1926,14 @@ fn execute_browser_assert(_app: &mut crate::app::App, args_json: &str) -> Result
 }
 
 fn execute_browser_go_back(_app: &mut crate::app::App) -> Result<String> {
-    send_browser_command("go_back", serde_json::json!({}))
+    let response = execute_typed_browser_operation(|target, lease_token| {
+        teshi_engine::BrowserOperation::GoBackBrowser {
+            target,
+            lease_token,
+            timeout_ms: 15_000,
+        }
+    })?;
+    Ok(serde_json::to_string_pretty(&response)?)
 }
 
 #[cfg(test)]

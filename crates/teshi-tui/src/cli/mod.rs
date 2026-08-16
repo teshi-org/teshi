@@ -89,7 +89,7 @@ pub enum Command {
     /// Inspect and execute locators through the browser bridge
     Browser {
         #[command(subcommand)]
-        action: BrowserCommand,
+        action: Box<BrowserCommand>,
     },
     /// Serve Teshi's local agent integrations through Model Context Protocol
     Mcp {
@@ -318,11 +318,40 @@ pub enum BrowserCommand {
     Sessions,
     /// List windows and tabs for one browser-profile session
     Tabs(BrowserSessionArgs),
+    /// Look up browser Profiles by opaque ID, label, browser name, or tab ID
+    Lookup(BrowserLookupArgs),
+    /// Set or clear a unique live Profile label
+    ProfileLabel {
+        #[command(subcommand)]
+        action: BrowserProfileLabelCommand,
+    },
+    /// Mutate tabs, windows, and optional tab groups under a Profile lease
+    Tab {
+        #[command(subcommand)]
+        action: BrowserTabCommand,
+    },
     /// Acquire, renew, or release an exclusive browser-session lease
     Lease {
         #[command(subcommand)]
         action: BrowserLeaseCommand,
     },
+    /// Manage explicit short-lived privileged browser capability grants
+    Grant {
+        #[command(subcommand)]
+        action: BrowserGrantCommand,
+    },
+    /// List bounded metadata-only privileged audit records
+    Audit(BrowserAuditArgs),
+    /// Execute bounded arbitrary JavaScript under an explicit grant
+    Javascript(BrowserJavascriptArgs),
+    /// Execute a policy-allowlisted page-scoped raw CDP method
+    Cdp(BrowserCdpArgs),
+    /// List Cookies scoped to the selected tab (values need a second grant)
+    Cookies(BrowserCookiesArgs),
+    /// Read or set one allowlisted setting for the selected tab origin
+    ContentSetting(BrowserContentSettingArgs),
+    /// List bounded extension metadata (mutations remain disabled)
+    Extensions(BrowserExtensionsArgs),
     /// Read page accessibility and interactive element snapshot
     Snapshot(BrowserSnapshotArgs),
     /// Navigate the active browser tab to an explicit URL
@@ -332,7 +361,7 @@ pub enum BrowserCommand {
     /// Clear active browser highlight
     ClearHighlight(BrowserTargetArgs),
     /// Execute one locator action in the active browser
-    Execute(BrowserExecuteArgs),
+    Execute(Box<BrowserExecuteArgs>),
     /// Replay confirmed step bindings
     Replay(BrowserReplayArgs),
     /// Start headless Playwright sidecar for CI/scripts (writes `.teshi/cdp-endpoint.json`)
@@ -353,6 +382,22 @@ pub enum BrowserCommand {
     LocatorVerify(BrowserLocatorVerifyArgs),
     /// Capture screenshot evidence tied to a target and page revision
     Evidence(BrowserEvidenceArgs),
+    /// Capture a viewport screenshot into managed artifact storage
+    Screenshot(BrowserScreenshotArgs),
+    /// Generate a PDF into managed artifact storage
+    Pdf(BrowserPdfArgs),
+    /// Capture bounded console diagnostics (requires p1.observability_artifacts)
+    Console {
+        #[command(subcommand)]
+        action: BrowserConsoleCommand,
+    },
+    /// Capture bounded network metadata and explicit response bodies (requires P1)
+    Network {
+        #[command(subcommand)]
+        action: BrowserNetworkCommand,
+    },
+    /// Explicitly remove managed browser artifact files
+    ArtifactCleanup(BrowserArtifactCleanupArgs),
 }
 
 #[derive(Debug, Args, Default)]
@@ -378,6 +423,77 @@ pub struct BrowserSessionArgs {
     pub session: String,
 }
 
+#[derive(Debug, Args)]
+pub struct BrowserLookupArgs {
+    #[arg(long)]
+    pub session: Option<String>,
+    #[arg(long)]
+    pub label: Option<String>,
+    #[arg(long)]
+    pub browser_name: Option<String>,
+    #[arg(long)]
+    pub tab: Option<i64>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BrowserProfileLabelCommand {
+    Set(BrowserProfileLabelSetArgs),
+    Clear(BrowserSessionArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserProfileLabelSetArgs {
+    #[arg(long)]
+    pub session: String,
+    #[arg(long)]
+    pub label: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BrowserTabCommand {
+    Open(BrowserTabOpenArgs),
+    Close(BrowserTargetArgs),
+    Activate(BrowserTabActivateArgs),
+    NewWindow(BrowserNewWindowArgs),
+    Group(BrowserTabGroupArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserTabOpenArgs {
+    pub url: String,
+    #[arg(long)]
+    pub active: bool,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserTabActivateArgs {
+    #[arg(long)]
+    pub focus_window: bool,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserNewWindowArgs {
+    pub url: String,
+    #[arg(long)]
+    pub focused: bool,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserTabGroupArgs {
+    #[arg(long = "tab-id", required = true)]
+    pub tab_ids: Vec<i64>,
+    #[arg(long)]
+    pub title: Option<String>,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum BrowserLeaseCommand {
     /// Acquire an exclusive browser-profile lease
@@ -386,6 +502,131 @@ pub enum BrowserLeaseCommand {
     Renew(BrowserLeaseRenewArgs),
     /// Release a matching browser-profile lease
     Release(BrowserLeaseReleaseArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BrowserGrantCommand {
+    /// Create a target-, project-, caller-, user-, and broker-bound grant
+    Create(BrowserGrantCreateArgs),
+    /// List active grant metadata without reusable secret tokens
+    List(BrowserGrantListArgs),
+    /// Revoke a grant by its public identifier
+    Revoke(BrowserGrantRevokeArgs),
+    /// Remove grants whose bounded lifetime has elapsed
+    Expire,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserGrantCreateArgs {
+    #[arg(long, value_parser = ["javascript", "raw-cdp", "cookies", "cookie-values", "content-settings", "extension-management"])]
+    pub capability: String,
+    #[arg(long, default_value_t = 300)]
+    pub ttl: u64,
+    /// Confirm an interactive grant after reviewing its exact capability
+    #[arg(long, conflicts_with = "non_interactive")]
+    pub yes: bool,
+    /// Request a policy-gated non-interactive grant
+    #[arg(long)]
+    pub non_interactive: bool,
+    /// Exact capability acknowledgement required with --non-interactive
+    #[arg(long, requires = "non_interactive")]
+    pub acknowledge_capability: Option<String>,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserGrantListArgs {
+    #[arg(long)]
+    pub session: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserGrantRevokeArgs {
+    pub grant_id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserAuditArgs {
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u64).range(1..=1000))]
+    pub limit: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserJavascriptArgs {
+    #[arg(long, group = "javascript_source", required = true)]
+    pub expression: Option<String>,
+    #[arg(long, group = "javascript_source")]
+    pub file: Option<PathBuf>,
+    #[arg(long)]
+    pub grant_token: String,
+    #[arg(long)]
+    pub page_revision: Option<String>,
+    #[arg(long, default_value_t = 5000)]
+    pub timeout_ms: u64,
+    #[arg(long, default_value_t = 65_536, value_parser = clap::value_parser!(u64).range(1..=1_048_576))]
+    pub max_result_bytes: u64,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserCdpArgs {
+    pub method: String,
+    #[arg(long, group = "cdp_params")]
+    pub params_json: Option<String>,
+    #[arg(long, group = "cdp_params")]
+    pub params_file: Option<PathBuf>,
+    #[arg(long)]
+    pub grant_token: String,
+    #[arg(long)]
+    pub page_revision: Option<String>,
+    #[arg(long, default_value_t = 65_536, value_parser = clap::value_parser!(u64).range(1..=1_048_576))]
+    pub max_result_bytes: u64,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserCookiesArgs {
+    /// Metadata-access grant token (`cookies`)
+    #[arg(long)]
+    pub grant_token: String,
+    /// Include values; requires --value-grant-token for `cookie-values`
+    #[arg(long, requires = "value_grant_token")]
+    pub include_values: bool,
+    /// Separate value-access grant token (`cookie-values`)
+    #[arg(long, requires = "include_values")]
+    pub value_grant_token: Option<String>,
+    #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u64).range(1..=500))]
+    pub max_entries: u64,
+    #[arg(long, default_value_t = 262_144, value_parser = clap::value_parser!(u64).range(1..=1_048_576))]
+    pub max_result_bytes: u64,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserContentSettingArgs {
+    /// Allowlisted setting name (notifications, popups, geolocation, camera, microphone, automatic_downloads)
+    pub setting: String,
+    /// Set an origin-scoped value; omit to read (allow, block, ask)
+    #[arg(long, value_parser = ["allow", "block", "ask"])]
+    pub value: Option<String>,
+    #[arg(long)]
+    pub grant_token: String,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserExtensionsArgs {
+    #[arg(long)]
+    pub grant_token: String,
+    #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u64).range(1..=500))]
+    pub max_entries: u64,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
 }
 
 #[derive(Debug, Args)]
@@ -440,6 +681,9 @@ pub struct BrowserNavigateArgs {
     /// Timeout in milliseconds
     #[arg(long, default_value_t = 15000)]
     pub timeout_ms: u64,
+    /// Return bounded before/after page summaries and a structured diff
+    #[arg(long)]
+    pub monitor: bool,
     #[command(flatten)]
     pub target: BrowserTargetArgs,
 }
@@ -454,18 +698,54 @@ pub struct BrowserSelectorArgs {
 
 #[derive(Debug, Args)]
 pub struct BrowserExecuteArgs {
-    /// CSS selector to execute against
+    /// CSS compatibility selector (mutually exclusive with --reference/--candidate-json)
+    #[arg(long, group = "browser_element_input")]
+    pub selector: Option<String>,
+    /// Revision-bound compact snapshot reference such as @e1
+    #[arg(long, group = "browser_element_input")]
+    pub reference: Option<String>,
+    /// Structured Playwright locator candidate JSON
+    #[arg(long, group = "browser_element_input")]
+    pub candidate_json: Option<String>,
+    /// Snapshot identity required when constraining a compact reference
     #[arg(long)]
-    pub selector: String,
+    pub snapshot_id: Option<String>,
+    /// Expected page-context revision
+    #[arg(long)]
+    pub page_revision: Option<String>,
     /// Action to execute
     #[arg(long, default_value = "click")]
     pub action: String,
     /// Optional input value for fill/assert_text/select/press_key
     #[arg(long)]
     pub value_arg: Option<String>,
+    /// Explicit project-authorized local file to upload (repeatable; upload action only)
+    #[arg(long = "file")]
+    pub files: Vec<PathBuf>,
     /// Timeout in milliseconds
     #[arg(long, default_value_t = 5000)]
     pub timeout_ms: u64,
+    /// Wait until URL contains this value after the action
+    #[arg(long, group = "browser_wait")]
+    pub wait_url: Option<String>,
+    /// Wait until visible page text contains this value
+    #[arg(long, group = "browser_wait")]
+    pub wait_text: Option<String>,
+    /// Wait for the selected element state: visible, hidden, enabled, disabled
+    #[arg(long, group = "browser_wait")]
+    pub wait_state: Option<String>,
+    /// Wait for the page revision to change from --page-revision
+    #[arg(long, group = "browser_wait", requires = "page_revision")]
+    pub wait_revision_change: bool,
+    /// Wait for bounded document load completion
+    #[arg(long, group = "browser_wait")]
+    pub wait_load: bool,
+    /// Allow pointer action to focus/activate the target browser window
+    #[arg(long)]
+    pub focus: bool,
+    /// Return bounded before/after page summaries and a structured diff
+    #[arg(long)]
+    pub monitor: bool,
     #[command(flatten)]
     pub target: BrowserTargetArgs,
 }
@@ -586,6 +866,167 @@ pub struct BrowserEvidenceArgs {
     pub timeout_ms: u64,
 }
 
+#[derive(Debug, Args)]
+pub struct BrowserScreenshotArgs {
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+    /// Optional expected page-context revision
+    #[arg(long)]
+    pub page_revision: Option<String>,
+    /// Revision-bound compact element reference
+    #[arg(long)]
+    pub reference: Option<String>,
+    /// Structured Playwright locator candidate JSON
+    #[arg(long)]
+    pub candidate_json: Option<String>,
+    /// CSS compatibility selector for an element screenshot
+    #[arg(long)]
+    pub selector: Option<String>,
+    /// Snapshot identity constraining --reference
+    #[arg(long)]
+    pub snapshot_id: Option<String>,
+    /// Image format: png or jpeg
+    #[arg(long, default_value = "png")]
+    pub format: String,
+    /// JPEG quality from 0 to 100 (JPEG only)
+    #[arg(long)]
+    pub quality: Option<u8>,
+    /// Capture the full scrollable page instead of only the viewport
+    #[arg(long)]
+    pub full_page: bool,
+    /// Operation timeout in milliseconds
+    #[arg(long, default_value_t = 30_000)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserPdfArgs {
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+    #[arg(long)]
+    pub page_revision: Option<String>,
+    /// Paper format such as A4, Letter, or Legal
+    #[arg(long, default_value = "A4")]
+    pub paper: String,
+    #[arg(long)]
+    pub landscape: bool,
+    /// Render scale from 0.1 to 2.0
+    #[arg(long, default_value_t = 1.0)]
+    pub scale: f64,
+    #[arg(long)]
+    pub print_background: bool,
+    #[arg(long, default_value_t = 30_000)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserArtifactCleanupArgs {
+    /// Exact managed artifact path to remove (repeatable)
+    #[arg(long = "path", required = true)]
+    pub paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BrowserConsoleCommand {
+    /// Start target-scoped bounded console capture
+    Start(BrowserConsoleStartArgs),
+    /// List captured console events with optional tighter limits
+    List(BrowserConsoleListArgs),
+    /// Clear retained events while capture remains active
+    Clear(BrowserTargetArgs),
+    /// Stop capture and discard retained events
+    Stop(BrowserTargetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserConsoleStartArgs {
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+    /// Levels to retain: debug,log,info,warn,error (comma-separated or repeatable)
+    #[arg(long, value_delimiter = ',')]
+    pub level: Vec<String>,
+    #[arg(long)]
+    pub max_age_ms: Option<u64>,
+    #[arg(long)]
+    pub max_entries: Option<u64>,
+    #[arg(long)]
+    pub max_bytes: Option<u64>,
+    /// Additional sensitive field name to redact (repeatable)
+    #[arg(long = "sensitive-field")]
+    pub sensitive_fields: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserConsoleListArgs {
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+    #[arg(long, value_delimiter = ',')]
+    pub level: Vec<String>,
+    #[arg(long)]
+    pub max_age_ms: Option<u64>,
+    #[arg(long)]
+    pub max_entries: Option<u64>,
+    #[arg(long)]
+    pub max_bytes: Option<u64>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BrowserNetworkCommand {
+    /// Start target-scoped metadata-only network capture
+    Start(BrowserNetworkStartArgs),
+    /// List captured request/response metadata without bodies
+    List(BrowserNetworkListArgs),
+    /// Get one request's metadata and optionally its bounded response body
+    Detail(BrowserNetworkDetailArgs),
+    /// Clear retained request metadata while capture remains active
+    Clear(BrowserTargetArgs),
+    /// Stop capture and discard retained request metadata
+    Stop(BrowserTargetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserNetworkStartArgs {
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+    #[arg(long)]
+    pub max_age_ms: Option<u64>,
+    #[arg(long)]
+    pub max_entries: Option<u64>,
+    #[arg(long)]
+    pub max_bytes: Option<u64>,
+    /// Maximum decoded response body bytes returned by an explicit detail request
+    #[arg(long)]
+    pub max_body_bytes: Option<u64>,
+    /// Additional sensitive header or query-field name to redact (repeatable)
+    #[arg(long = "sensitive-field")]
+    pub sensitive_fields: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserNetworkListArgs {
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+    #[arg(long)]
+    pub max_age_ms: Option<u64>,
+    #[arg(long)]
+    pub max_entries: Option<u64>,
+    #[arg(long)]
+    pub max_bytes: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserNetworkDetailArgs {
+    /// CDP request identifier returned by `browser network list`
+    pub network_request_id: String,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
+    /// Explicitly request the bounded response body; omitted by default
+    #[arg(long)]
+    pub include_body: bool,
+    #[arg(long, requires = "include_body")]
+    pub max_body_bytes: Option<u64>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum McpCommand {
     /// Serve the browser-agent tools over newline-delimited JSON-RPC on STDIO
@@ -600,6 +1041,12 @@ pub struct McpServeArgs {
     /// Project root containing `.teshi/cdp-endpoint.json`
     #[arg(long)]
     pub project: Option<PathBuf>,
+    /// Advertise safe P0 mutation tools (disabled by default)
+    #[arg(long, default_value_t = false)]
+    pub allow_browser_mutations: bool,
+    /// Explicit P2 tool capability allowlist; each entry must also be allowed by policy
+    #[arg(long = "allow-privileged-capability", value_parser = ["javascript", "raw-cdp", "cookies", "cookie-values", "content-settings", "extension-management"])]
+    pub allow_privileged_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -857,6 +1304,13 @@ mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
 
+    fn browser_command(cli: Cli) -> BrowserCommand {
+        let Some(Command::Browser { action }) = cli.command else {
+            panic!("expected browser subcommand");
+        };
+        *action
+    }
+
     #[test]
     fn cli_command_factory_has_valid_args() {
         Cli::command().debug_assert();
@@ -876,15 +1330,73 @@ mod tests {
             "test@example.com",
         ])
         .expect("parse browser execute");
-        let Some(Command::Browser {
-            action: BrowserCommand::Execute(args),
-        }) = cli.command
-        else {
+        let BrowserCommand::Execute(args) = browser_command(cli) else {
             panic!("expected browser execute subcommand");
         };
-        assert_eq!(args.selector, "input[name=email]");
+        assert_eq!(args.selector.as_deref(), Some("input[name=email]"));
         assert_eq!(args.action, "fill");
         assert_eq!(args.value_arg.as_deref(), Some("test@example.com"));
+    }
+
+    #[test]
+    fn browser_execute_accepts_reference_pointer_and_typed_wait() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "browser",
+            "execute",
+            "--reference",
+            "@e1",
+            "--page-revision",
+            "revision-a",
+            "--snapshot-id",
+            "snapshot-a",
+            "--action",
+            "pointer_click",
+            "--wait-text",
+            "Saved",
+            "--focus",
+            "--session",
+            "profile-a",
+            "--window",
+            "7",
+            "--tab",
+            "42",
+            "--lease-token",
+            "lease-a",
+        ])
+        .expect("parse reference pointer action");
+        let BrowserCommand::Execute(args) = browser_command(cli) else {
+            panic!("expected browser execute subcommand");
+        };
+        assert_eq!(args.reference.as_deref(), Some("@e1"));
+        assert_eq!(args.action, "pointer_click");
+        assert_eq!(args.wait_text.as_deref(), Some("Saved"));
+        assert!(args.focus);
+    }
+
+    #[test]
+    fn browser_execute_accepts_monitoring_and_explicit_upload_files() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "browser",
+            "execute",
+            "--selector",
+            "input[type=file]",
+            "--action",
+            "upload",
+            "--file",
+            "fixtures/avatar.png",
+            "--file",
+            "fixtures/profile.json",
+            "--monitor",
+        ])
+        .expect("parse monitored upload action");
+        let BrowserCommand::Execute(args) = browser_command(cli) else {
+            panic!("expected browser execute subcommand");
+        };
+        assert_eq!(args.action, "upload");
+        assert_eq!(args.files.len(), 2);
+        assert!(args.monitor);
     }
 
     #[test]
@@ -930,10 +1442,7 @@ mod tests {
             "data-qa",
         ])
         .expect("parse browser locator");
-        let Some(Command::Browser {
-            action: BrowserCommand::Locator(args),
-        }) = cli.command
-        else {
+        let BrowserCommand::Locator(args) = browser_command(cli) else {
             panic!("expected browser locator subcommand");
         };
         assert_eq!(args.target.session.as_deref(), Some("profile-a"));
@@ -959,12 +1468,9 @@ mod tests {
             "45",
         ])
         .expect("parse browser lease acquire");
-        let Some(Command::Browser {
-            action:
-                BrowserCommand::Lease {
-                    action: BrowserLeaseCommand::Acquire(args),
-                },
-        }) = cli.command
+        let BrowserCommand::Lease {
+            action: BrowserLeaseCommand::Acquire(args),
+        } = browser_command(cli)
         else {
             panic!("expected browser lease acquire subcommand");
         };
@@ -991,13 +1497,203 @@ mod tests {
             "button",
         ])
         .expect("parse a lease token beginning with a hyphen");
-        let Some(Command::Browser {
-            action: BrowserCommand::Locator(args),
-        }) = cli.command
-        else {
+        let BrowserCommand::Locator(args) = browser_command(cli) else {
             panic!("expected browser locator subcommand");
         };
         assert_eq!(args.target.lease_token.as_deref(), Some("-legacy-token"));
+    }
+
+    #[test]
+    fn browser_console_start_accepts_target_filters_and_limits() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "browser",
+            "console",
+            "start",
+            "--session",
+            "profile-a",
+            "--window",
+            "7",
+            "--tab",
+            "42",
+            "--lease-token",
+            "lease-a",
+            "--level",
+            "info,error",
+            "--max-entries",
+            "200",
+            "--sensitive-field",
+            "account-id",
+        ])
+        .expect("parse console capture start");
+        let BrowserCommand::Console {
+            action: BrowserConsoleCommand::Start(args),
+        } = browser_command(cli)
+        else {
+            panic!("expected browser console start subcommand");
+        };
+        assert_eq!(args.level, ["info", "error"]);
+        assert_eq!(args.max_entries, Some(200));
+        assert_eq!(args.sensitive_fields, ["account-id"]);
+    }
+
+    #[test]
+    fn browser_grant_create_requires_explicit_scope_inputs() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "browser",
+            "grant",
+            "create",
+            "--capability",
+            "javascript",
+            "--yes",
+            "--session",
+            "profile-a",
+            "--window",
+            "7",
+            "--tab",
+            "42",
+            "--lease-token",
+            "lease-a",
+        ])
+        .expect("parse privileged grant create");
+        let BrowserCommand::Grant {
+            action: BrowserGrantCommand::Create(args),
+        } = browser_command(cli)
+        else {
+            panic!("expected browser grant create");
+        };
+        assert_eq!(args.capability, "javascript");
+        assert!(args.yes);
+        assert_eq!(args.target.session.as_deref(), Some("profile-a"));
+    }
+
+    #[test]
+    fn browser_cookie_values_require_distinct_value_grant() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "browser",
+            "cookies",
+            "--grant-token",
+            "metadata-grant",
+            "--include-values",
+            "--value-grant-token",
+            "value-grant",
+            "--session",
+            "profile-a",
+            "--window",
+            "7",
+            "--tab",
+            "42",
+            "--lease-token",
+            "lease-a",
+        ])
+        .expect("parse privileged Cookie listing");
+        let BrowserCommand::Cookies(args) = browser_command(cli) else {
+            panic!("expected browser cookies subcommand");
+        };
+        assert!(args.include_values);
+        assert_eq!(args.value_grant_token.as_deref(), Some("value-grant"));
+    }
+
+    #[test]
+    fn browser_privileged_metadata_commands_parse_scoped_inputs() {
+        let setting = Cli::try_parse_from([
+            "teshi",
+            "browser",
+            "content-setting",
+            "notifications",
+            "--value",
+            "block",
+            "--grant-token",
+            "setting-grant",
+            "--session",
+            "profile-a",
+            "--window",
+            "7",
+            "--tab",
+            "42",
+            "--lease-token",
+            "lease-a",
+        ])
+        .expect("parse content setting command");
+        let BrowserCommand::ContentSetting(args) = browser_command(setting) else {
+            panic!("expected content-setting subcommand");
+        };
+        assert_eq!(args.setting, "notifications");
+        assert_eq!(args.value.as_deref(), Some("block"));
+
+        let extensions = Cli::try_parse_from([
+            "teshi",
+            "browser",
+            "extensions",
+            "--grant-token",
+            "management-grant",
+            "--session",
+            "profile-a",
+            "--window",
+            "7",
+            "--tab",
+            "42",
+            "--lease-token",
+            "lease-a",
+        ])
+        .expect("parse extension metadata command");
+        let BrowserCommand::Extensions(args) = browser_command(extensions) else {
+            panic!("expected extensions subcommand");
+        };
+        assert_eq!(args.max_entries, 200);
+    }
+
+    #[test]
+    fn browser_network_detail_requires_explicit_body_flag_for_body_limit() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "browser",
+            "network",
+            "detail",
+            "request-1",
+            "--session",
+            "profile-a",
+            "--window",
+            "7",
+            "--tab",
+            "42",
+            "--lease-token",
+            "lease-a",
+            "--include-body",
+            "--max-body-bytes",
+            "65536",
+        ])
+        .expect("parse network detail");
+        let BrowserCommand::Network {
+            action: BrowserNetworkCommand::Detail(args),
+        } = browser_command(cli)
+        else {
+            panic!("expected browser network detail subcommand");
+        };
+        assert_eq!(args.network_request_id, "request-1");
+        assert!(args.include_body);
+        assert_eq!(args.max_body_bytes, Some(65_536));
+
+        Cli::try_parse_from([
+            "teshi",
+            "browser",
+            "network",
+            "detail",
+            "request-1",
+            "--session",
+            "profile-a",
+            "--window",
+            "7",
+            "--tab",
+            "42",
+            "--lease-token",
+            "lease-a",
+            "--max-body-bytes",
+            "65536",
+        ])
+        .expect_err("body limit without --include-body must fail");
     }
 
     #[test]

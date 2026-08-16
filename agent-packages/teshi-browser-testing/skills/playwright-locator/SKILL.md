@@ -1,11 +1,13 @@
 ---
 name: playwright-locator
-description: Acquire and verify stable Playwright locators from a user's local Chromium profile through Teshi's multi-session browser broker. Use when an agent needs to inspect a live page, distinguish several connected browser profiles or tabs, generate Playwright locator expressions from an element description or Gherkin step, re-verify a candidate, or capture optional request-scoped evidence. Do not use this workflow to invent or execute test actions.
+description: Inspect and safely control explicit local Chromium Profiles through Teshi's P0 multi-session broker, including revision-bound refs, verified Playwright locators, typed actions/waits, and tab lifecycle. Use only when the requested test step supplies the intended action.
 ---
 
 # Playwright Locator
 
-Use Teshi's typed browser operations. Keep the workflow observational: identify an element and return verified locator candidates without clicking, filling, navigating, or inventing a test step.
+Use Teshi's typed browser operations. Locator acquisition stays observational. Execute a P0 action only when the user or selected test step explicitly supplies that action; never invent one.
+
+`teshi browser sessions` starts or reuses the per-user loopback broker even when Desktop is closed. A live incompatible broker is never terminated implicitly.
 
 ## Preflight
 
@@ -70,6 +72,22 @@ teshi browser locator-verify \
 
 Treat `stale_browser_target` or `stale_page_context` as a hard stop. Acquire a new snapshot and resolve again; never relabel a stale result as verified.
 
+## Execute an explicit P0 action
+
+Use exactly one of `--reference`, `--candidate-json`, or `--selector`. Compact refs such as `@e1` are valid only for their original Profile, tab, snapshot, and page revision. Structured candidates are re-verified immediately before mutation.
+
+```bash
+teshi browser execute \
+  --session <extension_instance_id> --window <window_id> --tab <tab_id> \
+  --lease-token <lease_token> \
+  --reference @e1 --snapshot-id <snapshot_id> --page-revision <revision> \
+  --action click --wait-text Saved
+```
+
+Use `pointer_click --focus` only when real pointer/focus behavior is required; ordinary `click` is DOM activation. Typed waits are `--wait-url`, `--wait-text`, `--wait-state`, `--wait-revision-change`, and `--wait-load`. Inspect `action_outcome` and `wait_outcome` separately: a wait timeout does not mean the action was not executed and must not trigger an automatic retry.
+
+Use `teshi browser lookup`, `profile-label`, and `tab open|close|activate|new-window|group` for explicit Profile and tab lifecycle. Every tab/window mutation requires the Profile lease and returns complete target identity for created tabs. `tab activate` leaves the browser window unfocused unless `--focus-window` is explicit. Treat `organized: false` with `tab_group_unavailable` as a non-fatal grouping result; the tabs remain usable.
+
 Capture a screenshot reference only when the user requests evidence or it materially helps disambiguation:
 
 ```bash
@@ -80,6 +98,47 @@ teshi browser evidence \
 ```
 
 Do not expose unrelated page content, URLs, titles, screenshot paths, or lease tokens in summaries.
+
+For a mutation whose visible impact matters, add `--monitor`. This performs one action dispatch and observes bounded page summaries before and after it; a diff never authorizes retrying the mutation. For file inputs use `--action upload --file <project-relative-path>` with only caller-specified files. Do not discover or enumerate candidate files. A rejected file index or policy reason is enough to ask for a corrected explicit path.
+
+## Capture bounded P1 diagnostics
+
+Check the selected session's `capabilities.supported_operations` before using P1. Console and network capture require the same complete target and Profile lease as control operations. Start capture only when diagnostics are needed, apply tighter limits where practical, and always stop it before releasing the lease.
+
+```bash
+teshi browser console start \
+  --session <extension_instance_id> --window <window_id> --tab <tab_id> \
+  --lease-token <lease_token> --level info,error --max-entries 200
+teshi browser console list \
+  --session <extension_instance_id> --window <window_id> --tab <tab_id> \
+  --lease-token <lease_token> --max-age-ms 60000
+teshi browser console stop \
+  --session <extension_instance_id> --window <window_id> --tab <tab_id> \
+  --lease-token <lease_token>
+```
+
+Network capture stores metadata only by default. `network list` never returns headers or bodies. Use `network detail <request_id>` for redacted request/response headers. Add `--include-body` only when the user or test step needs the response body; it remains byte-bounded and reports encoding, truncation, original size, and returned size.
+
+```bash
+teshi browser network start \
+  --session <extension_instance_id> --window <window_id> --tab <tab_id> \
+  --lease-token <lease_token> --max-entries 500
+teshi browser network list \
+  --session <extension_instance_id> --window <window_id> --tab <tab_id> \
+  --lease-token <lease_token>
+teshi browser network detail <request_id> --include-body --max-body-bytes 65536 \
+  --session <extension_instance_id> --window <window_id> --tab <tab_id> \
+  --lease-token <lease_token>
+teshi browser network stop \
+  --session <extension_instance_id> --window <window_id> --tab <tab_id> \
+  --lease-token <lease_token>
+```
+
+Authorization, Cookie, token, password, secret, and caller-configured fields are redacted by default. Do not treat redaction as permission to collect unrelated traffic. A debugger conflict means DevTools or another controller owns the target; stop and report it rather than retrying attachment.
+
+## Keep privileged P2 access explicit
+
+Privileged browser commands are disabled by default. Never request optional Chromium permissions silently or reuse a grant across projects, Profiles, callers, or broker restarts. For Cookie reads, start metadata-only; request the separate `cookie-values` grant only when values are explicitly necessary. Content settings must remain on the selected tab origin and fixed allowlist. Extension management is metadata-read-only; do not attempt enable, disable, or uninstall mutations. P2 MCP tools remain absent unless explicitly allowlisted by startup policy.
 
 ## Always release
 
@@ -97,4 +156,4 @@ If release reports that the lease already expired, report that bounded recovery 
 
 Return the recommended Playwright expression, structured arguments, frame/shadow context, match count, verification state, page revision, stability rationale, warnings, and useful alternatives. State why no locator is returned when the target is ambiguous, busy, disconnected, incompatible, timed out, or stale.
 
-For MCP callers, use the equivalent `list_browser_sessions`, `list_browser_tabs`, lease, snapshot, locator, verification, and evidence tools. Their target, validation, timeout, result, and error semantics are identical to the CLI operations.
+For MCP callers, observational tools are available by default. Start the server with `--allow-browser-mutations` to advertise the safe P0 `execute_browser_action` tool. Its target, validation, timeout, result, and error semantics are identical to the CLI operation.

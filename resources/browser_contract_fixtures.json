@@ -1,5 +1,79 @@
 {
   "schema_version": 1,
+  "phased": {
+    "p0_only_heartbeat": {
+      "schema_version": 1,
+      "protocol_version": 1,
+      "extension_instance_id": "profile-p0",
+      "extension_version": "0.7.9",
+      "features": [
+        { "feature": "p0.control", "available": true }
+      ],
+      "supported_actions": ["click", "fill", "navigate"],
+      "optional_permissions": {
+        "cookies": false,
+        "content_settings": false,
+        "extension_management": false
+      }
+    },
+    "p0_p1_heartbeat": {
+      "schema_version": 1,
+      "protocol_version": 1,
+      "extension_instance_id": "profile-p0-p1",
+      "extension_version": "0.8.0-dev",
+      "features": [
+        { "feature": "p0.control", "available": true },
+        { "feature": "p1.observability_artifacts", "available": true }
+      ],
+      "supported_actions": ["click", "pointer_click", "fill", "type", "navigate", "upload"],
+      "supported_operations": [
+        "capture_browser_screenshot",
+        "generate_browser_pdf",
+        "start_console_capture",
+        "list_console_events",
+        "clear_console_capture",
+        "stop_console_capture",
+        "start_network_capture",
+        "list_network_requests",
+        "get_network_request_detail",
+        "clear_network_capture",
+        "stop_network_capture"
+      ],
+      "optional_permissions": {
+        "cookies": false,
+        "content_settings": false,
+        "extension_management": false
+      }
+    },
+    "p2_optional_permissions_heartbeat": {
+      "schema_version": 1,
+      "protocol_version": 1,
+      "extension_instance_id": "profile-p2-permissions",
+      "extension_version": "0.8.0-dev",
+      "features": [
+        { "feature": "p0.control", "available": true },
+        { "feature": "p2.cookies", "available": false, "reason": "permission_not_granted" },
+        { "feature": "p2.raw_cdp", "available": false, "reason": "disabled_by_default" }
+      ],
+      "supported_actions": ["click", "navigate"],
+      "optional_permissions": {
+        "cookies": false,
+        "content_settings": false,
+        "extension_management": false
+      }
+    },
+    "incompatible_feature_request": {
+      "cmd": "capture_browser_screenshot",
+      "request_id": "feature-request-1",
+      "required_feature": "p1.observability_artifacts",
+      "target": {
+        "extension_instance_id": "profile-p0",
+        "window_id": 7,
+        "tab_id": 42
+      },
+      "lease_token": "fixture-secret-not-for-discovery"
+    }
+  },
   "legacy": {
     "heartbeat": {
       "project_root": "/work/project",

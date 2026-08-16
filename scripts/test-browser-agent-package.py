@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -76,6 +77,24 @@ def fake_heartbeat(instance_id: str, label: str) -> dict:
         "profile_label": label,
         "extension_version": cargo_version(),
         "protocol_version": 1,
+        "features": [
+            {"feature": "p0.control", "available": True},
+            {"feature": "p1.observability_artifacts", "available": True},
+        ],
+        "supported_actions": ["click", "upload"],
+        "supported_operations": [
+            "capture_browser_screenshot",
+            "generate_browser_pdf",
+            "start_console_capture",
+            "list_console_events",
+            "clear_console_capture",
+            "stop_console_capture",
+            "start_network_capture",
+            "list_network_requests",
+            "get_network_request_detail",
+            "clear_network_capture",
+            "stop_network_capture",
+        ],
         "browser": {"name": "Chromium", "version": "140", "platform": "Linux"},
         "active_window_id": 7,
         "active_tab_id": 42,
@@ -114,6 +133,24 @@ def smoke_test() -> None:
         shutil.copy2(BROKER_SOURCE, runtime / BROKER_SOURCE.name)
         shutil.copy2(BROWSER_SERVICE_SOURCE, runtime / BROWSER_SERVICE_SOURCE.name)
 
+        exe_name = "teshi.exe" if os.name == "nt" else "teshi"
+        built_cli = REPO_ROOT / "target" / "debug" / exe_name
+        require(built_cli.is_file(), f"built CLI is missing: {built_cli}")
+        installed_bin = package_root / "bin"
+        installed_share = installed_bin / "share"
+        installed_share.mkdir(parents=True)
+        installed_cli = installed_bin / exe_name
+        shutil.copy2(built_cli, installed_cli)
+        shutil.copy2(BROWSER_SERVICE_SOURCE, installed_share / BROWSER_SERVICE_SOURCE.name)
+        shutil.copy2(BROKER_SOURCE, installed_share / BROKER_SOURCE.name)
+
+        # Give the isolated project a runnable Python environment without copying
+        # the whole checkout-local virtualenv. The runtime resolves the base
+        # interpreter from pyvenv.cfg, while PYTHONPATH supplies its installed deps.
+        isolated_venv = isolated / ".venv"
+        isolated_venv.mkdir()
+        shutil.copy2(REPO_ROOT / ".venv" / "pyvenv.cfg", isolated_venv / "pyvenv.cfg")
+
         previous_cwd = Path.cwd()
         os.chdir(isolated)
         try:
@@ -145,6 +182,25 @@ def smoke_test() -> None:
             require(extension["version"] == version, "extension/CLI version drift")
             require(compatibility["broker_protocol"] == 1, "broker protocol drift")
             require(compatibility["browser_agent_schema"] == 1, "agent schema drift")
+            require(compatibility["phases"]["p0.control"]["cli"], "P0 CLI missing")
+            require(compatibility["phases"]["p0.control"]["extension"], "P0 extension missing")
+            p1 = compatibility["phases"]["p1.observability_artifacts"]
+            require(p1["cli"] and p1["broker"] and p1["extension"], "P1 surfaces missing")
+            require("upload" in p1["supported_actions"], "P1 upload capability missing")
+            require("list_console_events" in p1["operations"], "P1 console capability missing")
+            require("get_network_request_detail" in p1["operations"], "P1 network capability missing")
+            for feature in (
+                "p2.javascript",
+                "p2.raw_cdp",
+                "p2.cookies",
+                "p2.content_settings",
+                "p2.extension_management",
+            ):
+                declaration = compatibility["phases"][feature]
+                require(declaration["cli"] and declaration["broker"] and declaration["extension"], f"{feature} surfaces missing")
+                require(not declaration["default_enabled"], f"{feature} must default to disabled")
+                require(declaration["mcp"] is False, f"{feature} MCP must be absent by default")
+            require(compatibility["phases"]["p2.extension_management"]["mutations"] is False, "extension mutations must remain disabled")
 
             mcp = load_json(package_root / ".mcp.json")["mcpServers"]
             server = mcp["teshi-browser-agent"]
@@ -153,6 +209,31 @@ def smoke_test() -> None:
                 server["args"] == ["mcp", "serve", "--stdio"],
                 "MCP STDIO arguments drifted",
             )
+
+            cli_env = os.environ.copy()
+            site_packages = REPO_ROOT / ".venv" / (
+                "Lib/site-packages" if os.name == "nt" else "lib/python3/site-packages"
+            )
+            cli_env["PYTHONPATH"] = str(site_packages)
+            cli_result = subprocess.run(
+                [str(installed_cli), "browser", "sessions"],
+                cwd=isolated,
+                env=cli_env,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            require(
+                cli_result.returncode == 0,
+                "installed CLI broker bootstrap failed: "
+                f"stdout={cli_result.stdout!r} stderr={cli_result.stderr!r}",
+            )
+            require(
+                (isolated / ".teshi" / "cdp-endpoint.json").is_file(),
+                "installed CLI did not write project compatibility data",
+            )
+            json.loads(cli_result.stdout)
 
             broker_module = load_staged_broker(runtime / "browser_agent_broker.py")
             broker = broker_module.BrowserSessionBroker()
@@ -176,6 +257,41 @@ def smoke_test() -> None:
             }
             require(broker.resolve_target(target_a)[1] == target_a, "profile A misrouted")
             require(broker.resolve_target(target_b)[1] == target_b, "profile B misrouted")
+            snapshot_a = {
+                "request_id": "package-snapshot-a",
+                "page_context_revision": "revision-a",
+                "interactive_elements": [{"element_ref": "opaque-a", "shortSelector": "#save"}],
+            }
+            broker.cache_snapshot_references(record_a, target_a, snapshot_a)
+            require(snapshot_a["interactive_elements"][0]["ref"] == "@e1", "P0 ref missing")
+            resolved = broker.resolve_element_reference(
+                "profile-a", target_a, "@e1", page_context_revision="revision-a"
+            )
+            require(resolved.element["element_ref"] == "opaque-a", "P0 ref misrouted")
+            require(
+                "direct-ws" in broker.heartbeat_response(record_a)["command_transports"],
+                "direct command transport missing",
+            )
+            background = (package_root / "extension" / "teshi-bridge" / "background.js").read_text(encoding="utf-8")
+            for marker in (
+                "direct_command",
+                "pointer_click",
+                "browser_wait_timeout",
+                "open_tab",
+                "create_window",
+                "captureMonitoringSummary",
+                "DOM.setFileInputFiles",
+                "startConsoleCapture",
+                "startNetworkCapture",
+                "tab_group_unavailable",
+                "listBrowserCookies",
+                "accessBrowserContentSetting",
+                "listBrowserExtensions",
+                "mutations_enabled: false",
+            ):
+                require(marker in background, f"packaged extension missing P0 marker: {marker}")
+            require(not broker.capability_grants, "default package unexpectedly contains an active P2 grant")
+            require(not record_a.optional_permissions and not record_b.optional_permissions, "default fake installation unexpectedly grants optional P2 permissions")
             broker.release_lease("profile-a", lease_a["lease_token"])
             broker.release_lease("profile-b", lease_b["lease_token"])
         finally:

@@ -43,13 +43,17 @@ pub use authoring::{
     DEFAULT_TESTPOINTS_DIR, REQUIREMENTS_INDEX_FILE,
 };
 pub use browser_agent::{
-    AccessibleElement, BrowserAgentError, BrowserAgentErrorCode, BrowserEvidenceReference,
-    BrowserLease, BrowserLeaseSummary, BrowserMetadata, BrowserOperation, BrowserOperationResponse,
-    BrowserOperations, BrowserPageSnapshot, BrowserSession, BrowserSessionHealth, BrowserTab,
-    BrowserTarget, BrowserWindow, ExtensionIdentity, LocatorContext, LocatorIntent,
-    LocatorVerificationStatus, PageContextRevision, PlaywrightLocatorCandidate,
-    PlaywrightLocatorKind, PlaywrightLocatorResult, BROWSER_AGENT_SCHEMA_VERSION,
-    BROWSER_BROKER_PROTOCOL_VERSION, DEFAULT_BROWSER_LEASE_TTL_SECS,
+    AccessibleElement, BrowserAction, BrowserAgentError, BrowserAgentErrorCode,
+    BrowserCapabilities, BrowserConsoleLevel, BrowserElementInput, BrowserElementReferenceRecord,
+    BrowserElementState, BrowserEvidenceReference, BrowserFeatureAvailability, BrowserFeatureId,
+    BrowserFeaturePhase, BrowserLease, BrowserLeaseSummary, BrowserMetadata, BrowserOperation,
+    BrowserOperationResponse, BrowserOperations, BrowserPageSnapshot, BrowserPrivilegedCapability,
+    BrowserRequestEnvelope, BrowserScreenshotFormat, BrowserSession, BrowserSessionHealth,
+    BrowserTab, BrowserTarget, BrowserWaitCondition, BrowserWindow, ExtensionIdentity,
+    LocatorContext, LocatorIntent, LocatorVerificationStatus, PageContextRevision,
+    PlaywrightLocatorCandidate, PlaywrightLocatorKind, PlaywrightLocatorResult,
+    BROWSER_AGENT_SCHEMA_VERSION, BROWSER_BROKER_PROTOCOL_VERSION,
+    DEFAULT_BROWSER_CAPABILITY_GRANT_TTL_SECS, DEFAULT_BROWSER_LEASE_TTL_SECS,
 };
 pub use daemon::{
     find_project_root, pick_free_port, remove_daemon_manifest, spawn_daemon_background,
@@ -97,9 +101,10 @@ pub use project_settings::{
 };
 pub use screen::{Cell, Color, ProcessState, ScreenGrid};
 pub use sidecar::{
+    chrome_broker_endpoint_path, ensure_user_chrome_broker, fetch_chrome_broker_endpoint,
     get_recent_projects, send_sidecar_command, send_sidecar_command_with_timeout,
     start_browser_sidecar, stop_browser_sidecar, BrowserError, BrowserMode, BrowserStartResult,
-    SidecarState, CHROME_DISCOVERY_PORT,
+    ChromeBrokerEndpoint, SidecarState, CHROME_DISCOVERY_PORT,
 };
 pub use terminal::{resize_terminal, spawn_terminal, stop_terminal, write_terminal, TerminalState};
 pub use watcher::FileWatcherState;

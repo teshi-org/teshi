@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
-use teshi_engine::send_sidecar_command_with_timeout;
+use teshi_engine::{ChromeBrokerEndpoint, send_sidecar_command_with_timeout};
 
 /// Parsed `.teshi/cdp-endpoint.json` payload used by browser CLI commands.
 #[derive(Debug, Clone)]
@@ -20,6 +20,9 @@ pub struct CdpEndpoint {
     pub mode: String,
     pub ws_url: String,
     pub page_url: Option<String>,
+    pub broker_pid: Option<u32>,
+    pub broker_start_id: Option<String>,
+    pub protocol_version: Option<u16>,
 }
 
 /// Locates a project root by walking upward from `start` until `.teshi/cdp-endpoint.json` exists.
@@ -66,13 +69,55 @@ pub fn read_cdp_endpoint(project_root: &Path) -> Result<CdpEndpoint> {
         .get("page_url")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    let broker_pid = payload
+        .get("broker_pid")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok());
+    let broker_start_id = payload
+        .get("broker_start_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let protocol_version = payload
+        .get("protocol_version")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u16::try_from(value).ok());
     Ok(CdpEndpoint {
         project_root: project_root.to_path_buf(),
         endpoint_path,
         mode,
         ws_url,
         page_url,
+        broker_pid,
+        broker_start_id,
+        protocol_version,
     })
+}
+
+/// Writes project-scoped compatibility data for an attached user-session broker.
+pub fn write_chrome_broker_endpoint(
+    project_root: &Path,
+    endpoint: &ChromeBrokerEndpoint,
+) -> Result<()> {
+    let path = project_root.join(".teshi").join("cdp-endpoint.json");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let payload = json!({
+        "schema_version": endpoint.schema_version,
+        "protocol_version": endpoint.protocol_version,
+        "mode": endpoint.mode,
+        "ws_url": endpoint.ws_url,
+        "page_url": "about:blank",
+        "bridge": "python",
+        "broker_pid": endpoint.broker_pid,
+        "broker_start_id": endpoint.broker_start_id,
+        "discovery_url": endpoint.discovery_url,
+        "extension_frame_ws_url": endpoint.extension_frame_ws_url,
+        "project_root": project_root,
+        "broker_project_root": endpoint.project_root,
+    });
+    let text = serde_json::to_string_pretty(&payload).context("serialize cdp-endpoint")?;
+    fs::write(&path, text).with_context(|| format!("write {}", path.display()))
 }
 
 /// Result of a sidecar health probe suitable for JSON CLI output.
@@ -86,6 +131,12 @@ pub struct DoctorReport {
     pub error: Option<String>,
     pub tcp_reachable: bool,
     pub snapshot_ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub broker_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub broker_start_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<u16>,
 }
 
 /// Probes TCP reachability and issues a short `get_page_snapshot` over the sidecar WebSocket.
@@ -136,6 +187,9 @@ pub fn doctor_endpoint(project_root: &Path) -> Result<DoctorReport> {
         error,
         tcp_reachable,
         snapshot_ok,
+        broker_pid: endpoint.broker_pid,
+        broker_start_id: endpoint.broker_start_id,
+        protocol_version: endpoint.protocol_version,
     })
 }
 
@@ -275,4 +329,54 @@ pub fn ensure_sidecar_healthy(project_root: &Path) -> Result<CdpEndpoint> {
     Err(anyhow!(
         "browser sidecar still unhealthy after reconnect; run `teshi browser doctor` for details"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn broker_endpoint() -> ChromeBrokerEndpoint {
+        ChromeBrokerEndpoint {
+            schema_version: 1,
+            protocol_version: 1,
+            mode: "chrome".into(),
+            ws_url: "ws://127.0.0.1:24567".into(),
+            discovery_url: "http://127.0.0.1:17373/v1/bridge".into(),
+            extension_frame_ws_url: "ws://127.0.0.1:24567/extension/frames".into(),
+            broker_pid: 1234,
+            broker_start_id: "broker-start-a".into(),
+            broker_features: vec!["p0.control".into()],
+            project_root: "initial-project".into(),
+        }
+    }
+
+    #[test]
+    fn stale_project_endpoint_is_replaced_with_live_broker_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let teshi = temp.path().join(".teshi");
+        fs::create_dir_all(&teshi).unwrap();
+        fs::write(
+            teshi.join("cdp-endpoint.json"),
+            r#"{"mode":"chrome","ws_url":"ws://127.0.0.1:1","broker_start_id":"stale"}"#,
+        )
+        .unwrap();
+        write_chrome_broker_endpoint(temp.path(), &broker_endpoint()).unwrap();
+        let current = read_cdp_endpoint(temp.path()).unwrap();
+        assert_eq!(current.ws_url, "ws://127.0.0.1:24567");
+        assert_eq!(current.broker_start_id.as_deref(), Some("broker-start-a"));
+        assert_eq!(current.broker_pid, Some(1234));
+    }
+
+    #[test]
+    fn cli_and_desktop_compatibility_writes_preserve_shared_broker_identity() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let endpoint = broker_endpoint();
+        write_chrome_broker_endpoint(first.path(), &endpoint).unwrap();
+        write_chrome_broker_endpoint(second.path(), &endpoint).unwrap();
+        let cli = read_cdp_endpoint(first.path()).unwrap();
+        let desktop = read_cdp_endpoint(second.path()).unwrap();
+        assert_eq!(cli.broker_start_id, desktop.broker_start_id);
+        assert_eq!(cli.ws_url, desktop.ws_url);
+    }
 }

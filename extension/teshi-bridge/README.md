@@ -21,7 +21,7 @@ Toolbar and store icons are PNGs under `icons/`. After updating brand icons, reg
 1. In **Google Chrome** (or another Chromium browser), open the tabs you need on an **http(s)** page. Use one dedicated browser profile per concurrent agent.
 2. In teshi-desktop, open your project and click **Connect Chrome** in the Browser panel.
 3. Open the extension popup, set an optional profile label such as `agent-a`, then click **Connect to teshi**. The popup reports the persisted instance ID, extension/protocol versions, and actionable disconnected/incompatible/debugger/stale status.
-4. The extension sends **metadata heartbeats** to `127.0.0.1:17373` and a session-authenticated **screencast** over WebSocket. The broker keeps command queues, pending requests, frames, diagnostics, and leases isolated by extension instance.
+4. `teshi browser sessions` starts or reuses the per-user broker on `127.0.0.1:17373`; Desktop attaches to that same process. The extension sends metadata heartbeats and opens a session-authenticated WebSocket for screencast frames plus low-latency correlated commands. Heartbeat delivery is the bounded fallback.
 5. When connected, explicitly select the profile and tab in the Browser panel. The panel never projects tabs or frames from several profiles into one implicit selection.
 6. Select a Gherkin step and run the **bdd-locator** agent skill in the terminal, or use the packaged **playwright-locator** Skill for observational locator acquisition.
 
@@ -42,6 +42,10 @@ If the preview is idle or stalled:
 - **activeTab** — limit scope to user-visible browsing.
 - **alarms** — periodic wake for MV3 service worker.
 - **storage** — persist the opaque extension instance ID and optional display label in this browser profile.
+
+The popup offers three optional, separately approved permissions. `cookies` enables selected-tab Cookie metadata, `contentSettings` enables an allowlisted selected-origin setting read/write surface, and `management` enables extension metadata reads. Teshi never requests these silently. Removing a permission immediately makes the corresponding capability unavailable; safe P0/P1 operations continue working.
+
+Browser permission alone is not authorization. Every P2 call also requires the selected Profile lease and a short-lived, project/profile/caller-bound Teshi grant. Cookie values require a second `cookie-values` grant. Extension enable/disable/uninstall mutations are not implemented.
 - **127.0.0.1 / ws://127.0.0.1** — local bridge discovery, heartbeat, and extension frame WebSocket.
 - **http(s)://\*** — pages that can be debugged and screencast.
 
@@ -49,13 +53,13 @@ If the preview is idle or stalled:
 
 Protocol version 1 is the current contract. Legacy single-profile heartbeats remain accepted only through the bounded compatibility adapter.
 
-**Metadata** — `POST /v1/bridge/heartbeat` with `extension_instance_id`, optional `profile_label`, extension/protocol versions, browser metadata, all windows/tabs, active target, and project metadata. The response includes the same instance ID, compatibility preflight, only that instance's next `cmd`, and optional `stream_restart`.
+**Metadata** — `POST /v1/bridge/heartbeat` with `extension_instance_id`, optional `profile_label`, extension/protocol versions, browser metadata, all windows/tabs, active target, and project metadata. Every mutating POST sends `X-Teshi-Broker-Token`, derived from the random token in the discovered WebSocket URL. The response includes the same instance ID, compatibility preflight, only that instance's next `cmd`, and optional `stream_restart`.
 
 **Preview (primary)** — CDP `Page.startScreencast` → binary **TSH1** WebSocket uplink to `extension_frame_ws_url`:
 
 - `[4B magic 'TSH1'][4B meta_len LE][meta JSON][JPEG bytes]`
 - `stream_hello` JSON with `project_root`, `extension_instance_id`, and protocol version; the bridge authenticates the session before accepting binary frames.
 
-**Commands** (on heartbeat response `cmd`) carry a unique request ID and composite instance/window/tab target. In addition to legacy snapshot/highlight/execute commands, protocol 1 verifies batches of structured Playwright candidates and captures request-scoped evidence. Replies echo the request, instance, and target and are quarantined when correlation does not match.
+**Commands** carry a unique request ID and composite instance/window/tab target. P0 supports revision-bound snapshot refs, structured-candidate re-verification, DOM and CDP-pointer activation, typed input/waits, and lease-scoped tab/window/group lifecycle. Direct WebSocket dispatch requires the same broker-start token and atomically claims a command from the heartbeat queue; send failure restores the same request once. Replies echo request, instance, and target and mismatches are quarantined.
 
 **Discovery** — `GET /v1/bridge` includes `sessions[]` with identities, health, browser versions, windows/tabs, public lease state, `extension_frame_ws_url`, and stream diagnostics. Legacy flat fields are populated only when exactly one eligible target exists.

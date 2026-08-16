@@ -7,25 +7,33 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow};
 use serde_json::json;
 use teshi_engine::{
-    BrowserMode, BrowserOperation, BrowserOperations, BrowserTarget, LocatorIntent,
-    PageContextRevision, PlaywrightLocatorCandidate, RuntimeConfig, StepBinding, TeshiEngine,
-    default_browser_service_script, default_winapp_service_script, load_project_settings,
-    open_project, read_active_step, resolve_step_bindings, send_sidecar_command_with_timeout,
+    BrowserAction, BrowserConsoleLevel, BrowserElementInput, BrowserMode, BrowserOperation,
+    BrowserOperations, BrowserPrivilegedCapability, BrowserScreenshotFormat, BrowserTarget,
+    BrowserWaitCondition, LocatorIntent, PageContextRevision, PlaywrightLocatorCandidate,
+    RuntimeConfig, StepBinding, TeshiEngine, default_browser_service_script,
+    default_winapp_service_script, ensure_user_chrome_broker, load_project_settings, open_project,
+    read_active_step, resolve_step_bindings, send_sidecar_command_with_timeout,
     start_browser_sidecar, stop_browser_sidecar,
 };
 
 use super::browser_endpoint::{
     auto_reconnect_enabled, doctor_endpoint, ensure_sidecar_healthy, read_cdp_endpoint,
     reconnect_embedded, resolve_browser_project_root, write_cdp_endpoint_from_rust,
+    write_chrome_broker_endpoint,
 };
 use super::locator_verify::{LocatorVerifyRecord, append_locator_verify, verify_record_json};
 use super::replay_screenshots::{
     ReplayScreenshotEntry, capture_and_save_screenshot, iso_now, load_or_create_index, save_index,
 };
 use super::{
-    BrowserCommand, BrowserEvidenceArgs, BrowserExecuteArgs, BrowserLeaseCommand,
-    BrowserLocatorArgs, BrowserLocatorVerifyArgs, BrowserNavigateArgs, BrowserReconnectArgs,
-    BrowserReplayArgs, BrowserSelectorArgs, BrowserServeEmbeddedArgs, BrowserSnapshotArgs,
+    BrowserArtifactCleanupArgs, BrowserAuditArgs, BrowserCdpArgs, BrowserCommand,
+    BrowserConsoleCommand, BrowserConsoleListArgs, BrowserConsoleStartArgs,
+    BrowserContentSettingArgs, BrowserCookiesArgs, BrowserEvidenceArgs, BrowserExecuteArgs,
+    BrowserExtensionsArgs, BrowserGrantCommand, BrowserJavascriptArgs, BrowserLeaseCommand,
+    BrowserLocatorArgs, BrowserLocatorVerifyArgs, BrowserNavigateArgs, BrowserNetworkCommand,
+    BrowserNetworkDetailArgs, BrowserNetworkListArgs, BrowserNetworkStartArgs, BrowserPdfArgs,
+    BrowserProfileLabelCommand, BrowserReconnectArgs, BrowserReplayArgs, BrowserScreenshotArgs,
+    BrowserSelectorArgs, BrowserServeEmbeddedArgs, BrowserSnapshotArgs, BrowserTabCommand,
     BrowserTargetArgs, BrowserVerifyArgs,
 };
 
@@ -34,11 +42,14 @@ pub fn handle_browser_command(action: &BrowserCommand) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let project_root = resolve_browser_project_root(&cwd).unwrap_or(cwd);
     match action {
-        BrowserCommand::Sessions => run_typed_operation(
-            &project_root,
-            BrowserOperation::ListBrowserSessions,
-            Duration::from_secs(15),
-        ),
+        BrowserCommand::Sessions => {
+            ensure_cli_chrome_broker(&project_root)?;
+            run_typed_operation(
+                &project_root,
+                BrowserOperation::ListBrowserSessions,
+                Duration::from_secs(15),
+            )
+        }
         BrowserCommand::Tabs(args) => run_typed_operation(
             &project_root,
             BrowserOperation::ListBrowserTabs {
@@ -46,7 +57,26 @@ pub fn handle_browser_command(action: &BrowserCommand) -> Result<()> {
             },
             Duration::from_secs(15),
         ),
+        BrowserCommand::Lookup(args) => run_typed_operation(
+            &project_root,
+            BrowserOperation::LookupBrowserSessions {
+                extension_instance_id: args.session.clone(),
+                profile_label: args.label.clone(),
+                browser_name: args.browser_name.clone(),
+                tab_id: args.tab,
+            },
+            Duration::from_secs(15),
+        ),
+        BrowserCommand::ProfileLabel { action } => profile_label(&project_root, action),
+        BrowserCommand::Tab { action } => tab_operation(&project_root, action),
         BrowserCommand::Lease { action } => lease(&project_root, action),
+        BrowserCommand::Grant { action } => grant(&project_root, action),
+        BrowserCommand::Audit(args) => privileged_audit(&project_root, args),
+        BrowserCommand::Javascript(args) => privileged_javascript(&project_root, args),
+        BrowserCommand::Cdp(args) => privileged_cdp(&project_root, args),
+        BrowserCommand::Cookies(args) => privileged_cookies(&project_root, args),
+        BrowserCommand::ContentSetting(args) => privileged_content_setting(&project_root, args),
+        BrowserCommand::Extensions(args) => privileged_extensions(&project_root, args),
         BrowserCommand::Snapshot(args) => snapshot(&project_root, args),
         BrowserCommand::Navigate(args) => navigate(&project_root, args),
         BrowserCommand::Highlight(args) => highlight(&project_root, args),
@@ -62,7 +92,263 @@ pub fn handle_browser_command(action: &BrowserCommand) -> Result<()> {
         BrowserCommand::Locator(args) => locator(&project_root, args),
         BrowserCommand::LocatorVerify(args) => locator_verify(&project_root, args),
         BrowserCommand::Evidence(args) => evidence(&project_root, args),
+        BrowserCommand::Screenshot(args) => screenshot(&project_root, args),
+        BrowserCommand::Pdf(args) => pdf(&project_root, args),
+        BrowserCommand::Console { action } => console(&project_root, action),
+        BrowserCommand::Network { action } => network(&project_root, action),
+        BrowserCommand::ArtifactCleanup(args) => artifact_cleanup(&project_root, args),
     }
+}
+
+fn grant(project_root: &Path, action: &BrowserGrantCommand) -> Result<()> {
+    let operation = match action {
+        BrowserGrantCommand::Create(args) => {
+            if !args.yes && !args.non_interactive {
+                return Err(anyhow!(
+                    "privileged grant requires --yes, or --non-interactive with an exact --acknowledge-capability and policy allowlist"
+                ));
+            }
+            let (target, lease_token) = required_target(&args.target)?;
+            let capability: BrowserPrivilegedCapability =
+                serde_json::from_value(json!(args.capability))?;
+            let acknowledged_capability = args
+                .acknowledge_capability
+                .as_ref()
+                .map(|value| serde_json::from_value(json!(value)))
+                .transpose()?;
+            BrowserOperation::CreateBrowserCapabilityGrant {
+                target,
+                lease_token,
+                capability,
+                ttl_secs: args.ttl,
+                interactive_confirmed: args.yes,
+                non_interactive: args.non_interactive,
+                acknowledged_capability,
+            }
+        }
+        BrowserGrantCommand::List(args) => BrowserOperation::ListBrowserCapabilityGrants {
+            extension_instance_id: args.session.clone(),
+        },
+        BrowserGrantCommand::Revoke(args) => BrowserOperation::RevokeBrowserCapabilityGrant {
+            grant_id: args.grant_id.clone(),
+        },
+        BrowserGrantCommand::Expire => BrowserOperation::ExpireBrowserCapabilityGrants,
+    };
+    run_typed_operation(project_root, operation, Duration::from_secs(15))
+}
+
+fn privileged_audit(project_root: &Path, args: &BrowserAuditArgs) -> Result<()> {
+    run_typed_operation(
+        project_root,
+        BrowserOperation::ListBrowserPrivilegedAudit { limit: args.limit },
+        Duration::from_secs(15),
+    )
+}
+
+fn read_project_privileged_input(
+    project_root: &Path,
+    path: &Path,
+    max_bytes: u64,
+) -> Result<String> {
+    let root = project_root
+        .canonicalize()
+        .context("canonicalize project root")?;
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let canonical = candidate
+        .canonicalize()
+        .context("privileged input file is unavailable")?;
+    if !canonical.starts_with(&root) {
+        return Err(anyhow!("privileged input file is outside the project root"));
+    }
+    if canonical.metadata()?.len() > max_bytes {
+        return Err(anyhow!(
+            "privileged input file exceeds the configured byte limit"
+        ));
+    }
+    fs::read_to_string(canonical).context("read privileged input file")
+}
+
+fn privileged_javascript(project_root: &Path, args: &BrowserJavascriptArgs) -> Result<()> {
+    let (target, lease_token) = required_target(&args.target)?;
+    let (expression, source_kind) = if let Some(expression) = &args.expression {
+        (expression.clone(), "inline".to_string())
+    } else {
+        (
+            read_project_privileged_input(
+                project_root,
+                args.file.as_deref().context("--file is required")?,
+                1_048_576,
+            )?,
+            "file".to_string(),
+        )
+    };
+    run_typed_operation(
+        project_root,
+        BrowserOperation::ExecutePrivilegedJavascript {
+            target,
+            lease_token,
+            capability_grant_token: args.grant_token.clone(),
+            expression,
+            source_kind,
+            page_context_revision: args.page_revision.clone().map(PageContextRevision),
+            timeout_ms: args.timeout_ms,
+            max_result_bytes: args.max_result_bytes,
+        },
+        command_timeout_for_ms(args.timeout_ms),
+    )
+}
+
+fn privileged_cdp(project_root: &Path, args: &BrowserCdpArgs) -> Result<()> {
+    let (target, lease_token) = required_target(&args.target)?;
+    let params_text = if let Some(value) = &args.params_json {
+        Some(value.clone())
+    } else if let Some(path) = &args.params_file {
+        Some(read_project_privileged_input(project_root, path, 262_144)?)
+    } else {
+        None
+    };
+    let params = params_text
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .context("CDP params must be a JSON object")?
+        .unwrap_or_else(|| json!({}));
+    if !params.is_object() {
+        return Err(anyhow!("CDP params must be a JSON object"));
+    }
+    run_typed_operation(
+        project_root,
+        BrowserOperation::ExecutePrivilegedCdp {
+            target,
+            lease_token,
+            capability_grant_token: args.grant_token.clone(),
+            method: args.method.clone(),
+            params,
+            page_context_revision: args.page_revision.clone().map(PageContextRevision),
+            max_result_bytes: args.max_result_bytes,
+        },
+        Duration::from_secs(30),
+    )
+}
+
+fn privileged_cookies(project_root: &Path, args: &BrowserCookiesArgs) -> Result<()> {
+    let (target, lease_token) = required_target(&args.target)?;
+    run_typed_operation(
+        project_root,
+        BrowserOperation::ListBrowserCookies {
+            target,
+            lease_token,
+            capability_grant_token: args.grant_token.clone(),
+            value_capability_grant_token: args.value_grant_token.clone(),
+            include_values: args.include_values,
+            max_entries: args.max_entries,
+            max_result_bytes: args.max_result_bytes,
+        },
+        Duration::from_secs(30),
+    )
+}
+
+fn privileged_content_setting(project_root: &Path, args: &BrowserContentSettingArgs) -> Result<()> {
+    let (target, lease_token) = required_target(&args.target)?;
+    run_typed_operation(
+        project_root,
+        BrowserOperation::AccessBrowserContentSetting {
+            target,
+            lease_token,
+            capability_grant_token: args.grant_token.clone(),
+            setting: args.setting.clone(),
+            value: args.value.clone(),
+        },
+        Duration::from_secs(30),
+    )
+}
+
+fn privileged_extensions(project_root: &Path, args: &BrowserExtensionsArgs) -> Result<()> {
+    let (target, lease_token) = required_target(&args.target)?;
+    run_typed_operation(
+        project_root,
+        BrowserOperation::ListBrowserExtensions {
+            target,
+            lease_token,
+            capability_grant_token: args.grant_token.clone(),
+            max_entries: args.max_entries,
+        },
+        Duration::from_secs(30),
+    )
+}
+
+fn profile_label(project_root: &Path, action: &BrowserProfileLabelCommand) -> Result<()> {
+    let operation = match action {
+        BrowserProfileLabelCommand::Set(args) => BrowserOperation::SetBrowserProfileLabel {
+            extension_instance_id: args.session.clone(),
+            profile_label: args.label.clone(),
+        },
+        BrowserProfileLabelCommand::Clear(args) => BrowserOperation::ClearBrowserProfileLabel {
+            extension_instance_id: args.session.clone(),
+        },
+    };
+    run_typed_operation(project_root, operation, Duration::from_secs(15))
+}
+
+fn tab_operation(project_root: &Path, action: &BrowserTabCommand) -> Result<()> {
+    let operation = match action {
+        BrowserTabCommand::Open(args) => {
+            let (target, lease_token) = required_target(&args.target)?;
+            BrowserOperation::OpenBrowserTab {
+                target,
+                lease_token,
+                url: args.url.clone(),
+                active: args.active,
+            }
+        }
+        BrowserTabCommand::Close(args) => {
+            let (target, lease_token) = required_target(args)?;
+            BrowserOperation::CloseBrowserTab {
+                target,
+                lease_token,
+            }
+        }
+        BrowserTabCommand::Activate(args) => {
+            let (target, lease_token) = required_target(&args.target)?;
+            BrowserOperation::ActivateBrowserTab {
+                target,
+                lease_token,
+                focus_window: args.focus_window,
+            }
+        }
+        BrowserTabCommand::NewWindow(args) => {
+            let (target, lease_token) = required_target(&args.target)?;
+            BrowserOperation::CreateBrowserWindow {
+                target,
+                lease_token,
+                url: args.url.clone(),
+                focused: args.focused,
+            }
+        }
+        BrowserTabCommand::Group(args) => {
+            let (target, lease_token) = required_target(&args.target)?;
+            BrowserOperation::GroupBrowserTabs {
+                target,
+                lease_token,
+                tab_ids: args.tab_ids.clone(),
+                title: args.title.clone(),
+            }
+        }
+    };
+    run_typed_operation(project_root, operation, Duration::from_secs(30))
+}
+
+fn ensure_cli_chrome_broker(project_root: &Path) -> Result<()> {
+    let endpoint = ensure_user_chrome_broker(project_root, &default_browser_service_script())
+        .map_err(|error| match error.hint {
+            Some(hint) => anyhow!("{} ({hint})", error.message),
+            None => anyhow!(error.message),
+        })?;
+    write_chrome_broker_endpoint(project_root, &endpoint)
 }
 
 fn lease(project_root: &Path, action: &BrowserLeaseCommand) -> Result<()> {
@@ -147,15 +433,242 @@ fn evidence(project_root: &Path, args: &BrowserEvidenceArgs) -> Result<()> {
     )
 }
 
+fn screenshot(project_root: &Path, args: &BrowserScreenshotArgs) -> Result<()> {
+    let (target, lease_token) = required_target(&args.target)?;
+    let format = match args.format.to_ascii_lowercase().as_str() {
+        "png" => BrowserScreenshotFormat::Png,
+        "jpg" | "jpeg" => BrowserScreenshotFormat::Jpeg,
+        other => {
+            return Err(anyhow!(
+                "unsupported screenshot format {other}; use png or jpeg"
+            ));
+        }
+    };
+    if matches!(format, BrowserScreenshotFormat::Png) && args.quality.is_some() {
+        return Err(anyhow!("--quality is supported only with --format jpeg"));
+    }
+    if args.quality.is_some_and(|quality| quality > 100) {
+        return Err(anyhow!("--quality must be between 0 and 100"));
+    }
+    let candidate = args
+        .candidate_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .context("parse --candidate-json")?;
+    let element = BrowserElementInput {
+        reference: args.reference.clone(),
+        candidate,
+        css: args.selector.clone(),
+        snapshot_id: args.snapshot_id.clone(),
+        page_context_revision: args.page_revision.clone().map(PageContextRevision),
+    };
+    let element =
+        if element.reference.is_some() || element.candidate.is_some() || element.css.is_some() {
+            element.validate().map_err(|message| anyhow!(message))?;
+            if args.full_page {
+                return Err(anyhow!(
+                    "--full-page cannot be combined with an element target"
+                ));
+            }
+            Some(Box::new(element))
+        } else {
+            None
+        };
+    run_typed_operation(
+        project_root,
+        BrowserOperation::CaptureBrowserScreenshot {
+            target,
+            lease_token,
+            page_context_revision: args.page_revision.clone().map(PageContextRevision),
+            format,
+            quality: args.quality,
+            full_page: args.full_page,
+            element,
+        },
+        Duration::from_millis(args.timeout_ms),
+    )
+}
+
+fn pdf(project_root: &Path, args: &BrowserPdfArgs) -> Result<()> {
+    let (target, lease_token) = required_target(&args.target)?;
+    if !(0.1..=2.0).contains(&args.scale) {
+        return Err(anyhow!("--scale must be between 0.1 and 2.0"));
+    }
+    run_typed_operation(
+        project_root,
+        BrowserOperation::GenerateBrowserPdf {
+            target,
+            lease_token,
+            page_context_revision: args.page_revision.clone().map(PageContextRevision),
+            paper_format: args.paper.clone(),
+            landscape: args.landscape,
+            scale: args.scale,
+            print_background: args.print_background,
+        },
+        Duration::from_millis(args.timeout_ms),
+    )
+}
+
+fn artifact_cleanup(project_root: &Path, args: &BrowserArtifactCleanupArgs) -> Result<()> {
+    run_typed_operation(
+        project_root,
+        BrowserOperation::CleanupBrowserArtifacts {
+            paths: args
+                .paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+        },
+        Duration::from_secs(15),
+    )
+}
+
+fn console(project_root: &Path, action: &BrowserConsoleCommand) -> Result<()> {
+    let operation = match action {
+        BrowserConsoleCommand::Start(args) => console_start_operation(args)?,
+        BrowserConsoleCommand::List(args) => console_list_operation(args)?,
+        BrowserConsoleCommand::Clear(args) => {
+            let (target, lease_token) = required_target(args)?;
+            BrowserOperation::ClearBrowserConsoleCapture {
+                target,
+                lease_token,
+            }
+        }
+        BrowserConsoleCommand::Stop(args) => {
+            let (target, lease_token) = required_target(args)?;
+            BrowserOperation::StopBrowserConsoleCapture {
+                target,
+                lease_token,
+            }
+        }
+    };
+    run_typed_operation(project_root, operation, Duration::from_secs(30))
+}
+
+fn console_start_operation(args: &BrowserConsoleStartArgs) -> Result<BrowserOperation> {
+    let (target, lease_token) = required_target(&args.target)?;
+    Ok(BrowserOperation::StartBrowserConsoleCapture {
+        target,
+        lease_token,
+        levels: parse_console_levels(&args.level)?,
+        max_age_ms: args.max_age_ms,
+        max_entries: args.max_entries,
+        max_bytes: args.max_bytes,
+        sensitive_fields: args.sensitive_fields.clone(),
+    })
+}
+
+fn console_list_operation(args: &BrowserConsoleListArgs) -> Result<BrowserOperation> {
+    let (target, lease_token) = required_target(&args.target)?;
+    Ok(BrowserOperation::ListBrowserConsoleEvents {
+        target,
+        lease_token,
+        levels: if args.level.is_empty() {
+            None
+        } else {
+            Some(parse_console_levels(&args.level)?)
+        },
+        max_age_ms: args.max_age_ms,
+        max_entries: args.max_entries,
+        max_bytes: args.max_bytes,
+    })
+}
+
+fn parse_console_levels(values: &[String]) -> Result<Vec<BrowserConsoleLevel>> {
+    values
+        .iter()
+        .map(|value| match value.to_ascii_lowercase().as_str() {
+            "debug" => Ok(BrowserConsoleLevel::Debug),
+            "log" => Ok(BrowserConsoleLevel::Log),
+            "info" => Ok(BrowserConsoleLevel::Info),
+            "warn" | "warning" => Ok(BrowserConsoleLevel::Warn),
+            "error" => Ok(BrowserConsoleLevel::Error),
+            other => Err(anyhow!(
+                "unsupported console level {other}; use debug, log, info, warn, or error"
+            )),
+        })
+        .collect()
+}
+
+fn network(project_root: &Path, action: &BrowserNetworkCommand) -> Result<()> {
+    let operation = match action {
+        BrowserNetworkCommand::Start(args) => network_start_operation(args)?,
+        BrowserNetworkCommand::List(args) => network_list_operation(args)?,
+        BrowserNetworkCommand::Detail(args) => network_detail_operation(args)?,
+        BrowserNetworkCommand::Clear(args) => {
+            let (target, lease_token) = required_target(args)?;
+            BrowserOperation::ClearBrowserNetworkCapture {
+                target,
+                lease_token,
+            }
+        }
+        BrowserNetworkCommand::Stop(args) => {
+            let (target, lease_token) = required_target(args)?;
+            BrowserOperation::StopBrowserNetworkCapture {
+                target,
+                lease_token,
+            }
+        }
+    };
+    run_typed_operation(project_root, operation, Duration::from_secs(30))
+}
+
+fn network_start_operation(args: &BrowserNetworkStartArgs) -> Result<BrowserOperation> {
+    let (target, lease_token) = required_target(&args.target)?;
+    Ok(BrowserOperation::StartBrowserNetworkCapture {
+        target,
+        lease_token,
+        max_age_ms: args.max_age_ms,
+        max_entries: args.max_entries,
+        max_bytes: args.max_bytes,
+        max_body_bytes: args.max_body_bytes,
+        sensitive_fields: args.sensitive_fields.clone(),
+    })
+}
+
+fn network_list_operation(args: &BrowserNetworkListArgs) -> Result<BrowserOperation> {
+    let (target, lease_token) = required_target(&args.target)?;
+    Ok(BrowserOperation::ListBrowserNetworkRequests {
+        target,
+        lease_token,
+        max_age_ms: args.max_age_ms,
+        max_entries: args.max_entries,
+        max_bytes: args.max_bytes,
+    })
+}
+
+fn network_detail_operation(args: &BrowserNetworkDetailArgs) -> Result<BrowserOperation> {
+    let (target, lease_token) = required_target(&args.target)?;
+    Ok(BrowserOperation::GetBrowserNetworkRequestDetail {
+        target,
+        lease_token,
+        network_request_id: args.network_request_id.clone(),
+        include_body: args.include_body,
+        max_body_bytes: args.max_body_bytes,
+    })
+}
+
 fn run_typed_operation(
     project_root: &Path,
     operation: BrowserOperation,
     timeout: Duration,
 ) -> Result<()> {
+    let payload = execute_typed_operation_value(project_root, operation, timeout)?;
+    print_json_response(payload)
+}
+
+fn execute_typed_operation_value(
+    project_root: &Path,
+    operation: BrowserOperation,
+    timeout: Duration,
+) -> Result<serde_json::Value> {
     let endpoint = read_cdp_endpoint(project_root)?;
-    let client = BrowserOperations::new(endpoint.ws_url, timeout);
+    let client = BrowserOperations::new(endpoint.ws_url, timeout)
+        .with_caller_label("teshi-cli")
+        .with_project_root(project_root.to_string_lossy());
     match client.execute(&operation) {
-        Ok(response) => print_json_response(response.payload),
+        Ok(response) => Ok(response.payload),
         Err(error) => {
             eprintln!("{}", serde_json::to_string_pretty(&error.to_wire_value())?);
             Err(error.into())
@@ -222,14 +735,52 @@ fn verify(project_root: &Path, args: &BrowserVerifyArgs) -> Result<()> {
             .as_deref()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or(&args.selector);
-        navigate_to_url(
+        if args.target.session.is_some() {
+            let (target, lease_token) = required_target(&args.target)?;
+            execute_typed_operation_value(
+                project_root,
+                BrowserOperation::NavigateBrowser {
+                    target,
+                    lease_token,
+                    url: url.to_string(),
+                    timeout_ms: args.timeout_ms,
+                    wait: Some(BrowserWaitCondition::LoadComplete),
+                    monitor: false,
+                },
+                timeout,
+            )?
+        } else {
+            navigate_to_url(
+                project_root,
+                url,
+                args.timeout_ms,
+                timeout,
+                "browser-verify-navigate",
+                false,
+                Some(&args.target),
+            )?
+        }
+    } else if args.target.session.is_some() {
+        let (target, lease_token) = required_target(&args.target)?;
+        let action: BrowserAction = serde_json::from_value(json!(args.action))?;
+        execute_typed_operation_value(
             project_root,
-            url,
-            args.timeout_ms,
+            BrowserOperation::ExecuteBrowserAction {
+                target,
+                lease_token,
+                action,
+                element: BrowserElementInput {
+                    css: Some(args.selector.clone()),
+                    ..Default::default()
+                },
+                value: args.value_arg.clone(),
+                files: vec![],
+                wait: None,
+                timeout_ms: args.timeout_ms,
+                focus: false,
+                monitor: false,
+            },
             timeout,
-            "browser-verify-navigate",
-            false,
-            Some(&args.target),
         )?
     } else {
         execute_locator(
@@ -276,6 +827,21 @@ fn verify(project_root: &Path, args: &BrowserVerifyArgs) -> Result<()> {
 }
 
 fn navigate(project_root: &Path, args: &BrowserNavigateArgs) -> Result<()> {
+    if args.target.session.is_some() {
+        let (target, lease_token) = required_target(&args.target)?;
+        return run_typed_operation(
+            project_root,
+            BrowserOperation::NavigateBrowser {
+                target,
+                lease_token,
+                url: args.url.clone(),
+                timeout_ms: args.timeout_ms,
+                wait: Some(BrowserWaitCondition::LoadComplete),
+                monitor: args.monitor,
+            },
+            command_timeout_for_ms(args.timeout_ms),
+        );
+    }
     let timeout = command_timeout_for_ms(args.timeout_ms);
     let response = navigate_to_url(
         project_root,
@@ -335,22 +901,88 @@ fn clear_highlight(project_root: &Path, target: &BrowserTargetArgs) -> Result<()
 }
 
 fn execute(project_root: &Path, args: &BrowserExecuteArgs) -> Result<()> {
-    let timeout = command_timeout_for_ms(args.timeout_ms);
-    let response = execute_locator(
+    let (target, lease_token) = required_target(&args.target)?;
+    let action: BrowserAction = serde_json::from_value(json!(args.action)).with_context(|| {
+        format!(
+            "invalid --action {}; expected click, pointer_click, fill, type, select, press_key, assert_visible, assert_text, navigate, or upload",
+            args.action
+        )
+    })?;
+    let candidate = args
+        .candidate_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .context("parse --candidate-json")?;
+    let element = BrowserElementInput {
+        reference: args.reference.clone(),
+        candidate,
+        css: args.selector.clone(),
+        snapshot_id: args.snapshot_id.clone(),
+        page_context_revision: args.page_revision.clone().map(PageContextRevision),
+    };
+    element.validate().map_err(|message| anyhow!(message))?;
+    let wait = browser_wait_condition(args, &element)?;
+    run_typed_operation(
         project_root,
-        ExecuteLocatorParams {
-            selector: &args.selector,
-            action: &args.action,
-            value: args.value_arg.as_deref(),
+        BrowserOperation::ExecuteBrowserAction {
+            target,
+            lease_token,
+            action,
+            element,
+            value: args.value_arg.clone(),
+            files: args
+                .files
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            wait: wait.map(Box::new),
             timeout_ms: args.timeout_ms,
-            request_id: "browser-execute",
-            health_check: true,
-            target: Some(&args.target),
+            focus: args.focus,
+            monitor: args.monitor,
         },
-        timeout,
-    )?;
-    ensure_ok(&response)?;
-    print_json_response(response)
+        command_timeout_for_ms(args.timeout_ms),
+    )
+}
+
+fn browser_wait_condition(
+    args: &BrowserExecuteArgs,
+    element: &BrowserElementInput,
+) -> Result<Option<BrowserWaitCondition>> {
+    let mut waits = Vec::new();
+    if let Some(pattern) = &args.wait_url {
+        waits.push(BrowserWaitCondition::Url {
+            pattern: pattern.clone(),
+        });
+    }
+    if let Some(text) = &args.wait_text {
+        waits.push(BrowserWaitCondition::VisibleText { text: text.clone() });
+    }
+    if let Some(state) = &args.wait_state {
+        let state = serde_json::from_value(json!(state)).with_context(|| {
+            format!("invalid --wait-state {state}; expected visible, hidden, enabled, or disabled")
+        })?;
+        waits.push(BrowserWaitCondition::ElementState {
+            element: Box::new(element.clone()),
+            state,
+        });
+    }
+    if args.wait_revision_change {
+        let from = args
+            .page_revision
+            .clone()
+            .ok_or_else(|| anyhow!("--wait-revision-change requires --page-revision"))?;
+        waits.push(BrowserWaitCondition::PageRevisionChange {
+            from: PageContextRevision(from),
+        });
+    }
+    if args.wait_load {
+        waits.push(BrowserWaitCondition::LoadComplete);
+    }
+    if waits.len() > 1 {
+        anyhow::bail!("choose only one typed --wait-* condition");
+    }
+    Ok(waits.pop())
 }
 
 fn enhance(project_root: &Path, args: &BrowserSelectorArgs) -> Result<()> {
@@ -379,12 +1011,19 @@ fn enhance(project_root: &Path, args: &BrowserSelectorArgs) -> Result<()> {
 }
 
 fn heal_execute(project_root: &Path, args: &BrowserExecuteArgs) -> Result<()> {
+    if args.target.session.is_some() {
+        return execute(project_root, args);
+    }
+    let selector = args
+        .selector
+        .as_deref()
+        .ok_or_else(|| anyhow!("heal-execute currently requires --selector"))?;
     let timeout = command_timeout_for_ms(args.timeout_ms + 15_000);
     let command = apply_targeting(
         json!({
             "cmd": "heal_execute_locator",
             "request_id": "browser-heal-execute",
-            "selector": args.selector,
+            "selector": selector,
             "action": args.action,
             "value": args.value_arg,
             "timeout_ms": args.timeout_ms,
@@ -464,7 +1103,27 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
         if !non_interactive {
             prompt_continue(step)?;
         }
-        let response = if step.primary.action == "navigate" {
+        let response = if step.primary.action == "navigate" && args.target.session.is_some() {
+            let (target, lease_token) = required_target(&args.target)?;
+            let url = step
+                .primary
+                .value_arg
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(&step.primary.value);
+            execute_typed_operation_value(
+                project_root,
+                BrowserOperation::NavigateBrowser {
+                    target,
+                    lease_token,
+                    url: url.to_string(),
+                    timeout_ms: 15_000,
+                    wait: Some(BrowserWaitCondition::LoadComplete),
+                    monitor: false,
+                },
+                command_timeout_for_ms(15_000),
+            )?
+        } else if step.primary.action == "navigate" {
             let url = step
                 .primary
                 .value_arg
@@ -495,6 +1154,46 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                 command_timeout_for_ms(timeout_ms),
                 &format!("browser-replay-{}", idx + 1),
                 Some(&args.target),
+            )?
+        } else if args.target.session.is_some() {
+            let (target, lease_token) = required_target(&args.target)?;
+            let action: BrowserAction = serde_json::from_value(json!(step.primary.action))
+                .with_context(|| format!("unsupported binding action {}", step.primary.action))?;
+            let candidate = step
+                .primary
+                .structured_candidate
+                .clone()
+                .map(serde_json::from_value)
+                .transpose()
+                .context("binding structured_candidate is invalid")?;
+            let element = BrowserElementInput {
+                reference: step.primary.element_reference.clone(),
+                candidate,
+                css: (step.primary.element_reference.is_none()
+                    && step.primary.structured_candidate.is_none())
+                .then(|| step.primary.value.clone()),
+                snapshot_id: None,
+                page_context_revision: step
+                    .primary
+                    .page_context_revision
+                    .clone()
+                    .map(PageContextRevision),
+            };
+            execute_typed_operation_value(
+                project_root,
+                BrowserOperation::ExecuteBrowserAction {
+                    target,
+                    lease_token,
+                    action,
+                    element,
+                    value: step.primary.value_arg.clone(),
+                    files: vec![],
+                    wait: None,
+                    timeout_ms: 5_000,
+                    focus: false,
+                    monitor: false,
+                },
+                command_timeout_for_ms(5_000),
             )?
         } else {
             let timeout_ms = 5_000;
@@ -917,6 +1616,7 @@ fn debug_log(project_root: &Path, mut payload: serde_json::Value) {
             .unwrap_or_default();
         object.insert("ts_ms".to_string(), json!(ts_ms));
     }
+    redact_sensitive_json(&mut payload);
     let log_dir = project_root.join(".teshi").join("logs");
     if fs::create_dir_all(&log_dir).is_err() {
         return;
@@ -924,6 +1624,30 @@ fn debug_log(project_root: &Path, mut payload: serde_json::Value) {
     let path = log_dir.join("cli-browser.log");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "{}", payload);
+    }
+}
+
+fn redact_sensitive_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            object.retain(|key, nested| {
+                let normalized = key.to_ascii_lowercase().replace('-', "_");
+                let secret = normalized == "lease_token"
+                    || normalized == "capability_grant"
+                    || normalized == "capability_grant_token"
+                    || normalized.ends_with("_secret");
+                if !secret {
+                    redact_sensitive_json(nested);
+                }
+                !secret
+            });
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_sensitive_json(value);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -947,5 +1671,31 @@ mod tests {
     #[test]
     fn successful_json_operation_has_no_cli_error() {
         assert_eq!(json_response_error(&json!({"ok": true})), None);
+    }
+
+    #[test]
+    fn cli_diagnostic_json_removes_lease_and_grant_secrets() {
+        let mut payload = json!({
+            "event": "browser_command_start",
+            "command": {
+                "lease_token": "lease-private",
+                "target": {"extension_instance_id": "profile-a"},
+                "nested": {
+                    "capability_grant_token": "grant-private",
+                    "retryable": false
+                }
+            },
+            "recovery": {
+                "owner_label": "agent-a",
+                "broker_secret": "broker-private"
+            }
+        });
+        redact_sensitive_json(&mut payload);
+        let serialized = payload.to_string();
+        assert!(!serialized.contains("lease-private"));
+        assert!(!serialized.contains("grant-private"));
+        assert!(!serialized.contains("broker-private"));
+        assert!(serialized.contains("profile-a"));
+        assert!(serialized.contains("retryable"));
     }
 }

@@ -337,6 +337,17 @@ impl BrowserSessionsBackend for NativePlatformBackend {
             .get("project_root")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "browser bridge did not report its project root".to_string())?;
+        let broker_token = bridge
+            .get("ws_url")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|url| reqwest::Url::parse(url).ok())
+            .and_then(|url| {
+                url.query_pairs()
+                    .find(|(key, _)| key == "token")
+                    .map(|(_, value)| value.into_owned())
+            })
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| "browser bridge did not report its command token".to_string())?;
         let body = serde_json::json!({
             "project_root": project_root,
             "extension_instance_id": target.extension_instance_id,
@@ -345,6 +356,7 @@ impl BrowserSessionsBackend for NativePlatformBackend {
         });
         let response = Self::browser_client()?
             .post("http://127.0.0.1:17373/v1/bridge/activate_tab")
+            .header("X-Teshi-Broker-Token", broker_token)
             .json(&body)
             .send()
             .and_then(reqwest::blocking::Response::error_for_status)
