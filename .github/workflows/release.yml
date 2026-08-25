@@ -476,3 +476,69 @@ jobs:
           "@ | Set-Content -NoNewline (Join-Path $manifestDir "$pkgId.locale.en-US.yaml")
 
           wingetcreate submit --prtitle $prTitle --token $env:WINGET_TOKEN --no-open $manifestDir
+
+  notify-telegram:
+    name: Telegram notify
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - resolve
+      - build
+      - publish
+      - submit_winget
+    steps:
+      - name: Send Telegram message
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
+          RUN_SCOPE: ${{ needs.resolve.outputs.run_scope }}
+          RESOLVE_RESULT: ${{ needs.resolve.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          WINGET_RESULT: ${{ needs.submit_winget.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TELEGRAM_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "TELEGRAM_TOKEN or TELEGRAM_CHAT_ID is not configured; skipping notify."
+            exit 0
+          fi
+
+          tag="${TAG:-unknown}"
+          if [ "$PUBLISH_RESULT" = "success" ]; then
+            if [ "$PRERELEASE" = "true" ]; then
+              kind="Pre-release"
+            else
+              kind="Release"
+            fi
+            text="$(printf '%s\n' \
+              "Teshi ${tag} 发布成功（${kind}）" \
+              "范围: ${RUN_SCOPE}" \
+              "Release: ${RELEASE_URL}" \
+              "构建: ${RUN_URL}")"
+          elif [ "$RUN_SCOPE" = "windows-only" ] && [ "$BUILD_RESULT" = "success" ]; then
+            text="$(printf '%s\n' \
+              "Teshi ${tag} Windows-only 重试构建成功" \
+              "构建: ${RUN_URL}")"
+          else
+            text="$(printf '%s\n' \
+              "Teshi ${tag} 发版未完成" \
+              "resolve: ${RESOLVE_RESULT}" \
+              "build: ${BUILD_RESULT}" \
+              "publish: ${PUBLISH_RESULT}" \
+              "winget: ${WINGET_RESULT}" \
+              "构建: ${RUN_URL}")"
+          fi
+
+          payload="$(jq -n --arg chat "$TELEGRAM_CHAT_ID" --arg text "$text" \
+            '{chat_id:$chat, text:$text, disable_web_page_preview:false}')"
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            --data "$payload" \
+            | jq -e '.ok == true' >/dev/null
+          echo "Telegram notification sent."
+
