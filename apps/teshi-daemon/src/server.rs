@@ -1618,6 +1618,9 @@ mod integration {
     #[test]
     fn preview_frame_classifier_only_selects_frame_messages() {
         assert!(is_preview_frame(r#"{"type":"frame","data":"jpeg"}"#));
+        assert!(is_preview_frame(
+            r#"{"type":"frame","data":"jpeg","capture_backend":"wgc"}"#
+        ));
         assert!(!is_preview_frame(
             r#"{"type":"response","request_id":"gpui-preview-attach"}"#
         ));

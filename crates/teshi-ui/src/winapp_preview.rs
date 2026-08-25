@@ -25,6 +25,7 @@ struct PreviewModel {
     status: PreviewStatus,
     target: SharedString,
     detail: SharedString,
+    capture_note: SharedString,
     frame: Option<Arc<Image>>,
 }
 
@@ -34,6 +35,7 @@ impl PreviewModel {
             status: PreviewStatus::Connecting,
             target: target.into(),
             detail: "Starting WinApp preview…".into(),
+            capture_note: "Waiting for capture backend details…".into(),
             frame: None,
         }
     }
@@ -43,10 +45,32 @@ impl PreviewModel {
         self.detail = detail.into();
     }
 
-    fn set_jpeg(&mut self, jpeg: Vec<u8>) {
+    fn set_jpeg(
+        &mut self,
+        jpeg: Vec<u8>,
+        capture_backend: Option<&str>,
+        fallback_reason: Option<&str>,
+    ) {
         self.frame = Some(Arc::new(Image::from_bytes(ImageFormat::Jpeg, jpeg)));
         self.status = PreviewStatus::Streaming;
-        self.detail = "Live · prototype 8 FPS JPEG stream".into();
+        match capture_backend {
+            Some("wgc") => {
+                self.detail = "Live · Windows Graphics Capture · 8 FPS JPEG".into();
+                self.capture_note =
+                    "WGC captures the target window surface even when it is occluded.".into();
+            }
+            Some("imagegrab") => {
+                let reason = fallback_reason.unwrap_or("WGC is unavailable");
+                self.detail = format!("Live · ImageGrab fallback · {reason}").into();
+                self.capture_note =
+                    "ImageGrab fallback: keep the target window visible and unobscured.".into();
+            }
+            _ => {
+                self.detail = "Live · prototype 8 FPS JPEG stream".into();
+                self.capture_note =
+                    "Legacy capture backend: keep the target window visible and unobscured.".into();
+            }
+        }
     }
 
     fn fail(&mut self, detail: impl Into<SharedString>) {
@@ -75,8 +99,14 @@ impl WinAppPreview {
     }
 
     /// Replace the previous image with the newest JPEG frame.
-    pub fn set_jpeg(&mut self, jpeg: Vec<u8>, cx: &mut Context<Self>) {
-        self.model.set_jpeg(jpeg);
+    pub fn set_jpeg(
+        &mut self,
+        jpeg: Vec<u8>,
+        capture_backend: Option<&str>,
+        fallback_reason: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.set_jpeg(jpeg, capture_backend, fallback_reason);
         cx.notify();
     }
 
@@ -181,9 +211,10 @@ impl Render for WinAppPreview {
                     .child(self.model.detail.clone()),
             )
             .child(
-                div().text_sm().text_color(rgb(0x585b70)).child(
-                    "Prototype: keep the target window visible and unobscured while capturing.",
-                ),
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x585b70))
+                    .child(self.model.capture_note.clone()),
             )
     }
 }
@@ -195,9 +226,9 @@ mod tests {
     #[test]
     fn newest_frame_replaces_previous_frame() {
         let mut model = PreviewModel::new("TargetApp.exe");
-        model.set_jpeg(vec![1, 2, 3]);
+        model.set_jpeg(vec![1, 2, 3], Some("wgc"), None);
         let first = model.frame.clone().unwrap();
-        model.set_jpeg(vec![4, 5, 6]);
+        model.set_jpeg(vec![4, 5, 6], Some("wgc"), None);
 
         assert_eq!(model.status, PreviewStatus::Streaming);
         assert_eq!(model.frame.as_ref().unwrap().bytes(), &[4, 5, 6]);
@@ -207,7 +238,7 @@ mod tests {
     #[test]
     fn stream_error_retains_last_good_frame() {
         let mut model = PreviewModel::new("TargetApp.exe");
-        model.set_jpeg(vec![1, 2, 3]);
+        model.set_jpeg(vec![1, 2, 3], Some("wgc"), None);
         let frame = model.frame.clone().unwrap();
         model.fail("window is minimized");
 
@@ -223,5 +254,27 @@ mod tests {
 
         assert_eq!(model.status, PreviewStatus::Waiting);
         assert_eq!(model.target, "TargetApp.exe");
+    }
+
+    #[test]
+    fn wgc_status_does_not_require_an_unobscured_window() {
+        let mut model = PreviewModel::new("TargetApp.exe");
+        model.set_jpeg(vec![1, 2, 3], Some("wgc"), None);
+
+        assert_eq!(model.detail, "Live · Windows Graphics Capture · 8 FPS JPEG");
+        assert!(model.capture_note.contains("even when it is occluded"));
+    }
+
+    #[test]
+    fn imagegrab_status_explains_fallback_and_visibility() {
+        let mut model = PreviewModel::new("TargetApp.exe");
+        model.set_jpeg(
+            vec![1, 2, 3],
+            Some("imagegrab"),
+            Some("WGC first frame timed out"),
+        );
+
+        assert!(model.detail.contains("WGC first frame timed out"));
+        assert!(model.capture_note.contains("visible and unobscured"));
     }
 }

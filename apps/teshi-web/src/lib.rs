@@ -109,8 +109,21 @@ fn start_wasm_preview(preview: Entity<WinAppPreview>, app: Rc<AppCell>, cx: &mut
                     };
                     match base64::engine::general_purpose::STANDARD.decode(data) {
                         Ok(jpeg) => {
+                            let capture_backend = payload
+                                .get("capture_backend")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned);
+                            let fallback_reason = payload
+                                .get("capture_fallback_reason")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned);
                             update_preview(&message_app, &message_preview, |preview, cx| {
-                                preview.set_jpeg(jpeg, cx);
+                                preview.set_jpeg(
+                                    jpeg,
+                                    capture_backend.as_deref(),
+                                    fallback_reason.as_deref(),
+                                    cx,
+                                );
                             })
                         }
                         Err(error) => {

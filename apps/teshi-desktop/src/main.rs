@@ -22,7 +22,11 @@ use teshi_ui::{
 #[cfg_attr(not(windows), allow(dead_code))]
 enum PreviewEvent {
     Waiting(String),
-    Frame(Vec<u8>),
+    Frame {
+        jpeg: Vec<u8>,
+        capture_backend: Option<String>,
+        fallback_reason: Option<String>,
+    },
     Error(String),
 }
 
@@ -105,7 +109,20 @@ fn run_winapp_stream(slot: LatestPreviewEvent, process_name: String) -> Result<(
                     continue;
                 };
                 match base64::engine::general_purpose::STANDARD.decode(data) {
-                    Ok(jpeg) => replace_latest(&slot, PreviewEvent::Frame(jpeg)),
+                    Ok(jpeg) => replace_latest(
+                        &slot,
+                        PreviewEvent::Frame {
+                            jpeg,
+                            capture_backend: payload
+                                .get("capture_backend")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned),
+                            fallback_reason: payload
+                                .get("capture_fallback_reason")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_owned),
+                        },
+                    ),
                     Err(error) => replace_latest(
                         &slot,
                         PreviewEvent::Error(format!("invalid JPEG frame: {error}")),
@@ -180,7 +197,16 @@ fn poll_preview_events(preview: Entity<WinAppPreview>, slot: LatestPreviewEvent,
             if let Some(event) = event {
                 preview.update(cx, |preview, cx| match event {
                     PreviewEvent::Waiting(detail) => preview.set_waiting(detail, cx),
-                    PreviewEvent::Frame(jpeg) => preview.set_jpeg(jpeg, cx),
+                    PreviewEvent::Frame {
+                        jpeg,
+                        capture_backend,
+                        fallback_reason,
+                    } => preview.set_jpeg(
+                        jpeg,
+                        capture_backend.as_deref(),
+                        fallback_reason.as_deref(),
+                        cx,
+                    ),
                     PreviewEvent::Error(error) => preview.set_error(error, cx),
                 });
             }
