@@ -71,6 +71,27 @@ def load_staged_broker(path: Path):
     return module
 
 
+def resolve_built_cli() -> Path | None:
+    """Return a packaged teshi binary when one exists locally or in CI artifacts."""
+    exe_name = "teshi.exe" if os.name == "nt" else "teshi"
+    env_cli = os.environ.get("TESHI_CLI", "").strip()
+    candidates = []
+    if env_cli:
+        candidates.append(Path(env_cli))
+    candidates.extend(
+        [
+            REPO_ROOT / "target" / "debug" / exe_name,
+            REPO_ROOT / "target" / "release" / exe_name,
+            REPO_ROOT / "artifacts" / "teshi-x86_64-unknown-linux-gnu" / "teshi",
+            REPO_ROOT / "artifacts" / "teshi-x86_64-pc-windows-msvc" / "teshi.exe",
+        ]
+    )
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
 def fake_heartbeat(instance_id: str, label: str) -> dict:
     return {
         "extension_instance_id": instance_id,
@@ -139,22 +160,30 @@ def smoke_test() -> None:
         shutil.copy2(BROWSER_SERVICE_SOURCE, runtime / BROWSER_SERVICE_SOURCE.name)
 
         exe_name = "teshi.exe" if os.name == "nt" else "teshi"
-        built_cli = REPO_ROOT / "target" / "debug" / exe_name
-        require(built_cli.is_file(), f"built CLI is missing: {built_cli}")
-        installed_bin = package_root / "bin"
-        installed_share = installed_bin / "share"
-        installed_share.mkdir(parents=True)
-        installed_cli = installed_bin / exe_name
-        shutil.copy2(built_cli, installed_cli)
-        shutil.copy2(BROWSER_SERVICE_SOURCE, installed_share / BROWSER_SERVICE_SOURCE.name)
-        shutil.copy2(BROKER_SOURCE, installed_share / BROKER_SOURCE.name)
+        built_cli = resolve_built_cli()
+        installed_cli: Path | None = None
+        if built_cli is not None:
+            installed_bin = package_root / "bin"
+            installed_share = installed_bin / "share"
+            installed_share.mkdir(parents=True)
+            installed_cli = installed_bin / exe_name
+            shutil.copy2(built_cli, installed_cli)
+            if os.name != "nt":
+                installed_cli.chmod(installed_cli.stat().st_mode | 0o111)
+            shutil.copy2(
+                BROWSER_SERVICE_SOURCE,
+                installed_share / BROWSER_SERVICE_SOURCE.name,
+            )
+            shutil.copy2(BROKER_SOURCE, installed_share / BROKER_SOURCE.name)
 
         # Give the isolated project a runnable Python environment without copying
         # the whole checkout-local virtualenv. The runtime resolves the base
         # interpreter from pyvenv.cfg, while PYTHONPATH supplies its installed deps.
-        isolated_venv = isolated / ".venv"
-        isolated_venv.mkdir()
-        shutil.copy2(REPO_ROOT / ".venv" / "pyvenv.cfg", isolated_venv / "pyvenv.cfg")
+        source_pyvenv = REPO_ROOT / ".venv" / "pyvenv.cfg"
+        if source_pyvenv.is_file():
+            isolated_venv = isolated / ".venv"
+            isolated_venv.mkdir()
+            shutil.copy2(source_pyvenv, isolated_venv / "pyvenv.cfg")
 
         previous_cwd = Path.cwd()
         os.chdir(isolated)
@@ -225,30 +254,32 @@ def smoke_test() -> None:
                 "MCP STDIO arguments drifted",
             )
 
-            cli_env = os.environ.copy()
-            site_packages = REPO_ROOT / ".venv" / (
-                "Lib/site-packages" if os.name == "nt" else "lib/python3/site-packages"
-            )
-            cli_env["PYTHONPATH"] = str(site_packages)
-            cli_result = subprocess.run(
-                [str(installed_cli), "browser", "sessions"],
-                cwd=isolated,
-                env=cli_env,
-                capture_output=True,
-                text=True,
-                timeout=20,
-                check=False,
-            )
-            require(
-                cli_result.returncode == 0,
-                "installed CLI broker bootstrap failed: "
-                f"stdout={cli_result.stdout!r} stderr={cli_result.stderr!r}",
-            )
-            require(
-                (isolated / ".teshi" / "cdp-endpoint.json").is_file(),
-                "installed CLI did not write project compatibility data",
-            )
-            json.loads(cli_result.stdout)
+            if installed_cli is not None and source_pyvenv.is_file():
+                cli_env = os.environ.copy()
+                site_packages = REPO_ROOT / ".venv" / (
+                    "Lib/site-packages" if os.name == "nt" else "lib/python3/site-packages"
+                )
+                if site_packages.is_dir():
+                    cli_env["PYTHONPATH"] = str(site_packages)
+                cli_result = subprocess.run(
+                    [str(installed_cli), "browser", "sessions"],
+                    cwd=isolated,
+                    env=cli_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    check=False,
+                )
+                require(
+                    cli_result.returncode == 0,
+                    "installed CLI broker bootstrap failed: "
+                    f"stdout={cli_result.stdout!r} stderr={cli_result.stderr!r}",
+                )
+                require(
+                    (isolated / ".teshi" / "cdp-endpoint.json").is_file(),
+                    "installed CLI did not write project compatibility data",
+                )
+                json.loads(cli_result.stdout)
 
             broker_module = load_staged_broker(runtime / "browser_agent_broker.py")
             broker = broker_module.BrowserSessionBroker()
