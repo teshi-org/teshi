@@ -21,6 +21,13 @@ const BRIDGE_POST_RETRIES = 2;
 const BRIDGE_FETCH_TIMEOUT_MS = 15_000;
 const STREAM_WS_RECONNECT_BASE_MS = 500;
 const STREAM_WS_RECONNECT_MAX_MS = 8000;
+const NETWORK_RETRY_MS = 1500;
+const NETWORK_QUEUE_MAX_EVENTS = 1000;
+const NETWORK_QUEUE_MAX_BYTES = 5 * 1024 * 1024;
+const NETWORK_BATCH_MAX_EVENTS = 50;
+const NETWORK_BATCH_MAX_BYTES = 3 * 1024 * 1024;
+const NETWORK_BATCH_EVENT_BUDGET_BYTES = NETWORK_BATCH_MAX_BYTES - 16 * 1024;
+const MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024;
 const FRAME_MAGIC_BYTES = new Uint8Array([0x54, 0x53, 0x48, 0x31]);
 const MAX_SCREENSHOT_DIMENSION = 16384;
 const MAX_SCREENSHOT_PIXELS = 100000000;
@@ -33,6 +40,8 @@ function phasedFeatures(optionalPermissions) {
   return [
     { feature: "p0.control", available: true },
     { feature: "p1.observability_artifacts", available: true },
+    { feature: "p1.filtered_network_capture", available: true },
+    { feature: "p1.network_batch_transport", available: true },
     { feature: "p2.javascript", available: true, reason: "grant_required" },
     { feature: "p2.raw_cdp", available: true, reason: "grant_and_policy_required" },
     permissionFeature("p2.cookies", "cookies"),
@@ -80,21 +89,28 @@ const HIGHLIGHT_CONFIG = {
   borderColor: { r: 37, g: 99, b: 235, a: 0.9 },
 };
 
-/** @type {number | null} */
-let attachedTabId = null;
+/**
+ * Debugger ownership is shared by independent roles. A role release only
+ * detaches when no other feature still needs that tab's CDP session.
+ * @type {Map<number, {roles: Set<string>, domains: Set<string>}>}
+ */
+const debuggerSessions = new Map();
+/** @type {Map<number, Promise<{roles: Set<string>, domains: Set<string>}>>} */
+const debuggerAttachmentPromises = new Map();
 let cachedProjectRoot = "";
 let cachedBrokerToken = "";
 let extensionFrameWsUrl = "";
 let heartbeatRunning = false;
 let pendingStreamRestart = false;
 let tabEventTimer = null;
+let commandExecution = Promise.resolve();
 /** Pause preview while CDP locator commands run on the active tab. */
 let streamPaused = false;
 let lastStreamErrorPostedAt = 0;
-/** Page domain enabled on attachedTabId for stream capture. */
-let streamPageEnabled = false;
 /** @type {WebSocket | null} */
 let streamWs = null;
+/** @type {Promise<boolean> | null} */
+let streamWsConnectPromise = null;
 let streamWsReconnectDelay = STREAM_WS_RECONNECT_BASE_MS;
 let screencastActive = false;
 /** @type {number | null} */
@@ -104,8 +120,11 @@ let lastScreencastPublishAt = 0;
 let screencastListenerRegistered = false;
 /** Tab IDs with broker-owned bounded console capture enabled. */
 const consoleCaptureTabIds = new Set();
-/** Tab IDs with broker-owned bounded network metadata capture enabled. */
-const networkCaptureTabIds = new Set();
+/** @type {Map<number, object>} Active capture state keyed by tab ID. */
+const networkCapturesByTab = new Map();
+/** @type {Map<string, object>} Active or unacknowledged capture delivery state. */
+const networkDeliveryStates = new Map();
+let networkRetryTimer = null;
 let lastBridgeStatus = {
   connected: false,
   error: "Bridge has not been contacted yet.",
@@ -240,33 +259,61 @@ async function resolveCommandTab(target) {
   return tab;
 }
 
-async function detachIfNeeded() {
-  if (attachedTabId === null) {
-    return;
-  }
-  try {
-    await chrome.debugger.detach({ tabId: attachedTabId });
-  } catch {
-    // Tab closed or already detached.
-  }
-  attachedTabId = null;
-  streamPageEnabled = false;
-}
-
-async function ensureStreamDebugger(tab) {
+async function acquireDebuggerRole(tab, role, domains = []) {
   if (!tab?.id) {
     throw new Error("no active tab in the current window");
   }
-  if (attachedTabId !== tab.id) {
-    await detachIfNeeded();
-    await chrome.debugger.attach({ tabId: tab.id }, "1.3");
-    attachedTabId = tab.id;
-    streamPageEnabled = false;
+  let session = debuggerSessions.get(tab.id);
+  if (!session) {
+    let pending = debuggerAttachmentPromises.get(tab.id);
+    if (!pending) {
+      pending = (async () => {
+        await chrome.debugger.attach({ tabId: tab.id }, "1.3");
+        const attached = { roles: new Set(), domains: new Set() };
+        debuggerSessions.set(tab.id, attached);
+        return attached;
+      })();
+      debuggerAttachmentPromises.set(tab.id, pending);
+    }
+    try {
+      session = await pending;
+    } finally {
+      if (debuggerAttachmentPromises.get(tab.id) === pending) {
+        debuggerAttachmentPromises.delete(tab.id);
+      }
+    }
   }
-  if (!streamPageEnabled) {
-    await chrome.debugger.sendCommand({ tabId: tab.id }, "Page.enable", {});
-    streamPageEnabled = true;
+  session.roles.add(role);
+  for (const domain of domains) {
+    if (session.domains.has(domain)) {
+      continue;
+    }
+    await chrome.debugger.sendCommand({ tabId: tab.id }, `${domain}.enable`, {});
+    session.domains.add(domain);
   }
+  return session;
+}
+
+async function releaseDebuggerRole(tabId, role) {
+  const session = debuggerSessions.get(tabId);
+  if (!session) {
+    return;
+  }
+  session.roles.delete(role);
+  if (session.roles.size > 0) {
+    return;
+  }
+  // Delete first so our own detach callback cannot be mistaken for a failure.
+  debuggerSessions.delete(tabId);
+  try {
+    await chrome.debugger.detach({ tabId });
+  } catch {
+    // The tab may already be closed or externally detached.
+  }
+}
+
+async function ensureStreamDebugger(tab) {
+  await acquireDebuggerRole(tab, "preview", ["Page"]);
 }
 
 function base64ToBytes(b64) {
@@ -328,6 +375,20 @@ async function refreshExtensionFrameWsUrl() {
   return false;
 }
 
+function streamSocketNeeded() {
+  if (screencastActive && !streamPaused) {
+    return true;
+  }
+  if (networkCapturesByTab.size > 0) {
+    return true;
+  }
+  return Array.from(networkDeliveryStates.values()).some(
+    (state) => state.queue.length > 0 || (
+      state.termination_reason && !state.termination_acknowledged
+    ),
+  );
+}
+
 async function connectStreamWebSocket() {
   if (!extensionFrameWsUrl || !cachedProjectRoot) {
     return false;
@@ -335,10 +396,14 @@ async function connectStreamWebSocket() {
   if (streamWs?.readyState === WebSocket.OPEN) {
     return true;
   }
+  if (streamWsConnectPromise) {
+    return streamWsConnectPromise;
+  }
   closeStreamWebSocket();
-  return new Promise((resolve) => {
+  streamWsConnectPromise = new Promise((resolve) => {
     let settled = false;
     const ws = new WebSocket(extensionFrameWsUrl);
+    streamWs = ws;
     ws.binaryType = "arraybuffer";
     ws.onopen = async () => {
       streamWs = ws;
@@ -353,6 +418,14 @@ async function connectStreamWebSocket() {
           extension_version: chrome.runtime.getManifest().version,
         }),
       );
+      for (const state of networkDeliveryStates.values()) {
+        state.sent_through_seq = state.acked_seq;
+        state.termination_sent = false;
+        if (state.diagnostics_dirty) {
+          state.diagnostics_sent = false;
+        }
+      }
+      flushNetworkBatches();
       if (!settled) {
         settled = true;
         resolve(true);
@@ -375,6 +448,8 @@ async function connectStreamWebSocket() {
               ws.send(JSON.stringify(reply));
             }
           })();
+        } else if (ack.type === "network_ack") {
+          handleNetworkAck(ack);
         }
       } catch {
         // ignore
@@ -386,7 +461,7 @@ async function connectStreamWebSocket() {
         settled = true;
         resolve(false);
       }
-      if (screencastActive && cachedProjectRoot && !streamPaused) {
+      if (streamSocketNeeded() && cachedProjectRoot) {
         setTimeout(() => {
           void connectStreamWebSocket();
         }, streamWsReconnectDelay);
@@ -403,6 +478,11 @@ async function connectStreamWebSocket() {
       }
     };
   });
+  try {
+    return await streamWsConnectPromise;
+  } finally {
+    streamWsConnectPromise = null;
+  }
 }
 
 async function publishScreencastFrame(jpegBytes, tabId, url) {
@@ -478,8 +558,13 @@ function ensureScreencastDebuggerListener() {
       }
       return;
     }
-    if (method.startsWith("Network.") && networkCaptureTabIds.has(source.tabId)) {
-      void publishNetworkEvent(source.tabId, method, params);
+    const networkState = networkCapturesByTab.get(source.tabId);
+    if (method.startsWith("Network.") && networkState) {
+      // CDP callbacks can overlap while a request body is fetched. Serialize
+      // per capture so request metadata always precedes its response events.
+      networkState.processing = networkState.processing
+        .then(() => publishNetworkEvent(source.tabId, method, params, networkState))
+        .catch(() => undefined);
       return;
     }
     if (method !== "Page.screencastFrame") {
@@ -542,9 +627,8 @@ async function publishConsoleEvent(tabId, method, params) {
 
 async function startConsoleCapture(target = null) {
   ensureScreencastDebuggerListener();
-  const tab = await attachActiveTab(target);
-  await cdp(tab.id, "Runtime.enable", {});
-  await cdp(tab.id, "Log.enable", {});
+  const tab = await resolveCommandTab(target);
+  await acquireDebuggerRole(tab, "console", ["Runtime", "Log"]);
   consoleCaptureTabIds.add(tab.id);
   return { ok: true, active: true, tab_id: tab.id };
 }
@@ -552,25 +636,318 @@ async function startConsoleCapture(target = null) {
 async function stopConsoleCapture(target = null) {
   const tab = await resolveCommandTab(target);
   consoleCaptureTabIds.delete(tab.id);
+  await releaseDebuggerRole(tab.id, "console");
   return { ok: true, active: false, tab_id: tab.id };
 }
 
-async function publishNetworkEvent(tabId, method, params) {
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (!tab || !networkCaptureTabIds.has(tabId)) return;
-  const identity = await getExtensionIdentity();
+function normalizeAllowedHostnames(values) {
+  if (!Array.isArray(values) || values.length === 0) {
+    throw new Error("allowed_hostnames requires at least one exact hostname");
+  }
+  const normalized = [];
+  for (const value of values) {
+    const raw = String(value ?? "").trim().toLowerCase().replace(/\.+$/, "");
+    if (
+      !raw ||
+      raw.includes("://") ||
+      /[/*@?#\s]/.test(raw)
+    ) {
+      throw new Error(`invalid exact hostname: ${value}`);
+    }
+    let parsed;
+    try {
+      parsed = new URL(`http://${raw}`);
+    } catch {
+      throw new Error(`invalid exact hostname: ${value}`);
+    }
+    if (parsed.port || parsed.username || parsed.password || parsed.pathname !== "/") {
+      throw new Error(`invalid exact hostname: ${value}`);
+    }
+    const hostname = parsed.hostname.toLowerCase().replace(/\.+$/, "");
+    if (!hostname) {
+      throw new Error(`invalid exact hostname: ${value}`);
+    }
+    normalized.push(hostname);
+  }
+  return [...new Set(normalized)];
+}
+
+function hostnameAllowed(url, allowedHostnames) {
+  try {
+    const parsed = new URL(String(url || ""));
+    return (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      allowedHostnames.has(parsed.hostname.toLowerCase().replace(/\.+$/, ""))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function boundedUtf8RequestBody(value, maxBytes) {
+  const text = String(value ?? "");
+  const bytes = new TextEncoder().encode(text);
+  if (bytes.length <= maxBytes) {
+    return {
+      body: text,
+      encoding: "utf8",
+      captured_size: bytes.length,
+      original_size: bytes.length,
+      truncated: false,
+      unavailable: false,
+    };
+  }
+  let end = maxBytes;
+  // A UTF-8 response must not manufacture replacement bytes at the boundary.
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) {
+    end -= 1;
+  }
+  const data = new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(0, end));
+  return {
+    body: data,
+    encoding: "utf8",
+    captured_size: end,
+    original_size: bytes.length,
+    truncated: true,
+    unavailable: false,
+  };
+}
+
+function unavailableRequestBody(reason) {
+  return {
+    body: "",
+    encoding: "utf8",
+    captured_size: 0,
+    original_size: null,
+    truncated: false,
+    unavailable_reason: String(reason || "request body unavailable"),
+  };
+}
+
+async function captureRequestBody(tabId, request, requestId, state) {
+  if (!state.capture_request_bodies || !request?.hasPostData) {
+    return null;
+  }
+  if (Object.prototype.hasOwnProperty.call(request, "postData")) {
+    return boundedUtf8RequestBody(request.postData, state.max_request_body_bytes);
+  }
+  try {
+    const result = await cdp(tabId, "Network.getRequestPostData", {
+      requestId: String(requestId),
+    });
+    return boundedUtf8RequestBody(
+      result?.postData ?? "",
+      state.max_request_body_bytes,
+    );
+  } catch (error) {
+    return unavailableRequestBody(captureErrorMessage(error));
+  }
+}
+
+function captureStateKey(target, captureId) {
+  return `${target.extension_instance_id}:${target.window_id}:${target.tab_id}:${captureId}`;
+}
+
+function enqueueNetworkEvent(state, event) {
+  const seq = state.next_seq;
+  const entry = { seq, event };
+  const bytes = new TextEncoder().encode(JSON.stringify(entry)).length;
+  if (
+    bytes > NETWORK_BATCH_EVENT_BUDGET_BYTES ||
+    state.queue.length >= NETWORK_QUEUE_MAX_EVENTS ||
+    state.queue_bytes + bytes > NETWORK_QUEUE_MAX_BYTES
+  ) {
+    state.dropped_events_total += 1;
+    state.dropped_bytes_total += bytes;
+    state.diagnostics_dirty = true;
+    state.diagnostics_sent = false;
+    scheduleNetworkRetry();
+    return;
+  }
+  state.next_seq += 1;
+  state.queue.push({ ...entry, bytes });
+  state.queue_bytes += bytes;
+  flushNetworkBatches();
+  scheduleNetworkRetry();
+}
+
+function networkBatchFor(state) {
+  const events = [];
+  let bytes = 0;
+  for (const entry of state.queue) {
+    if (entry.seq <= state.sent_through_seq) {
+      continue;
+    }
+    if (
+      events.length >= NETWORK_BATCH_MAX_EVENTS ||
+      (events.length > 0 && bytes + entry.bytes > NETWORK_BATCH_EVENT_BUDGET_BYTES)
+    ) {
+      break;
+    }
+    events.push({ seq: entry.seq, event: entry.event });
+    bytes += entry.bytes;
+  }
+  return events;
+}
+
+function flushNetworkBatches() {
+  if (streamWs?.readyState !== WebSocket.OPEN) {
+    if (streamSocketNeeded()) {
+      void connectStreamWebSocket();
+    }
+    return;
+  }
+  for (const state of networkDeliveryStates.values()) {
+    const events = networkBatchFor(state);
+    const sendTermination = Boolean(
+      state.termination_reason &&
+      !state.termination_acknowledged &&
+      !state.termination_sent,
+    );
+    const sendDiagnostics = Boolean(
+      state.diagnostics_dirty && !state.diagnostics_sent,
+    );
+    if (events.length === 0 && !sendTermination && !sendDiagnostics) {
+      continue;
+    }
+    const batch = {
+      type: "network_batch",
+      extension_instance_id: state.target.extension_instance_id,
+      capture_id: state.capture_id,
+      target: state.target,
+      events,
+      dropped_events: state.dropped_events_total,
+      dropped_bytes: state.dropped_bytes_total,
+      dropped_events_total: state.dropped_events_total,
+      dropped_bytes_total: state.dropped_bytes_total,
+    };
+    if (events.length > 0) {
+      batch.first_seq = events[0].seq;
+      batch.last_seq = events[events.length - 1].seq;
+      state.sent_through_seq = events[events.length - 1].seq;
+    }
+    if (sendTermination) {
+      batch.termination_reason = state.termination_reason;
+      batch.termination_detail = state.termination_detail;
+      batch.final_sequence = state.next_seq - 1;
+      state.termination_sent = true;
+    }
+    if (sendDiagnostics) {
+      state.diagnostics_sent = true;
+    }
+    streamWs.send(JSON.stringify(batch));
+  }
+}
+
+function scheduleNetworkRetry() {
+  if (networkRetryTimer !== null || !streamSocketNeeded()) {
+    return;
+  }
+  networkRetryTimer = setTimeout(() => {
+    networkRetryTimer = null;
+    for (const state of networkDeliveryStates.values()) {
+      if (state.queue.length > 0) {
+        state.sent_through_seq = state.acked_seq;
+      }
+      if (state.termination_reason && !state.termination_acknowledged) {
+        state.termination_sent = false;
+      }
+      if (state.diagnostics_dirty) {
+        state.diagnostics_sent = false;
+      }
+    }
+    flushNetworkBatches();
+    if (streamSocketNeeded()) {
+      scheduleNetworkRetry();
+    }
+  }, NETWORK_RETRY_MS);
+}
+
+function handleNetworkAck(message) {
+  const target = message?.target;
+  const captureId = String(message?.capture_id || "");
+  const state = target
+    ? networkDeliveryStates.get(captureStateKey(target, captureId))
+    : null;
+  if (!state) {
+    return;
+  }
+  const ackSeq = Number(message.ack_seq);
+  if (!Number.isSafeInteger(ackSeq) || message.accepted === false) {
+    return;
+  }
+  if (
+    state.termination_reason &&
+    ackSeq >= state.next_seq - 1
+  ) {
+    state.termination_acknowledged = true;
+  }
+  if (state.diagnostics_sent) {
+    state.diagnostics_dirty = false;
+    state.diagnostics_sent = false;
+  }
+  if (ackSeq <= state.acked_seq && !state.termination_acknowledged) {
+    return;
+  }
+  state.acked_seq = Math.min(ackSeq, state.next_seq - 1);
+  while (state.queue[0]?.seq <= state.acked_seq) {
+    const acknowledged = state.queue.shift();
+    state.queue_bytes -= acknowledged?.bytes ?? 0;
+  }
+  if (
+    !state.active &&
+    state.queue.length === 0 &&
+    (!state.termination_reason || state.termination_acknowledged)
+  ) {
+    networkDeliveryStates.delete(captureStateKey(state.target, state.capture_id));
+  }
+  flushNetworkBatches();
+}
+
+function reportNetworkTermination(state, reason, detail = "") {
+  if (!state) {
+    return;
+  }
+  state.active = false;
+  state.termination_reason = reason;
+  state.termination_detail = String(detail || "");
+  state.termination_sent = false;
+  state.termination_acknowledged = false;
+  flushNetworkBatches();
+  void connectStreamWebSocket();
+}
+
+async function publishNetworkEvent(tabId, method, params, state) {
+  if (!state.active || networkCapturesByTab.get(tabId) !== state) return;
   let event = null;
   if (method === "Network.requestWillBeSent") {
+    const request = params?.request || {};
+    if (!hostnameAllowed(request.url, state.allowed_hostnames)) {
+      return;
+    }
+    state.matched_request_ids.add(params?.requestId);
+    const requestBody = await captureRequestBody(
+      tabId,
+      request,
+      params?.requestId,
+      state,
+    );
+    // Stop or replacement may occur while CDP resolves a large request body.
+    if (!state.active || networkCapturesByTab.get(tabId) !== state) return;
     event = {
       event_type: "request",
       request_id: params?.requestId,
       timestamp_ms: Number(params?.wallTime ? params.wallTime * 1000 : Date.now()),
-      url: params?.request?.url || "",
-      method: params?.request?.method || "",
+      url: request.url || "",
+      method: request.method || "",
       resource_type: params?.type || "",
-      headers: params?.request?.headers || {},
+      headers: request.headers || {},
     };
+    if (requestBody) {
+      event.request_body = requestBody;
+    }
   } else if (method === "Network.responseReceived") {
+    if (!state.matched_request_ids.has(params?.requestId)) return;
     event = {
       event_type: "response",
       request_id: params?.requestId,
@@ -582,51 +959,106 @@ async function publishNetworkEvent(tabId, method, params) {
       headers: params?.response?.headers || {},
     };
   } else if (method === "Network.loadingFinished") {
+    if (!state.matched_request_ids.has(params?.requestId)) return;
     event = {
       event_type: "finished",
       request_id: params?.requestId,
       encoded_data_length: params?.encodedDataLength,
     };
+    state.matched_request_ids.delete(params?.requestId);
   } else if (method === "Network.loadingFailed") {
+    if (!state.matched_request_ids.has(params?.requestId)) return;
     event = {
       event_type: "failed",
       request_id: params?.requestId,
       error_text: params?.errorText || "",
       canceled: Boolean(params?.canceled),
     };
+    state.matched_request_ids.delete(params?.requestId);
   }
   if (!event?.request_id) return;
-  try {
-    await bridgePost(RESPONSE_URL, {
-      type: "network_event",
-      extension_instance_id: identity.extension_instance_id,
-      target: {
-        extension_instance_id: identity.extension_instance_id,
-        window_id: tab.windowId,
-        tab_id: tabId,
-      },
-      event,
-    });
-  } catch {
-    // Diagnostic capture is best-effort and must not disrupt page control.
-  }
+  enqueueNetworkEvent(state, event);
 }
 
-async function startNetworkCapture(target = null) {
+async function startNetworkCapture(
+  target = null,
+  captureId,
+  allowedHostnames,
+  captureRequestBodies = false,
+  maxRequestBodyBytes = 0,
+) {
   ensureScreencastDebuggerListener();
-  const tab = await attachActiveTab(target);
+  const capture_id = String(captureId || "").trim();
+  if (!capture_id) {
+    throw new Error("capture_id is required");
+  }
+  const normalizedHostnames = normalizeAllowedHostnames(allowedHostnames);
+  const tab = await resolveCommandTab(target);
+  const identity = await getExtensionIdentity();
+  const existing = networkCapturesByTab.get(tab.id);
+  if (existing) {
+    existing.active = false;
+    reportNetworkTermination(existing, "capture_replaced");
+  }
+  await acquireDebuggerRole(tab, "network");
   await cdp(tab.id, "Network.enable", {
     maxTotalBufferSize: 10_000_000,
     maxResourceBufferSize: 2_000_000,
-    maxPostDataSize: 0,
+    maxPostDataSize: Math.max(
+      0,
+      Math.min(Number(maxRequestBodyBytes) || 0, MAX_REQUEST_BODY_BYTES),
+    ),
   });
-  networkCaptureTabIds.add(tab.id);
-  return { ok: true, active: true, tab_id: tab.id, metadata_only: true };
+  const targetIdentity = {
+    extension_instance_id: identity.extension_instance_id,
+    window_id: tab.windowId,
+    tab_id: tab.id,
+  };
+  const state = {
+    active: true,
+    capture_id,
+    target: targetIdentity,
+    allowed_hostnames: new Set(normalizedHostnames),
+    capture_request_bodies: Boolean(captureRequestBodies),
+    max_request_body_bytes: Math.max(
+      0,
+      Math.min(Number(maxRequestBodyBytes) || 0, MAX_REQUEST_BODY_BYTES),
+    ),
+    matched_request_ids: new Set(),
+    next_seq: 1,
+    acked_seq: 0,
+    sent_through_seq: 0,
+    queue: [],
+    queue_bytes: 0,
+    dropped_events_total: 0,
+    dropped_bytes_total: 0,
+    diagnostics_dirty: false,
+    diagnostics_sent: false,
+    termination_reason: "",
+    termination_detail: "",
+    termination_sent: false,
+    termination_acknowledged: false,
+    processing: Promise.resolve(),
+  };
+  networkCapturesByTab.set(tab.id, state);
+  networkDeliveryStates.set(captureStateKey(targetIdentity, capture_id), state);
+  await refreshExtensionFrameWsUrl();
+  void connectStreamWebSocket();
+  scheduleNetworkRetry();
+  return {
+    ok: true,
+    active: true,
+    tab_id: tab.id,
+    capture_id,
+    allowed_hostnames: normalizedHostnames,
+    capture_request_bodies: state.capture_request_bodies,
+    max_request_body_bytes: state.max_request_body_bytes,
+  };
 }
 
 async function getNetworkResponseBody(networkRequestId, target = null) {
   const tab = await attachActiveTab(target);
-  if (!networkCaptureTabIds.has(tab.id)) {
+  if (!networkCapturesByTab.has(tab.id)) {
     return { ok: false, code: "invalid_browser_operation", error: "network capture is not active" };
   }
   const result = await cdp(tab.id, "Network.getResponseBody", {
@@ -639,18 +1071,62 @@ async function getNetworkResponseBody(networkRequestId, target = null) {
   };
 }
 
+async function clearNetworkCapture(target = null) {
+  const tab = await resolveCommandTab(target);
+  const state = networkCapturesByTab.get(tab.id);
+  if (!state?.active) {
+    return {
+      ok: false,
+      code: "invalid_browser_operation",
+      error: "network capture is not active",
+    };
+  }
+  // Establish the barrier after all body lookups already queued for this
+  // capture have either produced an event or observed a stopped capture.
+  await state.processing;
+  const sequenceBarrier = state.next_seq - 1;
+  state.queue = state.queue.filter((entry) => entry.seq > sequenceBarrier);
+  state.queue_bytes = state.queue.reduce((total, entry) => total + entry.bytes, 0);
+  state.acked_seq = Math.max(state.acked_seq, sequenceBarrier);
+  state.sent_through_seq = Math.max(state.sent_through_seq, sequenceBarrier);
+  state.matched_request_ids.clear();
+  return {
+    ok: true,
+    active: true,
+    tab_id: tab.id,
+    capture_id: state.capture_id,
+    sequence_barrier: sequenceBarrier,
+  };
+}
+
 async function stopNetworkCapture(target = null) {
   const tab = await resolveCommandTab(target);
-  networkCaptureTabIds.delete(tab.id);
-  return { ok: true, active: false, tab_id: tab.id };
+  const state = networkCapturesByTab.get(tab.id);
+  if (state) {
+    state.active = false;
+    networkCapturesByTab.delete(tab.id);
+    await state.processing;
+    state.matched_request_ids.clear();
+    await releaseDebuggerRole(tab.id, "network");
+  }
+  return {
+    ok: true,
+    active: false,
+    tab_id: tab.id,
+    capture_id: state?.capture_id,
+    last_seq: state ? state.next_seq - 1 : 0,
+    dropped_events_total: state?.dropped_events_total ?? 0,
+    dropped_bytes_total: state?.dropped_bytes_total ?? 0,
+  };
 }
 
 async function stopStreamSession() {
   screencastActive = false;
-  if (streamSessionTabId !== null) {
+  const stoppedTabId = streamSessionTabId;
+  if (stoppedTabId !== null) {
     try {
       await chrome.debugger.sendCommand(
-        { tabId: streamSessionTabId },
+        { tabId: stoppedTabId },
         "Page.stopScreencast",
         {},
       );
@@ -660,6 +1136,9 @@ async function stopStreamSession() {
   }
   streamSessionTabId = null;
   lastScreencastPublishAt = 0;
+  if (stoppedTabId !== null) {
+    await releaseDebuggerRole(stoppedTabId, "preview");
+  }
 }
 
 async function startStreamSession(options = {}) {
@@ -766,24 +1245,11 @@ async function attachActiveTab(target = null) {
       "active tab cannot be debugged (use an http(s) page, not chrome://)",
     );
   }
-  if (attachedTabId === tab.id) {
-    for (const domain of ["Accessibility", "DOM", "Runtime", "Overlay", "Page"]) {
-      try {
-        await chrome.debugger.sendCommand({ tabId: tab.id }, `${domain}.enable`, {});
-      } catch {
-        // Domain may already be enabled.
-      }
-    }
-    streamPageEnabled = true;
-    return tab;
-  }
-  await detachIfNeeded();
-  await chrome.debugger.attach({ tabId: tab.id }, "1.3");
-  attachedTabId = tab.id;
-  for (const domain of ["Accessibility", "DOM", "Runtime", "Overlay", "Page"]) {
-    await chrome.debugger.sendCommand({ tabId: tab.id }, `${domain}.enable`, {});
-  }
-  streamPageEnabled = true;
+  await acquireDebuggerRole(
+    tab,
+    "command",
+    ["Accessibility", "DOM", "Runtime", "Overlay", "Page"],
+  );
   return tab;
 }
 
@@ -992,7 +1458,7 @@ async function highlightSelector(selector, target = null) {
 
 async function clearHighlight(target = null) {
   const targetTab = target ? await attachActiveTab(target) : null;
-  const tabId = targetTab?.id ?? attachedTabId;
+  const tabId = targetTab?.id ?? streamSessionTabId;
   if (tabId === null) return { ok: true };
   try {
     await cdp(tabId, "Overlay.hideHighlight", {});
@@ -2059,7 +2525,7 @@ const COMMANDS_PAUSING_STREAM = new Set([
   "generate_browser_pdf",
 ]);
 
-async function handleCmd(msg) {
+async function executeCmd(msg) {
   const { cmd, request_id: requestId, selector, tab_id: tabId } = msg;
   const target = msg.target ?? null;
   const pausesStream = COMMANDS_PAUSING_STREAM.has(cmd);
@@ -2111,9 +2577,6 @@ async function handleCmd(msg) {
       };
     } else if (cmd === "activate_tab") {
       body = await activateTab(target?.tab_id ?? tabId, target?.window_id ?? msg.window_id, msg.focus_window);
-      if (body.ok) {
-        streamSessionTabId = body.tab_id;
-      }
     } else if (cmd === "open_tab") {
       body = await openTab(msg.url, msg.active, target);
     } else if (cmd === "close_tab") {
@@ -2125,9 +2588,6 @@ async function handleCmd(msg) {
     } else if (cmd === "navigate") {
       const beforeSummary = msg.monitor ? await captureMonitoringSummary(target) : null;
       body = await navigateToUrl(msg.url, msg.timeout_ms, target);
-      if (body.ok) {
-        streamSessionTabId = body.tab_id;
-      }
       const navigateOutcome = body;
       const navigateWait = body.ok
         ? await waitForBrowserCondition(msg.wait, msg.timeout_ms, target)
@@ -2180,9 +2640,17 @@ async function handleCmd(msg) {
     } else if (cmd === "stop_console_capture") {
       body = await stopConsoleCapture(target);
     } else if (cmd === "start_network_capture") {
-      body = await startNetworkCapture(target);
+      body = await startNetworkCapture(
+        target,
+        msg.capture_id,
+        msg.allowed_hostnames,
+        msg.capture_request_bodies,
+        msg.max_request_body_bytes,
+      );
     } else if (cmd === "get_network_response_body") {
       body = await getNetworkResponseBody(msg.network_request_id, target);
+    } else if (cmd === "clear_network_capture") {
+      body = await clearNetworkCapture(target);
     } else if (cmd === "stop_network_capture") {
       body = await stopNetworkCapture(target);
     } else if (cmd === "execute_privileged_javascript") {
@@ -2213,8 +2681,9 @@ async function handleCmd(msg) {
       hint: "Close DevTools on this tab if attach fails.",
     };
   } finally {
-    if (target?.tab_id != null && pausesStream) {
-      streamSessionTabId = Number(target.tab_id);
+    const commandTab = await resolveCommandTab(target).catch(() => null);
+    if (commandTab) {
+      await releaseDebuggerRole(commandTab.id, "command");
     }
     if (pausesStream) {
       streamPaused = false;
@@ -2240,6 +2709,14 @@ async function handleCmd(msg) {
     cmd,
     ...body,
   };
+}
+
+function handleCmd(msg) {
+  // Command roles are idempotent within one operation. Serializing dispatch
+  // prevents one concurrent operation from releasing another's shared role.
+  const execution = commandExecution.then(() => executeCmd(msg));
+  commandExecution = execution.catch(() => undefined);
+  return execution;
 }
 
 function setBadge(connected) {
@@ -2505,35 +2982,71 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 chrome.tabs.onActivated.addListener((activeInfo) => {
-  if (attachedTabId !== null && attachedTabId !== activeInfo.tabId) {
-    void detachIfNeeded();
-  }
   scheduleTabSwitchCapture();
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   consoleCaptureTabIds.delete(tabId);
-  networkCaptureTabIds.delete(tabId);
-  if (tabId === attachedTabId) {
-    attachedTabId = null;
+  const networkState = networkCapturesByTab.get(tabId);
+  if (networkState) {
+    networkCapturesByTab.delete(tabId);
+    reportNetworkTermination(networkState, "tab_closed");
   }
+  debuggerSessions.delete(tabId);
   if (tabId === streamSessionTabId) {
     void stopStreamSession();
   }
 });
 
-chrome.debugger.onDetach.addListener((source) => {
+chrome.debugger.onDetach.addListener((source, reason) => {
+  const session = debuggerSessions.get(source.tabId);
+  if (!session) {
+    return;
+  }
+  debuggerSessions.delete(source.tabId);
   consoleCaptureTabIds.delete(source.tabId);
-  networkCaptureTabIds.delete(source.tabId);
-  if (source.tabId === attachedTabId) {
-    attachedTabId = null;
-    streamPageEnabled = false;
+  const networkState = networkCapturesByTab.get(source.tabId);
+  if (networkState) {
+    networkCapturesByTab.delete(source.tabId);
+    reportNetworkTermination(networkState, "debugger_detached", reason);
   }
   if (source.tabId === streamSessionTabId) {
     screencastActive = false;
     streamSessionTabId = null;
   }
 });
+
+if (globalThis.__TESHI_BRIDGE_TEST__) {
+  globalThis.__teshiBridgeTestHooks = {
+    acquireDebuggerRole,
+    releaseDebuggerRole,
+    normalizeAllowedHostnames,
+    hostnameAllowed,
+    boundedUtf8RequestBody,
+    captureRequestBody,
+    enqueueNetworkEvent,
+    networkBatchFor,
+    flushNetworkBatches,
+    handleNetworkAck,
+    publishNetworkEvent,
+    startNetworkCapture,
+    clearNetworkCapture,
+    stopNetworkCapture,
+    streamSocketNeeded,
+    connectStreamWebSocket,
+    debuggerSessions,
+    networkCapturesByTab,
+    networkDeliveryStates,
+    reportNetworkTermination,
+    setStreamWebSocketForTest(socket) {
+      streamWs = socket;
+    },
+    setBridgeContextForTest(projectRoot, wsUrl) {
+      cachedProjectRoot = projectRoot;
+      extensionFrameWsUrl = wsUrl;
+    },
+  };
+}
 
 setInterval(() => {
   void heartbeatLoop();

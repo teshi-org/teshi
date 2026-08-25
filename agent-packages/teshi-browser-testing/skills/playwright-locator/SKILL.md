@@ -117,12 +117,13 @@ teshi browser console stop \
   --lease-token <lease_token>
 ```
 
-Network capture stores metadata only by default. `network list` never returns headers or bodies. Use `network detail <request_id>` for redacted request/response headers. Add `--include-body` only when the user or test step needs the response body; it remains byte-bounded and reports encoding, truncation, original size, and returned size.
+Network capture requires at least one exact `--host`; provide every API hostname that the task explicitly needs and never broaden it with suffix assumptions. `network list` never returns headers or bodies. Add `--request-body` when matching POST/PUT/PATCH payloads are needed; the raw request body is retained with an explicit byte limit and is returned by `network detail`. Add `--include-body` only when the response body is also needed.
 
 ```bash
 teshi browser network start \
   --session <extension_instance_id> --window <window_id> --tab <tab_id> \
-  --lease-token <lease_token> --max-entries 500
+  --lease-token <lease_token> --host <exact_api_hostname> \
+  --request-body --max-request-body-bytes 65536 --max-entries 500
 teshi browser network list \
   --session <extension_instance_id> --window <window_id> --tab <tab_id> \
   --lease-token <lease_token>
@@ -134,7 +135,7 @@ teshi browser network stop \
   --lease-token <lease_token>
 ```
 
-Authorization, Cookie, token, password, secret, and caller-configured fields are redacted by default. Do not treat redaction as permission to collect unrelated traffic. A debugger conflict means DevTools or another controller owns the target; stop and report it rather than retrying attachment.
+Authorization, Cookie, token, password, secret, and caller-configured metadata fields are redacted by default. Explicitly captured request bodies are raw and unredacted, so request them only for the named task and avoid reproducing them in summaries. A debugger conflict means DevTools or another controller owns the target; stop and report it rather than retrying attachment.
 
 ## Keep privileged P2 access explicit
 

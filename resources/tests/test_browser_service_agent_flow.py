@@ -981,8 +981,10 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_network_capture_metadata_redaction_and_explicit_body_flow(self) -> None:
         await self.register("profile-a")
         lease = await self.acquire("profile-a")
+        forwarded: list[dict] = []
 
         async def direct(instance_id: str, command: dict) -> bool:
+            forwarded.append(dict(command))
             body = {"ok": True}
             if command["cmd"] == "get_network_response_body":
                 body.update({"body": "x" * 2_000, "base64_encoded": False})
@@ -1006,37 +1008,62 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
                 "request_id": "network-start",
                 "target": target("profile-a"),
                 "lease_token": lease,
+                "allowed_hostnames": ["EXAMPLE.test."],
+                "capture_request_bodies": True,
+                "max_request_body_bytes": 1024,
                 "max_body_bytes": 1024,
                 "sensitive_fields": ["x-private"],
             }
         )
         self.assertTrue(started["ok"])
-        await self.bridge.handle_extension_response(
-            {
-                "type": "network_event",
-                "extension_instance_id": "profile-a",
-                "target": target("profile-a"),
-                "event": {
-                    "event_type": "request",
-                    "request_id": "cdp-request-1",
-                    "url": "https://example.test/data",
-                    "method": "GET",
-                    "headers": {"Authorization": "private", "X-Private": "private"},
-                },
-            }
+        capture_id = started["capture"]["capture_id"]
+        self.assertEqual(
+            forwarded[0]["allowed_hostnames"], ["example.test"]
         )
-        await self.bridge.handle_extension_response(
+        self.assertEqual(forwarded[0]["capture_id"], capture_id)
+        first_ack = await self.bridge.handle_network_batch(
             {
-                "type": "network_event",
-                "extension_instance_id": "profile-a",
+                "type": "network_batch",
+                "capture_id": capture_id,
                 "target": target("profile-a"),
-                "event": {
-                    "event_type": "response",
-                    "request_id": "cdp-request-1",
-                    "status": 200,
-                    "headers": {"Set-Cookie": "private"},
-                },
-            }
+                "events": [
+                    {
+                        "seq": 1,
+                        "event_type": "request",
+                        "request_id": "cdp-request-1",
+                        "url": "https://example.test/data",
+                        "method": "POST",
+                        "headers": {
+                            "Authorization": "private",
+                            "X-Private": "private",
+                        },
+                        "request_body": {
+                            "encoding": "utf8",
+                            "body": "raw request",
+                        },
+                    }
+                ],
+            },
+            "profile-a",
+        )
+        self.assertEqual(first_ack["type"], "network_ack")
+        self.assertEqual(first_ack["ack_seq"], 1)
+        await self.bridge.handle_network_batch(
+            {
+                "type": "network_batch",
+                "capture_id": capture_id,
+                "target": target("profile-a"),
+                "events": [
+                    {
+                        "seq": 2,
+                        "event_type": "response",
+                        "request_id": "cdp-request-1",
+                        "status": 200,
+                        "headers": {"Set-Cookie": "private"},
+                    }
+                ],
+            },
+            "profile-a",
         )
         listed = await self.bridge.forward_command(
             {
@@ -1048,6 +1075,7 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(listed["requests"][0]["request_id"], "cdp-request-1")
         self.assertNotIn("headers", listed["requests"][0])
+        self.assertNotIn("request_body", listed["requests"][0])
         detail = await self.bridge.forward_command(
             {
                 "cmd": "get_network_request_detail",
@@ -1058,6 +1086,9 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         self.assertNotIn("private", str(detail))
+        self.assertEqual(
+            detail["request"]["request_body"]["body"], "raw request"
+        )
         body = await self.bridge.forward_command(
             {
                 "cmd": "get_network_request_detail",

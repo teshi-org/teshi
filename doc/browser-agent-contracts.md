@@ -50,3 +50,40 @@ when available.
 
 The broker is loopback-only by default. Session inventory must never include
 profile filesystem paths, cookies, storage values, form secrets, or page HTML.
+
+## Filtered network capture
+
+Enhanced network capture requires the advertised
+`p1.filtered_network_capture` and `p1.network_batch_transport` features. A
+start command supplies a complete leased target, one or more normalized exact
+`allowed_hostnames`, a broker-generated opaque `capture_id`, and optional raw
+request-body retention with a positive byte limit. Clients fail closed when
+either feature is unavailable; they do not fall back to legacy unfiltered
+capture.
+
+The extension filters parsed HTTP(S) hostnames before requesting post data from
+CDP. Matching requests with `hasPostData` may include a bounded `request_body`
+object:
+
+```json
+{
+  "encoding": "utf8",
+  "body": "{\"name\":\"example\"}",
+  "captured_size": 18,
+  "original_size": 18,
+  "truncated": false,
+  "unavailable_reason": null
+}
+```
+
+Request bodies are raw and are not covered by metadata redaction. List results
+omit request and response bodies; detail results include a retained request
+body, while response-body retrieval remains separately explicit.
+
+Captured events travel on the authenticated extension WebSocket as bounded
+`network_batch` messages. Every event carries a monotonic sequence number and
+is correlated by extension instance, complete target, and capture ID. The
+broker returns `network_ack` with the highest contiguous processed sequence.
+The extension retains unacknowledged events in a bounded queue, resends them
+after reconnect, and reports cumulative dropped-event diagnostics. The broker
+deduplicates retransmission and rejects mismatched or oversized batches.

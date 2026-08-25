@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -7,13 +8,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow};
 use serde_json::json;
 use teshi_engine::{
-    BrowserAction, BrowserConsoleLevel, BrowserElementInput, BrowserMode, BrowserOperation,
-    BrowserOperations, BrowserPrivilegedCapability, BrowserScreenshotFormat, BrowserTarget,
-    BrowserWaitCondition, LocatorIntent, PageContextRevision, PlaywrightLocatorCandidate,
-    RuntimeConfig, StepBinding, TeshiEngine, default_browser_service_script,
-    default_winapp_service_script, ensure_user_chrome_broker, load_project_settings, open_project,
-    read_active_step, resolve_step_bindings, send_sidecar_command_with_timeout,
-    start_browser_sidecar, stop_browser_sidecar,
+    BrowserAction, BrowserAgentError, BrowserAgentErrorCode, BrowserConsoleLevel,
+    BrowserElementInput, BrowserFeatureId, BrowserMode, BrowserOperation, BrowserOperations,
+    BrowserPrivilegedCapability, BrowserScreenshotFormat, BrowserTarget, BrowserWaitCondition,
+    LocatorIntent, PageContextRevision, PlaywrightLocatorCandidate, RuntimeConfig, StepBinding,
+    TeshiEngine, default_browser_service_script, default_winapp_service_script,
+    ensure_user_chrome_broker, load_project_settings, open_project, read_active_step,
+    resolve_step_bindings, send_sidecar_command_with_timeout, start_browser_sidecar,
+    stop_browser_sidecar,
 };
 
 use super::browser_endpoint::{
@@ -593,7 +595,16 @@ fn parse_console_levels(values: &[String]) -> Result<Vec<BrowserConsoleLevel>> {
 
 fn network(project_root: &Path, action: &BrowserNetworkCommand) -> Result<()> {
     let operation = match action {
-        BrowserNetworkCommand::Start(args) => network_start_operation(args)?,
+        BrowserNetworkCommand::Start(args) => {
+            let operation = network_start_operation(args)?;
+            let session = args
+                .target
+                .session
+                .as_deref()
+                .ok_or_else(|| anyhow!("--session is required for this browser operation"))?;
+            ensure_filtered_network_capture_compatible(project_root, session)?;
+            operation
+        }
         BrowserNetworkCommand::List(args) => network_list_operation(args)?,
         BrowserNetworkCommand::Detail(args) => network_detail_operation(args)?,
         BrowserNetworkCommand::Clear(args) => {
@@ -616,14 +627,92 @@ fn network(project_root: &Path, action: &BrowserNetworkCommand) -> Result<()> {
 
 fn network_start_operation(args: &BrowserNetworkStartArgs) -> Result<BrowserOperation> {
     let (target, lease_token) = required_target(&args.target)?;
+    let allowed_hostnames = args
+        .hosts
+        .iter()
+        .map(|hostname| super::normalize_exact_hostname(hostname))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(anyhow::Error::msg)?;
     Ok(BrowserOperation::StartBrowserNetworkCapture {
         target,
         lease_token,
+        allowed_hostnames,
+        capture_request_bodies: args.request_body,
+        max_request_body_bytes: args.max_request_body_bytes,
         max_age_ms: args.max_age_ms,
         max_entries: args.max_entries,
         max_bytes: args.max_bytes,
         max_body_bytes: args.max_body_bytes,
         sensitive_fields: args.sensitive_fields.clone(),
+    })
+}
+
+fn ensure_filtered_network_capture_compatible(project_root: &Path, session: &str) -> Result<()> {
+    let discovery = execute_typed_operation_value(
+        project_root,
+        BrowserOperation::ListBrowserSessions,
+        Duration::from_secs(15),
+    )?;
+    if let Err(error) = validate_filtered_network_capture_capabilities(&discovery, session) {
+        eprintln!("{}", serde_json::to_string_pretty(&error.to_wire_value())?);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+fn validate_filtered_network_capture_capabilities(
+    discovery: &serde_json::Value,
+    session: &str,
+) -> std::result::Result<(), BrowserAgentError> {
+    let selected = discovery
+        .get("sessions")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|sessions| {
+            sessions.iter().find(|candidate| {
+                candidate
+                    .pointer("/identity/extension_instance_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(session)
+            })
+        })
+        .ok_or_else(|| BrowserAgentError {
+            code: BrowserAgentErrorCode::BrowserTargetNotFound,
+            message: "selected browser session is absent from capability discovery".into(),
+            recovery: BTreeMap::from([("extension_instance_id".into(), json!(session))]),
+        })?;
+
+    let required = [
+        BrowserFeatureId::P1_FILTERED_NETWORK_CAPTURE,
+        BrowserFeatureId::P1_NETWORK_BATCH_TRANSPORT,
+    ];
+    let features = selected
+        .pointer("/capabilities/features")
+        .and_then(serde_json::Value::as_array);
+    let missing = required
+        .iter()
+        .filter(|required_feature| {
+            !features.is_some_and(|items| {
+                items.iter().any(|item| {
+                    item.get("feature").and_then(serde_json::Value::as_str)
+                        == Some(**required_feature)
+                        && item.get("available").and_then(serde_json::Value::as_bool) == Some(true)
+                })
+            })
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(BrowserAgentError {
+        code: BrowserAgentErrorCode::BrowserCapabilityUnavailable,
+        message: "selected browser session cannot safely start filtered network capture".into(),
+        recovery: BTreeMap::from([
+            ("extension_instance_id".into(), json!(session)),
+            ("required_features".into(), json!(required)),
+            ("missing_features".into(), json!(missing)),
+        ]),
     })
 }
 
@@ -1697,5 +1786,46 @@ mod tests {
         assert!(!serialized.contains("broker-private"));
         assert!(serialized.contains("profile-a"));
         assert!(serialized.contains("retryable"));
+    }
+
+    #[test]
+    fn filtered_network_capture_fails_closed_for_legacy_capabilities() {
+        let discovery = json!({
+            "sessions": [{
+                "identity": {"extension_instance_id": "profile-a"},
+                "capabilities": {
+                    "features": [{
+                        "feature": "p1.observability_artifacts",
+                        "available": true
+                    }]
+                }
+            }]
+        });
+        let error =
+            validate_filtered_network_capture_capabilities(&discovery, "profile-a").unwrap_err();
+        assert_eq!(
+            error.code,
+            BrowserAgentErrorCode::BrowserCapabilityUnavailable
+        );
+        assert_eq!(
+            error.recovery["missing_features"],
+            json!(["p1.filtered_network_capture", "p1.network_batch_transport"])
+        );
+    }
+
+    #[test]
+    fn filtered_network_capture_accepts_both_negotiated_capabilities() {
+        let discovery = json!({
+            "sessions": [{
+                "identity": {"extension_instance_id": "profile-a"},
+                "capabilities": {
+                    "features": [
+                        {"feature": "p1.filtered_network_capture", "available": true},
+                        {"feature": "p1.network_batch_transport", "available": true}
+                    ]
+                }
+            }]
+        });
+        assert!(validate_filtered_network_capture_capabilities(&discovery, "profile-a").is_ok());
     }
 }

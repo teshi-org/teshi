@@ -23,7 +23,9 @@
       "extension_version": "0.8.0-dev",
       "features": [
         { "feature": "p0.control", "available": true },
-        { "feature": "p1.observability_artifacts", "available": true }
+        { "feature": "p1.observability_artifacts", "available": true },
+        { "feature": "p1.filtered_network_capture", "available": true },
+        { "feature": "p1.network_batch_transport", "available": true }
       ],
       "supported_actions": ["click", "pointer_click", "fill", "type", "navigate", "upload"],
       "supported_operations": [
@@ -72,6 +74,53 @@
         "tab_id": 42
       },
       "lease_token": "fixture-secret-not-for-discovery"
+    }
+  },
+  "filtered_network": {
+    "start_command": {
+      "cmd": "start_network_capture",
+      "request_id": "network-start-1",
+      "target": {
+        "extension_instance_id": "profile-p0-p1",
+        "window_id": 7,
+        "tab_id": 42
+      },
+      "lease_token": "fixture-secret-not-for-discovery",
+      "allowed_hostnames": ["api.example.test"],
+      "capture_request_bodies": true,
+      "max_request_body_bytes": 65536
+    },
+    "list_response": {
+      "ok": true,
+      "operation": "list_network_requests",
+      "request_id": "network-list-1",
+      "requests": [
+        {
+          "network_request_id": "cdp-request-1",
+          "url": "https://api.example.test/v1/items",
+          "method": "POST",
+          "status": 201,
+          "has_request_body": true
+        }
+      ]
+    },
+    "detail_response": {
+      "ok": true,
+      "operation": "get_network_request_detail",
+      "request_id": "network-detail-1",
+      "request": {
+        "network_request_id": "cdp-request-1",
+        "url": "https://api.example.test/v1/items",
+        "method": "POST",
+        "status": 201,
+        "request_body": {
+          "data": "{\"name\":\"fixture\"}",
+          "encoding": "utf8",
+          "captured_bytes": 18,
+          "original_bytes": 18,
+          "truncated": false
+        }
+      }
     }
   },
   "legacy": {

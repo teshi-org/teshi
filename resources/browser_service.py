@@ -2502,6 +2502,16 @@ class ChromeBridge:
         if self._frame_callback is not None:
             await self._frame_callback(frame_out)
 
+    async def handle_network_batch(
+        self,
+        payload: dict[str, Any],
+        stream_instance_id: str,
+    ) -> dict[str, Any]:
+        """Accept a sequenced network batch from its authenticated extension."""
+        ack = self.broker.accept_network_batch(stream_instance_id, payload)
+        self.write_endpoint()
+        return ack
+
     async def handle_extension_response(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Correlate a JSON response without allowing cross-session delivery."""
         instance_id = str(payload.get("extension_instance_id", "")).strip()
@@ -2920,17 +2930,34 @@ class ChromeBridge:
                     data, legacy_compatibility=False
                 )
                 record, target, _ephemeral = authorized
+                allowed_hostnames = data.get("allowed_hostnames")
+                if allowed_hostnames is None:
+                    allowed_hostnames = data.get("hostnames")
                 capture = self.broker.start_network_capture(
                     record,
                     target,
+                    allowed_hostnames=allowed_hostnames,
+                    capture_request_bodies=data.get("capture_request_bodies", False),
+                    max_request_body_bytes=data.get("max_request_body_bytes"),
                     max_age_ms=data.get("max_age_ms"),
                     max_entries=data.get("max_entries"),
                     max_bytes=data.get("max_bytes"),
                     max_body_bytes=data.get("max_body_bytes"),
                     sensitive_fields=data.get("sensitive_fields"),
                 )
+                extension_request = dict(data)
+                extension_request.update(
+                    {
+                        "capture_id": capture["capture_id"],
+                        "allowed_hostnames": capture["allowed_hostnames"],
+                        "capture_request_bodies": capture["capture_request_bodies"],
+                        "max_request_body_bytes": capture["retention"][
+                            "max_request_body_bytes"
+                        ],
+                    }
+                )
                 result = await self._forward_extension_command(
-                    data, authorized=authorized
+                    extension_request, authorized=authorized
                 )
                 if not result.get("ok"):
                     self.broker.stop_network_capture(record, target)
@@ -2979,11 +3006,24 @@ class ChromeBridge:
                 )
                 return operation_success(operation, request_id, **bounded)
             if operation == "clear_network_capture":
-                record, target, _ephemeral = self.broker.authorize_command(
+                authorized = self.broker.authorize_command(
                     data, legacy_compatibility=False
                 )
-                result = self.broker.clear_network_capture(record, target)
-                return operation_success(operation, request_id, **result)
+                record, target, _ephemeral = authorized
+                extension_result = await self._forward_extension_command(
+                    data, authorized=authorized
+                )
+                if not extension_result.get("ok"):
+                    return extension_result
+                cleared = self.broker.clear_network_capture(
+                    record,
+                    target,
+                    sequence_barrier=extension_result.get(
+                        "sequence_barrier",
+                        extension_result.get("last_sequence"),
+                    ),
+                )
+                return operation_success(operation, request_id, **cleared)
             if operation == "stop_network_capture":
                 authorized = self.broker.authorize_command(
                     data, legacy_compatibility=False
@@ -2994,7 +3034,14 @@ class ChromeBridge:
                 )
                 if not result.get("ok"):
                     return result
-                stopped = self.broker.stop_network_capture(record, target)
+                stopped = self.broker.stop_network_capture(
+                    record,
+                    target,
+                    sequence_barrier=result.get(
+                        "sequence_barrier",
+                        result.get("final_sequence", result.get("last_sequence")),
+                    ),
+                )
                 return operation_success(operation, request_id, **stopped)
             if operation == "execute_privileged_javascript":
                 return await self._execute_privileged_javascript(data)
@@ -4108,6 +4155,15 @@ async def run_chrome(
                     elif data.get("type") == "response" and stream_authenticated:
                         data["extension_instance_id"] = stream_instance_id
                         await bridge.handle_extension_response(data)
+                    elif (
+                        data.get("type") == "network_batch"
+                        and stream_authenticated
+                        and stream_instance_id
+                    ):
+                        ack = await bridge.handle_network_batch(
+                            data, stream_instance_id
+                        )
+                        await websocket.send(json.dumps(ack))
                     elif data.get("type") == "frame_error":
                         await bridge.handle_extension_response(
                             {

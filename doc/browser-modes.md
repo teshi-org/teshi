@@ -9,7 +9,7 @@ teshi-desktop supports two browser backends for BDD locator recording. Both writ
 │  teshi-bridge   │ ──────────────────────────────────► │  Python bridge       │
 │  Chrome ext     │ ◄────────────────────────────────── │  127.0.0.1:17373     │
 │  (active tab)   │     JSON { cmd? }                     │  browser_service.py  │
-│                 │     WS /extension/frames (TSH1 JPEG)  │                      │
+│                 │     WS frames + commands + net batches│                      │
 └─────────────────┘                                       └──────────┬───────────┘
         │ CDP debugger (screencast + locator cmds)                     │ WebSocket
         ▼                                                            ▼
@@ -20,7 +20,7 @@ teshi-desktop supports two browser backends for BDD locator recording. Both writ
 ```
 
 - **Extension control plane**: HTTP `POST /v1/bridge/heartbeat` (~1.5 s) for `project_root`, tabs, and queued `cmd` objects. Small replies go to `POST /v1/bridge/response`. Every POST carries the random broker-start token discovered from `ws_url`; unauthenticated requests and browser-page CORS access are rejected.
-- **Extension preview data plane**: WebSocket `extension_frame_ws_url` from `GET /v1/bridge` (same host/port as agent `ws_url`, path `/extension/frames`). Binary **TSH1** packets: magic + JSON meta (`tab_id`, `url`, `seq`) + raw JPEG. The bridge base64-encodes once in a thread pool and broadcasts `{"type":"frame","data":"..."}` to teshi-desktop (same agent WebSocket protocol as before).
+- **Extension WebSocket data plane**: `extension_frame_ws_url` from `GET /v1/bridge` (same host/port as agent `ws_url`, path `/extension/frames`) authenticates one extension Profile. It carries binary **TSH1** screencast packets, direct commands/responses, and acknowledged `network_batch` JSON. Network batches use a capture ID plus monotonic sequence numbers and remain in a bounded extension queue until the broker returns a matching contiguous `network_ack`.
 - **Preview capture**: CDP `Page.startScreencast` only (JPEG quality **70**, fit inside **1920×1080**, no upscaling). Frames are sent when the page repaints (scroll, animation, etc.); a static page keeps the last frame and the panel may show **Preview idle**. Locator commands pause screencast briefly, then resume. If screencast cannot start, the extension reports `frame_error` (no HTTP capture fallback). Large JSON frames on `/v1/bridge/response` are deprecated.
 - **Agent ↔ bridge**: token-authenticated WebSocket (`ws_url` in `.teshi/cdp-endpoint.json`); ordinary web-page origins are rejected.
 - **Desktop**: starts/stops the Python process; polls discovery; `POST /v1/bridge/activate_tab` to switch Chrome tabs.
@@ -44,6 +44,8 @@ Each extension installation persists an opaque `extension_instance_id` in that C
 The broker isolates health, commands, pending requests, preview frames, diagnostics, and an exclusive bounded lease for every extension instance. Different agents may lease different profiles concurrently. A second owner targeting the same profile receives `browser_session_busy`; expired leases recover automatically. Explicit locator and mutation operations require the complete target and lease token. Legacy commands omit them only when exactly one eligible target exists; otherwise they fail with `ambiguous_browser_target` before mutation.
 
 For concurrent work, create one dedicated Chromium profile per agent, install the extension separately, and assign labels such as `agent-a` and `agent-b` in each popup. All profiles use the same loopback broker port.
+
+Network capture is independently keyed by Profile/window/tab/capture ID. One lease owner may capture several explicit tabs in its Profile, while agents holding different Profile leases may capture concurrently. Active-tab changes move only the preview role and do not stop an explicit capture. Tab closure, Profile disconnect, broker replacement, or an external debugger detach ends only the affected capture and reports its termination reason.
 
 ## Connect Chrome (default for locators)
 
@@ -86,6 +88,15 @@ teshi browser locator --session <instance-id> --window 7 --tab 42 \
 teshi browser execute --session <instance-id> --window 7 --tab 42 \
   --lease-token <token> --reference @e1 --page-revision <revision> \
   --action click --wait-text Saved
+teshi browser network start --session <instance-id> --window 7 --tab 42 \
+  --lease-token <token> --host api.example.test \
+  --request-body --max-request-body-bytes 262144
+teshi browser network list --session <instance-id> --window 7 --tab 42 \
+  --lease-token <token>
+teshi browser network detail <request-id> --session <instance-id> \
+  --window 7 --tab 42 --lease-token <token>
+teshi browser network stop --session <instance-id> --window 7 --tab 42 \
+  --lease-token <token>
 teshi browser lease release --session <instance-id> --lease-token <token>
 
 teshi mcp serve --stdio

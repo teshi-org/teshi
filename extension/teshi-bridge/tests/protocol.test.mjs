@@ -64,6 +64,8 @@ test("service worker implements protocol-v1 identity and routed operations", () 
   assert.match(background, /page_context_revision/);
   assert.match(background, /p0\.control/);
   assert.match(background, /p1\.observability_artifacts/);
+  assert.match(background, /p1\.filtered_network_capture/);
+  assert.match(background, /p1\.network_batch_transport/);
   assert.match(background, /supported_actions/);
   assert.match(background, /supported_operations/);
   assert.match(background, /direct_command/);
@@ -109,14 +111,41 @@ test("console capture uses target-scoped CDP events and bounded broker transport
   assert.match(background, /cmd === "stop_console_capture"/);
 });
 
-test("network capture emits metadata and retrieves bodies only on explicit command", () => {
+test("network capture uses filtered acknowledged WebSocket batches", () => {
   assert.match(background, /async function startNetworkCapture/);
   assert.match(background, /Network\.requestWillBeSent/);
   assert.match(background, /Network\.responseReceived/);
-  assert.match(background, /type: "network_event"/);
-  assert.match(background, /metadata_only: true/);
+  assert.match(background, /normalizeAllowedHostnames/);
+  assert.match(background, /hostnameAllowed\(request\.url, state\.allowed_hostnames\)/);
+  assert.match(background, /Network\.getRequestPostData/);
+  assert.match(background, /request_body = requestBody/);
+  assert.match(background, /type: "network_batch"/);
+  assert.match(background, /type === "network_ack"/);
+  assert.doesNotMatch(background, /type: "network_event"/);
   assert.match(background, /cmd === "get_network_response_body"/);
   assert.match(background, /Network\.getResponseBody/);
+});
+
+test("debugger sessions are role-aware and active-tab changes migrate preview only", () => {
+  assert.match(background, /const debuggerSessions = new Map\(\)/);
+  assert.match(background, /async function acquireDebuggerRole/);
+  assert.match(background, /async function releaseDebuggerRole/);
+  assert.match(background, /acquireDebuggerRole\(tab, "network"\)/);
+  assert.match(background, /releaseDebuggerRole\(stoppedTabId, "preview"\)/);
+  const activationListener = background.match(
+    /chrome\.tabs\.onActivated\.addListener\([^]*?\n\}\);/,
+  )?.[0];
+  assert.ok(activationListener, "tab activation listener missing");
+  assert.doesNotMatch(activationListener, /networkCapturesByTab\.(delete|clear)/);
+  assert.doesNotMatch(activationListener, /chrome\.debugger\.detach/);
+});
+
+test("capture activity and unacknowledged events keep socket reconnect enabled", () => {
+  assert.match(background, /function streamSocketNeeded/);
+  assert.match(background, /networkCapturesByTab\.size > 0/);
+  assert.match(background, /state\.queue\.length > 0/);
+  assert.match(background, /if \(streamSocketNeeded\(\) && cachedProjectRoot\)/);
+  assert.match(background, /state\.sent_through_seq = state\.acked_seq/);
 });
 
 test("artifact transport is bounded and element clips use page coordinates", () => {
@@ -176,6 +205,16 @@ test("phased fixtures distinguish safe, artifact, and privileged availability", 
   assert.ok(
     phased.p0_p1_heartbeat.features.some(
       (entry) => entry.feature === "p1.observability_artifacts" && entry.available,
+    ),
+  );
+  assert.ok(
+    phased.p0_p1_heartbeat.features.some(
+      (entry) => entry.feature === "p1.filtered_network_capture" && entry.available,
+    ),
+  );
+  assert.ok(
+    phased.p0_p1_heartbeat.features.some(
+      (entry) => entry.feature === "p1.network_batch_transport" && entry.available,
     ),
   );
   assert.ok(phased.p0_p1_heartbeat.supported_operations.includes("list_console_events"));

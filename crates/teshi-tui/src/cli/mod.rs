@@ -988,6 +988,15 @@ pub enum BrowserNetworkCommand {
 pub struct BrowserNetworkStartArgs {
     #[command(flatten)]
     pub target: BrowserTargetArgs,
+    /// Exact hostname to capture (repeatable)
+    #[arg(long = "host", required = true, value_parser = normalize_exact_hostname)]
+    pub hosts: Vec<String>,
+    /// Retain bounded raw request bodies for matching requests
+    #[arg(long)]
+    pub request_body: bool,
+    /// Maximum bytes retained from each request body
+    #[arg(long, requires = "request_body", value_parser = clap::value_parser!(u64).range(1..))]
+    pub max_request_body_bytes: Option<u64>,
     #[arg(long)]
     pub max_age_ms: Option<u64>,
     #[arg(long)]
@@ -1000,6 +1009,61 @@ pub struct BrowserNetworkStartArgs {
     /// Additional sensitive header or query-field name to redact (repeatable)
     #[arg(long = "sensitive-field")]
     pub sensitive_fields: Vec<String>,
+}
+
+/// Validates and canonicalizes one exact network-capture hostname.
+///
+/// # Errors
+///
+/// Returns an error when the input contains URL components, wildcards,
+/// credentials, non-ASCII characters, or invalid DNS label syntax.
+pub(crate) fn normalize_exact_hostname(value: &str) -> Result<String, String> {
+    if value.is_empty() || value.trim() != value {
+        return Err("hostname must not be empty or contain surrounding whitespace".into());
+    }
+    if value.contains("://") {
+        return Err("hostname must not include a URL scheme".into());
+    }
+    if value.contains('@') {
+        return Err("hostname must not include credentials".into());
+    }
+    if value.contains(':') {
+        return Err("hostname must not include a port".into());
+    }
+    if value.chars().any(|character| "/\\?#".contains(character)) {
+        return Err("hostname must not include a path, query, or fragment".into());
+    }
+    if value.contains('*') {
+        return Err("hostname must not include a wildcard".into());
+    }
+    if !value.is_ascii() {
+        return Err("hostname must contain only ASCII characters".into());
+    }
+    if value.ends_with("..") {
+        return Err("hostname may have at most one trailing dot".into());
+    }
+
+    let normalized = value
+        .strip_suffix('.')
+        .unwrap_or(value)
+        .to_ascii_lowercase();
+    if normalized.is_empty() || normalized.len() > 253 {
+        return Err("hostname must contain between 1 and 253 characters".into());
+    }
+    if normalized.split('.').any(|label| {
+        label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    }) {
+        return Err(
+            "hostname labels must use 1-63 ASCII letters, digits, or interior hyphens".into(),
+        );
+    }
+    Ok(normalized)
 }
 
 #[derive(Debug, Args)]
@@ -1694,6 +1758,51 @@ mod tests {
             "65536",
         ])
         .expect_err("body limit without --include-body must fail");
+    }
+
+    #[test]
+    fn browser_network_start_requires_and_normalizes_repeatable_exact_hosts() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "browser",
+            "network",
+            "start",
+            "--host",
+            "API.Example.Test.",
+            "--host",
+            "uploads.example.test",
+            "--request-body",
+            "--max-request-body-bytes",
+            "65536",
+        ])
+        .expect("parse filtered network capture");
+        let BrowserCommand::Network {
+            action: BrowserNetworkCommand::Start(args),
+        } = browser_command(cli)
+        else {
+            panic!("expected browser network start subcommand");
+        };
+        assert_eq!(args.hosts, ["api.example.test", "uploads.example.test"]);
+        assert!(args.request_body);
+        assert_eq!(args.max_request_body_bytes, Some(65_536));
+
+        Cli::try_parse_from(["teshi", "browser", "network", "start"])
+            .expect_err("network start without --host must fail");
+    }
+
+    #[test]
+    fn browser_network_start_rejects_non_hostname_filters() {
+        for invalid in [
+            "https://api.example.test",
+            "api.example.test:443",
+            "api.example.test/v1",
+            "*.example.test",
+            "user@example.test",
+        ] {
+            let result =
+                Cli::try_parse_from(["teshi", "browser", "network", "start", "--host", invalid]);
+            assert!(result.is_err(), "{invalid} must be rejected");
+        }
     }
 
     #[test]

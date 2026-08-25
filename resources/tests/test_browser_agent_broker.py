@@ -30,6 +30,8 @@ def heartbeat(instance_id: str, tab_id: int = 42, window_id: int = 7) -> dict:
         "features": [
             {"feature": "p0.control", "available": True},
             {"feature": "p1.observability_artifacts", "available": True},
+            {"feature": "p1.filtered_network_capture", "available": True},
+            {"feature": "p1.network_batch_transport", "available": True},
         ],
         "supported_operations": [
             "capture_browser_screenshot",
@@ -833,7 +835,12 @@ class PhasedCapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("read_every_secret", serialized)
         self.assertEqual(
             [item["feature"] for item in discovery["capabilities"]["features"]],
-            ["p0.control", "p1.observability_artifacts"],
+            [
+                "p0.control",
+                "p1.filtered_network_capture",
+                "p1.network_batch_transport",
+                "p1.observability_artifacts",
+            ],
         )
         self.assertIn(
             "list_console_events", discovery["capabilities"]["supported_operations"]
@@ -856,6 +863,32 @@ class PhasedCapabilityTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(BrokerError) as caught:
             broker.authorize_command(command)
         self.assertEqual(caught.exception.code, "browser_capability_unavailable")
+        self.assertEqual(len(record.command_queue), 0)
+
+    async def test_start_network_capture_fails_closed_without_filtered_features(self) -> None:
+        broker = BrowserSessionBroker()
+        payload = heartbeat("profile-a")
+        payload["features"] = [
+            {"feature": "p0.control", "available": True},
+            {"feature": "p1.observability_artifacts", "available": True},
+        ]
+        record = broker.register_heartbeat(payload)
+        lease = broker.acquire_lease(record.extension_instance_id, "Agent A")
+        with self.assertRaises(BrokerError) as caught:
+            broker.authorize_command(
+                {
+                    "cmd": "start_network_capture",
+                    "request_id": "legacy-network-start",
+                    "target": target(record.extension_instance_id),
+                    "lease_token": lease["lease_token"],
+                    "allowed_hostnames": ["api.example.test"],
+                }
+            )
+        self.assertEqual(caught.exception.code, "browser_capability_unavailable")
+        self.assertEqual(
+            caught.exception.recovery["required_feature"],
+            "p1.filtered_network_capture",
+        )
         self.assertEqual(len(record.command_queue), 0)
 
     async def test_previous_extension_without_optional_permissions_keeps_p2_disabled(self) -> None:
@@ -982,41 +1015,68 @@ class PhasedCapabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_network_capture_redacts_metadata_and_bounds_explicit_body(self) -> None:
         broker = BrowserSessionBroker()
         record = broker.register_heartbeat(heartbeat("profile-a"))
-        broker.start_network_capture(
+        capture = broker.start_network_capture(
             record,
             target("profile-a"),
+            allowed_hostnames=["EXAMPLE.test."],
+            capture_request_bodies=True,
             max_entries=2,
             max_bytes=4096,
             max_body_bytes=1_024,
+            max_request_body_bytes=1_024,
             sensitive_fields=["x-private"],
         )
-        self.assertTrue(
+        self.assertFalse(
             broker.record_network_event(
-                "profile-a",
-                target("profile-a"),
-                {
-                    "event_type": "request",
-                    "request_id": "request-1",
-                    "url": "https://example.test/api?token=private&safe=visible",
-                    "method": "POST",
-                    "resource_type": "Fetch",
-                    "headers": {
-                        "Authorization": "Bearer private",
-                        "Cookie": "session=private",
-                        "X-Private": "private",
-                        "Accept": "application/json",
-                    },
-                },
+                "profile-a", target("profile-a"), {"event_type": "request"}
             )
         )
-        broker.record_network_event(
+        first_ack = broker.accept_network_batch(
             "profile-a",
-            target("profile-a"),
             {
-                "event_type": "response",
-                "request_id": "request-1",
-                "status": 200,
-                "headers": {"Set-Cookie": "secret=1", "Content-Type": "application/json"},
+                "capture_id": capture["capture_id"],
+                "target": target("profile-a"),
+                "events": [
+                    {
+                        "seq": 1,
+                        "event_type": "request",
+                        "request_id": "request-1",
+                        "url": "https://example.test/api?token=private&safe=visible",
+                        "method": "POST",
+                        "resource_type": "Fetch",
+                        "headers": {
+                            "Authorization": "Bearer private",
+                            "Cookie": "session=private",
+                            "X-Private": "private",
+                            "Accept": "application/json",
+                        },
+                        "request_body": {
+                            "encoding": "utf8",
+                            "body": "a" * 2_000,
+                            "original_size": 2_000,
+                        },
+                    },
+                ],
+            },
+        )
+        self.assertEqual(first_ack["ack_seq"], 1)
+        broker.accept_network_batch(
+            "profile-a",
+            {
+                "capture_id": capture["capture_id"],
+                "target": target("profile-a"),
+                "events": [
+                    {
+                        "seq": 2,
+                        "event_type": "response",
+                        "request_id": "request-1",
+                        "status": 200,
+                        "headers": {
+                            "Set-Cookie": "secret=1",
+                            "Content-Type": "application/json",
+                        },
+                    }
+                ],
             },
         )
         detail = broker.get_network_request_detail(
@@ -1030,7 +1090,11 @@ class PhasedCapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret=1", serialized)
         self.assertNotIn('"X-Private": "private"', serialized)
         self.assertIn("[REDACTED]", serialized)
-        self.assertNotIn("request_headers", json.dumps(broker.list_network_requests(record, target("profile-a"))))
+        self.assertEqual(detail["request"]["request_body"]["body"], "a" * 1_024)
+        self.assertTrue(detail["request"]["request_body"]["truncated"])
+        listed = broker.list_network_requests(record, target("profile-a"))
+        self.assertNotIn("request_headers", json.dumps(listed))
+        self.assertNotIn("request_body", json.dumps(listed["requests"]))
 
         bounded = broker.bound_network_body(
             record,
@@ -1047,12 +1111,26 @@ class PhasedCapabilityTests(unittest.IsolatedAsyncioTestCase):
         broker = BrowserSessionBroker(heartbeat_ttl=0.01)
         record_a = broker.register_heartbeat(heartbeat("profile-a"))
         record_b = broker.register_heartbeat(heartbeat("profile-b"))
-        broker.start_network_capture(record_a, target("profile-a"))
-        broker.start_network_capture(record_b, target("profile-b"))
-        broker.record_network_event(
+        capture_a = broker.start_network_capture(
+            record_a, target("profile-a"), allowed_hostnames=["a.test"]
+        )
+        broker.start_network_capture(
+            record_b, target("profile-b"), allowed_hostnames=["b.test"]
+        )
+        broker.accept_network_batch(
             "profile-a",
-            target("profile-a"),
-            {"event_type": "request", "request_id": "only-a", "url": "https://a.test"},
+            {
+                "capture_id": capture_a["capture_id"],
+                "target": target("profile-a"),
+                "events": [
+                    {
+                        "seq": 1,
+                        "event_type": "request",
+                        "request_id": "only-a",
+                        "url": "https://a.test",
+                    }
+                ],
+            },
         )
         self.assertEqual(
             broker.list_network_requests(record_b, target("profile-b"))["requests"], []
@@ -1061,6 +1139,146 @@ class PhasedCapabilityTests(unittest.IsolatedAsyncioTestCase):
         broker.expire_stale()
         self.assertEqual(record_a.network_captures, {})
         self.assertEqual(record_a.console_captures, {})
+
+    async def test_network_batch_filters_deduplicates_and_honors_barriers(self) -> None:
+        broker = BrowserSessionBroker()
+        record = broker.register_heartbeat(heartbeat("profile-a"))
+        with self.assertRaises(BrokerError):
+            broker.start_network_capture(record, target("profile-a"))
+        capture = broker.start_network_capture(
+            record,
+            target("profile-a"),
+            allowed_hostnames=["api.example.test"],
+        )
+        payload = {
+            "capture_id": capture["capture_id"],
+            "target": target("profile-a"),
+            "events": [
+                {
+                    "seq": 1,
+                    "event_type": "request",
+                    "request_id": "suffix",
+                    "url": "https://evilapi.example.test/",
+                },
+                {
+                    "seq": 2,
+                    "event_type": "request",
+                    "request_id": "matching",
+                    "url": "https://api.example.test/",
+                },
+            ],
+            "dropped_events": 3,
+        }
+        ack = broker.accept_network_batch("profile-a", payload)
+        self.assertEqual(ack["ack_seq"], 2)
+        duplicate_ack = broker.accept_network_batch("profile-a", payload)
+        self.assertEqual(duplicate_ack["ack_seq"], 2)
+        listed = broker.list_network_requests(record, target("profile-a"))
+        self.assertEqual(
+            [request["request_id"] for request in listed["requests"]],
+            ["matching"],
+        )
+        self.assertEqual(listed["delivery"]["dropped_events"], 3)
+        self.assertEqual(listed["delivery"]["duplicate_events"], 2)
+
+        cleared = broker.clear_network_capture(
+            record, target("profile-a"), sequence_barrier=4
+        )
+        self.assertEqual(cleared["delivery"]["clear_sequence"], 4)
+        late_ack = broker.accept_network_batch(
+            "profile-a",
+            {
+                "capture_id": capture["capture_id"],
+                "target": target("profile-a"),
+                "events": [
+                    {
+                        "seq": 3,
+                        "event_type": "request",
+                        "request_id": "late",
+                        "url": "https://api.example.test/late",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(late_ack["ack_seq"], 4)
+        self.assertEqual(
+            broker.list_network_requests(record, target("profile-a"))["requests"],
+            [],
+        )
+
+        terminated_ack = broker.accept_network_batch(
+            "profile-a",
+            {
+                "capture_id": capture["capture_id"],
+                "target": target("profile-a"),
+                "events": [],
+                "termination_reason": "debugger_detached",
+                "final_sequence": 5,
+            },
+        )
+        self.assertEqual(terminated_ack["ack_seq"], 5)
+        terminated = broker.list_network_requests(record, target("profile-a"))
+        self.assertFalse(terminated["active"])
+        self.assertEqual(terminated["termination"]["reason"], "debugger_detached")
+        stopped = broker.stop_network_capture(
+            record, target("profile-a"), sequence_barrier=5
+        )
+        self.assertFalse(stopped["active"])
+        late_after_stop = broker.accept_network_batch(
+            "profile-a",
+            {
+                "capture_id": capture["capture_id"],
+                "target": target("profile-a"),
+                "events": payload["events"],
+            },
+        )
+        self.assertTrue(late_after_stop["accepted"])
+        self.assertEqual(late_after_stop["ack_seq"], 5)
+
+    async def test_network_batch_rejects_oversized_and_far_ahead_input(self) -> None:
+        broker = BrowserSessionBroker()
+        record = broker.register_heartbeat(heartbeat("profile-a"))
+        capture = broker.start_network_capture(
+            record,
+            target("profile-a"),
+            allowed_hostnames=["api.example.test"],
+        )
+        oversized = broker.accept_network_batch(
+            "profile-a",
+            {
+                "capture_id": capture["capture_id"],
+                "target": target("profile-a"),
+                "events": [
+                    {"seq": index + 1, "event": {}}
+                    for index in range(101)
+                ],
+            },
+        )
+        self.assertFalse(oversized["accepted"])
+        self.assertEqual(oversized["reason"], "batch_too_large")
+
+        far_ahead = broker.accept_network_batch(
+            "profile-a",
+            {
+                "capture_id": capture["capture_id"],
+                "target": target("profile-a"),
+                "events": [
+                    {
+                        "seq": 2_001,
+                        "event": {
+                            "event_type": "request",
+                            "request_id": "far-ahead",
+                            "url": "https://api.example.test/",
+                        },
+                    }
+                ],
+            },
+        )
+        self.assertTrue(far_ahead["accepted"])
+        self.assertEqual(far_ahead["ack_seq"], 0)
+        summary = broker.list_network_requests(record, target("profile-a"))
+        self.assertEqual(summary["delivery"]["pending_sequences"], 0)
+        self.assertEqual(summary["delivery"]["rejected_events"], 1)
 
     async def test_error_recovery_removes_nested_secrets(self) -> None:
         response = BrokerError(

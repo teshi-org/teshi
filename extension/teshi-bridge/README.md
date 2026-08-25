@@ -21,7 +21,7 @@ Toolbar and store icons are PNGs under `icons/`. After updating brand icons, reg
 1. In **Google Chrome** (or another Chromium browser), open the tabs you need on an **http(s)** page. Use one dedicated browser profile per concurrent agent.
 2. In teshi-desktop, open your project and click **Connect Chrome** in the Browser panel.
 3. Open the extension popup, set an optional profile label such as `agent-a`, then click **Connect to teshi**. The popup reports the persisted instance ID, extension/protocol versions, and actionable disconnected/incompatible/debugger/stale status.
-4. `teshi browser sessions` starts or reuses the per-user broker on `127.0.0.1:17373`; Desktop attaches to that same process. The extension sends metadata heartbeats and opens a session-authenticated WebSocket for screencast frames plus low-latency correlated commands. Heartbeat delivery is the bounded fallback.
+4. `teshi browser sessions` starts or reuses the per-user broker on `127.0.0.1:17373`; Desktop attaches to that same process. The extension sends metadata heartbeats and opens a session-authenticated WebSocket for screencast frames, low-latency correlated commands, and acknowledged network-capture batches. Heartbeat delivery is the bounded command fallback.
 5. When connected, explicitly select the profile and tab in the Browser panel. The panel never projects tabs or frames from several profiles into one implicit selection.
 6. Select a Gherkin step and run the **bdd-locator** agent skill in the terminal, or use the packaged **playwright-locator** Skill for observational locator acquisition.
 
@@ -61,5 +61,9 @@ Protocol version 1 is the current contract. Legacy single-profile heartbeats rem
 - `stream_hello` JSON with `project_root`, `extension_instance_id`, and protocol version; the bridge authenticates the session before accepting binary frames.
 
 **Commands** carry a unique request ID and composite instance/window/tab target. P0 supports revision-bound snapshot refs, structured-candidate re-verification, DOM and CDP-pointer activation, typed input/waits, and lease-scoped tab/window/group lifecycle. Direct WebSocket dispatch requires the same broker-start token and atomically claims a command from the heartbeat queue; send failure restores the same request once. Replies echo request, instance, and target and mismatches are quarantined.
+
+**Filtered network capture** — the extension advertises `p1.filtered_network_capture` and `p1.network_batch_transport`. `start_network_capture` requires a broker-issued `capture_id`, one or more exact `allowed_hostnames`, `capture_request_bodies`, and `max_request_body_bytes`. The extension filters parsed HTTP(S) hostnames before body retrieval, retains bounded raw UTF-8 request bodies when enabled, and sends bounded `network_batch` messages over the authenticated WebSocket. Each event has a monotonic sequence number. Events remain in a bounded retry queue until a matching target/capture `network_ack` acknowledges a contiguous sequence; reconnects resend unacknowledged data and include cumulative drop totals.
+
+Debugger attachments are owned per tab by independent preview, command, console, and network roles. Moving the active tab migrates only preview, so captures can continue on several tabs in one profile. Tab closure or an external debugger detach terminates and reports only the affected capture. An active capture or unacknowledged batch keeps the WebSocket reconnecting even when preview is disabled.
 
 **Discovery** — `GET /v1/bridge` includes `sessions[]` with identities, health, browser versions, windows/tabs, public lease state, `extension_frame_ws_url`, and stream diagnostics. Legacy flat fields are populated only when exactly one eligible target exists.

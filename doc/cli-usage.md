@@ -105,6 +105,8 @@ teshi browser console start --session <id> --window <id> --tab <id> --lease-toke
   [--level info,error] [--max-age-ms N] [--max-entries N] [--max-bytes N]
 teshi browser console list|clear|stop --session <id> --window <id> --tab <id> --lease-token <token>
 teshi browser network start --session <id> --window <id> --tab <id> --lease-token <token> \
+  --host <exact-hostname> [--host <another-hostname>] \
+  [--request-body --max-request-body-bytes N] \
   [--max-age-ms N] [--max-entries N] [--max-bytes N] [--max-body-bytes N]
 teshi browser network list --session <id> --window <id> --tab <id> --lease-token <token>
 teshi browser network detail <request-id> [--include-body] [--max-body-bytes N] \
@@ -116,7 +118,7 @@ Explicit agent operations require the composite session/window/tab target and an
 
 Project locator configuration lives in `.teshi/settings.json`; `playwright_test_id_attributes` defaults to `["data-testid"]` and may contain project-specific alternatives.
 
-P1 diagnostic commands appear in session discovery under `capabilities.supported_operations`; upload is advertised in `capabilities.supported_actions`. Console and network buffers are target-scoped, lease-protected, and bounded by age, entry count, and bytes. Network lists are metadata-only; response bodies require the explicit `network detail --include-body` flag and return encoding, truncation, original-size, and returned-size metadata. Authorization, Cookie, token, password, secret, and caller-configured sensitive fields are redacted by default.
+P1 diagnostic commands appear in session discovery under `capabilities.supported_operations`; upload is advertised in `capabilities.supported_actions`. Console and network buffers are target-scoped, lease-protected, and bounded by age, entry count, and bytes. Network capture requires one or more exact `--host` filters; it never treats suffix-similar or wildcard hosts as matches. `--request-body` retains bounded raw bodies for matching requests, while list output remains metadata-only. Request detail includes the retained request body; response bodies still require `network detail --include-body`. Authorization, Cookie, token, password, secret, and caller-configured metadata fields are redacted by default, but explicitly captured request bodies are not redacted.
 
 Add `--monitor` to `navigate` or a mutating `execute` call to capture one bounded before/after summary and structured diff around the single action dispatch. Upload uses `--action upload` with one or more repeatable `--file` arguments. Files must already exist inside the selected project root and satisfy count and size limits; failed validation returns only the failing argument index and policy reason, never a directory listing or unauthorized full path.
 

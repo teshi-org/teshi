@@ -39,6 +39,24 @@
       "network_bodies": "explicit and bounded",
       "redaction": "enabled by default"
     },
+    "p1.filtered_network_capture": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "requires": [
+        "p1.observability_artifacts",
+        "p1.network_batch_transport",
+        "one or more exact hostnames"
+      ],
+      "request_bodies": "explicit opt-in with a positive byte limit",
+      "list_output": "metadata only"
+    },
+    "p1.network_batch_transport": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "transport": "authenticated WebSocket batches with contiguous acknowledgements"
+    },
     "p2.javascript": {
       "cli": true,
       "broker": true,

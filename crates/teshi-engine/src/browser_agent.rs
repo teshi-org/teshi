@@ -41,6 +41,10 @@ impl BrowserFeatureId {
     pub const P0_CONTROL: &'static str = "p0.control";
     /// Bounded P1 observability and artifact surface.
     pub const P1_OBSERVABILITY_ARTIFACTS: &'static str = "p1.observability_artifacts";
+    /// Exact-hostname filtered network capture with bounded request bodies.
+    pub const P1_FILTERED_NETWORK_CAPTURE: &'static str = "p1.filtered_network_capture";
+    /// Acknowledged WebSocket batch transport for captured network events.
+    pub const P1_NETWORK_BATCH_TRANSPORT: &'static str = "p1.network_batch_transport";
     /// P2 arbitrary JavaScript execution.
     pub const P2_JAVASCRIPT: &'static str = "p2.javascript";
     /// P2 allowlisted raw CDP execution.
@@ -1051,10 +1055,18 @@ pub enum BrowserOperation {
         target: BrowserTarget,
         lease_token: String,
     },
-    /// Start bounded metadata-only network capture for one leased target.
+    /// Start bounded exact-hostname network capture for one leased target.
     StartBrowserNetworkCapture {
         target: BrowserTarget,
         lease_token: String,
+        /// Normalized exact hostnames that may be retained.
+        allowed_hostnames: Vec<String>,
+        /// Whether matching requests may retain bounded raw request bodies.
+        #[serde(default)]
+        capture_request_bodies: bool,
+        /// Maximum bytes retained from each request body.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_request_body_bytes: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_age_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1435,6 +1447,70 @@ mod tests {
         assert_eq!(
             serde_json::to_value(known).unwrap(),
             json!("p1.observability_artifacts")
+        );
+        assert_eq!(
+            BrowserFeatureId::new(BrowserFeatureId::P1_FILTERED_NETWORK_CAPTURE).phase(),
+            Some(BrowserFeaturePhase::P1)
+        );
+        assert_eq!(
+            BrowserFeatureId::new(BrowserFeatureId::P1_NETWORK_BATCH_TRANSPORT).as_str(),
+            "p1.network_batch_transport"
+        );
+    }
+
+    #[test]
+    fn network_start_wire_contract_includes_filters_and_request_body_policy() {
+        let operation = BrowserOperation::StartBrowserNetworkCapture {
+            target: target(),
+            lease_token: "lease-secret".into(),
+            allowed_hostnames: vec!["api.example.test".into(), "uploads.example.test".into()],
+            capture_request_bodies: true,
+            max_request_body_bytes: Some(65_536),
+            max_age_ms: Some(60_000),
+            max_entries: Some(200),
+            max_bytes: Some(1_048_576),
+            max_body_bytes: Some(262_144),
+            sensitive_fields: vec![],
+        };
+        let command = operation.to_sidecar_command("network-start-1");
+        assert_eq!(
+            command["allowed_hostnames"],
+            json!(["api.example.test", "uploads.example.test"])
+        );
+        assert_eq!(command["capture_request_bodies"], true);
+        assert_eq!(command["max_request_body_bytes"], 65_536);
+    }
+
+    #[test]
+    fn network_detail_response_preserves_additive_request_body_fields() {
+        let response = parse_operation_response(
+            "get_network_request_detail",
+            "network-detail-1",
+            json!({
+                "ok": true,
+                "operation": "get_network_request_detail",
+                "request_id": "network-detail-1",
+                "request": {
+                    "network_request_id": "cdp-1",
+                    "method": "POST",
+                    "request_body": {
+                        "data": "{\"query\":\"status\"}",
+                        "encoding": "utf8",
+                        "captured_bytes": 18,
+                        "original_bytes": 18,
+                        "truncated": false
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            response.payload["request"]["request_body"]["encoding"],
+            "utf8"
+        );
+        assert_eq!(
+            response.payload["request"]["request_body"]["captured_bytes"],
+            18
         );
     }
 

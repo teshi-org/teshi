@@ -80,6 +80,8 @@ def fake_heartbeat(instance_id: str, label: str) -> dict:
         "features": [
             {"feature": "p0.control", "available": True},
             {"feature": "p1.observability_artifacts", "available": True},
+            {"feature": "p1.filtered_network_capture", "available": True},
+            {"feature": "p1.network_batch_transport", "available": True},
         ],
         "supported_actions": ["click", "upload"],
         "supported_operations": [
@@ -120,7 +122,10 @@ def fake_heartbeat(instance_id: str, label: str) -> dict:
 
 
 def smoke_test() -> None:
-    with tempfile.TemporaryDirectory(prefix="teshi-browser-agent-package-") as temp:
+    with tempfile.TemporaryDirectory(
+        prefix="teshi-browser-agent-package-",
+        ignore_cleanup_errors=True,
+    ) as temp:
         isolated = Path(temp)
         package_root = isolated / "teshi-browser-testing"
         shutil.copytree(PACKAGE_SOURCE, package_root)
@@ -187,6 +192,16 @@ def smoke_test() -> None:
             p1 = compatibility["phases"]["p1.observability_artifacts"]
             require(p1["cli"] and p1["broker"] and p1["extension"], "P1 surfaces missing")
             require("upload" in p1["supported_actions"], "P1 upload capability missing")
+            filtered = compatibility["phases"]["p1.filtered_network_capture"]
+            require(
+                filtered["cli"] and filtered["broker"] and filtered["extension"],
+                "filtered network capture surfaces missing",
+            )
+            transport = compatibility["phases"]["p1.network_batch_transport"]
+            require(
+                transport["cli"] and transport["broker"] and transport["extension"],
+                "network batch transport surfaces missing",
+            )
             require("list_console_events" in p1["operations"], "P1 console capability missing")
             require("get_network_request_detail" in p1["operations"], "P1 network capability missing")
             for feature in (

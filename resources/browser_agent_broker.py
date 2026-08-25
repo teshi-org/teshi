@@ -44,6 +44,9 @@ MAX_NETWORK_MAX_AGE_MS = 3_600_000
 MAX_NETWORK_MAX_ENTRIES = 10_000
 MAX_NETWORK_MAX_BYTES = 16_777_216
 MAX_NETWORK_MAX_BODY_BYTES = 2_097_152
+MAX_NETWORK_BATCH_EVENTS = 100
+MAX_NETWORK_BATCH_BYTES = 4_194_304
+MAX_NETWORK_PENDING_EVENTS = 2_000
 DEFAULT_SENSITIVE_DIAGNOSTIC_FIELDS = {
     "authorization",
     "cookie",
@@ -75,12 +78,18 @@ PRIVILEGED_CAPABILITIES = {
 KNOWN_FEATURE_IDS = {
     "p0.control",
     "p1.observability_artifacts",
+    "p1.filtered_network_capture",
+    "p1.network_batch_transport",
     "p2.javascript",
     "p2.raw_cdp",
     "p2.cookies",
     "p2.content_settings",
     "p2.extension_management",
 }
+FILTERED_NETWORK_CAPTURE_FEATURES = (
+    "p1.filtered_network_capture",
+    "p1.network_batch_transport",
+)
 KNOWN_ACTIONS = {
     "click",
     "pointer_click",
@@ -289,6 +298,10 @@ class NetworkCaptureState:
     """Target-scoped bounded network capture configuration and metadata."""
 
     target: dict[str, Any]
+    capture_id: str
+    allowed_hostnames: tuple[str, ...]
+    capture_request_bodies: bool
+    max_request_body_bytes: int
     max_age_ms: int
     max_entries: int
     max_bytes: int
@@ -296,6 +309,18 @@ class NetworkCaptureState:
     sensitive_fields: set[str]
     requests: dict[str, NetworkRequestRecord] = field(default_factory=dict)
     byte_size: int = 0
+    active: bool = True
+    acknowledged_sequence: int = 0
+    highest_seen_sequence: int = 0
+    pending_events: dict[int, dict[str, Any]] = field(default_factory=dict)
+    clear_sequence: int = 0
+    dropped_events: int = 0
+    dropped_batches: int = 0
+    dropped_bytes: int = 0
+    rejected_events: int = 0
+    duplicate_events: int = 0
+    termination_reason: str | None = None
+    terminated_at_ms: int | None = None
 
 
 @dataclass
@@ -359,6 +384,7 @@ class SessionRecord:
     )
     console_captures: dict[str, ConsoleCaptureState] = field(default_factory=dict)
     network_captures: dict[str, NetworkCaptureState] = field(default_factory=dict)
+    network_capture_barriers: dict[str, int] = field(default_factory=dict)
 
     def is_legacy(self) -> bool:
         """Return whether this record came from the pre-versioned heartbeat."""
@@ -1020,12 +1046,17 @@ class BrowserSessionBroker:
         """Resolve a command target and enforce exclusive ownership."""
         operation = _clean_text(data.get("cmd"))
         record, target, explicit = self.resolve_target(data.get("target"))
+        required_features: list[str] = []
         required_feature = _clean_text(data.get("required_feature"))
         if operation in P1_BROWSER_OPERATIONS:
-            required_feature = "p1.observability_artifacts"
+            required_features.append("p1.observability_artifacts")
+            if operation == "start_network_capture":
+                required_features.extend(FILTERED_NETWORK_CAPTURE_FEATURES)
         elif operation in P2_BROWSER_OPERATION_FEATURES:
-            required_feature = P2_BROWSER_OPERATION_FEATURES[operation]
-        if required_feature:
+            required_features.append(P2_BROWSER_OPERATION_FEATURES[operation])
+        elif required_feature:
+            required_features.append(required_feature)
+        for required_feature in required_features:
             availability = next(
                 (
                     item
@@ -1441,15 +1472,29 @@ class BrowserSessionBroker:
         record: SessionRecord,
         target: dict[str, Any],
         *,
+        allowed_hostnames: Any = None,
+        capture_request_bodies: Any = False,
+        max_request_body_bytes: Any = None,
         max_age_ms: Any = None,
         max_entries: Any = None,
         max_bytes: Any = None,
         max_body_bytes: Any = None,
         sensitive_fields: Any = None,
     ) -> dict[str, Any]:
-        """Start or replace bounded metadata-only network capture."""
+        """Start or replace a hostname-filtered bounded network capture."""
+        hostnames = _normalize_allowed_hostnames(allowed_hostnames)
         state = NetworkCaptureState(
             target=dict(target),
+            capture_id=secrets.token_urlsafe(24),
+            allowed_hostnames=hostnames,
+            capture_request_bodies=bool(capture_request_bodies),
+            max_request_body_bytes=_bounded_int(
+                max_request_body_bytes,
+                DEFAULT_NETWORK_MAX_BODY_BYTES,
+                1,
+                MAX_NETWORK_MAX_BODY_BYTES,
+                "max_request_body_bytes",
+            ),
             max_age_ms=_bounded_int(
                 max_age_ms,
                 DEFAULT_NETWORK_MAX_AGE_MS,
@@ -1480,7 +1525,20 @@ class BrowserSessionBroker:
             ),
             sensitive_fields=_normalize_sensitive_fields(sensitive_fields),
         )
-        record.network_captures[_reference_target_prefix(target)] = state
+        target_key = _reference_target_prefix(target)
+        previous = record.network_captures.get(target_key)
+        if previous is not None:
+            record.network_capture_barriers[
+                _network_capture_identity(previous.target, previous.capture_id)
+            ] = max(
+                previous.acknowledged_sequence,
+                previous.highest_seen_sequence,
+            )
+            while len(record.network_capture_barriers) > 64:
+                record.network_capture_barriers.pop(
+                    next(iter(record.network_capture_barriers))
+                )
+        record.network_captures[target_key] = state
         return _network_capture_summary(state)
 
     def record_network_event(
@@ -1489,7 +1547,7 @@ class BrowserSessionBroker:
         target: dict[str, Any],
         raw_event: Any,
     ) -> bool:
-        """Merge one CDP network event into its isolated metadata record."""
+        """Reject legacy HTTP events for enhanced filtered captures."""
         record = self.sessions.get(extension_instance_id)
         if record is None or not isinstance(target, dict) or not isinstance(raw_event, dict):
             return False
@@ -1498,6 +1556,145 @@ class BrowserSessionBroker:
         state = record.network_captures.get(_reference_target_prefix(target))
         if state is None or not _targets_equal(state.target, target):
             return False
+        # Enhanced captures must only be populated by authenticated, sequenced batches.
+        if state.capture_id:
+            return False
+        return self._merge_network_event(state, raw_event)
+
+    def accept_network_batch(
+        self,
+        extension_instance_id: str,
+        payload: Any,
+    ) -> dict[str, Any]:
+        """Merge one authenticated batch and return its contiguous acknowledgement."""
+        if not isinstance(payload, dict):
+            return _network_ack("", {}, 0, False, "invalid_batch")
+        target = payload.get("target")
+        capture_id = _clean_text(payload.get("capture_id"))[:256]
+        if not isinstance(target, dict):
+            return _network_ack(capture_id, {}, 0, False, "invalid_target")
+        record = self.sessions.get(extension_instance_id)
+        if (
+            record is None
+            or target.get("extension_instance_id") != extension_instance_id
+        ):
+            return _network_ack(capture_id, target, 0, False, "target_mismatch")
+        state = record.network_captures.get(_reference_target_prefix(target))
+        if (
+            state is None
+            or not _targets_equal(state.target, target)
+            or state.capture_id != capture_id
+        ):
+            barrier = record.network_capture_barriers.get(
+                _network_capture_identity(target, capture_id)
+            )
+            if barrier is not None:
+                return _network_ack(capture_id, target, barrier, True)
+            return _network_ack(capture_id, target, 0, False, "capture_mismatch")
+
+        raw_events = payload.get("events")
+        if not isinstance(raw_events, list):
+            return _network_ack(
+                capture_id,
+                target,
+                state.acknowledged_sequence,
+                False,
+                "invalid_events",
+            )
+        batch_bytes = len(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        )
+        if (
+            len(raw_events) > MAX_NETWORK_BATCH_EVENTS
+            or batch_bytes > MAX_NETWORK_BATCH_BYTES
+        ):
+            state.dropped_batches += 1
+            return _network_ack(
+                capture_id,
+                target,
+                state.acknowledged_sequence,
+                False,
+                "batch_too_large",
+            )
+        for item in raw_events:
+            if not isinstance(item, dict):
+                state.rejected_events += 1
+                continue
+            sequence = _as_int(item.get("seq"))
+            if sequence is None:
+                sequence = _as_int(item.get("sequence"))
+            if sequence is None or sequence <= 0:
+                state.rejected_events += 1
+                continue
+            state.highest_seen_sequence = max(state.highest_seen_sequence, sequence)
+            if (
+                sequence <= state.acknowledged_sequence
+                or sequence <= state.clear_sequence
+                or sequence in state.pending_events
+            ):
+                state.duplicate_events += 1
+                continue
+            if sequence > state.acknowledged_sequence + MAX_NETWORK_PENDING_EVENTS:
+                state.rejected_events += 1
+                continue
+            event = item.get("event")
+            if not isinstance(event, dict):
+                event = {
+                    key: value
+                    for key, value in item.items()
+                    if key not in {"seq", "sequence"}
+                }
+            state.pending_events[sequence] = event
+
+        while state.acknowledged_sequence + 1 in state.pending_events:
+            state.acknowledged_sequence += 1
+            event = state.pending_events.pop(state.acknowledged_sequence)
+            if state.active:
+                if not self._merge_network_event(state, event):
+                    state.rejected_events += 1
+            else:
+                state.rejected_events += 1
+
+        state.dropped_events = max(
+            state.dropped_events,
+            _nonnegative_diagnostic(payload, "dropped_events", "dropped_event_count"),
+        )
+        state.dropped_batches = max(
+            state.dropped_batches,
+            _nonnegative_diagnostic(payload, "dropped_batches", "dropped_batch_count"),
+        )
+        state.dropped_bytes = max(
+            state.dropped_bytes,
+            _nonnegative_diagnostic(payload, "dropped_bytes"),
+        )
+        termination = payload.get("termination")
+        termination_reason = _clean_text(payload.get("termination_reason"))[:256]
+        if not termination_reason and isinstance(termination, dict):
+            termination_reason = _clean_text(termination.get("reason"))[:256]
+        if termination_reason:
+            barrier_payload = payload
+            if isinstance(termination, dict):
+                barrier_payload = {**payload, **termination}
+            barrier = _sequence_barrier(
+                barrier_payload,
+                max(state.acknowledged_sequence, state.highest_seen_sequence),
+            )
+            self._terminate_network_capture(state, termination_reason, barrier)
+        return _network_ack(
+            capture_id,
+            target,
+            state.acknowledged_sequence,
+            True,
+        )
+
+    def _merge_network_event(
+        self,
+        state: NetworkCaptureState,
+        raw_event: dict[str, Any],
+    ) -> bool:
+        """Merge a policy-validated CDP event into one retained request."""
         request_id = _clean_text(raw_event.get("request_id"))[:256]
         event_type = _clean_text(raw_event.get("event_type"))
         if not request_id or event_type not in {
@@ -1510,6 +1707,13 @@ class BrowserSessionBroker:
         now = time.monotonic()
         self._evict_network_requests(state, now)
         previous = state.requests.get(request_id)
+        if event_type == "request":
+            raw_url = _clean_text(raw_event.get("url"))[:8192]
+            if not _url_matches_allowed_hostname(raw_url, state.allowed_hostnames):
+                return False
+        elif previous is None:
+            # Never create an orphan response that bypassed request hostname filtering.
+            return False
         value = dict(previous.value) if previous is not None else {
             "request_id": request_id,
             "timestamp_ms": _as_int(raw_event.get("timestamp_ms"))
@@ -1529,6 +1733,27 @@ class BrowserSessionBroker:
                     ),
                 }
             )
+            if state.capture_request_bodies and "request_body" in raw_event:
+                request_body = raw_event.get("request_body")
+                if not isinstance(request_body, dict):
+                    request_body = {
+                        "body": request_body,
+                        "encoding": raw_event.get("request_body_encoding"),
+                        "base64_encoded": raw_event.get(
+                            "request_body_base64_encoded"
+                        ),
+                        "original_size": raw_event.get(
+                            "request_body_original_size"
+                        ),
+                        "truncated": raw_event.get("request_body_truncated"),
+                        "unavailable_reason": raw_event.get(
+                            "request_body_unavailable_reason"
+                        ),
+                    }
+                value["request_body"] = _bounded_request_body(
+                    request_body,
+                    state.max_request_body_bytes,
+                )
         elif event_type == "response":
             value.update(
                 {
@@ -1684,13 +1909,27 @@ class BrowserSessionBroker:
         }
 
     def clear_network_capture(
-        self, record: SessionRecord, target: dict[str, Any]
+        self,
+        record: SessionRecord,
+        target: dict[str, Any],
+        sequence_barrier: Any = None,
     ) -> dict[str, Any]:
         state = self._require_network_capture(record, target)
         removed_entries = len(state.requests)
         removed_bytes = state.byte_size
         state.requests.clear()
         state.byte_size = 0
+        barrier = _bounded_sequence(
+            sequence_barrier,
+            max(state.acknowledged_sequence, state.highest_seen_sequence),
+        )
+        state.clear_sequence = max(state.clear_sequence, barrier)
+        state.acknowledged_sequence = max(state.acknowledged_sequence, barrier)
+        state.pending_events = {
+            sequence: event
+            for sequence, event in state.pending_events.items()
+            if sequence > state.acknowledged_sequence
+        }
         return {
             **_network_capture_summary(state),
             "removed_entries": removed_entries,
@@ -1698,16 +1937,51 @@ class BrowserSessionBroker:
         }
 
     def stop_network_capture(
-        self, record: SessionRecord, target: dict[str, Any]
+        self,
+        record: SessionRecord,
+        target: dict[str, Any],
+        *,
+        sequence_barrier: Any = None,
+        termination_reason: str = "explicit_stop",
     ) -> dict[str, Any]:
         state = record.network_captures.pop(_reference_target_prefix(target), None)
         if state is None:
             return {"target": dict(target), "active": False, "removed_entries": 0}
+        barrier = _bounded_sequence(
+            sequence_barrier,
+            max(state.acknowledged_sequence, state.highest_seen_sequence),
+        )
+        self._terminate_network_capture(state, termination_reason, barrier)
+        record.network_capture_barriers[
+            _network_capture_identity(target, state.capture_id)
+        ] = state.acknowledged_sequence
+        while len(record.network_capture_barriers) > 64:
+            record.network_capture_barriers.pop(
+                next(iter(record.network_capture_barriers))
+            )
         return {
-            "target": dict(target),
-            "active": False,
+            **_network_capture_summary(state),
             "removed_entries": len(state.requests),
             "removed_bytes": state.byte_size,
+        }
+
+    @staticmethod
+    def _terminate_network_capture(
+        state: NetworkCaptureState,
+        reason: str,
+        sequence_barrier: int,
+    ) -> None:
+        state.active = False
+        state.termination_reason = _clean_text(reason)[:256] or "unknown"
+        state.terminated_at_ms = int(time.time() * 1000)
+        state.clear_sequence = max(state.clear_sequence, sequence_barrier)
+        state.acknowledged_sequence = max(
+            state.acknowledged_sequence, sequence_barrier
+        )
+        state.pending_events = {
+            sequence: event
+            for sequence, event in state.pending_events.items()
+            if sequence > state.acknowledged_sequence
         }
 
     def _require_network_capture(
@@ -1849,6 +2123,7 @@ class BrowserSessionBroker:
             record.element_references.clear()
             record.console_captures.clear()
             record.network_captures.clear()
+            record.network_capture_barriers.clear()
             for request_id, pending in list(self.pending.items()):
                 if pending.extension_instance_id != record.extension_instance_id:
                     continue
@@ -2702,18 +2977,202 @@ def _redact_url(value: str, sensitive_fields: set[str]) -> str:
         return value
 
 
+def _normalize_allowed_hostnames(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        raw_values = [value]
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = list(value)
+    else:
+        raw_values = []
+    normalized: set[str] = set()
+    for raw in raw_values:
+        hostname = _clean_text(raw).rstrip(".").lower()
+        if not hostname:
+            continue
+        if any(marker in hostname for marker in ("://", "/", "\\", "@", "*", "?", "#")):
+            raise BrokerError(
+                "invalid_browser_operation",
+                "allowed_hostnames must contain exact hostnames without URL components or wildcards",
+            )
+        try:
+            hostname = hostname.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise BrokerError(
+                "invalid_browser_operation",
+                "allowed_hostnames contains an invalid hostname",
+            ) from exc
+        if (
+            len(hostname) > 253
+            or ":" in hostname
+            or any(
+                not label
+                or len(label) > 63
+                or label.startswith("-")
+                or label.endswith("-")
+                or re.fullmatch(r"[a-z0-9-]+", label) is None
+                for label in hostname.split(".")
+            )
+        ):
+            raise BrokerError(
+                "invalid_browser_operation",
+                "allowed_hostnames contains an invalid exact hostname",
+            )
+        normalized.add(hostname)
+    if not normalized:
+        raise BrokerError(
+            "invalid_browser_operation",
+            "start_network_capture requires at least one exact hostname",
+        )
+    return tuple(sorted(normalized))
+
+
+def _url_matches_allowed_hostname(
+    value: str,
+    allowed_hostnames: tuple[str, ...],
+) -> bool:
+    try:
+        parsed = urlsplit(value)
+        hostname = (parsed.hostname or "").rstrip(".").lower()
+        if parsed.scheme.lower() not in {"http", "https"} or not hostname:
+            return False
+        hostname = hostname.encode("idna").decode("ascii")
+    except (UnicodeError, ValueError):
+        return False
+    return hostname in allowed_hostnames
+
+
+def _bounded_request_body(value: Any, limit: int) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {
+            "encoding": "utf8",
+            "body": "",
+            "captured_size": 0,
+            "original_size": None,
+            "truncated": False,
+            "unavailable_reason": "invalid_request_body",
+        }
+    encoding = _clean_text(value.get("encoding")).lower()
+    if not encoding:
+        encoding = "base64" if value.get("base64_encoded") else "utf8"
+    body = value.get("body")
+    if body is None:
+        body = value.get("data")
+    body_text = str(body) if body is not None else ""
+    unavailable_reason = _clean_text(
+        value.get("unavailable_reason") or value.get("unavailable")
+    )[:256]
+    if encoding == "base64":
+        try:
+            raw = base64.b64decode(body_text, validate=True)
+        except (TypeError, ValueError):
+            raw = b""
+            unavailable_reason = unavailable_reason or "invalid_base64"
+        bounded = raw[:limit]
+        output = base64.b64encode(bounded).decode("ascii")
+    else:
+        encoding = "utf8"
+        raw = body_text.encode("utf-8")
+        bounded = raw[:limit]
+        output = bounded.decode("utf-8", errors="ignore")
+        bounded = output.encode("utf-8")
+    reported_original = _as_int(value.get("original_size"))
+    original_size = (
+        max(0, reported_original) if reported_original is not None else None
+    )
+    truncated = bool(value.get("truncated")) or len(raw) > limit
+    if original_size is not None:
+        truncated = truncated or original_size > len(bounded)
+    return {
+        "encoding": encoding,
+        "body": output,
+        "captured_size": len(bounded),
+        "original_size": original_size,
+        "truncated": truncated,
+        "unavailable_reason": unavailable_reason or None,
+    }
+
+
+def _nonnegative_diagnostic(payload: dict[str, Any], *names: str) -> int:
+    for name in names:
+        parsed = _as_int(payload.get(name))
+        if parsed is not None:
+            return max(0, parsed)
+    diagnostics = payload.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        for name in names:
+            parsed = _as_int(diagnostics.get(name))
+            if parsed is not None:
+                return max(0, parsed)
+    return 0
+
+
+def _bounded_sequence(value: Any, default: int) -> int:
+    parsed = _as_int(value)
+    return max(0, default if parsed is None else parsed)
+
+
+def _sequence_barrier(payload: dict[str, Any], default: int) -> int:
+    for name in ("sequence_barrier", "final_sequence", "last_sequence"):
+        if name in payload:
+            return _bounded_sequence(payload.get(name), default)
+    return max(0, default)
+
+
+def _network_ack(
+    capture_id: str,
+    target: dict[str, Any],
+    acknowledged_sequence: int,
+    accepted: bool,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "type": "network_ack",
+        "capture_id": capture_id,
+        "target": dict(target),
+        "ack_seq": max(0, acknowledged_sequence),
+        "acknowledged_sequence": max(0, acknowledged_sequence),
+        "accepted": accepted,
+    }
+    if reason:
+        result["reason"] = reason
+    return result
+
+
+def _network_capture_identity(target: dict[str, Any], capture_id: str) -> str:
+    return f"{_reference_target_prefix(target)}:{capture_id}"
+
+
 def _network_capture_summary(state: NetworkCaptureState) -> dict[str, Any]:
     return {
         "target": dict(state.target),
-        "active": True,
+        "capture_id": state.capture_id,
+        "active": state.active,
+        "allowed_hostnames": list(state.allowed_hostnames),
+        "capture_request_bodies": state.capture_request_bodies,
         "retention": {
             "max_age_ms": state.max_age_ms,
             "max_entries": state.max_entries,
             "max_bytes": state.max_bytes,
             "max_body_bytes": state.max_body_bytes,
+            "max_request_body_bytes": state.max_request_body_bytes,
         },
         "retained_entries": len(state.requests),
         "retained_bytes": state.byte_size,
+        "delivery": {
+            "acknowledged_sequence": state.acknowledged_sequence,
+            "highest_seen_sequence": state.highest_seen_sequence,
+            "clear_sequence": state.clear_sequence,
+            "pending_sequences": len(state.pending_events),
+            "dropped_events": state.dropped_events,
+            "dropped_batches": state.dropped_batches,
+            "dropped_bytes": state.dropped_bytes,
+            "rejected_events": state.rejected_events,
+            "duplicate_events": state.duplicate_events,
+        },
+        "termination": {
+            "reason": state.termination_reason,
+            "terminated_at_ms": state.terminated_at_ms,
+        },
     }
 
 
