@@ -32,7 +32,7 @@ teshi can expose a native Windows app to terminal agents through the same sideca
 1. Open a BDD project in teshi Desktop/web.
 2. Click **Connect WinUI3 App** in the Target panel.
 3. Select a Gherkin step in the left panel.
-4. In the terminal, run the `winapp-locator` skill.
+4. In the terminal, run the `winapp-regression` skill.
 
 If no app is attached yet, list visible windows:
 
@@ -85,10 +85,10 @@ Selector preference:
 
 Prefer `AutomationId` whenever the app exposes it. Path selectors are last-resort because UI tree layout can shift between releases.
 
-## Bug-to-regression workflow
+## WinApp regression workflow
 
 1. Describe the bug using [bug-report-template.md](bug-report-template.md).
-2. Follow the **bug-to-regression** skill (`.teshi/skills/bug-to-regression/SKILL.md`) to create a `.feature` and bind each step.
+2. Follow the **winapp-regression** skill (`skills/winapp-regression/SKILL.md`) to create a `.feature` and bind each step.
 3. Use CLI helpers from the project root:
 
 ```bash

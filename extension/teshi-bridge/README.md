@@ -23,7 +23,7 @@ Toolbar and store icons are PNGs under `icons/`. After updating brand icons, reg
 3. Open the extension popup, set an optional profile label such as `agent-a`, then click **Connect to teshi**. The popup reports the persisted instance ID, extension/protocol versions, and actionable disconnected/incompatible/debugger/stale status.
 4. `teshi browser sessions` starts or reuses the per-user broker on `127.0.0.1:17373`; Desktop attaches to that same process. The extension sends metadata heartbeats and opens a session-authenticated WebSocket for screencast frames, low-latency correlated commands, and acknowledged network-capture batches. Heartbeat delivery is the bounded command fallback.
 5. When connected, explicitly select the profile and tab in the Browser panel. The panel never projects tabs or frames from several profiles into one implicit selection.
-6. Select a Gherkin step and run the **bdd-locator** agent skill in the terminal, or use the packaged **playwright-locator** Skill for observational locator acquisition.
+6. Select a Gherkin step and run the **playwright-locator** skill in the terminal (repo `skills/playwright-locator`, or the packaged copy under `share/teshi-browser-testing`).
 
 After changing extension files, click **Reload** on `chrome://extensions` for teshi-bridge, then **Disconnect / Connect Chrome** in teshi-desktop so `browser_service.py` restarts if needed.
 

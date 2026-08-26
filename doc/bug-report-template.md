@@ -1,6 +1,6 @@
 # Bug report template (for Agent → Gherkin)
 
-Copy the block below into chat or a scratch file when starting a **bug-to-regression** workflow in teshi. The Agent should turn this into one `.feature` **Scenario** with English keywords (`Given` / `When` / `Then`) and **Chinese step text** (or match your project language).
+Copy the block below into chat or a scratch file when starting a **winapp-regression** workflow in teshi. The Agent should turn this into one `.feature` **Scenario** with English keywords (`Given` / `When` / `Then`) and **Chinese step text** (or match your project language).
 
 ```text
 Title: <short bug title>
@@ -38,8 +38,8 @@ Notes:
 ## Next steps in teshi
 
 1. Create or update the `.feature` file (TUI Agent tools or paste into teshi Desktop).
-2. Connect WinUI3 and run the **winapp-locator** / **bug-to-regression** skill.
+2. Connect WinUI3 and run the **winapp-regression** skill.
 3. Confirm each binding in the Locator panel.
 4. Run `teshi winapp replay`, then optionally `teshi export --target behave`.
 
-See [winapp-modes.md](winapp-modes.md) and [.teshi/skills/bug-to-regression/SKILL.md](../.teshi/skills/bug-to-regression/SKILL.md).
+See [winapp-modes.md](winapp-modes.md) and [winapp-regression](../skills/winapp-regression/SKILL.md).

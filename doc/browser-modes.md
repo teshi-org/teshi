@@ -58,7 +58,7 @@ Privileged P2 access adds two independent gates: a short-lived Teshi grant bound
 3. Open the app under test in Chrome and select the target **tab**.
 4. Run `teshi browser sessions` or click **Connect Chrome**. Both attach to the same per-user broker; the CLI starts it when absent.
 5. Wait until the live stream appears (extension connected; check the status dot tooltip if needed).
-6. Select a Gherkin step and run the **bdd-locator** skill in the agent terminal.
+6. Select a Gherkin step and run the **playwright-locator** skill in the agent terminal.
 
 While waiting for the extension, the panel shows setup steps only (no stream). Once connected, the panel shows:
 
@@ -132,7 +132,7 @@ Launches **headless Playwright Chromium** with a live JPEG stream in the panel (
 
 1. Click **Start Embedded**.
 2. Navigate with the in-panel address bar.
-3. Record locators the same way via **bdd-locator**.
+3. Record locators the same way via **playwright-locator**.
 
 `cdp-endpoint.json` includes `"mode": "embedded"`.
 

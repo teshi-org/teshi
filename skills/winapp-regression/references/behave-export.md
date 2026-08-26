@@ -1,13 +1,6 @@
----
-name: behave-export-guide
-description: Configure and run a teshi-exported behave project for WinUI3 UIA tests without teshi in CI
----
+# Behave export
 
-# Behave Export Guide
-
-Use after `teshi export --target behave` generated a `tests-e2e/` (or custom) directory.
-
-Requires **teshi 0.4.0+** for the export layout and selector formats described below.
+Use after `teshi export --target behave` generated a `tests-e2e/` (or custom) directory. Requires teshi 0.4.0+ for the layout and selector formats below.
 
 ## Layout
 
@@ -34,7 +27,7 @@ behave
 behave features/your.feature -n "Scenario name"
 ```
 
-## Setup (Agent-guided, one time)
+## Setup (one time)
 
 1. Copy `.env.example` to `.env`.
 2. Set `APP_EXE` to the built WinUI3 application path.
@@ -85,7 +78,7 @@ Chinese or other non-ASCII feature file names produce a safe `page_module` (e.g.
 
 ## Updating after UI changes
 
-1. Re-bind changed steps in teshi (winapp-locator); `steps unbind` wrong bindings first.
+1. Re-bind changed steps in teshi (`steps unbind` wrong bindings first).
 2. Re-run `teshi export --target behave ...` (overwrites generated files).
 3. Clear `__pycache__`, run `behave --dry-run`.
 4. Commit updated `features/`, `pages/`, `steps/`, and project `.teshi/step-bindings/`.
