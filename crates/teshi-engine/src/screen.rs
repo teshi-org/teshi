@@ -167,9 +167,7 @@ impl GridPerformer {
     /// Mark every row in the grid as dirty.
     #[allow(dead_code)]
     fn mark_all_dirty(&mut self) {
-        for d in &mut self.dirty {
-            *d = true;
-        }
+        self.dirty.fill(true);
         self.has_new_content = true;
     }
 
@@ -857,9 +855,7 @@ impl ScreenGrid {
     /// Clear the dirty flags for all rows.
     pub fn clear_dirty(&self) {
         let mut perf = self.inner.lock().unwrap();
-        for d in &mut perf.dirty {
-            *d = false;
-        }
+        perf.dirty.fill(false);
         perf.has_new_content = false;
     }
 
