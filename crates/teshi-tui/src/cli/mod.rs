@@ -4,6 +4,7 @@ pub mod browser_endpoint;
 pub mod daemon;
 pub mod desktop;
 pub mod export;
+pub mod install_skill;
 pub mod locator_verify;
 pub mod mcp;
 pub mod replay_screenshots;
@@ -95,6 +96,15 @@ pub enum Command {
     Mcp {
         #[command(subcommand)]
         action: McpCommand,
+    },
+    /// Copy bundled agent skills into ~/.agents and link Agent discovery paths
+    InstallSkill {
+        /// Print the install plan without writing files
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the confirmation prompt (required when stdin is not a TTY)
+        #[arg(long)]
+        yes: bool,
     },
     /// Inspect and execute locators through the WinUI3 bridge
     #[command(name = "winapp", alias = "win-app")]
@@ -1378,6 +1388,17 @@ mod tests {
     #[test]
     fn cli_command_factory_has_valid_args() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn install_skill_parses_dry_run_and_yes() {
+        let cli = Cli::try_parse_from(["teshi", "install-skill", "--dry-run", "--yes"])
+            .expect("parse install-skill");
+        let Some(Command::InstallSkill { dry_run, yes }) = cli.command else {
+            panic!("expected install-skill subcommand");
+        };
+        assert!(dry_run);
+        assert!(yes);
     }
 
     #[test]

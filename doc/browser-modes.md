@@ -75,6 +75,8 @@ Discovery: `GET http://127.0.0.1:17373/v1/bridge` returns broker PID/start ident
 
 ## External coding agents
 
+Coding agents should follow [AI_INSTALL.md](../AI_INSTALL.md) and run `teshi install-skill` to copy bundled Skills into `~/.agents/skills` from the local share tree.
+
 The installed `teshi-browser-testing` package contains the `playwright-locator` Skill, compatible extension bundle, MCP metadata, and a machine-readable compatibility declaration. It is installed under `share/teshi-browser-testing` in Teshi release archives/MSI and is also published as a standalone zip. Its Skill may be copied unchanged to a consumer repository's `.agents/skills/playwright-locator` directory.
 
 Use JSON CLI operations or the equivalent local STDIO MCP tools:

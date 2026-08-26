@@ -206,6 +206,9 @@ pub fn run() -> Result<()> {
         Some(cli::Command::Mcp { action }) => {
             return cli::mcp::handle_mcp_command(&action);
         }
+        Some(cli::Command::InstallSkill { dry_run, yes }) => {
+            return cli::install_skill::handle_install_skill(dry_run, yes);
+        }
         Some(cli::Command::Trace { action }) => {
             return cli::trace::handle_trace_command(&action);
         }

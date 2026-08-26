@@ -1,5 +1,7 @@
 # Installation
 
+Coding agents should follow [AI_INSTALL.md](../AI_INSTALL.md) to install the teshi CLI, load teshi-bridge, and run `teshi install-skill`.
+
 ## Windows
 
 | Asset | Contents |
