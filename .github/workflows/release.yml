@@ -84,6 +84,7 @@ jobs:
           INPUT_RUN_SCOPE: ${{ inputs.run_scope }}
           INPUT_INVOKED_VIA_CALL: ${{ inputs.invoked_via_call }}
           INPUT_RELEASE_BODY: ${{ inputs.release_body }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -119,7 +120,9 @@ jobs:
             run_scope="${{ github.event.inputs.run_scope }}"
           elif [ "${event}" = "push" ] && [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             tag="${GITHUB_REF#refs/tags/}"
-            source_ref="${GITHUB_REF}"
+            # Releases API rejects refs/tags/* as target_commitish; GITHUB_SHA is
+            # the peeled commit the tag points at and is valid for checkout too.
+            source_ref="${GITHUB_SHA}"
             if echo "${tag}" | grep -q -- '-nightly'; then
               prerelease=true
               skip_winget=true
@@ -136,6 +139,12 @@ jobs:
           if [[ ! "${tag}" =~ ^v.+$ ]]; then
             echo "Tag must start with 'v' (got: ${tag})." >&2
             exit 1
+          fi
+
+          # action-gh-release forwards source_ref as target_commitish. GitHub only
+          # accepts a branch name or commit SHA — never refs/tags/*.
+          if [[ ! "${source_ref}" =~ ^[0-9a-f]{40}$ ]]; then
+            source_ref="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${source_ref}" --jq .sha)"
           fi
 
           {
