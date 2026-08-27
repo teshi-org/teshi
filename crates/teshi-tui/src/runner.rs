@@ -498,7 +498,7 @@ fn collect_cases(
     feature: &teshi_core::gherkin::BddFeature,
     scenario_filter: Option<&str>,
 ) {
-    for (si, scenario) in feature.scenarios.iter().enumerate() {
+    for (si, scenario) in feature.all_scenarios().into_iter().enumerate() {
         if let Some(name) = scenario_filter
             && scenario.name != name
         {

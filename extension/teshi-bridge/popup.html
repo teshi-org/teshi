@@ -15,6 +15,18 @@
         padding: 8px;
         cursor: pointer;
       }
+      .permission { margin-top: 6px; }
+      label {
+        display: block;
+        margin: 10px 0 4px;
+        color: #333;
+      }
+      input {
+        box-sizing: border-box;
+        width: 100%;
+        padding: 7px;
+        margin-bottom: 6px;
+      }
       p {
         color: #444;
         line-height: 1.4;
@@ -26,8 +38,15 @@
   </head>
   <body>
     <p id="status">Checking bridge…</p>
+    <label for="profile-label">Browser profile label (optional)</label>
+    <input id="profile-label" maxlength="120" placeholder="e.g. QA account" />
+    <button type="button" id="save-label">Save profile label</button>
     <button type="button" id="connect">Connect to teshi</button>
-    <p>Open your app tab in Chrome, then click Connect in teshi-desktop.</p>
+    <label>Optional privileged permissions</label>
+    <button class="permission" data-permission="cookies" type="button">Allow Cookie metadata</button>
+    <button class="permission" data-permission="contentSettings" type="button">Allow content settings</button>
+    <button class="permission" data-permission="management" type="button">Allow extension management</button>
+    <p id="details">Open your app tab in Chrome, then click Connect in teshi.</p>
     <script src="popup.js"></script>
   </body>
 </html>

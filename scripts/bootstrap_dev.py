@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """One-command teshi web UI self-bootstrap with a live status dashboard.
 
-Starts the full dev stack (teshi-desktop + teshi web + Vite + optional embedded
-sidecar), then refreshes a Rich table with version, health, and duplicate-instance
-warnings for each component.
+Starts the official GPUI WASM web shell (optionally with teshi-desktop and the
+embedded browser sidecar), then refreshes a Rich table with version, health, and
+duplicate-instance warnings for each component.
 
 Usage:
     pip install -r scripts/requirements-dev.txt
@@ -68,7 +68,6 @@ class BootstrapConfig:
     project: Path
     mode: str
     api_port: int
-    ui_port: int
     build: bool
     embedded: bool
     refresh_interval: float
@@ -86,7 +85,7 @@ class BootstrapConfig:
 
     @property
     def sut_url(self) -> str:
-        return f"http://127.0.0.1:{self.ui_port}/?e2e=1"
+        return f"http://127.0.0.1:{self.api_port}/?gpui_wasm=1"
 
     @property
     def api_base(self) -> str:
@@ -361,7 +360,7 @@ def _cleanup_orphans(cfg: BootstrapConfig) -> None:
         if pid not in seen:
             seen.add(pid)
             _kill_process_tree(pid)
-    for port in (cfg.api_port, cfg.ui_port, 17373):
+    for port in (cfg.api_port, 17373):
         for pid in _pids_listening_on(port):
             if pid not in seen:
                 seen.add(pid)
@@ -439,11 +438,8 @@ def _external_teshi_pids(cfg: BootstrapConfig) -> list[tuple[int, str]]:
 
 def _probe_repo_versions(cfg: BootstrapConfig) -> ItemProbe:
     cargo_v = _read_toml_version(cfg.repo_root / "apps" / "teshi-cli" / "Cargo.toml")
-    pkg_v = _read_json_version(
-        cfg.repo_root / "apps" / "teshi-web-ui" / "package.json"
-    )
     ext_v = _read_json_version(cfg.repo_root / "extension" / "teshi-bridge" / "manifest.json")
-    versions = {"Cargo.toml": cargo_v, "package.json": pkg_v, "manifest.json": ext_v}
+    versions = {"Cargo.toml": cargo_v, "manifest.json": ext_v}
     unique = {v for v in versions.values() if v}
     if len(unique) <= 1:
         status = ItemStatus.HEALTHY
@@ -544,14 +540,14 @@ def _probe_teshi_desktop(
     if debug_pids:
         status = ItemStatus.HEALTHY if len(debug_pids) == 1 else ItemStatus.DUPLICATE
         detail = f"{len(debug_pids)} running (desktop child)"
-    elif cfg.mode == "tauri-dev":
+    elif cfg.mode == "gpui-web":
         return ItemProbe(
             name="teshi_desktop",
             version="—",
             status=ItemStatus.HEALTHY,
             pids=[],
             instances=0,
-            detail="skipped (web UI mode; use --mode separate for GPUI)",
+            detail="skipped (web-only mode; use --mode separate for GPUI Desktop)",
         )
 
     if run_v and repo_v and run_v != repo_v and not debug_pids:
@@ -604,54 +600,19 @@ def _probe_teshi_web(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> Ite
     )
 
 
-def _probe_vite_dev(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> ItemProbe:
-    listeners = _pids_listening_on(cfg.ui_port)
-    ok, msg = _http_ok(f"http://127.0.0.1:{cfg.ui_port}/", require_200=True)
-    pkg_v = _read_json_version(
-        cfg.repo_root / "apps" / "teshi-web-ui" / "package.json"
-    )
-
-    status = ItemStatus.STOPPED
-    if len(listeners) > 1:
-        status = ItemStatus.DUPLICATE
-    elif ok:
-        status = ItemStatus.HEALTHY
-    elif listeners:
-        status = ItemStatus.STARTING
-        detail = msg
-    else:
-        vite_mp = next(
-            (mp for mp in supervisor.processes if mp.label == "vite"), None
-        )
-        if vite_mp and vite_mp.popen.poll() is None:
-            status = ItemStatus.STARTING
-            detail = "waiting for Vite"
-        elif msg.startswith("HTTP"):
-            status = ItemStatus.UNHEALTHY
-            detail = msg
-        else:
-            status = ItemStatus.UNHEALTHY if supervisor.managed_pids else ItemStatus.STOPPED
-            detail = msg or "not listening"
-
-    vite_pids = _pids_by_cmdline("vite.js") or _pids_by_cmdline("vite/bin")
-    if len(listeners) == 1 and ok:
-        status = ItemStatus.HEALTHY
-        detail = msg
-    elif len(vite_pids) > 2 and status != ItemStatus.DUPLICATE:
-        status = ItemStatus.WARN
-        detail = f"{len(vite_pids)} node/vite workers (normal: npm + vite); {msg}"
-
-    if not ok and status == ItemStatus.STOPPED and detail == "":
-        detail = msg
-
+def _probe_gpui_wasm_dist(cfg: BootstrapConfig) -> ItemProbe:
+    dist = cfg.repo_root / "apps" / "teshi-web" / "dist"
+    index = dist / "index.html"
+    wasm = dist / "pkg" / "teshi_web_bg.wasm"
+    marker = 'name="teshi-ui-runtime" content="gpui-wasm"'
+    marker_ok = index.is_file() and marker in index.read_text(encoding="utf-8", errors="replace")
+    healthy = marker_ok and wasm.is_file() and wasm.stat().st_size > 0
+    version = _read_toml_version(cfg.repo_root / "apps" / "teshi-web" / "Cargo.toml")
     return ItemProbe(
-        name="vite_dev",
-        version=pkg_v or "—",
-        status=status,
-        pids=listeners or vite_pids,
-        instances=max(len(listeners), len(vite_pids)),
-        uptime=supervisor.uptime_for_pids(listeners),
-        detail=detail,
+        name="gpui_wasm_dist",
+        version=version or "—",
+        status=ItemStatus.HEALTHY if healthy else ItemStatus.UNHEALTHY,
+        detail=str(dist) if healthy else "missing/stale; run scripts/build-teshi-web.ps1",
     )
 
 
@@ -800,7 +761,7 @@ class ProbeRegistry:
             _probe_teshi_cli(self.cfg, self.supervisor),
             _probe_teshi_desktop(self.cfg, self.supervisor),
             _probe_teshi_web(self.cfg, self.supervisor),
-            _probe_vite_dev(self.cfg, self.supervisor),
+            _probe_gpui_wasm_dist(self.cfg),
             _probe_sidecar(self.cfg, self.supervisor),
             _probe_python_venv(self.cfg),
         ]
@@ -871,23 +832,19 @@ def _build_header(cfg: BootstrapConfig, items: list[ItemProbe], *, shutting_down
     return header
 
 
-def _npm_cmd() -> str:
-    return "npm.cmd" if os.name == "nt" else "npm"
-
-
 def _preflight(cfg: BootstrapConfig) -> None:
     """Verify tools required for the selected launch mode."""
-    console = Console(stderr=True)
-    if cfg.mode == "tauri-dev":
-        frontend = cfg.repo_root / "apps" / "teshi-web-ui"
-        if not (frontend / "node_modules").is_dir():
-            console.print("[dim]Installing desktop npm dependencies...[/dim]")
-            subprocess.run(
-                [_npm_cmd(), "install"],
-                cwd=str(frontend),
-                check=True,
-            )
-    if cfg.mode == "separate" and not cfg.desktop_bin.is_file():
+    dist = cfg.repo_root / "apps" / "teshi-web" / "dist"
+    if not (dist / "index.html").is_file() or not (
+        dist / "pkg" / "teshi_web_bg.wasm"
+    ).is_file():
+        raise SystemExit(
+            "GPUI WASM dist is missing; run scripts/build-teshi-web.ps1 "
+            "(or scripts/build-teshi-web.sh) first"
+        )
+    if not cfg.teshi_bin.is_file() and not cfg.build:
+        raise SystemExit(f"teshi binary not found at {cfg.teshi_bin}; pass --build")
+    if cfg.mode == "separate" and not cfg.desktop_bin.is_file() and not cfg.build:
         raise SystemExit(
             f"teshi-desktop not found at {cfg.desktop_bin}; pass --build"
         )
@@ -949,7 +906,7 @@ def _cleanup_before_start(cfg: BootstrapConfig, *, aggressive: bool) -> list[int
     for pid in _pids_by_cmdline("browser_service.py"):
         stop_pid(pid)
 
-    for port in (cfg.api_port, cfg.ui_port, 17373):
+    for port in (cfg.api_port, 17373):
         for pid in _pids_listening_on(port):
             stop_pid(pid)
 
@@ -1006,7 +963,7 @@ def _release_teshi_exe_lock(cfg: BootstrapConfig) -> list[int]:
         for name in ("teshi.exe", "teshi-desktop.exe", "teshi"):
             for pid in _pids_by_name(name):
                 stop_pid(pid)
-        for port in (cfg.api_port, cfg.ui_port, 17373):
+        for port in (cfg.api_port, 17373):
             for pid in _pids_listening_on(port):
                 stop_pid(pid)
         for pid in _pids_by_cmdline("browser_service.py"):
@@ -1078,7 +1035,7 @@ def _build_workspace(cfg: BootstrapConfig) -> None:
 
 def _ensure_built(cfg: BootstrapConfig) -> None:
     console = Console(stderr=True)
-    if cfg.mode == "tauri-dev":
+    if cfg.mode == "gpui-web":
         _build_workspace(cfg)
         return
     _release_teshi_exe_lock(cfg)
@@ -1118,24 +1075,16 @@ def _start_stack(cfg: BootstrapConfig, supervisor: ProcessSupervisor) -> None:
     teshi = str(cfg.teshi_bin)
     project = str(cfg.project.resolve())
 
-    if cfg.mode != "tauri-dev" and not cfg.teshi_bin.is_file():
+    if not cfg.teshi_bin.is_file():
         raise SystemExit(f"teshi binary not found at {cfg.teshi_bin}; pass --build")
 
-    if cfg.mode == "tauri-dev":
-        # Vite only — skip npm `predev` (cargo build) to avoid locking teshi.exe on Windows.
+    if cfg.mode == "gpui-web":
         supervisor.spawn(
-            [_npm_cmd(), "run", "dev", "--ignore-scripts"],
-            cwd=cfg.repo_root / "apps" / "teshi-web-ui",
-            label="vite",
+            [teshi, "web", "--project", project, "--port", str(cfg.api_port), "--no-open"],
+            cwd=cfg.repo_root,
+            label="teshi-web",
         )
     elif cfg.mode == "separate":
-        if not cfg.teshi_bin.is_file():
-            raise SystemExit(f"teshi binary not found at {cfg.teshi_bin}; pass --build")
-        supervisor.spawn(
-            [_npm_cmd(), "run", "dev"],
-            cwd=cfg.repo_root / "apps" / "teshi-web-ui",
-            label="vite",
-        )
         supervisor.spawn(
             [str(cfg.desktop_bin), "--project", project],
             cwd=cfg.repo_root,
@@ -1155,7 +1104,7 @@ def _maybe_start_desktop(
     *,
     desktop_started: bool,
 ) -> bool:
-    """Native desktop is optional (GPUI). React UI uses the browser via teshi web."""
+    """Native GPUI desktop is optional in the web-only launch mode."""
     return True
 
 
@@ -1165,18 +1114,13 @@ def _maybe_start_web(
     *,
     web_started: bool,
 ) -> bool:
-    """Start teshi web after Vite are ready (avoids Windows exe lock)."""
-    if cfg.mode != "tauri-dev":
-        return web_started
+    """Ensure the GPUI WASM daemon host remains running."""
     if web_started:
         if any(mp.label == "teshi-web" and mp.popen.poll() is None for mp in supervisor.processes):
             return True
         # dead — fall through to restart
     elif any(mp.label == "teshi-web" and mp.popen.poll() is None for mp in supervisor.processes):
         return True
-    ui_ok, _ = _http_ok(f"http://127.0.0.1:{cfg.ui_port}/", require_200=True)
-    if not ui_ok:
-        return False
     if not cfg.teshi_bin.is_file():
         return False
     teshi = str(cfg.teshi_bin)
@@ -1206,16 +1150,7 @@ def _maybe_start_embedded(
     api_ok, _ = _http_ok(
         f"{cfg.api_base}/api/v1/settings/recent", require_200=True
     )
-    ui_ok, _ = _http_ok(
-        f"http://127.0.0.1:{cfg.ui_port}/", require_200=True
-    )
-    if not (api_ok and ui_ok):
-        return False
-    if cfg.mode == "tauri-dev" and not any(
-        mp.label == "teshi-web" and mp.popen.poll() is None for mp in supervisor.processes
-    ):
-        return False
-    if cfg.mode == "tauri-dev" and not _pids_by_name(cfg.desktop_bin.name):
+    if not api_ok:
         return False
     _stop_all_browser_services()
     teshi = str(cfg.teshi_bin)
@@ -1258,12 +1193,11 @@ def _parse_args(argv: list[str] | None = None) -> BootstrapConfig:
     )
     parser.add_argument(
         "--mode",
-        choices=("tauri-dev", "separate"),
-        default="tauri-dev",
-        help="tauri-dev: vite + teshi web; separate: GPUI desktop + vite + teshi web",
+        choices=("gpui-web", "separate"),
+        default="gpui-web",
+        help="gpui-web: official GPUI WASM UI; separate: GPUI WASM plus native GPUI Desktop",
     )
     parser.add_argument("--api-port", type=int, default=20253, help="teshi web API port")
-    parser.add_argument("--ui-port", type=int, default=1420, help="Vite dev / SUT UI port")
     parser.add_argument("--build", action="store_true", help="Run cargo build before starting")
     parser.add_argument(
         "--stop-existing",
@@ -1293,7 +1227,6 @@ def _parse_args(argv: list[str] | None = None) -> BootstrapConfig:
         project=project,
         mode=args.mode,
         api_port=args.api_port,
-        ui_port=args.ui_port,
         build=args.build,
         embedded=not args.no_embedded,
         refresh_interval=args.refresh_interval,
@@ -1317,7 +1250,7 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(signal.SIGTERM, _handle_signal)
 
     _preflight(cfg)
-    if cfg.mode == "tauri-dev" or cfg.build:
+    if cfg.build:
         _ensure_built(cfg)
 
     _start_stack(cfg, supervisor)
@@ -1325,8 +1258,8 @@ def main(argv: list[str] | None = None) -> int:
     registry = ProbeRegistry(cfg, supervisor)
     console = Console(force_terminal=True)
     embedded_started = False
-    web_started = cfg.mode != "tauri-dev"
-    desktop_started = cfg.mode != "tauri-dev"
+    web_started = True
+    desktop_started = cfg.mode == "separate"
 
     # Daemon thread: wait for 'q' key via console API (more reliable than polling kbhit)
     quit_event = threading.Event()

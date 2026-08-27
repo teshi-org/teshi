@@ -478,10 +478,10 @@ fn catalog(project_root: &Path, args: &StepsCatalogArgs) -> Result<()> {
                         let f = &project.features[loc.feature_idx];
                         let scenario = if loc.scenario_idx == usize::MAX {
                             "<Background>".to_string()
-                        } else if loc.scenario_idx < f.scenarios.len() {
-                            f.scenarios[loc.scenario_idx].name.clone()
                         } else {
-                            format!("<Rule-{}>", loc.scenario_idx)
+                            f.scenario_at(loc.scenario_idx)
+                                .map(|s| s.name.clone())
+                                .unwrap_or_else(|| format!("<unknown-{}>", loc.scenario_idx))
                         };
                         json!({
                             "feature": f.file_path.strip_prefix(root).unwrap_or(&f.file_path).to_string_lossy(),

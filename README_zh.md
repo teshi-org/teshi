@@ -2,6 +2,8 @@
 
 终端优先的 BDD 编辑器，支持 AI 辅助、思维导图导航和外部测试运行器集成。
 
+请阅读 [AI_INSTALL.md](AI_INSTALL.md) 并按其步骤安装 teshi CLI、加载 teshi-bridge Chrome 扩展，并添加 teshi agent skills。
+
 ## 快速开始
 
 ```bash

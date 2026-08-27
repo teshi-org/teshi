@@ -42,7 +42,7 @@ pub fn validate_project(project: &BddProject) -> Vec<ValidationIssue> {
     for feature in &project.features {
         let path = feature.file_path.to_string_lossy();
 
-        for sc in &feature.scenarios {
+        for sc in feature.all_scenarios() {
             // Check Given/When/Then order
             let keywords: Vec<&str> = sc.steps.iter().map(|s| s.keyword.trim()).collect();
 
@@ -138,7 +138,7 @@ pub fn validate_project(project: &BddProject) -> Vec<ValidationIssue> {
 
         // Check duplicate scenario names
         let mut names = HashMap::new();
-        for sc in &feature.scenarios {
+        for sc in feature.all_scenarios() {
             let entry = names.entry(sc.name.clone()).or_insert(0usize);
             *entry += 1;
         }

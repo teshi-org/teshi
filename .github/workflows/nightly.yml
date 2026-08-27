@@ -1,0 +1,89 @@
+name: Nightly
+
+on:
+  push:
+    branches: [dev]
+  schedule:
+    # Daily pre-release build from dev (06:00 UTC).
+    # Note: scheduled workflows run from the repo default branch workflow file.
+    # Keep nightly.yml on default branch (main) for the schedule trigger to fire.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-dev
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare nightly tag
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      source_ref: ${{ steps.meta.outputs.source_ref }}
+      release_body: ${{ steps.meta.outputs.release_body }}
+      skip: ${{ steps.meta.outputs.skip }}
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Compute nightly tag
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch origin --tags --force
+
+          version=$(grep -m1 '^version = ' apps/teshi-cli/Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          date=$(date -u +%Y%m%d)
+          sha=$(git rev-parse --short=7 HEAD)
+          full_sha=$(git rev-parse HEAD)
+          subject=$(git log -1 --format=%s)
+          tag="v${version}-nightly.${date}.${sha}"
+
+          if [[ ! "${tag}" =~ ^v[0-9].+-nightly\.[0-9]{8}\.[0-9a-f]{7}$ ]]; then
+            echo "Computed nightly tag has unexpected format: ${tag}" >&2
+            exit 1
+          fi
+
+          if git rev-parse "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Tag ${tag} already exists; skipping nightly publish."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+          {
+            echo "release_tag=${tag}"
+            echo "source_ref=${full_sha}"
+            echo "release_body<<EOF"
+            echo "Nightly pre-release built from \`dev\`."
+            echo ""
+            echo "- Commit: ${full_sha}"
+            echo "- Subject: ${subject}"
+            echo "- Tag: ${tag}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "Nightly tag: ${tag}"
+
+  nightly:
+    name: Build and publish nightly
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      release_tag: ${{ needs.prepare.outputs.release_tag }}
+      source_ref: ${{ needs.prepare.outputs.source_ref }}
+      release_body: ${{ needs.prepare.outputs.release_body }}
+      prerelease: true
+      skip_winget: true
+      invoked_via_call: true
+    secrets: inherit

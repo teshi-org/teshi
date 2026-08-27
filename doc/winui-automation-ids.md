@@ -51,6 +51,6 @@ Recommend a PR in the app repo to assign stable IDs to list rows before relying 
 
 ## teshi workflow
 
-1. Record bindings with [winapp-locator](../.teshi/skills/winapp-locator/SKILL.md).
+1. Record bindings with [winapp-regression](../skills/winapp-regression/SKILL.md).
 2. Commit `.teshi/step-bindings/*.json` with the feature file.
 3. Export with `teshi export --target behave` when CI should run without teshi.

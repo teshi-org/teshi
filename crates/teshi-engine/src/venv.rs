@@ -38,13 +38,13 @@ pub fn resolve_project_venv(project_root: &Path) -> Option<ResolvedVenv> {
 }
 
 fn resolve_venv_at(venv_root: &Path) -> Option<ResolvedVenv> {
-    let shim = venv_scripts_python(venv_root)?;
     let uv_managed = is_uv_managed_venv(venv_root);
 
     let (python_exe, site_packages) = if uv_managed {
         let (python_exe, site_packages) = resolve_uv_python(venv_root)?;
         (python_exe, site_packages)
     } else {
+        let shim = venv_scripts_python(venv_root)?;
         (dunce::simplified(&shim).to_path_buf(), None)
     };
 
@@ -233,17 +233,6 @@ mod tests {
     #[test]
     fn resolve_uv_venv_uses_home_python_and_site_packages() {
         let dir = tempdir().unwrap();
-        let scripts = dir
-            .path()
-            .join(if cfg!(windows) { "Scripts" } else { "bin" });
-        fs::create_dir_all(&scripts).unwrap();
-        let shim = scripts.join(if cfg!(windows) {
-            "python.exe"
-        } else {
-            "python"
-        });
-        fs::write(&shim, "").unwrap();
-
         let site = dir.path().join("Lib").join("site-packages");
         fs::create_dir_all(&site).unwrap();
 

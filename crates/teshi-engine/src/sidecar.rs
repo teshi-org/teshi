@@ -8,9 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use fd_lock::RwLock;
+use serde::{Deserialize, Serialize};
 
-use crate::TeshiEngine;
+use crate::{TeshiEngine, BROWSER_AGENT_SCHEMA_VERSION, BROWSER_BROKER_PROTOCOL_VERSION};
 
 /// Browser session backend started by the sidecar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -62,7 +63,6 @@ impl SidecarState {
 
     /// Stops the sidecar process if running.
     pub async fn stop(&self) -> Result<()> {
-        let mode = *self.mode.lock().unwrap();
         if let Some(mut child) = self.child.lock().unwrap().take() {
             let _ = child.kill();
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -73,12 +73,6 @@ impl SidecarState {
                     Err(_) => break,
                 }
             }
-        }
-
-        // Release orphaned chrome discovery listeners after crashes or untracked sidecars.
-        if mode == Some(BrowserMode::Chrome) || port_is_open(CHROME_DISCOVERY_PORT) {
-            let _ = kill_listener_on_port(CHROME_DISCOVERY_PORT);
-            let _ = wait_for_port_release(CHROME_DISCOVERY_PORT, Duration::from_secs(2));
         }
 
         *self.ws_url.lock().unwrap() = None;
@@ -103,6 +97,23 @@ pub struct BrowserStartResult {
     pub ws_url: String,
     pub cdp_endpoint_path: String,
     pub mode: String,
+}
+
+/// Public discovery record for the per-user Chrome broker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChromeBrokerEndpoint {
+    pub schema_version: u16,
+    pub protocol_version: u16,
+    pub mode: String,
+    pub ws_url: String,
+    pub discovery_url: String,
+    pub extension_frame_ws_url: String,
+    pub broker_pid: u32,
+    pub broker_start_id: String,
+    #[serde(default)]
+    pub broker_features: Vec<String>,
+    #[serde(default)]
+    pub project_root: String,
 }
 
 /// User-facing browser startup failure.
@@ -175,109 +186,8 @@ fn port_is_open(port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
 
-fn wait_for_port_release(port: u16, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if !port_is_open(port) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    !port_is_open(port)
-}
-
-/// PID of the process listening on `127.0.0.1:port`, if discoverable.
-fn find_listener_pid(port: u16) -> Option<u32> {
-    #[cfg(windows)]
-    {
-        let output = Command::new("netstat").args(["-ano"]).output().ok()?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        let needle = format!("127.0.0.1:{port}");
-        for line in text.lines() {
-            if line.contains(&needle) && line.contains("LISTENING") {
-                if let Some(pid) = line.split_whitespace().last() {
-                    if let Ok(pid) = pid.parse::<u32>() {
-                        return Some(pid);
-                    }
-                }
-            }
-        }
-        None
-    }
-    #[cfg(not(windows))]
-    {
-        let output = Command::new("lsof")
-            .args(["-ti", &format!("tcp:{port}")])
-            .output()
-            .ok()?;
-        let lossy = String::from_utf8_lossy(&output.stdout);
-        let pid = lossy.trim();
-        pid.parse().ok()
-    }
-}
-
-/// Stops the process bound to the discovery port (orphaned `browser_service.py`).
-fn kill_listener_on_port(port: u16) -> Result<(), String> {
-    let Some(pid) = find_listener_pid(port) else {
-        return Ok(());
-    };
-    #[cfg(windows)]
-    {
-        let status = Command::new("taskkill")
-            .args(["/F", "/PID", &pid.to_string()])
-            .status()
-            .map_err(|e| e.to_string())?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("taskkill failed for PID {pid} (port {port})"))
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let status = Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .status()
-            .map_err(|e| e.to_string())?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("kill failed for PID {pid} (port {port})"))
-        }
-    }
-}
-
-fn normalize_project_root(path: &Path) -> PathBuf {
-    dunce::simplified(path)
-        .canonicalize()
-        .unwrap_or_else(|_| dunce::simplified(path).to_path_buf())
-}
-
-fn project_roots_match(expected: &Path, got: &str) -> bool {
-    if got.trim().is_empty() {
-        return false;
-    }
-    let got_path = Path::new(got);
-    let a = normalize_project_root(expected);
-    let b = normalize_project_root(got_path);
-    if a == b {
-        return true;
-    }
-    #[cfg(windows)]
-    return a
-        .to_string_lossy()
-        .eq_ignore_ascii_case(&b.to_string_lossy());
-    #[cfg(not(windows))]
-    false
-}
-
-/// Parsed `GET /v1/bridge` payload for chrome mode reuse.
-struct ChromeBridgeDiscovery {
-    ws_url: String,
-    project_root: String,
-}
-
-fn fetch_chrome_bridge_discovery(port: u16) -> Result<ChromeBridgeDiscovery, BrowserError> {
+/// Reads the versioned public discovery record from a loopback Chrome broker.
+pub fn fetch_chrome_broker_endpoint(port: u16) -> Result<ChromeBrokerEndpoint, BrowserError> {
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
@@ -323,20 +233,65 @@ fn fetch_chrome_bridge_discovery(port: u16) -> Result<ChromeBridgeDiscovery, Bro
             message: "discovery response missing ws_url".into(),
             hint: None,
         })?;
-    let project_root = payload
-        .get("project_root")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
     if payload.get("mode").and_then(|v| v.as_str()) != Some("chrome") {
         return Err(BrowserError {
             message: "discovery port is not serving chrome bridge mode".into(),
             hint: None,
         });
     }
-    Ok(ChromeBridgeDiscovery {
+    let number = |name: &str| -> Result<u64, BrowserError> {
+        payload
+            .get(name)
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| BrowserError {
+                message: format!("discovery response missing {name}"),
+                hint: None,
+            })
+    };
+    let string = |name: &str| -> Result<String, BrowserError> {
+        payload
+            .get(name)
+            .and_then(|v| v.as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| BrowserError {
+                message: format!("discovery response missing {name}"),
+                hint: None,
+            })
+    };
+    Ok(ChromeBrokerEndpoint {
+        schema_version: u16::try_from(number("schema_version")?).map_err(|_| BrowserError {
+            message: "invalid broker schema_version".into(),
+            hint: None,
+        })?,
+        protocol_version: u16::try_from(number("protocol_version")?).map_err(|_| BrowserError {
+            message: "invalid broker protocol_version".into(),
+            hint: None,
+        })?,
+        mode: "chrome".into(),
         ws_url: ws_url.to_string(),
-        project_root,
+        discovery_url: format!("http://127.0.0.1:{port}/v1/bridge"),
+        extension_frame_ws_url: string("extension_frame_ws_url")?,
+        broker_pid: u32::try_from(number("broker_pid")?).map_err(|_| BrowserError {
+            message: "invalid broker_pid".into(),
+            hint: None,
+        })?,
+        broker_start_id: string("broker_start_id")?,
+        broker_features: payload
+            .get("broker_features")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| BrowserError {
+                message: "discovery response missing broker_features".into(),
+                hint: None,
+            })?
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect(),
+        project_root: payload
+            .get("project_root")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
     })
 }
 
@@ -420,32 +375,223 @@ fn read_port_from_child_stdout(child: &mut Child, timeout: Duration) -> Result<u
     }
 }
 
-/// Frees port 17373 or reuses an existing bridge for the same project.
-fn prepare_chrome_discovery(project_root: &Path) -> Result<Option<String>, BrowserError> {
-    if !port_is_open(CHROME_DISCOVERY_PORT) {
-        return Ok(None);
-    }
+fn chrome_broker_state_dir() -> Result<PathBuf, BrowserError> {
+    let base = dirs::data_local_dir()
+        .or_else(dirs::cache_dir)
+        .ok_or_else(|| BrowserError {
+            message: "Cannot resolve a per-user data directory for the Chrome broker.".into(),
+            hint: Some("Set LOCALAPPDATA (Windows) or XDG_DATA_HOME (Linux).".into()),
+        })?;
+    Ok(base.join("teshi").join("browser-broker"))
+}
 
-    if let Ok(bridge) = fetch_chrome_bridge_discovery(CHROME_DISCOVERY_PORT) {
-        if project_roots_match(project_root, &bridge.project_root) {
-            return Ok(Some(bridge.ws_url));
-        }
-    }
+/// Location of the per-user broker compatibility record.
+pub fn chrome_broker_endpoint_path() -> Result<PathBuf, BrowserError> {
+    Ok(chrome_broker_state_dir()?.join("endpoint.json"))
+}
 
-    kill_listener_on_port(CHROME_DISCOVERY_PORT).map_err(|e| BrowserError {
-        message: format!("Port {CHROME_DISCOVERY_PORT} is in use and could not be released: {e}"),
-        hint: Some("Close other teshi instances or run: netstat -ano | findstr :17373".into()),
-    })?;
-    if !wait_for_port_release(CHROME_DISCOVERY_PORT, Duration::from_secs(3)) {
+fn validate_chrome_broker_compatibility(
+    endpoint: ChromeBrokerEndpoint,
+) -> Result<ChromeBrokerEndpoint, BrowserError> {
+    if endpoint.schema_version != BROWSER_AGENT_SCHEMA_VERSION
+        || endpoint.protocol_version != BROWSER_BROKER_PROTOCOL_VERSION
+    {
         return Err(BrowserError {
-            message: format!("Port {CHROME_DISCOVERY_PORT} is still in use after cleanup."),
+            message: format!(
+                "Incompatible Teshi Chrome broker is already running (schema {}, protocol {}); this CLI requires schema {}, protocol {}.",
+                endpoint.schema_version,
+                endpoint.protocol_version,
+                BROWSER_AGENT_SCHEMA_VERSION,
+                BROWSER_BROKER_PROTOCOL_VERSION
+            ),
             hint: Some(
-                "End the orphaned python.exe on port 17373, then click Connect Chrome again."
+                "The running broker was left untouched. Use the matching Teshi CLI, or stop it explicitly before upgrading."
                     .into(),
             ),
         });
     }
-    Ok(None)
+    if !endpoint
+        .broker_features
+        .iter()
+        .any(|feature| feature == "p0.control")
+    {
+        return Err(BrowserError {
+            message: "Incompatible Teshi Chrome broker is already running; this CLI requires broker feature p0.control.".into(),
+            hint: Some(
+                "The running broker was left untouched. Stop it explicitly before upgrading Teshi."
+                    .into(),
+            ),
+        });
+    }
+    Ok(endpoint)
+}
+
+fn discover_compatible_chrome_broker() -> Result<Option<ChromeBrokerEndpoint>, BrowserError> {
+    if !port_is_open(CHROME_DISCOVERY_PORT) {
+        return Ok(None);
+    }
+    let endpoint = fetch_chrome_broker_endpoint(CHROME_DISCOVERY_PORT).map_err(|error| {
+        BrowserError {
+            message: format!(
+                "Port {CHROME_DISCOVERY_PORT} is occupied by a service that is not a compatible Teshi Chrome broker: {}",
+                error.message
+            ),
+            hint: Some(
+                "The listener was not terminated. Stop it explicitly or configure the matching Teshi version."
+                    .into(),
+            ),
+        }
+    })?;
+    validate_chrome_broker_compatibility(endpoint).map(Some)
+}
+
+fn persist_user_broker_endpoint(endpoint: &ChromeBrokerEndpoint) -> Result<(), BrowserError> {
+    let path = chrome_broker_endpoint_path()?;
+    crate::fs_util::write_atomic(&path, endpoint).map_err(|error| BrowserError {
+        message: format!(
+            "Failed to write broker endpoint {}: {error}",
+            path.display()
+        ),
+        hint: None,
+    })
+}
+
+fn coordinate_broker_start<D, S>(
+    state_dir: &Path,
+    readiness_timeout: Duration,
+    mut discover: D,
+    mut start: S,
+) -> Result<ChromeBrokerEndpoint, BrowserError>
+where
+    D: FnMut() -> Result<Option<ChromeBrokerEndpoint>, BrowserError>,
+    S: FnMut() -> Result<(), BrowserError>,
+{
+    if let Some(endpoint) = discover()? {
+        return Ok(endpoint);
+    }
+    std::fs::create_dir_all(state_dir).map_err(|error| BrowserError {
+        message: format!("Failed to create broker state directory: {error}"),
+        hint: None,
+    })?;
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(state_dir.join("startup.lock"))
+        .map_err(|error| BrowserError {
+            message: format!("Failed to open Chrome broker startup lock: {error}"),
+            hint: None,
+        })?;
+    let mut lock = RwLock::new(lock_file);
+    let _startup_guard = lock.write().map_err(|error| BrowserError {
+        message: format!("Failed to acquire Chrome broker startup lock: {error}"),
+        hint: None,
+    })?;
+    if let Some(endpoint) = discover()? {
+        return Ok(endpoint);
+    }
+    start()?;
+    let deadline = Instant::now() + readiness_timeout;
+    while Instant::now() < deadline {
+        if let Some(endpoint) = discover()? {
+            return Ok(endpoint);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    Err(BrowserError {
+        message: "Timed out waiting for the user-session Chrome broker.".into(),
+        hint: None,
+    })
+}
+
+/// Starts or reuses the per-user Chrome broker under an inter-process startup lock.
+pub fn ensure_user_chrome_broker(
+    project_root: &Path,
+    browser_service_script: &Path,
+) -> Result<ChromeBrokerEndpoint, BrowserError> {
+    let state_dir = chrome_broker_state_dir()?;
+    let start = || {
+        let venv = resolve_project_venv(project_root).ok_or_else(|| BrowserError {
+            message: "Python virtual environment not found or not runnable.".into(),
+            hint: Some("Create .venv and install websockets from python/requirements.txt.".into()),
+        })?;
+        let check = build_import_check_command(&venv)
+            .args(["-c", "import websockets"])
+            .output()
+            .map_err(|error| BrowserError {
+                message: format!("Failed to run Python: {error}"),
+                hint: Some(format!(
+                    "{} -m pip install websockets",
+                    venv.python_exe.display()
+                )),
+            })?;
+        if !check.status.success() {
+            return Err(BrowserError {
+                message: import_check_failed_message(&check, "websockets"),
+                hint: Some(format!(
+                    "{} -m pip install websockets",
+                    venv.python_exe.display()
+                )),
+            });
+        }
+        if !browser_service_script.is_file() {
+            return Err(BrowserError {
+                message: format!(
+                    "browser_service.py not found at {}",
+                    browser_service_script.display()
+                ),
+                hint: Some("Reinstall Teshi so its bundled share resources are present.".into()),
+            });
+        }
+
+        let stderr_path = state_dir.join("broker.stderr.log");
+        let stderr = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stderr_path)
+            .map_err(|error| BrowserError {
+                message: format!("Failed to open broker diagnostic log: {error}"),
+                hint: None,
+            })?;
+        let mut cmd = python_sidecar_command(&venv);
+        cmd.arg(browser_service_script).args([
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--mode",
+            "chrome",
+            "--user-session",
+            "--project-root",
+            &project_root.to_string_lossy(),
+            "--discovery-port",
+            &CHROME_DISCOVERY_PORT.to_string(),
+        ]);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr));
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const DETACHED_PROCESS: u32 = 0x00000008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        }
+        cmd.spawn().map_err(|error| BrowserError {
+            message: format!("Failed to start the user-session Chrome broker: {error}"),
+            hint: Some(format!("Inspect {}", stderr_path.display())),
+        })?;
+        Ok(())
+    };
+    let endpoint = coordinate_broker_start(
+        &state_dir,
+        Duration::from_secs(10),
+        discover_compatible_chrome_broker,
+        start,
+    )?;
+    persist_user_broker_endpoint(&endpoint)?;
+    Ok(endpoint)
 }
 
 /// Starts the browser sidecar for the open project in the given mode.
@@ -465,6 +611,32 @@ pub async fn start_browser_sidecar(
             message: "Open a project before starting the browser.".into(),
             hint: None,
         })?;
+
+    if mode == BrowserMode::Chrome {
+        let endpoint = ensure_user_chrome_broker(&project_root, &rt.browser_service_script)?;
+        *rt.sidecar.ws_url.lock().unwrap() = Some(endpoint.ws_url.clone());
+        *rt.sidecar.mode.lock().unwrap() = Some(mode);
+        *rt.project.browser_active.lock().unwrap() = true;
+        rt.events.emit(
+            "browser-started",
+            serde_json::json!({
+                "ws_url": endpoint.ws_url,
+                "mode": mode.as_str(),
+                "broker_pid": endpoint.broker_pid,
+                "broker_start_id": endpoint.broker_start_id,
+                "attached": true
+            }),
+        );
+        return Ok(BrowserStartResult {
+            ws_url: endpoint.ws_url,
+            cdp_endpoint_path: project_root
+                .join(".teshi")
+                .join("cdp-endpoint.json")
+                .to_string_lossy()
+                .into_owned(),
+            mode: mode.as_str().to_string(),
+        });
+    }
 
     let venv = resolve_project_venv(&project_root).ok_or_else(|| {
         let dot_venv = project_root.join(".venv");
@@ -568,28 +740,6 @@ pub async fn start_browser_sidecar(
         0
     };
 
-    if mode == BrowserMode::Chrome {
-        if let Some(ws_url) = prepare_chrome_discovery(&project_root)? {
-            *rt.sidecar.ws_url.lock().unwrap() = Some(ws_url.clone());
-            *rt.sidecar.mode.lock().unwrap() = Some(mode);
-            *rt.project.browser_active.lock().unwrap() = true;
-            rt.events.emit(
-                "browser-started",
-                serde_json::json!({ "ws_url": ws_url, "mode": mode.as_str() }),
-            );
-            let cdp_endpoint_path = project_root
-                .join(".teshi")
-                .join("cdp-endpoint.json")
-                .to_string_lossy()
-                .into_owned();
-            return Ok(BrowserStartResult {
-                ws_url,
-                cdp_endpoint_path,
-                mode: mode.as_str().to_string(),
-            });
-        }
-    }
-
     let mut cmd = python_sidecar_command(&venv);
     cmd.arg(script).args([
         "--host",
@@ -606,8 +756,6 @@ pub async fn start_browser_sidecar(
         if rt.embedded_no_preview_stream {
             cmd.arg("--no-preview-stream");
         }
-    } else if mode == BrowserMode::Chrome {
-        cmd.args(["--discovery-port", &CHROME_DISCOVERY_PORT.to_string()]);
     }
     let mut child = cmd
         .stdout(Stdio::piped())
@@ -619,11 +767,7 @@ pub async fn start_browser_sidecar(
         })?;
 
     let actual_port = read_port_from_child_stdout(&mut child, Duration::from_secs(10))?;
-    let ready = if mode == BrowserMode::Chrome {
-        wait_until_chrome_ready(&mut child, actual_port, CHROME_DISCOVERY_PORT)
-    } else {
-        wait_until_ready(&mut child, actual_port)
-    };
+    let ready = wait_until_ready(&mut child, actual_port);
     if let Err(err) = ready {
         let _ = child.kill();
         let _ = child.wait();
@@ -652,85 +796,6 @@ pub async fn start_browser_sidecar(
         cdp_endpoint_path,
         mode: mode.as_str().to_string(),
     })
-}
-
-fn wait_until_chrome_ready(
-    child: &mut Child,
-    ws_port: u16,
-    discovery_port: u16,
-) -> Result<(), BrowserError> {
-    use std::net::{SocketAddr, TcpStream};
-    use std::time::{Duration, Instant};
-
-    let ws_addr: SocketAddr = ([127, 0, 0, 1], ws_port).into();
-    let deadline = Instant::now() + Duration::from_secs(20);
-
-    loop {
-        if let Ok(Some(status)) = child.try_wait() {
-            let detail = read_child_stderr(child);
-            let message = if detail.is_empty() {
-                format!("Browser sidecar exited during startup (status: {status}).")
-            } else {
-                format!("Browser sidecar exited during startup (status: {status}): {detail}")
-            };
-            return Err(BrowserError {
-                message,
-                hint: Some(
-                    "If port 17373 is in use, click Disconnect then Connect Chrome again.".into(),
-                ),
-            });
-        }
-        let ws_up = TcpStream::connect_timeout(&ws_addr, Duration::from_millis(400)).is_ok();
-        let discovery_ok = fetch_discovery_bridge(discovery_port).is_ok();
-        if ws_up && discovery_ok {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(BrowserError {
-                message: "Chrome bridge did not become ready in time.".into(),
-                hint: Some(
-                    "Load unpacked extension from C:\\Program Files\\teshi\\share\\teshi-bridge in Chrome, activate your target tab, then retry."
-                        .into(),
-                ),
-            });
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-}
-
-fn fetch_discovery_bridge(discovery_port: u16) -> Result<(), BrowserError> {
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
-    use std::time::Duration;
-
-    let mut stream = TcpStream::connect_timeout(
-        &([127, 0, 0, 1], discovery_port).into(),
-        Duration::from_millis(500),
-    )
-    .map_err(|e| BrowserError {
-        message: e.to_string(),
-        hint: None,
-    })?;
-    stream
-        .write_all(b"GET /v1/bridge HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-        .map_err(|e| BrowserError {
-            message: e.to_string(),
-            hint: None,
-        })?;
-    let mut buf = [0u8; 512];
-    let n = stream.read(&mut buf).map_err(|e| BrowserError {
-        message: e.to_string(),
-        hint: None,
-    })?;
-    let text = String::from_utf8_lossy(&buf[..n]);
-    if text.contains("200 OK") && text.contains("ws_url") {
-        Ok(())
-    } else {
-        Err(BrowserError {
-            message: "discovery endpoint did not return bridge info".into(),
-            hint: None,
-        })
-    }
 }
 
 fn wait_until_ready(child: &mut Child, port: u16) -> Result<(), BrowserError> {
@@ -778,4 +843,152 @@ pub async fn stop_browser_sidecar(rt: &TeshiEngine) -> Result<(), String> {
 /// Returns persisted recent project paths.
 pub fn get_recent_projects() -> Result<Vec<String>, String> {
     crate::app_data::get_recent_projects().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    fn endpoint(start_id: &str) -> ChromeBrokerEndpoint {
+        ChromeBrokerEndpoint {
+            schema_version: BROWSER_AGENT_SCHEMA_VERSION,
+            protocol_version: BROWSER_BROKER_PROTOCOL_VERSION,
+            mode: "chrome".into(),
+            ws_url: "ws://127.0.0.1:23456".into(),
+            discovery_url: "http://127.0.0.1:17373/v1/bridge".into(),
+            extension_frame_ws_url: "ws://127.0.0.1:23456/extension/frames".into(),
+            broker_pid: 42,
+            broker_start_id: start_id.into(),
+            broker_features: vec!["p0.control".into()],
+            project_root: "fixture".into(),
+        }
+    }
+
+    #[test]
+    fn first_start_and_existing_broker_reuse_share_start_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let started = AtomicBool::new(false);
+        let starts = AtomicUsize::new(0);
+        let discovered = || {
+            Ok(started
+                .load(Ordering::SeqCst)
+                .then(|| endpoint("first-start")))
+        };
+        let result =
+            coordinate_broker_start(temp.path(), Duration::from_secs(1), discovered, || {
+                starts.fetch_add(1, Ordering::SeqCst);
+                started.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(result.broker_start_id, "first-start");
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+        let reused =
+            coordinate_broker_start(temp.path(), Duration::from_secs(1), discovered, || {
+                panic!("compatible broker must be reused")
+            })
+            .unwrap();
+        assert_eq!(reused.broker_start_id, result.broker_start_id);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn concurrent_start_is_serialized_by_per_user_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().to_path_buf();
+        let started = Arc::new(AtomicBool::new(false));
+        let starts = Arc::new(AtomicUsize::new(0));
+        let mut threads = Vec::new();
+        for _ in 0..4 {
+            let state_dir = state_dir.clone();
+            let started = Arc::clone(&started);
+            let starts = Arc::clone(&starts);
+            threads.push(std::thread::spawn(move || {
+                coordinate_broker_start(
+                    &state_dir,
+                    Duration::from_secs(2),
+                    || {
+                        Ok(started
+                            .load(Ordering::SeqCst)
+                            .then(|| endpoint("concurrent")))
+                    },
+                    || {
+                        starts.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(40));
+                        started.store(true, Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
+                .unwrap()
+            }));
+        }
+        let identities: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap().broker_start_id)
+            .collect();
+        assert!(identities.iter().all(|identity| identity == "concurrent"));
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn incompatible_broker_is_reported_without_starting_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let starts = AtomicUsize::new(0);
+        let mut incompatible = endpoint("older");
+        incompatible.protocol_version = BROWSER_BROKER_PROTOCOL_VERSION + 1;
+        let error = coordinate_broker_start(
+            temp.path(),
+            Duration::from_millis(10),
+            || validate_chrome_broker_compatibility(incompatible.clone()).map(Some),
+            || {
+                starts.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.message.contains("protocol 2"));
+        assert!(error.message.contains("requires"));
+        assert!(error.hint.unwrap().contains("left untouched"));
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn broker_without_required_feature_is_incompatible_with_p0_cli() {
+        let mut discovered = endpoint("pre-p0-broker");
+        discovered.broker_features.clear();
+        let error = validate_chrome_broker_compatibility(discovered).unwrap_err();
+        assert!(error.message.contains("p0.control"));
+        assert!(error.hint.unwrap().contains("left untouched"));
+    }
+
+    #[tokio::test]
+    async fn desktop_detach_does_not_stop_shared_listener() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let state = SidecarState::new();
+        *state.mode.lock().unwrap() = Some(BrowserMode::Chrome);
+        state.stop().await.unwrap();
+        assert!(std::net::TcpStream::connect(address).is_ok());
+    }
+
+    #[tokio::test]
+    async fn owned_sidecar_clean_shutdown_clears_process_and_endpoint_state() {
+        #[cfg(windows)]
+        let child = Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+            .spawn()
+            .unwrap();
+        #[cfg(not(windows))]
+        let child = Command::new("sh").args(["-c", "sleep 30"]).spawn().unwrap();
+        let state = SidecarState::new();
+        *state.child.lock().unwrap() = Some(child);
+        *state.ws_url.lock().unwrap() = Some("ws://127.0.0.1:1".into());
+        *state.mode.lock().unwrap() = Some(BrowserMode::Embedded);
+        state.stop().await.unwrap();
+        assert!(state.child.lock().unwrap().is_none());
+        assert!(state.browser_ws_url().is_none());
+        assert!(state.browser_mode().is_none());
+    }
 }

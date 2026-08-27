@@ -3,3 +3,4 @@ websockets>=12.0
 Pillow
 uiautomation
 comtypes
+windows-capture==2.0.1; sys_platform == "win32" and platform_machine == "AMD64"

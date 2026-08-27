@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "package_version": "0.7.10",
+  "teshi_cli": ">=0.7.10 <0.8.0",
+  "browser_agent_schema": 1,
+  "broker_protocol": 1,
+  "phases": {
+    "p0.control": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "embedded": true,
+      "skill": true,
+      "mcp": "mutations require --allow-browser-mutations"
+    },
+    "p1.observability_artifacts": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "operations": [
+        "capture_browser_screenshot",
+        "generate_browser_pdf",
+        "start_console_capture",
+        "list_console_events",
+        "clear_console_capture",
+        "stop_console_capture",
+        "start_network_capture",
+        "list_network_requests",
+        "get_network_request_detail",
+        "clear_network_capture",
+        "stop_network_capture"
+      ],
+      "supported_actions": [
+        "upload"
+      ],
+      "monitoring": "optional bounded before/after summary around one mutation",
+      "window_focus": "explicit opt-in",
+      "tab_grouping": "optional and non-fatal",
+      "network_bodies": "explicit and bounded",
+      "redaction": "enabled by default"
+    },
+    "p1.filtered_network_capture": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "requires": [
+        "p1.observability_artifacts",
+        "p1.network_batch_transport",
+        "one or more exact hostnames"
+      ],
+      "request_bodies": "explicit opt-in with a positive byte limit",
+      "list_output": "metadata only"
+    },
+    "p1.network_batch_transport": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "transport": "authenticated WebSocket batches with contiguous acknowledgements"
+    },
+    "p2.javascript": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "default_enabled": false,
+      "requires": ["profile lease", "short-lived javascript grant"],
+      "mcp": false
+    },
+    "p2.raw_cdp": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "default_enabled": false,
+      "requires": ["profile lease", "short-lived raw-cdp grant", "project method allowlist"],
+      "mcp": false
+    },
+    "p2.cookies": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "default_enabled": false,
+      "requires": ["profile lease", "short-lived cookies grant", "optional cookies permission"],
+      "values_require": "separate short-lived cookie-values grant",
+      "mcp": false
+    },
+    "p2.content_settings": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "default_enabled": false,
+      "requires": ["profile lease", "short-lived content-settings grant", "optional contentSettings permission"],
+      "scope": "selected tab origin and fixed setting allowlist",
+      "mcp": false
+    },
+    "p2.extension_management": {
+      "cli": true,
+      "broker": true,
+      "extension": true,
+      "default_enabled": false,
+      "requires": ["profile lease", "short-lived extension-management grant", "optional management permission"],
+      "mutations": false,
+      "mcp": false
+    }
+  },
+  "extension": ">=0.7.10 <0.8.0",
+  "chromium": ">=116 (Chrome, Edge, or compatible Chromium with Manifest V3 and chrome.debugger)",
+  "operating_systems": [
+    "Windows 10/11 x86_64",
+    "Linux x86_64",
+    "macOS 13+ arm64"
+  ],
+  "mcp_protocols": [
+    "2026-07-28",
+    "2025-11-25",
+    "2025-06-18",
+    "2024-11-05"
+  ],
+  "transport": "same-host STDIO MCP and loopback browser broker only"
+}

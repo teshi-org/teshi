@@ -311,7 +311,7 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
             })
             .unwrap_or_default();
 
-        for (sci, scenario) in feature.scenarios.iter().enumerate() {
+        for (sci, scenario) in feature.all_scenarios().into_iter().enumerate() {
             let mut node_idx = 0usize;
             let mut parent_idx = 0usize;
             let mut effective_keyword: Option<StepKeywordType> = None;
@@ -603,5 +603,35 @@ Feature: F
         let index = build_index(&project);
         let node = find_closest_node(&index, 0, 3);
         assert!(node.is_some(), "should find a node near line 3");
+    }
+
+    #[test]
+    fn rule_only_feature_builds_mindmap_nodes() {
+        let content = "\
+Feature: Rule only
+  Background:
+    Given shared
+  Rule: First
+    Scenario: Nested
+      When action
+      Then result
+";
+        let feature = gherkin::parse_feature(content, PathBuf::from("rule.feature"));
+        assert!(feature.scenarios.is_empty());
+        assert_eq!(feature.scenario_count(), 1);
+        let project = BddProject {
+            root_dir: PathBuf::from("."),
+            features: vec![feature],
+        };
+        let index = build_index(&project);
+        assert!(
+            index.node_labels.len() > 1,
+            "Rule-nested scenarios must contribute mindmap nodes, got {} labels",
+            index.node_labels.len()
+        );
+        assert!(
+            find_closest_node(&index, 0, 7).is_some(),
+            "should resolve a node near the nested When step"
+        );
     }
 }

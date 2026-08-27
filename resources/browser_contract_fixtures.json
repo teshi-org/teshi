@@ -1,0 +1,174 @@
+{
+  "schema_version": 1,
+  "phased": {
+    "p0_only_heartbeat": {
+      "schema_version": 1,
+      "protocol_version": 1,
+      "extension_instance_id": "profile-p0",
+      "extension_version": "0.7.9",
+      "features": [
+        { "feature": "p0.control", "available": true }
+      ],
+      "supported_actions": ["click", "fill", "navigate"],
+      "optional_permissions": {
+        "cookies": false,
+        "content_settings": false,
+        "extension_management": false
+      }
+    },
+    "p0_p1_heartbeat": {
+      "schema_version": 1,
+      "protocol_version": 1,
+      "extension_instance_id": "profile-p0-p1",
+      "extension_version": "0.8.0-dev",
+      "features": [
+        { "feature": "p0.control", "available": true },
+        { "feature": "p1.observability_artifacts", "available": true },
+        { "feature": "p1.filtered_network_capture", "available": true },
+        { "feature": "p1.network_batch_transport", "available": true }
+      ],
+      "supported_actions": ["click", "pointer_click", "fill", "type", "navigate", "upload"],
+      "supported_operations": [
+        "capture_browser_screenshot",
+        "generate_browser_pdf",
+        "start_console_capture",
+        "list_console_events",
+        "clear_console_capture",
+        "stop_console_capture",
+        "start_network_capture",
+        "list_network_requests",
+        "get_network_request_detail",
+        "clear_network_capture",
+        "stop_network_capture"
+      ],
+      "optional_permissions": {
+        "cookies": false,
+        "content_settings": false,
+        "extension_management": false
+      }
+    },
+    "p2_optional_permissions_heartbeat": {
+      "schema_version": 1,
+      "protocol_version": 1,
+      "extension_instance_id": "profile-p2-permissions",
+      "extension_version": "0.8.0-dev",
+      "features": [
+        { "feature": "p0.control", "available": true },
+        { "feature": "p2.cookies", "available": false, "reason": "permission_not_granted" },
+        { "feature": "p2.raw_cdp", "available": false, "reason": "disabled_by_default" }
+      ],
+      "supported_actions": ["click", "navigate"],
+      "optional_permissions": {
+        "cookies": false,
+        "content_settings": false,
+        "extension_management": false
+      }
+    },
+    "incompatible_feature_request": {
+      "cmd": "capture_browser_screenshot",
+      "request_id": "feature-request-1",
+      "required_feature": "p1.observability_artifacts",
+      "target": {
+        "extension_instance_id": "profile-p0",
+        "window_id": 7,
+        "tab_id": 42
+      },
+      "lease_token": "fixture-secret-not-for-discovery"
+    }
+  },
+  "filtered_network": {
+    "start_command": {
+      "cmd": "start_network_capture",
+      "request_id": "network-start-1",
+      "target": {
+        "extension_instance_id": "profile-p0-p1",
+        "window_id": 7,
+        "tab_id": 42
+      },
+      "lease_token": "fixture-secret-not-for-discovery",
+      "allowed_hostnames": ["api.example.test"],
+      "capture_request_bodies": true,
+      "max_request_body_bytes": 65536
+    },
+    "list_response": {
+      "ok": true,
+      "operation": "list_network_requests",
+      "request_id": "network-list-1",
+      "requests": [
+        {
+          "network_request_id": "cdp-request-1",
+          "url": "https://api.example.test/v1/items",
+          "method": "POST",
+          "status": 201,
+          "has_request_body": true
+        }
+      ]
+    },
+    "detail_response": {
+      "ok": true,
+      "operation": "get_network_request_detail",
+      "request_id": "network-detail-1",
+      "request": {
+        "network_request_id": "cdp-request-1",
+        "url": "https://api.example.test/v1/items",
+        "method": "POST",
+        "status": 201,
+        "request_body": {
+          "data": "{\"name\":\"fixture\"}",
+          "encoding": "utf8",
+          "captured_bytes": 18,
+          "original_bytes": 18,
+          "truncated": false
+        }
+      }
+    }
+  },
+  "legacy": {
+    "heartbeat": {
+      "project_root": "/work/project",
+      "url": "https://example.test/dashboard",
+      "title": "Dashboard",
+      "active_tab_id": 42,
+      "tabs": [
+        {
+          "id": 42,
+          "title": "Dashboard",
+          "url": "https://example.test/dashboard",
+          "active": true,
+          "favIconUrl": "",
+          "debuggable": true
+        }
+      ],
+      "frame_error": ""
+    },
+    "command": {
+      "type": "cmd",
+      "request_id": "legacy-snapshot-1",
+      "cmd": "get_page_snapshot"
+    },
+    "response": {
+      "type": "response",
+      "request_id": "legacy-snapshot-1",
+      "cmd": "get_page_snapshot",
+      "ok": true,
+      "url": "https://example.test/dashboard",
+      "title": "Dashboard",
+      "tab_id": 42,
+      "accessibility_tree": {},
+      "interactive_elements": []
+    },
+    "frame_meta": {
+      "tab_id": 42,
+      "url": "https://example.test/dashboard",
+      "seq": 1
+    },
+    "cdp_endpoint": {
+      "mode": "chrome",
+      "ws_url": "ws://127.0.0.1:20254",
+      "page_url": "https://example.test/dashboard",
+      "bridge": "python",
+      "extension_connected": true,
+      "discovery_url": "http://127.0.0.1:17373/v1/bridge"
+    }
+  }
+}

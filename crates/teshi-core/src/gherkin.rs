@@ -30,8 +30,38 @@ pub struct BddFeature {
     pub description: Vec<String>,
     pub background: Option<BddBackground>,
     pub rules: Vec<BddRule>,
+    /// Top-level scenarios (not nested under a `Rule:`).
+    ///
+    /// Prefer [`BddFeature::all_scenarios`] / [`BddFeature::scenario_at`] when listing or
+    /// indexing scenarios for UI/run — those include Rule-nested scenarios too.
     pub scenarios: Vec<BddScenario>,
     pub line_count: usize,
+}
+
+impl BddFeature {
+    /// Flat scenario list for Explore, MindMap, and runners, sorted by source
+    /// `line_number` so Rule-nested and top-level scenarios stay in file order.
+    ///
+    /// Indexes from this list match [`Self::scenario_at`] / [`Self::scenario_count`].
+    pub fn all_scenarios(&self) -> Vec<&BddScenario> {
+        let mut scenarios: Vec<&BddScenario> = self
+            .scenarios
+            .iter()
+            .chain(self.rules.iter().flat_map(|r| r.scenarios.iter()))
+            .collect();
+        scenarios.sort_by_key(|s| s.line_number);
+        scenarios
+    }
+
+    /// Total scenarios including those nested under `Rule:` blocks.
+    pub fn scenario_count(&self) -> usize {
+        self.scenarios.len() + self.rules.iter().map(|r| r.scenarios.len()).sum::<usize>()
+    }
+
+    /// Lookup by flat scenario index (same order as [`Self::all_scenarios`]).
+    pub fn scenario_at(&self, idx: usize) -> Option<&BddScenario> {
+        self.all_scenarios().get(idx).copied()
+    }
 }
 
 /// `Background:` block — shared steps prepended to every scenario.
@@ -819,6 +849,51 @@ Feature: With Rule
         // Scenario after the Rule is not consumed by the Rule
         assert_eq!(f.scenarios.len(), 1);
         assert_eq!(f.scenarios[0].name, "No rule");
+        // Flat index follows source line order (Rule scenarios, then top-level)
+        assert_eq!(f.scenario_count(), 3);
+        assert_eq!(
+            f.all_scenarios()
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Valid login", "Invalid login", "No rule"]
+        );
+        assert_eq!(
+            f.scenario_at(0).map(|s| s.name.as_str()),
+            Some("Valid login")
+        );
+        assert_eq!(
+            f.scenario_at(1).map(|s| s.name.as_str()),
+            Some("Invalid login")
+        );
+        assert_eq!(f.scenario_at(2).map(|s| s.name.as_str()), Some("No rule"));
+        assert!(f.scenario_at(3).is_none());
+    }
+
+    #[test]
+    fn rule_only_feature_exposes_nested_scenarios_via_all_scenarios() {
+        let content = "\
+Feature: Rule only
+  Rule: First
+    Scenario: A
+      Given a
+  Rule: Second
+    Scenario: B
+      Given b
+    Scenario: C
+      Given c
+";
+        let f = parse_feature(content, PathBuf::from("rule-only.feature"));
+        assert!(f.scenarios.is_empty());
+        assert_eq!(f.rules.len(), 2);
+        assert_eq!(f.scenario_count(), 3);
+        assert_eq!(
+            f.all_scenarios()
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "B", "C"]
+        );
     }
 
     #[test]

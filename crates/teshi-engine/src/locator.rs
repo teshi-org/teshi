@@ -304,6 +304,7 @@ fn read_step_bindings_file(
             return Ok(bindings);
         }
         return Ok(StepBindingsFile {
+            format_version: 2,
             feature: feature_relative_path.to_string(),
             steps: Vec::new(),
         });
@@ -314,6 +315,7 @@ fn read_step_bindings_file(
 fn write_step_bindings_file(project_root: &Path, bindings: &StepBindingsFile) -> Result<()> {
     let path = step_bindings_path(project_root, &bindings.feature);
     let mut normalized = bindings.clone();
+    normalized.format_version = 2;
     normalized.steps.sort_by(|a, b| {
         a.step_line
             .cmp(&b.step_line)
@@ -335,6 +337,9 @@ fn binding_from_candidate(step: &ActiveStep, candidate: &LocatorCandidate) -> St
             value: candidate.value.clone(),
             action: candidate.action.clone(),
             value_arg: candidate.value_arg.clone(),
+            element_reference: None,
+            structured_candidate: None,
+            page_context_revision: None,
         },
         confirmed_at: Some(Utc::now().to_rfc3339()),
     }

@@ -6,7 +6,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-pub use teshi_core::project_settings::{ProjectSettings, DEFAULT_LOCATOR_AUTO_CONFIRM_SEC};
+pub use teshi_core::project_settings::{
+    ProjectSettings, DEFAULT_LOCATOR_AUTO_CONFIRM_SEC, DEFAULT_PLAYWRIGHT_TEST_ID_ATTRIBUTE,
+};
 
 fn settings_path(project_root: &Path) -> std::path::PathBuf {
     project_root.join(".teshi").join("settings.json")

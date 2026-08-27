@@ -11,6 +11,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+base64 = { workspace = true }
 console_error_panic_hook = "0.1"
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
@@ -19,4 +20,15 @@ serde_json = { workspace = true }
 teshi-ui = { workspace = true }
 js-sys = "0.3"
 wasm-bindgen = "=0.2.126"
-web-sys = { version = "0.3", features = ["XmlHttpRequest", "console"] }
+web-sys = { version = "0.3", features = [
+    "CloseEvent",
+    "ErrorEvent",
+    "Event",
+    "Location",
+    "MessageEvent",
+    "UrlSearchParams",
+    "WebSocket",
+    "Window",
+    "XmlHttpRequest",
+    "console",
+] }

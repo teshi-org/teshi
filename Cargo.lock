@@ -6704,7 +6704,7 @@ dependencies = [
 
 [[package]]
 name = "teshi-cli"
-version = "0.7.9"
+version = "0.7.10"
 dependencies = [
  "anyhow",
  "clap",
@@ -6743,6 +6743,7 @@ dependencies = [
  "teshi-core",
  "teshi-engine",
  "tokio",
+ "tokio-tungstenite 0.24.0",
  "tokio-util",
  "toml 0.8.23",
  "tower",
@@ -6758,10 +6759,15 @@ name = "teshi-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "gpui",
  "gpui_platform",
+ "reqwest",
+ "serde_json",
  "teshi-engine",
  "teshi-ui",
+ "tokio",
+ "tungstenite 0.24.0",
 ]
 
 [[package]]
@@ -6783,6 +6789,7 @@ dependencies = [
  "tempfile",
  "teshi-core",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "tungstenite 0.24.0",
  "vte",
@@ -6847,6 +6854,7 @@ dependencies = [
 name = "teshi-web"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "console_error_panic_hook",
  "gpui",
  "gpui_platform",

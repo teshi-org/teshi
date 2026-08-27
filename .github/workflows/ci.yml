@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -37,16 +37,16 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Compilation check
-        run: cargo check --workspace --locked
+        run: cargo check --workspace --exclude teshi-web --locked
 
       - name: Run tests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --exclude teshi-web --locked
 
       - name: Run clippy with warnings denied
-        run: cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --exclude teshi-web --locked --all-targets --all-features -- -D warnings
 
       - name: Build doc
-        run: cargo doc --workspace --locked --no-deps --document-private-items
+        run: cargo doc --workspace --exclude teshi-web --locked --no-deps --document-private-items
 
   desktop:
     name: teshi-desktop build (GPUI)

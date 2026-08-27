@@ -14,23 +14,23 @@ If no `.feature` files are found, the TUI opens an empty project buffer.
 
 ### Browser GUI (`teshi web`)
 
-React workspace UI served over loopback HTTP by the local daemon:
+GPUI WASM workspace UI served over loopback HTTP by the local daemon:
 
 ```bash
-teshi web [--project PATH] [--port 1421] [--no-open] [--dist PATH]
+teshi web [--project PATH] [--port 20253] [--no-open] [--dist PATH]
 ```
 
 On Windows, the full MSI and release zip bundle web assets under `share/web/` next to `teshi.exe`.
 For development from source, build the frontend first:
 
 ```bash
-npm --prefix apps/teshi-web-ui run build
-teshi web --dist apps/teshi-web-ui/dist
+bash scripts/build-teshi-web.sh
+teshi web --dist apps/teshi-web/dist
 ```
 
 ### Native desktop (`teshi desktop` / `teshi-desktop`)
 
-GPUI desktop shell (separate from the React web UI):
+GPUI desktop shell sharing its browser-session and settings views with GPUI Web:
 
 ```bash
 teshi desktop [--project PATH]
@@ -55,11 +55,10 @@ teshi run --runner-cmd "behat" --runner-cwd /app path/
 
 Configure the runner in `teshi.toml` (see below). CLI flags override file and env settings.
 
-For web UI self-test CI, start the embedded sidecar and replay bindings:
+For the supported GPUI WASM web UI smoke gate:
 
 ```bash
-teshi browser serve-embedded --navigate http://127.0.0.1:1421
-teshi run tests/feature/web-ui/welcome_smoke.feature
+bash scripts/run-web-ui-smoke.sh
 ```
 
 See [web-ui-self-test.md](web-ui-self-test.md) and `scripts/run-web-ui-smoke.sh`.
@@ -71,14 +70,90 @@ Commands for locator recording, replay, and sidecar health (see [browser-modes.m
 ```bash
 teshi browser doctor              # TCP + snapshot probe; exit 1 if stale
 teshi browser reconnect           # Restart embedded sidecar (refresh cdp-endpoint.json)
+teshi browser sessions            # Versioned browser-profile discovery JSON
+teshi browser tabs --session <id> # Windows/tabs scoped to one profile
+teshi browser lookup [--session <id>] [--label <name>] [--browser-name Chromium] [--tab <id>]
+teshi browser profile-label set --session <id> --label <unique-name>
+teshi browser profile-label clear --session <id>
+teshi browser lease acquire --session <id> --owner <label> [--ttl 60]
+teshi browser lease renew --session <id> --lease-token <token> [--ttl 60]
+teshi browser lease release --session <id> --lease-token <token>
 teshi browser snapshot            # Page accessibility tree
 teshi browser navigate <url>      # Navigate active tab
 teshi browser highlight <selector>
-teshi browser execute --selector <css> --action <action> [--value-arg <text>]
+teshi browser execute (--reference @e1 | --candidate-json '<json>' | --selector <css>) \
+  --action <action> [--value-arg <text>] [--page-revision <revision>] \
+  [--file <project-relative-path>] [--monitor] \
+  [--wait-url <part> | --wait-text <text> | --wait-state <state> | --wait-load]
+teshi browser tab open <url> --session <id> --window <id> --tab <id> --lease-token <token>
+teshi browser tab close --session <id> --window <id> --tab <id> --lease-token <token>
+teshi browser tab activate [--focus-window] --session <id> --window <id> --tab <id> --lease-token <token>
+teshi browser tab new-window <url> --session <id> --window <id> --tab <id> --lease-token <token>
 teshi browser verify --step-line N --selector <css> --action <action> [--value-arg <text>]
 teshi browser replay [--until-line N] [--non-interactive] [--yes]
 teshi browser serve-embedded [--navigate <url>]
+teshi browser locator --session <id> --window <id> --tab <id> --lease-token <token> \
+  [--purpose <text>] [--role <role>] [--text <text>] [--element-ref <ref>] \
+  [--gherkin-step <text>] [--test-id-attribute <name>]
+teshi browser locator-verify --session <id> --window <id> --tab <id> \
+  --lease-token <token> --page-revision <revision> --candidate-json '<json>'
+teshi browser evidence --session <id> --window <id> --tab <id> \
+  --lease-token <token> --page-revision <revision>
+teshi browser screenshot --session <id> --window <id> --tab <id> --lease-token <token> [--full-page]
+teshi browser pdf --session <id> --window <id> --tab <id> --lease-token <token> [--paper A4]
+teshi browser console start --session <id> --window <id> --tab <id> --lease-token <token> \
+  [--level info,error] [--max-age-ms N] [--max-entries N] [--max-bytes N]
+teshi browser console list|clear|stop --session <id> --window <id> --tab <id> --lease-token <token>
+teshi browser network start --session <id> --window <id> --tab <id> --lease-token <token> \
+  --host <exact-hostname> [--host <another-hostname>] \
+  [--request-body --max-request-body-bytes N] \
+  [--max-age-ms N] [--max-entries N] [--max-bytes N] [--max-body-bytes N]
+teshi browser network list --session <id> --window <id> --tab <id> --lease-token <token>
+teshi browser network detail <request-id> [--include-body] [--max-body-bytes N] \
+  --session <id> --window <id> --tab <id> --lease-token <token>
+teshi browser network clear|stop --session <id> --window <id> --tab <id> --lease-token <token>
 ```
+
+Explicit agent operations require the composite session/window/tab target and an exclusive profile lease. Existing commands may omit them only when one eligible target exists. When several profiles are live, omission fails with `ambiguous_browser_target` and performs no mutation. Machine-readable failures contain a stable `code`, actionable `error`, and non-sensitive `recovery` object and exit non-zero.
+
+Project locator configuration lives in `.teshi/settings.json`; `playwright_test_id_attributes` defaults to `["data-testid"]` and may contain project-specific alternatives.
+
+P1 diagnostic commands appear in session discovery under `capabilities.supported_operations`; upload is advertised in `capabilities.supported_actions`. Console and network buffers are target-scoped, lease-protected, and bounded by age, entry count, and bytes. Network capture requires one or more exact `--host` filters; it never treats suffix-similar or wildcard hosts as matches. `--request-body` retains bounded raw bodies for matching requests, while list output remains metadata-only. Request detail includes the retained request body; response bodies still require `network detail --include-body`. Authorization, Cookie, token, password, secret, and caller-configured metadata fields are redacted by default, but explicitly captured request bodies are not redacted.
+
+Add `--monitor` to `navigate` or a mutating `execute` call to capture one bounded before/after summary and structured diff around the single action dispatch. Upload uses `--action upload` with one or more repeatable `--file` arguments. Files must already exist inside the selected project root and satisfy count and size limits; failed validation returns only the failing argument index and policy reason, never a directory listing or unauthorized full path.
+
+Activating a tab changes the active tab but does not focus its browser window unless `--focus-window` is supplied. Tab grouping is optional organization: an unavailable grouping API returns `organized: false` and a `tab_group_unavailable` warning while leaving the tabs open.
+
+### Privileged browser capabilities (P2)
+
+P2 is denied by default. Start with a dedicated browser Profile, acquire its lease, and approve only the exact optional permission in the `teshi-bridge` popup. Then create a short-lived grant; interactive creation requires `--yes`. Non-interactive grants additionally require `.teshi/browser-policy.json` and an exact `--acknowledge-capability`.
+
+```powershell
+teshi browser grant create --capability cookies --yes --session <id> --window <id> --tab <id> --lease-token <lease>
+teshi browser cookies --grant-token <cookies-grant> --session <id> --window <id> --tab <id> --lease-token <lease>
+
+# Values require both metadata and value grants.
+teshi browser grant create --capability cookie-values --yes --session <id> --window <id> --tab <id> --lease-token <lease>
+teshi browser cookies --include-values --grant-token <cookies-grant> --value-grant-token <value-grant> --session <id> --window <id> --tab <id> --lease-token <lease>
+
+teshi browser content-setting notifications --grant-token <settings-grant> --session <id> --window <id> --tab <id> --lease-token <lease>
+teshi browser content-setting notifications --value block --grant-token <settings-grant> --session <id> --window <id> --tab <id> --lease-token <lease>
+teshi browser extensions --grant-token <management-grant> --session <id> --window <id> --tab <id> --lease-token <lease>
+```
+
+Cookie queries are bound to the selected tab URL, return metadata with values omitted by default, preserve partition metadata, and enforce entry/byte limits. Content settings are limited to `notifications`, `popups`, `geolocation`, `camera`, `microphone`, and `automatic_downloads`, always scoped to the selected origin. Extension management returns only bounded metadata; mutations remain disabled.
+
+Use `teshi browser grant list`, `grant revoke <grant-id>`, `grant expire`, and `audit --limit N` for lifecycle and metadata-only audit inspection. Grant tokens, lease tokens, JavaScript source, CDP bodies, and Cookie values are excluded from discovery/audit. P2 MCP tools are absent by default even when the CLI supports them.
+
+Grants and audit records live only in the current broker process; they are not written to the project. A broker restart invalidates all grants and clears the bounded audit ring. Browser artifacts are separate files under `.teshi/artifacts/browser` and remain until an explicit `artifact-cleanup` request or manual project cleanup.
+
+### Local MCP browser-agent server
+
+```bash
+teshi mcp serve --stdio [--project PATH] [--allow-browser-mutations]
+```
+
+The newline-delimited JSON-RPC server exposes the same typed contracts as the CLI. Safe mutation tools are omitted unless `--allow-browser-mutations` is present. It supports current `server/discover` negotiation and legacy `initialize`, writes protocol messages only to stdout, and operates only against the same-host Teshi broker.
 
 **Actions** for `execute`, `verify`, and `steps propose --action`:
 
@@ -86,7 +161,8 @@ teshi browser serve-embedded [--navigate <url>]
 |--------|-------------|
 | `click` | Click element |
 | `fill` | Fill input (no Enter) |
-| `type` | Fill + Enter (xterm terminal) |
+| `type` | Type sequentially without clearing or pressing Enter |
+| `pointer_click` | Verified CDP pointer click; add `--focus` only when focus is intended |
 | `assert_visible` | Element must be visible |
 | `assert_text` | Element text must match `--value-arg` |
 | `select` | Select option |
@@ -103,16 +179,29 @@ Environment:
 
 ---
 
-### Auth management
+### LLM profiles (`teshi auth`)
+
+TUI, CLI, Desktop, and the daemon share one model-profile store under the Teshi app data directory:
+
+| Platform | Default path |
+|----------|----------------|
+| Windows | `%APPDATA%\teshi\model-profiles\` |
+| Linux / macOS | `$XDG_DATA_HOME/teshi/model-profiles` (often `~/.local/share/teshi/model-profiles`) |
+
+Override the root with `TESHI_APP_DATA_DIR`. Legacy `%APPDATA%\teshi-desktop` data and older TUI `config.toml` / `auth.json` / `models/*.toml` are imported once automatically.
 
 ```bash
-teshi auth login                    # interactive: choose provider + enter key
-teshi auth login --provider openai  # specify provider
-teshi auth list                     # show stored providers (keys masked)
-teshi auth remove openai            # delete credentials
-teshi auth status                   # show config paths and credential status
-teshi auth migrate                  # import from env vars (TESHI_OPENAI_API_KEY, etc.)
+teshi auth login                    # interactive: provider + key → profile (activated)
+teshi auth login --provider openai  # specify built-in provider id
+teshi auth list                     # list profiles (keys masked)
+teshi auth remove openai            # clear API key on matching provider profile(s)
+teshi auth status                   # show app-data paths and profile status
+teshi auth migrate                  # import keys from TESHI_* / OPENAI_* env vars into profiles
 ```
+
+Built-in provider ids: `openai`, `anthropic`, `deepseek-openai`. For Ollama or other OpenAI-compatible servers, use `openai` with a custom base URL (the login flow offers an Ollama shortcut).
+
+In the TUI, press `m` to open the model panel (same store). `/auth` shows a read-only overview.
 
 ---
 
@@ -122,51 +211,21 @@ teshi auth migrate                  # import from env vars (TESHI_OPENAI_API_KEY
 
 | Scope | Path |
 |-------|------|
-| Global | `~/.teshi/config.toml` |
+| LLM profiles (shared) | `<app_data>/teshi/model-profiles/*.json` + `active` pointer |
+| Global (legacy / non-LLM) | `<config_dir>/teshi/config.toml` |
 | Project | `./.teshi/config.toml` |
 | Runner | `./teshi.toml` (working directory) |
 
-### Format (TOML)
+### Runner format (`teshi.toml`)
 
 ```toml
-# Default AI provider
-default_provider = "deepseek"
-
-# Provider definitions
-[providers.deepseek]
-base_url = "https://api.deepseek.com"
-model = "deepseek-chat"
-api_key = "${auth:deepseek}"   # resolves from ~/.teshi/auth.json
-
-[providers.openai]
-base_url = "https://api.openai.com/v1"
-model = "gpt-4o"
-api_key = "${auth:openai}"
-
-# Custom provider (Ollama, etc.)
-[providers.ollama]
-base_url = "http://localhost:11434/v1"
-model = "llama3"
-api_key = "ollama"              # Ollama doesn't need a real key
-
-# Runner configuration (teshi.toml)
 [runner]
 cmd = "teshi-runner"
 args = ["--bin", "runner"]
 cwd = "."
-
-# LLM settings
-[llm]
-max_tokens = 4096
-temperature = 0.7
 ```
 
-### Placeholders
-
-- `${auth:provider}` — loads API key from `~/.teshi/auth.json`
-- `${env:VAR}` — loads from environment variable
-
-API keys should **never** be written directly in config files. Use `teshi auth login` or `${env:VAR}` instead.
+Older `[providers.*]` blocks and `${auth:…}` placeholders in `config.toml` are no longer the runtime LLM source of truth; they are only imported once into model profiles when the shared store is empty.
 
 ---
 
@@ -174,12 +233,12 @@ API keys should **never** be written directly in config files. Use `teshi auth l
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `TESHI_DEFAULT_PROVIDER` | — | Override default LLM provider |
-| `TESHI_LLM_API_KEY` | — | LLM API key |
-| `TESHI_LLM_BASE_URL` | `https://api.openai.com/v1` | LLM API base URL |
-| `TESHI_LLM_MODEL` | `gpt-4o-mini` | LLM model name |
-| `TESHI_LLM_MAX_TOKENS` | `1024` | Max tokens per completion |
-| `TESHI_LLM_TEMPERATURE` | `0.7` | Sampling temperature |
+| `TESHI_APP_DATA_DIR` | OS data dir + `teshi` | Override shared app-data root (profiles, settings, recent) |
+| `TESHI_LLM_API_KEY` | — | Fallback LLM API key when no active profile has a key |
+| `TESHI_LLM_BASE_URL` | `https://api.openai.com/v1` | Fallback LLM API base URL |
+| `TESHI_LLM_MODEL` | `gpt-4o-mini` | Fallback LLM model name |
+| `TESHI_LLM_MAX_TOKENS` | `1024` | Max tokens per completion (env fallback) |
+| `TESHI_LLM_TEMPERATURE` | `0.7` | Sampling temperature (env fallback) |
 | `TESHI_RUNNER_CMD` | — | Override runner command |
 | `TESHI_RUNNER_ARGS` | — | Override runner args (space-separated) |
 | `TESHI_RUNNER_CWD` | current dir | Override runner working directory |
@@ -258,23 +317,12 @@ See [desktop/README.md](../desktop/README.md) for development setup.
 
 ---
 
-## Auth storage
+## LLM profile storage
 
-Credentials are stored in `~/.teshi/auth.json` with `0600` permissions:
+Each profile is a JSON file under `<app_data>/teshi/model-profiles/{id}.json`. The active profile id is stored in `model-profiles/active`.
 
-```json
-{
-  "deepseek": {
-    "api_key": "sk-abc123...",
-    "added_at": "2026-01-15T10:30:00Z"
-  },
-  "openai": {
-    "api_key": "sk-xyz789...",
-    "added_at": "2026-02-20T14:00:00Z"
-  }
-}
-```
+Typical fields: `id`, `name`, `provider`, `api_style`, `model_id`, `base_url`, `api_key`, `max_output_tokens`, `stream`, `http_headers`, `chat_options`.
 
-- Atomic writes via temp file + rename
-- Warning displayed if file permissions are not `0600`
-- `teshi auth list` masks keys: shows first 4 + last 4 characters only
+- Desktop Settings, TUI model panel (`m`), `teshi auth`, and daemon `/api/v1/llm/profiles` all read/write this store.
+- Public listings mask API keys; empty key on save preserves the previously stored key.
+- When no active profile has a key, runtime falls back to `TESHI_LLM_*`.

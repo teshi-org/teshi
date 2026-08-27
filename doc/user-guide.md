@@ -51,7 +51,7 @@ Slash helpers:
 - `/generate` — start requirements gathering
 - `/continue` — continue generation after approving test points (same as `c` on the Test Points tab)
 
-The AI tab is hidden when no LLM credentials are configured. Type `/auth` in the chat to manage credentials.
+The AI tab is hidden when no LLM credentials are configured. Press `m` to manage shared model profiles, or type `/auth` for a status overview. From the shell, use `teshi auth login` (same store as Desktop Settings).
 
 ### Requirements
 
@@ -110,7 +110,7 @@ See [CLI & Config](cli-usage.md) for more runner options.
 
 ## WinUI3 / Native App Recording
 
-`teshi desktop` can start a WinUI3/native Windows app bridge with **Connect WinUI3 App**. Terminal agents can then use `teshi winapp` commands through the tracked `winapp-locator` skill. Confirmed UIA bindings are stored in `.teshi/step-bindings/{feature}.json` with `strategy: "uia"`.
+`teshi desktop` can start a WinUI3/native Windows app bridge with **Connect WinUI3 App**. Terminal agents can then use `teshi winapp` commands through the tracked `winapp-regression` skill. Confirmed UIA bindings are stored in `.teshi/step-bindings/{feature}.json` with `strategy: "uia"`.
 
 See [WinUI3 / Native Windows app mode](winapp-modes.md) for setup and limitations.
 

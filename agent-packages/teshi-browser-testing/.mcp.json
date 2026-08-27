@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "teshi-browser-agent": {
+      "command": "teshi",
+      "args": [
+        "mcp",
+        "serve",
+        "--stdio"
+      ],
+      "tool_timeout_sec": 300
+    }
+  }
+}

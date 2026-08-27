@@ -65,6 +65,9 @@
 <?ifndef BridgeRoot ?>
     <?define BridgeRoot = "$(var.StagingRoot)\share\teshi-bridge" ?>
 <?endif ?>
+<?ifndef AgentRoot ?>
+    <?define AgentRoot = "$(var.StagingRoot)\share\teshi-browser-testing" ?>
+<?endif ?>
 
 <Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
 
@@ -165,6 +168,14 @@
                                 Source='$(var.StagingRoot)\share\browser_service.py'
                                 KeyPath='yes'/>
                         </Component>
+                        <Component Id='BrowserAgentBrokerScript' Guid='*'>
+                            <File
+                                Id='browserAgentBrokerScriptFile'
+                                Name='browser_agent_broker.py'
+                                DiskId='1'
+                                Source='$(var.StagingRoot)\share\browser_agent_broker.py'
+                                KeyPath='yes'/>
+                        </Component>
                         <Component Id='WinAppServiceScript' Guid='*'>
                             <File
                                 Id='winAppServiceScriptFile'
@@ -174,6 +185,7 @@
                                 KeyPath='yes'/>
                         </Component>
                         <Directory Id='ShareTeshiBridgeDir' Name='teshi-bridge'/>
+                        <Directory Id='ShareTeshiAgentDir' Name='teshi-browser-testing'/>
                         <Directory Id='ShareWebDir' Name='web'/>
                     </Directory>
                 </Directory>
@@ -198,8 +210,10 @@
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='StartMenuShortcut'/>
             <ComponentRef Id='BrowserServiceScript'/>
+            <ComponentRef Id='BrowserAgentBrokerScript'/>
             <ComponentRef Id='WinAppServiceScript'/>
             <ComponentGroupRef Id='BridgeFiles'/>
+            <ComponentGroupRef Id='BrowserAgentFiles'/>
             <ComponentGroupRef Id='WebFiles'/>
 
             <Feature

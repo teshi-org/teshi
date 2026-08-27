@@ -18,20 +18,145 @@ on:
         options:
           - full
           - windows-only
+  workflow_call:
+    inputs:
+      release_tag:
+        description: "Release tag to publish (for example: v0.7.9-nightly.20260801.abc1234)"
+        required: true
+        type: string
+      source_ref:
+        description: "Git ref to build (branch, tag, or SHA). Defaults to release_tag."
+        required: false
+        type: string
+        default: ""
+      prerelease:
+        description: "Mark the GitHub release as a pre-release"
+        required: false
+        type: boolean
+        default: false
+      skip_winget:
+        description: "Skip WinGet manifest submission"
+        required: false
+        type: boolean
+        default: false
+      run_scope:
+        description: "Workflow scope: full release or windows-only retry"
+        required: false
+        type: string
+        default: full
+      invoked_via_call:
+        description: "True when this workflow runs as a reusable workflow caller"
+        required: false
+        type: boolean
+        default: false
+      release_body:
+        description: "Optional GitHub release description (overrides auto-generated notes when set)"
+        required: false
+        type: string
+        default: ""
 
 concurrency:
-  group: release-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+  group: release-${{ inputs.release_tag || github.event.inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
   contents: write
 
-env:
-  RESOLVED_REF: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref }}
-
 jobs:
+  resolve:
+    name: Resolve release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      source_ref: ${{ steps.meta.outputs.source_ref }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      skip_winget: ${{ steps.meta.outputs.skip_winget }}
+      run_scope: ${{ steps.meta.outputs.run_scope }}
+      release_body: ${{ steps.meta.outputs.release_body }}
+    steps:
+      - name: Resolve tag and build ref
+        id: meta
+        env:
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+          INPUT_SKIP_WINGET: ${{ inputs.skip_winget }}
+          INPUT_RUN_SCOPE: ${{ inputs.run_scope }}
+          INPUT_INVOKED_VIA_CALL: ${{ inputs.invoked_via_call }}
+          INPUT_RELEASE_BODY: ${{ inputs.release_body }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          event="${{ github.event_name }}"
+          release_body=""
+          # Reusable workflows inherit the caller's github.event_name (e.g. push), not
+          # workflow_call. Use an explicit caller flag instead of github.event_name.
+          if [ "${INPUT_INVOKED_VIA_CALL}" = "true" ]; then
+            tag="${INPUT_RELEASE_TAG}"
+            if [ -z "${tag}" ]; then
+              echo "workflow_call requires release_tag input." >&2
+              exit 1
+            fi
+            source_ref="${INPUT_SOURCE_REF}"
+            if [ -z "${source_ref}" ]; then
+              source_ref="${tag}"
+            fi
+            prerelease="${INPUT_PRERELEASE}"
+            skip_winget="${INPUT_SKIP_WINGET}"
+            run_scope="${INPUT_RUN_SCOPE:-full}"
+            release_body="${INPUT_RELEASE_BODY}"
+          elif [ "${event}" = "workflow_dispatch" ]; then
+            tag="${{ github.event.inputs.release_tag }}"
+            source_ref="${tag}"
+            if echo "${tag}" | grep -q -- '-nightly'; then
+              prerelease=true
+              skip_winget=true
+            else
+              prerelease=false
+              skip_winget=false
+            fi
+            run_scope="${{ github.event.inputs.run_scope }}"
+          elif [ "${event}" = "push" ] && [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+            source_ref="${GITHUB_REF}"
+            if echo "${tag}" | grep -q -- '-nightly'; then
+              prerelease=true
+              skip_winget=true
+            else
+              prerelease=false
+              skip_winget=false
+            fi
+            run_scope=full
+          else
+            echo "Unsupported release trigger: event=${event}, ref=${GITHUB_REF}" >&2
+            exit 1
+          fi
+
+          if [[ ! "${tag}" =~ ^v.+$ ]]; then
+            echo "Tag must start with 'v' (got: ${tag})." >&2
+            exit 1
+          fi
+
+          {
+            echo "tag=${tag}"
+            echo "source_ref=${source_ref}"
+            echo "prerelease=${prerelease}"
+            echo "skip_winget=${skip_winget}"
+            echo "run_scope=${run_scope}"
+          } >> "${GITHUB_OUTPUT}"
+
+          if [ -n "${release_body}" ]; then
+            {
+              echo "release_body<<EOF"
+              printf '%s\n' "${release_body}"
+              echo "EOF"
+            } >> "${GITHUB_OUTPUT}"
+          fi
+
   build:
     name: Build (${{ matrix.target }})
+    needs: resolve
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -48,7 +173,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.RESOLVED_REF }}
+          ref: ${{ needs.resolve.outputs.source_ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -62,23 +187,29 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} --bin teshi
 
       # Windows-only: build teshi-desktop + combined MSI installer
-      - name: Setup Node.js
+      - name: Install nightly WASM target
         if: matrix.target == 'x86_64-pc-windows-msvc'
-        uses: actions/setup-node@v4
+        shell: pwsh
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup target add wasm32-unknown-unknown --toolchain nightly
+
+      - name: Cache wasm-bindgen CLI
+        id: cache_wasm_bindgen
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/cache@v4
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: apps/teshi-web-ui/package-lock.json
+          path: ~/.cargo/bin/wasm-bindgen.exe
+          key: ${{ runner.os }}-wasm-bindgen-0.2.126
 
-      - name: Install npm dependencies
-        if: matrix.target == 'x86_64-pc-windows-msvc'
-        working-directory: apps/teshi-web-ui
-        run: npm ci
+      - name: Install wasm-bindgen CLI
+        if: matrix.target == 'x86_64-pc-windows-msvc' && steps.cache_wasm_bindgen.outputs.cache-hit != 'true'
+        run: cargo install wasm-bindgen-cli --locked --version 0.2.126
 
-      - name: Build web UI
+      - name: Build GPUI WASM web UI
         if: matrix.target == 'x86_64-pc-windows-msvc'
-        working-directory: apps/teshi-web-ui
-        run: npm run build
+        shell: pwsh
+        run: ./scripts/build-teshi-web.ps1
 
       - name: Install WiX Toolset
         if: matrix.target == 'x86_64-pc-windows-msvc'
@@ -100,11 +231,10 @@ jobs:
       - name: Build combined MSI installer
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
         run: |
-          $tag = "${{ github.ref_name }}"
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $tag = "${{ github.event.inputs.release_tag }}"
-          }
+          $tag = $env:RELEASE_TAG
           if (-not $tag.StartsWith("v")) { throw "Release tag must start with 'v' (got: $tag)." }
 
           $stagingRoot = "staging/msi-root"
@@ -112,32 +242,44 @@ jobs:
           $shareDir  = Join-Path $stagingRoot "share"
           $webDir    = Join-Path $stagingRoot "share/web"
           $bridgeDir = Join-Path $stagingRoot "share/teshi-bridge"
-          New-Item -ItemType Directory -Force -Path $binDir, $webDir, $bridgeDir | Out-Null
+          $agentDir  = Join-Path $stagingRoot "share/teshi-browser-testing"
+          $agentBridgeDir = Join-Path $agentDir "extension/teshi-bridge"
+          New-Item -ItemType Directory -Force -Path $binDir, $webDir, $bridgeDir, $agentBridgeDir | Out-Null
 
           # Verify required files
           $builtExe    = "target/${{ matrix.target }}/release/teshi.exe"
-          @($builtExe, "apps/teshi-web-ui/dist", "resources/browser_service.py",
-            "resources/winapp_service.py", "extension/teshi-bridge/manifest.json") |
+          @($builtExe, "apps/teshi-web/dist", "apps/teshi-web/dist/pkg/teshi_web_bg.wasm", "resources/browser_service.py",
+            "resources/browser_agent_broker.py", "resources/winapp_service.py",
+            "extension/teshi-bridge/manifest.json",
+            "agent-packages/teshi-browser-testing/.codex-plugin/plugin.json") |
             ForEach-Object { if (-not (Test-Path $_)) { throw "Missing: $_" } }
 
           Copy-Item $builtExe   (Join-Path $binDir "teshi.exe")          -Force
           Copy-Item "resources/browser_service.py" (Join-Path $shareDir "browser_service.py") -Force
+          Copy-Item "resources/browser_agent_broker.py" (Join-Path $shareDir "browser_agent_broker.py") -Force
           Copy-Item "resources/winapp_service.py"  (Join-Path $shareDir "winapp_service.py") -Force
-          Copy-Item -Path "apps/teshi-web-ui/dist/*" -Destination $webDir -Recurse -Force
+          Copy-Item -Path "apps/teshi-web/dist/*" -Destination $webDir -Recurse -Force
           Copy-Item -Path "extension/teshi-bridge/*" -Destination $bridgeDir -Recurse -Force
+          Copy-Item -Path "agent-packages/teshi-browser-testing/*" -Destination $agentDir -Recurse -Force
+          Copy-Item -Path "agent-packages/teshi-browser-testing/.codex-plugin" -Destination $agentDir -Recurse -Force
+          Copy-Item -Path "agent-packages/teshi-browser-testing/.mcp.json" -Destination $agentDir -Force
+          Copy-Item -Path "extension/teshi-bridge/*" -Destination $agentBridgeDir -Recurse -Force
 
-          # Generate WiX fragments for web and bridge files
+          # Generate WiX fragments for web, bridge, and browser-agent files
           $heat = Join-Path $env:WIX "bin/heat.exe"
           & $heat dir $webDir    -out wix/web-files.wxs    -gg -sfrag -srd -dr ShareWebDir    -cg WebFiles    -var var.WebRoot
           & $heat dir $bridgeDir -out wix/bridge-files.wxs -gg -sfrag -srd -dr ShareTeshiBridgeDir -cg BridgeFiles -var var.BridgeRoot
+          & $heat dir $agentDir  -out wix/browser-agent-files.wxs -gg -sfrag -srd -dr ShareTeshiAgentDir -cg BrowserAgentFiles -var var.AgentRoot
 
           # Add fallback defines to heat-generated files (avoid here-string to prevent YAML backtick issues)
           $webDirFull = (Resolve-Path $webDir).Path
           $bridgeDirFull = (Resolve-Path $bridgeDir).Path
+          $agentDirFull = (Resolve-Path $agentDir).Path
           $defaultBlock = "`n" +
             '<?ifndef WebRoot ?><?define WebRoot = "' + $webDirFull + '"?><?endif ?>' + "`n" +
-            '<?ifndef BridgeRoot ?><?define BridgeRoot = "' + $bridgeDirFull + '"?><?endif ?>' + "`n"
-          foreach ($f in @("wix/web-files.wxs", "wix/bridge-files.wxs")) {
+            '<?ifndef BridgeRoot ?><?define BridgeRoot = "' + $bridgeDirFull + '"?><?endif ?>' + "`n" +
+            '<?ifndef AgentRoot ?><?define AgentRoot = "' + $agentDirFull + '"?><?endif ?>' + "`n"
+          foreach ($f in @("wix/web-files.wxs", "wix/bridge-files.wxs", "wix/browser-agent-files.wxs")) {
             $content = Get-Content $f -Raw
             $idx = $content.IndexOf("`n")
             if ($idx -ge 0) {
@@ -149,6 +291,7 @@ jobs:
             --include wix/main.wxs `
             --include wix/web-files.wxs `
             --include wix/bridge-files.wxs `
+            --include wix/browser-agent-files.wxs `
             --nocapture --no-build -o "target/wix/teshi-$tag-x64.msi"
 
       - name: Upload binary artifact
@@ -173,40 +316,34 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: teshi-web-dist
-          path: apps/teshi-web-ui/dist
+          path: apps/teshi-web/dist
           if-no-files-found: error
 
   publish:
     name: Publish Release Assets
     runs-on: ubuntu-latest
-    needs: build
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_scope != 'windows-only' }}
+    needs: [build, resolve]
+    if: ${{ needs.resolve.outputs.run_scope != 'windows-only' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.RESOLVED_REF }}
+          ref: ${{ needs.resolve.outputs.source_ref }}
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Resolve release tag
-        id: release_meta
-        shell: bash
-        run: |
-          tag="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}"
-          if [[ ! "${tag}" =~ ^v.+$ ]]; then echo "Tag must start with 'v' (got: ${tag})." >&2; exit 1; fi
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "tag_sha=$(git rev-list -n 1 "${tag}")" >> "$GITHUB_OUTPUT"
+      - name: Smoke-test browser-agent package
+        run: python3 scripts/test-browser-agent-package.py
 
       - name: Package release assets
         shell: bash
         run: |
           set -euo pipefail
-          version="${{ steps.release_meta.outputs.tag }}"
+          version="${{ needs.resolve.outputs.tag }}"
           mkdir -p dist
 
           artifacts_dir="${{ github.workspace }}/artifacts"
@@ -217,16 +354,20 @@ jobs:
             [[ "${target}" == *"windows"* ]] && binary_name="teshi.exe"
 
             stage_dir="dist/teshi-${version}-${target}"
-            mkdir -p "${stage_dir}"
+            mkdir -p "${stage_dir}/share/teshi-bridge"
+            mkdir -p "${stage_dir}/share/teshi-browser-testing/extension/teshi-bridge"
             cp "${artifacts_dir}/teshi-${target}/${binary_name}" "${stage_dir}/"
 
+            cp "${repo_dir}/resources/browser_service.py" "${stage_dir}/share/browser_service.py"
+            cp "${repo_dir}/resources/browser_agent_broker.py" "${stage_dir}/share/browser_agent_broker.py"
+            cp -a "${repo_dir}/extension/teshi-bridge/." "${stage_dir}/share/teshi-bridge/"
+            cp -a "${repo_dir}/agent-packages/teshi-browser-testing/." "${stage_dir}/share/teshi-browser-testing/"
+            cp -a "${repo_dir}/extension/teshi-bridge/." "${stage_dir}/share/teshi-browser-testing/extension/teshi-bridge/"
+
             if [[ "${target}" == *"windows"* ]]; then
-              # Service scripts and browser extension from git checkout
-              mkdir -p "${stage_dir}/share/teshi-bridge" "${stage_dir}/share/web"
-              cp "${repo_dir}/resources/browser_service.py" "${stage_dir}/share/browser_service.py"
+              mkdir -p "${stage_dir}/share/web"
               cp "${repo_dir}/resources/winapp_service.py"  "${stage_dir}/share/winapp_service.py"
-              cp -r "${repo_dir}/extension/teshi-bridge/."  "${stage_dir}/share/teshi-bridge/"
-              cp -r "${artifacts_dir}/teshi-web-dist/."      "${stage_dir}/share/web/"
+              cp -a "${artifacts_dir}/teshi-web-dist/."      "${stage_dir}/share/web/"
             else
               chmod +x "${stage_dir}/teshi"
             fi
@@ -240,6 +381,14 @@ jobs:
 
           (cd "${repo_dir}/extension/teshi-bridge" && zip -r "${repo_dir}/dist/teshi-bridge-${version}.zip" .)
 
+          agent_stage="dist/teshi-browser-testing-${version}"
+          mkdir -p "${agent_stage}/extension/teshi-bridge" "${agent_stage}/runtime"
+          cp -a "${repo_dir}/agent-packages/teshi-browser-testing/." "${agent_stage}/"
+          cp -a "${repo_dir}/extension/teshi-bridge/." "${agent_stage}/extension/teshi-bridge/"
+          cp "${repo_dir}/resources/browser_service.py" "${agent_stage}/runtime/browser_service.py"
+          cp "${repo_dir}/resources/browser_agent_broker.py" "${agent_stage}/runtime/browser_agent_broker.py"
+          (cd dist && zip -r "teshi-browser-testing-${version}.zip" "teshi-browser-testing-${version}")
+
           cp "${artifacts_dir}/teshi-msi/"*.msi dist/
           cd dist
           find . -maxdepth 1 \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.msi" \) \
@@ -248,8 +397,11 @@ jobs:
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.release_meta.outputs.tag }}
-          generate_release_notes: true
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          target_commitish: ${{ needs.resolve.outputs.source_ref }}
+          prerelease: ${{ needs.resolve.outputs.prerelease == 'true' }}
+          generate_release_notes: ${{ needs.resolve.outputs.prerelease != 'true' }}
+          body: ${{ needs.resolve.outputs.release_body }}
           files: |
             dist/*.zip
             dist/*.tar.gz
@@ -259,8 +411,8 @@ jobs:
   submit_winget:
     name: Submit WinGet manifest
     runs-on: windows-latest
-    needs: publish
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_scope != 'windows-only' }}
+    needs: [publish, resolve]
+    if: ${{ needs.resolve.outputs.run_scope != 'windows-only' && needs.resolve.outputs.skip_winget != 'true' }}
 
     steps:
       - name: Install wingetcreate
@@ -270,14 +422,14 @@ jobs:
       - name: Submit MSI to winget-pkgs
         shell: pwsh
         env:
-          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:WINGET_TOKEN)) {
             Write-Host "Skipping WinGet submission: WINGET_TOKEN not configured."
             exit 0
           }
 
-          $tag = "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}"
+          $tag = $env:RELEASE_TAG
           $version = $tag.TrimStart('v')
           $msiUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/teshi-$tag-x64.msi"
           $prTitle = "Add teshi $version"
@@ -324,3 +476,69 @@ jobs:
           "@ | Set-Content -NoNewline (Join-Path $manifestDir "$pkgId.locale.en-US.yaml")
 
           wingetcreate submit --prtitle $prTitle --token $env:WINGET_TOKEN --no-open $manifestDir
+
+  notify-telegram:
+    name: Telegram notify
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - resolve
+      - build
+      - publish
+      - submit_winget
+    steps:
+      - name: Send Telegram message
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
+          RUN_SCOPE: ${{ needs.resolve.outputs.run_scope }}
+          RESOLVE_RESULT: ${{ needs.resolve.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          WINGET_RESULT: ${{ needs.submit_winget.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TELEGRAM_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "TELEGRAM_TOKEN or TELEGRAM_CHAT_ID is not configured; skipping notify."
+            exit 0
+          fi
+
+          tag="${TAG:-unknown}"
+          if [ "$PUBLISH_RESULT" = "success" ]; then
+            if [ "$PRERELEASE" = "true" ]; then
+              kind="Pre-release"
+            else
+              kind="Release"
+            fi
+            text="$(printf '%s\n' \
+              "Teshi ${tag} 发布成功（${kind}）" \
+              "范围: ${RUN_SCOPE}" \
+              "Release: ${RELEASE_URL}" \
+              "构建: ${RUN_URL}")"
+          elif [ "$RUN_SCOPE" = "windows-only" ] && [ "$BUILD_RESULT" = "success" ]; then
+            text="$(printf '%s\n' \
+              "Teshi ${tag} Windows-only 重试构建成功" \
+              "构建: ${RUN_URL}")"
+          else
+            text="$(printf '%s\n' \
+              "Teshi ${tag} 发版未完成" \
+              "resolve: ${RESOLVE_RESULT}" \
+              "build: ${BUILD_RESULT}" \
+              "publish: ${PUBLISH_RESULT}" \
+              "winget: ${WINGET_RESULT}" \
+              "构建: ${RUN_URL}")"
+          fi
+
+          payload="$(jq -n --arg chat "$TELEGRAM_CHAT_ID" --arg text "$text" \
+            '{chat_id:$chat, text:$text, disable_web_page_preview:false}')"
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            --data "$payload" \
+            | jq -e '.ok == true' >/dev/null
+          echo "Telegram notification sent."
+

@@ -58,6 +58,12 @@ pub struct LocatorPrimary {
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_arg: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_candidate: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_context_revision: Option<String>,
 }
 
 /// One row in `.teshi/step-bindings/{feature}.json`.
@@ -77,8 +83,14 @@ pub struct StepBinding {
 /// Per-feature binding index committed with the project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepBindingsFile {
+    #[serde(default = "legacy_step_binding_version")]
+    pub format_version: u16,
     pub feature: String,
     pub steps: Vec<StepBinding>,
+}
+
+fn legacy_step_binding_version() -> u16 {
+    1
 }
 
 /// Status summary used by desktop/web step-tree badges.
@@ -128,5 +140,30 @@ pub fn sanitize_feature_path(feature_relative_path: &str) -> String {
         "feature".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod binding_version_tests {
+    use super::*;
+
+    #[test]
+    fn reads_legacy_v1_binding_and_new_v2_reference_fields() {
+        let legacy: StepBindingsFile = serde_json::from_str(
+            r##"{"feature":"a.feature","steps":[{"step_line":1,"step_keyword":"Given","step_text":"x","step_text_normalized":"x","source":"binding","status":"confirmed","primary":{"strategy":"css","value":"#x","action":"click"}}]}"##,
+        )
+        .unwrap();
+        assert_eq!(legacy.format_version, 1);
+        assert!(legacy.steps[0].primary.element_reference.is_none());
+
+        let current: StepBindingsFile = serde_json::from_str(
+            r#"{"format_version":2,"feature":"a.feature","steps":[{"step_line":1,"step_keyword":"Given","step_text":"x","step_text_normalized":"x","source":"binding","status":"confirmed","primary":{"strategy":"reference","value":"@e1","action":"click","element_reference":"@e1","page_context_revision":"rev-a"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(current.format_version, 2);
+        assert_eq!(
+            current.steps[0].primary.element_reference.as_deref(),
+            Some("@e1")
+        );
     }
 }

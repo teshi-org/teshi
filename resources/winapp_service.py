@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from ctypes import wintypes
 from pathlib import Path
@@ -35,12 +36,23 @@ except ImportError:
     auto = None
 
 try:
-    from PIL import ImageGrab
+    from PIL import Image, ImageGrab
 except ImportError:
+    Image = None
     ImageGrab = None
+
+try:
+    from windows_capture import WindowsCapture
+except Exception as exc:
+    WindowsCapture = None
+    WGC_IMPORT_ERROR = str(exc)
+else:
+    WGC_IMPORT_ERROR = ""
 
 
 FRAME_INTERVAL_SEC = 1.0 / 8.0
+FIRST_FRAME_TIMEOUT_SEC = 2.0
+JPEG_QUALITY = 70
 MAX_SNAPSHOT_DEPTH = 8
 MAX_SNAPSHOT_NODES = 300
 INTERACTIVE_TYPES = {
@@ -129,6 +141,8 @@ if os.name == "nt":
     user32.EnumWindows.restype = ctypes.c_bool
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
     user32.IsWindowVisible.restype = ctypes.c_bool
+    user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.IsWindow.restype = ctypes.c_bool
     user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
     user32.GetWindowTextLengthW.restype = ctypes.c_int
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
@@ -298,6 +312,123 @@ def get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
     if rect.right <= rect.left or rect.bottom <= rect.top:
         return None
     return (rect.left, rect.top, rect.right, rect.bottom)
+
+
+def is_window(hwnd: int) -> bool:
+    """Return whether `hwnd` still identifies a live window."""
+    return bool(user32 is not None and user32.IsWindow(hwnd))
+
+
+class ImageGrabCaptureBackend:
+    """Visibility-sensitive screen-rectangle capture fallback."""
+
+    name = "imagegrab"
+
+    def __init__(self, hwnd: int, fallback_reason: str = "") -> None:
+        self.hwnd = hwnd
+        self.fallback_reason = fallback_reason
+
+    def capture_jpeg(self, _timeout: float = FIRST_FRAME_TIMEOUT_SEC) -> bytes:
+        if ImageGrab is None:
+            raise RuntimeError(
+                "Pillow is not installed; run `pip install -r python/requirements.txt`"
+            )
+        bbox = get_window_rect(self.hwnd)
+        if bbox is None:
+            raise RuntimeError("target window has no valid bounds")
+        image = ImageGrab.grab(bbox=bbox, all_screens=True)
+        buffer = io.BytesIO()
+        image.convert("RGB").save(buffer, format="JPEG", quality=JPEG_QUALITY)
+        return buffer.getvalue()
+
+    def stop(self) -> None:
+        """ImageGrab has no persistent capture session."""
+
+
+class WgcCaptureBackend:
+    """Latest-frame Windows Graphics Capture session for one HWND."""
+
+    name = "wgc"
+    fallback_reason = ""
+
+    def __init__(self, hwnd: int, capture_factory: Any = None) -> None:
+        factory = capture_factory or WindowsCapture
+        if factory is None:
+            detail = f": {WGC_IMPORT_ERROR}" if WGC_IMPORT_ERROR else ""
+            raise RuntimeError(f"windows-capture is unavailable{detail}")
+        if Image is None:
+            raise RuntimeError("Pillow is unavailable for WGC JPEG encoding")
+
+        self.hwnd = hwnd
+        self._lock = threading.Lock()
+        self._first_frame = threading.Event()
+        self._latest_jpeg: bytes | None = None
+        self._terminal_error = ""
+        self._control: Any = None
+        self._capture = factory(
+            cursor_capture=False,
+            draw_border=False,
+            secondary_window=False,
+            minimum_update_interval=round(FRAME_INTERVAL_SEC * 1000),
+            monitor_index=None,
+            window_name=None,
+            window_hwnd=hwnd,
+        )
+
+        @self._capture.event
+        def on_frame_arrived(frame: Any, capture_control: Any) -> None:
+            try:
+                # windows-capture exposes BGRA8 data borrowed for the callback.
+                # Encode immediately so no native frame memory crosses threads.
+                rgb = frame.frame_buffer[:, :, [2, 1, 0]]
+                image = Image.fromarray(rgb, mode="RGB")
+                buffer = io.BytesIO()
+                image.save(buffer, format="JPEG", quality=JPEG_QUALITY)
+                with self._lock:
+                    self._latest_jpeg = buffer.getvalue()
+                self._first_frame.set()
+            except Exception as exc:
+                with self._lock:
+                    self._terminal_error = f"WGC frame encoding failed: {exc}"
+                self._first_frame.set()
+                capture_control.stop()
+
+        @self._capture.event
+        def on_closed() -> None:
+            with self._lock:
+                if not self._terminal_error:
+                    self._terminal_error = "WGC capture session closed"
+            self._first_frame.set()
+
+        self._control = self._capture.start_free_threaded()
+
+    def capture_jpeg(self, timeout: float = FIRST_FRAME_TIMEOUT_SEC) -> bytes:
+        if not self._first_frame.wait(timeout):
+            raise RuntimeError(f"WGC did not produce a frame within {timeout:g} seconds")
+        with self._lock:
+            error = self._terminal_error
+            latest = self._latest_jpeg
+        if error:
+            raise RuntimeError(error)
+        if self._control is not None and self._control.is_finished():
+            raise RuntimeError("WGC capture thread stopped unexpectedly")
+        if latest is None:
+            raise RuntimeError("WGC capture returned no frame")
+        return latest
+
+    def stop(self) -> None:
+        control = self._control
+        self._control = None
+        if control is None:
+            return
+        try:
+            control.stop()
+        except Exception:
+            return
+        try:
+            control.wait()
+        except Exception:
+            return
 
 
 def enum_windows() -> list[dict[str, Any]]:
@@ -529,6 +660,63 @@ class WinAppSession:
         self.overlay = HighlightOverlay()
         self._frame_seq = 0
         self._last_error = ""
+        self._capture_switch_lock = threading.RLock()
+        self._capture_backend: WgcCaptureBackend | ImageGrabCaptureBackend | None = None
+        self._capture_fallback_reason = ""
+
+    def _stop_capture_backend(self) -> None:
+        backend = self._capture_backend
+        self._capture_backend = None
+        if backend is not None:
+            backend.stop()
+
+    def _use_imagegrab(self, reason: str) -> None:
+        """Replace the active WGC session with the compatibility backend."""
+        hwnd = self.hwnd
+        if hwnd is None:
+            raise RuntimeError("no WinUI3 window attached")
+        self._stop_capture_backend()
+        self._capture_fallback_reason = reason
+        self._capture_backend = ImageGrabCaptureBackend(hwnd, reason)
+        debug_log(
+            self.project_root,
+            "capture_fallback",
+            {"hwnd": hwnd, "backend": "imagegrab", "reason": reason},
+        )
+
+    def _attach_target(self, window: dict[str, Any]) -> None:
+        """Replace the current target and start its preferred capture backend."""
+        with self._capture_switch_lock:
+            self._stop_capture_backend()
+            self.hwnd = int(window["hwnd"])
+            self.title = str(window["title"])
+            self._capture_fallback_reason = ""
+            try:
+                self._capture_backend = WgcCaptureBackend(self.hwnd)
+            except Exception as exc:
+                self._use_imagegrab(str(exc))
+        update_endpoint_target(self.project_root, self.target_url(), self.title)
+        debug_log(
+            self.project_root,
+            "attached",
+            {
+                "hwnd": self.hwnd,
+                "title": self.title,
+                "capture_backend": self.capture_backend_name,
+                "capture_fallback_reason": self._capture_fallback_reason,
+            },
+        )
+
+    @property
+    def capture_backend_name(self) -> str:
+        backend = self._capture_backend
+        return backend.name if backend is not None else ""
+
+    def capture_metadata(self) -> dict[str, str]:
+        metadata = {"capture_backend": self.capture_backend_name}
+        if self._capture_fallback_reason:
+            metadata["capture_fallback_reason"] = self._capture_fallback_reason
+        return metadata
 
     def target_url(self) -> str:
         """Return a stable display URL for the selected native target."""
@@ -553,10 +741,7 @@ class WinAppSession:
         )
         if not window:
             return {"ok": False, "error": "matching top-level window not found"}
-        self.hwnd = int(window["hwnd"])
-        self.title = str(window["title"])
-        update_endpoint_target(self.project_root, self.target_url(), self.title)
-        debug_log(self.project_root, "attached", {"hwnd": self.hwnd, "title": self.title})
+        self._attach_target(window)
         return {"ok": True, "target": self.target_info()}
 
     async def launch(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -578,9 +763,7 @@ class WinAppSession:
             if not window and title:
                 window = find_window(title=str(title))
             if window:
-                self.hwnd = int(window["hwnd"])
-                self.title = str(window["title"])
-                update_endpoint_target(self.project_root, self.target_url(), self.title)
+                self._attach_target(window)
                 return {"ok": True, "target": self.target_info()}
             await asyncio.sleep(0.25)
         return {"ok": False, "error": "launched process did not expose a visible window"}
@@ -596,6 +779,7 @@ class WinAppSession:
             "pid": get_window_pid(self.hwnd),
             "rect": get_window_rect(self.hwnd),
             "url": self.target_url(),
+            **self.capture_metadata(),
         }
 
     def root_control(self) -> Any:
@@ -1200,20 +1384,20 @@ class WinAppSession:
 
     def capture_jpeg(self) -> bytes:
         """Capture the attached window as JPEG bytes."""
-        if self.hwnd is None:
-            raise RuntimeError("no WinUI3 window attached")
-        if ImageGrab is None:
-            raise RuntimeError(
-                "Pillow is not installed; run `pip install -r python/requirements.txt`"
-            )
-        bbox = get_window_rect(self.hwnd)
-        if bbox is None:
-            raise RuntimeError("target window has no valid bounds")
-        # all_screens=True is required when the target HWND is on a non-primary monitor.
-        image = ImageGrab.grab(bbox=bbox, all_screens=True)
-        buffer = io.BytesIO()
-        image.convert("RGB").save(buffer, format="JPEG", quality=70)
-        return buffer.getvalue()
+        with self._capture_switch_lock:
+            if self.hwnd is None:
+                raise RuntimeError("no WinUI3 window attached")
+            if self._capture_backend is None:
+                raise RuntimeError("capture backend is not initialized")
+            try:
+                return self._capture_backend.capture_jpeg()
+            except Exception as exc:
+                if self.capture_backend_name != "wgc":
+                    raise
+                if not is_window(self.hwnd):
+                    raise RuntimeError("target window closed during WGC capture") from exc
+                self._use_imagegrab(str(exc))
+                return self._capture_backend.capture_jpeg()
 
     async def broadcast_frame_loop(self) -> None:
         """Broadcast preview frames while clients are connected."""
@@ -1224,7 +1408,7 @@ class WinAppSession:
             if self.hwnd is None:
                 continue
             try:
-                jpg = self.capture_jpeg()
+                jpg = await asyncio.to_thread(self.capture_jpeg)
                 self._frame_seq += 1
                 payload = json.dumps(
                     {
@@ -1233,6 +1417,7 @@ class WinAppSession:
                         "url": self.target_url(),
                         "title": get_window_title(self.hwnd) or self.title,
                         "seq": self._frame_seq,
+                        **self.capture_metadata(),
                     }
                 )
                 self._last_error = ""
@@ -1243,6 +1428,12 @@ class WinAppSession:
                 self._last_error = error
                 payload = json.dumps({"type": "frame_error", "error": error})
             await self.broadcast(payload)
+
+    def close(self) -> None:
+        """Release persistent capture resources owned by this session."""
+        with self._capture_switch_lock:
+            self._stop_capture_backend()
+        self.overlay.clear()
 
     async def broadcast(self, message: str) -> None:
         """Send a message to all connected clients."""
@@ -1275,9 +1466,15 @@ async def handle_command(session: WinAppSession, payload: dict[str, Any]) -> dic
         if cmd == "execute_locator":
             return session.execute(payload)
         if cmd == "screenshot":
-            jpg = session.capture_jpeg()
+            jpg = await asyncio.to_thread(session.capture_jpeg)
             b64 = base64.b64encode(jpg).decode("ascii")
-            return {"type": "response", "request_id": payload.get("request_id"), "ok": True, "screenshot": b64}
+            return {
+                "type": "response",
+                "request_id": payload.get("request_id"),
+                "ok": True,
+                "screenshot": b64,
+                **session.capture_metadata(),
+            }
         if cmd == "get_target":
             return {"ok": True, "target": session.target_info()}
         return {"ok": False, "error": f"unknown command: {cmd}"}
@@ -1322,6 +1519,7 @@ async def run_server(host: str, port: int, project_root: Path | None) -> None:
             await asyncio.Future()
         finally:
             frame_task.cancel()
+            session.close()
 
 
 def main() -> None:

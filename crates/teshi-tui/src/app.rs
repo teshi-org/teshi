@@ -529,7 +529,10 @@ fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
 /// A clickable region registered during rendering for mouse hit-testing.
 #[derive(Debug, Clone)]
 pub enum ClickableRegion {
-    Tab(MainTab),
+    Tab {
+        tab: MainTab,
+        rect: ratatui::layout::Rect,
+    },
     Tree,
     /// Approval mode badge in the chat panel title bar (click to open picker).
     ApprovalBadge {
@@ -776,8 +779,8 @@ impl App {
             status_message_deadline: None,
             config,
             auth_panel_active: false,
-            model_profiles: crate::profiles::ModelProfile::load_all(),
-            model_active_id: crate::profiles::ModelProfile::read_active_id(),
+            model_profiles: crate::profiles::load_all(),
+            model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
             model_panel_selection: 0,
             model_panel_mode: ModelPanelMode::List,
@@ -920,8 +923,8 @@ impl App {
             status_message_deadline: None,
             config,
             auth_panel_active: false,
-            model_profiles: crate::profiles::ModelProfile::load_all(),
-            model_active_id: crate::profiles::ModelProfile::read_active_id(),
+            model_profiles: crate::profiles::load_all(),
+            model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
             model_panel_selection: 0,
             model_panel_mode: ModelPanelMode::List,
@@ -1054,8 +1057,8 @@ impl App {
             status_message_deadline: None,
             config,
             auth_panel_active: false,
-            model_profiles: crate::profiles::ModelProfile::load_all(),
-            model_active_id: crate::profiles::ModelProfile::read_active_id(),
+            model_profiles: crate::profiles::load_all(),
+            model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
             model_panel_selection: 0,
             model_panel_mode: ModelPanelMode::List,
@@ -1112,7 +1115,8 @@ impl App {
         if self.explore_selected_feature >= feature_len {
             self.explore_selected_feature = feature_len - 1;
         }
-        let scenarios = &self.project.features[self.explore_selected_feature].scenarios;
+        let feature = &self.project.features[self.explore_selected_feature];
+        let scenarios = feature.all_scenarios();
         if scenarios.is_empty() {
             self.explore_selected_scenario = 0;
             self.explore_selected_step = 0;
@@ -1214,42 +1218,31 @@ impl App {
         }
     }
 
-    /// Spawn the LLM worker thread if `TESHI_LLM_API_KEY` is set and no handle exists yet.
+    /// Spawn the LLM worker when the shared profile store or `TESHI_LLM_*` is usable.
     pub fn spawn_llm_if_configured(&mut self) {
         if self.agent_mut().llm_handle.is_some() {
             return;
         }
-        // Try the new config-based approach first
-        if let Some((name, provider)) = self.config.default_provider_config() {
-            match crate::llm::LlmConfig::from_provider_config(name, provider) {
-                Ok(config) => {
-                    self.active_model_label = Some(format!("{name} ({})", config.model));
-                    self.status = format!(
-                        "LLM configured: model={}, base_url={}",
-                        config.model, config.base_url
-                    );
-                    let (handle, rx) = crate::llm::spawn_llm(config);
-                    self.agent_mut().llm_handle = Some(handle);
-                    self.agent_mut().llm_rx = Some(rx);
-                    return;
-                }
-                Err(e) => {
-                    self.status = format!("LLM not configured: {e}");
-                    return;
-                }
-            }
-        }
-        // Fall back to legacy env-var config
-        match crate::llm::LlmConfig::from_env() {
-            Ok(config) => {
-                self.active_model_label = Some(format!("env: {}", config.model));
+        match crate::llm::effective_config() {
+            Ok(config) if !config.api_key.trim().is_empty() => {
+                let label = teshi_engine::load_active_profile()
+                    .ok()
+                    .flatten()
+                    .map(|p| format!("{} ({})", p.name, config.model))
+                    .unwrap_or_else(|| format!("env: {}", config.model));
+                self.active_model_label = Some(label);
                 self.status = format!(
-                    "LLM configured: model={}, base_url={}",
-                    config.model, config.base_url
+                    "LLM configured: model={}, base_url={}, provider={}",
+                    config.model, config.base_url, config.provider
                 );
                 let (handle, rx) = crate::llm::spawn_llm(config);
                 self.agent_mut().llm_handle = Some(handle);
                 self.agent_mut().llm_rx = Some(rx);
+            }
+            Ok(_) => {
+                self.status =
+                    "LLM not configured: set an API key on a model profile or TESHI_LLM_API_KEY"
+                        .to_string();
             }
             Err(e) => {
                 self.status = format!("LLM not configured: {e}");
@@ -1270,20 +1263,26 @@ impl App {
         self.activate_model_profile(&profile);
     }
 
-    /// Respawn the LLM worker thread using the given model profile's configuration.
+    /// Respawn the LLM worker thread using the given shared model profile.
     fn activate_model_profile(&mut self, profile: &crate::profiles::ModelProfile) {
-        let config = crate::llm::LlmConfig {
-            api_key: profile.api_key.clone(),
-            base_url: profile.base_url.clone(),
-            model: profile.model.clone(),
-            max_tokens: profile.max_tokens,
-            temperature: profile.temperature,
-            context_window: None,
+        let config = match teshi_engine::profile_to_llm_config(profile) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                self.status = format!("Failed to activate profile: {e}");
+                return;
+            }
         };
+        if config.api_key.trim().is_empty() {
+            self.status = format!(
+                "Profile '{}' has no API key; set one or use TESHI_LLM_API_KEY",
+                profile.name
+            );
+            return;
+        }
         let (handle, rx) = crate::llm::spawn_llm(config);
         self.agent_mut().llm_handle = Some(handle);
         self.agent_mut().llm_rx = Some(rx);
-        self.active_model_label = Some(format!("{} ({})", profile.name, profile.model));
+        self.active_model_label = Some(format!("{} ({})", profile.name, profile.model_id));
         self.status = format!("Switched to model: {}", profile.name);
     }
 
@@ -1628,8 +1627,12 @@ impl App {
 
         for f in &self.project.features {
             let path = f.file_path.to_string_lossy();
-            let sc_count = f.scenarios.len();
-            let st_count: usize = f.scenarios.iter().map(|s| s.steps.len()).sum::<usize>()
+            let sc_count = f.scenario_count();
+            let st_count: usize = f
+                .all_scenarios()
+                .iter()
+                .map(|s| s.steps.len())
+                .sum::<usize>()
                 + f.background.as_ref().map(|bg| bg.steps.len()).unwrap_or(0);
             ctx.push_str(&format!(
                 "  {path}: {sc_count} scenario(s), {st_count} step(s)"
@@ -2295,9 +2298,23 @@ impl App {
         self.set_status_message("AI cleared filter".into());
     }
 
-    /// Get the context window size from the active provider config.
-    /// Falls back to 128000 if not configured.
+    /// Get the context window size, preferring the active model profile's setting.
+    ///
+    /// Resolution order:
+    /// 1. `max_context_tokens` from the in-memory active model profile (when set).
+    /// 2. `context_window` from config.toml provider settings.
+    /// 3. Hard-coded default of 128 000.
     fn active_context_window(&self) -> u32 {
+        // Prefer the active profile's max_context_tokens when available.
+        if let Some(profile) = self
+            .model_profiles
+            .iter()
+            .find(|p| self.model_active_id.as_deref() == Some(p.id.as_str()))
+            && let Some(tokens) = profile.max_context_tokens
+        {
+            return tokens;
+        }
+        // Fall back to config.toml provider setting.
         self.config
             .default_provider_config()
             .and_then(|(_, p)| p.context_window)
@@ -3208,7 +3225,7 @@ impl App {
         };
         match self.explore_focus {
             ColumnFocus::Feature => {
-                for (si, scenario) in feature.scenarios.iter().enumerate() {
+                for (si, scenario) in feature.all_scenarios().into_iter().enumerate() {
                     cases.push(build_case(
                         self.explore_selected_feature,
                         si,
@@ -3218,7 +3235,7 @@ impl App {
                 }
             }
             ColumnFocus::Scenario | ColumnFocus::Step => {
-                if let Some(scenario) = feature.scenarios.get(self.explore_selected_scenario) {
+                if let Some(scenario) = feature.scenario_at(self.explore_selected_scenario) {
                     cases.push(build_case(
                         self.explore_selected_feature,
                         self.explore_selected_scenario,
@@ -3329,7 +3346,7 @@ impl App {
                     .project
                     .features
                     .get(self.explore_selected_feature)
-                    .map(|f| f.scenarios.len())
+                    .map(|f| f.scenario_count())
                     .unwrap_or(0);
                 let next = clamp_idx(self.explore_selected_scenario as isize + delta, scenarios);
                 if next != self.explore_selected_scenario {
@@ -3341,7 +3358,7 @@ impl App {
                     .project
                     .features
                     .get(self.explore_selected_feature)
-                    .and_then(|f| f.scenarios.get(self.explore_selected_scenario))
+                    .and_then(|f| f.scenario_at(self.explore_selected_scenario))
                     .map(|s| s.steps.len())
                     .unwrap_or(0);
                 let next = clamp_idx(self.explore_selected_step as isize + delta, steps);
@@ -3375,9 +3392,9 @@ impl App {
             }
             ColumnFocus::Scenario => {
                 if let Some(f) = self.project.features.get(self.explore_selected_feature)
-                    && !f.scenarios.is_empty()
+                    && f.scenario_count() > 0
                 {
-                    self.explore_set_scenario(f.scenarios.len() - 1);
+                    self.explore_set_scenario(f.scenario_count() - 1);
                 }
             }
             ColumnFocus::Step => {
@@ -3385,7 +3402,7 @@ impl App {
                     .project
                     .features
                     .get(self.explore_selected_feature)
-                    .and_then(|f| f.scenarios.get(self.explore_selected_scenario))
+                    .and_then(|f| f.scenario_at(self.explore_selected_scenario))
                     && !s.steps.is_empty()
                 {
                     self.explore_selected_step = s.steps.len() - 1;
@@ -3419,7 +3436,7 @@ impl App {
 
     fn explore_selected_step_line(&self) -> Option<usize> {
         let feature = self.project.features.get(self.explore_selected_feature)?;
-        let scenario = feature.scenarios.get(self.explore_selected_scenario)?;
+        let scenario = feature.scenario_at(self.explore_selected_scenario)?;
         let step = scenario.steps.get(self.explore_selected_step)?;
         Some(step.line_number)
     }
@@ -3437,7 +3454,7 @@ impl App {
             .project
             .features
             .get(self.explore_selected_feature)
-            .and_then(|f| f.scenarios.get(self.explore_selected_scenario))
+            .and_then(|f| f.scenario_at(self.explore_selected_scenario))
         {
             // scenario.line_number is 1-based, convert to 0-based row
             let scenario_row = scenario.line_number.saturating_sub(1);
@@ -3545,7 +3562,7 @@ impl App {
 
         let (mut start_line, mut end_line, title) = match loc.context {
             mindmap::LocationContext::Scenario(sci) => {
-                let Some(scenario) = feature.scenarios.get(sci) else {
+                let Some(scenario) = feature.scenario_at(sci) else {
                     self.set_empty_preview();
                     return;
                 };
@@ -3565,7 +3582,7 @@ impl App {
                 }
 
                 let mut end = buffer_lines;
-                if let Some(next_sc) = feature.scenarios.get(sci + 1) {
+                if let Some(next_sc) = feature.scenario_at(sci + 1) {
                     end = next_sc.line_number.saturating_sub(1).max(1);
                 }
                 if end < start {
@@ -3589,7 +3606,7 @@ impl App {
                 };
                 let start = bg.line_number.max(1);
                 let mut end = buffer_lines;
-                if let Some(first_sc) = feature.scenarios.first() {
+                if let Some(first_sc) = feature.all_scenarios().into_iter().next() {
                     end = first_sc.line_number.saturating_sub(1).max(1);
                 }
                 if end < start {
@@ -4118,10 +4135,10 @@ impl App {
                     self.agent_mut().agent_loop_count = 0;
                     self.status = "Sending MindMap context to AI...".to_string();
 
-                    if !crate::llm::LlmConfig::is_configured() {
+                    if !crate::llm::is_configured() {
                         self.agent_mut().messages.push(AiChatMessage {
                                 role: AiRole::Assistant,
-                                content: "AI is not configured. Set TESHI_LLM_API_KEY in your environment to enable AI responses.".to_string(),
+                                content: "AI is not configured. Run 'teshi auth login', open the model panel, or set TESHI_LLM_API_KEY in your environment.".to_string(),
                                 tool_calls: None,
                                 tool_call_id: None,
                                 reasoning_content: None,
@@ -4240,7 +4257,7 @@ impl App {
                 self.model_panel_active = true;
                 self.model_panel_selection = 0;
                 self.model_panel_mode = ModelPanelMode::List;
-                self.model_profiles = crate::profiles::ModelProfile::load_all();
+                self.model_profiles = crate::profiles::load_all();
                 self.status =
                     "Model profiles [m]. a add · e edit · ↑↓ select · Enter activate · Esc close"
                         .to_string();
@@ -4265,7 +4282,7 @@ impl App {
             Action::ModelPanelActivate => {
                 if let Some(profile) = self.model_profiles.get(self.model_panel_selection).cloned()
                 {
-                    if let Err(e) = crate::profiles::ModelProfile::write_active_id(&profile.id) {
+                    if let Err(e) = crate::profiles::write_active_id(&profile.id) {
                         self.status = format!("Failed to save active profile: {e}");
                     } else {
                         self.model_active_id = Some(profile.id.clone());
@@ -4295,13 +4312,14 @@ impl App {
                     self.model_form_editing_id = Some(profile.id.clone());
                     self.model_panel_mode = ModelPanelMode::Editing;
                     self.model_form_focus = 0;
+                    self.model_form_temperature =
+                        crate::profiles::profile_temperature(&profile).to_string();
                     self.model_form_name = profile.name;
                     self.model_form_provider = profile.provider;
-                    self.model_form_model = profile.model;
+                    self.model_form_model = profile.model_id;
                     self.model_form_base_url = profile.base_url;
                     self.model_form_api_key = profile.api_key;
-                    self.model_form_max_tokens = profile.max_tokens.to_string();
-                    self.model_form_temperature = profile.temperature.to_string();
+                    self.model_form_max_tokens = profile.max_output_tokens.to_string();
                     self.status = "Edit the fields and press Enter to save.".to_string();
                 }
                 self.quit_pending_confirm = false;
@@ -4310,19 +4328,30 @@ impl App {
                 if let Some(profile) = self.model_profiles.get(self.model_panel_selection).cloned()
                 {
                     let name = profile.name.clone();
-                    if let Err(e) = profile.delete_from_disk() {
+                    let deleted_id = profile.id.clone();
+                    if let Err(e) = crate::profiles::delete_profile(&deleted_id) {
                         self.status = format!("Failed to delete profile: {e}");
                     } else {
-                        self.model_profiles = crate::profiles::ModelProfile::load_all();
+                        self.model_profiles = crate::profiles::load_all();
+                        self.model_active_id = crate::profiles::read_active_id();
                         if self.model_panel_selection >= self.model_profiles.len() {
                             self.model_panel_selection =
                                 self.model_profiles.len().saturating_sub(1);
                         }
-                        // If the deleted profile was active, clear the active state
-                        if self.model_active_id.as_deref() == Some(&profile.id) {
-                            self.model_active_id = None;
+                        // Engine may have activated a sibling; respawn from the new active.
+                        self.agent_mut().llm_handle = None;
+                        self.agent_mut().llm_rx = None;
+                        if let Some(id) = self.model_active_id.clone() {
+                            if let Some(p) =
+                                self.model_profiles.iter().find(|p| p.id == id).cloned()
+                            {
+                                self.activate_model_profile(&p);
+                            } else {
+                                self.active_model_label = None;
+                                self.spawn_llm_if_configured();
+                            }
+                        } else {
                             self.active_model_label = None;
-                            // Fall back to env-var config
                             self.spawn_llm_if_configured();
                         }
                         self.status = format!("Deleted profile: {name}");
@@ -4387,9 +4416,9 @@ impl App {
                     return Ok(());
                 }
                 let provider = if self.model_form_provider.trim().is_empty() {
-                    "openai".to_string()
+                    teshi_engine::PROVIDER_OPENAI.to_string()
                 } else {
-                    self.model_form_provider.trim().to_string()
+                    crate::profiles::normalize_provider(self.model_form_provider.trim())
                 };
                 let model = self.model_form_model.trim().to_string();
                 if model.is_empty() {
@@ -4397,20 +4426,16 @@ impl App {
                     self.quit_pending_confirm = false;
                     return Ok(());
                 }
-                let base_url = if self.model_form_base_url.trim().is_empty() {
-                    "https://api.openai.com/v1".to_string()
-                } else {
-                    self.model_form_base_url.trim().to_string()
-                };
+                let base_url = self.model_form_base_url.trim().to_string();
                 let api_key = self.model_form_api_key.trim().to_string();
                 let max_tokens: u32 = self.model_form_max_tokens.trim().parse().unwrap_or(4096);
                 let temperature: f32 = self.model_form_temperature.trim().parse().unwrap_or(0.7);
 
                 let is_editing = self.model_form_editing_id.is_some();
 
-                let profile = if let Some(ref edit_id) = self.model_form_editing_id {
+                let mut profile = if let Some(ref edit_id) = self.model_form_editing_id {
                     // Editing existing profile — preserve the original ID.
-                    let mut p = match self
+                    match self
                         .model_profiles
                         .iter()
                         .find(|p| p.id == *edit_id)
@@ -4422,26 +4447,19 @@ impl App {
                             self.quit_pending_confirm = false;
                             return Ok(());
                         }
-                    };
-                    p.name = name;
-                    p.provider = provider;
-                    p.model = model;
-                    p.base_url = base_url;
-                    p.api_key = api_key;
-                    p.max_tokens = max_tokens;
-                    p.temperature = temperature;
-                    p
+                    }
                 } else {
-                    // Adding new profile.
-                    let mut p =
-                        crate::profiles::ModelProfile::new(&name, &provider, &model, &base_url);
-                    p.api_key = api_key;
-                    p.max_tokens = max_tokens;
-                    p.temperature = temperature;
-                    p
+                    teshi_engine::ModelProfile::new(name.clone())
                 };
+                profile.name = name;
+                profile.provider = provider;
+                profile.model_id = model;
+                profile.base_url = base_url;
+                profile.api_key = api_key;
+                profile.max_output_tokens = max_tokens;
+                crate::profiles::set_profile_temperature(&mut profile, temperature);
 
-                if let Err(e) = profile.save_to_disk() {
+                if let Err(e) = crate::profiles::save(&mut profile) {
                     self.status = format!("Failed to save profile: {e}");
                     self.quit_pending_confirm = false;
                     return Ok(());
@@ -4449,23 +4467,19 @@ impl App {
 
                 if is_editing {
                     self.status = format!("Updated profile: {}", profile.name);
-                    // Re-activate if the edited profile was active
                     if self.model_active_id.as_deref() == Some(&profile.id) {
                         self.activate_model_profile(&profile);
                     }
+                } else if let Err(e) = crate::profiles::write_active_id(&profile.id) {
+                    self.status = format!("Profile saved but failed to activate: {e}");
                 } else {
-                    // Auto-activate the new profile
-                    if let Err(e) = crate::profiles::ModelProfile::write_active_id(&profile.id) {
-                        self.status = format!("Profile saved but failed to activate: {e}");
-                    } else {
-                        self.model_active_id = Some(profile.id.clone());
-                        self.activate_model_profile(&profile);
-                        self.status = format!("Added and activated profile: {}", profile.name);
-                    }
+                    self.model_active_id = Some(profile.id.clone());
+                    self.activate_model_profile(&profile);
+                    self.status = format!("Added and activated profile: {}", profile.name);
                 }
 
                 self.model_form_editing_id = None;
-                self.model_profiles = crate::profiles::ModelProfile::load_all();
+                self.model_profiles = crate::profiles::load_all();
                 self.model_panel_mode = ModelPanelMode::List;
                 self.model_panel_selection = 0;
                 self.quit_pending_confirm = false;
@@ -5154,12 +5168,10 @@ impl App {
                 self.status = "Sending message to AI...".to_string();
 
                 // If the LLM is not configured, add a mock response
-                if !crate::llm::LlmConfig::is_configured()
-                    && self.config.default_provider_config().is_none()
-                {
+                if !crate::llm::is_configured() {
                     self.agent_mut().messages.push(AiChatMessage {
                         role: AiRole::Assistant,
-                        content: "AI is not configured. Run 'teshi auth login' to configure a provider, or set TESHI_LLM_API_KEY in your environment.".to_string(),
+                        content: "AI is not configured. Run 'teshi auth login', open the model panel, or set TESHI_LLM_API_KEY in your environment.".to_string(),
                         tool_calls: None,
                         tool_call_id: None,
                         reasoning_content: None,
@@ -5787,15 +5799,15 @@ impl App {
                 .project
                 .features
                 .get(feature_idx)
-                .and_then(|f| f.scenarios.iter().position(|s| s.name == name))
+                .and_then(|f| f.all_scenarios().into_iter().position(|s| s.name == name))
         {
             self.explore_set_scenario(scenario_idx);
         } else if let Some(line) = sc_ref.scenario_line
-            && let Some(scenario_idx) = self
-                .project
-                .features
-                .get(feature_idx)
-                .and_then(|f| f.scenarios.iter().position(|s| s.line_number == line))
+            && let Some(scenario_idx) = self.project.features.get(feature_idx).and_then(|f| {
+                f.all_scenarios()
+                    .into_iter()
+                    .position(|s| s.line_number == line)
+            })
         {
             self.explore_set_scenario(scenario_idx);
         }
@@ -5904,7 +5916,7 @@ impl App {
         let feature = self.project.features.get(feature_idx)?;
         let line_number = self.cursor_row + 1;
         let mut selected = None;
-        for (scenario_idx, scenario) in feature.scenarios.iter().enumerate() {
+        for (scenario_idx, scenario) in feature.all_scenarios().into_iter().enumerate() {
             if scenario.line_number <= line_number {
                 selected = Some(scenario_idx);
             } else {
@@ -6313,32 +6325,12 @@ impl App {
 
     /// Find the first clickable region that contains `pos`.
     fn hit_test(&self, pos: &ratatui::layout::Position) -> Option<&ClickableRegion> {
-        // Tab bar: row is always 0, check x-position against known label widths
-        if pos.y == 0 {
-            let tab_bar_x = 0; // tab bar starts at column 0
-            let tab_labels = [
-                (MainTab::Explore, " Explore [1] ", 0u16),
-                (MainTab::MindMap, " MindMap [2] ", 13u16),
-                (MainTab::Ai, " AI [3] ", 27u16),
-                (MainTab::Requirements, " Requirements [4] ", 36u16),
-                (MainTab::TestPoints, " Test Points [5] ", 54u16),
-            ];
-            for &(ref tab, label, start_x) in &tab_labels {
-                let end_x = start_x + label.chars().count() as u16;
-                if pos.x >= tab_bar_x + start_x && pos.x < tab_bar_x + end_x {
-                    // Return a matching Tab region from clickable_regions
-                    return self
-                        .clickable_regions
-                        .iter()
-                        .find(|r| matches!(r, ClickableRegion::Tab(t) if *t == *tab));
-                }
-            }
-        }
-
         for region in &self.clickable_regions {
             match region {
-                ClickableRegion::Tab(_) => {
-                    // Already handled above
+                ClickableRegion::Tab { rect, .. } => {
+                    if rect.contains(*pos) {
+                        return Some(region);
+                    }
                 }
                 ClickableRegion::Tree => {
                     if let Some(rect) = self.tree_panel_rect
@@ -6440,9 +6432,8 @@ impl App {
         pos: &ratatui::layout::Position,
     ) -> Result<()> {
         match region {
-            ClickableRegion::Tab(tab) => {
-                self.active_tab = *tab;
-                self.status = format!("Switched to {tab:?} tab");
+            ClickableRegion::Tab { tab, .. } => {
+                self.select_tab(*tab);
             }
             ClickableRegion::Tree => {
                 // tui-tree-widget uses absolute terminal coordinates internally
@@ -7104,7 +7095,7 @@ impl App {
         self.model_panel_active = true;
         self.model_panel_selection = 0;
         self.model_panel_mode = ModelPanelMode::List;
-        self.model_profiles = crate::profiles::ModelProfile::load_all();
+        self.model_profiles = crate::profiles::load_all();
         self.status = "Model profiles [m]. a add · e edit · ↑↓ select · Enter activate · Esc close"
             .to_string();
         Ok(())
@@ -7128,12 +7119,15 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
-        AgentPanelMode, AgentThread, App, BddFocusSlot, ColumnFocus, MainTab, MindMapFocus,
-        ModelPanelMode, ViewStage, current_step_keyword_index, replace_step_keyword_line,
+        AgentPanelMode, AgentThread, App, BddFocusSlot, ClickableRegion, ColumnFocus, MainTab,
+        MindMapFocus, ModelPanelMode, ViewStage, current_step_keyword_index,
+        replace_step_keyword_line,
     };
     use crate::bdd_nav::step_edit_start_col;
     use crate::editor_buffer::EditorBuffer;
     use crate::keymap::Action;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
     use teshi_core::StepIndex;
     use teshi_core::gherkin_lang::GherkinLanguages;
 
@@ -7147,6 +7141,14 @@ mod tests {
         app.active_tab = MainTab::MindMap;
         app.view_stage = ViewStage::EditorAndPanel;
         app
+    }
+
+    fn render_test_app(app: &mut App, width: u16) {
+        let backend = TestBackend::new(width, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+        terminal
+            .draw(|frame| crate::ui::render(frame, app))
+            .expect("test UI should render");
     }
 
     fn temp_feature_path(name: &str) -> PathBuf {
@@ -7425,6 +7427,124 @@ mod tests {
     }
 
     #[test]
+    fn test_rendered_tab_titles_are_clickable_across_their_full_width() {
+        let mut app = App::from_args().expect("app init should work");
+        render_test_app(&mut app, 100);
+
+        let expected = [
+            (MainTab::Explore, Rect::new(1, 0, 13, 1)),
+            (MainTab::MindMap, Rect::new(17, 0, 13, 1)),
+            (MainTab::Ai, Rect::new(33, 0, 8, 1)),
+            (MainTab::Requirements, Rect::new(44, 0, 18, 1)),
+            (MainTab::TestPoints, Rect::new(65, 0, 17, 1)),
+        ];
+        let actual = app
+            .clickable_regions
+            .iter()
+            .filter_map(|region| match region {
+                ClickableRegion::Tab { tab, rect } => Some((*tab, *rect)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+
+        for (tab, rect) in expected {
+            for x in [rect.left(), rect.left() + rect.width / 2, rect.right() - 1] {
+                app.active_tab = if tab == MainTab::Explore {
+                    MainTab::Ai
+                } else {
+                    MainTab::Explore
+                };
+                app.handle_mouse_event(
+                    MouseEventKind::Down(MouseButton::Left),
+                    x,
+                    rect.top(),
+                    KeyModifiers::NONE,
+                )
+                .expect("tab click should succeed");
+                assert_eq!(app.active_tab, tab, "click at column {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_clipped_tab_title_only_registers_visible_columns() {
+        let mut app = App::from_args().expect("app init should work");
+        render_test_app(&mut app, 70);
+
+        let test_points_rect = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::Tab {
+                    tab: MainTab::TestPoints,
+                    rect,
+                } => Some(*rect),
+                _ => None,
+            })
+            .expect("partially visible Test Points tab should be registered");
+        assert_eq!(test_points_rect, Rect::new(65, 0, 5, 1));
+
+        for x in test_points_rect.left()..test_points_rect.right() {
+            app.active_tab = MainTab::Explore;
+            app.handle_mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                x,
+                0,
+                KeyModifiers::NONE,
+            )
+            .expect("visible clipped tab click should succeed");
+            assert_eq!(app.active_tab, MainTab::TestPoints);
+        }
+
+        app.active_tab = MainTab::Explore;
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            64,
+            0,
+            KeyModifiers::NONE,
+        )
+        .expect("padding click should succeed");
+        assert_eq!(app.active_tab, MainTab::Explore);
+    }
+
+    #[test]
+    fn test_mouse_tab_selection_uses_standard_state_transition() {
+        let mut app = App::from_args().expect("app init should work");
+        app.active_tab = MainTab::Explore;
+        app.view_stage = ViewStage::EditorAndPanel;
+        app.mindmap_focus = MindMapFocus::AiPanel;
+        app.ai_input_focused = true;
+        app.scenario_dropdown_open = true;
+        app.explore_edit_mode = true;
+        app.explore_detail_open = true;
+        app.explore_detail_case = Some((0, 0));
+        app.pending_char = Some('g');
+        app.quit_pending_confirm = true;
+        render_test_app(&mut app, 100);
+
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            17,
+            0,
+            KeyModifiers::NONE,
+        )
+        .expect("MindMap tab click should succeed");
+
+        assert_eq!(app.active_tab, MainTab::MindMap);
+        assert_eq!(app.view_stage, ViewStage::TreeOnly);
+        assert_eq!(app.mindmap_focus, MindMapFocus::Main);
+        assert!(!app.ai_input_focused);
+        assert!(!app.scenario_dropdown_open);
+        assert!(!app.explore_edit_mode);
+        assert!(!app.explore_detail_open);
+        assert!(app.explore_detail_case.is_none());
+        assert!(app.pending_char.is_none());
+        assert!(!app.quit_pending_confirm);
+        assert_eq!(app.status, "Switched to MindMap tab");
+    }
+
+    #[test]
     fn test_requirements_create_test_point_from_selection() {
         let mut app = App::from_args().expect("app init should work");
         app.authoring_ui.create_document("req.md", "Req");
@@ -7677,8 +7797,8 @@ mod tests {
             status_message_deadline: None,
             config: crate::config::load_config().unwrap(),
             auth_panel_active: false,
-            model_profiles: crate::profiles::ModelProfile::load_all(),
-            model_active_id: crate::profiles::ModelProfile::read_active_id(),
+            model_profiles: crate::profiles::load_all(),
+            model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
             model_panel_selection: 0,
             active_model_label: None,
@@ -7836,8 +7956,8 @@ Feature: B
             status_message_deadline: None,
             config: crate::config::load_config().unwrap(),
             auth_panel_active: false,
-            model_profiles: crate::profiles::ModelProfile::load_all(),
-            model_active_id: crate::profiles::ModelProfile::read_active_id(),
+            model_profiles: crate::profiles::load_all(),
+            model_active_id: crate::profiles::read_active_id(),
             model_panel_active: false,
             model_panel_selection: 0,
             active_model_label: None,

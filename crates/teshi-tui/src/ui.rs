@@ -41,6 +41,58 @@ const SELECTION_BG: Color = Color::Rgb(64, 96, 160);
 const SELECTION_FG: Color = Color::White;
 const HIGHLIGHT_SELECTED_FG: Color = Color::Yellow;
 const HIGHLIGHT_UNFOCUSED_FG: Color = Color::Cyan;
+const MAIN_TABS: &[(MainTab, &str)] = &[
+    (MainTab::Explore, " Explore [1] "),
+    (MainTab::MindMap, " MindMap [2] "),
+    (MainTab::Ai, " AI [3] "),
+    (MainTab::Requirements, " Requirements [4] "),
+    (MainTab::TestPoints, " Test Points [5] "),
+];
+const TAB_PADDING_LEFT: &str = " ";
+const TAB_PADDING_RIGHT: &str = " ";
+const TAB_DIVIDER: &str = " ";
+
+fn register_tab_regions(app: &mut App, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+
+    // Mirror `ratatui::Tabs` rendering: left padding, visible title, right
+    // padding, then a divider. Keeping these values beside `MAIN_TABS` and
+    // applying them explicitly to the widget keeps rendering and hit-testing
+    // on the same coordinate system.
+    let mut x = area.left();
+    let right = area.right();
+    let padding_left_width = TAB_PADDING_LEFT.width() as u16;
+    let padding_right_width = TAB_PADDING_RIGHT.width() as u16;
+    let divider_width = TAB_DIVIDER.width() as u16;
+
+    for (index, &(tab, title)) in MAIN_TABS.iter().enumerate() {
+        x = x.saturating_add(padding_left_width.min(right.saturating_sub(x)));
+        if x >= right {
+            break;
+        }
+
+        let width = (title.width() as u16).min(right.saturating_sub(x));
+        if width == 0 {
+            break;
+        }
+        app.clickable_regions.push(ClickableRegion::Tab {
+            tab,
+            rect: Rect::new(x, area.top(), width, 1),
+        });
+        x = x.saturating_add(width);
+        if x >= right {
+            break;
+        }
+
+        x = x.saturating_add(padding_right_width.min(right.saturating_sub(x)));
+        if x >= right || index == MAIN_TABS.len() - 1 {
+            break;
+        }
+        x = x.saturating_add(divider_width.min(right.saturating_sub(x)));
+    }
+}
 
 /// Braille spinner frames for the thinking indicator.
 fn spinner_frame() -> &'static str {
@@ -245,13 +297,12 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         ])
         .split(frame.area());
 
-    let top_tabs = Tabs::new(vec![
-        Line::from(" Explore [1] "),
-        Line::from(" MindMap [2] "),
-        Line::from(" AI [3] "),
-        Line::from(" Requirements [4] "),
-        Line::from(" Test Points [5] "),
-    ])
+    let top_tabs = Tabs::new(
+        MAIN_TABS
+            .iter()
+            .map(|&(_, title)| Line::from(title))
+            .collect::<Vec<_>>(),
+    )
     .select(match app.active_tab {
         MainTab::Explore => 0,
         MainTab::MindMap => 1,
@@ -265,20 +316,11 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
     )
-    .divider(" ");
+    .padding(TAB_PADDING_LEFT, TAB_PADDING_RIGHT)
+    .divider(TAB_DIVIDER);
     frame.render_widget(top_tabs, chunks[0]);
 
-    // Push tab regions for click/hover tracking
-    app.clickable_regions
-        .push(ClickableRegion::Tab(MainTab::Explore));
-    app.clickable_regions
-        .push(ClickableRegion::Tab(MainTab::MindMap));
-    app.clickable_regions
-        .push(ClickableRegion::Tab(MainTab::Ai));
-    app.clickable_regions
-        .push(ClickableRegion::Tab(MainTab::Requirements));
-    app.clickable_regions
-        .push(ClickableRegion::Tab(MainTab::TestPoints));
+    register_tab_regions(app, chunks[0]);
 
     let divider_w = chunks[1].width as usize;
     let divider_line = "─".repeat(divider_w.max(1));
@@ -585,10 +627,12 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let greeting = Line::raw("Welcome to AI Chat! Type a message below and press Enter.");
         chat_lines.push(greeting);
         chat_lines.push(Line::raw(""));
-        if !crate::llm::LlmConfig::is_configured() {
+        if !crate::llm::is_configured() {
             chat_lines.push(
-                Line::raw("Note: Set TESHI_LLM_API_KEY to enable AI responses.")
-                    .style(Style::default().fg(Color::Yellow)),
+                Line::raw(
+                    "Note: Run 'teshi auth login' or set TESHI_LLM_API_KEY to enable AI responses.",
+                )
+                .style(Style::default().fg(Color::Yellow)),
             );
         }
     }
@@ -1225,9 +1269,9 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .project
         .features
         .get(app.explore_selected_feature)
-        .map(|f| &f.scenarios);
+        .map(|f| f.all_scenarios());
 
-    if scenarios.is_none_or(|s| s.is_empty()) {
+    if scenarios.as_ref().is_none_or(|s| s.is_empty()) {
         lines.push(Line::styled(
             " (no scenarios)",
             Style::default().fg(Color::DarkGray),
@@ -1279,7 +1323,7 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .project
         .features
         .get(app.explore_selected_feature)
-        .map(|f| &f.scenarios)
+        .map(|f| f.all_scenarios())
     {
         for (i, _scenario) in scenarios.iter().enumerate() {
             app.clickable_regions
@@ -1298,7 +1342,7 @@ fn explore_scenarios_title(app: &App) -> String {
         .project
         .features
         .get(app.explore_selected_feature)
-        .map(|f| f.scenarios.len())
+        .map(|f| f.scenario_count())
         .unwrap_or(0);
     format!("Scenarios ({count})")
 }
@@ -1324,7 +1368,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
 
         let feature = app.project.features.get(app.explore_selected_feature);
-        let scenario = feature.and_then(|f| f.scenarios.get(app.explore_selected_scenario));
+        let scenario = feature.and_then(|f| f.scenario_at(app.explore_selected_scenario));
         let scenario_steps = scenario.map(|s| s.steps.as_slice()).unwrap_or(&[]);
 
         // Determine line-number range of the current scenario's steps
@@ -1396,7 +1440,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut line_idx = inner.y;
 
     let feature = app.project.features.get(app.explore_selected_feature);
-    let scenario = feature.and_then(|f| f.scenarios.get(app.explore_selected_scenario));
+    let scenario = feature.and_then(|f| f.scenario_at(app.explore_selected_scenario));
     let background_steps = feature
         .and_then(|f| f.background.as_ref())
         .map(|bg| bg.steps.as_slice())
@@ -1596,7 +1640,7 @@ fn render_failure_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(feature) = app.project.features.get(fi) else {
         return;
     };
-    let Some(scenario) = feature.scenarios.get(si) else {
+    let Some(scenario) = feature.scenario_at(si) else {
         return;
     };
 
@@ -1971,7 +2015,7 @@ fn render_scenario_dropdown(
                     .project
                     .features
                     .get(loc.feature_idx)
-                    .and_then(|f| f.scenarios.get(sci))
+                    .and_then(|f| f.scenario_at(sci))
                     .map(|s| s.name.as_str())
                     .unwrap_or("?");
                 format!("{}: Scenario: {}", feature_name, scenario_name)
@@ -2144,10 +2188,12 @@ pub(crate) fn render_agent_chat_inner(
     if app.agent().messages.is_empty() {
         chat_lines.push(Line::raw("Welcome to AI Chat!"));
         chat_lines.push(Line::raw(""));
-        if !crate::llm::LlmConfig::is_configured() {
+        if !crate::llm::is_configured() {
             chat_lines.push(
-                Line::raw("Note: Set TESHI_LLM_API_KEY to enable AI responses.")
-                    .style(Style::default().fg(Color::Yellow)),
+                Line::raw(
+                    "Note: Run 'teshi auth login' or set TESHI_LLM_API_KEY to enable AI responses.",
+                )
+                .style(Style::default().fg(Color::Yellow)),
             );
         }
     }
@@ -2837,7 +2883,7 @@ fn render_reserved_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .project
             .features
             .get(app.explore_selected_feature)
-            .and_then(|f| f.scenarios.get(app.explore_selected_scenario))
+            .and_then(|f| f.scenario_at(app.explore_selected_scenario))
             .map(|s| s.name.as_str())
             .unwrap_or("-");
         truncate_lines(build_case_detail_lines(scenario_name, detail), inner.width)
@@ -2957,7 +3003,7 @@ fn render_explore_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .project
         .features
         .get(app.explore_selected_feature)
-        .and_then(|f| f.scenarios.get(app.explore_selected_scenario))
+        .and_then(|f| f.scenario_at(app.explore_selected_scenario))
         .map(|s| s.name.clone())
         .unwrap_or_else(|| "-".to_string());
     let left = format!("{feature_name}  {scenario_name}");
@@ -2966,7 +3012,7 @@ fn render_explore_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .project
         .features
         .get(app.explore_selected_feature)
-        .map(|f| f.scenarios.len())
+        .map(|f| f.scenario_count())
         .unwrap_or(0);
     let right = if let Some(summary) = &app.explore_run_summary {
         format!(
@@ -3151,45 +3197,49 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
             ));
         }
         _ => {
-            // Default: show provider overview
+            // Default: show shared model-profile overview
             lines.push(Line::styled(
-                "Configured Providers",
+                "Model Profiles (shared store)",
                 Style::default().add_modifier(Modifier::BOLD),
             ));
             lines.push(Line::raw(""));
 
-            if app.config.providers.is_empty() {
-                lines.push(Line::raw("  No providers configured."));
+            if app.model_profiles.is_empty() {
+                lines.push(Line::raw("  No model profiles configured."));
+                lines.push(Line::raw("  Use 'teshi auth login' or press m to add one."));
             } else {
-                for (name, provider) in &app.config.providers {
-                    let model = provider.model.as_deref().unwrap_or("-");
-                    let has_key = provider
-                        .api_key
-                        .as_ref()
-                        .filter(|k| !k.is_empty())
-                        .is_some();
+                for profile in &app.model_profiles {
+                    let has_key = !profile.api_key.is_empty();
                     let key_status = if has_key { "✓" } else { "✗" };
                     let key_color = if has_key { Color::Green } else { Color::Red };
+                    let active = if app.model_active_id.as_deref() == Some(profile.id.as_str()) {
+                        " *"
+                    } else {
+                        ""
+                    };
                     lines.push(Line::from(vec![
                         Span::raw("  "),
                         Span::styled(
-                            format!("{:<14}", name),
+                            format!("{:<14}", profile.name),
                             Style::default().add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             format!(" key: {}", key_status),
                             Style::default().fg(key_color),
                         ),
-                        Span::raw(format!("  model: {}", model)),
+                        Span::raw(format!(
+                            "  {} / {}{}",
+                            profile.provider, profile.model_id, active
+                        )),
                     ]));
                 }
             }
 
-            if let Some(ref default) = app.config.default_provider {
+            if let Some(ref active) = app.model_active_id {
                 lines.push(Line::raw(""));
                 lines.push(Line::from(vec![
-                    Span::raw("  Default: "),
-                    Span::styled(default.as_str(), Style::default().fg(Color::Cyan)),
+                    Span::raw("  Active id: "),
+                    Span::styled(active.as_str(), Style::default().fg(Color::Cyan)),
                 ]));
             }
         }
@@ -3273,7 +3323,7 @@ fn render_model_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Span::styled(format!("{:<20}", profile.name), style),
                 Span::raw("  "),
                 Span::styled(
-                    format!("{} | {}", profile.provider, profile.model),
+                    format!("{} | {}", profile.provider, profile.model_id),
                     Style::default().fg(Color::Cyan),
                 ),
                 Span::styled(active_mark, Style::default().fg(Color::Green)),
@@ -4544,6 +4594,25 @@ mod truncate_tests {
         app.project.features = vec![feature];
         app.explore_selected_feature = 0;
         assert_eq!(explore_scenarios_title(&app), "Scenarios (2)");
+    }
+
+    #[test]
+    fn test_explore_scenarios_title_counts_rule_nested_scenarios() {
+        let mut app = App::from_args().expect("app init should work");
+        let feature = gherkin::parse_feature(
+            "\
+Feature: Rule only
+  Rule: R1
+    Scenario: Nested
+      Given a
+",
+            PathBuf::from("rule.feature"),
+        );
+        assert!(feature.scenarios.is_empty());
+        assert_eq!(feature.scenario_count(), 1);
+        app.project.features = vec![feature];
+        app.explore_selected_feature = 0;
+        assert_eq!(explore_scenarios_title(&app), "Scenarios (1)");
     }
 
     #[test]
