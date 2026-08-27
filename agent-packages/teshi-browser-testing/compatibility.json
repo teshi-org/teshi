@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "package_version": "0.7.9",
-  "teshi_cli": ">=0.7.9 <0.8.0",
+  "package_version": "0.7.10",
+  "teshi_cli": ">=0.7.10 <0.8.0",
   "browser_agent_schema": 1,
   "broker_protocol": 1,
   "phases": {
@@ -101,7 +101,7 @@
       "mcp": false
     }
   },
-  "extension": ">=0.7.9 <0.8.0",
+  "extension": ">=0.7.10 <0.8.0",
   "chromium": ">=116 (Chrome, Edge, or compatible Chromium with Manifest V3 and chrome.debugger)",
   "operating_systems": [
     "Windows 10/11 x86_64",

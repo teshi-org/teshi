@@ -1,6 +1,6 @@
 {
   "name": "teshi-browser-testing",
-  "version": "0.7.9",
+  "version": "0.7.10",
   "description": "Acquire verified Playwright locators from explicitly selected local Chromium profiles through Teshi.",
   "author": {
     "name": "teshi-org",

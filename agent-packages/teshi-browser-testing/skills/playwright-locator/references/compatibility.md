@@ -4,10 +4,10 @@
 
 | Component | Required value |
 |---|---|
-| Teshi CLI | `>=0.7.9 <0.8.0` |
+| Teshi CLI | `>=0.7.10 <0.8.0` |
 | Browser-agent schema | `1` |
 | Broker/extension protocol | `1` |
-| teshi-bridge extension | `>=0.7.9 <0.8.0` |
+| teshi-bridge extension | `>=0.7.10 <0.8.0` |
 | Chromium | 116 or newer with Manifest V3 and `chrome.debugger` |
 | Operating systems | Windows x86_64, Linux x86_64, macOS arm64 |
 | MCP | `2026-07-28`; legacy initialization is accepted for `2025-11-25`, `2025-06-18`, and `2024-11-05` |
