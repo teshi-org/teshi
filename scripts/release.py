@@ -80,10 +80,22 @@ def git(*args: str) -> str:
 
 
 def get_last_tag() -> str | None:
+    """Return the newest stable ``vX.Y.Z`` tag reachable from HEAD.
+
+    Nightly and other prerelease tags (for example ``v0.7.9-nightly.…``) are
+    ignored so changelog and bump analysis cover the last published stable
+    release rather than the most recent pre-release tag on ``dev``.
+    """
     try:
-        return git("describe", "--tags", "--abbrev=0", "--match", "v*")
+        tags = git("tag", "--list", "v*", "--sort=-v:refname", "--merged", "HEAD")
     except subprocess.CalledProcessError:
         return None
+    stable = re.compile(r"^v\d+\.\d+\.\d+$")
+    for tag in tags.splitlines():
+        tag = tag.strip()
+        if stable.fullmatch(tag):
+            return tag
+    return None
 
 
 def get_commits_since(tag: str) -> list[dict]:
