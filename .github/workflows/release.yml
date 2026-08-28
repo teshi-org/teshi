@@ -432,6 +432,7 @@ jobs:
         shell: pwsh
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:WINGET_TOKEN)) {
             Write-Host "Skipping WinGet submission: WINGET_TOKEN not configured."
