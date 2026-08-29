@@ -112,6 +112,8 @@ pub enum Action {
     AiSuggest,
     EnterEdit,
     ToggleFailureDetail,
+    /// Expand or hide redacted HTTP fields in Explore run details.
+    ToggleInspectorPlaintext,
     // Step keyword picker overlay
     StepKeywordPickerUp,
     StepKeywordPickerDown,
@@ -712,6 +714,7 @@ impl Action {
                 (KeyCode::End, _) => Some(Self::MoveEnd),
                 (KeyCode::Enter, _) => Some(Self::ToggleFailureDetail),
                 (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Self::RunScenario),
+                (KeyCode::Char('p'), KeyModifiers::NONE) => Some(Self::ToggleInspectorPlaintext),
                 (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::AiSuggest),
                 (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Self::EnterEdit),
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),

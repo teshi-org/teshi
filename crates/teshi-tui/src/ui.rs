@@ -2977,6 +2977,33 @@ fn build_case_detail_lines(scenario_name: &str, detail: &CaseDetail) -> Vec<Line
         }
     }
 
+    if !detail.steps.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw("Steps:"));
+        for step in &detail.steps {
+            let status = step.status.as_deref().unwrap_or("running");
+            lines.push(Line::raw(format!("- [{status}] {}", step.text)));
+            if let Some(message) = &step.message {
+                lines.push(Line::raw(format!("    {message}")));
+            }
+        }
+    }
+
+    if !detail.exchanges.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw(if detail.inspector_plaintext {
+            "HTTP exchanges (plaintext — p to hide):"
+        } else {
+            "HTTP exchanges (redacted — p to expand):"
+        }));
+        for exchange in &detail.exchanges {
+            for line in teshi_core::format_exchange_lines(exchange, true) {
+                lines.push(Line::raw(line));
+            }
+            lines.push(Line::raw(""));
+        }
+    }
+
     lines
 }
 
@@ -4576,8 +4603,10 @@ fn render_test_points_excerpts(
 mod truncate_tests {
     use std::path::PathBuf;
 
-    use super::{Line, Span, explore_scenarios_title, truncate_line_to_cols};
-    use crate::app::App;
+    use super::{
+        Line, Span, build_case_detail_lines, explore_scenarios_title, truncate_line_to_cols,
+    };
+    use crate::app::{App, CaseDetail, RunStatus};
     use teshi_core::gherkin;
 
     #[test]
@@ -4592,6 +4621,47 @@ mod truncate_tests {
     fn test_explore_scenarios_title_shows_zero_when_no_feature_selected() {
         let app = App::from_args().expect("app init should work");
         assert_eq!(explore_scenarios_title(&app), "Scenarios (0)");
+    }
+
+    #[test]
+    fn case_detail_lines_keep_redacted_http_values() {
+        let exchange = teshi_core::HttpExchange::from_value(&serde_json::json!({
+            "type": "http_exchange",
+            "exchange_id": "e1",
+            "template": "create_user.json.j2",
+            "method": "POST",
+            "url": "https://example.test/users",
+            "request_headers": {"Authorization": "***"},
+            "request_body": {"password": "***", "name": "Ada"},
+            "status": 201,
+            "response_headers": {},
+            "response_body": {"id": "42"},
+            "duration_ms": 8,
+            "extract": {},
+            "asserts": [{"name": "status_ok", "passed": true}],
+            "redacted": true
+        }))
+        .expect("parse exchange");
+        let detail = CaseDetail {
+            case_id: "f0:s0".into(),
+            status: RunStatus::Passed,
+            duration_ms: Some(8),
+            message: None,
+            stack: None,
+            attachments: Vec::new(),
+            logs: Vec::new(),
+            exchanges: vec![exchange],
+            steps: Vec::new(),
+            inspector_plaintext: false,
+        };
+        let text = build_case_detail_lines("Create user", &detail)
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("***"));
+        assert!(!text.to_lowercase().contains("bearer"));
+        assert!(text.contains("redacted"));
     }
 
     #[test]

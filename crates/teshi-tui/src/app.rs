@@ -253,6 +253,40 @@ pub struct CaseDetail {
     pub stack: Option<String>,
     pub attachments: Vec<runner::RunAttachment>,
     pub logs: Vec<String>,
+    /// HTTP exchanges for this case (redacted unless inspector_plaintext).
+    pub exchanges: Vec<teshi_core::HttpExchange>,
+    /// Step start/end records in scenario order.
+    pub steps: Vec<StepRunRecord>,
+    /// When true, Explore fetches plaintext exchanges from the API sidecar.
+    pub inspector_plaintext: bool,
+}
+
+/// One Gherkin step observed during an Explore run.
+#[derive(Debug, Clone)]
+pub struct StepRunRecord {
+    /// Correlation id from `start_step` / `end_step`.
+    pub step_id: String,
+    /// Step body after `[API]` stripping when provided.
+    pub text: String,
+    /// `passed` / `failed` when ended.
+    pub status: Option<String>,
+    /// Failure message from the step.
+    pub message: Option<String>,
+}
+
+fn empty_running_detail(case_id: String) -> CaseDetail {
+    CaseDetail {
+        case_id,
+        status: RunStatus::Running,
+        duration_ms: None,
+        message: None,
+        stack: None,
+        attachments: Vec::new(),
+        logs: Vec::new(),
+        exchanges: Vec::new(),
+        steps: Vec::new(),
+        inspector_plaintext: false,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -3010,6 +3044,9 @@ impl App {
                             stack: None,
                             attachments: Vec::new(),
                             logs: Vec::new(),
+                            exchanges: Vec::new(),
+                            steps: Vec::new(),
+                            inspector_plaintext: false,
                         });
                 }
             }
@@ -3030,6 +3067,9 @@ impl App {
                                 stack: None,
                                 attachments: Vec::new(),
                                 logs: Vec::new(),
+                                exchanges: Vec::new(),
+                                steps: Vec::new(),
+                                inspector_plaintext: false,
                             });
                     detail.status = RunStatus::Passed;
                     detail.duration_ms = duration_ms;
@@ -3058,6 +3098,9 @@ impl App {
                                 stack: None,
                                 attachments: Vec::new(),
                                 logs: Vec::new(),
+                                exchanges: Vec::new(),
+                                steps: Vec::new(),
+                                inspector_plaintext: false,
                             });
                     detail.status = RunStatus::Failed;
                     detail.duration_ms = duration_ms;
@@ -3085,6 +3128,9 @@ impl App {
                                 stack: None,
                                 attachments: Vec::new(),
                                 logs: Vec::new(),
+                                exchanges: Vec::new(),
+                                steps: Vec::new(),
+                                inspector_plaintext: false,
                             });
                     detail.status = RunStatus::Skipped;
                     detail.duration_ms = None;
@@ -3110,6 +3156,9 @@ impl App {
                                 stack: None,
                                 attachments: Vec::new(),
                                 logs: Vec::new(),
+                                exchanges: Vec::new(),
+                                steps: Vec::new(),
+                                inspector_plaintext: false,
                             });
                     if detail.logs.len() >= 200 {
                         detail.logs.remove(0);
@@ -3136,6 +3185,9 @@ impl App {
                                 stack: None,
                                 attachments: Vec::new(),
                                 logs: Vec::new(),
+                                exchanges: Vec::new(),
+                                steps: Vec::new(),
+                                inspector_plaintext: false,
                             });
                     detail
                         .attachments
@@ -3155,6 +3207,60 @@ impl App {
                     skipped,
                 });
                 self.status = format!("Run complete: {passed} passed, {failed} failed");
+            }
+            RunEvent::StartStep {
+                case_id,
+                step_id,
+                text,
+                ..
+            } => {
+                if let Some(case_id) = case_id
+                    && let Some(key) = self.explore_case_map.get(&case_id).copied()
+                {
+                    let detail = self
+                        .explore_case_details
+                        .entry(key)
+                        .or_insert_with(|| empty_running_detail(case_id.clone()));
+                    detail.steps.push(StepRunRecord {
+                        step_id,
+                        text: text.unwrap_or_default(),
+                        status: None,
+                        message: None,
+                    });
+                }
+            }
+            RunEvent::EndStep {
+                case_id,
+                step_id,
+                status,
+                message,
+            } => {
+                if let Some(case_id) = case_id
+                    && let Some(key) = self.explore_case_map.get(&case_id).copied()
+                    && let Some(detail) = self.explore_case_details.get_mut(&key)
+                {
+                    if let Some(step) = detail.steps.iter_mut().rev().find(|s| s.step_id == step_id)
+                    {
+                        step.status = status.clone();
+                        step.message = message.clone();
+                    }
+                    if status.as_deref() == Some("failed")
+                        && let Some(msg) = message
+                    {
+                        detail.message = Some(msg);
+                    }
+                }
+            }
+            RunEvent::HttpExchange(exchange) => {
+                if let Some(case_id) = exchange.case_id.clone()
+                    && let Some(key) = self.explore_case_map.get(&case_id).copied()
+                {
+                    let detail = self
+                        .explore_case_details
+                        .entry(key)
+                        .or_insert_with(|| empty_running_detail(case_id));
+                    detail.exchanges.push(*exchange);
+                }
             }
             RunEvent::RunnerExit { success, .. } => {
                 if !success {
@@ -3184,10 +3290,6 @@ impl App {
             self.status = "Runner already active".to_string();
             return;
         }
-        let Some(config) = self.runner_config.clone() else {
-            self.status = "Runner not configured (teshi.toml or TESHI_RUNNER_CMD)".to_string();
-            return;
-        };
         let cases = self.build_explore_cases();
         if cases.is_empty() {
             self.status = "No scenarios to run".to_string();
@@ -3207,20 +3309,51 @@ impl App {
                     .insert((fi, si), RunStatus::Running);
             }
         }
-        let request = RunRequest {
-            command: "run".to_string(),
-            cases,
-            meta: HashMap::new(),
+        let needs_dispatch = self.explore_cases_need_dispatch(&cases);
+        let started = if needs_dispatch {
+            runner::spawn_teshi_dispatch(self.project.root_dir.clone(), cases)
+        } else {
+            let Some(config) = self.runner_config.clone() else {
+                self.status = "Runner not configured (teshi.toml or TESHI_RUNNER_CMD)".to_string();
+                return;
+            };
+            let request = RunRequest {
+                command: "run".to_string(),
+                cases,
+                meta: HashMap::new(),
+            };
+            runner::spawn_runner(config, request)
         };
-        match runner::spawn_runner(config, request) {
+        match started {
             Ok(rx) => {
                 self.runner_rx = Some(rx);
-                self.status = "Run started".to_string();
+                self.status = if needs_dispatch {
+                    "API/mixed run started".to_string()
+                } else {
+                    "Run started".to_string()
+                };
             }
             Err(err) => {
                 self.status = format!("Failed to start runner: {err}");
             }
         }
+    }
+
+    fn explore_cases_need_dispatch(&self, cases: &[RunCase]) -> bool {
+        cases.iter().any(|case| {
+            let Some((fi, si)) = parse_case_key(&case.id) else {
+                return false;
+            };
+            let Some(feature) = self.project.features.get(fi) else {
+                return false;
+            };
+            let Some(scenario) = feature.scenario_at(si) else {
+                return false;
+            };
+            teshi_engine::mode_uses_teshi_dispatch(teshi_core::scenario_engine_mode(
+                feature, scenario,
+            ))
+        })
     }
 
     fn build_explore_cases(&self) -> Vec<RunCase> {
@@ -3264,13 +3397,73 @@ impl App {
             self.explore_selected_scenario,
         );
         if let Some(detail) = self.explore_case_details.get(&key)
-            && detail.status == RunStatus::Failed
+            && (detail.status == RunStatus::Failed
+                || !detail.exchanges.is_empty()
+                || detail
+                    .steps
+                    .iter()
+                    .any(|s| s.status.as_deref() == Some("failed")))
         {
             self.explore_detail_open = true;
             self.explore_detail_case = Some(key);
         } else {
-            self.status = "No failure details for selection".to_string();
+            self.status = "No run details for selection".to_string();
         }
+    }
+
+    fn toggle_inspector_plaintext(&mut self) {
+        let Some(key) = self.explore_detail_case else {
+            self.status = "Open run details first (Enter), then press p to expand secrets".into();
+            return;
+        };
+        let Some(detail) = self.explore_case_details.get_mut(&key) else {
+            return;
+        };
+        if detail.inspector_plaintext {
+            detail.inspector_plaintext = false;
+            self.status = "Hiding plaintext secrets".into();
+            return;
+        }
+        let root = self.project.root_dir.clone();
+        let ids: Vec<String> = detail
+            .exchanges
+            .iter()
+            .map(|exchange| exchange.exchange_id.clone())
+            .collect();
+        if ids.is_empty() {
+            self.status = "No HTTP exchanges to expand".into();
+            return;
+        }
+        for (index, id) in ids.iter().enumerate() {
+            let command = serde_json::json!({
+                "cmd": "get_exchange",
+                "request_id": "explore-expand",
+                "exchange_id": id,
+                "redact": false,
+            });
+            match teshi_engine::send_api_command(&root, command, std::time::Duration::from_secs(5))
+            {
+                Ok(response) => {
+                    if let Some(value) = response.get("exchange")
+                        && let Ok(parsed) = teshi_core::HttpExchange::from_value(value)
+                        && let Some(slot) = self
+                            .explore_case_details
+                            .get_mut(&key)
+                            .and_then(|d| d.exchanges.get_mut(index))
+                    {
+                        *slot = parsed;
+                    }
+                }
+                Err(err) => {
+                    self.status = format!("Plaintext expand needs a running API sidecar: {err}");
+                    return;
+                }
+            }
+        }
+        if let Some(detail) = self.explore_case_details.get_mut(&key) {
+            detail.inspector_plaintext = true;
+        }
+        self.status = "Showing plaintext secrets (p to hide)".into();
     }
 
     fn persist_explore_memory(&mut self) {
@@ -4552,6 +4745,12 @@ impl App {
             Action::ToggleFailureDetail => {
                 if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     self.toggle_failure_detail();
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ToggleInspectorPlaintext => {
+                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                    self.toggle_inspector_plaintext();
                     self.quit_pending_confirm = false;
                 }
             }
