@@ -108,6 +108,17 @@ Test results stream back as NDJSON lines and are displayed inline in the Explore
 
 See [CLI & Config](cli-usage.md) for more runner options.
 
+## HTTP API BDD
+
+Gherkin can drive HTTP APIs. Each interface is one Jinja2 file under `api/` (override with `[api] templates` in `teshi.toml`). Python step defs in `features/steps/` call `call("create_user.json.j2")` — variables flow through scenario `vars`, not kwargs.
+
+- Mark HTTP steps with `[API]` immediately after the keyword (`When [API] I create a user named "Ada"`).
+- Tag scenarios `@api`, `@ui`, or both (`@api @ui` for mixed). Scenario engine tags override Feature tags (no union).
+- Mixed and Explore runs use Teshi step dispatch: `[API]` → API sidecar, other steps → browser/WinApp bindings. Pure `@api` CI can use behave with the same helper (`TESHI_API_NDJSON=1`).
+- TUI Explore shows redacted `http_exchange` events; press `p` in the detail pane to expand plaintext (requires a running sidecar). GPUI desktop/web **Run** is inspect-only — it does not edit `.feature` files.
+
+Seed vars from `[api]` keys plus `TESHI_API_*` environment variables (`TESHI_API_TOKEN` → `token`). See [CLI & Config](cli-usage.md).
+
 ## WinUI3 / Native App Recording
 
 `teshi desktop` can start a WinUI3/native Windows app bridge with **Connect WinUI3 App**. Terminal agents can then use `teshi winapp` commands through the tracked `winapp-regression` skill. Confirmed UIA bindings are stored in `.teshi/step-bindings/{feature}.json` with `strategy: "uia"`.

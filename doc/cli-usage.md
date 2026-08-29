@@ -63,6 +63,33 @@ bash scripts/run-web-ui-smoke.sh
 
 See [web-ui-self-test.md](web-ui-self-test.md) and `scripts/run-web-ui-smoke.sh`.
 
+### HTTP API BDD (`teshi api`)
+
+Loopback sidecar for Jinja2 HTTP envelopes (same helper used by behave):
+
+```bash
+teshi api serve                   # start/reuse sidecar; writes .teshi/api-endpoint.json
+teshi api doctor                  # ping + template/steps discovery
+teshi api exchange <id>           # redacted http_exchange payload
+teshi api exchange <id> --plaintext
+teshi api stop
+```
+
+Layout: `api/*.json.j2` (one file per HTTP call), `features/steps/*.py` importing `teshi_api.call` / `@when`. Gherkin steps use `[API]` after the keyword. Mixed `@api @ui` scenarios are walked by Teshi; pure `@api` `teshi run` uses the configured `[runner]` (typically behave).
+
+```toml
+[api]
+templates = "api"
+base_url = "https://api.example.test"
+redact_keys = ["x-trace-id"]
+
+[runner]
+cmd = "behave"
+args = ["features"]
+```
+
+`TESHI_API_*` env vars become scenario vars (`TESHI_API_TOKEN` → `token`). GPUI **Run** lists scenarios and inspects exchanges; Gherkin editing stays in the TUI.
+
 ### Browser sidecar (`teshi browser`)
 
 Commands for locator recording, replay, and sidecar health (see [browser-modes.md](browser-modes.md)):
@@ -223,6 +250,11 @@ In the TUI, press `m` to open the model panel (same store). `/auth` shows a read
 cmd = "teshi-runner"
 args = ["--bin", "runner"]
 cwd = "."
+
+[api]
+templates = "api"
+base_url = "https://api.example.test"
+redact_keys = ["x-trace-id"]
 ```
 
 Older `[providers.*]` blocks and `${auth:…}` placeholders in `config.toml` are no longer the runtime LLM source of truth; they are only imported once into model profiles when the shared store is empty.
@@ -242,6 +274,9 @@ Older `[providers.*]` blocks and `${auth:…}` placeholders in `config.toml` are
 | `TESHI_RUNNER_CMD` | — | Override runner command |
 | `TESHI_RUNNER_ARGS` | — | Override runner args (space-separated) |
 | `TESHI_RUNNER_CWD` | current dir | Override runner working directory |
+| `TESHI_API_SERVICE` | bundled `api_service.py` | Override API sidecar script path |
+| `TESHI_API_NDJSON` | — | When set (not `0`), API helper prints `http_exchange` NDJSON to stdout |
+| `TESHI_API_*` | — | Seeded into scenario `vars` (`TESHI_API_TOKEN` → `token`) |
 | `TESHI_CLI` | — | Absolute path to `teshi` binary (Desktop embedded terminal sets this to the dev build) |
 | `TESHI_DIAG_PATH` | — | Write diagnostic log to this file path |
 | `TESHI_NO_RAW` | — | Disable raw terminal mode |
