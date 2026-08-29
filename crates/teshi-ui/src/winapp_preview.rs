@@ -34,7 +34,7 @@ impl PreviewModel {
         Self {
             status: PreviewStatus::Connecting,
             target: target.into(),
-            detail: "Starting WinApp preview…".into(),
+            detail: "Starting screenshot stream…".into(),
             capture_note: "Waiting for capture backend details…".into(),
             frame: None,
         }
@@ -157,11 +157,7 @@ impl Render for WinAppPreview {
                             .flex()
                             .flex_col()
                             .gap(px(3.))
-                            .child(
-                                div()
-                                    .text_color(rgb(0xcdd6f4))
-                                    .child("WinApp window preview"),
-                            )
+                            .child(div().text_color(rgb(0xcdd6f4)).child("Screenshot stream"))
                             .child(
                                 div()
                                     .text_sm()

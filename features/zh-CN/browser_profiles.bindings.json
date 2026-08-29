@@ -1,0 +1,106 @@
+{
+  "format_version": 2,
+  "feature": "features/zh-CN/browser_profiles.feature",
+  "steps": [
+    {
+      "step_line": 10,
+      "step_keyword": "假如",
+      "step_text": "teshi web 运行在 http://127.0.0.1:20253/?e2e=1",
+      "step_text_normalized": "teshi web 运行在 http://127.0.0.1:20253/?e2e=1",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "url",
+        "value": "http://127.0.0.1:20253/?e2e=1",
+        "action": "navigate",
+        "value_arg": "http://127.0.0.1:20253/?e2e=1"
+      },
+      "confirmed_at": "2026-08-28T12:00:00+00:00"
+    },
+    {
+      "step_line": 13,
+      "step_keyword": "当",
+      "step_text": "teshi web 页面加载完成",
+      "step_text_normalized": "teshi web 页面加载完成",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=e2e-root]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-08-28T12:00:00+00:00"
+    },
+    {
+      "step_line": 24,
+      "step_keyword": "当",
+      "step_text": "用户选择一个浏览器配置",
+      "step_text_normalized": "用户选择一个浏览器配置",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=select-first-browser-profile]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-08-28T12:00:00+00:00"
+    },
+    {
+      "step_line": 25,
+      "step_keyword": "那么",
+      "step_text": "该配置成为活动的浏览器目标",
+      "step_text_normalized": "该配置成为活动的浏览器目标",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=e2e-profile-selected]",
+        "action": "assert_text",
+        "value_arg": "true"
+      },
+      "confirmed_at": "2026-08-28T12:00:00+00:00"
+    },
+    {
+      "step_line": 28,
+      "step_keyword": "假如",
+      "step_text": "浏览器配置表面已显示",
+      "step_text_normalized": "浏览器配置表面已显示",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-browser-sessions]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-08-28T12:00:00+00:00"
+    },
+    {
+      "step_line": 29,
+      "step_keyword": "当",
+      "step_text": "用户刷新浏览器配置列表",
+      "step_text_normalized": "用户刷新浏览器配置列表",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=refresh-browser-sessions]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-08-28T12:00:00+00:00"
+    },
+    {
+      "step_line": 30,
+      "step_keyword": "那么",
+      "step_text": "配置列表已从当前桥接更新",
+      "step_text_normalized": "配置列表已从当前桥接更新",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=e2e-browser-status]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-08-28T12:00:00+00:00"
+    }
+  ]
+}

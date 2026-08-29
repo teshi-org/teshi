@@ -1,0 +1,106 @@
+{
+  "format_version": 2,
+  "feature": "features/browser_profiles.feature",
+  "steps": [
+    {
+      "step_line": 10,
+      "step_keyword": "Given",
+      "step_text": "teshi web is running at http://127.0.0.1:20253/?e2e=1",
+      "step_text_normalized": "teshi web is running at http://127.0.0.1:20253/?e2e=1",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "url",
+        "value": "http://127.0.0.1:20253/?e2e=1",
+        "action": "navigate",
+        "value_arg": "http://127.0.0.1:20253/?e2e=1"
+      },
+      "confirmed_at": "2026-08-28T11:26:12.346593500+00:00"
+    },
+    {
+      "step_line": 13,
+      "step_keyword": "When",
+      "step_text": "the teshi web page finishes loading",
+      "step_text_normalized": "the teshi web page finishes loading",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=e2e-root]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-08-28T11:26:16.583130200+00:00"
+    },
+    {
+      "step_line": 24,
+      "step_keyword": "When",
+      "step_text": "the user selects a browser profile",
+      "step_text_normalized": "the user selects a browser profile",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=select-first-browser-profile]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-08-28T11:26:18.752860600+00:00"
+    },
+    {
+      "step_line": 25,
+      "step_keyword": "Then",
+      "step_text": "that profile becomes the active browser target",
+      "step_text_normalized": "that profile becomes the active browser target",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=e2e-profile-selected]",
+        "action": "assert_text",
+        "value_arg": "true"
+      },
+      "confirmed_at": "2026-08-28T11:26:19.880480500+00:00"
+    },
+    {
+      "step_line": 28,
+      "step_keyword": "Given",
+      "step_text": "the Browser Profiles surface is shown",
+      "step_text_normalized": "the browser profiles surface is shown",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-browser-sessions]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-08-28T11:26:21.033142900+00:00"
+    },
+    {
+      "step_line": 29,
+      "step_keyword": "When",
+      "step_text": "the user refreshes the browser profile list",
+      "step_text_normalized": "the user refreshes the browser profile list",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=refresh-browser-sessions]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-08-28T11:26:22.138324800+00:00"
+    },
+    {
+      "step_line": 30,
+      "step_keyword": "Then",
+      "step_text": "the profile list is updated from the current bridge",
+      "step_text_normalized": "the profile list is updated from the current bridge",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=e2e-browser-status]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-08-28T11:26:23.104162400+00:00"
+    }
+  ]
+}

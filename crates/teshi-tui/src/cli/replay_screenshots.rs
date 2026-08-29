@@ -2,10 +2,11 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use teshi_engine::send_sidecar_command_with_timeout;
 
+/// One JPEG captured after a replayed Gherkin step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplayScreenshotEntry {
     pub step_line: usize,
@@ -15,6 +16,7 @@ pub struct ReplayScreenshotEntry {
     pub captured_at: String,
 }
 
+/// Index of screenshots for one feature replay run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplayScreenshotsIndex {
     pub feature: String,
@@ -26,6 +28,10 @@ pub struct ReplayScreenshotsIndex {
 
 /// Captures a screenshot via the sidecar WebSocket, saves to disk as JPEG,
 /// and returns a metadata entry suitable for the replay index.
+///
+/// This path is for embedded Playwright and WinApp sidecars that answer
+/// `cmd: screenshot` with a base64 JPEG. Chrome-bridge replay must use
+/// [`save_screenshot_from_artifact`] after `capture_browser_screenshot`.
 pub fn capture_and_save_screenshot(
     ws_url: &str,
     _project_root: &Path,
@@ -35,7 +41,6 @@ pub fn capture_and_save_screenshot(
     step_text: &str,
     screenshot_dir: &Path,
 ) -> Result<ReplayScreenshotEntry> {
-    // 1. Send screenshot command via WebSocket
     let response = send_sidecar_command_with_timeout(
         ws_url,
         json!({
@@ -51,35 +56,93 @@ pub fn capture_and_save_screenshot(
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("screenshot response missing 'screenshot' field"))?;
 
-    // 2. Decode base64
     use base64::Engine;
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(b64)
         .context("decode base64 screenshot")?;
 
-    // 3. Build filename and write
+    save_jpeg_bytes(
+        &decoded,
+        feature_sanitized,
+        step_line,
+        step_keyword,
+        step_text,
+        screenshot_dir,
+    )
+}
+
+/// Copies a managed browser screenshot artifact into the replay screenshot directory.
+///
+/// # Errors
+///
+/// Returns an error when the artifact cannot be read or the replay file cannot be written.
+pub fn save_screenshot_from_artifact(
+    artifact_path: &Path,
+    feature_sanitized: &str,
+    step_line: usize,
+    step_keyword: &str,
+    step_text: &str,
+    screenshot_dir: &Path,
+) -> Result<ReplayScreenshotEntry> {
+    let bytes = fs::read(artifact_path)
+        .with_context(|| format!("read screenshot artifact {}", artifact_path.display()))?;
+    save_jpeg_bytes(
+        &bytes,
+        feature_sanitized,
+        step_line,
+        step_keyword,
+        step_text,
+        screenshot_dir,
+    )
+}
+
+/// Reads the managed artifact path from a `capture_browser_screenshot` payload.
+///
+/// # Errors
+///
+/// Returns an error when `artifact.path` is missing or empty.
+pub fn artifact_path_from_screenshot_payload(payload: &serde_json::Value) -> Result<PathBuf> {
+    let path = payload
+        .get("artifact")
+        .and_then(|artifact| artifact.get("path"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("screenshot response missing artifact.path"))?;
+    Ok(PathBuf::from(path))
+}
+
+/// Writes JPEG bytes into the replay screenshot directory and returns an index entry.
+pub fn save_jpeg_bytes(
+    bytes: &[u8],
+    feature_sanitized: &str,
+    step_line: usize,
+    step_keyword: &str,
+    step_text: &str,
+    screenshot_dir: &Path,
+) -> Result<ReplayScreenshotEntry> {
+    if bytes.is_empty() {
+        return Err(anyhow!("screenshot bytes are empty"));
+    }
     let unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
 
-    let filename = format!("{}_L{}_{}.jpg", feature_sanitized, step_line, unix_ms);
+    let filename = format!("{feature_sanitized}_L{step_line}_{unix_ms}.jpg");
     let filepath = screenshot_dir.join(&filename);
 
     fs::create_dir_all(screenshot_dir)
         .with_context(|| format!("create screenshot dir {}", screenshot_dir.display()))?;
-    fs::write(&filepath, &decoded)
+    fs::write(&filepath, bytes)
         .with_context(|| format!("write screenshot {}", filepath.display()))?;
-
-    // 4. Build ISO 8601 timestamp
-    let captured_at = iso_now();
 
     Ok(ReplayScreenshotEntry {
         step_line,
         step_keyword: step_keyword.to_string(),
         step_text: step_text.to_string(),
         screenshot_file: filename,
-        captured_at,
+        captured_at: iso_now(),
     })
 }
 
@@ -108,15 +171,79 @@ pub fn save_index(screenshot_dir: &Path, index: &ReplayScreenshotsIndex) -> Resu
     Ok(())
 }
 
+/// Format a Unix-epoch timestamp as a coarse ISO-like string.
 pub fn iso_now() -> String {
-    // Simple ISO-like timestamp. We don't have chrono in tree deps as
-    // a direct dep of the CLI crate, so use local time via std.
     let d = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    // Format as ISO 8601 without external dep: YYYY-MM-DDTHH:MM:SS.fffZ
     let secs = d.as_secs();
     let millis = d.subsec_millis();
-    // Use a simple approach: unix timestamp string
     format!("{}", secs as f64 + millis as f64 / 1000.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_path_from_screenshot_payload_reads_managed_path() {
+        let payload = json!({
+            "ok": true,
+            "operation": "capture_browser_screenshot",
+            "artifact": {
+                "path": "D:\\\\tmp\\\\shot.jpg",
+                "format": "jpeg"
+            }
+        });
+        let path = artifact_path_from_screenshot_payload(&payload).unwrap();
+        assert!(path.ends_with("shot.jpg"));
+    }
+
+    #[test]
+    fn artifact_path_from_screenshot_payload_rejects_missing_path() {
+        let err = artifact_path_from_screenshot_payload(&json!({"ok": true})).unwrap_err();
+        assert!(err.to_string().contains("artifact.path"));
+    }
+
+    #[test]
+    fn save_jpeg_bytes_writes_named_file_and_index_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = save_jpeg_bytes(
+            b"fake-jpeg",
+            "features_run_inspect",
+            12,
+            "Then",
+            "the Run inspect surface is shown",
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(entry.step_line, 12);
+        assert!(
+            entry
+                .screenshot_file
+                .starts_with("features_run_inspect_L12_")
+        );
+        assert!(entry.screenshot_file.ends_with(".jpg"));
+        let written = fs::read(dir.path().join(&entry.screenshot_file)).unwrap();
+        assert_eq!(written, b"fake-jpeg");
+    }
+
+    #[test]
+    fn save_screenshot_from_artifact_copies_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = dir.path().join("managed.jpeg");
+        fs::write(&artifact, b"jpeg-bytes").unwrap();
+        let dest = dir.path().join("replay");
+        let entry = save_screenshot_from_artifact(
+            &artifact,
+            "feat",
+            3,
+            "When",
+            "the user opens the Run surface",
+            &dest,
+        )
+        .unwrap();
+        let copied = fs::read(dest.join(&entry.screenshot_file)).unwrap();
+        assert_eq!(copied, b"jpeg-bytes");
+    }
 }

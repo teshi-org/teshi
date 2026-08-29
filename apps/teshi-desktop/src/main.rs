@@ -14,9 +14,10 @@ use teshi_engine::{
     default_winapp_service_script, open_project, start_browser_sidecar,
 };
 use teshi_ui::{
-    ApiStyleDto, AppShell, BrowserSessionListSnapshot, BrowserSessionsBackend, BrowserTabTarget,
-    LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate, ModelProfileListSnapshot,
-    ModelProfileSnapshot, ModelProfileUpdate, WinAppPreview, bind_llm_config_keys,
+    ApiRunBackend, ApiRunEventDto, ApiScenarioSnapshot, ApiStyleDto, AppShell,
+    BrowserSessionListSnapshot, BrowserSessionsBackend, BrowserTabTarget, LlmConfigBackend,
+    LlmConfigSnapshot, LlmConfigUpdate, ModelProfileListSnapshot, ModelProfileSnapshot,
+    ModelProfileUpdate, WinAppPreview, bind_llm_config_keys,
 };
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -401,13 +402,77 @@ impl BrowserSessionsBackend for NativePlatformBackend {
     }
 }
 
+impl ApiRunBackend for NativePlatformBackend {
+    fn list_scenarios(&self) -> Result<Vec<ApiScenarioSnapshot>, String> {
+        let root = std::env::current_dir().map_err(|e| e.to_string())?;
+        Ok(teshi_engine::list_runnable_scenarios(&root)
+            .into_iter()
+            .map(|item| ApiScenarioSnapshot {
+                id: item.id,
+                feature_path: item.feature_path,
+                name: item.name,
+                tags: item.tags,
+                engine_mode: item.engine_mode,
+            })
+            .collect())
+    }
+
+    fn start_run(&self, scenario_ids: &[String]) -> Result<Vec<ApiRunEventDto>, String> {
+        let root = std::env::current_dir().map_err(|e| e.to_string())?;
+        let listed = teshi_engine::list_runnable_scenarios(&root);
+        let cases: Vec<teshi_engine::DispatchCase> = listed
+            .into_iter()
+            .filter(|item| scenario_ids.iter().any(|id| id == &item.id))
+            .map(|item| teshi_engine::DispatchCase {
+                id: item.id,
+                feature_path: std::path::PathBuf::from(item.feature_path),
+                scenario: item.name,
+            })
+            .collect();
+        let mut events = Vec::new();
+        teshi_engine::dispatch_cases(
+            &root,
+            &teshi_engine::default_api_service_script(),
+            &cases,
+            |value| {
+                events.push(ApiRunEventDto {
+                    type_name: value
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    payload: value,
+                });
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(events)
+    }
+
+    fn get_exchange(&self, exchange_id: &str, redact: bool) -> Result<serde_json::Value, String> {
+        let root = std::env::current_dir().map_err(|e| e.to_string())?;
+        teshi_engine::send_api_command(
+            &root,
+            serde_json::json!({
+                "cmd": "get_exchange",
+                "request_id": "desktop-expand",
+                "exchange_id": exchange_id,
+                "redact": redact,
+            }),
+            Duration::from_secs(5),
+        )
+        .map_err(|e| e.to_string())
+    }
+}
+
 fn main() {
     gpui_platform::application().run(|cx: &mut App| {
         bind_llm_config_keys(cx);
         let bounds = Bounds::centered(None, size(px(960.0), px(720.0)), cx);
         let platform = Rc::new(NativePlatformBackend);
         let llm_backend: Rc<dyn LlmConfigBackend> = platform.clone();
-        let browser_backend: Rc<dyn BrowserSessionsBackend> = platform;
+        let browser_backend: Rc<dyn BrowserSessionsBackend> = platform.clone();
+        let api_backend: Rc<dyn ApiRunBackend> = platform;
         let process_name = std::env::var("TESHI_WINAPP_PROCESS")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -434,6 +499,7 @@ fn main() {
                     AppShell::new(
                         llm_backend.clone(),
                         browser_backend.clone(),
+                        api_backend.clone(),
                         preview.clone(),
                         window,
                         cx,

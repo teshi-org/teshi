@@ -5,11 +5,15 @@ use std::rc::Rc;
 use base64::Engine as _;
 use gpui::{AppCell, Entity, prelude::*};
 use teshi_ui::{
-    AppShell, BrowserSessionListSnapshot, BrowserSessionsBackend, BrowserTabTarget,
-    LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate, ModelProfileListSnapshot,
-    ModelProfileSnapshot, ModelProfileUpdate, WinAppPreview, bind_llm_config_keys,
+    ApiRunBackend, ApiRunEventDto, ApiScenarioSnapshot, AppShell, BrowserSessionListSnapshot,
+    BrowserSessionsBackend, BrowserTabTarget, LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate,
+    ModelProfileListSnapshot, ModelProfileSnapshot, ModelProfileUpdate, WinAppPreview,
+    bind_llm_config_keys,
 };
+use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
+
+mod e2e;
 
 fn query_parameter(name: &str) -> Option<String> {
     let search = web_sys::window()?.location().search().ok()?;
@@ -48,22 +52,44 @@ fn update_preview(
     }
 }
 
-fn start_wasm_preview(preview: Entity<WinAppPreview>, app: Rc<AppCell>, cx: &mut gpui::App) {
+fn schedule_preview_reconnect(preview: Entity<WinAppPreview>, app: Rc<AppCell>) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let closure = Closure::wrap(Box::new(move || {
+        start_wasm_preview(preview.clone(), app.clone(), false);
+    }) as Box<dyn FnMut()>);
+    let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+        closure.as_ref().unchecked_ref(),
+        2_000,
+    );
+    closure.forget();
+}
+
+fn start_wasm_preview(preview: Entity<WinAppPreview>, app: Rc<AppCell>, start_winapp: bool) {
     let ws_url = if let Some(ws_url) = query_parameter("winapp_ws") {
         ws_url
     } else {
-        match WasmBackend::xhr_json(
-            "POST",
-            "/api/v1/browser/start",
-            Some(r#"{"mode":"winapp"}"#),
-        )
-        .and_then(|_| same_origin_preview_ws_url())
-        {
-            Ok(ws_url) => ws_url,
-            Err(error) => {
-                preview.update(cx, |preview, cx| {
+        if start_winapp {
+            if let Err(error) = WasmBackend::xhr_json(
+                "POST",
+                "/api/v1/browser/start",
+                Some(r#"{"mode":"winapp"}"#),
+            ) {
+                update_preview(&app, &preview, |preview, cx| {
                     preview.set_error(format!("start WinApp sidecar: {error}"), cx);
                 });
+                schedule_preview_reconnect(preview, app);
+                return;
+            }
+        }
+        match same_origin_preview_ws_url() {
+            Ok(ws_url) => ws_url,
+            Err(error) => {
+                update_preview(&app, &preview, |preview, cx| {
+                    preview.set_error(format!("preview WebSocket URL: {error}"), cx);
+                });
+                schedule_preview_reconnect(preview, app);
                 return;
             }
         }
@@ -72,9 +98,10 @@ fn start_wasm_preview(preview: Entity<WinAppPreview>, app: Rc<AppCell>, cx: &mut
     let socket = match web_sys::WebSocket::new(&ws_url) {
         Ok(socket) => socket,
         Err(error) => {
-            preview.update(cx, |preview, cx| {
+            update_preview(&app, &preview, |preview, cx| {
                 preview.set_error(format!("open {ws_url}: {error:?}"), cx);
             });
+            schedule_preview_reconnect(preview, app);
             return;
         }
     };
@@ -83,10 +110,7 @@ fn start_wasm_preview(preview: Entity<WinAppPreview>, app: Rc<AppCell>, cx: &mut
     let open_preview = preview.clone();
     let on_open = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
         update_preview(&open_app, &open_preview, |preview, cx| {
-            preview.set_waiting(
-                "Connected through daemon; attaching to target application…",
-                cx,
-            );
+            preview.set_waiting("Connected; waiting for screenshot stream…", cx);
         });
     });
     socket.set_onopen(Some(on_open.as_ref().unchecked_ref()));
@@ -137,7 +161,7 @@ fn start_wasm_preview(preview: Entity<WinAppPreview>, app: Rc<AppCell>, cx: &mut
                     let error = payload
                         .get("error")
                         .and_then(|value| value.as_str())
-                        .unwrap_or("WinApp capture failed")
+                        .unwrap_or("screenshot stream failed")
                         .to_string();
                     update_preview(&message_app, &message_preview, |preview, cx| {
                         preview.set_error(error, cx);
@@ -173,7 +197,7 @@ fn start_wasm_preview(preview: Entity<WinAppPreview>, app: Rc<AppCell>, cx: &mut
     let on_error =
         Closure::<dyn FnMut(web_sys::ErrorEvent)>::new(move |event: web_sys::ErrorEvent| {
             let detail = if event.message().is_empty() {
-                "browser rejected the WinApp preview WebSocket".to_string()
+                "browser rejected the screenshot-stream WebSocket".to_string()
             } else {
                 event.message()
             };
@@ -184,8 +208,10 @@ fn start_wasm_preview(preview: Entity<WinAppPreview>, app: Rc<AppCell>, cx: &mut
     socket.set_onerror(Some(on_error.as_ref().unchecked_ref()));
     on_error.forget();
 
-    let close_app = app;
-    let close_preview = preview;
+    let close_app = Rc::clone(&app);
+    let close_preview = preview.clone();
+    let reconnect_app = app;
+    let reconnect_preview = preview;
     let on_close =
         Closure::<dyn FnMut(web_sys::CloseEvent)>::new(move |event: web_sys::CloseEvent| {
             let detail = if event.reason().is_empty() {
@@ -196,6 +222,7 @@ fn start_wasm_preview(preview: Entity<WinAppPreview>, app: Rc<AppCell>, cx: &mut
             update_preview(&close_app, &close_preview, |preview, cx| {
                 preview.set_error(detail, cx);
             });
+            schedule_preview_reconnect(reconnect_preview.clone(), Rc::clone(&reconnect_app));
         });
     socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
     on_close.forget();
@@ -291,6 +318,44 @@ impl BrowserSessionsBackend for WasmBackend {
     }
 }
 
+impl ApiRunBackend for WasmBackend {
+    fn list_scenarios(&self) -> Result<Vec<ApiScenarioSnapshot>, String> {
+        let text = Self::xhr_json("GET", "/api/v1/gherkin/scenarios", None)?;
+        serde_json::from_str(&text).map_err(|e| e.to_string())
+    }
+
+    fn start_run(&self, scenario_ids: &[String]) -> Result<Vec<ApiRunEventDto>, String> {
+        let body = serde_json::json!({ "scenario_ids": scenario_ids });
+        let text = Self::xhr_json("POST", "/api/v1/daemon/run", Some(&body.to_string()))?;
+        let mut events = Vec::new();
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let payload: serde_json::Value =
+                serde_json::from_str(line).map_err(|e| e.to_string())?;
+            events.push(ApiRunEventDto {
+                type_name: payload
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                payload,
+            });
+        }
+        Ok(events)
+    }
+
+    fn get_exchange(&self, exchange_id: &str, redact: bool) -> Result<serde_json::Value, String> {
+        let body = serde_json::json!({
+            "exchange_id": exchange_id,
+            "redact": redact,
+        });
+        let text = Self::xhr_json("POST", "/api/v1/api/exchange", Some(&body.to_string()))?;
+        serde_json::from_str(&text).map_err(|e| e.to_string())
+    }
+}
+
 /// Start the GPUI web shell and report async startup outcome to JavaScript.
 ///
 /// GPU initialization is asynchronous. Call `on_ready` after the window opens
@@ -314,28 +379,39 @@ pub fn run(on_ready: js_sys::Function, on_error: js_sys::Function) -> Result<(),
         bind_llm_config_keys(cx);
         let platform = Rc::new(WasmBackend);
         let llm_backend: Rc<dyn LlmConfigBackend> = platform.clone();
-        let browser_backend: Rc<dyn BrowserSessionsBackend> = platform;
-        let preview = cx.new(|_| WinAppPreview::new("target application"));
-        match cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-            cx.new(|cx| {
+        let browser_backend: Rc<dyn BrowserSessionsBackend> = platform.clone();
+        let api_backend: Rc<dyn ApiRunBackend> = platform;
+        let preview = cx.new(|_| WinAppPreview::new("browser tab"));
+        let shell_slot: Rc<std::cell::RefCell<Option<gpui::Entity<AppShell>>>> =
+            Rc::new(std::cell::RefCell::new(None));
+        let shell_for_window = shell_slot.clone();
+        let preview_for_window = preview.clone();
+        match cx.open_window(gpui::WindowOptions::default(), move |window, cx| {
+            let shell = cx.new(|cx| {
                 AppShell::new(
                     llm_backend.clone(),
                     browser_backend.clone(),
-                    preview.clone(),
+                    api_backend.clone(),
+                    preview_for_window.clone(),
                     window,
                     cx,
                 )
-            })
+            });
+            *shell_for_window.borrow_mut() = Some(shell.clone());
+            shell
         }) {
             Ok(_) => {
-                cx.activate(true);
-                // WinApp capture is opt-in. Starting it unconditionally would replace
-                // an active Chrome bridge while the default Browser surface loads.
-                if query_parameter("winapp_preview").is_some()
-                    || query_parameter("winapp_ws").is_some()
-                {
-                    start_wasm_preview(preview, app_cell.clone(), cx);
+                if e2e::e2e_enabled() {
+                    if let Some(shell) = shell_slot.borrow().clone() {
+                        e2e::install(app_cell.clone(), shell);
+                    }
                 }
+                cx.activate(true);
+                // Connect to the daemon screenshot stream without starting WinApp.
+                // Starting WinApp here would replace an active Chrome bridge.
+                // `?winapp_preview=1` still starts the WinApp sidecar first.
+                let start_winapp = query_parameter("winapp_preview").is_some();
+                start_wasm_preview(preview, app_cell.clone(), start_winapp);
                 if let Err(err) = on_ready.call0(&JsValue::NULL) {
                     web_sys::console::error_1(&err);
                 }

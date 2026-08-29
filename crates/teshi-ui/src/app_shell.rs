@@ -1,4 +1,4 @@
-//! Shared root shell: browser sessions, WinApp preview, and settings host.
+//! Shared root shell: browser sessions, WinApp preview, Run/API inspect, and settings host.
 
 use gpui::{
     App, AppContext, Context, Entity, FocusHandle, Focusable, FontWeight, InteractiveElement,
@@ -6,9 +6,10 @@ use gpui::{
     px, rgb,
 };
 
-use crate::backend::{SharedBrowserSessionsBackend, SharedLlmBackend};
+use crate::backend::{SharedApiRunBackend, SharedBrowserSessionsBackend, SharedLlmBackend};
 use crate::browser_sessions_view::BrowserSessionsView;
 use crate::llm_config_view::LlmConfigView;
+use crate::run_view::ApiRunView;
 use crate::winapp_preview::WinAppPreview;
 
 /// Which primary surface the shell is showing.
@@ -19,8 +20,22 @@ pub enum ShellSurface {
     Browser,
     /// Native Windows application preview.
     WinApp,
+    /// Run and inspect HTTP API / mixed Gherkin scenarios (no editor).
+    Run,
     /// Settings host (LLM config and future panels).
     Settings,
+}
+
+impl ShellSurface {
+    /// Stable token written to the web e2e DOM (`data-testid="e2e-surface"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Browser => "browser",
+            Self::WinApp => "winapp",
+            Self::Run => "run",
+            Self::Settings => "settings",
+        }
+    }
 }
 
 /// Root GPUI view for desktop and web: browser sessions, WinApp preview, and settings.
@@ -33,6 +48,7 @@ pub struct AppShell {
     llm_config: Entity<LlmConfigView>,
     browser_sessions: Entity<BrowserSessionsView>,
     winapp_preview: Entity<WinAppPreview>,
+    api_run: Entity<ApiRunView>,
 }
 
 impl AppShell {
@@ -43,6 +59,7 @@ impl AppShell {
     pub fn new(
         llm_backend: SharedLlmBackend,
         browser_backend: SharedBrowserSessionsBackend,
+        api_run_backend: SharedApiRunBackend,
         winapp_preview: Entity<WinAppPreview>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -51,24 +68,57 @@ impl AppShell {
         window.focus(&focus_handle, cx);
         let llm_config = cx.new(|cx| LlmConfigView::new(llm_backend, window, cx));
         let browser_sessions = cx.new(|cx| BrowserSessionsView::new(browser_backend, window, cx));
+        let api_run = cx.new(|cx| ApiRunView::new(api_run_backend, window, cx));
         Self {
             surface: ShellSurface::Browser,
             focus_handle,
             llm_config,
             browser_sessions,
             winapp_preview,
+            api_run,
         }
     }
 
-    fn set_surface(&mut self, surface: ShellSurface, window: &mut Window, cx: &mut Context<Self>) {
+    /// Which shell surface is currently visible.
+    pub fn surface(&self) -> ShellSurface {
+        self.surface
+    }
+
+    /// Run/API inspect view (used by the web e2e DOM bridge).
+    pub fn api_run(&self) -> &Entity<ApiRunView> {
+        &self.api_run
+    }
+
+    /// Browser-profile view (used by the web e2e DOM bridge).
+    pub fn browser_sessions(&self) -> &Entity<BrowserSessionsView> {
+        &self.browser_sessions
+    }
+
+    /// Switch the visible surface without requiring a pointer event.
+    ///
+    /// Focus is updated when a window is supplied (header clicks). The web e2e
+    /// bridge may omit focus and still change the rendered surface.
+    pub fn show_surface(
+        &mut self,
+        surface: ShellSurface,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         self.surface = surface;
-        let handle = match surface {
-            ShellSurface::Browser => self.browser_sessions.read(cx).focus_handle(cx),
-            ShellSurface::Settings => self.llm_config.read(cx).focus_handle(cx),
-            ShellSurface::WinApp => self.focus_handle.clone(),
-        };
-        window.focus(&handle, cx);
+        if let Some(window) = window {
+            let handle = match surface {
+                ShellSurface::Browser => self.browser_sessions.read(cx).focus_handle(cx),
+                ShellSurface::Settings => self.llm_config.read(cx).focus_handle(cx),
+                ShellSurface::WinApp => self.focus_handle.clone(),
+                ShellSurface::Run => self.api_run.read(cx).focus_handle(cx),
+            };
+            window.focus(&handle, cx);
+        }
         cx.notify();
+    }
+
+    fn set_surface(&mut self, surface: ShellSurface, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_surface(surface, Some(window), cx);
     }
 
     fn nav_button(
@@ -110,7 +160,8 @@ impl AppShell {
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let title = match self.surface {
             ShellSurface::Browser => "Teshi · Browser Profiles",
-            ShellSurface::WinApp => "Teshi · WinApp Preview",
+            ShellSurface::WinApp => "Teshi · Screenshot Stream",
+            ShellSurface::Run => "Teshi · Run / API",
             ShellSurface::Settings => "Settings",
         };
 
@@ -143,10 +194,11 @@ impl AppShell {
                     ))
                     .child(self.nav_button(
                         "open-winapp-preview",
-                        "WinApp",
+                        "Preview",
                         ShellSurface::WinApp,
                         cx,
                     ))
+                    .child(self.nav_button("open-api-run", "Run", ShellSurface::Run, cx))
                     .child(self.nav_button(
                         "open-settings",
                         "Settings",
@@ -177,6 +229,9 @@ impl Render for AppShell {
             })
             .when(self.surface == ShellSurface::WinApp, |this| {
                 this.child(div().size_full().child(self.winapp_preview.clone()))
+            })
+            .when(self.surface == ShellSurface::Run, |this| {
+                this.child(div().size_full().child(self.api_run.clone()))
             })
             .when(self.surface == ShellSurface::Settings, |this| {
                 this.child(

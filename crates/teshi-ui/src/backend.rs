@@ -370,3 +370,60 @@ pub trait BrowserSessionsBackend {
 
 /// Shared backend handle used by [`crate::BrowserSessionsView`].
 pub type SharedBrowserSessionsBackend = Rc<dyn BrowserSessionsBackend>;
+
+/// One scenario listed on the GPUI Run surface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiScenarioSnapshot {
+    /// Stable id (`f{feature}:s{scenario}`).
+    pub id: String,
+    /// Feature file path.
+    pub feature_path: String,
+    /// Scenario title.
+    pub name: String,
+    /// Combined feature/scenario tags.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Resolved engine mode (`api`, `ui`, `mixed`).
+    #[serde(default)]
+    pub engine_mode: String,
+}
+
+/// One NDJSON-shaped event from a run (same schema as TUI Explore).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiRunEventDto {
+    /// Event type (`start_case`, `http_exchange`, …).
+    pub type_name: String,
+    /// Full JSON payload (includes `type` and event fields).
+    pub payload: Value,
+}
+
+/// Platform I/O for listing scenarios, starting runs, and expanding exchanges.
+///
+/// `teshi-ui` must not depend on `teshi-engine`; hosts implement this trait.
+pub trait ApiRunBackend {
+    /// List runnable scenarios in the open project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the project cannot be read.
+    fn list_scenarios(&self) -> Result<Vec<ApiScenarioSnapshot>, String>;
+
+    /// Start a run for the selected scenario ids and return collected events.
+    ///
+    /// Implementations may block until the run finishes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the run cannot start.
+    fn start_run(&self, scenario_ids: &[String]) -> Result<Vec<ApiRunEventDto>, String>;
+
+    /// Fetch one HTTP exchange; `redact` false is inspector expand-to-plaintext.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the sidecar is down or the id is unknown.
+    fn get_exchange(&self, exchange_id: &str, redact: bool) -> Result<Value, String>;
+}
+
+/// Shared backend handle used by [`crate::ApiRunView`].
+pub type SharedApiRunBackend = Rc<dyn ApiRunBackend>;

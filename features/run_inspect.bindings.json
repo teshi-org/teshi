@@ -1,0 +1,264 @@
+{
+  "format_version": 2,
+  "feature": "features/run_inspect.feature",
+  "steps": [
+    {
+      "step_line": 10,
+      "step_keyword": "Given",
+      "step_text": "teshi web is running at http://127.0.0.1:20253/?e2e=1",
+      "step_text_normalized": "teshi web is running at http://127.0.0.1:20253/?e2e=1",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "url",
+        "value": "http://127.0.0.1:20253/?e2e=1",
+        "action": "navigate",
+        "value_arg": "http://127.0.0.1:20253/?e2e=1"
+      },
+      "confirmed_at": "2026-08-28T11:20:38.238531+00:00"
+    },
+    {
+      "step_line": 11,
+      "step_keyword": "And",
+      "step_text": "teshi web has a project with Gherkin scenarios open",
+      "step_text_normalized": "teshi web has a project with gherkin scenarios open",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=\"e2e-root\"]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-08-28T11:26:54.299732+00:00"
+    },
+    {
+      "step_line": 15,
+      "step_keyword": "When",
+      "step_text": "the user opens the Run surface",
+      "step_text_normalized": "the user opens the run surface",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-08-28T11:23:15.300073200+00:00"
+    },
+    {
+      "step_line": 17,
+      "step_keyword": "And",
+      "step_text": "teshi web does not show the settings form",
+      "step_text_normalized": "teshi web does not show the settings form",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=e2e-editor]",
+        "action": "assert_text",
+        "value_arg": "none"
+      },
+      "confirmed_at": "2026-08-28T11:23:22.874975500+00:00"
+    },
+    {
+      "step_line": 21,
+      "step_keyword": "When",
+      "step_text": "the user views the scenario list",
+      "step_text_normalized": "the user views the scenario list",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=run-reload]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-08-28T11:23:25.175968200+00:00"
+    },
+    {
+      "step_line": 26,
+      "step_keyword": "When",
+      "step_text": "the user refreshes the scenario list",
+      "step_text_normalized": "the user refreshes the scenario list",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=run-reload]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-08-28T11:23:28.471823900+00:00"
+    },
+    {
+      "step_line": 27,
+      "step_keyword": "Then",
+      "step_text": "teshi web lists Gherkin scenarios from the open project",
+      "step_text_normalized": "teshi web lists gherkin scenarios from the open project",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=e2e-scenarios]",
+        "action": "assert_text",
+        "value_arg": "[api] Create a user then fetch by extracted id"
+      },
+      "confirmed_at": "2026-08-28T11:23:29.611254700+00:00"
+    },
+    {
+      "step_line": 31,
+      "step_keyword": "And",
+      "step_text": "a Gherkin scenario is selected",
+      "step_text_normalized": "a gherkin scenario is selected",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=e2e-scenarios]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-08-28T11:23:31.758826700+00:00"
+    },
+    {
+      "step_line": 32,
+      "step_keyword": "When",
+      "step_text": "the user starts that scenario",
+      "step_text_normalized": "the user starts that scenario",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=run-start]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-08-28T11:23:34.609037700+00:00"
+    },
+    {
+      "step_line": 33,
+      "step_keyword": "Then",
+      "step_text": "an event log is shown for the run",
+      "step_text_normalized": "an event log is shown for the run",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=e2e-run-status]",
+        "action": "assert_text",
+        "value_arg": "Run finished"
+      },
+      "confirmed_at": "2026-08-28T11:23:35.751560400+00:00"
+    },
+    {
+      "step_line": 37,
+      "step_keyword": "When",
+      "step_text": "the user inspects the run events",
+      "step_text_normalized": "the user inspects the run events",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=e2e-events]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-08-28T11:24:10.973193800+00:00"
+    },
+    {
+      "step_line": 38,
+      "step_keyword": "Then",
+      "step_text": "teshi web does not offer a Gherkin editor",
+      "step_text_normalized": "teshi web does not offer a gherkin editor",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=e2e-editor]",
+        "action": "assert_text",
+        "value_arg": "none"
+      },
+      "confirmed_at": "2026-08-28T11:24:12.090529200+00:00"
+    },
+    {
+      "step_line": 41,
+      "step_keyword": "Given",
+      "step_text": "a completed run with redacted HTTP values is shown",
+      "step_text_normalized": "a completed run with redacted http values is shown",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=e2e-run-status]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-08-28T11:24:13.034989+00:00"
+    },
+    {
+      "step_line": 42,
+      "step_keyword": "When",
+      "step_text": "the user expands secrets",
+      "step_text_normalized": "the user expands secrets",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=run-expand]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-08-28T11:24:14.136528+00:00"
+    },
+    {
+      "step_line": 43,
+      "step_keyword": "Then",
+      "step_text": "teshi web reveals the previously redacted values",
+      "step_text_normalized": "teshi web reveals the previously redacted values",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=e2e-run-status]",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-08-28T11:24:15.266061900+00:00"
+    },
+    {
+      "step_line": 46,
+      "step_keyword": "Given",
+      "step_text": "the Run inspect surface is shown",
+      "step_text_normalized": "the run inspect surface is shown",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-08-28T11:24:16.391204100+00:00"
+    },
+    {
+      "step_line": 47,
+      "step_keyword": "When",
+      "step_text": "the user opens the Browser Profiles surface",
+      "step_text_normalized": "the user opens the browser profiles surface",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-browser-sessions]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-08-28T11:24:17.332217700+00:00"
+    },
+    {
+      "step_line": 48,
+      "step_keyword": "Then",
+      "step_text": "the Browser Profiles surface is shown",
+      "step_text_normalized": "the browser profiles surface is shown",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=e2e-surface]",
+        "action": "assert_text",
+        "value_arg": "browser"
+      },
+      "confirmed_at": "2026-08-28T11:24:18.518070400+00:00"
+    }
+  ]
+}

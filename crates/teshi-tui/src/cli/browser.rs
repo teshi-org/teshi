@@ -25,7 +25,8 @@ use super::browser_endpoint::{
 };
 use super::locator_verify::{LocatorVerifyRecord, append_locator_verify, verify_record_json};
 use super::replay_screenshots::{
-    ReplayScreenshotEntry, capture_and_save_screenshot, iso_now, load_or_create_index, save_index,
+    ReplayScreenshotEntry, artifact_path_from_screenshot_payload, capture_and_save_screenshot,
+    iso_now, load_or_create_index, save_index, save_screenshot_from_artifact,
 };
 use super::{
     BrowserArtifactCleanupArgs, BrowserAuditArgs, BrowserCdpArgs, BrowserCommand,
@@ -1300,28 +1301,31 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                 command_timeout_for_ms(timeout_ms),
             )?
         };
-        // Capture screenshot after each step (before ensure_ok so we capture even on failure)
+        // Capture screenshot after each step (before ensure_ok so we capture even on failure).
         if !args.dry_run {
-            match read_cdp_endpoint(project_root) {
-                Ok(endpoint) => {
-                    match capture_and_save_screenshot(
-                        &endpoint.ws_url,
-                        project_root,
-                        &teshi_engine::sanitize_feature_path(&feature),
-                        step.step_line,
-                        &step.step_keyword,
-                        &step.step_text,
-                        &screenshot_dir,
-                    ) {
-                        Ok(entry) => screenshot_entries.push(entry),
-                        Err(e) => eprintln!(
-                            "warning: screenshot capture failed at L{}: {e}",
-                            step.step_line
-                        ),
-                    }
+            match capture_replay_step_screenshot(
+                project_root,
+                &feature,
+                step.step_line,
+                &step.step_keyword,
+                &step.step_text,
+                &screenshot_dir,
+                &args.target,
+            ) {
+                Ok(entry) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&json!({
+                            "event": "replay_screenshot",
+                            "step_line": entry.step_line,
+                            "screenshot_file": entry.screenshot_file,
+                            "screenshots_dir": screenshot_dir.to_string_lossy(),
+                        }))?
+                    );
+                    screenshot_entries.push(entry);
                 }
                 Err(e) => eprintln!(
-                    "warning: cannot read cdp-endpoint for screenshot at L{}: {e}",
+                    "warning: screenshot capture failed at L{}: {e}",
                     step.step_line
                 ),
             }
@@ -1454,6 +1458,58 @@ fn prompt_continue(step: &StepBinding) -> Result<()> {
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     Ok(())
+}
+
+/// Capture one replay screenshot: Chrome uses P1 `capture_browser_screenshot`;
+/// embedded/WinApp still use the sidecar `cmd: screenshot` JPEG.
+fn capture_replay_step_screenshot(
+    project_root: &Path,
+    feature: &str,
+    step_line: usize,
+    step_keyword: &str,
+    step_text: &str,
+    screenshot_dir: &Path,
+    target: &BrowserTargetArgs,
+) -> Result<ReplayScreenshotEntry> {
+    let feature_sanitized = teshi_engine::sanitize_feature_path(feature);
+    if target.session.is_some() {
+        let (browser_target, lease_token) = required_target(target)?;
+        let endpoint = read_cdp_endpoint(project_root)?;
+        let client = BrowserOperations::new(endpoint.ws_url, Duration::from_secs(15))
+            .with_caller_label("teshi-cli")
+            .with_project_root(project_root.to_string_lossy());
+        let response = client
+            .execute(&BrowserOperation::CaptureBrowserScreenshot {
+                target: browser_target,
+                lease_token,
+                page_context_revision: None,
+                format: BrowserScreenshotFormat::Jpeg,
+                quality: Some(70),
+                full_page: false,
+                element: None,
+            })
+            .map_err(|error| anyhow!("{}", error.message))?;
+        let artifact = artifact_path_from_screenshot_payload(&response.payload)?;
+        save_screenshot_from_artifact(
+            &artifact,
+            &feature_sanitized,
+            step_line,
+            step_keyword,
+            step_text,
+            screenshot_dir,
+        )
+    } else {
+        let endpoint = read_cdp_endpoint(project_root)?;
+        capture_and_save_screenshot(
+            &endpoint.ws_url,
+            project_root,
+            &feature_sanitized,
+            step_line,
+            step_keyword,
+            step_text,
+            screenshot_dir,
+        )
+    }
 }
 
 /// Sidecar wait budget: locator timeout plus slack for Chrome heartbeat and CDP work.

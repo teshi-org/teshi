@@ -77,6 +77,53 @@ impl BrowserSessionsView {
         view
     }
 
+    /// Reload sessions from the host backend.
+    pub fn refresh_public(&mut self, cx: &mut Context<Self>) {
+        self.refresh();
+        cx.notify();
+    }
+
+    /// Start the Chrome bridge from the Browser Profiles surface.
+    pub fn start_bridge_public(&mut self, cx: &mut Context<Self>) {
+        self.start_bridge(cx);
+    }
+
+    /// Select the first eligible connected profile (explicit user choice).
+    pub fn select_first_eligible(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .model
+            .sessions
+            .iter()
+            .find(|session| session.is_eligible())
+            .map(|session| session.identity.extension_instance_id.clone())
+        else {
+            self.status = "No eligible browser profile to select.".into();
+            cx.notify();
+            return;
+        };
+        self.select_session(id, cx);
+    }
+
+    /// Status line shown on Browser Profiles.
+    pub fn status_text(&self) -> String {
+        self.status.to_string()
+    }
+
+    /// Number of connected browser profiles.
+    pub fn profile_count(&self) -> usize {
+        self.model.sessions.len()
+    }
+
+    /// Whether a profile is selected without an explicit user click.
+    pub fn auto_selected(&self) -> bool {
+        self.model.selected_id.is_some() && !self.model.explicitly_selected
+    }
+
+    /// Whether the user has explicitly selected a profile.
+    pub fn explicitly_selected(&self) -> bool {
+        self.model.explicitly_selected && self.model.selected().is_some()
+    }
+
     fn refresh(&mut self) {
         match self.backend.list_browser_sessions() {
             Ok(BrowserSessionListSnapshot { sessions, .. }) => {

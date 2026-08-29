@@ -23,16 +23,16 @@ use teshi_core::{BddFeature, BddProject, FeatureRenderPayload, StepIndex};
 
 use crate::session::{Role, SessionStore};
 use teshi_engine::{
-    check_project_switch_allowed, confirm_locator, delete_profile, get_active_step,
-    get_pending_locator, get_profile_public, get_project_root, get_recent_projects,
-    highlight_locator, list_dir, list_profiles, load_llm_config_public, load_project_settings,
-    open_project, reject_locator, render_feature, resize_terminal, save_profile,
-    save_stored_llm_config, set_active_id, spawn_terminal, start_browser_sidecar,
-    step_binding_statuses, stop_browser_sidecar, sync_active_step, teardown_runtime, unbind_step,
-    write_terminal, ActiveStep, ApiStyle, BrowserError, BrowserMode, BrowserStartResult, DirEntry,
-    LlmConfigPublic, LlmConfigWrite, ModelProfile, ModelProfileList, ModelProfilePublic,
-    PendingLocator, ProjectSettings, RuntimeEvent, StepBinding, StepBindingStatus, TeshiEngine,
-    PROVIDER_OPENAI,
+    check_project_switch_allowed, confirm_locator, default_api_service_script, delete_profile,
+    dispatch_cases, get_active_step, get_pending_locator, get_profile_public, get_project_root,
+    get_recent_projects, highlight_locator, list_dir, list_profiles, list_runnable_scenarios,
+    load_llm_config_public, load_project_settings, open_project, reject_locator, render_feature,
+    resize_terminal, save_profile, save_stored_llm_config, send_api_command, set_active_id,
+    spawn_terminal, start_browser_sidecar, step_binding_statuses, stop_browser_sidecar,
+    sync_active_step, teardown_runtime, unbind_step, write_terminal, ActiveStep, ApiStyle,
+    BrowserError, BrowserMode, BrowserStartResult, DirEntry, DispatchCase, LlmConfigPublic,
+    LlmConfigWrite, ModelProfile, ModelProfileList, ModelProfilePublic, PendingLocator,
+    ProjectSettings, RuntimeEvent, StepBinding, StepBindingStatus, TeshiEngine, PROVIDER_OPENAI,
 };
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
@@ -157,6 +157,8 @@ pub async fn run_server(
         .route("/api/v1/settings/recent", get(api_recent))
         .route("/api/v1/fs/list", get(api_list_dir))
         .route("/api/v1/gherkin/render", post(api_render_feature))
+        .route("/api/v1/gherkin/scenarios", get(api_gherkin_scenarios))
+        .route("/api/v1/api/exchange", post(api_get_exchange))
         .route("/api/v1/locator/sync-step", post(api_sync_step))
         .route("/api/v1/locator/active-step", get(api_active_step))
         .route("/api/v1/locator/pending", get(api_pending_locator))
@@ -306,36 +308,47 @@ fn is_preview_frame(text: &str) -> bool {
         .is_some_and(|kind| kind == "frame")
 }
 
+/// Chrome, embedded Playwright, and WinApp sidecars all emit `{type:frame}` JPEGs.
+fn preview_stream_supported(mode: Option<BrowserMode>) -> bool {
+    matches!(
+        mode,
+        Some(BrowserMode::WinApp | BrowserMode::Chrome | BrowserMode::Embedded)
+    )
+}
+
 async fn browser_stream_ws(State(state): State<DaemonState>, ws: WebSocketUpgrade) -> Response {
     state.touch();
     let Some(ws_url) = state.rt.sidecar.browser_ws_url() else {
         return (
             StatusCode::CONFLICT,
-            Json(json!({ "error": "WinApp sidecar is not running" })),
+            Json(json!({ "error": "preview sidecar is not running" })),
         )
             .into_response();
     };
-    if state.rt.sidecar.browser_mode() != Some(BrowserMode::WinApp) {
+    let mode = state.rt.sidecar.browser_mode();
+    if !preview_stream_supported(mode) {
         return (
             StatusCode::CONFLICT,
-            Json(json!({ "error": "active sidecar is not in WinApp mode" })),
+            Json(json!({ "error": "active sidecar does not emit a screenshot stream" })),
         )
             .into_response();
     }
 
-    let process_name = std::env::var("TESHI_WINAPP_PROCESS")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "TargetApp.exe".into());
+    let attach_process = (mode == Some(BrowserMode::WinApp)).then(|| {
+        std::env::var("TESHI_WINAPP_PROCESS")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "TargetApp.exe".into())
+    });
     let active_ws = state.active_ws.clone();
     ws.on_upgrade(move |socket| {
-        handle_browser_stream_socket(ws_url, process_name, active_ws, socket)
+        handle_browser_stream_socket(ws_url, attach_process, active_ws, socket)
     })
 }
 
 async fn handle_browser_stream_socket(
     ws_url: String,
-    process_name: String,
+    attach_process: Option<String>,
     active_ws: Arc<AtomicUsize>,
     mut downstream: WebSocket,
 ) {
@@ -347,7 +360,7 @@ async fn handle_browser_stream_socket(
         Err(error) => {
             let payload = json!({
                 "type": "frame_error",
-                "error": format!("connect to WinApp sidecar: {error}"),
+                "error": format!("connect to preview sidecar: {error}"),
             });
             let _ = downstream
                 .send(Message::Text(payload.to_string().into()))
@@ -356,25 +369,27 @@ async fn handle_browser_stream_socket(
         }
     };
 
-    let attach = json!({
-        "cmd": "attach_window",
-        "request_id": "gpui-preview-attach",
-        "process_name": process_name,
-    });
-    if let Err(error) = upstream
-        .send(tokio_tungstenite::tungstenite::Message::Text(
-            attach.to_string(),
-        ))
-        .await
-    {
-        let payload = json!({
-            "type": "frame_error",
-            "error": format!("attach to target application: {error}"),
+    if let Some(process_name) = attach_process {
+        let attach = json!({
+            "cmd": "attach_window",
+            "request_id": "gpui-preview-attach",
+            "process_name": process_name,
         });
-        let _ = downstream
-            .send(Message::Text(payload.to_string().into()))
-            .await;
-        return;
+        if let Err(error) = upstream
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                attach.to_string(),
+            ))
+            .await
+        {
+            let payload = json!({
+                "type": "frame_error",
+                "error": format!("attach to target application: {error}"),
+            });
+            let _ = downstream
+                .send(Message::Text(payload.to_string().into()))
+                .await;
+            return;
+        }
     }
 
     let (frame_tx, mut frame_rx) = tokio::sync::watch::channel(None::<String>);
@@ -1196,10 +1211,114 @@ async fn api_daemon_shutdown(State(state): State<DaemonState>) -> StatusCode {
 
 // ── Run endpoint ──────────────────────────────────────────────────────────
 
+fn case_is_mixed(case: &Value) -> bool {
+    let Some(path) = case.get("feature_path").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(name) = case.get("scenario").and_then(Value::as_str) else {
+        return false;
+    };
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    let feature = teshi_core::parse_feature(&content, PathBuf::from(path));
+    let Some(scenario) = feature
+        .all_scenarios()
+        .into_iter()
+        .find(|item| item.name == name)
+    else {
+        return false;
+    };
+    teshi_core::scenario_engine_mode(&feature, scenario) == teshi_core::EngineMode::Mixed
+}
+
+async fn api_gherkin_scenarios(
+    State(state): State<DaemonState>,
+) -> Result<Json<Vec<teshi_engine::RunnableScenario>>, ApiError> {
+    state.touch();
+    let project_root = state
+        .rt
+        .project
+        .root
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| ApiError::internal("no project open"))?;
+    Ok(Json(list_runnable_scenarios(&project_root)))
+}
+
+#[derive(Deserialize)]
+struct ExchangeApiBody {
+    exchange_id: String,
+    redact: Option<bool>,
+}
+
+async fn api_get_exchange(
+    State(state): State<DaemonState>,
+    Json(body): Json<ExchangeApiBody>,
+) -> Result<Json<Value>, ApiError> {
+    state.touch();
+    let project_root = state
+        .rt
+        .project
+        .root
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| ApiError::internal("no project open"))?;
+    let command = json!({
+        "cmd": "get_exchange",
+        "request_id": "daemon-exchange",
+        "exchange_id": body.exchange_id,
+        "redact": body.redact.unwrap_or(true),
+    });
+    let response = tokio::task::spawn_blocking(move || {
+        send_api_command(&project_root, command, std::time::Duration::from_secs(5))
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(response))
+}
+
+async fn dispatch_run_ndjson(
+    project_root: PathBuf,
+    cases: Vec<Value>,
+) -> Result<Response, ApiError> {
+    let dispatch: Vec<DispatchCase> = cases
+        .iter()
+        .filter_map(|case| {
+            Some(DispatchCase {
+                id: case.get("id")?.as_str()?.to_string(),
+                feature_path: PathBuf::from(case.get("feature_path")?.as_str()?),
+                scenario: case.get("scenario")?.as_str()?.to_string(),
+            })
+        })
+        .collect();
+    let script = default_api_service_script();
+    let lines = tokio::task::spawn_blocking(move || {
+        let mut lines = Vec::new();
+        dispatch_cases(&project_root, &script, &dispatch, |value| {
+            lines.push(value.to_string());
+        })
+        .map(|_| lines)
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+    let body = lines.join("\n") + "\n";
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/x-ndjson")
+        .body(axum::body::Body::from(body))
+        .map_err(|e| ApiError::internal(e.to_string()))
+}
+
 #[derive(Deserialize)]
 struct RunApiBody {
     feature_path: Option<String>,
     scenario: Option<String>,
+    scenario_ids: Option<Vec<String>>,
 }
 
 /// POST /api/v1/daemon/run — execute BDD scenarios via the NDJSON runner.
@@ -1269,6 +1388,22 @@ async fn api_run(
 
     if cases.is_empty() {
         return Err(ApiError::internal("no scenarios found"));
+    }
+
+    if let Some(ids) = &body.scenario_ids {
+        cases.retain(|case| {
+            case.get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| ids.iter().any(|want| want == id))
+        });
+        if cases.is_empty() {
+            return Err(ApiError::internal("no scenarios matched scenario_ids"));
+        }
+    }
+
+    let teshi_dispatch = body.scenario_ids.is_some() || cases.iter().any(case_is_mixed);
+    if teshi_dispatch {
+        return dispatch_run_ndjson(project_root, cases).await;
     }
 
     let request = serde_json::json!({
@@ -1626,6 +1761,14 @@ mod integration {
         ));
         assert!(!is_preview_frame(r#"{"type":"frame_error"}"#));
         assert!(!is_preview_frame("not json"));
+    }
+
+    #[test]
+    fn preview_stream_accepts_chrome_embedded_and_winapp() {
+        assert!(preview_stream_supported(Some(BrowserMode::Chrome)));
+        assert!(preview_stream_supported(Some(BrowserMode::Embedded)));
+        assert!(preview_stream_supported(Some(BrowserMode::WinApp)));
+        assert!(!preview_stream_supported(None));
     }
 
     // ── Main test ────────────────────────────────────────────────────────────
