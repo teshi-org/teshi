@@ -1,0 +1,12 @@
+{
+  "method": "GET",
+  "url": "{{ base_url }}/users/{{ user_id }}",
+  "headers": {% include "_headers.json.j2" %},
+  "extract": {
+    "fetched_name": "{{ response.json.name }}"
+  },
+  "assert": {
+    "status_ok": "{{ response.status == 200 }}",
+    "name_matches": "{{ response.json.name == name }}"
+  }
+}

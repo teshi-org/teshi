@@ -1,5 +1,7 @@
 playwright>=1.40
 websockets>=12.0
+jinja2>=3.1
+httpx>=0.27
 Pillow
 uiautomation
 comtypes

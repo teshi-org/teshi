@@ -1,3 +1,4 @@
+pub mod api;
 pub mod auth;
 pub mod browser;
 pub mod browser_endpoint;
@@ -111,6 +112,11 @@ pub enum Command {
     WinApp {
         #[command(subcommand)]
         action: WinAppCommand,
+    },
+    /// Start and inspect the HTTP API BDD sidecar
+    Api {
+        #[command(subcommand)]
+        action: ApiCommand,
     },
     /// Control an interactive terminal via the terminal sidecar
     Terminal {
@@ -1141,6 +1147,37 @@ pub enum WinAppCommand {
     Execute(WinAppExecuteArgs),
     /// Replay confirmed UIA step bindings
     Replay(WinAppReplayArgs),
+}
+
+/// HTTP API BDD sidecar (`teshi api`).
+#[derive(Debug, Subcommand)]
+pub enum ApiCommand {
+    /// Start (or reuse) the loopback API sidecar and write `.teshi/api-endpoint.json`
+    Serve(ApiServeArgs),
+    /// Check sidecar health (`ping` / `doctor`)
+    Doctor,
+    /// Stop the sidecar recorded in `.teshi/api-endpoint.json`
+    Stop,
+    /// Fetch one stored HTTP exchange (redacted by default)
+    Exchange(ApiExchangeArgs),
+}
+
+/// Arguments for `teshi api serve`.
+#[derive(Debug, Args)]
+pub struct ApiServeArgs {
+    /// Project directory (default: current working directory)
+    #[arg(long)]
+    pub project: Option<PathBuf>,
+}
+
+/// Arguments for `teshi api exchange`.
+#[derive(Debug, Args)]
+pub struct ApiExchangeArgs {
+    /// Exchange id from an `http_exchange` event
+    pub id: String,
+    /// Return unredacted headers and bodies (inspector expand)
+    #[arg(long)]
+    pub plaintext: bool,
 }
 
 #[derive(Debug, Args)]

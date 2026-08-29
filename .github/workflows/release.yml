@@ -250,6 +250,7 @@ jobs:
           $builtExe    = "target/${{ matrix.target }}/release/teshi.exe"
           @($builtExe, "apps/teshi-web/dist", "apps/teshi-web/dist/pkg/teshi_web_bg.wasm", "resources/browser_service.py",
             "resources/browser_agent_broker.py", "resources/winapp_service.py",
+            "resources/api_service.py", "resources/teshi_api.py",
             "extension/teshi-bridge/manifest.json",
             "agent-packages/teshi-browser-testing/.codex-plugin/plugin.json") |
             ForEach-Object { if (-not (Test-Path $_)) { throw "Missing: $_" } }
@@ -258,6 +259,8 @@ jobs:
           Copy-Item "resources/browser_service.py" (Join-Path $shareDir "browser_service.py") -Force
           Copy-Item "resources/browser_agent_broker.py" (Join-Path $shareDir "browser_agent_broker.py") -Force
           Copy-Item "resources/winapp_service.py"  (Join-Path $shareDir "winapp_service.py") -Force
+          Copy-Item "resources/api_service.py" (Join-Path $shareDir "api_service.py") -Force
+          Copy-Item "resources/teshi_api.py" (Join-Path $shareDir "teshi_api.py") -Force
           Copy-Item -Path "apps/teshi-web/dist/*" -Destination $webDir -Recurse -Force
           Copy-Item -Path "extension/teshi-bridge/*" -Destination $bridgeDir -Recurse -Force
           Copy-Item -Path "agent-packages/teshi-browser-testing/*" -Destination $agentDir -Recurse -Force
@@ -360,6 +363,8 @@ jobs:
 
             cp "${repo_dir}/resources/browser_service.py" "${stage_dir}/share/browser_service.py"
             cp "${repo_dir}/resources/browser_agent_broker.py" "${stage_dir}/share/browser_agent_broker.py"
+            cp "${repo_dir}/resources/api_service.py" "${stage_dir}/share/api_service.py"
+            cp "${repo_dir}/resources/teshi_api.py" "${stage_dir}/share/teshi_api.py"
             cp -a "${repo_dir}/extension/teshi-bridge/." "${stage_dir}/share/teshi-bridge/"
             cp -a "${repo_dir}/agent-packages/teshi-browser-testing/." "${stage_dir}/share/teshi-browser-testing/"
             cp -a "${repo_dir}/extension/teshi-bridge/." "${stage_dir}/share/teshi-browser-testing/extension/teshi-bridge/"

@@ -1,5 +1,6 @@
 //! Shared BDD runtime for teshi desktop and web hosts.
 
+mod api_dispatch;
 mod app_data;
 mod authoring;
 mod browser_agent;
@@ -32,6 +33,11 @@ pub mod python_env {
     };
 }
 
+pub use api_dispatch::{
+    api_endpoint_path, dispatch_cases, ensure_api_sidecar, list_runnable_scenarios,
+    mode_uses_teshi_dispatch, read_api_endpoint, send_api_command, stop_api_sidecar, ApiEndpoint,
+    DispatchCase, RunnableScenario,
+};
 pub use app_data::{
     app_data_dir, ensure_migrated_from_teshi_desktop_at,
     get_recent_projects as load_recent_projects, load_settings, open_dialog_default_dir,
@@ -248,6 +254,35 @@ pub fn default_winapp_service_script() -> PathBuf {
         .first()
         .cloned()
         .unwrap_or_else(|| PathBuf::from("resources/winapp_service.py"))
+}
+
+/// Resolves `api_service.py` from an override, a source checkout, or installed layouts.
+pub fn default_api_service_script() -> PathBuf {
+    if let Ok(path) = std::env::var("TESHI_API_SERVICE") {
+        return PathBuf::from(path);
+    }
+
+    if let Some(path) = source_checkout_resource("api_service.py") {
+        return path;
+    }
+
+    let mut candidates = vec![];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("share").join("api_service.py"));
+            candidates.push(exe_dir.join("..").join("share").join("api_service.py"));
+            candidates.push(exe_dir.join("resources").join("api_service.py"));
+        }
+    }
+    for path in &candidates {
+        if path.is_file() {
+            return path.clone();
+        }
+    }
+    candidates
+        .first()
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("resources/api_service.py"))
 }
 
 /// Resolves the `teshi` CLI binary for embedded terminal agents (`TESHI_CLI`).

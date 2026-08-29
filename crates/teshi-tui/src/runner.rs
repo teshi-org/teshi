@@ -108,6 +108,19 @@ pub enum RunEvent {
         failed: usize,
         skipped: usize,
     },
+    StartStep {
+        case_id: Option<String>,
+        step_id: String,
+        text: Option<String>,
+        is_api: Option<bool>,
+    },
+    EndStep {
+        case_id: Option<String>,
+        step_id: String,
+        status: Option<String>,
+        message: Option<String>,
+    },
+    HttpExchange(Box<teshi_core::HttpExchange>),
     RunnerExit {
         code: Option<i32>,
         success: bool,
@@ -201,6 +214,40 @@ pub fn spawn_runner(config: RunnerConfig, request: RunRequest) -> Result<Receive
     Ok(rx)
 }
 
+/// Walk API/mixed scenarios in-process and emit the same NDJSON event types as an external runner.
+pub fn spawn_teshi_dispatch(
+    project_root: PathBuf,
+    cases: Vec<RunCase>,
+) -> Result<Receiver<RunEvent>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let dispatch: Vec<teshi_engine::DispatchCase> = cases
+            .iter()
+            .map(|case| teshi_engine::DispatchCase {
+                id: case.id.clone(),
+                feature_path: PathBuf::from(&case.feature_path),
+                scenario: case.scenario.clone(),
+            })
+            .collect();
+        let script = teshi_engine::default_api_service_script();
+        let emit = |value: serde_json::Value| {
+            if let Some(event) = parse_event_line(&value.to_string()) {
+                let _ = tx.send(event);
+            }
+        };
+        if let Err(err) = teshi_engine::dispatch_cases(&project_root, &script, &dispatch, emit) {
+            let _ = tx.send(RunEvent::RunnerError {
+                message: err.to_string(),
+            });
+        }
+        let _ = tx.send(RunEvent::RunnerExit {
+            code: Some(0),
+            success: true,
+        });
+    });
+    Ok(rx)
+}
+
 fn run_child(config: RunnerConfig, request: RunRequest, tx: Sender<RunEvent>) -> Result<()> {
     let mut cmd = Command::new(&config.cmd);
     cmd.args(&config.args)
@@ -251,7 +298,7 @@ fn run_child(config: RunnerConfig, request: RunRequest, tx: Sender<RunEvent>) ->
     Ok(())
 }
 
-fn parse_event_line(line: &str) -> Option<RunEvent> {
+pub(crate) fn parse_event_line(line: &str) -> Option<RunEvent> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
     let kind = value.get("type")?.as_str()?;
     match kind {
@@ -320,6 +367,36 @@ fn parse_event_line(line: &str) -> Option<RunEvent> {
             failed: value.get("failed").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
             skipped: value.get("skipped").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
         }),
+        "start_step" => Some(RunEvent::StartStep {
+            case_id: value
+                .get("case_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            step_id: value.get("step_id")?.as_str()?.to_string(),
+            text: value
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            is_api: value.get("is_api").and_then(|v| v.as_bool()),
+        }),
+        "end_step" => Some(RunEvent::EndStep {
+            case_id: value
+                .get("case_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            step_id: value.get("step_id")?.as_str()?.to_string(),
+            status: value
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            message: value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        }),
+        "http_exchange" => teshi_core::HttpExchange::from_value(&value)
+            .ok()
+            .map(|exchange| RunEvent::HttpExchange(Box::new(exchange))),
         _ => None,
     }
 }
@@ -387,29 +464,53 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
         return run_via_daemon(&manifest, &feature_path, opts);
     }
 
-    // Fallback: direct runner spawn
-    // First, try engine-backed execution
-    match crate::engine::load_engine_config(
-        &project_root,
-        opts.runner_cmd.as_deref(),
-        &opts.runner_args,
-    ) {
-        Ok(engine_config) => {
-            return crate::engine::run_feature_with_engine(&engine_config, &feature_path, &opts);
-        }
-        Err(_engine_err) => {
-            // Engine not available; fall through to generic runner
-        }
-    }
-    let config = load_runner_config(Some(RunnerCliOverride {
-        cmd: opts.runner_cmd,
-        args: opts.runner_args,
-        cwd: opts.runner_cwd,
-    }))?;
+    // Fallback: Teshi mixed dispatch, then engine / generic runner
     let cases = build_cases_from_path(&feature_path, opts.scenario.as_deref())?;
     if cases.is_empty() {
         return Err(anyhow::anyhow!("no scenarios found to run"));
     }
+    let (mixed, rest) = classify_cases(&cases)?;
+    let had_mixed = !mixed.is_empty();
+    if !mixed.is_empty() {
+        drain_dispatch_events(&project_root, mixed)?;
+    }
+    if rest.is_empty() {
+        return Ok(());
+    }
+
+    if !had_mixed {
+        match crate::engine::load_engine_config(
+            &project_root,
+            opts.runner_cmd.as_deref(),
+            &opts.runner_args,
+        ) {
+            Ok(engine_config) => {
+                return crate::engine::run_feature_with_engine(
+                    &engine_config,
+                    &feature_path,
+                    &opts,
+                );
+            }
+            Err(_engine_err) => {}
+        }
+    }
+
+    let config = match load_runner_config(Some(RunnerCliOverride {
+        cmd: opts.runner_cmd,
+        args: opts.runner_args,
+        cwd: opts.runner_cwd,
+    })) {
+        Ok(config) => config,
+        Err(err) => {
+            let all_api = rest
+                .iter()
+                .all(|case| case_engine_mode(case) == Some(teshi_core::EngineMode::Api));
+            if all_api {
+                return drain_dispatch_events(&project_root, rest);
+            }
+            return Err(err);
+        }
+    };
     let mut meta = HashMap::new();
     meta.insert(
         "project_root".to_string(),
@@ -428,7 +529,7 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
     }
     let request = RunRequest {
         command: "run".to_string(),
-        cases,
+        cases: rest,
         meta,
     };
     let rx = spawn_runner(config, request)?;
@@ -570,9 +671,89 @@ fn format_event(event: &RunEvent) -> String {
         } => {
             format!("end_run passed={passed} failed={failed} skipped={skipped}")
         }
+        RunEvent::StartStep { step_id, text, .. } => {
+            format!("start_step {step_id} {}", text.clone().unwrap_or_default())
+        }
+        RunEvent::EndStep {
+            step_id, status, ..
+        } => format!("end_step {step_id} {}", status.clone().unwrap_or_default()),
+        RunEvent::HttpExchange(exchange) => format!(
+            "http_exchange {} {} {}",
+            exchange.method, exchange.url, exchange.exchange_id
+        ),
         RunEvent::RunnerExit { code, success } => {
             format!("runner_exit code={:?} success={success}", code)
         }
         RunEvent::RunnerError { message } => format!("runner_error {message}"),
+    }
+}
+
+fn drain_dispatch_events(project_root: &Path, cases: Vec<RunCase>) -> Result<()> {
+    let rx = spawn_teshi_dispatch(project_root.to_path_buf(), cases)?;
+    while let Ok(event) = rx.recv() {
+        println!("{}", format_event(&event));
+        if matches!(event, RunEvent::RunnerExit { .. }) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn case_engine_mode(case: &RunCase) -> Option<teshi_core::EngineMode> {
+    let content = std::fs::read_to_string(&case.feature_path).ok()?;
+    let feature = teshi_core::gherkin::parse_feature(&content, PathBuf::from(&case.feature_path));
+    let scenario = feature
+        .all_scenarios()
+        .into_iter()
+        .find(|item| item.name == case.scenario)?;
+    Some(teshi_core::scenario_engine_mode(&feature, scenario))
+}
+
+fn classify_cases(cases: &[RunCase]) -> Result<(Vec<RunCase>, Vec<RunCase>)> {
+    let mut mixed = Vec::new();
+    let mut rest = Vec::new();
+    for case in cases {
+        match case_engine_mode(case) {
+            Some(teshi_core::EngineMode::Mixed) => mixed.push(case.clone()),
+            _ => rest.push(case.clone()),
+        }
+    }
+    Ok((mixed, rest))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_event_line_keeps_legacy_case_events() {
+        let event =
+            parse_event_line(r#"{"type":"case_passed","case_id":"f0:s0","duration_ms":12}"#)
+                .expect("parse");
+        assert!(matches!(event, RunEvent::CasePassed { case_id, .. } if case_id == "f0:s0"));
+    }
+
+    #[test]
+    fn parse_event_line_reads_http_exchange() {
+        let line = r#"{"type":"http_exchange","exchange_id":"e1","case_id":"c1","step_id":"s1","template":"create_user.json.j2","method":"POST","url":"https://example.test/users","request_headers":{"Authorization":"***"},"request_body":{"name":"Ada"},"status":201,"response_headers":{},"response_body":{"id":"42"},"duration_ms":9,"extract":{"user_id":"42"},"asserts":[{"name":"status_ok","passed":true}],"redacted":true}"#;
+        let event = parse_event_line(line).expect("parse exchange");
+        let RunEvent::HttpExchange(exchange) = event else {
+            panic!("expected http_exchange");
+        };
+        assert_eq!(exchange.exchange_id, "e1");
+        assert_eq!(exchange.method, "POST");
+        assert!(exchange.redacted);
+        assert_eq!(
+            exchange
+                .request_headers
+                .get("Authorization")
+                .and_then(|v| v.as_str()),
+            Some("***")
+        );
+    }
+
+    #[test]
+    fn parse_event_line_ignores_unknown_types() {
+        assert!(parse_event_line(r#"{"type":"not_a_real_event"}"#).is_none());
     }
 }

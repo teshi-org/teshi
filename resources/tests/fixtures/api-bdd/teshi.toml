@@ -1,0 +1,4 @@
+[api]
+templates = "api"
+base_url = "https://api.example.test"
+redact_keys = ["x-trace-id"]

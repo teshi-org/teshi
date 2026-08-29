@@ -215,6 +215,9 @@ pub fn run(version: &str) -> Result<()> {
         Some(cli::Command::WinApp { action }) => {
             return cli::winapp::handle_winapp_command(&action);
         }
+        Some(cli::Command::Api { action }) => {
+            return cli::api::handle_api_command(&action);
+        }
         Some(cli::Command::Terminal { action }) => {
             return cli::terminal::handle_terminal_command(&action);
         }
