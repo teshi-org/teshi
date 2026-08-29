@@ -155,7 +155,7 @@ fn write_diagnostic_event(writer: &mut impl Write, event: &Event) -> io::Result<
 }
 
 /// Runs the terminal application and non-daemon CLI commands.
-pub fn run() -> Result<()> {
+pub fn run(version: &str) -> Result<()> {
     let mut diag_file = std::env::var("TESHI_DIAG_PATH").ok().and_then(|path| {
         std::fs::OpenOptions::new()
             .create(true)
@@ -241,6 +241,7 @@ pub fn run() -> Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let mut app = App::from_cli(&cli_args)?;
+    app.version = version.to_string();
     let mut event_source = input::EventSource::new()?;
 
     while !app.should_quit {

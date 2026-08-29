@@ -24,5 +24,5 @@ fn main() -> Result<()> {
         return runtime.block_on(teshi_daemon::run_client(command.options));
     }
 
-    teshi_tui::run()
+    teshi_tui::run(env!("CARGO_PKG_VERSION"))
 }

@@ -475,6 +475,8 @@ pub struct App {
     pub status_message: Option<String>,
     /// When the status message should be cleared (3-second lifespan).
     status_message_deadline: Option<Instant>,
+    /// Product version displayed in the TUI header.
+    pub version: String,
     // ── Config ────────────────────────────────────────────────────────
     /// Resolved application configuration from layered sources.
     pub config: AppConfig,
@@ -777,6 +779,7 @@ impl App {
             quit_panel_selection: 0,
             status_message: None,
             status_message_deadline: None,
+            version: String::new(),
             config,
             auth_panel_active: false,
             model_profiles: crate::profiles::load_all(),
@@ -921,6 +924,7 @@ impl App {
             quit_panel_selection: 0,
             status_message: None,
             status_message_deadline: None,
+            version: String::new(),
             config,
             auth_panel_active: false,
             model_profiles: crate::profiles::load_all(),
@@ -1055,6 +1059,7 @@ impl App {
             quit_panel_selection: 0,
             status_message: None,
             status_message_deadline: None,
+            version: String::new(),
             config,
             auth_panel_active: false,
             model_profiles: crate::profiles::load_all(),
@@ -7795,6 +7800,7 @@ mod tests {
             quit_panel_selection: 0,
             status_message: None,
             status_message_deadline: None,
+            version: String::new(),
             config: crate::config::load_config().unwrap(),
             auth_panel_active: false,
             model_profiles: crate::profiles::load_all(),
@@ -7954,6 +7960,7 @@ Feature: B
             quit_panel_selection: 0,
             status_message: None,
             status_message_deadline: None,
+            version: String::new(),
             config: crate::config::load_config().unwrap(),
             auth_panel_active: false,
             model_profiles: crate::profiles::load_all(),

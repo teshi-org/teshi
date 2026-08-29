@@ -322,12 +322,35 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     register_tab_regions(app, chunks[0]);
 
-    let divider_w = chunks[1].width as usize;
-    let divider_line = "─".repeat(divider_w.max(1));
-    frame.render_widget(
-        Paragraph::new(divider_line).style(Style::default().fg(Color::DarkGray)),
-        chunks[1],
-    );
+    let version_text = format!("v{}", app.version);
+    let version_width = version_text.width() as u16;
+    if !app.version.is_empty() && chunks[1].width > version_width + 1 {
+        let rule_width = chunks[1].width - version_width - 1;
+        let [rule_area, version_area] = Layout::horizontal([
+            Constraint::Length(rule_width),
+            Constraint::Length(version_width),
+        ])
+        .areas(chunks[1]);
+        let rule_w = rule_area.width as usize;
+        let divider_line = "─".repeat(rule_w.max(1));
+        frame.render_widget(
+            Paragraph::new(divider_line).style(Style::default().fg(Color::DarkGray)),
+            rule_area,
+        );
+        frame.render_widget(
+            Paragraph::new(version_text)
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Right),
+            version_area,
+        );
+    } else {
+        let divider_w = chunks[1].width as usize;
+        let divider_line = "─".repeat(divider_w.max(1));
+        frame.render_widget(
+            Paragraph::new(divider_line).style(Style::default().fg(Color::DarkGray)),
+            chunks[1],
+        );
+    }
 
     render_main_panel(frame, app, chunks[2]);
 
