@@ -23,6 +23,7 @@ Thumbs.db
 .agents/
 
 # Miscellaneous working-tree artifacts
+tmp/
 arch-vision.html
 tests/feature/example.feature
 !.cursor/rules/
@@ -40,6 +41,8 @@ teshi.toml
 
 # Local Teshi runtime state (traces, daemon, agent context); any nesting
 .teshi/
+!.teshi/step-bindings/
+!.teshi/step-bindings/**
 
 # Local release packaging output (binaries, archives, checksums)
 release-pack/
