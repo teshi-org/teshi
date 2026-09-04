@@ -172,10 +172,10 @@ Nightly builds publish the same asset set as stable releases, but from the `dev`
 | Trigger | Workflow |
 |---------|----------|
 | Push to `dev` | [`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml) |
-| Daily 06:00 UTC | same (uses workflow file on the **default branch**; sync `dev` → `main` to keep schedule active) |
+| Daily 06:00 UTC | same (uses workflow file on the **default branch**; sync `dev` → `main` to keep schedule active). Catch-up only: skipped when `dev` HEAD already has a nightly tag. |
 | Manual | `gh workflow run nightly.yml` |
 
-Tag format: `v{semver}-nightly.{YYYYMMDD}.{short_sha}` (for example `v0.7.9-nightly.20260801.dc6c942`), derived from `apps/teshi-cli/Cargo.toml` version + UTC date + commit.
+Tag format: `v{semver}-nightly.{YYYYMMDD}.{short_sha}` (for example `v0.7.9-nightly.20260801.dc6c942`), derived from `apps/teshi-cli/Cargo.toml` version + UTC date of first publish + commit. The workflow skips when this commit already has a `v*-nightly.*` tag, so an unchanged `dev` tip does not get a new tag on the next calendar day. To rebuild the same commit, delete that nightly tag/release first.
 
 ```powershell
 gh run list --workflow=nightly.yml --limit 3
