@@ -30,8 +30,8 @@ pub struct WebOptions {
     /// TCP port for the local server (default: auto-pick).
     #[arg(long)]
     pub port: Option<u16>,
-    /// Host address to bind the local server (default: 0.0.0.0).
-    #[arg(long, default_value = "0.0.0.0")]
+    /// Host address to bind the local server (default: 127.0.0.1).
+    #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
     /// Do not open the system browser automatically.
     #[arg(long)]
@@ -56,7 +56,7 @@ pub struct DaemonInternalOptions {
     pub project_root: PathBuf,
     #[arg(long)]
     pub port: u16,
-    #[arg(long, default_value = "0.0.0.0")]
+    #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
     #[arg(long)]
     pub dist: Option<PathBuf>,

@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{header, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -123,12 +123,14 @@ pub async fn run_server(
 
     let cors = browser_cors_layer();
 
-    // ── Public routes (no auth required) ──────────────────────────────────────
-    let public_routes = Router::new()
-        .route("/api/v1/events", get(events_ws))
+    // Session bootstrap remains available to local clients only. Remote clients
+    // must use a token minted by a process on the daemon host.
+    let session_routes = Router::new()
         .route("/api/v1/sessions", post(api_create_session))
         .route("/api/v1/sessions/{token}", get(api_get_session))
-        .route("/api/v1/sessions/{token}", delete(api_delete_session));
+        .route("/api/v1/sessions/{token}", delete(api_delete_session))
+        .route_layer(middleware::from_fn(loopback_only))
+        .route_layer(middleware::from_fn(same_origin_only));
 
     let llm_mutation_routes = Router::new()
         .route("/api/v1/llm/config", put(api_put_llm_config))
@@ -151,6 +153,7 @@ pub async fn run_server(
 
     // ── Protected routes (checked by auth middleware) ─────────────────────────
     let protected_routes = Router::new()
+        .route("/api/v1/events", get(events_ws))
         .route("/api/v1/projects/open", post(api_open_project))
         .route("/api/v1/projects/teardown", post(api_teardown))
         .route("/api/v1/projects/switch-allowed", get(api_switch_allowed))
@@ -186,10 +189,11 @@ pub async fn run_server(
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
-        ));
+        ))
+        .route_layer(middleware::from_fn(same_origin_only));
 
     let app = Router::new()
-        .merge(public_routes)
+        .merge(session_routes)
         .merge(protected_routes)
         .fallback_service(ServeDir::new(dist).append_index_html_on_directories(true))
         .layer(cors)
@@ -232,9 +236,12 @@ pub async fn run_server(
         token_ctrlc.cancel();
     });
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move { shutdown_token.cancelled().await })
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move { shutdown_token.cancelled().await })
+    .await?;
 
     // Clean up on exit
     if let Some(root) = idle_project_root {
@@ -480,9 +487,9 @@ async fn handle_browser_stream_socket(
 
 /// Axum middleware that checks `X-Teshi-Token` against the session store.
 ///
-/// Requests without a token default to `Admin` (backward compatible with the
-/// web UI which does not yet send tokens).  Unknown tokens also fall back to
-/// `Admin` rather than rejecting — only explicit restricted tokens are limited.
+/// Tokenless requests are accepted as `Admin` only from the loopback interface
+/// for compatibility with the local web UI. Remote requests require a valid
+/// session token, and an invalid token always fails closed.
 async fn auth_middleware(
     State(state): State<DaemonState>,
     req: Request,
@@ -497,15 +504,30 @@ async fn auth_middleware(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    // Determine role: explicit session token overrides, otherwise Admin
+    let is_loopback = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|ConnectInfo(peer)| peer.ip().is_loopback());
+
+    // Local UI requests may omit the token. Every supplied token must be valid,
+    // and remote requests may never obtain implicit Admin access.
     let role = if token.is_empty() {
-        Role::Admin
+        if is_loopback {
+            Role::Admin
+        } else {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "A valid X-Teshi-Token is required" })),
+            ));
+        }
     } else {
-        state
-            .sessions
-            .get_session(token)
-            .map(|s| s.role)
-            .unwrap_or(Role::Admin)
+        let Some(session) = state.sessions.get_session(token) else {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "Invalid or expired X-Teshi-Token" })),
+            ));
+        };
+        session.role
     };
 
     if !role.can_execute(&path) {
@@ -521,6 +543,18 @@ async fn auth_middleware(
     }
 
     Ok(next.run(req).await)
+}
+
+async fn loopback_only(req: Request, next: Next) -> Response {
+    let is_loopback = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|ConnectInfo(peer)| peer.ip().is_loopback());
+    if is_loopback {
+        next.run(req).await
+    } else {
+        StatusCode::FORBIDDEN.into_response()
+    }
 }
 
 // ── Session API ─────────────────────────────────────────────────────────────
@@ -641,9 +675,40 @@ struct ListDirQuery {
     path: String,
 }
 
-async fn api_read_file(Query(q): Query<ListDirQuery>) -> Result<String, (StatusCode, String)> {
-    fs::read_to_string(&q.path)
-        .map_err(|e| (StatusCode::NOT_FOUND, format!("read {}: {e}", q.path)))
+async fn api_read_file(
+    State(state): State<DaemonState>,
+    Query(q): Query<ListDirQuery>,
+) -> Result<String, (StatusCode, String)> {
+    let project_root =
+        get_project_root(&state.rt).ok_or((StatusCode::CONFLICT, "no project open".to_string()))?;
+    read_project_file(FsPath::new(&project_root), FsPath::new(&q.path))
+}
+
+fn read_project_file(
+    project_root: &FsPath,
+    requested_path: &FsPath,
+) -> Result<String, (StatusCode, String)> {
+    let canonical_root = project_root.canonicalize().map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            "project root is unavailable".to_string(),
+        )
+    })?;
+    let canonical_path = requested_path
+        .canonicalize()
+        .map_err(|_| (StatusCode::NOT_FOUND, "file not found".to_string()))?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "file path is outside the open project".to_string(),
+        ));
+    }
+    fs::read_to_string(&canonical_path).map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            "file is not readable text".to_string(),
+        )
+    })
 }
 
 async fn api_list_dir(
@@ -1576,14 +1641,17 @@ mod integration {
         let public = Router::new()
             .route("/api/v1/sessions", post(api_create_session))
             .route("/api/v1/sessions/{token}", get(api_get_session))
-            .route("/api/v1/sessions/{token}", delete(api_delete_session));
+            .route("/api/v1/sessions/{token}", delete(api_delete_session))
+            .route_layer(middleware::from_fn(loopback_only))
+            .route_layer(middleware::from_fn(same_origin_only));
 
         let protected = Router::new()
             .route("/api/v1/_ping", get(|| async { "pong" }))
             .route_layer(middleware::from_fn_with_state(
                 state.clone(),
                 auth_middleware,
-            ));
+            ))
+            .route_layer(middleware::from_fn(same_origin_only));
 
         Router::new()
             .merge(public)
@@ -1601,7 +1669,11 @@ mod integration {
         if let Some(body_str) = body {
             b = b.header("content-length", body_str.len().to_string());
         }
-        b.body(Body::from(body.unwrap_or("").to_string())).unwrap()
+        let mut req = b.body(Body::from(body.unwrap_or("").to_string())).unwrap();
+        req.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:41000".parse::<SocketAddr>().unwrap(),
+        ));
+        req
     }
 
     fn with_token(req: Request<Body>, token: &str) -> Request<Body> {
@@ -1610,6 +1682,13 @@ mod integration {
             .headers
             .insert("x-teshi-token", HeaderValue::from_str(token).unwrap());
         Request::from_parts(parts, body)
+    }
+
+    fn from_remote(mut req: Request<Body>) -> Request<Body> {
+        req.extensions_mut().insert(ConnectInfo(
+            "192.0.2.10:41000".parse::<SocketAddr>().unwrap(),
+        ));
+        req
     }
 
     async fn exec(router: &mut Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
@@ -1772,6 +1851,31 @@ mod integration {
         assert!(!preview_stream_supported(None));
     }
 
+    #[test]
+    fn file_reads_are_confined_to_the_open_project() {
+        let base = std::env::temp_dir().join(format!("teshi-daemon-{}", uuid::Uuid::new_v4()));
+        let project = base.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let inside = project.join("feature.txt");
+        let outside = base.join("secret.txt");
+        fs::write(&inside, "feature").unwrap();
+        fs::write(&outside, "secret").unwrap();
+
+        assert_eq!(read_project_file(&project, &inside).unwrap(), "feature");
+        assert_eq!(
+            read_project_file(&project, &outside).unwrap_err().0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            read_project_file(&project, &project.join("missing.txt"))
+                .unwrap_err()
+                .0,
+            StatusCode::NOT_FOUND
+        );
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
     // ── Main test ────────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -1854,13 +1958,13 @@ mod integration {
         let status = exec_status(&mut router, build_req("GET", "/api/v1/_ping", None)).await;
         assert_eq!(status, 200, "no token = Admin");
 
-        // ── 9. Unknown token → falls back to Admin ───────────────────────────
+        // ── 9. Unknown token → rejected ──────────────────────────────────────
         let status = exec_status(
             &mut router,
             with_token(build_req("GET", "/api/v1/_ping", None), "tk_nevercreated"),
         )
         .await;
-        assert_eq!(status, 200, "unknown token = Admin fallback");
+        assert_eq!(status, 401, "unknown token fails closed");
 
         // ── 10. Admin token → allowed ────────────────────────────────────────
         let admin_tok = sessions.create_session(Role::Admin, None);
@@ -1917,13 +2021,13 @@ mod integration {
         // ── 14. Session independence ─────────────────────────────────────────
         sessions.remove_session(&restricted_tok);
 
-        // Deleted token falls back to Admin
+        // Deleted tokens remain invalid rather than escalating to Admin.
         let status = exec_status(
             &mut router,
             with_token(build_req("GET", "/api/v1/_ping", None), &restricted_tok),
         )
         .await;
-        assert_eq!(status, 200, "deleted token = Admin fallback");
+        assert_eq!(status, 401, "deleted token fails closed");
 
         // Admin token still works independently
         let status = exec_status(
@@ -1932,5 +2036,34 @@ mod integration {
         )
         .await;
         assert_eq!(status, 200, "Admin token unaffected");
+
+        // Remote clients cannot obtain implicit Admin access or mint sessions.
+        let status = exec_status(
+            &mut router,
+            from_remote(build_req("GET", "/api/v1/_ping", None)),
+        )
+        .await;
+        assert_eq!(status, 401, "remote tokenless request is rejected");
+
+        let status = exec_status(
+            &mut router,
+            from_remote(build_req(
+                "POST",
+                "/api/v1/sessions",
+                Some(r#"{"role":"admin"}"#),
+            )),
+        )
+        .await;
+        assert_eq!(status, 403, "remote session bootstrap is rejected");
+
+        let status = exec_status(
+            &mut router,
+            from_remote(with_token(
+                build_req("GET", "/api/v1/_ping", None),
+                &admin_tok,
+            )),
+        )
+        .await;
+        assert_eq!(status, 200, "valid remote Admin token is accepted");
     }
 }
