@@ -48,20 +48,34 @@ Editing tools queue file changes for your approval: `Y` to accept, `N`/`Esc` to 
 
 Slash helpers:
 
-- `/generate` — start requirements gathering
+- `/generate` — confirm the requirement-library source scope, then start requirements gathering
 - `/continue` — continue generation after approving test points (same as `c` on the Test Points tab)
 
 The AI tab is hidden when no LLM credentials are configured. Press `m` to manage shared model profiles, or type `/auth` for a status overview. From the shell, use `teshi auth login` (same store as Desktop Settings).
 
 ### Requirements
 
-Authoring tab for durable requirement Markdown under `requirements/`:
+Authoring tab for the **user-level requirement library** shared by all projects. The library is ordinary Markdown plus `_teshi.json`; it is not stored in the Git repo of the project you have open.
 
-- **Tree** — indexed documents from `requirements/_teshi.json`
+Default locations:
+
+| Platform | Path |
+|----------|------|
+| Windows | `%APPDATA%\teshi\requirements\` |
+| Linux | `$XDG_DATA_HOME/teshi/requirements` (often `~/.local/share/teshi/requirements`) |
+| macOS | `dirs::data_dir()/teshi/requirements` |
+
+Override for this process with `teshi --requirements-root PATH`, or persistently with `TESHI_REQUIREMENTS_DIR`. `TESHI_APP_DATA_DIR` still changes the Teshi app-data root (and therefore the default `requirements/` subdirectory). Confirm the resolved path with `teshi requirements path`. The library can live on another disk or in its own Git repository; Teshi does not sync it for you.
+
+`<project>/requirements/` is **not** loaded at runtime. If Teshi finds that legacy directory, it shows a migration diagnostic. Preview with `teshi requirements import-project --dry-run`, then import (IDs/paths are kept or remapped; project test-point links get the target `store_id`; source files are left in place).
+
+- **Tree** — indexed documents from the current store's `_teshi.json`. Title shows the active iteration filter. Press `i` to filter by All / Unassigned / a named iteration, `g` to group by path or iteration, `I` to set the selected document's iteration (empty = Unassigned). Filter and group preferences are saved per `store_id` in user settings.
 - **Editor** — Markdown body with range selection and linked-range highlights
-- **Linked test points** — filtered by the active selection when present
+- **Linked test points** — filtered by the active selection when present; test points themselves stay in `<project>/testpoints/testpoints.json`
 
-Select text and press `n` to create a `Proposed` test point linked to that exact range. Press `Ctrl+n` for a new document.
+Select text and press `n` to create a `Proposed` test point linked to that exact range (identity is `(store_id, document_id)`). Press `Ctrl+n` for a new document.
+
+`/generate` asks you to confirm the source scope (store path, store ID, iteration). The Requirements filter is only a suggestion; it does not silently bind the AI session. Pasted chat text is not a requirement-library source.
 
 ### Test Points
 
@@ -79,14 +93,14 @@ Review states: `Proposed` → `Approved` / `Rejected`; approved points with stal
 
 When you ask the AI to create a feature (including `/generate`), the authoritative flow is:
 
-1. **Requirements Gathering** — conversational paste and/or persisted document/range sources via `submit_requirements`
+1. **Requirements Gathering** — confirm store/iteration scope, then conversational paste and/or persisted document/range sources via `submit_requirements` (`list_requirement_documents` / `read_requirement_document` read the current store on demand)
 2. **Generating Test Points** — agent calls `propose_test_points` (no Given/When/Then inside test points)
 3. **Reviewing Test Points** — agent pauses; humans approve in the Test Points tab
 4. **Planning** — `generate_plan` with approved, resolved `test_point_ids`
 5. **Writing** — `create_feature_file` / `insert_scenario` write Gherkin; scenarios keep `@teshi-tp:<id>` tags
 6. **Validation** — `validate_feature` / tests as applicable
 
-Restarting the TUI restores the review phase and artifacts from disk without implicitly approving anything.
+Restarting the TUI restores the review phase, confirmed source scope, and artifacts from `.teshi/generation-state.json` without implicitly approving anything. A store mismatch, missing iteration, or document revision drift pauses generation until you reconfirm sources. Legacy sessions that referenced documents without a store identity are not rebound to the current library.
 
 ## External Test Runner
 

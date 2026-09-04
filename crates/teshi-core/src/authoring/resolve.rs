@@ -2,7 +2,9 @@
 
 use crate::authoring::positions::{document_char_len, slice_by_char_range};
 use crate::authoring::testpoints::{ReviewState, TestPoint};
-use crate::authoring::{CharPosition, QuoteSelector, RequirementLink, ResolutionState, TextRange};
+use crate::authoring::{
+    CharPosition, QuoteSelector, RequirementLink, RequirementStoreId, ResolutionState, TextRange,
+};
 
 /// Maximum prefix/suffix context length stored with each anchor.
 pub const ANCHOR_CONTEXT_CHARS: usize = 32;
@@ -13,6 +15,7 @@ pub const ANCHOR_CONTEXT_CHARS: usize = 32;
 ///
 /// Returns `None` when the range is empty or invalid for `text`.
 pub fn create_requirement_link(
+    store_id: RequirementStoreId,
     document_id: impl Into<String>,
     document_revision: impl Into<String>,
     text: &str,
@@ -27,6 +30,7 @@ pub fn create_requirement_link(
     let suffix = context_after(text, range.end, ANCHOR_CONTEXT_CHARS);
 
     Some(RequirementLink {
+        store_id: Some(store_id),
         document_id: document_id.into(),
         document_revision: document_revision.into(),
         position: range,
@@ -42,16 +46,27 @@ pub fn create_requirement_link(
 /// Re-resolves a link against the current document body and revision.
 ///
 /// Resolution order:
-/// 1. Same revision + position still matches quote → resolved at stored position
-/// 2. Unique exact quote match → resolved at new position
-/// 3. Multiple quote matches disambiguated by prefix/suffix → resolved
-/// 4. Otherwise → stale
+/// 1. Missing or mismatched `store_id` → stale (never search another store)
+/// 2. Same revision + position still matches quote → resolved at stored position
+/// 3. Unique exact quote match → resolved at new position
+/// 4. Multiple quote matches disambiguated by prefix/suffix → resolved
+/// 5. Otherwise → stale
 pub fn resolve_requirement_link(
     text: &str,
     current_revision: &str,
+    current_store_id: Option<&RequirementStoreId>,
     link: &RequirementLink,
 ) -> RequirementLink {
     let mut resolved = link.clone();
+
+    let store_matches = match (link.store_id.as_ref(), current_store_id) {
+        (Some(link_store), Some(current)) => link_store == current,
+        _ => false,
+    };
+    if !store_matches {
+        resolved.resolution = ResolutionState::Stale;
+        return resolved;
+    }
 
     if link.document_revision == current_revision
         && position_matches_quote(text, link.position, &link.quote.quote)
@@ -84,6 +99,7 @@ pub fn resolve_requirement_link(
 /// becomes `NeedsReview`. Unrelated approvals are preserved.
 pub fn re_resolve_document_links(
     text: &str,
+    store_id: Option<&RequirementStoreId>,
     document_id: &str,
     current_revision: &str,
     test_points: &mut [TestPoint],
@@ -97,7 +113,7 @@ pub fn re_resolve_document_links(
                 continue;
             }
             let before = (link.position, link.resolution);
-            *link = resolve_requirement_link(text, current_revision, link);
+            *link = resolve_requirement_link(text, current_revision, store_id, link);
             if (link.position, link.resolution) != before {
                 any_changed = true;
             }
@@ -193,22 +209,35 @@ mod tests {
     use super::*;
     use crate::authoring::testpoints::HierarchyPath;
 
+    fn test_store() -> RequirementStoreId {
+        RequirementStoreId::parse("reqstore-test").unwrap()
+    }
+
     fn link_at(text: &str, start: u32, end: u32) -> RequirementLink {
-        create_requirement_link("doc-1", "rev-1", text, TextRange::new(start, end)).unwrap()
+        create_requirement_link(
+            test_store(),
+            "doc-1",
+            "rev-1",
+            text,
+            TextRange::new(start, end),
+        )
+        .unwrap()
     }
 
     #[test]
     fn create_rejects_empty_selection() {
         let text = "hello";
-        assert!(create_requirement_link("doc-1", "rev-1", text, TextRange::new(2, 2)).is_none());
-        assert!(create_requirement_link("doc-1", "rev-1", text, TextRange::new(2, 2)).is_none());
+        assert!(
+            create_requirement_link(test_store(), "doc-1", "rev-1", text, TextRange::new(2, 2))
+                .is_none()
+        );
     }
 
     #[test]
     fn resolve_by_position_when_revision_matches() {
         let text = "User can log in";
         let link = link_at(text, 0, 4);
-        let resolved = resolve_requirement_link(text, "rev-1", &link);
+        let resolved = resolve_requirement_link(text, "rev-1", Some(&test_store()), &link);
         assert_eq!(resolved.resolution, ResolutionState::Resolved);
         assert_eq!(resolved.position.start.offset(), 0);
     }
@@ -218,7 +247,7 @@ mod tests {
         let original = "prefix login suffix";
         let link = link_at(original, 7, 12);
         let edited = "login prefix suffix";
-        let resolved = resolve_requirement_link(edited, "rev-2", &link);
+        let resolved = resolve_requirement_link(edited, "rev-2", Some(&test_store()), &link);
         assert_eq!(resolved.resolution, ResolutionState::Resolved);
         assert_eq!(
             slice_by_char_range(edited, resolved.position).as_deref(),
@@ -232,7 +261,7 @@ mod tests {
         let mut link = link_at(text, 0, 3);
         link.quote.prefix.clear();
         link.quote.suffix.clear();
-        let resolved = resolve_requirement_link(text, "rev-2", &link);
+        let resolved = resolve_requirement_link(text, "rev-2", Some(&test_store()), &link);
         assert_eq!(resolved.resolution, ResolutionState::Stale);
     }
 
@@ -240,12 +269,13 @@ mod tests {
     fn duplicate_quotes_disambiguated_by_context() {
         let text = "alpha foo beta foo gamma";
         let range = TextRange::new(6, 9);
-        let mut link = create_requirement_link("doc-1", "rev-1", text, range).unwrap();
+        let mut link =
+            create_requirement_link(test_store(), "doc-1", "rev-1", text, range).unwrap();
         link.quote.prefix = "alpha ".into();
         link.quote.suffix = " beta".into();
 
         let edited = "beta foo gamma alpha foo beta";
-        let resolved = resolve_requirement_link(edited, "rev-2", &link);
+        let resolved = resolve_requirement_link(edited, "rev-2", Some(&test_store()), &link);
         assert_eq!(resolved.resolution, ResolutionState::Resolved);
         assert_eq!(
             slice_by_char_range(edited, resolved.position).as_deref(),
@@ -258,7 +288,26 @@ mod tests {
         let text = "remove me";
         let link = link_at(text, 0, 6);
         let edited = "keep";
-        let resolved = resolve_requirement_link(edited, "rev-2", &link);
+        let resolved = resolve_requirement_link(edited, "rev-2", Some(&test_store()), &link);
+        assert_eq!(resolved.resolution, ResolutionState::Stale);
+    }
+
+    #[test]
+    fn mismatched_store_id_is_stale_without_searching() {
+        let text = "User can log in";
+        let link = link_at(text, 0, 4);
+        let other = RequirementStoreId::parse("reqstore-other").unwrap();
+        let resolved = resolve_requirement_link(text, "rev-1", Some(&other), &link);
+        assert_eq!(resolved.resolution, ResolutionState::Stale);
+        assert_eq!(resolved.position, link.position);
+    }
+
+    #[test]
+    fn missing_store_id_is_stale_without_guessing() {
+        let text = "User can log in";
+        let mut link = link_at(text, 0, 4);
+        link.store_id = None;
+        let resolved = resolve_requirement_link(text, "rev-1", Some(&test_store()), &link);
         assert_eq!(resolved.resolution, ResolutionState::Stale);
     }
 
@@ -278,7 +327,13 @@ mod tests {
         };
 
         let edited = "auth flow";
-        re_resolve_document_links(edited, "doc-1", "rev-2", std::slice::from_mut(&mut tp));
+        re_resolve_document_links(
+            edited,
+            Some(&test_store()),
+            "doc-1",
+            "rev-2",
+            std::slice::from_mut(&mut tp),
+        );
         assert_eq!(tp.review_state, ReviewState::NeedsReview);
         assert_eq!(tp.requirement_links[0].resolution, ResolutionState::Stale);
     }
@@ -299,7 +354,13 @@ mod tests {
         };
 
         let edited = "login is required for admins";
-        re_resolve_document_links(edited, "doc-1", "rev-2", std::slice::from_mut(&mut tp));
+        re_resolve_document_links(
+            edited,
+            Some(&test_store()),
+            "doc-1",
+            "rev-2",
+            std::slice::from_mut(&mut tp),
+        );
         assert_eq!(tp.review_state, ReviewState::Approved);
         assert_eq!(
             tp.requirement_links[0].resolution,

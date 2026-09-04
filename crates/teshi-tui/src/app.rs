@@ -389,6 +389,15 @@ pub struct AgentPendingChange {
     pub agent_idx: usize,
 }
 
+/// Pending confirmation of the AI generation source scope before Gathering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationScopePrompt {
+    /// Iteration window suggested from the Requirements view (not implicitly bound).
+    pub iteration: teshi_core::authoring::RequirementIterationFilter,
+    /// User message to send after the user confirms the scope.
+    pub pending_user_message: String,
+}
+
 pub struct App {
     // ── Multi-file project ──────────────────────────────────────────
     pub project: BddProject,
@@ -548,10 +557,18 @@ pub struct App {
     pub generation_stage: teshi_agent::pipeline::GenerationStage,
     pub pipeline_requirement: Option<teshi_agent::pipeline::Requirement>,
     pub pipeline_plan: Option<teshi_agent::pipeline::GenerationPlan>,
+    /// Confirmed requirement-library window for the active generation session.
+    pub generation_scope: Option<teshi_agent::pipeline::RequirementSourceScope>,
+    /// Overlay asking the user to confirm store/iteration before Gathering.
+    pub generation_scope_prompt: Option<GenerationScopePrompt>,
+    /// Why restored generation cannot continue until the user reconfirms scope.
+    pub generation_paused_reason: Option<String>,
     /// Requirements / test-point authoring UI state.
     pub authoring_ui: crate::authoring_tab::AuthoringUiState,
     /// Test Points tab UI state.
     pub test_points_ui: crate::test_points_tab::TestPointsUiState,
+    /// Resolved user-level requirement store root for this process.
+    pub requirements_root: PathBuf,
 }
 
 /// Convert a character index to the corresponding byte offset in a UTF-8 string.
@@ -664,11 +681,16 @@ impl App {
             .iter()
             .find(|p| p.extension().is_some_and(|ext| ext == "feature"));
         if let Some(p) = feature_file {
-            return Self::from_file(p, config);
+            return Self::from_file(p, config, teshi_engine::requirements_data_dir(None)?);
         }
 
         match paths.iter().find(|p| p.is_dir()) {
-            Some(p) => Self::from_directory(p, config, directory_scan_recursive(p, recursive_flag)),
+            Some(p) => Self::from_directory(
+                p,
+                config,
+                directory_scan_recursive(p, recursive_flag),
+                teshi_engine::requirements_data_dir(None)?,
+            ),
             None => Ok(Self::empty(config)),
         }
     }
@@ -676,8 +698,10 @@ impl App {
     /// Builds the editor state from parsed CLI arguments.
     pub fn from_cli(cli: &crate::cli::Cli) -> Result<Self> {
         let config = crate::config::load_config()?;
+        let requirements_root =
+            teshi_engine::requirements_data_dir(cli.requirements_root.as_deref())?;
         if cli.paths.is_empty() {
-            return Ok(Self::empty(config));
+            return Ok(Self::empty_with_requirements(config, requirements_root));
         }
 
         let paths: Vec<PathBuf> = cli.paths.iter().map(PathBuf::from).collect();
@@ -686,16 +710,26 @@ impl App {
             .iter()
             .find(|p| p.extension().is_some_and(|ext| ext == "feature"));
         if let Some(p) = feature_file {
-            return Self::from_file(p, config);
+            return Self::from_file(p, config, requirements_root);
         }
 
         match paths.iter().find(|p| p.is_dir()) {
-            Some(p) => Self::from_directory(p, config, directory_scan_recursive(p, cli.recursive)),
-            None => Ok(Self::empty(config)),
+            Some(p) => Self::from_directory(
+                p,
+                config,
+                directory_scan_recursive(p, cli.recursive),
+                requirements_root,
+            ),
+            None => Ok(Self::empty_with_requirements(config, requirements_root)),
         }
     }
 
-    fn from_directory(dir: &Path, config: AppConfig, recursive: bool) -> Result<Self> {
+    fn from_directory(
+        dir: &Path,
+        config: AppConfig,
+        recursive: bool,
+        requirements_root: PathBuf,
+    ) -> Result<Self> {
         let project = if recursive {
             gherkin::parse_project(dir)
         } else {
@@ -841,8 +875,15 @@ impl App {
             generation_stage: teshi_agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
-            authoring_ui: crate::authoring_tab::AuthoringUiState::load_from_project(&project_root),
+            generation_scope: None,
+            generation_scope_prompt: None,
+            generation_paused_reason: None,
+            authoring_ui: crate::authoring_tab::AuthoringUiState::load_from_project(
+                &project_root,
+                &requirements_root,
+            ),
             test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
+            requirements_root,
         };
         app.restore_generation_session_from_disk();
         app.spawn_llm_if_configured();
@@ -855,7 +896,11 @@ impl App {
         Ok(app)
     }
 
-    pub(crate) fn from_file(path: &PathBuf, config: AppConfig) -> Result<Self> {
+    pub(crate) fn from_file(
+        path: &PathBuf,
+        config: AppConfig,
+        requirements_root: PathBuf,
+    ) -> Result<Self> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
         let feature = gherkin::parse_feature(&content, path.clone());
@@ -989,8 +1034,15 @@ impl App {
             generation_stage: teshi_agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
-            authoring_ui: crate::authoring_tab::AuthoringUiState::load_from_project(&project_root),
+            generation_scope: None,
+            generation_scope_prompt: None,
+            generation_paused_reason: None,
+            authoring_ui: crate::authoring_tab::AuthoringUiState::load_from_project(
+                &project_root,
+                &requirements_root,
+            ),
             test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
+            requirements_root,
         };
         app.restore_generation_session_from_disk();
         app.spawn_llm_if_configured();
@@ -1002,6 +1054,13 @@ impl App {
     }
 
     fn empty(config: AppConfig) -> Self {
+        Self::empty_with_requirements(
+            config,
+            teshi_engine::requirements_data_dir(None).unwrap_or_default(),
+        )
+    }
+
+    fn empty_with_requirements(config: AppConfig, requirements_root: PathBuf) -> Self {
         let project = BddProject {
             root_dir: PathBuf::from("."),
             features: Vec::new(),
@@ -1121,8 +1180,12 @@ impl App {
             generation_stage: teshi_agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
+            generation_scope: None,
+            generation_scope_prompt: None,
+            generation_paused_reason: None,
             authoring_ui: crate::authoring_tab::AuthoringUiState::empty(),
             test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
+            requirements_root,
         };
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -1783,9 +1846,141 @@ impl App {
             stage: self.generation_stage,
             requirement: self.pipeline_requirement.clone(),
             plan: self.pipeline_plan.clone(),
+            source_scope: self.generation_scope.clone(),
         };
         crate::generation_state::save_generation_state(&self.project.root_dir, &state)
             .context("persist generation session state")
+    }
+
+    fn confirm_requirements_overlay(&mut self) -> Result<()> {
+        if self.generation_scope_prompt.is_some()
+            && let crate::authoring_tab::RequirementsOverlay::FilterPicker { selection } =
+                self.authoring_ui.overlay.clone()
+        {
+            let options = self.authoring_ui.filter_picker_options();
+            let filter = options
+                .get(selection)
+                .cloned()
+                .unwrap_or(teshi_core::authoring::RequirementIterationFilter::All);
+            if let Some(prompt) = self.generation_scope_prompt.as_mut() {
+                prompt.iteration = filter;
+            }
+            self.authoring_ui.cancel_overlay();
+            return Ok(());
+        }
+        match self.authoring_ui.confirm_overlay() {
+            Ok(()) => {
+                self.status = "Requirements view updated".to_string();
+            }
+            Err(msg) => {
+                self.status = msg;
+            }
+        }
+        Ok(())
+    }
+
+    fn confirm_generation_scope(&mut self) -> Result<()> {
+        let Some(prompt) = self.generation_scope_prompt.take() else {
+            return Ok(());
+        };
+        if let teshi_core::authoring::RequirementIterationFilter::Named(name) = &prompt.iteration
+            && !self
+                .authoring_ui
+                .discovered_iteration_names()
+                .iter()
+                .any(|existing| existing == name)
+        {
+            self.status = format!(
+                "Iteration '{name}' is not in the current requirement store; choose another scope"
+            );
+            self.generation_scope_prompt = Some(prompt);
+            return Ok(());
+        }
+        self.generation_scope = self
+            .authoring_ui
+            .artifacts
+            .as_ref()
+            .and_then(|artifacts| artifacts.index.store_id.clone())
+            .map(|store_id| teshi_agent::pipeline::RequirementSourceScope {
+                store_id,
+                iteration: prompt.iteration.clone(),
+            });
+        self.generation_paused_reason = None;
+        self.generation_stage = teshi_agent::pipeline::GenerationStage::Gathering;
+        self.persist_generation_state()?;
+        self.status = "Generation source scope confirmed".to_string();
+        self.dispatch_user_message(prompt.pending_user_message)
+    }
+
+    fn dispatch_user_message(&mut self, user_msg: String) -> Result<()> {
+        self.agent_mut().scroll_offset = 0;
+        self.agent_mut().messages.push(AiChatMessage {
+            role: AiRole::User,
+            content: user_msg.clone(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+        });
+        if self.agent().title.starts_with("Agent ") {
+            let name = user_msg
+                .chars()
+                .take(30)
+                .collect::<String>()
+                .trim()
+                .to_string();
+            if !name.is_empty() {
+                self.agent_mut().title = name;
+            }
+        }
+        self.agent_mut().status = AiStatus::Waiting;
+        self.agent_mut().partial_response.clear();
+        self.agent_mut().agent_loop_count = 0;
+        self.status = "Sending message to AI...".to_string();
+
+        if !crate::llm::is_configured() {
+            self.agent_mut().messages.push(AiChatMessage {
+                role: AiRole::Assistant,
+                content: "AI is not configured. Run 'teshi auth login', open the model panel, or set TESHI_LLM_API_KEY in your environment.".to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+            });
+            self.agent_mut().status = AiStatus::Idle;
+            self.agent_mut().partial_response.clear();
+            self.status = "AI not configured".to_string();
+        } else if self.agent().llm_handle.is_some() {
+            self.compact_context_if_needed(self.selected_agent);
+            use crate::llm::LlmRequest;
+            let messages = self.build_chat_messages_for_agent(self.selected_agent);
+            let profile = self.agent_profile(self.selected_agent);
+            let allowed: Option<&[String]> = profile.and_then(|p| match &p.tools {
+                teshi_agent::definition::ToolPermission::All => None,
+                teshi_agent::definition::ToolPermission::None => Some(&[] as &[String]),
+                teshi_agent::definition::ToolPermission::Whitelist(list) => Some(list.as_slice()),
+            });
+            let tools = Some(teshi_agent::get_tools(allowed));
+            let handle = self.agent().llm_handle.as_ref().unwrap();
+            if handle
+                .send(LlmRequest::Chat {
+                    system: Some(self.ai_system_prompt(Some(&user_msg), self.selected_agent)),
+                    messages,
+                    tools,
+                })
+                .is_err()
+            {
+                self.agent_mut().status = AiStatus::Error;
+                self.agent_mut().partial_response.clear();
+                self.status = "AI error: background LLM thread has exited".to_string();
+            }
+        } else {
+            self.agent_mut().status = AiStatus::Error;
+            self.agent_mut().partial_response.clear();
+            self.status = "AI error: LLM handle not available".to_string();
+        }
+        self.quit_pending_confirm = false;
+        Ok(())
     }
 
     /// Restores generation stage/sources/plan from disk without granting approvals.
@@ -1802,8 +1997,35 @@ impl App {
         ) {
             Ok((stage, Some(saved))) => {
                 self.generation_stage = stage;
-                self.pipeline_requirement = saved.requirement;
-                self.pipeline_plan = saved.plan;
+                self.pipeline_requirement = saved.requirement.clone();
+                self.pipeline_plan = saved.plan.clone();
+                self.generation_scope = saved.source_scope.clone();
+                let current_store = self
+                    .authoring_ui
+                    .artifacts
+                    .as_ref()
+                    .and_then(|a| a.index.store_id.clone());
+                let empty_index = teshi_core::authoring::RequirementDocumentIndex::default();
+                let (index, documents) = self
+                    .authoring_ui
+                    .artifacts
+                    .as_ref()
+                    .map(|a| (&a.index, a.documents.as_slice()))
+                    .unwrap_or((&empty_index, &[]));
+                match teshi_agent::pipeline::evaluate_restored_scope(
+                    &saved,
+                    current_store.as_ref(),
+                    index,
+                    documents,
+                ) {
+                    Ok(()) => {
+                        self.generation_paused_reason = None;
+                    }
+                    Err(err) => {
+                        self.generation_paused_reason = Some(err.to_string());
+                        self.status = format!("Generation paused: {err}");
+                    }
+                }
                 self.sync_test_point_scenario_refs();
                 self.test_points_ui
                     .rebuild_tree(self.authoring_ui.artifacts.as_ref());
@@ -1826,15 +2048,42 @@ impl App {
     ///
     /// Intentionally ignores `approval_mode`: Auto/Bypass cannot trigger this gate.
     fn continue_test_point_generation(&mut self) -> Result<()> {
-        let test_points = self
+        let test_points: Vec<teshi_core::authoring::TestPoint> = self
             .authoring_ui
             .artifacts
             .as_ref()
-            .map(|a| a.test_points.test_points.as_slice())
-            .unwrap_or(&[]);
-        match teshi_agent::pipeline::continue_from_review(self.generation_stage, test_points) {
+            .map(|a| a.test_points.test_points.clone())
+            .unwrap_or_default();
+        match teshi_agent::pipeline::continue_from_review(self.generation_stage, &test_points) {
             Ok(next) => {
-                let approved = teshi_agent::pipeline::approved_resolved_test_point_ids(test_points);
+                if let (Some(scope), Some(artifacts)) = (
+                    self.generation_scope.as_ref(),
+                    self.authoring_ui.artifacts.as_ref(),
+                ) {
+                    if let Some(requirement) = self.pipeline_requirement.as_ref()
+                        && let Err(err) = teshi_agent::pipeline::revalidate_source_refs(
+                            &requirement.source_refs,
+                            scope,
+                            &artifacts.index,
+                            &artifacts.documents,
+                        )
+                    {
+                        self.status = format!("Generation paused: {err}");
+                        self.generation_paused_reason = Some(err);
+                        return Ok(());
+                    }
+                    if let Err(err) = teshi_agent::pipeline::validate_test_point_links_in_scope(
+                        &test_points,
+                        scope,
+                        &artifacts.index,
+                    ) {
+                        self.status = format!("Generation paused: {err}");
+                        self.generation_paused_reason = Some(err);
+                        return Ok(());
+                    }
+                }
+                let approved =
+                    teshi_agent::pipeline::approved_resolved_test_point_ids(&test_points);
                 self.generation_stage = next;
                 self.persist_generation_state()?;
                 let agent_idx = self.selected_agent;
@@ -1900,7 +2149,7 @@ impl App {
         prompt.push_str(
             "\n\n## Feature Generation Pipeline\n\
              When the user asks to create or generate a feature (including `/generate`), follow this pipeline:\n\
-             1. **Requirements Gathering** — Ask questions or accept pasted requirement text. Prefer `source_refs` to persisted requirement documents/ranges when available. Call `submit_requirements` when done.\n\
+             1. **Requirements Gathering** — Ask questions or accept pasted requirement text. Use `list_requirement_documents` and `read_requirement_document` to inspect the current local requirement store on demand; do not assume every Markdown file is already in the prompt. Prefer `source_refs` to persisted documents/ranges in the confirmed store/iteration scope. Pasted or conversational text is not a requirement-library source. Call `submit_requirements` when done.\n\
              2. **Generating Test Points** — Call `propose_test_points` with non-Gherkin verification intents (title, objective, hierarchy). Do NOT write Given/When/Then inside test points.\n\
              3. **Reviewing Test Points** — Stop and wait. Humans approve/reject in the Test Points tab. Do NOT call `generate_plan` and do NOT treat Auto/Bypass file approval as test-point approval.\n\
              4. **Planning** — After the user continues generation, design Gherkin scenarios. Every scenario must include `test_point_ids` for approved test points. Call `generate_plan`.\n\
@@ -1927,6 +2176,24 @@ impl App {
                 self.generation_stage.label()
             ));
             prompt.push_str(self.generation_stage.prompt_guidance());
+            if let Some(scope) = &self.generation_scope {
+                let iteration = match &scope.iteration {
+                    teshi_core::authoring::RequirementIterationFilter::All => "All".to_string(),
+                    teshi_core::authoring::RequirementIterationFilter::Unassigned => {
+                        teshi_core::authoring::UNASSIGNED_ITERATION_LABEL.to_string()
+                    }
+                    teshi_core::authoring::RequirementIterationFilter::Named(name) => name.clone(),
+                };
+                prompt.push_str(&format!(
+                    "\nActive requirement source scope: store_id={}, iteration={iteration}. Use list/read tools; do not invent documents outside this window.\n",
+                    scope.store_id
+                ));
+            }
+            if let Some(reason) = &self.generation_paused_reason {
+                prompt.push_str(&format!(
+                    "\nGeneration is paused: {reason}. Do not call submit_requirements or propose_test_points until the user reconfirms the source scope.\n"
+                ));
+            }
         }
 
         // Append extra guidance for generation requests
@@ -4161,6 +4428,49 @@ impl App {
             };
         }
 
+        if self.authoring_ui.overlay_active() {
+            return match action {
+                Action::OverlayConfirm => self.confirm_requirements_overlay(),
+                Action::OverlayCancel => {
+                    self.authoring_ui.cancel_overlay();
+                    Ok(())
+                }
+                Action::OverlayMoveUp => {
+                    self.authoring_ui.overlay_move_selection(-1);
+                    Ok(())
+                }
+                Action::OverlayMoveDown => {
+                    self.authoring_ui.overlay_move_selection(1);
+                    Ok(())
+                }
+                Action::OverlayInsert(ch) => {
+                    self.authoring_ui.overlay_insert_char(ch);
+                    Ok(())
+                }
+                Action::OverlayBackspace => {
+                    self.authoring_ui.overlay_backspace();
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+        }
+
+        if self.generation_scope_prompt.is_some() {
+            return match action {
+                Action::GenerationScopeConfirm => self.confirm_generation_scope(),
+                Action::GenerationScopeCancel => {
+                    self.generation_scope_prompt = None;
+                    self.status = "Generation canceled".to_string();
+                    Ok(())
+                }
+                Action::GenerationScopeChangeIteration => {
+                    self.authoring_ui.open_filter_picker();
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+        }
+
         // Agent profile selection panel intercept.
         if self.agent_profile_panel_active {
             return match action {
@@ -5050,6 +5360,45 @@ impl App {
                     self.quit_pending_confirm = false;
                 }
             }
+            Action::ReqFilterOverlay => {
+                if self.active_tab == MainTab::Requirements {
+                    self.authoring_ui.open_filter_picker();
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ReqGroupToggle => {
+                if self.active_tab == MainTab::Requirements {
+                    self.authoring_ui.toggle_group_mode();
+                    self.status = match self.authoring_ui.group_mode {
+                        teshi_core::authoring::RequirementGroupMode::Path => {
+                            "Grouped by path".to_string()
+                        }
+                        teshi_core::authoring::RequirementGroupMode::Iteration => {
+                            "Grouped by iteration".to_string()
+                        }
+                    };
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ReqEditIteration => {
+                if self.active_tab == MainTab::Requirements {
+                    if self.authoring_ui.selected_document_id.is_some() {
+                        self.authoring_ui.open_iteration_editor();
+                    } else {
+                        self.status = "Select a requirement document to set its iteration".into();
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::OverlayConfirm
+            | Action::OverlayCancel
+            | Action::OverlayMoveUp
+            | Action::OverlayMoveDown
+            | Action::OverlayInsert(_)
+            | Action::OverlayBackspace
+            | Action::GenerationScopeConfirm
+            | Action::GenerationScopeCancel
+            | Action::GenerationScopeChangeIteration => {}
             Action::TpApprove => {
                 if self.active_tab == MainTab::TestPoints {
                     self.commit_test_point_field_edit()?;
@@ -5261,7 +5610,7 @@ impl App {
                     return Ok(());
                 }
 
-                let mut user_msg = std::mem::take(&mut self.agent_mut().input);
+                let user_msg = std::mem::take(&mut self.agent_mut().input);
                 self.agent_mut().input_cursor = 0;
 
                 // Intercept slash commands before sending to LLM
@@ -5328,15 +5677,19 @@ impl App {
                             .unwrap_or("")
                             .trim()
                             .to_string();
-                        self.generation_stage = teshi_agent::pipeline::GenerationStage::Gathering;
-                        let _ = self.persist_generation_state();
-                        user_msg = if rest.is_empty() {
+                        let pending_user_message = if rest.is_empty() {
                             "I want to generate a feature from requirements. Start the Feature Generation Pipeline: gather requirements (I can paste detailed text next), propose non-Gherkin test points for human review, then plan and write Gherkin .feature files. Do not use FreeMind or mock HTML.".to_string()
                         } else {
                             format!(
                                 "Please generate a feature from these requirements using the Feature Generation Pipeline. Propose non-Gherkin test points for human review before planning scenarios. Write Gherkin .feature files only (no FreeMind or mock HTML).\n\nRequirements:\n{rest}"
                             )
                         };
+                        self.generation_scope_prompt = Some(GenerationScopePrompt {
+                            iteration: self.authoring_ui.iteration_filter.clone(),
+                            pending_user_message,
+                        });
+                        self.status = "Confirm generation source scope (Enter confirm · Esc cancel · i change iteration)".to_string();
+                        return Ok(());
                     } else if cmd == "continue" || cmd == "continue-generation" {
                         return self.continue_test_point_generation();
                     } else {
@@ -5345,81 +5698,7 @@ impl App {
                     }
                 }
 
-                self.agent_mut().scroll_offset = 0;
-                self.agent_mut().messages.push(AiChatMessage {
-                    role: AiRole::User,
-                    content: user_msg.clone(),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    reasoning_content: None,
-                    source: None,
-                });
-                // Auto-rename from "Agent N" to the first user message
-                if self.agent().title.starts_with("Agent ") {
-                    let name = user_msg
-                        .chars()
-                        .take(30)
-                        .collect::<String>()
-                        .trim()
-                        .to_string();
-                    if !name.is_empty() {
-                        self.agent_mut().title = name;
-                    }
-                }
-                self.agent_mut().status = AiStatus::Waiting;
-                self.agent_mut().partial_response.clear();
-                self.agent_mut().agent_loop_count = 0;
-                self.status = "Sending message to AI...".to_string();
-
-                // If the LLM is not configured, add a mock response
-                if !crate::llm::is_configured() {
-                    self.agent_mut().messages.push(AiChatMessage {
-                        role: AiRole::Assistant,
-                        content: "AI is not configured. Run 'teshi auth login', open the model panel, or set TESHI_LLM_API_KEY in your environment.".to_string(),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                        source: None,
-                    });
-                    self.agent_mut().status = AiStatus::Idle;
-                    self.agent_mut().partial_response.clear();
-                    self.status = "AI not configured".to_string();
-                } else if self.agent().llm_handle.is_some() {
-                    // Compact context before sending to avoid exceeding token limits
-                    self.compact_context_if_needed(self.selected_agent);
-                    use crate::llm::LlmRequest;
-                    let messages = self.build_chat_messages_for_agent(self.selected_agent);
-                    let profile = self.agent_profile(self.selected_agent);
-                    let allowed: Option<&[String]> = profile.and_then(|p| match &p.tools {
-                        teshi_agent::definition::ToolPermission::All => None,
-                        teshi_agent::definition::ToolPermission::None => Some(&[] as &[String]),
-                        teshi_agent::definition::ToolPermission::Whitelist(list) => {
-                            Some(list.as_slice())
-                        }
-                    });
-                    let tools = Some(teshi_agent::get_tools(allowed));
-                    let handle = self.agent().llm_handle.as_ref().unwrap();
-                    if handle
-                        .send(LlmRequest::Chat {
-                            system: Some(
-                                self.ai_system_prompt(Some(&user_msg), self.selected_agent),
-                            ),
-                            messages,
-                            tools,
-                        })
-                        .is_err()
-                    {
-                        self.agent_mut().status = AiStatus::Error;
-                        self.agent_mut().partial_response.clear();
-                        self.status = "AI error: background LLM thread has exited".to_string();
-                    }
-                } else {
-                    // LLM is configured but the handle is None — shouldn't happen normally.
-                    self.agent_mut().status = AiStatus::Error;
-                    self.agent_mut().partial_response.clear();
-                    self.status = "AI error: LLM handle not available".to_string();
-                }
-                self.quit_pending_confirm = false;
+                self.dispatch_user_message(user_msg)?;
             }
             Action::AiBackspace => {
                 if self.agent().input_cursor > 0 {
@@ -7332,6 +7611,7 @@ mod tests {
     use crate::keymap::Action;
     use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    use tempfile::tempdir;
     use teshi_core::StepIndex;
     use teshi_core::gherkin_lang::GherkinLanguages;
 
@@ -7369,8 +7649,12 @@ mod tests {
     fn feature_file_app(name: &str, content: &str) -> (App, PathBuf) {
         let path = temp_feature_path(name);
         fs::write(&path, content).expect("feature fixture should be written");
-        let app = App::from_file(&path, crate::config::load_config().unwrap())
-            .expect("app should open fixture file");
+        let app = App::from_file(
+            &path,
+            crate::config::load_config().unwrap(),
+            teshi_engine::requirements_data_dir(None).unwrap_or_default(),
+        )
+        .expect("app should open fixture file");
         (app, path)
     }
 
@@ -7592,6 +7876,7 @@ mod tests {
             hierarchy_path: HierarchyPath::new(vec!["Auth".into()]),
             review_state: ReviewState::Proposed,
             requirement_links: vec![teshi_core::authoring::RequirementLink {
+                store_id: None,
                 document_id: "doc-1".into(),
                 document_revision: "rev".into(),
                 position: teshi_core::authoring::TextRange::new(0, 5),
@@ -7750,7 +8035,21 @@ mod tests {
 
     #[test]
     fn test_requirements_create_test_point_from_selection() {
-        let mut app = App::from_args().expect("app init should work");
+        let project = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        let feature = project.path().join("sample.feature");
+        fs::write(
+            &feature,
+            "Feature: Sample\n  Scenario: placeholder\n    Given noop\n",
+        )
+        .unwrap();
+        let mut app = App::from_file(
+            &feature,
+            crate::config::load_config().unwrap(),
+            store.path().to_path_buf(),
+        )
+        .expect("app init should work");
         app.authoring_ui.create_document("req.md", "Req");
         app.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Editor;
         app.authoring_ui.selection_anchor = Some((0, 0));
@@ -8027,8 +8326,12 @@ mod tests {
             generation_stage: teshi_agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
+            generation_scope: None,
+            generation_scope_prompt: None,
+            generation_paused_reason: None,
             authoring_ui: crate::authoring_tab::AuthoringUiState::empty(),
             test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
+            requirements_root: teshi_engine::requirements_data_dir(None).unwrap_or_default(),
         };
 
         app.handle_action(Action::ExploreRight)
@@ -8187,8 +8490,12 @@ Feature: B
             generation_stage: teshi_agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
+            generation_scope: None,
+            generation_scope_prompt: None,
+            generation_paused_reason: None,
             authoring_ui: crate::authoring_tab::AuthoringUiState::empty(),
             test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
+            requirements_root: teshi_engine::requirements_data_dir(None).unwrap_or_default(),
         };
 
         app.explore_selected_feature = 0;

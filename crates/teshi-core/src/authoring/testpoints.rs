@@ -133,6 +133,7 @@ mod tests {
                 hierarchy_path: HierarchyPath::new(vec!["Authentication".into(), "Login".into()]),
                 review_state: ReviewState::Proposed,
                 requirement_links: vec![RequirementLink {
+                    store_id: None,
                     document_id: "doc-1".into(),
                     document_revision: "rev-1".into(),
                     position: TextRange::new(0, 5),

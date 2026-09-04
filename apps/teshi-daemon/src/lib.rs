@@ -167,6 +167,7 @@ pub async fn run_daemon_internal(opts: DaemonInternalOptions) -> Result<()> {
             browser_service_script: script,
             winapp_service_script: winapp_script,
             embedded_no_preview_stream: false,
+            requirements_root: None,
         },
         None,
     );

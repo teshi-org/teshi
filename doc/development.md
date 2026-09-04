@@ -45,6 +45,8 @@ cargo fmt --all --check                                           # check format
   - Step navigation and keyword replacement (`crates/teshi-tui/src/bdd_nav.rs`)
   - App integration (navigation, editing, focus, undo, copy/paste) (`crates/teshi-tui/src/app.rs`)
 
+Requirement documents used by the TUI live in the user-level store (`<app_data>/requirements`, overridable with `TESHI_REQUIREMENTS_DIR` or `--requirements-root`). Tests that touch settings or the requirement library should set `TESHI_APP_DATA_DIR` to a temp directory. Legacy `<project>/requirements/` fixtures are only for `teshi requirements import-project` migration tests.
+
 ## Running `teshi web`
 
 The browser GUI is served by `apps/teshi-daemon` and requires the prebuilt GPUI WASM bundle:

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
@@ -8,6 +8,7 @@ pub fn spawn_desktop(
     project: Option<&str>,
     path: Option<&str>,
     start_embedded: bool,
+    requirements_root: Option<&Path>,
 ) -> Result<()> {
     let binary = resolve_desktop_binary()?;
     let mut cmd = Command::new(&binary);
@@ -22,6 +23,9 @@ pub fn spawn_desktop(
     }
     if start_embedded {
         cmd.arg("--start-embedded");
+    }
+    if let Some(root) = requirements_root {
+        cmd.env("TESHI_REQUIREMENTS_DIR", root);
     }
 
     let status = cmd

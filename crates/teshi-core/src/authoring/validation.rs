@@ -83,6 +83,13 @@ pub fn validate_requirement_index(index: &RequirementDocumentIndex) -> Vec<Autho
                 record_id: Some(doc.id.clone()),
                 message: "requirement document path must not be empty".into(),
             });
+        } else if let Err(err) = crate::authoring::validate_requirement_path(&doc.path) {
+            diagnostics.push(AuthoringDiagnostic {
+                severity: AuthoringSeverity::Error,
+                location: "requirements/_teshi.json".into(),
+                record_id: Some(doc.id.clone()),
+                message: err.to_string(),
+            });
         } else if !seen_paths.insert(doc.path.clone()) {
             diagnostics.push(AuthoringDiagnostic {
                 severity: AuthoringSeverity::Error,
@@ -269,6 +276,33 @@ pub fn validate_test_points(
                 continue;
             }
 
+            if let Some(current_store) = index.store_id.as_ref() {
+                match link.store_id.as_ref() {
+                    None => {
+                        diagnostics.push(AuthoringDiagnostic {
+                            severity: AuthoringSeverity::Error,
+                            location: "testpoints/testpoints.json".into(),
+                            record_id: Some(tp.id.clone()),
+                            message: "requirement link is missing store_id; run `teshi requirements import-project` to migrate project requirements".into(),
+                        });
+                        continue;
+                    }
+                    Some(link_store) if link_store != current_store => {
+                        diagnostics.push(AuthoringDiagnostic {
+                            severity: AuthoringSeverity::Error,
+                            location: "testpoints/testpoints.json".into(),
+                            record_id: Some(tp.id.clone()),
+                            message: format!(
+                                "requirement link store_id '{}' does not match the current requirement store '{}'",
+                                link_store, current_store
+                            ),
+                        });
+                        continue;
+                    }
+                    Some(_) => {}
+                }
+            }
+
             if !doc_ids.contains_key(link.document_id.as_str()) {
                 diagnostics.push(AuthoringDiagnostic {
                     severity: AuthoringSeverity::Error,
@@ -333,6 +367,7 @@ pub fn validate_test_points(
 pub fn validate_loaded_artifacts(
     artifacts: &AuthoringArtifacts,
     project_root: &Path,
+    requirements_root: &Path,
 ) -> Vec<AuthoringDiagnostic> {
     let mut diagnostics = validate_requirement_index(&artifacts.index);
     diagnostics.extend(validate_test_points(
@@ -348,7 +383,7 @@ pub fn validate_loaded_artifacts(
         .collect();
 
     for doc in &artifacts.index.documents {
-        let req_path = requirements_root(project_root).join(&doc.path);
+        let req_path = requirements_root.join(&doc.path);
         if !req_path.is_file() {
             diagnostics.push(AuthoringDiagnostic {
                 severity: AuthoringSeverity::Error,
@@ -382,9 +417,17 @@ pub fn validate_loaded_artifacts(
     diagnostics
 }
 
-/// Default requirement root relative to the project directory.
-pub fn requirements_root(project_root: &Path) -> PathBuf {
+/// Project-local requirements directory from older Teshi versions.
+///
+/// Runtime loading must not use this path. Import detects it and prompts
+/// `teshi requirements import-project`.
+pub fn legacy_project_requirements_dir(project_root: &Path) -> PathBuf {
     project_root.join("requirements")
+}
+
+/// Legacy alias for [`legacy_project_requirements_dir`].
+pub fn requirements_root(project_root: &Path) -> PathBuf {
+    legacy_project_requirements_dir(project_root)
 }
 
 /// Default test points file path relative to the project directory.
@@ -413,12 +456,13 @@ mod tests {
     fn sample_index() -> RequirementDocumentIndex {
         RequirementDocumentIndex {
             version: 1,
-            documents: vec![RequirementDocumentMeta {
-                id: "doc-1".into(),
-                path: "auth.md".into(),
-                title: "Auth".into(),
-                revision: DocumentRevision::new("rev-1"),
-            }],
+            documents: vec![RequirementDocumentMeta::new(
+                "doc-1",
+                "auth.md",
+                "Auth",
+                DocumentRevision::new("rev-1"),
+            )],
+            ..Default::default()
         }
     }
 
@@ -426,18 +470,8 @@ mod tests {
     fn duplicate_document_ids_are_reported() {
         let index = RequirementDocumentIndex {
             documents: vec![
-                RequirementDocumentMeta {
-                    id: "dup".into(),
-                    path: "a.md".into(),
-                    title: "A".into(),
-                    revision: DocumentRevision::new("r1"),
-                },
-                RequirementDocumentMeta {
-                    id: "dup".into(),
-                    path: "b.md".into(),
-                    title: "B".into(),
-                    revision: DocumentRevision::new("r2"),
-                },
+                RequirementDocumentMeta::new("dup", "a.md", "A", DocumentRevision::new("r1")),
+                RequirementDocumentMeta::new("dup", "b.md", "B", DocumentRevision::new("r2")),
             ],
             ..Default::default()
         };
@@ -464,6 +498,7 @@ mod tests {
                 hierarchy_path: HierarchyPath::new(vec!["Auth".into()]),
                 review_state: ReviewState::Proposed,
                 requirement_links: vec![RequirementLink {
+                    store_id: None,
                     document_id: "missing".into(),
                     document_revision: "rev".into(),
                     position: TextRange::new(0, 1),
@@ -523,18 +558,18 @@ mod tests {
                 "duplicate document id",
                 RequirementDocumentIndex {
                     documents: vec![
-                        RequirementDocumentMeta {
-                            id: "dup".into(),
-                            path: "a.md".into(),
-                            title: "A".into(),
-                            revision: DocumentRevision::new("r1"),
-                        },
-                        RequirementDocumentMeta {
-                            id: "dup".into(),
-                            path: "b.md".into(),
-                            title: "B".into(),
-                            revision: DocumentRevision::new("r2"),
-                        },
+                        RequirementDocumentMeta::new(
+                            "dup",
+                            "a.md",
+                            "A",
+                            DocumentRevision::new("r1"),
+                        ),
+                        RequirementDocumentMeta::new(
+                            "dup",
+                            "b.md",
+                            "B",
+                            DocumentRevision::new("r2"),
+                        ),
                     ],
                     ..Default::default()
                 },
@@ -573,6 +608,7 @@ mod tests {
                         hierarchy_path: HierarchyPath::new(vec!["Auth".into()]),
                         review_state: ReviewState::Proposed,
                         requirement_links: vec![RequirementLink {
+                            store_id: None,
                             document_id: "doc-1".into(),
                             document_revision: "rev".into(),
                             position: TextRange::new(0, 1),
@@ -602,6 +638,7 @@ mod tests {
                         hierarchy_path: HierarchyPath::new(vec!["Auth".into()]),
                         review_state: ReviewState::Proposed,
                         requirement_links: vec![RequirementLink {
+                            store_id: None,
                             document_id: "doc-1".into(),
                             document_revision: "rev".into(),
                             position: TextRange::new(0, 1),

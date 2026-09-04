@@ -41,12 +41,16 @@ pub use api_dispatch::{
 pub use app_data::{
     app_data_dir, ensure_migrated_from_teshi_desktop_at,
     get_recent_projects as load_recent_projects, load_settings, open_dialog_default_dir,
-    save_settings, validated_window_size, AppSettings, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH,
+    requirements_data_dir, save_settings, validated_window_size, AppSettings,
+    RequirementsViewPrefs, DEFAULT_REQUIREMENTS_STORE_DIR, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH,
+    TESHI_REQUIREMENTS_DIR_ENV,
 };
 pub use authoring::{
-    compute_document_revision, load_authoring_artifacts, save_requirement_document_index,
-    save_requirement_markdown, save_test_points, AuthoringLoadResult, DEFAULT_REQUIREMENTS_DIR,
-    DEFAULT_TESTPOINTS_DIR, REQUIREMENTS_INDEX_FILE,
+    compute_document_revision, import_project_requirements, initialize_requirement_store,
+    load_authoring_artifacts, save_requirement_document_index, save_requirement_markdown,
+    save_test_points, set_requirement_document_iteration, AuthoringLoadResult, ImportMapping,
+    ImportProjectOptions, ImportProjectPlan, DEFAULT_REQUIREMENTS_DIR, DEFAULT_TESTPOINTS_DIR,
+    REQUIREMENTS_INDEX_FILE,
 };
 pub use browser_agent::{
     AccessibleElement, BrowserAction, BrowserAgentError, BrowserAgentErrorCode,
@@ -129,6 +133,8 @@ pub struct RuntimeConfig {
     /// (no JPEG frame loop). Intended for headless CI / replay only;
     /// desktop mode always keeps this `false`.
     pub embedded_no_preview_stream: bool,
+    /// Optional CLI `--requirements-root` override for this process.
+    pub requirements_root: Option<PathBuf>,
 }
 
 /// Central holder for project, terminal, browser sidecar, and event bus state.
@@ -146,6 +152,8 @@ pub struct TeshiEngine {
     pub embedded_no_preview_stream: bool,
     /// Optional `teshi` CLI path injected into the embedded terminal as `TESHI_CLI`.
     embedded_terminal_teshi_cli: Option<PathBuf>,
+    /// Optional `--requirements-root` override for authoring loads.
+    pub requirements_root_override: Option<PathBuf>,
 }
 
 impl TeshiEngine {
@@ -162,6 +170,7 @@ impl TeshiEngine {
             winapp_service_script: config.winapp_service_script,
             embedded_no_preview_stream: config.embedded_no_preview_stream,
             embedded_terminal_teshi_cli: resolve_embedded_terminal_teshi_cli(),
+            requirements_root_override: config.requirements_root,
         })
     }
 

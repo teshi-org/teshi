@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::requirements::RequirementStoreId;
+
 /// A Unicode scalar offset into requirement Markdown content.
 ///
 /// Offsets count [`char`] boundaries (not UTF-8 bytes) so persisted ranges
@@ -75,7 +77,13 @@ pub enum ResolutionState {
 /// A trace link from a test point to a requirement text range.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequirementLink {
-    /// Stable requirement document identifier from `requirements/_teshi.json`.
+    /// Store identity of the linked requirement document.
+    ///
+    /// Absent on unmigrated project-local links. Resolvers must not guess a
+    /// matching document in the current store when this field is missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_id: Option<RequirementStoreId>,
+    /// Stable requirement document identifier from `_teshi.json`.
     pub document_id: String,
     /// Content revision observed when the anchor was created or last resolved.
     pub document_revision: String,
@@ -104,6 +112,7 @@ mod tests {
     #[test]
     fn requirement_link_serde_roundtrip() {
         let link = RequirementLink {
+            store_id: Some(RequirementStoreId::parse("reqstore-1").unwrap()),
             document_id: "doc-auth".into(),
             document_revision: "rev-1".into(),
             position: TextRange::new(10, 25),
@@ -117,5 +126,18 @@ mod tests {
         let json = serde_json::to_string(&link).expect("serialize");
         let back: RequirementLink = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, link);
+    }
+
+    #[test]
+    fn legacy_link_without_store_id_deserializes() {
+        let json = r#"{
+            "document_id": "doc-1",
+            "document_revision": "rev",
+            "position": {"start": 0, "end": 4},
+            "quote": {"quote": "User"}
+        }"#;
+        let link: RequirementLink = serde_json::from_str(json).expect("deserialize");
+        assert!(link.store_id.is_none());
+        assert_eq!(link.document_id, "doc-1");
     }
 }

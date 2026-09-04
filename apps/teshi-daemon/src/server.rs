@@ -1559,6 +1559,7 @@ mod integration {
                 browser_service_script: PathBuf::from(""),
                 winapp_service_script: PathBuf::from(""),
                 embedded_no_preview_stream: false,
+                requirements_root: None,
             },
             None,
         );

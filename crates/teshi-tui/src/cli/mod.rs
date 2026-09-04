@@ -9,6 +9,7 @@ pub mod install_skill;
 pub mod locator_verify;
 pub mod mcp;
 pub mod replay_screenshots;
+pub mod requirements;
 pub mod steps;
 pub mod terminal;
 pub mod trace;
@@ -41,6 +42,10 @@ pub struct Cli {
     /// File or directory paths for TUI mode (`teshi .` = recursive project root)
     #[arg(value_name = "PATH")]
     pub paths: Vec<String>,
+
+    /// Override the user-level requirement store root for this process
+    #[arg(long, value_name = "PATH", global = true)]
+    pub requirements_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -61,6 +66,11 @@ pub enum Command {
         /// Auto-start embedded browser on startup
         #[arg(long)]
         start_embedded: bool,
+    },
+    /// Inspect and manage the user-level requirement library
+    Requirements {
+        #[command(subcommand)]
+        action: RequirementsCommand,
     },
     /// Run BDD features headlessly (CI / scripts; streams NDJSON runner events)
     Run {
@@ -176,6 +186,25 @@ pub struct ExportArgs {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ExportTargetArg {
     Behave,
+}
+
+/// Subcommands for `teshi requirements`.
+#[derive(Debug, Subcommand)]
+pub enum RequirementsCommand {
+    /// Print the resolved user-level requirement store path
+    Path,
+    /// Import a project's legacy `requirements/` directory into the current store
+    ImportProject {
+        /// Project directory (default: current directory)
+        #[arg(value_name = "PROJECT")]
+        project: Option<PathBuf>,
+        /// Show the import plan without writing files
+        #[arg(long)]
+        dry_run: bool,
+        /// Apply a conflict remapping plan without an interactive prompt
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

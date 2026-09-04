@@ -329,11 +329,48 @@ fn get_all_tools() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "list_requirement_documents".into(),
+            description: "List requirement documents in the active generation source scope \
+                          from the current local user-level requirement store. Returns id, \
+                          title, relative path, iteration, and revision. Call this instead of \
+                          assuming the prompt contains every document. Free-text conversation \
+                          is not a requirement-library source."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        ToolDefinition {
+            name: "read_requirement_document".into(),
+            description: "Read one requirement document from the current local store when it \
+                          belongs to the active generation source scope. Provide document_id \
+                          (and optional store_id). Returns Markdown body and the current revision."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "document_id": {
+                        "type": "string",
+                        "description": "Stable requirement document ID from the current store index"
+                    },
+                    "store_id": {
+                        "type": "string",
+                        "description": "Optional store identity; must match the active scope when provided"
+                    }
+                },
+                "required": ["document_id"]
+            }),
+        },
+        ToolDefinition {
             name: "submit_requirements".into(),
             description: "Submit gathered requirements for a new feature and advance to \
                           test-point generation. Provide source_refs for persisted requirement \
-                          documents/ranges and/or scenario_descriptions for pasted conversational \
-                          text. Call this after gathering enough information."
+                          documents/ranges in the active store/iteration scope and/or \
+                          scenario_descriptions for pasted conversational text. Conversational \
+                          text is not a requirement-library source. Call this after gathering \
+                          enough information. The system fills store_id and document_revision."
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -358,7 +395,11 @@ fn get_all_tools() -> Vec<ToolDefinition> {
                             "properties": {
                                 "document_id": {
                                     "type": "string",
-                                    "description": "Stable requirement document ID from requirements/_teshi.json"
+                                    "description": "Stable requirement document ID from the current store index"
+                                },
+                                "store_id": {
+                                    "type": "string",
+                                    "description": "Optional store identity; must match the active generation scope"
                                 },
                                 "range": {
                                     "type": "object",
@@ -417,6 +458,10 @@ fn get_all_tools() -> Vec<ToolDefinition> {
                                         "type": "object",
                                         "properties": {
                                             "document_id": { "type": "string" },
+                                            "store_id": {
+                                                "type": "string",
+                                                "description": "Optional; must match the active generation scope"
+                                            },
                                             "document_revision": { "type": "string" },
                                             "position": {
                                                 "type": "object",
@@ -748,7 +793,9 @@ mod tests {
     fn test_propose_test_points_schema_requires_test_points() {
         let tools = get_all_tools();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"propose_test_points"));
+        assert!(names.contains(&"submit_requirements"));
+        assert!(names.contains(&"list_requirement_documents"));
+        assert!(names.contains(&"read_requirement_document"));
         let propose = tools
             .iter()
             .find(|t| t.name == "propose_test_points")

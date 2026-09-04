@@ -41,6 +41,10 @@ pub struct KeyContext {
     pub requirements_focus: RequirementsFocus,
     /// Active pane when the Test Points tab is selected.
     pub test_points_focus: TestPointsFocus,
+    /// Whether a Requirements filter/iteration overlay is open.
+    pub requirements_overlay_active: bool,
+    /// Whether the AI generation source-scope confirmation overlay is open.
+    pub generation_scope_prompt_active: bool,
 
     /// Whether the quit confirmation panel is open.
     pub quit_pending_confirm: bool,
@@ -88,6 +92,30 @@ pub enum Action {
     // Requirements tab authoring
     ReqNewTestPoint,
     ReqNewDocument,
+    /// Open the iteration filter picker (`i` on the Requirements tree).
+    ReqFilterOverlay,
+    /// Toggle path vs iteration grouping (`g` on the Requirements tree).
+    ReqGroupToggle,
+    /// Edit the selected document's iteration (`I` on the Requirements tree).
+    ReqEditIteration,
+    /// Confirm the active Requirements overlay.
+    OverlayConfirm,
+    /// Cancel the active Requirements overlay.
+    OverlayCancel,
+    /// Move the overlay list selection up.
+    OverlayMoveUp,
+    /// Move the overlay list selection down.
+    OverlayMoveDown,
+    /// Insert into the overlay text field.
+    OverlayInsert(char),
+    /// Backspace in the overlay text field.
+    OverlayBackspace,
+    /// Confirm the pending generation source-scope overlay.
+    GenerationScopeConfirm,
+    /// Cancel the pending generation source-scope overlay.
+    GenerationScopeCancel,
+    /// Change the pending generation iteration without starting gathering.
+    GenerationScopeChangeIteration,
     // Test Points tab review and navigation
     TpApprove,
     TpReject,
@@ -488,6 +516,39 @@ impl Action {
             };
         }
 
+        // Requirements overlay intercepts keys while open (including from generation scope).
+        if context.requirements_overlay_active {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Esc, _) => Some(Self::OverlayCancel),
+                (KeyCode::Enter, _) => Some(Self::OverlayConfirm),
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                    Some(Self::OverlayMoveUp)
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    Some(Self::OverlayMoveDown)
+                }
+                (KeyCode::Backspace, _) => Some(Self::OverlayBackspace),
+                (KeyCode::Char(ch), modifiers)
+                    if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
+                {
+                    Some(Self::OverlayInsert(ch))
+                }
+                _ => None,
+            };
+        }
+
+        // Generation source-scope confirmation intercepts keys while open.
+        if context.generation_scope_prompt_active {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Enter, _) => Some(Self::GenerationScopeConfirm),
+                (KeyCode::Esc, _) => Some(Self::GenerationScopeCancel),
+                (KeyCode::Char('i'), KeyModifiers::NONE) => {
+                    Some(Self::GenerationScopeChangeIteration)
+                }
+                _ => None,
+            };
+        }
+
         // Step keyword picker intercepts all keys
         if context.step_keyword_picker_active {
             return match (event.code, event.modifiers) {
@@ -591,6 +652,9 @@ impl Action {
                     Some(Self::MoveDown)
                 }
                 (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::ReqNewDocument),
+                (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Self::ReqFilterOverlay),
+                (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Self::ReqGroupToggle),
+                (KeyCode::Char('I'), KeyModifiers::SHIFT) => Some(Self::ReqEditIteration),
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
                 (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),
@@ -1027,6 +1091,8 @@ mod tests {
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
             test_points_focus: TestPointsFocus::Tree,
+            requirements_overlay_active: false,
+            generation_scope_prompt_active: false,
             quit_pending_confirm: false,
         };
         let action = Action::from_key_event(
@@ -1062,6 +1128,8 @@ mod tests {
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
             test_points_focus: TestPointsFocus::Tree,
+            requirements_overlay_active: false,
+            generation_scope_prompt_active: false,
             quit_pending_confirm: false,
         };
         let action = Action::from_key_event(
@@ -1097,6 +1165,8 @@ mod tests {
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
             test_points_focus: TestPointsFocus::Tree,
+            requirements_overlay_active: false,
+            generation_scope_prompt_active: false,
             quit_pending_confirm: false,
         };
         assert_eq!(
@@ -1142,6 +1212,8 @@ mod tests {
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
             test_points_focus: TestPointsFocus::Tree,
+            requirements_overlay_active: false,
+            generation_scope_prompt_active: false,
             quit_pending_confirm: false,
         };
         assert_eq!(
@@ -1187,6 +1259,8 @@ mod tests {
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
             test_points_focus: TestPointsFocus::Tree,
+            requirements_overlay_active: false,
+            generation_scope_prompt_active: false,
             quit_pending_confirm: false,
         };
         assert_eq!(
@@ -1240,6 +1314,8 @@ mod tests {
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
             test_points_focus: TestPointsFocus::Tree,
+            requirements_overlay_active: false,
+            generation_scope_prompt_active: false,
             quit_pending_confirm: false,
         };
         let action = Action::from_key_event(
@@ -1275,6 +1351,8 @@ mod tests {
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
             test_points_focus: TestPointsFocus::Tree,
+            requirements_overlay_active: false,
+            generation_scope_prompt_active: false,
             quit_pending_confirm: false,
         };
         let action = Action::from_key_event(
@@ -1310,6 +1388,8 @@ mod tests {
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
             test_points_focus: TestPointsFocus::Tree,
+            requirements_overlay_active: false,
+            generation_scope_prompt_active: false,
             quit_pending_confirm: false,
         };
         assert_eq!(
@@ -1369,6 +1449,8 @@ mod tests {
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
             test_points_focus: TestPointsFocus::Tree,
+            requirements_overlay_active: false,
+            generation_scope_prompt_active: false,
             quit_pending_confirm: false,
         };
         let copy_context = KeyContext {
@@ -1421,6 +1503,8 @@ mod tests {
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
             test_points_focus: TestPointsFocus::Tree,
+            requirements_overlay_active: false,
+            generation_scope_prompt_active: false,
             quit_pending_confirm: false,
         };
         assert_eq!(
@@ -1430,6 +1514,84 @@ mod tests {
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
             Some(Action::ExternalChangeKeepLocal)
+        );
+    }
+
+    fn requirements_tree_context() -> KeyContext {
+        KeyContext {
+            step_keyword_picker_active: false,
+            step_input_active: false,
+            external_change_prompt_active: false,
+            agent_change_prompt_active: false,
+            active_tab: MainTab::Requirements,
+            view_stage: ViewStage::TreeOnly,
+            explore_edit_mode: false,
+            pending_char: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: false,
+            ai_input_focused: false,
+            slash_suggestion_active: false,
+            auth_panel_active: false,
+            model_panel_active: false,
+            model_panel_adding: false,
+            session_panel_active: false,
+            change_summary_visible: false,
+            ai_status_waiting: false,
+            scenario_dropdown_open: false,
+            approval_panel_active: false,
+            agent_profile_panel_active: false,
+            requirements_focus: RequirementsFocus::Tree,
+            test_points_focus: TestPointsFocus::Tree,
+            requirements_overlay_active: false,
+            generation_scope_prompt_active: false,
+            quit_pending_confirm: false,
+        }
+    }
+
+    #[test]
+    fn requirements_tree_binds_filter_group_and_iteration() {
+        let context = requirements_tree_context();
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::ReqFilterOverlay)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::ReqGroupToggle)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('I'), KeyModifiers::SHIFT),
+                context
+            ),
+            Some(Action::ReqEditIteration)
+        );
+    }
+
+    #[test]
+    fn requirements_overlay_intercepts_confirm_and_insert() {
+        let mut context = requirements_tree_context();
+        context.requirements_overlay_active = true;
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
+            Some(Action::OverlayConfirm)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
+            Some(Action::OverlayCancel)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::OverlayInsert('a'))
         );
     }
 }

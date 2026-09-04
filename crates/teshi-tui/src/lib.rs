@@ -168,6 +168,7 @@ pub fn run(version: &str) -> Result<()> {
     }
 
     let cli_args = cli::Cli::parse();
+    let requirements_root = cli_args.requirements_root.clone();
 
     match cli_args.command {
         Some(cli::Command::Auth { action }) => {
@@ -182,6 +183,13 @@ pub fn run(version: &str) -> Result<()> {
                 project.as_deref(),
                 path.as_deref(),
                 start_embedded,
+                requirements_root.as_deref(),
+            );
+        }
+        Some(cli::Command::Requirements { action }) => {
+            return cli::requirements::handle_requirements_command(
+                &action,
+                requirements_root.as_deref(),
             );
         }
         Some(cli::Command::Run {
@@ -291,6 +299,8 @@ pub fn run(version: &str) -> Result<()> {
                             agent_profile_panel_active: app.agent_profile_panel_active,
                             requirements_focus: app.authoring_ui.focus,
                             test_points_focus: app.test_points_ui.focus,
+                            requirements_overlay_active: app.authoring_ui.overlay_active(),
+                            generation_scope_prompt_active: app.generation_scope_prompt.is_some(),
                             quit_pending_confirm: app.quit_pending_confirm,
                         },
                     ) {

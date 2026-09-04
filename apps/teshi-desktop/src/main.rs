@@ -53,6 +53,7 @@ fn run_winapp_stream(slot: LatestPreviewEvent, process_name: String) -> Result<(
                 browser_service_script: default_browser_service_script(),
                 winapp_service_script: default_winapp_service_script(),
                 embedded_no_preview_stream: false,
+                requirements_root: None,
             },
             None,
         );

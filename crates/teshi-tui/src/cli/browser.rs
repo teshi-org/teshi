@@ -1386,6 +1386,7 @@ async fn serve_embedded_async(args: &BrowserServeEmbeddedArgs) -> Result<()> {
             browser_service_script: dev_browser_script,
             winapp_service_script: default_winapp_service_script(),
             embedded_no_preview_stream: false,
+            requirements_root: None,
         },
         None,
     );

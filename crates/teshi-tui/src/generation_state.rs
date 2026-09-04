@@ -84,6 +84,7 @@ mod tests {
             hierarchy_path: HierarchyPath::new(vec!["Auth".into()]),
             review_state: ReviewState::Proposed,
             requirement_links: vec![RequirementLink {
+                store_id: None,
                 document_id: "doc-1".into(),
                 document_revision: "rev".into(),
                 position: TextRange::new(0, 4),
@@ -111,6 +112,7 @@ mod tests {
                 tags: vec![],
             }),
             plan: None,
+            source_scope: None,
         };
         save_generation_state(dir.path(), &state).unwrap();
         let (stage, restored) = restore_generation_session(dir.path(), &[proposed_tp()]).unwrap();

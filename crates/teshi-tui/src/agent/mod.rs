@@ -119,6 +119,8 @@ fn execute_tool_impl(
         "reorder_steps" => execute_reorder_steps(app, args_json, tool_call_id, agent_idx),
         "search_features" => execute_search_features(app, args_json),
         "run_tests" => execute_run_tests(app, args_json),
+        "list_requirement_documents" => execute_list_requirement_documents(app),
+        "read_requirement_document" => execute_read_requirement_document(app, args_json),
         "submit_requirements" => execute_submit_requirements(app, args_json),
         "propose_test_points" => execute_propose_test_points(app, args_json),
         "generate_plan" => execute_generate_plan(app, args_json),
@@ -1272,7 +1274,106 @@ fn execute_run_tests(app: &mut crate::app::App, args_json: &str) -> Result<Strin
 
 // ── submit_requirements ───────────────────────────────────────────────────────
 
+fn generation_is_paused(app: &crate::app::App) -> Result<()> {
+    if let Some(reason) = &app.generation_paused_reason {
+        anyhow::bail!("generation is paused: {reason}");
+    }
+    Ok(())
+}
+
+fn active_or_default_scope(
+    app: &crate::app::App,
+) -> Option<teshi_agent::pipeline::RequirementSourceScope> {
+    if let Some(scope) = app.generation_scope.clone() {
+        return Some(scope);
+    }
+    app.authoring_ui
+        .artifacts
+        .as_ref()
+        .and_then(|artifacts| artifacts.index.store_id.clone())
+        .map(|store_id| teshi_agent::pipeline::RequirementSourceScope {
+            store_id,
+            iteration: teshi_core::authoring::RequirementIterationFilter::All,
+        })
+}
+
+fn reload_requirement_store(app: &mut crate::app::App) -> Result<()> {
+    app.authoring_ui.project_root = app.project.root_dir.clone();
+    app.authoring_ui.requirements_root = app.requirements_root.clone();
+    app.authoring_ui.reload_from_disk()
+}
+
+fn execute_list_requirement_documents(app: &mut crate::app::App) -> Result<String> {
+    generation_is_paused(app)?;
+    reload_requirement_store(app)?;
+    let Some(scope) = active_or_default_scope(app) else {
+        return Ok("[]".into());
+    };
+    let Some(artifacts) = app.authoring_ui.artifacts.as_ref() else {
+        return Ok("[]".into());
+    };
+    let metas = teshi_agent::pipeline::documents_in_scope(&artifacts.index, &scope)
+        .map_err(|err| anyhow::anyhow!(err))?;
+    let payload: Vec<serde_json::Value> = metas
+        .into_iter()
+        .map(|meta| {
+            serde_json::json!({
+                "id": meta.id,
+                "title": meta.title,
+                "path": meta.path,
+                "iteration": meta.iteration,
+                "revision": meta.revision.as_str(),
+            })
+        })
+        .collect();
+    Ok(serde_json::to_string(&payload)?)
+}
+
+fn execute_read_requirement_document(app: &mut crate::app::App, args_json: &str) -> Result<String> {
+    generation_is_paused(app)?;
+    reload_requirement_store(app)?;
+    let args: serde_json::Value =
+        serde_json::from_str(args_json).context("invalid JSON arguments")?;
+    let document_id = args
+        .get("document_id")
+        .and_then(|v| v.as_str())
+        .context("missing 'document_id'")?
+        .trim()
+        .to_string();
+    let Some(scope) = active_or_default_scope(app) else {
+        anyhow::bail!("requirement store is uninitialized");
+    };
+    let store_id = match args.get("store_id").and_then(|v| v.as_str()) {
+        Some(raw) => teshi_core::authoring::RequirementStoreId::parse(raw)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+        None => scope.store_id.clone(),
+    };
+    let artifacts = app
+        .authoring_ui
+        .artifacts
+        .as_ref()
+        .context("authoring artifacts unavailable")?;
+    let document = teshi_agent::pipeline::read_document_in_scope(
+        &artifacts.documents,
+        &artifacts.index,
+        &scope,
+        &store_id,
+        &document_id,
+    )
+    .map_err(|err| anyhow::anyhow!(err))?;
+    Ok(serde_json::to_string(&serde_json::json!({
+        "document_id": document.meta.id,
+        "store_id": scope.store_id.to_string(),
+        "revision": document.meta.revision.as_str(),
+        "iteration": document.meta.iteration,
+        "path": document.meta.path,
+        "markdown": document.body,
+    }))?)
+}
+
 fn execute_submit_requirements(app: &mut crate::app::App, args_json: &str) -> Result<String> {
+    generation_is_paused(app)?;
+    reload_requirement_store(app)?;
     let args: serde_json::Value =
         serde_json::from_str(args_json).context("invalid JSON arguments")?;
 
@@ -1295,7 +1396,7 @@ fn execute_submit_requirements(app: &mut crate::app::App, args_json: &str) -> Re
                 .collect()
         })
         .unwrap_or_default();
-    let source_refs = parse_source_refs(args.get("source_refs"))?;
+    let source_refs = parse_source_refs(args.get("source_refs"), app)?;
     let tags: Vec<String> = args
         .get("tags")
         .and_then(|v| v.as_array())
@@ -1318,6 +1419,9 @@ fn execute_submit_requirements(app: &mut crate::app::App, args_json: &str) -> Re
             "submit_requirements requires source_refs and/or scenario_descriptions (pasted text)"
         );
     }
+    if !requirement.source_refs.is_empty() && app.generation_scope.is_none() {
+        app.generation_scope = active_or_default_scope(app);
+    }
 
     app.pipeline_requirement = Some(requirement);
     app.generation_stage = teshi_agent::pipeline::GenerationStage::GeneratingTestPoints;
@@ -1331,17 +1435,25 @@ fn execute_submit_requirements(app: &mut crate::app::App, args_json: &str) -> Re
 
 fn parse_source_refs(
     value: Option<&serde_json::Value>,
+    app: &crate::app::App,
 ) -> Result<Vec<teshi_agent::pipeline::RequirementSourceRef>> {
     let Some(arr) = value.and_then(|v| v.as_array()) else {
         return Ok(Vec::new());
     };
-    let mut refs = Vec::new();
+    let mut submitted = Vec::new();
     for item in arr {
         let document_id = item
             .get("document_id")
             .and_then(|v| v.as_str())
             .context("source_refs[].document_id is required")?
             .to_string();
+        let store_id = match item.get("store_id").and_then(|v| v.as_str()) {
+            Some(raw) => Some(
+                teshi_core::authoring::RequirementStoreId::parse(raw)
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?,
+            ),
+            None => None,
+        };
         let range = if let Some(range_val) = item.get("range") {
             let start = range_val
                 .get("start")
@@ -1358,14 +1470,36 @@ fn parse_source_refs(
         } else {
             None
         };
-        refs.push(teshi_agent::pipeline::RequirementSourceRef { document_id, range });
+        submitted.push(teshi_agent::pipeline::SubmittedSourceRef {
+            store_id,
+            document_id,
+            range,
+        });
     }
-    Ok(refs)
+    if submitted.is_empty() {
+        return Ok(Vec::new());
+    }
+    let scope = active_or_default_scope(app).ok_or_else(|| {
+        anyhow::anyhow!("submit_requirements source_refs require an initialized requirement store")
+    })?;
+    let artifacts =
+        app.authoring_ui.artifacts.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("requirement documents are unavailable for source_refs")
+        })?;
+    teshi_agent::pipeline::resolve_submitted_source_refs(
+        &submitted,
+        &scope,
+        &artifacts.index,
+        &artifacts.documents,
+    )
+    .map_err(|err| anyhow::anyhow!(err))
 }
 
 // ── propose_test_points ───────────────────────────────────────────────────────
 
 fn execute_propose_test_points(app: &mut crate::app::App, args_json: &str) -> Result<String> {
+    generation_is_paused(app)?;
+    reload_requirement_store(app)?;
     if app.pipeline_requirement.is_none()
         && !matches!(
             app.generation_stage,
@@ -1389,6 +1523,12 @@ fn execute_propose_test_points(app: &mut crate::app::App, args_json: &str) -> Re
     }
 
     ensure_authoring_artifacts(app);
+    let scope = active_or_default_scope(app);
+    let submitted_refs = app
+        .pipeline_requirement
+        .as_ref()
+        .map(|requirement| requirement.source_refs.clone())
+        .unwrap_or_default();
     let artifacts = app
         .authoring_ui
         .artifacts
@@ -1399,8 +1539,12 @@ fn execute_propose_test_points(app: &mut crate::app::App, args_json: &str) -> Re
     let mut proposed = Vec::with_capacity(items.len());
     let mut proposed_ids = HashSet::new();
     for item in items {
-        let test_point =
-            parse_proposed_test_point(item, &id_allocation_pool, &artifacts.documents)?;
+        let test_point = parse_proposed_test_point(
+            item,
+            &id_allocation_pool,
+            &artifacts.documents,
+            artifacts.index.store_id.clone(),
+        )?;
         if !proposed_ids.insert(test_point.id.clone()) {
             anyhow::bail!(
                 "propose_test_points contains duplicate id '{}'",
@@ -1409,6 +1553,21 @@ fn execute_propose_test_points(app: &mut crate::app::App, args_json: &str) -> Re
         }
         id_allocation_pool.push(test_point.clone());
         proposed.push(test_point);
+    }
+    if let Some(scope) = scope.as_ref() {
+        teshi_agent::pipeline::validate_test_point_links_in_scope(
+            &proposed,
+            scope,
+            &artifacts.index,
+        )
+        .map_err(|err| anyhow::anyhow!(err))?;
+        teshi_agent::pipeline::revalidate_source_refs(
+            &submitted_refs,
+            scope,
+            &artifacts.index,
+            &artifacts.documents,
+        )
+        .map_err(|err| anyhow::anyhow!(err))?;
     }
     for tp in &proposed {
         if let Some(existing) = artifacts
@@ -1475,6 +1634,7 @@ fn parse_proposed_test_point(
     item: &serde_json::Value,
     existing: &[teshi_core::authoring::TestPoint],
     documents: &[teshi_core::authoring::RequirementDocumentContent],
+    store_id: Option<teshi_core::authoring::RequirementStoreId>,
 ) -> Result<teshi_core::authoring::TestPoint> {
     let title = item
         .get("title")
@@ -1524,7 +1684,8 @@ fn parse_proposed_test_point(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let requirement_links = parse_requirement_links(item.get("requirement_links"), documents)?;
+    let requirement_links =
+        parse_requirement_links(item.get("requirement_links"), documents, store_id)?;
 
     Ok(teshi_core::authoring::TestPoint {
         id,
@@ -1553,6 +1714,7 @@ fn next_agent_test_point_id(existing: &[teshi_core::authoring::TestPoint]) -> St
 fn parse_requirement_links(
     value: Option<&serde_json::Value>,
     documents: &[teshi_core::authoring::RequirementDocumentContent],
+    store_id: Option<teshi_core::authoring::RequirementStoreId>,
 ) -> Result<Vec<teshi_core::authoring::RequirementLink>> {
     let Some(value) = value else {
         return Ok(Vec::new());
@@ -1570,6 +1732,17 @@ fn parse_requirement_links(
             .to_string();
         if document_id.is_empty() {
             anyhow::bail!("requirement_links[].document_id must be non-empty");
+        }
+        if let Some(raw_store) = item.get("store_id").and_then(|v| v.as_str()) {
+            let parsed = teshi_core::authoring::RequirementStoreId::parse(raw_store)
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+            if let Some(expected) = store_id.as_ref()
+                && &parsed != expected
+            {
+                anyhow::bail!(
+                    "requirement link store '{parsed}' does not match the current store '{expected}'"
+                );
+            }
         }
         let document = documents
             .iter()
@@ -1647,6 +1820,7 @@ fn parse_requirement_links(
             .unwrap_or("")
             .to_string();
         links.push(teshi_core::authoring::RequirementLink {
+            store_id: store_id.clone(),
             document_id,
             document_revision,
             position: range,
@@ -1942,10 +2116,11 @@ mod pipeline_gate_tests {
     use tempfile::tempdir;
     use teshi_agent::AgentHost;
     use teshi_agent::approval::ApprovalMode;
-    use teshi_agent::pipeline::GenerationStage;
+    use teshi_agent::pipeline::{GenerationStage, RequirementSourceScope};
     use teshi_core::authoring::{
-        DocumentRevision, QuoteSelector, RequirementDocumentContent, RequirementDocumentMeta,
-        RequirementLink, ResolutionState, ReviewState, ScenarioRef, TestPointsFile, TextRange,
+        DocumentRevision, QuoteSelector, RequirementDocumentContent, RequirementDocumentIndex,
+        RequirementDocumentMeta, RequirementIterationFilter, RequirementLink, RequirementStoreId,
+        ResolutionState, ReviewState, ScenarioRef, TestPointsFile, TextRange,
     };
 
     fn app_in_temp_project() -> (crate::app::App, tempfile::TempDir) {
@@ -1956,8 +2131,11 @@ mod pipeline_gate_tests {
             "Feature: Sample\n  Scenario: placeholder\n    Given noop\n",
         )
         .expect("write feature");
-        let app = crate::app::App::from_file(&feature, crate::config::load_config().unwrap())
-            .expect("open app");
+        let req_store = dir.path().join("requirement-store");
+        fs::create_dir_all(&req_store).expect("requirement store");
+        let app =
+            crate::app::App::from_file(&feature, crate::config::load_config().unwrap(), req_store)
+                .expect("open app");
         (app, dir)
     }
 
@@ -1999,8 +2177,7 @@ mod pipeline_gate_tests {
                 "submit_requirements",
                 r#"{
                     "feature_name": "Auth",
-                    "scenario_descriptions": ["user can log in"],
-                    "source_refs": [{"document_id": "doc-1"}]
+                    "scenario_descriptions": ["user can log in"]
                 }"#,
                 "tc-1",
                 0,
@@ -2014,6 +2191,174 @@ mod pipeline_gate_tests {
                 .unwrap()
                 .has_usable_sources()
         );
+    }
+
+    fn app_with_scoped_document(
+        iteration: Option<&str>,
+    ) -> (crate::app::App, tempfile::TempDir, RequirementStoreId) {
+        let (mut app, dir) = app_in_temp_project();
+        let store_id = RequirementStoreId::parse("reqstore-test").unwrap();
+        let mut meta = RequirementDocumentMeta::new(
+            "doc-1",
+            "login.md",
+            "Login",
+            DocumentRevision::new("rev-1"),
+        );
+        meta.iteration = iteration.map(str::to_string);
+        let body = "hello world";
+        fs::write(app.requirements_root.join("login.md"), body).expect("write markdown");
+        let index = RequirementDocumentIndex {
+            version: 2,
+            store_id: Some(store_id.clone()),
+            documents: vec![meta.clone()],
+        };
+        teshi_engine::save_requirement_document_index(&app.requirements_root, &index)
+            .expect("persist store");
+        app.authoring_ui = crate::authoring_tab::AuthoringUiState::load_from_project(
+            &app.project.root_dir,
+            &app.requirements_root,
+        );
+        app.generation_scope = Some(RequirementSourceScope {
+            store_id: store_id.clone(),
+            iteration: match iteration {
+                Some(name) => RequirementIterationFilter::Named(name.to_string()),
+                None => RequirementIterationFilter::All,
+            },
+        });
+        (app, dir, store_id)
+    }
+
+    #[test]
+    fn list_and_read_requirement_documents_stay_in_scope() {
+        let (mut app, _dir, store_id) = app_with_scoped_document(Some("Sprint 1"));
+        let listed = app
+            .execute_tool("list_requirement_documents", "{}", "tc-list", 0)
+            .unwrap();
+        assert!(listed.contains("doc-1"));
+        assert!(listed.contains("Sprint 1"));
+        let read = app
+            .execute_tool(
+                "read_requirement_document",
+                &format!(r#"{{"document_id":"doc-1","store_id":"{store_id}"}}"#),
+                "tc-read",
+                0,
+            )
+            .unwrap();
+        assert!(read.contains("hello world"));
+        let wrong = app
+            .execute_tool(
+                "read_requirement_document",
+                r#"{"document_id":"doc-1","store_id":"reqstore-other"}"#,
+                "tc-wrong",
+                0,
+            )
+            .unwrap_err();
+        assert!(wrong.to_string().contains("outside the active scope"));
+    }
+
+    #[test]
+    fn requirement_tools_reload_store_before_scope_checks() {
+        let (mut app, _dir, store_id) = app_with_scoped_document(Some("Sprint 1"));
+        let listed = app
+            .execute_tool("list_requirement_documents", "{}", "tc-before", 0)
+            .unwrap();
+        assert!(listed.contains("doc-1"));
+
+        let mut index: RequirementDocumentIndex = serde_json::from_str(
+            &fs::read_to_string(app.requirements_root.join("_teshi.json")).unwrap(),
+        )
+        .unwrap();
+        index.documents[0].iteration = Some("Sprint 2".into());
+        teshi_engine::save_requirement_document_index(&app.requirements_root, &index).unwrap();
+
+        let listed = app
+            .execute_tool("list_requirement_documents", "{}", "tc-after", 0)
+            .unwrap();
+        assert_eq!(listed, "[]");
+        let err = app
+            .execute_tool(
+                "read_requirement_document",
+                &format!(r#"{{"document_id":"doc-1","store_id":"{store_id}"}}"#),
+                "tc-read-stale",
+                0,
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("outside the active generation source scope")
+                || err.to_string().contains("outside the active scope")
+        );
+    }
+
+    #[test]
+    fn submit_requirements_rejects_out_of_scope_and_wrong_store() {
+        let (mut app, _dir, _store_id) = app_with_scoped_document(Some("Sprint 1"));
+        let missing = app
+            .execute_tool(
+                "submit_requirements",
+                r#"{"feature_name":"Auth","source_refs":[{"document_id":"missing"}]}"#,
+                "tc-miss",
+                0,
+            )
+            .unwrap_err();
+        assert!(
+            missing
+                .to_string()
+                .contains("outside the active generation source scope")
+        );
+
+        let wrong_store = app
+            .execute_tool(
+                "submit_requirements",
+                r#"{"feature_name":"Auth","source_refs":[{"document_id":"doc-1","store_id":"reqstore-other"}]}"#,
+                "tc-store",
+                0,
+            )
+            .unwrap_err();
+        assert!(
+            wrong_store
+                .to_string()
+                .contains("does not match the active scope")
+        );
+
+        let ok = app
+            .execute_tool(
+                "submit_requirements",
+                r#"{"feature_name":"Auth","source_refs":[{"document_id":"doc-1"}]}"#,
+                "tc-ok",
+                0,
+            )
+            .unwrap();
+        assert!(ok.contains("propose_test_points"));
+        let revision = &app.pipeline_requirement.as_ref().unwrap().source_refs[0];
+        assert_eq!(revision.document_revision, "rev-1");
+        assert!(revision.store_id.is_some());
+    }
+
+    #[test]
+    fn propose_test_points_does_not_write_when_link_is_out_of_scope() {
+        let (mut app, dir, store_id) = app_with_scoped_document(Some("Sprint 1"));
+        app.execute_tool(
+            "submit_requirements",
+            r#"{"feature_name":"Auth","source_refs":[{"document_id":"doc-1"}]}"#,
+            "tc-1",
+            0,
+        )
+        .unwrap();
+        let err = app
+            .execute_tool(
+                "propose_test_points",
+                r#"{"test_points":[{"title":"T","objective":"o","hierarchy_path":["A"],"requirement_links":[{"document_id":"doc-1","store_id":"reqstore-other","document_revision":"rev-1","position":{"start":0,"end":5},"quote":{"quote":"hello"}}]}]}"#,
+                "tc-2",
+                0,
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("does not match the current store")
+                || err.to_string().contains("outside the active scope")
+        );
+        assert!(!dir.path().join("testpoints/testpoints.json").is_file());
+        let _ = store_id;
     }
 
     #[test]
@@ -2088,6 +2433,7 @@ mod pipeline_gate_tests {
     fn proposal_rejects_invalid_requirement_links() {
         let document = RequirementDocumentContent {
             meta: RequirementDocumentMeta {
+                iteration: None,
                 id: "doc-1".into(),
                 path: "auth.md".into(),
                 title: "Auth".into(),
@@ -2140,7 +2486,7 @@ mod pipeline_gate_tests {
         ];
 
         for (value, expected) in cases {
-            let error = super::parse_requirement_links(Some(&value), &documents).unwrap_err();
+            let error = super::parse_requirement_links(Some(&value), &documents, None).unwrap_err();
             assert!(
                 error.to_string().contains(expected),
                 "expected '{expected}' in '{error}'"
@@ -2153,7 +2499,7 @@ mod pipeline_gate_tests {
             "position": {"start": 0, "end": 5},
             "quote": {"quote": "Login"}
         }]);
-        let links = super::parse_requirement_links(Some(&valid), &documents).unwrap();
+        let links = super::parse_requirement_links(Some(&valid), &documents, None).unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].resolution, ResolutionState::Resolved);
     }
@@ -2476,8 +2822,12 @@ mod pipeline_gate_tests {
 
         // Simulate restart by reopening the same project root
         let feature = dir.path().join("sample.feature");
-        let restored =
-            crate::app::App::from_file(&feature, crate::config::load_config().unwrap()).unwrap();
+        let restored = crate::app::App::from_file(
+            &feature,
+            crate::config::load_config().unwrap(),
+            teshi_engine::requirements_data_dir(None).unwrap_or_default(),
+        )
+        .unwrap();
         assert_eq!(
             restored.generation_stage,
             GenerationStage::ReviewingTestPoints
@@ -2527,6 +2877,8 @@ mod pipeline_gate_tests {
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
             test_points_focus: TestPointsFocus::Tree,
+            requirements_overlay_active: false,
+            generation_scope_prompt_active: false,
             quit_pending_confirm: false,
         };
         assert_eq!(
@@ -2650,6 +3002,7 @@ mod pipeline_gate_tests {
             .test_points[0];
         test_point.review_state = ReviewState::Approved;
         test_point.requirement_links.push(RequirementLink {
+            store_id: None,
             document_id: "doc-1".into(),
             document_revision: "rev-1".into(),
             position: TextRange::new(0, 5),

@@ -369,7 +369,13 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     } else if app.active_tab == MainTab::Ai {
         render_ai_footer(frame, app, chunks[3]);
     } else if app.active_tab == MainTab::Requirements {
-        frame.render_widget(crate::authoring_tab::requirements_footer_line(), chunks[3]);
+        frame.render_widget(
+            crate::authoring_tab::requirements_footer_line(
+                &app.requirements_root,
+                &app.authoring_ui.iteration_filter,
+            ),
+            chunks[3],
+        );
     } else if app.active_tab == MainTab::TestPoints {
         frame.render_widget(crate::test_points_tab::test_points_footer_line(), chunks[3]);
     } else {
@@ -404,6 +410,14 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     if app.agent_profile_panel_active {
         render_agent_profile_panel(frame, app, frame.area());
+    }
+
+    if !matches!(
+        app.authoring_ui.overlay,
+        crate::authoring_tab::RequirementsOverlay::None
+    ) || app.generation_scope_prompt.is_some()
+    {
+        render_requirements_overlay(frame, app, frame.area());
     }
 }
 
@@ -3196,7 +3210,10 @@ fn footer_hints(app: &App) -> Line<'static> {
             Span::raw(" "),
             footer_pill(" Quit [q] "),
         ]),
-        (MainTab::Requirements, _) => crate::authoring_tab::requirements_footer_line(),
+        (MainTab::Requirements, _) => crate::authoring_tab::requirements_footer_line(
+            &app.requirements_root,
+            &app.authoring_ui.iteration_filter,
+        ),
         (MainTab::TestPoints, _) => crate::test_points_tab::test_points_footer_line(),
     }
 }
@@ -4000,19 +4017,21 @@ fn render_requirements_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .split(area)
     };
 
-    let ui = &mut app.authoring_ui;
-    let tree_focused = ui.focus == crate::authoring_tab::RequirementsFocus::Tree;
-    render_requirements_tree(frame, ui, layout[0], tree_focused);
+    {
+        let ui = &mut app.authoring_ui;
+        let tree_focused = ui.focus == crate::authoring_tab::RequirementsFocus::Tree;
+        render_requirements_tree(frame, ui, layout[0], tree_focused);
 
-    if layout.len() == 2 {
-        render_requirements_editor(frame, ui, layout[1], true);
-        return;
+        if layout.len() == 2 {
+            render_requirements_editor(frame, ui, layout[1], true);
+        } else {
+            let editor_focused = ui.focus == crate::authoring_tab::RequirementsFocus::Editor;
+            let linked_focused =
+                ui.focus == crate::authoring_tab::RequirementsFocus::LinkedTestPoints;
+            render_requirements_editor(frame, ui, layout[1], editor_focused);
+            render_requirements_linked(frame, ui, layout[2], linked_focused);
+        }
     }
-
-    let editor_focused = ui.focus == crate::authoring_tab::RequirementsFocus::Editor;
-    let linked_focused = ui.focus == crate::authoring_tab::RequirementsFocus::LinkedTestPoints;
-    render_requirements_editor(frame, ui, layout[1], editor_focused);
-    render_requirements_linked(frame, ui, layout[2], linked_focused);
 }
 
 fn render_requirements_tree(
@@ -4030,7 +4049,9 @@ fn render_requirements_tree(
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("Requirements")
+        .title(crate::authoring_tab::requirements_tree_title(
+            &ui.iteration_filter,
+        ))
         .title_style(title_style);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -4287,6 +4308,119 @@ fn render_requirements_linked(
     }
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    use crate::authoring_tab::RequirementsOverlay;
+    match &app.authoring_ui.overlay {
+        RequirementsOverlay::None => {}
+        RequirementsOverlay::FilterPicker { selection } => {
+            let options = app.authoring_ui.filter_picker_options();
+            let panel_w = area.width.min(48);
+            let panel_h = (options.len() as u16 + 4).min(area.height.min(16));
+            let panel_area = Rect::new(
+                (area.width.saturating_sub(panel_w)) / 2,
+                (area.height.saturating_sub(panel_h)) / 2,
+                panel_w,
+                panel_h,
+            );
+            frame.render_widget(Clear, panel_area);
+            let lines: Vec<Line> = options
+                .iter()
+                .enumerate()
+                .map(|(i, filter)| {
+                    let label = match filter {
+                        teshi_core::authoring::RequirementIterationFilter::All => "All".to_string(),
+                        teshi_core::authoring::RequirementIterationFilter::Unassigned => {
+                            teshi_core::authoring::UNASSIGNED_ITERATION_LABEL.to_string()
+                        }
+                        teshi_core::authoring::RequirementIterationFilter::Named(name) => {
+                            name.clone()
+                        }
+                    };
+                    let style = if i == *selection {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    Line::styled(format!("  {label}"), style)
+                })
+                .collect();
+            frame.render_widget(
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Filter iteration "),
+                ),
+                panel_area,
+            );
+        }
+        RequirementsOverlay::IterationEdit { buffer } => {
+            let panel_w = area.width.min(56);
+            let panel_h = 5.min(area.height);
+            let panel_area = Rect::new(
+                (area.width.saturating_sub(panel_w)) / 2,
+                (area.height.saturating_sub(panel_h)) / 2,
+                panel_w,
+                panel_h,
+            );
+            frame.render_widget(Clear, panel_area);
+            frame.render_widget(
+                Paragraph::new(format!("Iteration: {buffer}")).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Set iteration (empty = Unassigned) "),
+                ),
+                panel_area,
+            );
+        }
+    }
+
+    if let Some(prompt) = &app.generation_scope_prompt {
+        let panel_w = area.width.min(72);
+        let panel_h = 10.min(area.height);
+        let panel_area = Rect::new(
+            (area.width.saturating_sub(panel_w)) / 2,
+            (area.height.saturating_sub(panel_h)) / 2,
+            panel_w,
+            panel_h,
+        );
+        frame.render_widget(Clear, panel_area);
+        let filter = match &prompt.iteration {
+            teshi_core::authoring::RequirementIterationFilter::All => "All".to_string(),
+            teshi_core::authoring::RequirementIterationFilter::Unassigned => {
+                teshi_core::authoring::UNASSIGNED_ITERATION_LABEL.to_string()
+            }
+            teshi_core::authoring::RequirementIterationFilter::Named(name) => name.clone(),
+        };
+        let store_id = app
+            .authoring_ui
+            .artifacts
+            .as_ref()
+            .and_then(|a| a.index.store_id.as_ref())
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "(uninitialized)".into());
+        let lines = vec![
+            Line::raw(format!(
+                "Requirement store: {}",
+                app.requirements_root.display()
+            )),
+            Line::raw(format!("Store ID: {store_id}")),
+            Line::raw(format!("Iteration scope: {filter}")),
+            Line::raw(""),
+            Line::raw("Enter confirm · Esc cancel · i change iteration"),
+        ];
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Confirm generation source scope "),
+            ),
+            panel_area,
+        );
+    }
 }
 
 fn render_test_points_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {

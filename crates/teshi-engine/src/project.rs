@@ -93,7 +93,9 @@ pub async fn open_project(rt: Arc<TeshiEngine>, path: String) -> Result<(), Stri
     *rt.project.browser_active.lock().unwrap() = false;
     *rt.project.terminal_active.lock().unwrap() = false;
 
-    match load_authoring_artifacts(&canonical) {
+    let requirements_root = crate::requirements_data_dir(rt.requirements_root_override.as_deref())
+        .map_err(|e| format!("resolve requirements store: {e}"))?;
+    match load_authoring_artifacts(&canonical, &requirements_root) {
         Ok(result) => {
             *rt.project.authoring.lock().unwrap() = result.artifacts;
         }

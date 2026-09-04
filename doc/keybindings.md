@@ -28,6 +28,9 @@
 | `Tab` | Cycle tree / editor / linked test-point panes |
 | `n` | Create a Proposed test point from the active non-empty selection |
 | `Ctrl+n` | Create a new requirement Markdown document |
+| `i` | Filter the tree by iteration (All / Unassigned / named) |
+| `g` | Toggle grouping: path hierarchy vs iteration → path |
+| `I` | Edit the selected document's iteration (empty = Unassigned) |
 | `s` | Save the current requirement document |
 
 ## Test Points tab

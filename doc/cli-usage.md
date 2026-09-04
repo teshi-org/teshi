@@ -12,6 +12,27 @@ teshi path/to/file.feature         # open single .feature file
 
 If no `.feature` files are found, the TUI opens an empty project buffer.
 
+Global flag (all subcommands): `--requirements-root PATH` overrides the user-level requirement library for this process.
+
+### Requirement library (`teshi requirements`)
+
+Requirement Markdown lives in a **user-level store**, not in the project you have open. Test points remain per-project under `testpoints/testpoints.json`.
+
+```bash
+teshi requirements path
+teshi requirements import-project --dry-run
+teshi requirements import-project --yes
+teshi --requirements-root D:\Docs\teshi-requirements requirements path
+```
+
+| Platform | Default store |
+|----------|----------------|
+| Windows | `%APPDATA%\teshi\requirements\` |
+| Linux | `$XDG_DATA_HOME/teshi/requirements` |
+| macOS | `dirs::data_dir()/teshi/requirements` |
+
+Path resolution: `--requirements-root` → non-empty `TESHI_REQUIREMENTS_DIR` → `<app_data>/requirements`. Put the store in a separate Git repo if you want version control independent of application projects. Import copies legacy `<project>/requirements/` into the current store and rewrites that project's test-point links; it does not delete the source directory.
+
 ### Browser GUI (`teshi web`)
 
 GPUI WASM workspace UI served over loopback HTTP by the local daemon:
@@ -265,7 +286,8 @@ Older `[providers.*]` blocks and `${auth:…}` placeholders in `config.toml` are
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `TESHI_APP_DATA_DIR` | OS data dir + `teshi` | Override shared app-data root (profiles, settings, recent) |
+| `TESHI_APP_DATA_DIR` | OS data dir + `teshi` | Override shared app-data root (profiles, settings, recent, default requirements store) |
+| `TESHI_REQUIREMENTS_DIR` | `<app_data>/requirements` | Override the user-level requirement library path |
 | `TESHI_LLM_API_KEY` | — | Fallback LLM API key when no active profile has a key |
 | `TESHI_LLM_BASE_URL` | `https://api.openai.com/v1` | Fallback LLM API base URL |
 | `TESHI_LLM_MODEL` | `gpt-4o-mini` | Fallback LLM model name |

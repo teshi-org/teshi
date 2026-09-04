@@ -557,6 +557,7 @@ mod tests {
             hierarchy_path: HierarchyPath::new(hierarchy.into_iter().map(str::to_string).collect()),
             review_state: state,
             requirement_links: vec![teshi_core::authoring::RequirementLink {
+                store_id: None,
                 document_id: "doc-1".into(),
                 document_revision: "rev".into(),
                 position: teshi_core::authoring::TextRange::new(0, 4),

@@ -1,15 +1,23 @@
 //! Application data directory helpers (recent, settings, logs).
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use teshi_core::authoring::{RequirementGroupMode, RequirementIterationFilter};
 
 const RECENT_MAX: usize = 10;
 const DESKTOP_MIGRATION_MARKER: &str = ".migrated-from-teshi-desktop";
 const LEGACY_DESKTOP_DIR_NAME: &str = "teshi-desktop";
 const APP_DATA_DIR_NAME: &str = "teshi";
+
+/// Environment variable that overrides the requirement store root.
+pub const TESHI_REQUIREMENTS_DIR_ENV: &str = "TESHI_REQUIREMENTS_DIR";
+
+/// Directory name under app data used as the default requirement store.
+pub const DEFAULT_REQUIREMENTS_STORE_DIR: &str = "requirements";
 
 /// Minimum window width for desktop shells.
 pub const MIN_WINDOW_WIDTH: u32 = 1280;
@@ -35,6 +43,20 @@ pub struct AppSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_height: Option<u32>,
     pub last_project_parent: Option<String>,
+    /// Requirements tab filter/group preferences keyed by store identity.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub requirements_views: HashMap<String, RequirementsViewPrefs>,
+}
+
+/// User-level Requirements tab view preferences for one requirement store.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequirementsViewPrefs {
+    /// Last iteration filter applied to this store.
+    #[serde(default)]
+    pub filter: RequirementIterationFilter,
+    /// Last grouping mode applied to this store.
+    #[serde(default)]
+    pub group: RequirementGroupMode,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -69,6 +91,54 @@ fn resolve_app_data_dir() -> Result<(PathBuf, bool)> {
         }
     }
     Ok((default_app_data_dir()?, true))
+}
+
+/// Resolves the user-level requirement store root.
+///
+/// Priority:
+/// 1. `cli_override` when present and non-empty
+/// 2. Non-empty `TESHI_REQUIREMENTS_DIR`
+/// 3. `app_data_dir()/requirements`
+///
+/// The returned path is absolute when the current directory can be resolved.
+/// This function does not create the directory or initialize a store index.
+///
+/// # Errors
+///
+/// Returns an error when the default app data directory cannot be resolved.
+pub fn requirements_data_dir(cli_override: Option<&Path>) -> Result<PathBuf> {
+    let resolved = resolve_requirements_data_dir(
+        cli_override,
+        std::env::var(TESHI_REQUIREMENTS_DIR_ENV).ok().as_deref(),
+    )?;
+    Ok(absolute_path(&resolved))
+}
+
+fn resolve_requirements_data_dir(
+    cli_override: Option<&Path>,
+    env_dir: Option<&str>,
+) -> Result<PathBuf> {
+    if let Some(path) = cli_override {
+        if !path.as_os_str().is_empty() {
+            return Ok(path.to_path_buf());
+        }
+    }
+    if let Some(env) = env_dir {
+        let trimmed = env.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+    Ok(app_data_dir()?.join(DEFAULT_REQUIREMENTS_STORE_DIR))
+}
+
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn default_app_data_dir() -> Result<PathBuf> {
@@ -415,5 +485,92 @@ mod tests {
             !neu.join(DESKTOP_MIGRATION_MARKER).exists(),
             "marker must not be written when legacy path is not a directory"
         );
+    }
+
+    fn with_isolated_env<T>(f: impl FnOnce() -> T) -> T {
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+        let prev_app = std::env::var("TESHI_APP_DATA_DIR").ok();
+        let prev_req = std::env::var(TESHI_REQUIREMENTS_DIR_ENV).ok();
+        let result = f();
+        match prev_app {
+            Some(value) => unsafe { std::env::set_var("TESHI_APP_DATA_DIR", value) },
+            None => unsafe { std::env::remove_var("TESHI_APP_DATA_DIR") },
+        }
+        match prev_req {
+            Some(value) => unsafe { std::env::set_var(TESHI_REQUIREMENTS_DIR_ENV, value) },
+            None => unsafe { std::env::remove_var(TESHI_REQUIREMENTS_DIR_ENV) },
+        }
+        result
+    }
+
+    #[test]
+    fn requirements_dir_defaults_under_app_data() {
+        with_isolated_env(|| {
+            let tmp = TempDir::new().unwrap();
+            unsafe {
+                std::env::set_var("TESHI_APP_DATA_DIR", tmp.path());
+                std::env::remove_var(TESHI_REQUIREMENTS_DIR_ENV);
+            }
+            let resolved = requirements_data_dir(None).unwrap();
+            assert_eq!(resolved, tmp.path().join(DEFAULT_REQUIREMENTS_STORE_DIR));
+        });
+    }
+
+    #[test]
+    fn teshi_requirements_dir_overrides_app_data() {
+        with_isolated_env(|| {
+            let tmp = TempDir::new().unwrap();
+            let custom = tmp.path().join("custom-reqs");
+            unsafe {
+                std::env::set_var("TESHI_APP_DATA_DIR", tmp.path().join("app"));
+                std::env::set_var(TESHI_REQUIREMENTS_DIR_ENV, &custom);
+            }
+            let resolved = requirements_data_dir(None).unwrap();
+            assert_eq!(resolved, custom);
+        });
+    }
+
+    #[test]
+    fn empty_teshi_requirements_dir_falls_back_to_app_data() {
+        with_isolated_env(|| {
+            let tmp = TempDir::new().unwrap();
+            unsafe {
+                std::env::set_var("TESHI_APP_DATA_DIR", tmp.path());
+                std::env::set_var(TESHI_REQUIREMENTS_DIR_ENV, "   ");
+            }
+            let resolved = requirements_data_dir(None).unwrap();
+            assert_eq!(resolved, tmp.path().join(DEFAULT_REQUIREMENTS_STORE_DIR));
+        });
+    }
+
+    #[test]
+    fn cli_override_wins_over_env() {
+        with_isolated_env(|| {
+            let tmp = TempDir::new().unwrap();
+            let env_dir = tmp.path().join("from-env");
+            let cli_dir = tmp.path().join("from-cli");
+            unsafe {
+                std::env::set_var("TESHI_APP_DATA_DIR", tmp.path().join("app"));
+                std::env::set_var(TESHI_REQUIREMENTS_DIR_ENV, &env_dir);
+            }
+            let resolved = requirements_data_dir(Some(&cli_dir)).unwrap();
+            assert_eq!(resolved, cli_dir);
+        });
+    }
+
+    #[test]
+    fn teshi_app_data_dir_changes_default_requirements_root() {
+        with_isolated_env(|| {
+            let tmp = TempDir::new().unwrap();
+            let app = tmp.path().join("custom-app");
+            unsafe {
+                std::env::set_var("TESHI_APP_DATA_DIR", &app);
+                std::env::remove_var(TESHI_REQUIREMENTS_DIR_ENV);
+            }
+            let resolved = requirements_data_dir(None).unwrap();
+            assert_eq!(resolved, app.join(DEFAULT_REQUIREMENTS_STORE_DIR));
+        });
     }
 }
