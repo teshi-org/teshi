@@ -183,7 +183,7 @@ fn server_info() -> Value {
     json!({
         "name": SERVER_NAME,
         "title": "Teshi Browser Agent",
-        "version": env!("CARGO_PKG_VERSION")
+        "version": crate::version_display()
     })
 }
 

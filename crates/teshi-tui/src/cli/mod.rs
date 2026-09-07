@@ -17,7 +17,7 @@ pub mod winapp;
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -46,6 +46,15 @@ pub struct Cli {
     /// Override the user-level requirement store root for this process
     #[arg(long, value_name = "PATH", global = true)]
     pub requirements_root: Option<PathBuf>,
+}
+
+/// Parses process arguments with the product version display for `-V`/`--version`.
+pub fn parse_cli() -> Cli {
+    let command = Cli::command().version(crate::version_display());
+    match command.try_get_matches() {
+        Ok(matches) => Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit()),
+        Err(err) => err.exit(),
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -2071,5 +2080,18 @@ mod tests {
         };
         assert_eq!(refs, ["doc-12", "doc-13"]);
         assert_eq!(iteration, "Sprint 12");
+    }
+
+    #[test]
+    fn version_flag_uses_product_display() {
+        let command = Cli::command().version(crate::version_display());
+        let err = command
+            .try_get_matches_from(["teshi", "-V"])
+            .expect_err("version flag exits");
+        let rendered = err.render().to_string();
+        assert!(
+            rendered.contains(crate::version_display()),
+            "version output: {rendered:?}"
+        );
     }
 }

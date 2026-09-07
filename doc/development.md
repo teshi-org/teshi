@@ -178,7 +178,7 @@ Nightly builds publish the same asset set as stable releases, but from the `dev`
 | Daily 06:00 UTC | same (uses workflow file on the **default branch**; sync `dev` → `main` to keep schedule active). Catch-up only: skipped when `dev` HEAD already has a nightly tag. |
 | Manual | `gh workflow run nightly.yml` |
 
-Tag format: `v{semver}-nightly.{YYYYMMDD}.{short_sha}` (for example `v0.7.9-nightly.20260801.dc6c942`), derived from the product SemVer + UTC date of first publish + commit. The product SemVer lives in `[workspace.package] version` (root `Cargo.toml`). The nightly workflow still greps `apps/teshi-cli/Cargo.toml` until it is pointed at that workspace field. The workflow skips when this commit already has a `v*-nightly.*` tag, so an unchanged `dev` tip does not get a new tag on the next calendar day. To rebuild the same commit, delete that nightly tag/release first.
+Tag format: `v{semver}-nightly.{YYYYMMDD}.{short_sha}` (for example `v0.7.9-nightly.20260801.dc6c942`), derived from `[workspace.package] version` in the root `Cargo.toml` + UTC date of first publish + commit. The workflow skips when this commit already has a `v*-nightly.*` tag, so an unchanged `dev` tip does not get a new tag on the next calendar day. To rebuild the same commit, delete that nightly tag/release first. Nightly CI injects `TESHI_BUILD_CHANNEL`, `TESHI_BUILD_DATE`, and `TESHI_GIT_SHA` so `teshi -V` prints `0.7.10 (nightly 2026-09-07, cb4361a)` instead of writing the tag into Cargo.toml.
 
 ```powershell
 gh run list --workflow=nightly.yml --limit 3

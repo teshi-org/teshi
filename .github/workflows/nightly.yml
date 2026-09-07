@@ -41,7 +41,13 @@ jobs:
 
           git fetch origin --tags --force
 
-          version=$(grep -m1 '^version = ' apps/teshi-cli/Cargo.toml | sed -E 's/^version = "([^"]+)".*/\1/')
+          version=$(grep -A20 '^\[workspace.package\]' Cargo.toml \
+            | grep -m1 '^version = ' \
+            | sed -E 's/^version = "([^"]+)".*/\1/')
+          if [[ -z "${version}" ]]; then
+            echo "workspace package version is missing from Cargo.toml" >&2
+            exit 1
+          fi
           date=$(date -u +%Y%m%d)
           sha=$(git rev-parse --short=7 HEAD)
           full_sha=$(git rev-parse HEAD)

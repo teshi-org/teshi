@@ -20,6 +20,9 @@ mod runner;
 mod session;
 mod test_points_tab;
 mod ui;
+mod version;
+
+pub use version::{VersionInfo, version_display, version_info};
 
 use std::fmt;
 use std::io;
@@ -27,7 +30,6 @@ use std::io::Write;
 use std::time::Duration;
 
 use anyhow::Result;
-use clap::Parser;
 use crossterm::Command;
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind};
@@ -154,8 +156,8 @@ fn write_diagnostic_event(writer: &mut impl Write, event: &Event) -> io::Result<
     }
 }
 
-/// Runs the terminal application and non-daemon CLI commands.
-pub fn run(version: &str) -> Result<()> {
+/// Runs the terminal application and non-interactive CLI commands.
+pub fn run() -> Result<()> {
     let mut diag_file = std::env::var("TESHI_DIAG_PATH").ok().and_then(|path| {
         std::fs::OpenOptions::new()
             .create(true)
@@ -164,10 +166,15 @@ pub fn run(version: &str) -> Result<()> {
             .ok()
     });
     if let Some(file) = diag_file.as_mut() {
-        let _ = writeln!(file, "pid {}: entered main", std::process::id());
+        let _ = writeln!(
+            file,
+            "pid {}: teshi {} entered main",
+            std::process::id(),
+            version_display()
+        );
     }
 
-    let cli_args = cli::Cli::parse();
+    let cli_args = cli::parse_cli();
     let requirements_root = cli_args.requirements_root.clone();
 
     match cli_args.command {
@@ -252,7 +259,7 @@ pub fn run(version: &str) -> Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let mut app = App::from_cli(&cli_args)?;
-    app.version = version.to_string();
+    app.version = version_display().to_string();
     let mut event_source = input::EventSource::new()?;
 
     while !app.should_quit {

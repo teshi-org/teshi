@@ -182,8 +182,28 @@ jobs:
 
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: teshi-${{ needs.resolve.outputs.tag }}
+
+      - name: Resolve Teshi build identity
+        id: build_id
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG}"
+          if [[ "${tag}" =~ ^v[0-9.]+-nightly\.([0-9]{8})\.([0-9a-f]+)$ ]]; then
+            echo "channel=nightly" >> "${GITHUB_OUTPUT}"
+            echo "date=${BASH_REMATCH[1]}" >> "${GITHUB_OUTPUT}"
+            echo "sha=${BASH_REMATCH[2]}" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Build teshi CLI
+        env:
+          TESHI_BUILD_CHANNEL: ${{ steps.build_id.outputs.channel }}
+          TESHI_BUILD_DATE: ${{ steps.build_id.outputs.date }}
+          TESHI_GIT_SHA: ${{ steps.build_id.outputs.sha }}
         run: cargo build --release --target ${{ matrix.target }} --bin teshi
 
       # Windows-only: build teshi-desktop + combined MSI installer
