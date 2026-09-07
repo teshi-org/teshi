@@ -34,7 +34,7 @@ ALLOWED_MINOR = 7
 
 VERSION_FILES: list[tuple[str, str, re.Pattern, str]] = [
     # (label, file_path, regex, replacement)
-    ("apps/teshi-cli/Cargo.toml", "apps/teshi-cli/Cargo.toml",
+    ("Cargo.toml (root)", "Cargo.toml",
      re.compile(r'^version = "(\d+\.\d+\.\d+)"', re.MULTILINE),
      'version = "{version}"'),
     ("extension/teshi-bridge/manifest.json", "extension/teshi-bridge/manifest.json",

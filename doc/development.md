@@ -146,7 +146,7 @@ If you prefer to do it step by step:
 
 1. **Analyze commits** since last tag to determine bump type
 2. **Update version** in component files (must match):
-   - `apps/teshi-cli/Cargo.toml`
+   - `Cargo.toml` (`[workspace.package] version`, inherited by `teshi-cli` and `teshi-tui`)
    - `extension/teshi-bridge/manifest.json`
 3. **Commit and tag**: `git commit -m "chore: bump version to vX.Y.Z"` then `git tag vX.Y.Z`
 4. **Push**: `git push origin main && git push origin vX.Y.Z`
@@ -178,7 +178,7 @@ Nightly builds publish the same asset set as stable releases, but from the `dev`
 | Daily 06:00 UTC | same (uses workflow file on the **default branch**; sync `dev` → `main` to keep schedule active). Catch-up only: skipped when `dev` HEAD already has a nightly tag. |
 | Manual | `gh workflow run nightly.yml` |
 
-Tag format: `v{semver}-nightly.{YYYYMMDD}.{short_sha}` (for example `v0.7.9-nightly.20260801.dc6c942`), derived from `apps/teshi-cli/Cargo.toml` version + UTC date of first publish + commit. The workflow skips when this commit already has a `v*-nightly.*` tag, so an unchanged `dev` tip does not get a new tag on the next calendar day. To rebuild the same commit, delete that nightly tag/release first.
+Tag format: `v{semver}-nightly.{YYYYMMDD}.{short_sha}` (for example `v0.7.9-nightly.20260801.dc6c942`), derived from the product SemVer + UTC date of first publish + commit. The product SemVer lives in `[workspace.package] version` (root `Cargo.toml`). The nightly workflow still greps `apps/teshi-cli/Cargo.toml` until it is pointed at that workspace field. The workflow skips when this commit already has a `v*-nightly.*` tag, so an unchanged `dev` tip does not get a new tag on the next calendar day. To rebuild the same commit, delete that nightly tag/release first.
 
 ```powershell
 gh run list --workflow=nightly.yml --limit 3

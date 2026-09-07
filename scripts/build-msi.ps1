@@ -3,7 +3,11 @@
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
-$version = (Select-String -Path apps/teshi-cli/Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+$cargoToml = Get-Content -Raw -Path "Cargo.toml"
+if ($cargoToml -notmatch '(?ms)\[workspace\.package\].*?^version = "([^"]+)"') {
+    throw "workspace package version is missing from Cargo.toml"
+}
+$version = $Matches[1]
 $tag = "v$version"
 Write-Host "==> Building teshi $tag MSI"
 

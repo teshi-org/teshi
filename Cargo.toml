@@ -19,6 +19,9 @@ members = [
 ]
 exclude = ["runner"]
 
+[workspace.package]
+version = "0.7.10"
+
 [workspace.dependencies]
 anyhow = "1"
 base64 = "0.22"

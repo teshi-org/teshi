@@ -31,11 +31,12 @@ def load_json(path: Path) -> dict:
 
 
 def cargo_version() -> str:
-    text = (REPO_ROOT / "apps" / "teshi-cli" / "Cargo.toml").read_text(
-        encoding="utf-8"
+    text = (REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8")
+    match = re.search(
+        r'(?ms)^\[workspace\.package\].*?^version\s*=\s*"([^"]+)"',
+        text,
     )
-    match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
-    require(match is not None, "teshi CLI version is missing")
+    require(match is not None, "workspace package version is missing")
     return match.group(1)
 
 
