@@ -50,7 +50,7 @@ def discover_skill(skill_root: Path) -> tuple[str, str]:
     )
     require(name is not None and description is not None, "skill metadata is incomplete")
     require(name.group(1).strip() == skill_root.name, "skill name/folder mismatch")
-    require("playwright" in description.group(1).lower(), "skill trigger is not focused")
+    require(bool(description.group(1).strip()), "skill description is empty")
     return name.group(1).strip(), text
 
 
@@ -150,6 +150,8 @@ def smoke_test() -> None:
         isolated = Path(temp)
         package_root = isolated / "teshi-browser-testing"
         shutil.copytree(PACKAGE_SOURCE, package_root)
+        for skill in ("teshi", "bdd-feature", "winapp-regression"):
+            shutil.copytree(REPO_ROOT / "skills" / skill, package_root / "skills" / skill)
         shutil.copytree(
             EXTENSION_SOURCE,
             package_root / "extension" / "teshi-bridge",
@@ -200,6 +202,16 @@ def smoke_test() -> None:
             skill_name, skill_text = discover_skill(skill_root)
             assert_local_references_resolve(skill_root, skill_text)
             require((skill_root / "agents" / "openai.yaml").is_file(), "UI metadata missing")
+
+            # Validate the complete release skill set without checkout-relative files.
+            for bundled_skill in (package_root / "skills").iterdir():
+                if not bundled_skill.is_dir():
+                    continue
+                discover_skill(bundled_skill)
+                for reference in bundled_skill.rglob("*.md"):
+                    assert_local_references_resolve(
+                        reference.parent, reference.read_text(encoding="utf-8")
+                    )
 
             consumer_skill = isolated / "consumer" / ".agents" / "skills" / skill_name
             consumer_skill.parent.mkdir(parents=True)

@@ -1,183 +1,80 @@
 ---
 name: winapp-regression
-description: Turn a WinUI3 bug report into a Gherkin scenario, bind UIA locators, replay to verify, and optionally export behave tests. Use whenever connecting a WinUI3 or native Windows app in teshi, recording UIA step-bindings, replaying them, or exporting CI tests. Do not use for Chrome or embedded browser locators.
+description: Create and verify a native Windows or WinUI3 BDD regression with Teshi UIA locators, confirmed step bindings, replay, and optional behave export. Use for native Windows targets; Chromium control belongs to playwright-locator.
 ---
 
 # WinApp Regression
 
-Closed loop for WinUI3 / native Windows: **feature → bind → replay → (optional) export**. Stay in this skill for locator, replay, and export. Browser work belongs to **playwright-locator**. Gherkin conventions live in **bdd-feature**.
+Complete the requested native regression: feature → verified binding → confirmation → replay → optional export. Use `bdd-feature` for scenario conventions when available. Examples use `teshi` as shorthand for the executable from `TESHI_CLI`, otherwise PATH.
 
-## Prerequisites
+## Establish the environment
 
-1. Project open in teshi Desktop/web; **Connect WinUI3 App** active.
-2. `.teshi/cdp-endpoint.json` has `"mode": "winapp"`.
-3. Working from project root. Prefer the Desktop embedded terminal (`TESHI_CLI` is set).
-4. teshi CLI **>= 0.4.0**. The 0.3.0 MSI lacks `winapp` / `steps` / `export` — do not guess commands.
+Work from the intended project root. Check `teshi --version`, `teshi winapp --help`, and `teshi steps --help`; do not rely on a minimum historical version as proof of current capabilities.
 
-```bash
-TESHI="${TESHI_CLI:-teshi}"
-$TESHI --version
-$TESHI winapp --help
-$TESHI steps --help
+WinApp commands require a live native Windows sidecar and project `.teshi/cdp-endpoint.json` with `mode: "winapp"`. `winapp attach` selects a window through that sidecar; it does not start the sidecar. If the endpoint is absent, stale, or in another mode, report the missing connection and use setup supported by the installed application. Do not fabricate the endpoint or assume current GPUI exposes a legacy **Connect WinUI3 App** button. The current WinApp GPUI surface is a screenshot stream, not an embedded terminal or Gherkin editor.
+
+## Write and select a regression
+
+Use the bug's preconditions, reproduction action, and expected visible result to write a focused Scenario in the project's feature directory. Match the project's language and runner conventions. Edit the feature directly when authorized or use the TUI; keep UIA selectors out of step text.
+
+```text
+teshi steps list --feature features/regression.feature
+teshi steps unbound --feature features/regression.feature
+teshi steps select --feature features/regression.feature --line 12
 ```
 
-External PowerShell if Desktop did not inject the CLI:
+Substitute the real path and step line. Check `.teshi/active-step.json` matches that feature and step text. `steps next-unbound --feature <path>` also selects the next step; inspect its result and distinguish exhaustion from errors.
 
-```powershell
-$env:TESHI_CLI = 'D:\Dev\Rust\teshi\target\debug\teshi.exe'
+## Attach and verify
+
+```text
+teshi winapp list-windows
+teshi winapp attach --hwnd 123456
+teshi winapp snapshot
 ```
 
-If `mode` is not `winapp`, stop and ask the user to click **Connect WinUI3 App**.
+Choose the actual window from discovery. Alternatives are `attach --pid`, `--title`, or `--process-name`; title/process fragments can be ambiguous. If launching the application is requested, use `winapp launch <executable-path>` with its supported arguments. Do not attach an unrelated window.
 
-## Context files
+Prefer a stable `uia:automation_id=...`, then `uia:control_type=...;name=...`, then a unique `uia:name=...`. Use `uia:path=...` only when necessary and report its fragility. Verify the target against the current UIA tree; do not invent AutomationIds.
 
-| File | Purpose |
-|------|---------|
-| `.teshi/active-step.json` | Selected feature path, scenario, step line, step text |
-| `.teshi/settings.json` | `locator_auto_confirm_sec` (default 60; 0 = manual only) |
-| `.teshi/cdp-endpoint.json` | `mode: "winapp"` and `ws_url` |
-| `.teshi/pending-locator.json` | Written by `teshi steps propose` |
-| `.teshi/step-bindings/{feature}.json` | Written only after confirmation; commit this file |
+For a step asserting that a welcome message is visible, an example verification is:
 
-Do not write `{stem}.locators.md`.
-
-## Phase 1 — Feature
-
-When the user describes a bug, use [doc/bug-report-template.md](../../doc/bug-report-template.md). Draft **one Scenario** with English keywords and project-language step text. Put a strong **`Then`** from Expected vs Actual. Apply **bdd-feature** conventions; do not embed UIA selectors in the Feature.
-
-Create the file:
-
-- **TUI**: `create_feature_file` / `insert_scenario` (user approves with Y).
-- **Desktop terminal**: output the Gherkin block for the user to save, or edit in the Gherkin panel.
-
-Then:
-
-```bash
-$TESHI steps list --feature '<path>'
+```text
+teshi winapp execute --selector "uia:automation_id=WelcomeMessage" --action assert_visible
 ```
 
-## Phase 2 — Bind each step
+Use only the actual discovered selector and the action/value supplied by the step. Mutating verification changes application state; restore the relevant scenario setup before replay or inspecting later steps when necessary. A highlight alone is not action verification. Do not retry failed mutations until you understand their outcome.
 
-Attach the target window before inspecting. Do not guess a destructive or unrelated window. If several candidates are plausible, ask.
+## Propose and confirm
 
-```bash
-$TESHI winapp list-windows
-$TESHI winapp attach --hwnd 123456
-$TESHI winapp attach --title 'My App'
-$TESHI winapp attach --process-name MyApp.exe
+After successful verification of that same assertion:
+
+```text
+teshi steps propose --line 12 --strategy uia --value "uia:automation_id=WelcomeMessage" --action assert_visible --confidence 0.95 --rationale "Unique message verified visible in the attached window"
 ```
 
-Inspect the UIA tree and match `step_text`. Prefer selector stability in this order:
+For actions such as `fill`, `assert_text`, `select`, or `press_key`, pass the verified `--value-arg`. Use supported secret placeholders instead of persisting passwords. Set `--highlight-applied` only after successful highlighting.
 
-1. `uia:automation_id=...`
-2. `uia:control_type=...;name=...`
-3. `uia:name=...`
-4. `uia:path=...` (last resort; document risk)
+Follow the user's confirmation mode. For visual review, show evidence and wait without automatic confirmation (`steps wait --until confirmed --timeout 60`). If agent confirmation is authorized, use `steps confirm --rank 1`; `steps wait --auto-confirm` attempts confirmation on timeout. Rejection or context mismatch requires inspection, not automatic re-proposal. There is no need to ask again when the user already authorized confirmation.
 
-For list items without AutomationId, see [doc/winui-automation-ids.md](../../doc/winui-automation-ids.md). Prefer app-side IDs (e.g. `LibraryGameItem_{id}`) over fragile name/path selectors.
+Pending proposals are in `.teshi/pending-locator.json`; confirmed bindings are in `.teshi/step-bindings/`. Manage them through CLI. When repair is requested, remove the wrong binding with `steps unbind --feature <path> --line <N>` before re-recording. Do not conceal a product regression by changing an assertion to match the failure.
 
-Verify before proposing:
+## Replay
 
-```bash
-$TESHI winapp snapshot
-$TESHI winapp highlight 'uia:automation_id=LoginButton'
-$TESHI winapp execute --selector 'uia:automation_id=LoginButton' --action assert_visible
-$TESHI winapp execute --selector 'uia:name=Welcome' --action assert_text --value-arg 'Welcome'
+Ensure the correct app is attached and its state matches scenario preconditions. Include the setup/navigation steps required by the scenario, not only assertions.
+
+```text
+teshi steps resolve --feature features/regression.feature
+teshi winapp replay --feature features/regression.feature --dry-run
+teshi winapp replay --feature features/regression.feature --non-interactive
 ```
 
-For actions that mutate app state (`click`, `fill`, `select`, `press_key`), execute only when the selected Gherkin step clearly describes that action.
+Use `--until-line <N>` for a bounded replay. `--launch <executable-path>` is available when launching is in scope; check help for its behavior. Use `winapp replay`, not browser replay. Inspect each step result and final status; dry-run does not execute the test. On failure, report the feature/line, action, error, and potentially changed state before deciding whether repair is appropriate.
 
-For process checks (e.g. Steam running), keep declarative Gherkin and bind with `--action exec`:
+## Export when requested
 
-```bash
-$TESHI steps propose --action exec --value 'system-check' \
-  --value-arg 'Get-Process steam -ErrorAction SilentlyContinue | Select-Object -First 1' \
-  --strategy script --confidence 1.0 --rationale 'Steam must be running'
+```text
+teshi export --target behave --feature features/regression.feature --out tests-e2e
 ```
 
-Default unattended binding loop (`steps select`, `next-unbound`, and `unbind` require teshi 0.4.0+). Confirm `.teshi/active-step.json` matches the intended `step_line` and `feature_relative_path` before each propose.
-
-```bash
-TESHI="${TESHI_CLI:-teshi}"
-while true; do
-  NEXT=$($TESHI steps next-unbound --feature '<feature>' 2>/dev/null) || break
-  echo "$NEXT"
-
-  $TESHI winapp snapshot
-  $TESHI steps propose \
-    --line <step_line> \
-    --strategy uia \
-    --value 'uia:automation_id=...' \
-    --action click \
-    --confidence 0.9 \
-    --rationale '...' \
-    --highlight-applied
-
-  $TESHI steps wait --until confirmed --timeout 60 --auto-confirm || exit 2
-done
-```
-
-`--line` must match `active-step.json`; mismatch exits with code 1. For `fill`, `assert_text`, `select`, `press_key`, and `exec`, pass `--value-arg`. Use placeholders such as `${LOGIN_PW}`, not real secrets.
-
-On mismatch between active step and pending proposal, auto-confirm **rejects** and exits 2. For visual review, omit `--auto-confirm`. If rejected, stop — do not auto re-propose.
-
-Remove a wrong binding:
-
-```bash
-$TESHI steps unbind --feature '<feature>' --line <step_line>
-```
-
-## Phase 3 — Replay
-
-Preflight:
-
-1. App is running (or use `--launch`).
-2. Window attached — replay fails fast when detached.
-3. Background includes **navigation** bindings (e.g. open Library), not only `assert_visible`.
-4. UI state matches the scenario start.
-
-```bash
-$TESHI winapp list-windows
-$TESHI winapp attach --title 'My App'
-$TESHI steps resolve --feature '<feature-relative-path>'
-```
-
-Interactive (default):
-
-```bash
-$TESHI winapp replay --feature '<feature-relative-path>' --until-line <line>
-```
-
-Non-interactive:
-
-```bash
-$TESHI winapp replay --feature '<feature-relative-path>' --yes
-$TESHI winapp replay --feature '<feature>' --launch 'C:\path\to\App.exe' --yes
-```
-
-Dry run:
-
-```bash
-$TESHI winapp replay --feature '<feature-relative-path>' --dry-run
-```
-
-If replay reports **not attached**, run attach/launch first. If a line fails, report line, action, selector, and error; snapshot and re-bind that step (`steps unbind` + propose). Do not invent selectors during replay. Do not use `teshi browser replay` for WinUI3 targets.
-
-## Phase 4 — Export (optional)
-
-When all bindings are confirmed:
-
-```bash
-$TESHI export --target behave --feature '<feature>' --out ./tests-e2e
-```
-
-Then read [references/behave-export.md](references/behave-export.md) for `.env`, venv, `behave --dry-run`, and CI.
-
-## Do not
-
-- Put selectors in the `.feature` file.
-- Use teshi 0.3.0 MSI commands that do not exist.
-- Run AI locator inference on every CI run (bindings are the source of truth).
-- Confirm on the user's behalf when `--auto-confirm` is off and they asked to review visually.
-- Use coordinate/path selectors when a stable `AutomationId` exists.
-- Assume replay starts the app without `--launch` or a running process.
+Export confirmed bindings, then read [references/behave-export.md](references/behave-export.md). Check existing output before overwriting generated artifacts. Report separately whether export, dry-run, and actual replay passed. Committing or publishing is a separate action when requested by the user.

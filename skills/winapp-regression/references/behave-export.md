@@ -1,6 +1,6 @@
 # Behave export
 
-Use after `teshi export --target behave` generated a `tests-e2e/` (or custom) directory. Requires teshi 0.4.0+ for the layout and selector formats below.
+Use after `teshi export --target behave` generated a `tests-e2e/` (or custom) directory. Inspect the generated README, requirements, and environment module for the installed exporter's actual layout and supported actions.
 
 ## Layout
 
@@ -48,11 +48,7 @@ behave --dry-run          # validate step defs without launching app
 behave
 ```
 
-Clear stale bytecode after editing generated step files:
-
-```powershell
-Get-ChildItem -Recurse __pycache__ | Remove-Item -Recurse -Force
-```
+Inspect both dry-run output and exit status. A dry-run validates definitions but does not prove UI behavior.
 
 ## Feature naming (non-ASCII)
 
@@ -71,7 +67,7 @@ Chinese or other non-ASCII feature file names produce a safe `page_module` (e.g.
 
 ## CI
 
-- Do **not** require teshi Desktop or CLI.
+- Exported tests run independently of Teshi Desktop/CLI; Windows UIA still requires an appropriate interactive Windows session and the application under test.
 - Install Python + app artifact + `pip install -r requirements.txt`.
 - Set `APP_EXE` (and secrets) as pipeline variables.
 - Run `behave --junit` (or your reporter).
@@ -80,8 +76,8 @@ Chinese or other non-ASCII feature file names produce a safe `page_module` (e.g.
 
 1. Re-bind changed steps in teshi (`steps unbind` wrong bindings first).
 2. Re-run `teshi export --target behave ...` (overwrites generated files).
-3. Clear `__pycache__`, run `behave --dry-run`.
-4. Commit updated `features/`, `pages/`, `steps/`, and project `.teshi/step-bindings/`.
+3. Run `behave --dry-run`, then the requested regression against the application.
+4. Report generated changes and test results; commit only when requested.
 
 ## Do not
 

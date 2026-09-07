@@ -16,6 +16,15 @@ Explore · MindMap · AI — three tabs for browsing, editing, and AI-assisted a
 
 Please read https://github.com/teshi-org/teshi/blob/main/AI_INSTALL.md and follow it to install the teshi CLI, load the teshi-bridge Chrome extension, and add the teshi agent skills.
 
+The [Teshi skill](skills/teshi/SKILL.md) guides agents through CLI workflows and the
+Desktop/Web capability map. `skills/` contains `teshi`, `bdd-feature`, and
+`winapp-regression`; the sole `playwright-locator` source lives under
+`agent-packages/teshi-browser-testing/skills/`. All four are bundled in release
+packages. Preview installation with `teshi install-skill --dry-run`, then
+install with `teshi install-skill --yes`. The installer copies bundled skills to
+`~/.agents/skills/` and links supported Agent discovery directories when they exist;
+existing real directories at those link destinations are preserved.
+
 **Next steps** — [User Guide](doc/user-guide.md) · [Installation](doc/installation.md) · [CLI & Config](doc/cli-usage.md) · [Keybindings](doc/keybindings.md) · [Development](doc/development.md)
 
 ---

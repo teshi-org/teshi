@@ -7,6 +7,8 @@ description: Inspect and safely control explicit local Chromium Profiles through
 
 Use Teshi's typed browser operations. Locator acquisition stays observational. Execute a P0 action only when the user or selected test step explicitly supplies that action; never invent one.
 
+For Gherkin step selection, binding proposals, confirmation, and replay, use the **teshi** skill's binding workflow when available. This skill supplies browser target discovery and verified operations within that workflow; it does not require a GUI step-selection panel. If installed alone, inspect `teshi steps --help` before attempting binding operations.
+
 `teshi browser sessions` starts or reuses the per-user loopback broker even when Desktop is closed. A live incompatible broker is never terminated implicitly.
 
 ## Preflight

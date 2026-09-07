@@ -5,16 +5,16 @@ description: Write, extend, review, or split Gherkin .feature files for teshi (w
 
 # BDD Feature
 
-Create or change `.feature` files only. Locator recording and replay belong to **playwright-locator** (browser) or **winapp-regression** (WinUI3).
+Use this skill for `.feature` authoring and review. Continue browser binding and replay through the **teshi** skill's binding workflow, with **playwright-locator** for browser operations; use **winapp-regression** for native Windows targets.
 
 When reviewing PRs, splitting scenarios, or unsure about granularity, read [references/convention.md](references/convention.md).
 
 ## Output location (teshi web-ui self-test)
 
-- Default: `tests/feature/web-ui/<name>.feature`
-- Tags: `@web-ui @embedded`
+- Default: `features/en-US/<name>.feature` (English) and `features/zh-CN/<name>.feature` (Chinese)
+- Tag Teshi Web scenarios `@web-ui`; add runner-specific tags only when the selected runner requires them.
 
-For a WinUI3 bug regression, put the Feature in the project’s usual features directory and continue with **winapp-regression**.
+CLI control-plane E2E lives under `tests/feature/en-US/` and `tests/feature/zh-CN/`. For a WinUI3 bug regression in another project, put the Feature in that project’s usual `features/` directory and continue with **winapp-regression**.
 
 ## Language rules
 
@@ -27,24 +27,24 @@ For a WinUI3 bug regression, put the Feature in the project’s usual features d
 ```gherkin
 # language: en
 
-@web-ui @embedded
+@web-ui
 Feature: <short title>
   <one-line description>
 
   Background:
-    Given teshi web is running at http://127.0.0.1:1420/?e2e=1
+    Given teshi web is running at http://127.0.0.1:20253/?e2e=1
 ```
 
-For CI/stable dist-only runs, use port `1421` without Vite.
+Use the actual configured daemon address when it differs. The supported frontend is GPUI WASM. When working in the Teshi source checkout, consult `doc/web-ui-self-test.md` for build and validation guidance; installed consumers need not have that document. Do not assume legacy React/Vite DOM selectors or ports apply.
 
 ## Step granularity (important for replay)
 
 | Intent | Step pattern | Binding style |
 |--------|--------------|---------------|
-| Open project | Separate `Given` | `open_project` API action |
-| Switch Files tab | Separate `When`/`And` | click `FileTreeTab` |
-| Run terminal command | One command per step | `type` on `.xterm-helper-textarea` |
-| File appears in tree | Separate `Then` | `assert_visible` on `FileTreeNode-<file>` |
+| Establish project context | Separate `Given` | setup supported by the actual SUT/runner |
+| Switch a supported panel | Separate `When`/`And` | verified panel control |
+| Run terminal command in a SUT that provides a terminal | One command per step | verified terminal input |
+| Item appears in a SUT list | Separate `Then` | verified item assertion |
 | Navigate to URL | Background or explicit Given | `navigate` action |
 
 Do **not** combine "switch tab + assert file" in one step if replay needs intermediate state.
@@ -53,11 +53,11 @@ Do **not** combine "switch tab + assert file" in one step if replay needs interm
 
 ```bash
 TESHI=${TESHI_CLI:-teshi}
-$TESHI steps list --feature tests/feature/web-ui/<name>.feature
-$TESHI steps unbound --feature tests/feature/web-ui/<name>.feature
+$TESHI steps list --feature features/en-US/<name>.feature
+$TESHI steps unbound --feature features/en-US/<name>.feature
 ```
 
-Hand unbound browser steps to **playwright-locator**. Hand unbound WinUI3 steps to **winapp-regression**.
+Hand unbound browser steps to **teshi** for binding and **playwright-locator** for browser verification. Hand unbound WinUI3 steps to **winapp-regression**. If a specialist is unavailable, inspect the relevant CLI help rather than assuming a repository path exists.
 
 ## Do not
 

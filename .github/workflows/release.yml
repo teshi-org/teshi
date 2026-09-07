@@ -264,6 +264,7 @@ jobs:
           Copy-Item -Path "apps/teshi-web/dist/*" -Destination $webDir -Recurse -Force
           Copy-Item -Path "extension/teshi-bridge/*" -Destination $bridgeDir -Recurse -Force
           Copy-Item -Path "agent-packages/teshi-browser-testing/*" -Destination $agentDir -Recurse -Force
+          Copy-Item -LiteralPath "skills/teshi", "skills/bdd-feature", "skills/winapp-regression" -Destination (Join-Path $agentDir "skills") -Recurse -Force
           Copy-Item -Path "agent-packages/teshi-browser-testing/.codex-plugin" -Destination $agentDir -Recurse -Force
           Copy-Item -Path "agent-packages/teshi-browser-testing/.mcp.json" -Destination $agentDir -Force
           Copy-Item -Path "extension/teshi-bridge/*" -Destination $agentBridgeDir -Recurse -Force
@@ -367,6 +368,7 @@ jobs:
             cp "${repo_dir}/resources/teshi_api.py" "${stage_dir}/share/teshi_api.py"
             cp -a "${repo_dir}/extension/teshi-bridge/." "${stage_dir}/share/teshi-bridge/"
             cp -a "${repo_dir}/agent-packages/teshi-browser-testing/." "${stage_dir}/share/teshi-browser-testing/"
+            cp -a "${repo_dir}/skills/teshi" "${repo_dir}/skills/bdd-feature" "${repo_dir}/skills/winapp-regression" "${stage_dir}/share/teshi-browser-testing/skills/"
             cp -a "${repo_dir}/extension/teshi-bridge/." "${stage_dir}/share/teshi-browser-testing/extension/teshi-bridge/"
 
             if [[ "${target}" == *"windows"* ]]; then
@@ -389,6 +391,7 @@ jobs:
           agent_stage="dist/teshi-browser-testing-${version}"
           mkdir -p "${agent_stage}/extension/teshi-bridge" "${agent_stage}/runtime"
           cp -a "${repo_dir}/agent-packages/teshi-browser-testing/." "${agent_stage}/"
+          cp -a "${repo_dir}/skills/teshi" "${repo_dir}/skills/bdd-feature" "${repo_dir}/skills/winapp-regression" "${agent_stage}/skills/"
           cp -a "${repo_dir}/extension/teshi-bridge/." "${agent_stage}/extension/teshi-bridge/"
           cp "${repo_dir}/resources/browser_service.py" "${agent_stage}/runtime/browser_service.py"
           cp "${repo_dir}/resources/browser_agent_broker.py" "${agent_stage}/runtime/browser_agent_broker.py"

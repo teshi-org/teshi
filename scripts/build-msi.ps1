@@ -44,6 +44,7 @@ Copy-Item "resources/winapp_service.py" (Join-Path $shareDir "winapp_service.py"
 Copy-Item -Path "apps/teshi-web/dist/*" -Destination $webDir -Recurse -Force
 Copy-Item -Path "extension/teshi-bridge/*" -Destination $bridgeDir -Recurse -Force
 Copy-Item -Path "agent-packages/teshi-browser-testing/*" -Destination $agentDir -Recurse -Force
+Copy-Item -LiteralPath "skills/teshi", "skills/bdd-feature", "skills/winapp-regression" -Destination (Join-Path $agentDir "skills") -Recurse -Force
 Copy-Item -Path "agent-packages/teshi-browser-testing/.codex-plugin" -Destination $agentDir -Recurse -Force
 Copy-Item -Path "agent-packages/teshi-browser-testing/.mcp.json" -Destination $agentDir -Force
 Copy-Item -Path "extension/teshi-bridge/*" -Destination $agentBridgeDir -Recurse -Force
