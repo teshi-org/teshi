@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{MainTab, MindMapFocus, ViewStage};
-use crate::authoring_tab::RequirementsFocus;
+use crate::authoring_tab::{RequirementsEditorMode, RequirementsFocus};
 use crate::test_points_tab::TestPointsFocus;
 
 /// Inputs for [`Action::from_key_event`] to resolve mode-specific bindings.
@@ -39,6 +39,8 @@ pub struct KeyContext {
     pub agent_profile_panel_active: bool,
     /// Active pane when the Requirements tab is selected.
     pub requirements_focus: RequirementsFocus,
+    /// Independent Markdown editor mode.
+    pub requirements_editor_mode: RequirementsEditorMode,
     /// Active pane when the Test Points tab is selected.
     pub test_points_focus: TestPointsFocus,
     /// Whether a Requirements filter/iteration overlay is open.
@@ -91,6 +93,10 @@ pub enum Action {
     PendingChar(char),
     // Requirements tab authoring
     ReqNewTestPoint,
+    /// Enter Requirements text input.
+    ReqEnterInsert,
+    /// Return to Requirements navigation.
+    ReqExitInsert,
     ReqNewDocument,
     /// Open the iteration filter picker (`i` on the Requirements tree).
     ReqFilterOverlay,
@@ -561,7 +567,7 @@ impl Action {
         }
 
         // Step text input mode
-        if context.step_input_active {
+        if context.step_input_active && context.active_tab != MainTab::Requirements {
             return match (event.code, event.modifiers) {
                 (KeyCode::Esc, _) => Some(Self::ClearInputState),
                 (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
@@ -593,6 +599,29 @@ impl Action {
         // Requirements tab: three-pane navigation and plain-text editing
         if context.active_tab == MainTab::Requirements {
             if context.requirements_focus == RequirementsFocus::Editor {
+                if context.requirements_editor_mode == RequirementsEditorMode::Insert {
+                    return match (event.code, event.modifiers) {
+                        (KeyCode::Esc, _) => Some(Self::ReqExitInsert),
+                        (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
+                        (KeyCode::Left, _) => Some(Self::MoveLeft),
+                        (KeyCode::Right, _) => Some(Self::MoveRight),
+                        (KeyCode::Up, _) => Some(Self::MoveUp),
+                        (KeyCode::Down, _) => Some(Self::MoveDown),
+                        (KeyCode::Home, _) => Some(Self::MoveHome),
+                        (KeyCode::End, _) => Some(Self::MoveEnd),
+                        (KeyCode::Enter, _) => Some(Self::Enter),
+                        (KeyCode::Tab, KeyModifiers::NONE) => Some(Self::Insert('\t')),
+                        (KeyCode::Backspace, _) => Some(Self::Backspace),
+                        (KeyCode::Delete, _) => Some(Self::Delete),
+                        (KeyCode::Char(ch), modifiers)
+                            if !ch.is_control()
+                                && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+                        {
+                            Some(Self::Insert(ch))
+                        }
+                        _ => None,
+                    };
+                }
                 return match (event.code, event.modifiers) {
                     (KeyCode::Tab, _) => Some(Self::FocusNextColumn),
                     (KeyCode::BackTab, _) => Some(Self::FocusPrevColumn),
@@ -608,9 +637,13 @@ impl Action {
                     (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                         Some(Self::MoveDown)
                     }
-                    (KeyCode::Enter, _) => Some(Self::Enter),
-                    (KeyCode::Backspace, _) => Some(Self::Backspace),
-                    (KeyCode::Delete, _) => Some(Self::Delete),
+                    (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Self::ReqEnterInsert),
+                    (KeyCode::Char('I'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                        Some(Self::ReqEditIteration)
+                    }
+                    (KeyCode::Home, _) => Some(Self::MoveHome),
+                    (KeyCode::End, _) => Some(Self::MoveEnd),
+                    (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
                     (KeyCode::Char('n'), KeyModifiers::NONE) => Some(Self::ReqNewTestPoint),
                     (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::ReqNewDocument),
                     (KeyCode::Char('1'), KeyModifiers::NONE) => {
@@ -629,12 +662,7 @@ impl Action {
                     (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                     (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                     (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
-                    (KeyCode::Esc, _) => Some(Self::ClearInputState),
-                    (KeyCode::Char(ch), modifiers)
-                        if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT =>
-                    {
-                        Some(Self::Insert(ch))
-                    }
+                    (KeyCode::Esc, _) => Some(Self::ReqExitInsert),
                     _ => None,
                 };
             }
@@ -1090,6 +1118,7 @@ mod tests {
             approval_panel_active: false,
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
@@ -1127,6 +1156,7 @@ mod tests {
             approval_panel_active: false,
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
@@ -1164,6 +1194,7 @@ mod tests {
             approval_panel_active: false,
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
@@ -1211,6 +1242,7 @@ mod tests {
             approval_panel_active: false,
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
@@ -1258,6 +1290,7 @@ mod tests {
             approval_panel_active: false,
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
@@ -1313,6 +1346,7 @@ mod tests {
             approval_panel_active: false,
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
@@ -1350,6 +1384,7 @@ mod tests {
             approval_panel_active: false,
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
@@ -1387,6 +1422,7 @@ mod tests {
             approval_panel_active: false,
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
@@ -1448,6 +1484,7 @@ mod tests {
             approval_panel_active: false,
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
@@ -1502,6 +1539,7 @@ mod tests {
             approval_panel_active: false,
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
@@ -1515,6 +1553,68 @@ mod tests {
             Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), context),
             Some(Action::ExternalChangeKeepLocal)
         );
+    }
+
+    #[test]
+    fn requirements_modes_keep_printable_text_and_commands_separate() {
+        use crate::authoring_tab::RequirementsEditorMode;
+        let mut context = requirements_tree_context();
+        context.requirements_focus = RequirementsFocus::Editor;
+        for ch in (32u8..=126).map(char::from).chain("中文🙂é".chars()) {
+            let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
+            assert!(!matches!(
+                Action::from_key_event(key, context),
+                Some(Action::Insert(_))
+            ));
+            let insert = KeyContext {
+                requirements_editor_mode: RequirementsEditorMode::Insert,
+                ..context
+            };
+            assert_eq!(
+                Action::from_key_event(key, insert),
+                Some(Action::Insert(ch))
+            );
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SHIFT),
+                    insert
+                ),
+                Some(Action::Insert(ch))
+            );
+        }
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::ReqEnterInsert)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
+            Some(Action::FocusNextColumn)
+        );
+        context.requirements_editor_mode = RequirementsEditorMode::Insert;
+        for (key, modifiers, expected) in [
+            (
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+                Some(Action::ReqExitInsert),
+            ),
+            (
+                KeyCode::Char('s'),
+                KeyModifiers::CONTROL,
+                Some(Action::Save),
+            ),
+            (KeyCode::Tab, KeyModifiers::NONE, Some(Action::Insert('\t'))),
+            (KeyCode::BackTab, KeyModifiers::SHIFT, None),
+            (KeyCode::Home, KeyModifiers::NONE, Some(Action::MoveHome)),
+            (KeyCode::End, KeyModifiers::NONE, Some(Action::MoveEnd)),
+        ] {
+            assert_eq!(
+                Action::from_key_event(KeyEvent::new(key, modifiers), context),
+                expected
+            );
+        }
     }
 
     fn requirements_tree_context() -> KeyContext {
@@ -1541,6 +1641,7 @@ mod tests {
             approval_panel_active: false,
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,

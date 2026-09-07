@@ -298,6 +298,7 @@ pub fn run(version: &str) -> Result<()> {
                             approval_panel_active: app.approval_panel_active,
                             agent_profile_panel_active: app.agent_profile_panel_active,
                             requirements_focus: app.authoring_ui.focus,
+                            requirements_editor_mode: app.authoring_ui.editor_mode,
                             test_points_focus: app.test_points_ui.focus,
                             requirements_overlay_active: app.authoring_ui.overlay_active(),
                             generation_scope_prompt_active: app.generation_scope_prompt.is_some(),
@@ -314,6 +315,22 @@ pub fn run(version: &str) -> Result<()> {
                         mouse_event.row,
                         mouse_event.modifiers,
                     )?;
+                }
+                Event::Paste(text) if app.active_tab == crate::app::MainTab::Requirements => {
+                    if app.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor
+                        && app.authoring_ui.editor_mode
+                            == crate::authoring_tab::RequirementsEditorMode::Insert
+                        && !app.authoring_ui.overlay_active()
+                    {
+                        for ch in text.replace("\r\n", "\n").replace('\r', "\n").chars() {
+                            match ch {
+                                '\n' => app.handle_action(Action::Enter)?,
+                                '\t' => app.handle_action(Action::Insert('\t'))?,
+                                ch if !ch.is_control() => app.handle_action(Action::Insert(ch))?,
+                                _ => {}
+                            }
+                        }
+                    }
                 }
                 Event::Paste(text) if app.ai_input_focused => {
                     app.handle_action(Action::AiPaste(text))?;

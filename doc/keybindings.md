@@ -23,15 +23,30 @@
 
 ## Requirements tab
 
+The Markdown editor starts in **Browse** mode. Press `i` in the editor to enter
+**Insert**, and `Esc` to return to Browse. Browse never inserts ordinary text.
+
 | Key | Action |
 |-----|--------|
-| `Tab` | Cycle tree / editor / linked test-point panes |
+| `Tab` / `Shift+Tab` | Next / previous pane in Browse |
+| `hjkl` / arrows | Move the cursor in Browse |
 | `n` | Create a Proposed test point from the active non-empty selection |
 | `Ctrl+n` | Create a new requirement Markdown document |
-| `i` | Filter the tree by iteration (All / Unassigned / named) |
+| `i` | Filter by iteration in the tree; enter Insert in the editor |
 | `g` | Toggle grouping: path hierarchy vs iteration → path |
-| `I` | Edit the selected document's iteration (empty = Unassigned) |
-| `s` | Save the current requirement document |
+| `I` | Edit iteration from the tree or Browse editor (empty = Unassigned) |
+| `s` | Save the current requirement document in Browse |
+
+In Insert, all printable ASCII and Unicode characters are text, including
+`s`, `q`, `hjkl`, and `1`–`5`. Arrows, Home/End, Enter, Backspace, and Delete edit
+the document; `Tab` inserts four spaces. `Ctrl+S` saves and stays in Insert.
+Bracketed paste accepts text in Insert. Use `Esc`, then `Tab`, to change panes.
+Mouse dragging selects Markdown text for creating a test point in Browse.
+
+Leaving a dirty document through document selection, a filter that hides it,
+main-tab navigation, new-document creation, or quit opens an unsaved-changes
+prompt: `S` saves and continues, `D` discards and continues, and `Esc` cancels.
+A failed save keeps the buffer and prompt open so the operation can be retried.
 
 ## Test Points tab
 

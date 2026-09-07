@@ -4366,6 +4366,24 @@ impl App {
     // ── Action handler ──────────────────────────────────────────────
 
     pub fn handle_action(&mut self, action: Action) -> Result<()> {
+        if let crate::authoring_tab::RequirementsOverlay::Unsaved { pending } =
+            self.authoring_ui.overlay.clone()
+        {
+            return self.resolve_unsaved_requirement(action, pending);
+        }
+        if self.is_requirements_editor_active()
+            && self.authoring_ui.editor_mode == crate::authoring_tab::RequirementsEditorMode::Browse
+            && matches!(
+                action,
+                Action::Insert(_)
+                    | Action::Enter
+                    | Action::InsertNewline
+                    | Action::Backspace
+                    | Action::Delete
+            )
+        {
+            return Ok(());
+        }
         if self.external_change_prompt.is_some() {
             return match action {
                 Action::ExternalChangeReload => self.accept_external_reload(),
@@ -5206,7 +5224,10 @@ impl App {
                 }
             }
             Action::MoveHome => {
-                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.cursor_col = 0;
+                    self.authoring_ui.desired_col = 0;
+                } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     self.explore_move_home();
                     self.quit_pending_confirm = false;
                 } else {
@@ -5214,7 +5235,14 @@ impl App {
                 }
             }
             Action::MoveEnd => {
-                if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
+                if self.is_requirements_editor_active() {
+                    let col = self
+                        .authoring_ui
+                        .buffer
+                        .line_len_chars(self.authoring_ui.cursor_row);
+                    self.authoring_ui.cursor_col = col;
+                    self.authoring_ui.desired_col = col;
+                } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     self.explore_move_end();
                     self.quit_pending_confirm = false;
                 } else {
@@ -5248,7 +5276,13 @@ impl App {
             }
             Action::Insert(ch) => {
                 if self.is_requirements_editor_active() {
-                    self.authoring_ui.insert_char(ch);
+                    if ch == '\t' {
+                        for _ in 0..4 {
+                            self.authoring_ui.insert_char(' ');
+                        }
+                    } else if !ch.is_control() {
+                        self.authoring_ui.insert_char(ch);
+                    }
                     self.quit_pending_confirm = false;
                 } else if self.is_test_points_details_active() {
                     self.test_points_ui.insert_char(ch);
@@ -5346,6 +5380,13 @@ impl App {
             }
             Action::ReqNewDocument => {
                 if self.active_tab == MainTab::Requirements {
+                    if self.authoring_ui.guard_unsaved(
+                        crate::authoring_tab::RequirementsPendingAction::Action(
+                            Action::ReqNewDocument,
+                        ),
+                    ) {
+                        return Ok(());
+                    }
                     let n = self
                         .authoring_ui
                         .artifacts
@@ -5360,6 +5401,12 @@ impl App {
                     self.quit_pending_confirm = false;
                 }
             }
+            Action::ReqEnterInsert => {
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.enter_insert_mode();
+                }
+            }
+            Action::ReqExitInsert => self.authoring_ui.exit_insert_mode(),
             Action::ReqFilterOverlay => {
                 if self.active_tab == MainTab::Requirements {
                     self.authoring_ui.open_filter_picker();
@@ -6031,11 +6078,64 @@ impl App {
         Ok(())
     }
 
+    fn resolve_unsaved_requirement(
+        &mut self,
+        action: Action,
+        pending: crate::authoring_tab::RequirementsPendingAction,
+    ) -> Result<()> {
+        use crate::authoring_tab::RequirementsPendingAction;
+        match action {
+            Action::OverlayCancel => {
+                self.authoring_ui.cancel_overlay();
+                return Ok(());
+            }
+            Action::OverlayInsert('s' | 'S') | Action::Save => {
+                if let Err(error) = self
+                    .authoring_ui
+                    .save_current_document(&self.project.root_dir)
+                {
+                    self.status = format!("Could not save requirement: {error}");
+                    return Ok(());
+                }
+            }
+            Action::OverlayInsert('d' | 'D') => {
+                self.authoring_ui.discard_current_document();
+            }
+            _ => return Ok(()),
+        }
+        self.authoring_ui.cancel_overlay();
+        match pending {
+            RequirementsPendingAction::Document(id) => {
+                self.authoring_ui.select_tree_node(&format!("req-doc:{id}"));
+            }
+            RequirementsPendingAction::Filter(filter) => {
+                if let Err(error) = self.authoring_ui.try_set_iteration_filter(filter) {
+                    self.status = error;
+                }
+            }
+            RequirementsPendingAction::Iteration { document_id, value } => {
+                if self.authoring_ui.selected_document_id.as_deref() == Some(&document_id)
+                    && let Err(error) = self.authoring_ui.save_current_iteration(&value)
+                {
+                    self.status = error;
+                }
+            }
+            RequirementsPendingAction::Action(action) => return self.handle_action(action),
+        }
+        Ok(())
+    }
+
     fn save(&mut self) -> Result<()> {
-        if self.active_tab == MainTab::Requirements && self.authoring_ui.buffer_dirty {
-            self.authoring_ui
-                .save_current_document(&self.project.root_dir)?;
-            self.status = "Saved requirement document".to_string();
+        if self.active_tab == MainTab::Requirements {
+            if self.authoring_ui.buffer_dirty {
+                match self
+                    .authoring_ui
+                    .save_current_document(&self.project.root_dir)
+                {
+                    Ok(()) => self.status = "Saved requirement document".to_string(),
+                    Err(error) => self.status = format!("Could not save requirement: {error}"),
+                }
+            }
             return Ok(());
         }
         if self.active_tab == MainTab::TestPoints {
@@ -6069,6 +6169,14 @@ impl App {
     }
 
     fn quit(&mut self) {
+        if self
+            .authoring_ui
+            .guard_unsaved(crate::authoring_tab::RequirementsPendingAction::Action(
+                Action::Quit,
+            ))
+        {
+            return;
+        }
         if self.dirty {
             if !self.quit_pending_confirm {
                 self.quit_pending_confirm = true;
@@ -6100,6 +6208,14 @@ impl App {
         if self.active_tab == tab {
             return;
         }
+        if self.active_tab == MainTab::Requirements
+            && self.authoring_ui.guard_unsaved(
+                crate::authoring_tab::RequirementsPendingAction::Action(Action::SelectTab(tab)),
+            )
+        {
+            return;
+        }
+        self.authoring_ui.exit_insert_mode();
         self.scenario_dropdown_open = false;
         if self.step_input_active {
             self.clear_step_input_state();
@@ -6681,8 +6797,77 @@ impl App {
         row: u16,
         modifiers: KeyModifiers,
     ) -> Result<()> {
+        if self.authoring_ui.overlay_active() {
+            return Ok(());
+        }
         // Update hover tracking
         let pos = ratatui::layout::Position::new(col, row);
+
+        if self.active_tab == MainTab::Requirements {
+            use crate::authoring_tab::RequirementsFocus;
+            let ui = &mut self.authoring_ui;
+            let pane = ui.pane_areas.iter().position(|area| area.contains(pos));
+            if matches!(kind, MouseEventKind::Up(MouseButton::Left)) {
+                ui.selection_dragging = false;
+            }
+            if let Some(pane) = pane {
+                if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+                    let focus = [
+                        RequirementsFocus::Tree,
+                        RequirementsFocus::Editor,
+                        RequirementsFocus::LinkedTestPoints,
+                    ][pane];
+                    if ui.focus != focus {
+                        ui.exit_insert_mode();
+                    }
+                    ui.focus = focus;
+                    if pane == 0 {
+                        let previous = ui.tree_state.selected().to_vec();
+                        ui.tree_state.click_at(pos);
+                        if let Some(id) = ui.tree_state.selected().last().cloned() {
+                            ui.select_tree_node(&id);
+                            if ui.overlay_active() {
+                                ui.tree_state.select(previous);
+                            }
+                        }
+                    }
+                }
+                if pane == 1
+                    && (matches!(kind, MouseEventKind::Down(MouseButton::Left))
+                        || (ui.selection_dragging
+                            && matches!(kind, MouseEventKind::Drag(MouseButton::Left))))
+                {
+                    let inner = ui.pane_areas[1].inner(ratatui::layout::Margin {
+                        horizontal: 1,
+                        vertical: 1,
+                    });
+                    if inner.contains(pos) {
+                        let row = (ui.scroll_row + (pos.y - inner.y) as usize)
+                            .min(ui.buffer.line_count().saturating_sub(1));
+                        let x = (pos.x - inner.x) as usize;
+                        let mut width = 0;
+                        let col = ui
+                            .buffer
+                            .line(row)
+                            .chars()
+                            .take_while(|ch| {
+                                width += unicode_width::UnicodeWidthChar::width(*ch).unwrap_or(0);
+                                width <= x
+                            })
+                            .count();
+                        if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+                            ui.selection_anchor = Some((row, col));
+                            ui.selection_dragging = true;
+                        }
+                        ui.selection_end = Some((row, col));
+                        ui.cursor_row = row;
+                        ui.cursor_col = col;
+                        ui.desired_col = col;
+                    }
+                }
+                return Ok(());
+            }
+        }
 
         match kind {
             MouseEventKind::Moved => {
@@ -7614,6 +7799,210 @@ mod tests {
     use tempfile::tempdir;
     use teshi_core::StepIndex;
     use teshi_core::gherkin_lang::GherkinLanguages;
+
+    fn requirements_test_app() -> (App, tempfile::TempDir, tempfile::TempDir) {
+        let project = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        let feature = project.path().join("sample.feature");
+        fs::write(&feature, "Feature: Sample\n").unwrap();
+        let mut app = App::from_file(
+            &feature,
+            crate::config::load_config().unwrap(),
+            store.path().to_path_buf(),
+        )
+        .unwrap();
+        app.active_tab = MainTab::Requirements;
+        app.authoring_ui.create_document("req.md", "Req");
+        app.authoring_ui
+            .save_current_document(project.path())
+            .unwrap();
+        app.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Editor;
+        (app, project, store)
+    }
+
+    #[test]
+    fn test_requirements_insert_save_and_browse_reject_mutations() {
+        use crate::authoring_tab::RequirementsEditorMode;
+        let (mut app, _project, store) = requirements_test_app();
+        let original = app.authoring_ui.buffer.as_string();
+        for action in [
+            Action::Insert('x'),
+            Action::Enter,
+            Action::Backspace,
+            Action::Delete,
+        ] {
+            app.handle_action(action).unwrap();
+        }
+        assert_eq!(app.authoring_ui.buffer.as_string(), original);
+        app.handle_action(Action::ReqEnterInsert).unwrap();
+        for ch in "hjkl nsmq12345 中文🙂".chars() {
+            app.handle_action(Action::Insert(ch)).unwrap();
+        }
+        app.handle_action(Action::Insert('\t')).unwrap();
+        app.handle_action(Action::Save).unwrap();
+        assert_eq!(app.authoring_ui.editor_mode, RequirementsEditorMode::Insert);
+        assert_eq!(
+            fs::read_to_string(store.path().join("req.md")).unwrap(),
+            app.authoring_ui.buffer.as_string()
+        );
+        app.handle_action(Action::ReqExitInsert).unwrap();
+        assert_eq!(app.authoring_ui.editor_mode, RequirementsEditorMode::Browse);
+    }
+
+    #[test]
+    fn test_requirements_unsaved_cancel_discard_and_save_resume_navigation() {
+        let (mut app, _project, store) = requirements_test_app();
+        let original = app.authoring_ui.buffer.as_string();
+        app.authoring_ui.enter_insert_mode();
+        app.authoring_ui.insert_char('中');
+        let edited = app.authoring_ui.buffer.as_string();
+        app.handle_action(Action::SelectTab(MainTab::Explore))
+            .unwrap();
+        assert_eq!(app.active_tab, MainTab::Requirements);
+        app.handle_action(Action::OverlayCancel).unwrap();
+        assert_eq!(app.authoring_ui.buffer.as_string(), edited);
+        app.handle_action(Action::SelectTab(MainTab::Explore))
+            .unwrap();
+        app.handle_action(Action::OverlayInsert('d')).unwrap();
+        assert_eq!(app.active_tab, MainTab::Explore);
+        assert_eq!(app.authoring_ui.buffer.as_string(), original);
+        assert_eq!(
+            fs::read_to_string(store.path().join("req.md")).unwrap(),
+            original
+        );
+        app.select_tab(MainTab::Requirements);
+        app.authoring_ui.insert_char('新');
+        let saved = app.authoring_ui.buffer.as_string();
+        app.handle_action(Action::ReqNewDocument).unwrap();
+        assert_eq!(
+            app.authoring_ui
+                .artifacts
+                .as_ref()
+                .unwrap()
+                .index
+                .documents
+                .len(),
+            1
+        );
+        app.handle_action(Action::OverlayInsert('S')).unwrap();
+        assert_eq!(
+            fs::read_to_string(store.path().join("req.md")).unwrap(),
+            saved
+        );
+        assert_eq!(
+            app.authoring_ui
+                .artifacts
+                .as_ref()
+                .unwrap()
+                .index
+                .documents
+                .len(),
+            2
+        );
+        app.handle_action(Action::Quit).unwrap();
+        assert!(!app.should_quit);
+        app.handle_action(Action::OverlayCancel).unwrap();
+        assert!(!app.should_quit);
+        app.handle_action(Action::Quit).unwrap();
+        app.handle_action(Action::OverlayInsert('d')).unwrap();
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_requirements_failed_save_keeps_overlay_buffer_and_pending_action() {
+        let (mut app, _project, store) = requirements_test_app();
+        let blocked = store.path().join("blocked");
+        fs::write(&blocked, "file prevents directory creation").unwrap();
+        app.authoring_ui.requirements_root = blocked;
+        app.authoring_ui.insert_char('中');
+        let body = app.authoring_ui.buffer.as_string();
+        app.authoring_ui.enter_insert_mode();
+        app.handle_action(Action::Save).unwrap();
+        assert!(app.authoring_ui.buffer_dirty);
+        assert_eq!(
+            app.authoring_ui.editor_mode,
+            crate::authoring_tab::RequirementsEditorMode::Insert
+        );
+        assert_eq!(app.authoring_ui.buffer.as_string(), body);
+        app.handle_action(Action::Quit).unwrap();
+        let overlay = app.authoring_ui.overlay.clone();
+        app.handle_action(Action::OverlayInsert('s')).unwrap();
+        assert!(!app.should_quit);
+        assert!(app.authoring_ui.buffer_dirty);
+        assert_eq!(app.authoring_ui.buffer.as_string(), body);
+        assert_eq!(app.authoring_ui.overlay, overlay);
+        assert!(app.status.contains("Could not save requirement"));
+        app.authoring_ui.requirements_root = store.path().to_path_buf();
+        app.handle_action(Action::OverlayInsert('s')).unwrap();
+        assert!(app.should_quit);
+        assert_eq!(
+            fs::read_to_string(store.path().join("req.md")).unwrap(),
+            body
+        );
+    }
+
+    #[test]
+    fn test_requirements_mouse_selection_and_tab_guard() {
+        let (mut app, _project, _store) = requirements_test_app();
+        render_test_app(&mut app, 120);
+        let pane = app.authoring_ui.pane_areas[1];
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            pane.x + 1,
+            pane.y + 1,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        app.handle_mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            pane.x + 4,
+            pane.y + 1,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        app.handle_mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            pane.x + 4,
+            pane.y + 1,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(
+            app.authoring_ui.selection_char_range(),
+            Some(teshi_core::authoring::TextRange::new(0, 3))
+        );
+        assert!(!app.authoring_ui.selection_dragging);
+        app.authoring_ui.insert_char('中');
+        let region = app
+            .clickable_regions
+            .iter()
+            .find(|region| {
+                matches!(
+                    region,
+                    ClickableRegion::Tab {
+                        tab: MainTab::Explore,
+                        ..
+                    }
+                )
+            })
+            .cloned()
+            .unwrap();
+        app.handle_region_click(&region, &ratatui::layout::Position::new(0, 0))
+            .unwrap();
+        assert_eq!(app.active_tab, MainTab::Requirements);
+        let selection = app.authoring_ui.selection_char_range();
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            pane.x + 1,
+            pane.y + 2,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(app.authoring_ui.selection_char_range(), selection);
+        app.handle_action(Action::OverlayCancel).unwrap();
+        assert_eq!(app.active_tab, MainTab::Requirements);
+    }
 
     fn en() -> &'static teshi_core::gherkin_lang::GherkinLanguage {
         GherkinLanguages::global().get("en")

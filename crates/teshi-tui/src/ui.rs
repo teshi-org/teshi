@@ -370,10 +370,17 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         render_ai_footer(frame, app, chunks[3]);
     } else if app.active_tab == MainTab::Requirements {
         frame.render_widget(
-            crate::authoring_tab::requirements_footer_line(
+            if app.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor {
+                Line::raw(match app.authoring_ui.editor_mode {
+                    crate::authoring_tab::RequirementsEditorMode::Browse =>
+                        " [BROWSE] hjkl/arrows Move  i Insert  s Save  n Test point  I Iteration  Tab Pane",
+                    crate::authoring_tab::RequirementsEditorMode::Insert =>
+                        " [INSERT] Esc Browse  Ctrl+S Save  Tab Indent  Arrows/Home/End Move",
+                })
+            } else { crate::authoring_tab::requirements_footer_line(
                 &app.requirements_root,
                 &app.authoring_ui.iteration_filter,
-            ),
+            ) },
             chunks[3],
         );
     } else if app.active_tab == MainTab::TestPoints {
@@ -3996,6 +4003,7 @@ fn hatched_empty_lines(height: usize, label: &str) -> Vec<Line<'static>> {
 
 /// Requirements tab: tree, Markdown editor, and linked test points.
 fn render_requirements_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    app.authoring_ui.pane_areas = [Rect::default(); 3];
     if area.width < 20 || area.height < 3 {
         return;
     }
@@ -4019,6 +4027,9 @@ fn render_requirements_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     {
         let ui = &mut app.authoring_ui;
+        for (index, pane) in layout.iter().enumerate() {
+            ui.pane_areas[index] = *pane;
+        }
         let tree_focused = ui.focus == crate::authoring_tab::RequirementsFocus::Tree;
         render_requirements_tree(frame, ui, layout[0], tree_focused);
 
@@ -4122,7 +4133,13 @@ fn render_requirements_editor(
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(display_title)
+        .title(format!(
+            "{display_title} [{}]",
+            match ui.editor_mode {
+                crate::authoring_tab::RequirementsEditorMode::Browse => "BROWSE",
+                crate::authoring_tab::RequirementsEditorMode::Insert => "INSERT",
+            }
+        ))
         .title_style(title_style);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -4145,7 +4162,13 @@ fn render_requirements_editor(
     let visible_lines = inner.height as usize;
     let line_count = buffer.line_count();
     let max_scroll = line_count.saturating_sub(visible_lines);
+    if cursor_row < ui.scroll_row {
+        ui.scroll_row = cursor_row;
+    } else if cursor_row >= ui.scroll_row + visible_lines {
+        ui.scroll_row = cursor_row.saturating_sub(visible_lines.saturating_sub(1));
+    }
     let scroll_row = ui.scroll_row.min(max_scroll);
+    ui.scroll_row = scroll_row;
 
     let highlight_ranges = ui
         .highlight_test_point_id
@@ -4314,6 +4337,34 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
     use crate::authoring_tab::RequirementsOverlay;
     match &app.authoring_ui.overlay {
         RequirementsOverlay::None => {}
+        RequirementsOverlay::Unsaved { .. } => {
+            let width = area.width.min(60);
+            let height = area.height.min(7);
+            let panel = Rect::new(
+                area.x + area.width.saturating_sub(width) / 2,
+                area.y + area.height.saturating_sub(height) / 2,
+                width,
+                height,
+            );
+            let title = app
+                .authoring_ui
+                .current_document_meta()
+                .map(|doc| doc.title.as_str())
+                .unwrap_or("Requirement");
+            frame.render_widget(Clear, panel);
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{title} has unsaved changes.\n\n[S] Save   [D] Discard   [Esc] Cancel"
+                ))
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Unsaved requirement "),
+                ),
+                panel,
+            );
+        }
         RequirementsOverlay::FilterPicker { selection } => {
             let options = app.authoring_ui.filter_picker_options();
             let panel_w = area.width.min(48);

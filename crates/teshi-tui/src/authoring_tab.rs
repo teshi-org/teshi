@@ -27,9 +27,28 @@ pub const TREE_DOC_PREFIX: &str = "req-doc:";
 /// Tree node id prefix for iteration group nodes.
 pub const TREE_ITER_PREFIX: &str = "req-iter:";
 
+/// Independent input mode for the Markdown editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RequirementsEditorMode {
+    #[default]
+    Browse,
+    Insert,
+}
+
+/// Deferred navigation resumed after resolving unsaved Markdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequirementsPendingAction {
+    Document(String),
+    Filter(RequirementIterationFilter),
+    Iteration { document_id: String, value: String },
+    Action(crate::keymap::Action),
+}
+
 /// Overlay used to pick a filter or edit a document iteration.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum RequirementsOverlay {
+    /// Resolve unsaved changes before navigation.
+    Unsaved { pending: RequirementsPendingAction },
     /// No overlay.
     #[default]
     None,
@@ -62,11 +81,18 @@ pub struct AuthoringUiState {
     pub tree_items: Vec<TreeItem<'static, String>>,
     pub tree_state: TreeState<String>,
     pub focus: RequirementsFocus,
+    /// Input mode independent of Explore.
+    pub editor_mode: RequirementsEditorMode,
+    /// Last rendered pane areas for mouse navigation and text selection.
+    pub pane_areas: [ratatui::layout::Rect; 3],
+    /// Whether a Markdown selection drag is in progress.
+    pub selection_dragging: bool,
     pub selected_document_id: Option<String>,
     pub selected_linked_index: usize,
     pub highlight_test_point_id: Option<String>,
     pub buffer: EditorBuffer,
     pub buffer_dirty: bool,
+    draft_document_id: Option<String>,
     pub cursor_row: usize,
     pub cursor_col: usize,
     pub desired_col: usize,
@@ -79,6 +105,45 @@ pub struct AuthoringUiState {
 }
 
 impl AuthoringUiState {
+    /// Enters text input when a document is selected.
+    pub fn enter_insert_mode(&mut self) {
+        if self.selected_document_id.is_some() {
+            self.editor_mode = RequirementsEditorMode::Insert;
+        }
+    }
+
+    /// Returns to command navigation.
+    pub fn exit_insert_mode(&mut self) {
+        self.editor_mode = RequirementsEditorMode::Browse;
+    }
+
+    /// Restores saved Markdown, or removes a document that was never saved.
+    pub fn discard_current_document(&mut self) {
+        self.buffer_dirty = false;
+        if let Some(id) = self.draft_document_id.take() {
+            if let Some(artifacts) = self.artifacts.as_mut() {
+                artifacts.index.documents.retain(|doc| doc.id != id);
+                artifacts.documents.retain(|doc| doc.meta.id != id);
+            }
+            self.selected_document_id = None;
+            self.buffer = EditorBuffer::from_string(String::new());
+            self.exit_insert_mode();
+            self.rebuild_tree();
+        } else if let Some(id) = self.selected_document_id.clone() {
+            self.select_document_by_id(&id);
+        }
+    }
+
+    /// Defers navigation while the buffer has unsaved changes.
+    pub fn guard_unsaved(&mut self, pending: RequirementsPendingAction) -> bool {
+        if self.buffer_dirty {
+            self.overlay = RequirementsOverlay::Unsaved { pending };
+            true
+        } else {
+            false
+        }
+    }
+
     /// Creates an empty state with no loaded artifacts.
     pub fn empty() -> Self {
         Self {
@@ -89,11 +154,15 @@ impl AuthoringUiState {
             tree_items: Vec::new(),
             tree_state: TreeState::default(),
             focus: RequirementsFocus::Tree,
+            editor_mode: RequirementsEditorMode::Browse,
+            pane_areas: [ratatui::layout::Rect::default(); 3],
+            selection_dragging: false,
             selected_document_id: None,
             selected_linked_index: 0,
             highlight_test_point_id: None,
             buffer: EditorBuffer::from_string(String::new()),
             buffer_dirty: false,
+            draft_document_id: None,
             cursor_row: 0,
             cursor_col: 0,
             desired_col: 0,
@@ -148,6 +217,7 @@ impl AuthoringUiState {
         let filter = self.iteration_filter.clone();
         let group_mode = self.group_mode;
         let overlay = self.overlay.clone();
+        let editor_mode = self.editor_mode;
         let dirty = self.buffer_dirty;
         let preserved_buffer = dirty.then(|| self.buffer.clone());
         let cursor_row = self.cursor_row;
@@ -191,6 +261,7 @@ impl AuthoringUiState {
             self.selection_anchor = selection_anchor;
             self.selection_end = selection_end;
         }
+        self.editor_mode = editor_mode;
         Ok(())
     }
 
@@ -209,6 +280,10 @@ impl AuthoringUiState {
                 if let Some(first) = visible.first() {
                     self.select_document_by_id(first);
                 } else {
+                    if self.buffer_dirty {
+                        return;
+                    }
+                    self.exit_insert_mode();
                     self.selected_document_id = None;
                     self.buffer = EditorBuffer::from_string(String::new());
                     self.buffer_dirty = false;
@@ -259,12 +334,11 @@ impl AuthoringUiState {
         self.overlay = RequirementsOverlay::IterationEdit { buffer: current };
     }
 
-    /// Applies `filter` unless it would hide unsaved editor changes.
+    /// Applies `filter`, or asks to resolve unsaved changes before hiding the document.
     ///
     /// # Errors
     ///
-    /// Returns an error when the buffer is dirty and the selected document would
-    /// disappear from the tree.
+    /// Reserved for filter validation failures.
     pub fn try_set_iteration_filter(
         &mut self,
         filter: RequirementIterationFilter,
@@ -280,9 +354,8 @@ impl AuthoringUiState {
             .as_ref()
             .is_some_and(|id| !visible.iter().any(|visible_id| visible_id == id));
         if would_hide && self.buffer_dirty {
-            return Err(
-                "Save or discard the current requirement before changing the filter".into(),
-            );
+            self.guard_unsaved(RequirementsPendingAction::Filter(filter));
+            return Ok(());
         }
         self.iteration_filter = filter;
         self.overlay = RequirementsOverlay::None;
@@ -305,9 +378,10 @@ impl AuthoringUiState {
     ///
     /// # Errors
     ///
-    /// Returns an error when a filter change is blocked or iteration save fails.
+    /// Returns an error when saving iteration metadata fails.
     pub fn confirm_overlay(&mut self) -> Result<(), String> {
         match self.overlay.clone() {
+            RequirementsOverlay::Unsaved { .. } => Ok(()),
             RequirementsOverlay::None => Ok(()),
             RequirementsOverlay::FilterPicker { selection } => {
                 let options = self.filter_picker_options();
@@ -359,11 +433,24 @@ impl AuthoringUiState {
         !matches!(self.overlay, RequirementsOverlay::None)
     }
 
-    fn save_current_iteration(&mut self, raw: &str) -> Result<(), String> {
+    /// Saves iteration metadata, prompting first if this would hide dirty Markdown.
+    pub(crate) fn save_current_iteration(&mut self, raw: &str) -> Result<(), String> {
         let doc_id = self
             .selected_document_id
             .clone()
             .ok_or_else(|| "no requirement document selected".to_string())?;
+        let would_hide = match &self.iteration_filter {
+            RequirementIterationFilter::All => false,
+            RequirementIterationFilter::Unassigned => !raw.trim().is_empty(),
+            RequirementIterationFilter::Named(name) => name != raw.trim(),
+        };
+        if self.buffer_dirty && would_hide {
+            self.guard_unsaved(RequirementsPendingAction::Iteration {
+                document_id: doc_id,
+                value: raw.to_string(),
+            });
+            return Ok(());
+        }
         let iteration = if raw.trim().is_empty() {
             None
         } else {
@@ -440,6 +527,13 @@ impl AuthoringUiState {
 
     /// Selects a document by stable id and loads its Markdown into the editor buffer.
     pub fn select_document_by_id(&mut self, doc_id: &str) {
+        if self.buffer_dirty {
+            if self.selected_document_id.as_deref() != Some(doc_id) {
+                self.guard_unsaved(RequirementsPendingAction::Document(doc_id.to_string()));
+            }
+            return;
+        }
+        self.exit_insert_mode();
         self.selected_document_id = Some(doc_id.to_string());
         self.selected_linked_index = 0;
         self.highlight_test_point_id = None;
@@ -465,7 +559,9 @@ impl AuthoringUiState {
     pub fn select_tree_node(&mut self, node_id: &str) {
         if let Some(doc_id) = node_id.strip_prefix(TREE_DOC_PREFIX) {
             self.select_document_by_id(doc_id);
-            self.tree_state.select(vec![node_id.to_string()]);
+            if self.selected_document_id.as_deref() == Some(doc_id) {
+                self.tree_state.select(vec![node_id.to_string()]);
+            }
         }
     }
 
@@ -635,6 +731,7 @@ impl AuthoringUiState {
         self.select_document_by_id(&id);
         self.buffer = EditorBuffer::from_string(body);
         self.buffer_dirty = true;
+        self.draft_document_id = Some(id.clone());
         id
     }
 
@@ -672,6 +769,8 @@ impl AuthoringUiState {
             &relative_path,
             &body,
         )?;
+        // Markdown now exists on disk even if saving linked test points fails.
+        self.draft_document_id = None;
         if let Some(doc) = artifacts.documents.iter_mut().find(|d| d.meta.id == doc_id) {
             doc.body = body.clone();
             if let Some(index_meta) = artifacts.index.documents.iter().find(|d| d.id == doc_id) {
@@ -695,10 +794,12 @@ impl AuthoringUiState {
         );
         save_test_points(project_root, &artifacts.test_points)?;
         self.buffer_dirty = false;
+        self.draft_document_id = None;
         Ok(())
     }
 
     pub fn focus_next_column(&mut self) {
+        self.exit_insert_mode();
         self.focus = match self.focus {
             RequirementsFocus::Tree => RequirementsFocus::Editor,
             RequirementsFocus::Editor => RequirementsFocus::LinkedTestPoints,
@@ -707,6 +808,7 @@ impl AuthoringUiState {
     }
 
     pub fn focus_prev_column(&mut self) {
+        self.exit_insert_mode();
         self.focus = match self.focus {
             RequirementsFocus::Tree => RequirementsFocus::Tree,
             RequirementsFocus::Editor => RequirementsFocus::Tree,
@@ -737,10 +839,9 @@ impl AuthoringUiState {
             .artifacts
             .as_ref()
             .map(|a| {
-                a.index
-                    .documents
-                    .iter()
-                    .map(|d| format!("{TREE_DOC_PREFIX}{}", d.id))
+                visible_document_ids(&a.index, &self.iteration_filter)
+                    .into_iter()
+                    .map(|id| format!("{TREE_DOC_PREFIX}{id}"))
                     .collect()
             })
             .unwrap_or_default();
@@ -1165,6 +1266,44 @@ mod tests {
         assert!(!line.spans.is_empty());
     }
 
+    #[test]
+    fn dirty_tree_navigation_preserves_buffer_and_selection_until_confirmed() {
+        let mut state = sample_authoring_state();
+        state.enter_insert_mode();
+        state.insert_char('中');
+        let body = state.buffer.as_string();
+        let tree_selection = state.tree_state.selected().to_vec();
+        state.move_tree_selection(1);
+        assert_eq!(state.buffer.as_string(), body);
+        assert_eq!(state.selected_document_id.as_deref(), Some("doc-sprint"));
+        assert_eq!(state.tree_state.selected(), tree_selection);
+        assert!(matches!(state.overlay, RequirementsOverlay::Unsaved { .. }));
+        state.cancel_overlay();
+        assert_eq!(state.editor_mode, RequirementsEditorMode::Insert);
+        state.select_document_by_id("doc-sprint");
+        assert_eq!(state.buffer.as_string(), body);
+        assert!(!state.overlay_active());
+    }
+
+    #[test]
+    fn discard_new_document_removes_unsaved_draft() {
+        let mut state = sample_authoring_state();
+        let id = state.create_document("draft.md", "Draft");
+        state.discard_current_document();
+        assert!(!state.buffer_dirty);
+        assert!(
+            !state
+                .artifacts
+                .as_ref()
+                .unwrap()
+                .index
+                .documents
+                .iter()
+                .any(|doc| doc.id == id)
+        );
+        assert_eq!(state.buffer.as_string(), "login");
+    }
+
     fn sample_authoring_state() -> AuthoringUiState {
         let mut state = AuthoringUiState::empty();
         let store_id = teshi_core::authoring::RequirementStoreId::parse("reqstore-shared").unwrap();
@@ -1242,10 +1381,10 @@ mod tests {
         let mut state = sample_authoring_state();
         state.select_document_by_id("doc-sprint");
         state.buffer_dirty = true;
-        let err = state
+        state
             .try_set_iteration_filter(RequirementIterationFilter::Unassigned)
-            .unwrap_err();
-        assert!(err.contains("Save or discard"));
+            .unwrap();
+        assert!(matches!(state.overlay, RequirementsOverlay::Unsaved { .. }));
         assert_eq!(state.iteration_filter, RequirementIterationFilter::All);
     }
 

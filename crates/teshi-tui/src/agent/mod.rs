@@ -2876,6 +2876,7 @@ mod pipeline_gate_tests {
             approval_panel_active: false,
             agent_profile_panel_active: false,
             requirements_focus: RequirementsFocus::Tree,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
