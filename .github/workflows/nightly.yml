@@ -4,7 +4,7 @@ on:
   push:
     branches: [dev]
   schedule:
-    # Daily pre-release build from dev (06:00 UTC).
+    # Daily catch-up from dev (06:00 UTC). Skips when HEAD already has a nightly tag.
     # Note: scheduled workflows run from the repo default branch workflow file.
     # Keep nightly.yml on default branch (main) for the schedule trigger to fire.
     - cron: "0 6 * * *"
@@ -53,8 +53,12 @@ jobs:
             exit 1
           fi
 
-          if git rev-parse "refs/tags/${tag}" >/dev/null 2>&1; then
-            echo "Tag ${tag} already exists; skipping nightly publish."
+          # Skip when this commit already has a nightly tag. The date in the tag
+          # name is first-publish time, so a later cron must not mint a new tag
+          # for unchanged HEAD.
+          existing=$(git tag --list 'v*-nightly.*' --points-at "${full_sha}" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+          if [ -n "${existing}" ]; then
+            echo "Commit ${full_sha} already published as nightly (${existing}); skipping."
             echo "skip=true" >> "${GITHUB_OUTPUT}"
           else
             echo "skip=false" >> "${GITHUB_OUTPUT}"
