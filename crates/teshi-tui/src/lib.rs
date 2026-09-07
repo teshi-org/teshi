@@ -22,6 +22,7 @@ mod test_points_tab;
 mod ui;
 mod version;
 
+pub use app::{RequirementsTabSnapshot, requirements_tab_without_project};
 pub use version::{VersionInfo, version_display, version_info};
 
 use std::fmt;

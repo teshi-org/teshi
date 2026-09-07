@@ -36,6 +36,7 @@ pub struct World {
     store: tempfile::TempDir,
     app_data: tempfile::TempDir,
     last: Option<CommandResult>,
+    tab: Option<teshi_tui::RequirementsTabSnapshot>,
     revisions: HashMap<String, String>,
 }
 
@@ -47,6 +48,7 @@ impl World {
             store: tempfile::tempdir().context("create requirement store temp dir")?,
             app_data: tempfile::tempdir().context("create TESHI_APP_DATA_DIR temp dir")?,
             last: None,
+            tab: None,
             revisions: HashMap::new(),
         })
     }
@@ -101,9 +103,34 @@ impl World {
             .with_context(|| format!("no seeded revision for {document_id}"))
     }
 
+    /// Canonical body captured when the sample store was seeded.
+    pub fn seeded_body(&self, document_id: &str) -> Result<&'static str> {
+        match document_id {
+            "doc-12" => Ok(LOGIN_BODY),
+            "doc-37" => Ok(MOBILE_BODY),
+            "doc-9" => Ok(CHECKOUT_BODY),
+            other => bail!("no seeded body for {other}"),
+        }
+    }
+
     /// Isolated store root passed as `--requirements-root`.
     pub fn store_path(&self) -> &Path {
         self.store.path()
+    }
+
+    /// Requirements-tab snapshot from opening teshi with no PATH.
+    pub fn tab(&self) -> Result<&teshi_tui::RequirementsTabSnapshot> {
+        self.tab
+            .as_ref()
+            .context("teshi has not been opened without a project path yet")
+    }
+
+    /// Constructs TUI state as `teshi` with no PATH against this store.
+    pub fn open_tui_without_project(&mut self) -> Result<&teshi_tui::RequirementsTabSnapshot> {
+        let _guard = AppDataEnvGuard::apply(self.app_data.path());
+        let snapshot = teshi_tui::requirements_tab_without_project(self.store.path())?;
+        self.tab = Some(snapshot);
+        self.tab()
     }
 
     /// Runs `teshi --requirements-root <store> requirements ...` with stdin closed.
@@ -175,6 +202,33 @@ impl World {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
+    }
+}
+
+/// Restores `TESHI_APP_DATA_DIR` when dropped so TUI construction stays isolated.
+struct AppDataEnvGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl AppDataEnvGuard {
+    fn apply(path: &Path) -> Self {
+        let previous = std::env::var_os("TESHI_APP_DATA_DIR");
+        unsafe {
+            std::env::set_var("TESHI_APP_DATA_DIR", path);
+            std::env::remove_var("TESHI_REQUIREMENTS_DIR");
+        }
+        Self { previous }
+    }
+}
+
+impl Drop for AppDataEnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var("TESHI_APP_DATA_DIR", value),
+                None => std::env::remove_var("TESHI_APP_DATA_DIR"),
+            }
+        }
     }
 }
 

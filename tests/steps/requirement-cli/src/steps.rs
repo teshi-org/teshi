@@ -239,6 +239,12 @@ fn when(world: &mut World, step: &BddStep) -> Result<()> {
         world.run(&["edit", &id, "--json"])?;
         return Ok(());
     }
+    if text == "the tester opens teshi without a project path"
+        || text == "测试人员在不提供项目路径的情况下打开 teshi"
+    {
+        world.open_tui_without_project()?;
+        return Ok(());
+    }
     unimplemented_step("When", text)
 }
 
@@ -474,6 +480,36 @@ fn then(world: &mut World, step: &BddStep) -> Result<()> {
             .unwrap_or_default();
         if actual != expected {
             bail!("revision of {id} changed from {expected} to {actual}");
+        }
+        return Ok(());
+    }
+    if text.contains("Requirements tab lists documents") || text.contains("需求标签页列出文档")
+    {
+        let expected: HashSet<String> = quoted_parts(text).into_iter().collect();
+        let actual: HashSet<String> = world.tab()?.document_ids.iter().cloned().collect();
+        if actual != expected {
+            bail!("expected Requirements tab documents {expected:?}, got {actual:?}");
+        }
+        return Ok(());
+    }
+    if let Some(id) = text
+        .strip_prefix("the Requirements tab shows the body of document ")
+        .or_else(|| {
+            text.strip_prefix("需求标签页显示文档 ")
+                .and_then(|rest| rest.strip_suffix(" 的正文"))
+        })
+    {
+        let id = unquote(id)?;
+        let expected = world.seeded_body(&id)?.to_string();
+        let tab = world.tab()?;
+        if tab.selected_document_id.as_deref() != Some(id.as_str()) {
+            bail!(
+                "expected selected document {id}, got {:?}",
+                tab.selected_document_id
+            );
+        }
+        if tab.selected_body.trim_end() != expected.trim_end() {
+            bail!("expected body of {id}, got:\n{}", tab.selected_body);
         }
         return Ok(());
     }

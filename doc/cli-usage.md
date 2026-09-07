@@ -121,8 +121,10 @@ Requirement-library CLI E2E lives in `features/en-US/` and `features/zh-CN/` as 
 cargo build -p teshi-cli -p teshi-requirement-cli-runner
 TESHI_BIN=./target/debug/teshi teshi run --runner-cmd ./target/debug/teshi-requirement-cli-runner features/en-US/requirement_listing.feature
 TESHI_BIN=./target/debug/teshi teshi run --runner-cmd ./target/debug/teshi-requirement-cli-runner features/en-US/requirement_authoring.feature
+TESHI_BIN=./target/debug/teshi teshi run --runner-cmd ./target/debug/teshi-requirement-cli-runner features/en-US/requirement_tab.feature
 TESHI_BIN=./target/debug/teshi teshi run --runner-cmd ./target/debug/teshi-requirement-cli-runner features/zh-CN/需求列表.feature
 TESHI_BIN=./target/debug/teshi teshi run --runner-cmd ./target/debug/teshi-requirement-cli-runner features/zh-CN/需求编写.feature
+TESHI_BIN=./target/debug/teshi teshi run --runner-cmd ./target/debug/teshi-requirement-cli-runner features/zh-CN/需求标签页.feature
 ```
 
 For the supported GPUI WASM web UI smoke gate:

@@ -398,6 +398,55 @@ pub struct GenerationScopePrompt {
     pub pending_user_message: String,
 }
 
+/// Documents visible in the Requirements tab after constructing TUI state.
+#[derive(Debug, Clone)]
+pub struct RequirementsTabSnapshot {
+    /// Stable document ids in index order.
+    pub document_ids: Vec<String>,
+    /// Currently selected document id, if any.
+    pub selected_document_id: Option<String>,
+    /// Center-pane Markdown for the selected document.
+    pub selected_body: String,
+}
+
+/// Builds TUI state as `teshi` with no PATH and snapshots the Requirements tab.
+///
+/// Used by requirement E2E to assert that the user-level store is visible
+/// without launching the interactive event loop.
+///
+/// # Errors
+///
+/// Returns an error when configuration or the requirement store cannot be loaded.
+pub fn requirements_tab_without_project(
+    requirements_root: &Path,
+) -> Result<RequirementsTabSnapshot> {
+    let cli = crate::cli::Cli {
+        command: None,
+        recursive: false,
+        paths: Vec::new(),
+        requirements_root: Some(requirements_root.to_path_buf()),
+    };
+    let app = App::from_cli(&cli)?;
+    let document_ids = app
+        .authoring_ui
+        .artifacts
+        .as_ref()
+        .map(|artifacts| {
+            artifacts
+                .index
+                .documents
+                .iter()
+                .map(|doc| doc.id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(RequirementsTabSnapshot {
+        document_ids,
+        selected_document_id: app.authoring_ui.selected_document_id.clone(),
+        selected_body: app.authoring_ui.buffer.as_string(),
+    })
+}
+
 pub struct App {
     // ── Multi-file project ──────────────────────────────────────────
     pub project: BddProject,
@@ -1065,6 +1114,7 @@ impl App {
             root_dir: PathBuf::from("."),
             features: Vec::new(),
         };
+        let project_root = project.root_dir.clone();
         let step_index = StepIndex::build(&project);
         let mut mindmap_index = mindmap::build_index(&project);
         let tree_state = mindmap::init_tree_state(&mut mindmap_index);
@@ -1183,7 +1233,12 @@ impl App {
             generation_scope: None,
             generation_scope_prompt: None,
             generation_paused_reason: None,
-            authoring_ui: crate::authoring_tab::AuthoringUiState::empty(),
+            // Requirement documents live in the user-level store, not the BDD
+            // project. `teshi` with no PATH still opens tab [4] against that store.
+            authoring_ui: crate::authoring_tab::AuthoringUiState::load_from_project(
+                &project_root,
+                &requirements_root,
+            ),
             test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
             requirements_root,
         };
@@ -7819,6 +7874,46 @@ mod tests {
             .unwrap();
         app.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Editor;
         (app, project, store)
+    }
+
+    #[test]
+    fn test_bare_teshi_loads_requirement_documents_into_tab() {
+        use crate::authoring_tab::AuthoringUiState;
+        use clap::Parser;
+
+        let project = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        let mut writer = AuthoringUiState::load_from_project(project.path(), store.path());
+        writer.create_document("login.md", "Login");
+        writer.buffer = EditorBuffer::from_string("# Login\n\nMust authenticate.\n".into());
+        writer.save_current_document(project.path()).unwrap();
+
+        let cli = crate::cli::Cli::try_parse_from([
+            "teshi",
+            "--requirements-root",
+            store.path().to_str().expect("utf-8 temp path"),
+        ])
+        .expect("parse bare teshi");
+        assert!(cli.paths.is_empty());
+
+        let app = App::from_cli(&cli).unwrap();
+        assert!(app.authoring_ui.discovered);
+        let artifacts = app.authoring_ui.artifacts.as_ref().expect("loaded store");
+        assert!(
+            artifacts
+                .index
+                .documents
+                .iter()
+                .any(|doc| doc.title == "Login"),
+            "expected Login document in Requirements tab"
+        );
+        assert!(
+            app.authoring_ui
+                .buffer
+                .as_string()
+                .contains("Must authenticate")
+        );
     }
 
     #[test]

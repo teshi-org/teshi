@@ -6805,6 +6805,7 @@ dependencies = [
  "tempfile",
  "teshi-core",
  "teshi-engine",
+ "teshi-tui",
 ]
 
 [[package]]
