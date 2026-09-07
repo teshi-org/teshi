@@ -205,6 +205,63 @@ pub enum RequirementsCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// List requirement documents in the current store
+    List {
+        /// Include only documents in this iteration
+        #[arg(long, conflicts_with = "unassigned")]
+        iteration: Option<String>,
+        /// Include only documents with no iteration
+        #[arg(long)]
+        unassigned: bool,
+        /// Machine-readable JSON envelope
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print one requirement document
+    Show {
+        /// Document ID, relative path, or unique title
+        #[arg(value_name = "REF")]
+        reference: String,
+        /// Machine-readable JSON envelope including the Markdown body
+        #[arg(long)]
+        json: bool,
+    },
+    /// Edit a requirement document with $VISUAL/$EDITOR, --file, or stdin
+    Edit {
+        /// Document ID, relative path, or unique title
+        #[arg(value_name = "REF")]
+        reference: String,
+        /// Read replacement Markdown from this file instead of launching an editor
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Overwrite even if the on-disk revision changed
+        #[arg(long)]
+        force: bool,
+        /// Machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set the iteration for one or more documents
+    SetIteration {
+        /// Document ID, relative path, or unique title
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        /// Iteration name to assign
+        #[arg(long, required = true)]
+        iteration: String,
+        /// Machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Clear the iteration for one or more documents
+    ClearIteration {
+        /// Document ID, relative path, or unique title
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        /// Machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1942,5 +1999,77 @@ mod tests {
             panic!("expected winapp attach subcommand");
         };
         assert_eq!(args.title.as_deref(), Some("My App"));
+    }
+
+    #[test]
+    fn teshi_without_subcommand_does_not_select_requirements() {
+        let cli = Cli::try_parse_from(["teshi"]).expect("parse teshi");
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn requirements_path_and_import_project_still_parse() {
+        let path = Cli::try_parse_from(["teshi", "requirements", "path"]).expect("parse path");
+        assert!(matches!(
+            path.command,
+            Some(Command::Requirements {
+                action: RequirementsCommand::Path
+            })
+        ));
+        let import = Cli::try_parse_from(["teshi", "requirements", "import-project", "--dry-run"])
+            .expect("parse import-project");
+        let Some(Command::Requirements {
+            action: RequirementsCommand::ImportProject { dry_run, .. },
+        }) = import.command
+        else {
+            panic!("expected import-project");
+        };
+        assert!(dry_run);
+    }
+
+    #[test]
+    fn requirements_list_rejects_conflicting_filters() {
+        Cli::try_parse_from([
+            "teshi",
+            "requirements",
+            "list",
+            "--iteration",
+            "Sprint 12",
+            "--unassigned",
+        ])
+        .expect_err("iteration and unassigned conflict");
+    }
+
+    #[test]
+    fn requirements_set_iteration_requires_flag() {
+        Cli::try_parse_from([
+            "teshi",
+            "requirements",
+            "set-iteration",
+            "doc-12",
+            "Sprint 12",
+        ])
+        .expect_err("iteration value must use --iteration");
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "requirements",
+            "set-iteration",
+            "doc-12",
+            "doc-13",
+            "--iteration",
+            "Sprint 12",
+        ])
+        .expect("parse set-iteration");
+        let Some(Command::Requirements {
+            action:
+                RequirementsCommand::SetIteration {
+                    refs, iteration, ..
+                },
+        }) = cli.command
+        else {
+            panic!("expected set-iteration");
+        };
+        assert_eq!(refs, ["doc-12", "doc-13"]);
+        assert_eq!(iteration, "Sprint 12");
     }
 }

@@ -6796,6 +6796,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "teshi-requirement-cli-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "teshi-core",
+ "teshi-engine",
+]
+
+[[package]]
 name = "teshi-terminal-sidecar"
 version = "0.1.0"
 dependencies = [

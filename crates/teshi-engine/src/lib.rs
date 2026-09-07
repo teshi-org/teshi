@@ -47,9 +47,12 @@ pub use app_data::{
 };
 pub use authoring::{
     compute_document_revision, import_project_requirements, initialize_requirement_store,
-    load_authoring_artifacts, save_requirement_document_index, save_requirement_markdown,
-    save_test_points, set_requirement_document_iteration, AuthoringLoadResult, ImportMapping,
-    ImportProjectOptions, ImportProjectPlan, DEFAULT_REQUIREMENTS_DIR, DEFAULT_TESTPOINTS_DIR,
+    list_requirement_documents, load_authoring_artifacts, read_requirement_document,
+    resolve_requirement_ref, resolve_requirement_ref_in_store, save_requirement_document_index,
+    save_requirement_markdown, save_test_points, set_requirement_document_iteration,
+    set_requirement_documents_iteration, update_requirement_document_body, AuthoringLoadResult,
+    ImportMapping, ImportProjectOptions, ImportProjectPlan, RequirementDocumentList,
+    RequirementRefMatch, RequirementStoreError, DEFAULT_REQUIREMENTS_DIR, DEFAULT_TESTPOINTS_DIR,
     REQUIREMENTS_INDEX_FILE,
 };
 pub use browser_agent::{

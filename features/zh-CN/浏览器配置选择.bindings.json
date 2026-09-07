@@ -1,6 +1,6 @@
 {
   "format_version": 2,
-  "feature": "features/zh-CN/browser_profiles.feature",
+  "feature": "features/zh-CN/浏览器配置选择.feature",
   "steps": [
     {
       "step_line": 10,

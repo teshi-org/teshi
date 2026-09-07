@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use teshi_core::authoring::{
-    legacy_project_requirements_dir, normalize_iteration_name, re_resolve_document_links,
-    resolve_requirement_store_path, testpoints_file, validate_loaded_artifacts,
-    validate_requirement_path, AuthoringArtifacts, AuthoringDiagnostic, AuthoringSeverity,
-    DocumentRevision, RequirementDocumentContent, RequirementDocumentIndex, TestPointsFile,
+    legacy_project_requirements_dir, re_resolve_document_links, resolve_requirement_store_path,
+    testpoints_file, validate_loaded_artifacts, validate_requirement_path, AuthoringArtifacts,
+    AuthoringDiagnostic, AuthoringSeverity, DocumentRevision, RequirementDocumentContent,
+    RequirementDocumentIndex, TestPointsFile,
 };
 
 use crate::fs_util::{with_exclusive_lock, write_atomic, write_json_unlocked};
@@ -62,7 +62,7 @@ fn validate_index_document_paths(index: &RequirementDocumentIndex) -> Result<()>
     Ok(())
 }
 
-fn read_requirement_index_unlocked(
+pub(crate) fn read_requirement_index_unlocked(
     requirements_root: &Path,
 ) -> Result<Option<RequirementDocumentIndex>> {
     let path = index_path(requirements_root);
@@ -473,31 +473,12 @@ pub fn set_requirement_document_iteration(
     document_id: &str,
     iteration: Option<&str>,
 ) -> Result<RequirementDocumentIndex> {
-    with_requirement_store_lock(requirements_root, || {
-        let mut index = read_requirement_index_unlocked(requirements_root)?.with_context(|| {
-            format!(
-                "requirement store is not initialized at {}",
-                requirements_root.display()
-            )
-        })?;
-        if index.store_id.is_none() {
-            bail!("requirement store is missing a valid store_id");
-        }
-        let normalized = match iteration {
-            None => None,
-            Some(raw) => {
-                Some(normalize_iteration_name(raw).map_err(|err| anyhow::anyhow!("{err}"))?)
-            }
-        };
-        let meta = index
-            .documents
-            .iter_mut()
-            .find(|d| d.id == document_id)
-            .with_context(|| format!("requirement document '{document_id}' not found"))?;
-        meta.iteration = normalized;
-        write_requirement_index_unlocked(requirements_root, &index)?;
-        Ok(index)
-    })
+    super::service::set_requirement_documents_iteration(
+        requirements_root,
+        &[document_id],
+        iteration,
+    )
+    .map_err(anyhow::Error::from)
 }
 
 /// Atomically writes the canonical test-point file with stable ordering.

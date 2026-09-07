@@ -30,9 +30,16 @@ Scenario: Valid task submission adds the task
 
 Keep CSS, XPath, test IDs, UIA selectors, and arbitrary sleeps in bindings or step implementations. Describe the visible control or intended behavior in Gherkin. Preserve details that are themselves the tested contract: an API scenario may explicitly assert a status code or endpoint, and a navigation scenario may explicitly name its URL.
 
+When a Then asserts JSON fields or a JSON error `code`, the When that produced that output must say the command ran as JSON. Pair field assertions with an explicit success or failure Then.
+
 Use the project's existing step catalog before adding equivalent phrasing. `teshi steps catalog` discovers Teshi's catalog when available; also inspect the consuming runner's step definitions. Use concrete example values for ordinary scenarios. Use Scenario Outline with an Examples table when multiple data rows exercise the same behavior; angle-bracket placeholders need that context.
 
-Match the project's natural language. This Teshi workflow uses English Gherkin keywords with English or Chinese step text and `# language: en`; do not invent translated keywords under that header. Avoid creating duplicate language variants unless the task or project conventions require them.
+Match the project's natural language. Teshi product self-test keeps paired locales under `features/en-US/` and `features/zh-CN/`:
+
+- English files use English snake_case filenames, `# language: en` with English Gherkin keywords, and English step text
+- Chinese files use Chinese filenames that match the `功能` title, `# language: zh-CN` with Chinese Gherkin keywords (`功能`, `背景`, `场景`, `假如`, `当`, `那么`, `并且`), and Chinese step text
+
+Do not mix English keywords under `# language: zh-CN`, or translated keywords under `# language: en`. Duplicate language variants are required for Teshi web-ui and requirement CLI self-test; do not invent extra locales.
 
 ## Review the result
 

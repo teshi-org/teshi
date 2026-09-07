@@ -15,6 +15,7 @@ members = [
     "apps/teshi-terminal-sidecar",
     "apps/teshi-desktop",
     "apps/teshi-web",
+    "tests/steps/requirement-cli",
 ]
 exclude = ["runner"]
 

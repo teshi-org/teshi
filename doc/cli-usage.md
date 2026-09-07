@@ -23,7 +23,46 @@ teshi requirements path
 teshi requirements import-project --dry-run
 teshi requirements import-project --yes
 teshi --requirements-root D:\Docs\teshi-requirements requirements path
+
+teshi requirements list
+teshi requirements list --iteration "Sprint 12" --json
+teshi requirements list --unassigned
+teshi requirements show doc-12
+teshi requirements show doc-12 --json
+teshi requirements edit doc-12
+teshi requirements edit doc-12 --file body.md
+teshi requirements edit doc-12 --file body.md --force
+teshi requirements set-iteration doc-12 doc-13 --iteration "Sprint 12"
+teshi requirements clear-iteration doc-12 doc-13
 ```
+
+`teshi` with no subcommand still opens the TUI. Only explicit `teshi requirements ...` runs the non-interactive store commands.
+
+Document arguments (`<REF>`) resolve in this order: exact document ID, then store-relative path (`\` is treated as `/`), then a unique exact title. If a title matches more than one document, the command exits `2` and prints the candidates; use the document ID. `--json` failures print `{ "code": "...", "error": "..." }` to stdout (`ambiguous_requirement_ref` includes `matches`).
+
+`list --json` returns a stable envelope:
+
+```json
+{
+  "store_id": "reqstore-...",
+  "store_path": "C:\\Users\\...\\requirements",
+  "documents": [
+    {
+      "id": "doc-12",
+      "title": "Login",
+      "path": "auth/login.md",
+      "iteration": "Sprint 12",
+      "revision": "..."
+    }
+  ]
+}
+```
+
+Unassigned documents use JSON `null` for `iteration`. `show` prints Markdown only; `show --json` adds the same metadata plus `body`.
+
+`edit` on a TTY copies the current body to a temporary `.md` file and opens `$VISUAL`, then `$EDITOR`. On Windows, if both are unset, Teshi falls back to `notepad`. After the editor exits, Teshi writes through the store API and updates `_teshi.json` revision. Non-interactive agents should pass `--file` or stdin; a non-TTY with neither input fails instead of launching an editor. If the on-disk revision changed during the edit, Teshi refuses to overwrite unless `--force` is set and leaves the temp file path in the error.
+
+`--iteration` and `--unassigned` cannot be combined. The iteration value for `set-iteration` must be `--iteration <name>` so multiple refs can be listed.
 
 | Platform | Default store |
 |----------|----------------|
@@ -74,7 +113,17 @@ teshi run --scenario "Successful login" path/to/file.feature
 teshi run --runner-cmd "behat" --runner-cwd /app path/
 ```
 
-Configure the runner in `teshi.toml` (see below). CLI flags override file and env settings.
+Configure the runner in `teshi.toml` (see below). CLI flags override file and env settings. `--runner-cmd` and `teshi.toml [runner]` take precedence over a live daemon and Python engine auto-detect.
+
+Requirement-library CLI E2E lives in `features/en-US/` and `features/zh-CN/` as `@cli` files and uses `teshi-requirement-cli-runner`. English CLI files are `requirement_*.feature`; Chinese CLI files use titles such as `需求列表.feature`. Run one locale's CLI files, not the whole language directory (that also contains `@web-ui` scenarios):
+
+```bash
+cargo build -p teshi-cli -p teshi-requirement-cli-runner
+TESHI_BIN=./target/debug/teshi teshi run --runner-cmd ./target/debug/teshi-requirement-cli-runner features/en-US/requirement_listing.feature
+TESHI_BIN=./target/debug/teshi teshi run --runner-cmd ./target/debug/teshi-requirement-cli-runner features/en-US/requirement_authoring.feature
+TESHI_BIN=./target/debug/teshi teshi run --runner-cmd ./target/debug/teshi-requirement-cli-runner features/zh-CN/需求列表.feature
+TESHI_BIN=./target/debug/teshi teshi run --runner-cmd ./target/debug/teshi-requirement-cli-runner features/zh-CN/需求编写.feature
+```
 
 For the supported GPUI WASM web UI smoke gate:
 

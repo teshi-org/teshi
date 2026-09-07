@@ -1,6 +1,6 @@
 {
   "format_version": 2,
-  "feature": "features/browser_profiles.feature",
+  "feature": "features/en-US/browser_profiles.feature",
   "steps": [
     {
       "step_line": 10,

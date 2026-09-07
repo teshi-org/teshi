@@ -38,7 +38,8 @@ cargo fmt --all --check                                           # check format
 ### Test layout
 
 - Unit tests live at the bottom of each source file (in `#[cfg(test)]` modules)
-- Integration tests: `tests/feature/*.feature` — BDD scenarios that describe expected behavior
+- Product Gherkin: `features/en-US/` and `features/zh-CN/` (`@web-ui` for Teshi Web, `@cli` for requirement CLI E2E)
+- Requirement CLI E2E is executed by `teshi run` and `teshi-requirement-cli-runner` (`tests/steps/requirement-cli`) against `@cli` files only (English `requirement_*.feature`, Chinese titles such as `需求列表.feature`)
 - Key test areas:
   - Gherkin parsing edge cases (`crates/teshi-core/src/gherkin.rs`)
   - Editor buffer operations (`crates/teshi-tui/src/editor_buffer.rs`)

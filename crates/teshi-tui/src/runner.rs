@@ -457,8 +457,16 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
     let project_root = teshi_engine::find_project_root(Some(&feature_path))
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    // Try daemon first
-    if let Some(manifest) = teshi_engine::DaemonManifest::load_manifest(&project_root)
+    let runner_config = load_runner_config(Some(RunnerCliOverride {
+        cmd: opts.runner_cmd.clone(),
+        args: opts.runner_args.clone(),
+        cwd: opts.runner_cwd.clone(),
+    }));
+
+    // An explicit NDJSON runner must win over a live daemon and Python engine
+    // auto-detect (`import engine.cli` succeeds on many developer machines).
+    if runner_config.is_err()
+        && let Some(manifest) = teshi_engine::DaemonManifest::load_manifest(&project_root)
         && manifest.is_daemon_alive()
     {
         return run_via_daemon(&manifest, &feature_path, opts);
@@ -478,12 +486,8 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
         return Ok(());
     }
 
-    if !had_mixed {
-        match crate::engine::load_engine_config(
-            &project_root,
-            opts.runner_cmd.as_deref(),
-            &opts.runner_args,
-        ) {
+    if !had_mixed && runner_config.is_err() {
+        match crate::engine::load_engine_config(&project_root, None, &[]) {
             Ok(engine_config) => {
                 return crate::engine::run_feature_with_engine(
                     &engine_config,
@@ -495,11 +499,7 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
         }
     }
 
-    let config = match load_runner_config(Some(RunnerCliOverride {
-        cmd: opts.runner_cmd,
-        args: opts.runner_args,
-        cwd: opts.runner_cwd,
-    })) {
+    let config = match runner_config {
         Ok(config) => config,
         Err(err) => {
             let all_api = rest
@@ -755,5 +755,17 @@ mod tests {
     #[test]
     fn parse_event_line_ignores_unknown_types() {
         assert!(parse_event_line(r#"{"type":"not_a_real_event"}"#).is_none());
+    }
+
+    #[test]
+    fn cli_runner_cmd_loads_without_relying_on_engine() {
+        let cfg = load_runner_config(Some(RunnerCliOverride {
+            cmd: Some("teshi-requirement-cli-runner".into()),
+            args: vec!["--quiet".into()],
+            cwd: Some(PathBuf::from(".")),
+        }))
+        .expect("cli runner override");
+        assert_eq!(cfg.cmd, "teshi-requirement-cli-runner");
+        assert_eq!(cfg.args, vec!["--quiet"]);
     }
 }

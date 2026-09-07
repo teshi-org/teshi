@@ -77,6 +77,17 @@ Select text and press `n` to create a `Proposed` test point linked to that exact
 
 `/generate` asks you to confirm the source scope (store path, store ID, iteration). The Requirements filter is only a suggestion; it does not silently bind the AI session. Pasted chat text is not a requirement-library source.
 
+Agents and scripts should use the same store through `teshi requirements` rather than editing `_teshi.json` directly:
+
+```bash
+teshi requirements list --iteration "Sprint 12" --json
+teshi requirements show doc-12
+teshi requirements set-iteration doc-12 doc-13 --iteration "Sprint 13"
+teshi requirements edit doc-12 --file body.md
+```
+
+Refs may be a document ID, relative path, or unique title. `edit` without `--file` opens `$VISUAL` / `$EDITOR` (Windows falls back to `notepad`). See [cli-usage.md](cli-usage.md) for the JSON envelope, revision guard, and `--force`.
+
 ### Test Points
 
 Review tab for non-Gherkin verification intents stored in `testpoints/testpoints.json`:
@@ -120,7 +131,7 @@ args = ["run", "--bin", "teshi-runner"]
 
 Test results stream back as NDJSON lines and are displayed inline in the Explore tab with status colors per scenario and step.
 
-See [CLI & Config](cli-usage.md) for more runner options.
+See [CLI & Config](cli-usage.md) for more runner options. Requirement CLI control-plane E2E uses this same protocol (`@cli` files in `features/en-US/` or `features/zh-CN/` + `teshi-requirement-cli-runner`).
 
 ## HTTP API BDD
 

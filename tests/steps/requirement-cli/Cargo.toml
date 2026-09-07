@@ -1,0 +1,17 @@
+[package]
+name = "teshi-requirement-cli-runner"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "teshi-requirement-cli-runner"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+teshi-core.workspace = true
+teshi-engine.workspace = true
+tempfile = "3"
