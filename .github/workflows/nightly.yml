@@ -76,6 +76,8 @@ jobs:
             echo "release_body<<EOF"
             echo "Nightly pre-release built from \`dev\`."
             echo ""
+            echo "Windows per-user installer only (\`teshi-*-x64-setup.exe\`). Linux/macOS archives and MSI are not published on this channel."
+            echo ""
             echo "- Commit: ${full_sha}"
             echo "- Subject: ${subject}"
             echo "- Tag: ${tag}"
@@ -95,5 +97,6 @@ jobs:
       release_body: ${{ needs.prepare.outputs.release_body }}
       prerelease: true
       skip_winget: true
+      run_scope: windows-installer
       invoked_via_call: true
     secrets: inherit

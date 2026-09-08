@@ -54,6 +54,21 @@ class UpdateManifestTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 manifest.verify_release(root)
 
+    def test_publication_can_include_only_the_windows_setup_exe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "teshi-v0.7.10-x64-setup.exe").write_bytes(b"setup fixture")
+            manifest.release(root, {}, "v0.7.10", include=("exe",))
+            assets = json.loads((root / "update-manifest.json").read_text())["assets"]
+            self.assertEqual([asset["kind"] for asset in assets], ["exe"])
+            self.assertEqual(
+                [asset["name"] for asset in assets],
+                ["teshi-v0.7.10-x64-setup.exe"],
+            )
+            self.assertIn("teshi-v0.7.10-x64-setup.exe", (root / "SHA256SUMS").read_text())
+            self.assertNotIn(".msi", (root / "SHA256SUMS").read_text())
+            manifest.verify_release(root)
+
 
 if __name__ == "__main__":
     unittest.main()

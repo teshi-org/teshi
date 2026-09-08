@@ -170,7 +170,7 @@ WinGet submission (CLI MSI only) runs automatically when `WINGET_TOKEN` is confi
 
 ### Nightly (pre-release) builds
 
-Nightly builds publish the same asset set as stable releases, but from the `dev` branch as GitHub **pre-releases** (no WinGet submission).
+Nightly builds publish the Windows per-user **setup.exe** from the `dev` branch as GitHub **pre-releases** (no Linux/macOS archives, MSI, or WinGet submission). Stable releases still publish the full asset set.
 
 | Trigger | Workflow |
 |---------|----------|
@@ -178,7 +178,7 @@ Nightly builds publish the same asset set as stable releases, but from the `dev`
 | Daily 06:00 UTC | same (uses workflow file on the **default branch**; sync `dev` → `main` to keep schedule active). Catch-up only: skipped when `dev` HEAD already has a nightly tag. |
 | Manual | `gh workflow run nightly.yml` |
 
-Tag format: `v{semver}-nightly.{YYYYMMDD}.{short_sha}` (for example `v0.7.9-nightly.20260801.dc6c942`), derived from `[workspace.package] version` in the root `Cargo.toml` + UTC date of first publish + commit. The workflow skips when this commit already has a `v*-nightly.*` tag, so an unchanged `dev` tip does not get a new tag on the next calendar day. To rebuild the same commit, delete that nightly tag/release first. Nightly CI injects `TESHI_BUILD_CHANNEL`, `TESHI_BUILD_DATE`, and `TESHI_GIT_SHA` so `teshi -V` prints `0.7.10 (nightly 2026-09-07, cb4361a)` instead of writing the tag into Cargo.toml.
+Tag format: `v{semver}-nightly.{YYYYMMDD}.{short_sha}` (for example `v0.7.9-nightly.20260801.dc6c942`), derived from `[workspace.package] version` in the root `Cargo.toml` + UTC date of first publish + commit. The workflow skips when this commit already has a `v*-nightly.*` tag, so an unchanged `dev` tip does not get a new tag on the next calendar day. To rebuild the same commit, delete that nightly tag/release first. Nightly CI injects `TESHI_BUILD_CHANNEL`, `TESHI_BUILD_DATE`, and `TESHI_GIT_SHA` so `teshi -V` prints `0.7.10 (nightly 2026-09-07, cb4361a)` instead of writing the tag into Cargo.toml. The published asset is `teshi-<tag>-x64-setup.exe` plus `update-manifest.json` and `SHA256SUMS`.
 
 ```powershell
 gh run list --workflow=nightly.yml --limit 3

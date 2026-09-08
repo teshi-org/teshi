@@ -11,13 +11,14 @@ on:
         required: true
         type: string
       run_scope:
-        description: "Workflow scope: full release or windows-only retry"
+        description: "Workflow scope: full release, windows-only retry, or windows installer"
         required: true
         default: full
         type: choice
         options:
           - full
           - windows-only
+          - windows-installer
   workflow_call:
     inputs:
       release_tag:
@@ -40,7 +41,7 @@ on:
         type: boolean
         default: false
       run_scope:
-        description: "Workflow scope: full release or windows-only retry"
+        description: "Workflow scope: full release, windows-only retry, or windows installer"
         required: false
         type: string
         default: full
@@ -72,6 +73,7 @@ jobs:
       prerelease: ${{ steps.meta.outputs.prerelease }}
       skip_winget: ${{ steps.meta.outputs.skip_winget }}
       run_scope: ${{ steps.meta.outputs.run_scope }}
+      matrix: ${{ steps.meta.outputs.matrix }}
       release_body: ${{ steps.meta.outputs.release_body }}
       build_timestamp: ${{ steps.meta.outputs.build_timestamp }}
     steps:
@@ -134,6 +136,16 @@ jobs:
             exit 1
           fi
 
+          if [[ ! "${run_scope}" =~ ^(full|windows-only|windows-installer)$ ]]; then
+            echo "Unsupported run_scope: ${run_scope}" >&2
+            exit 1
+          fi
+          if [ "${run_scope}" = "full" ]; then
+            matrix='{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"macos-14","target":"aarch64-apple-darwin"}]}'
+          else
+            matrix='{"include":[{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]}'
+          fi
+
           if [[ ! "${tag}" =~ ^v.+$ ]]; then
             echo "Tag must start with 'v' (got: ${tag})." >&2
             exit 1
@@ -145,6 +157,7 @@ jobs:
             echo "prerelease=${prerelease}"
             echo "skip_winget=${skip_winget}"
             echo "run_scope=${run_scope}"
+            echo "matrix=${matrix}"
             echo "build_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "${GITHUB_OUTPUT}"
 
@@ -162,14 +175,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: macos-14
-            target: aarch64-apple-darwin
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
 
     steps:
       - name: Checkout
@@ -224,6 +230,8 @@ jobs:
           cp build-identity.json "target/${{ matrix.target }}/release/build-identity.json"
 
       - name: Verify updater contracts and native helper transactions
+        # Nightly installer builds skip this gate; Linux CI already runs the same tests.
+        if: needs.resolve.outputs.run_scope != 'windows-installer'
         run: cargo test --locked -p teshi-update -p teshi-update-helper
 
       # Windows-only: build teshi-desktop + combined MSI installer
@@ -251,25 +259,30 @@ jobs:
         shell: pwsh
         run: ./scripts/build-teshi-web.ps1
 
-      - name: Install WiX Toolset
+      - name: Install Inno Setup
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
-        run: choco install wixtoolset innosetup --no-progress -y
+        run: choco install innosetup --no-progress -y
+
+      - name: Install WiX Toolset
+        if: matrix.target == 'x86_64-pc-windows-msvc' && needs.resolve.outputs.run_scope != 'windows-installer'
+        shell: pwsh
+        run: choco install wixtoolset --no-progress -y
 
       - name: Cache cargo-wix
         id: cache_cargo_wix
-        if: matrix.target == 'x86_64-pc-windows-msvc'
+        if: matrix.target == 'x86_64-pc-windows-msvc' && needs.resolve.outputs.run_scope != 'windows-installer'
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/cargo-wix.exe
           key: ${{ runner.os }}-cargo-wix-0.3.9
 
       - name: Install cargo-wix
-        if: matrix.target == 'x86_64-pc-windows-msvc' && steps.cache_cargo_wix.outputs.cache-hit != 'true'
+        if: matrix.target == 'x86_64-pc-windows-msvc' && needs.resolve.outputs.run_scope != 'windows-installer' && steps.cache_cargo_wix.outputs.cache-hit != 'true'
         run: cargo install cargo-wix --locked --version 0.3.9
 
       - name: Build combined MSI installer
-        if: matrix.target == 'x86_64-pc-windows-msvc'
+        if: matrix.target == 'x86_64-pc-windows-msvc' && needs.resolve.outputs.run_scope != 'windows-installer'
         shell: pwsh
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
@@ -344,7 +357,7 @@ jobs:
             --nocapture --no-build -o "target/wix/teshi-$tag-x64.msi"
 
       - name: Build per-user setup.exe
-        if: matrix.target == 'x86_64-pc-windows-msvc'
+        if: matrix.target == 'x86_64-pc-windows-msvc' && needs.resolve.outputs.run_scope != 'windows-installer'
         shell: pwsh
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
@@ -355,6 +368,54 @@ jobs:
           python scripts/update_manifest.py bundle --root staging/exe-root --identity build-identity.json --target "${{ matrix.target }}" --kind exe
           if ($LASTEXITCODE -ne 0) { throw "EXE bundle manifest generation failed" }
           ./scripts/build-exe-setup.ps1 -StagingRoot "staging/exe-root" -Tag $tag -Version $identity.semver
+
+      - name: Stage payload and build per-user setup.exe
+        if: matrix.target == 'x86_64-pc-windows-msvc' && needs.resolve.outputs.run_scope == 'windows-installer'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          if (-not $tag.StartsWith("v")) { throw "Release tag must start with 'v' (got: $tag)." }
+
+          $stagingRoot = "staging/exe-root"
+          $binDir    = Join-Path $stagingRoot "bin"
+          $shareDir  = Join-Path $stagingRoot "share"
+          $webDir    = Join-Path $stagingRoot "share/web"
+          $bridgeDir = Join-Path $stagingRoot "share/teshi-bridge"
+          $agentDir  = Join-Path $stagingRoot "share/teshi-browser-testing"
+          $agentBridgeDir = Join-Path $agentDir "extension/teshi-bridge"
+          New-Item -ItemType Directory -Force -Path $binDir, $webDir, $bridgeDir, $agentBridgeDir | Out-Null
+
+          $builtExe    = "target/${{ matrix.target }}/release/teshi.exe"
+          @($builtExe, "apps/teshi-web/dist", "apps/teshi-web/dist/pkg/teshi_web_bg.wasm", "resources/browser_service.py",
+            "resources/browser_agent_broker.py", "resources/winapp_service.py",
+            "resources/api_service.py", "resources/teshi_api.py",
+            "extension/teshi-bridge/manifest.json",
+            "agent-packages/teshi-browser-testing/.codex-plugin/plugin.json") |
+            ForEach-Object { if (-not (Test-Path $_)) { throw "Missing: $_" } }
+
+          Copy-Item $builtExe   (Join-Path $binDir "teshi.exe")          -Force
+          Copy-Item "target/${{ matrix.target }}/release/teshi-update-helper.exe" (Join-Path $binDir "teshi-update-helper.exe")
+          Copy-Item "target/${{ matrix.target }}/release/teshi-desktop.exe" (Join-Path $binDir "teshi-desktop.exe")
+          Copy-Item "resources/browser_service.py" (Join-Path $shareDir "browser_service.py") -Force
+          Copy-Item "resources/update_participant.py" (Join-Path $shareDir "update_participant.py") -Force
+          Copy-Item "resources/browser_agent_broker.py" (Join-Path $shareDir "browser_agent_broker.py") -Force
+          Copy-Item "resources/winapp_service.py"  (Join-Path $shareDir "winapp_service.py") -Force
+          Copy-Item "resources/api_service.py" (Join-Path $shareDir "api_service.py") -Force
+          Copy-Item "resources/teshi_api.py" (Join-Path $shareDir "teshi_api.py") -Force
+          Copy-Item -Path "apps/teshi-web/dist/*" -Destination $webDir -Recurse -Force
+          Copy-Item -Path "extension/teshi-bridge/*" -Destination $bridgeDir -Recurse -Force
+          Copy-Item -Path "agent-packages/teshi-browser-testing/*" -Destination $agentDir -Recurse -Force
+          Copy-Item -LiteralPath "skills/teshi", "skills/bdd-feature", "skills/winapp-regression" -Destination (Join-Path $agentDir "skills") -Recurse -Force
+          Copy-Item -Path "agent-packages/teshi-browser-testing/.codex-plugin" -Destination $agentDir -Recurse -Force
+          Copy-Item -Path "agent-packages/teshi-browser-testing/.mcp.json" -Destination $agentDir -Force
+          Copy-Item -Path "extension/teshi-bridge/*" -Destination $agentBridgeDir -Recurse -Force
+          python scripts/update_manifest.py bundle --root $stagingRoot --identity build-identity.json --target "${{ matrix.target }}" --kind exe
+          if ($LASTEXITCODE -ne 0) { throw "EXE bundle manifest generation failed" }
+
+          $identity = Get-Content build-identity.json | ConvertFrom-Json
+          ./scripts/build-exe-setup.ps1 -StagingRoot $stagingRoot -Tag $tag -Version $identity.semver
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -370,7 +431,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload MSI artifact
-        if: matrix.target == 'x86_64-pc-windows-msvc'
+        if: matrix.target == 'x86_64-pc-windows-msvc' && needs.resolve.outputs.run_scope != 'windows-installer'
         uses: actions/upload-artifact@v4
         with:
           name: teshi-msi
@@ -386,7 +447,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload web dist artifact
-        if: matrix.target == 'x86_64-pc-windows-msvc'
+        if: matrix.target == 'x86_64-pc-windows-msvc' && needs.resolve.outputs.run_scope != 'windows-installer'
         uses: actions/upload-artifact@v4
         with:
           name: teshi-web-dist
@@ -414,6 +475,7 @@ jobs:
         run: python3 scripts/test-browser-agent-package.py
 
       - name: Package release assets
+        if: needs.resolve.outputs.run_scope == 'full'
         shell: bash
         run: |
           set -euo pipefail
@@ -481,6 +543,18 @@ jobs:
           python scripts/update_manifest.py release --dist dist --identity "${artifacts_dir}/teshi-x86_64-pc-windows-msvc/build-identity.json" --tag "$version"
           python scripts/update_manifest.py verify --dist dist
 
+      - name: Package Windows installer assets
+        if: needs.resolve.outputs.run_scope == 'windows-installer'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.resolve.outputs.tag }}"
+          mkdir -p dist
+          artifacts_dir="${{ github.workspace }}/artifacts"
+          cp "${artifacts_dir}/teshi-setup/"*-setup.exe dist/
+          python scripts/update_manifest.py release --dist dist --identity "${artifacts_dir}/teshi-x86_64-pc-windows-msvc/build-identity.json" --tag "$version" --include exe
+          python scripts/update_manifest.py verify --dist dist
+
       - name: Refuse changes to a published release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -495,7 +569,8 @@ jobs:
             exit 1
           fi
 
-      - name: Publish release assets
+      - name: Publish full release assets
+        if: needs.resolve.outputs.run_scope == 'full'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.resolve.outputs.tag }}
@@ -512,6 +587,21 @@ jobs:
             dist/SHA256SUMS
             dist/update-manifest.json
 
+      - name: Publish Windows installer assets
+        if: needs.resolve.outputs.run_scope == 'windows-installer'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          target_commitish: ${{ needs.resolve.outputs.source_ref }}
+          prerelease: ${{ needs.resolve.outputs.prerelease == 'true' }}
+          draft: true
+          generate_release_notes: false
+          body: ${{ needs.resolve.outputs.release_body }}
+          files: |
+            dist/*-setup.exe
+            dist/SHA256SUMS
+            dist/update-manifest.json
+
       - name: Publish completed draft
         env:
           GH_TOKEN: ${{ github.token }}
@@ -523,7 +613,7 @@ jobs:
     name: Submit WinGet manifest
     runs-on: windows-latest
     needs: [publish, resolve]
-    if: ${{ needs.resolve.outputs.run_scope != 'windows-only' && needs.resolve.outputs.skip_winget != 'true' }}
+    if: ${{ needs.resolve.outputs.run_scope == 'full' && needs.resolve.outputs.skip_winget != 'true' }}
 
     steps:
       - name: Install wingetcreate

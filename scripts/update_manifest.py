@@ -73,19 +73,35 @@ def bundle(root, build, target, kind):
     return result
 
 
-def release(dist, build, tag):
+INCLUDE_KINDS = ("portable", "msi", "exe")
+
+
+def parse_include(value):
+    """Parse a comma-separated subset of portable, msi, and exe publication kinds."""
+    kinds = tuple(part.strip() for part in value.split(",") if part.strip())
+    if not kinds or any(kind not in INCLUDE_KINDS for kind in kinds):
+        raise ValueError("include must be a comma-separated subset of portable,msi,exe")
+    return kinds
+
+
+def release(dist, build, tag, include=INCLUDE_KINDS):
     assets = []
-    for target in TARGETS:
-        extension = "zip" if "windows" in target else "tar.gz"
-        name = f"teshi-{tag}-{target}.{extension}"
+    if "portable" in include:
+        for target in TARGETS:
+            extension = "zip" if "windows" in target else "tar.gz"
+            name = f"teshi-{tag}-{target}.{extension}"
+            path = dist / name
+            assets.append(dict(name=name, target=target, kind="portable", size=path.stat().st_size, sha256=digest(path)))
+    if "msi" in include:
+        name = f"teshi-{tag}-x64.msi"
         path = dist / name
-        assets.append(dict(name=name, target=target, kind="portable", size=path.stat().st_size, sha256=digest(path)))
-    name = f"teshi-{tag}-x64.msi"
-    path = dist / name
-    assets.append(dict(name=name, target=TARGETS[0], kind="msi", size=path.stat().st_size, sha256=digest(path)))
-    name = f"teshi-{tag}-x64-setup.exe"
-    path = dist / name
-    assets.append(dict(name=name, target=TARGETS[0], kind="exe", size=path.stat().st_size, sha256=digest(path)))
+        assets.append(dict(name=name, target=TARGETS[0], kind="msi", size=path.stat().st_size, sha256=digest(path)))
+    if "exe" in include:
+        name = f"teshi-{tag}-x64-setup.exe"
+        path = dist / name
+        assets.append(dict(name=name, target=TARGETS[0], kind="exe", size=path.stat().st_size, sha256=digest(path)))
+    if not assets:
+        raise ValueError("No release assets selected")
     write_json(dist / "update-manifest.json", dict(schema=1, minimum_updater=1, identity=build, tag=tag, assets=assets))
     files = sorted(
         p
@@ -131,6 +147,7 @@ def main():
     publish.add_argument("--dist", type=Path, required=True)
     publish.add_argument("--identity", type=Path, required=True)
     publish.add_argument("--tag", required=True)
+    publish.add_argument("--include", default="portable,msi,exe")
     check = modes.add_parser("verify")
     check.add_argument("--dist", type=Path, required=True)
     args = parser.parse_args()
@@ -153,7 +170,12 @@ def main():
     elif args.mode == "verify":
         verify_release(args.dist)
     else:
-        release(args.dist, json.loads(args.identity.read_text(encoding="utf-8")), args.tag)
+        release(
+            args.dist,
+            json.loads(args.identity.read_text(encoding="utf-8")),
+            args.tag,
+            include=parse_include(args.include),
+        )
 
 
 if __name__ == "__main__":
