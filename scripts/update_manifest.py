@@ -100,6 +100,21 @@ def release(dist, build, tag):
     (dist / "SHA256SUMS").write_text("".join(f"{digest(p)}  {p.name}\n" for p in files), encoding="utf-8")
 
 
+def verify_release(dist):
+    """Reject a publication whose SHA256SUMS or asset hashes disagree with the files on disk."""
+    sums = {}
+    for line in (dist / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+        value, name = line.split(None, 1)
+        sums[name.strip()] = value
+    manifest = json.loads((dist / "update-manifest.json").read_text(encoding="utf-8"))
+    for asset in manifest["assets"]:
+        actual = digest(dist / asset["name"])
+        if actual != asset["sha256"] or actual != sums[asset["name"]]:
+            raise ValueError(f"Checksum mismatch: {asset['name']}")
+    if sums["update-manifest.json"] != digest(dist / "update-manifest.json"):
+        raise ValueError("update-manifest.json checksum mismatch")
+
+
 def main():
     parser = argparse.ArgumentParser(__doc__)
     modes = parser.add_subparsers(dest="mode", required=True)
@@ -116,6 +131,8 @@ def main():
     publish.add_argument("--dist", type=Path, required=True)
     publish.add_argument("--identity", type=Path, required=True)
     publish.add_argument("--tag", required=True)
+    check = modes.add_parser("verify")
+    check.add_argument("--dist", type=Path, required=True)
     args = parser.parse_args()
     if args.mode == "identity":
         sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -133,6 +150,8 @@ def main():
                 stream.writelines(f"{key}={value}\n" for key, value in values.items())
     elif args.mode == "bundle":
         bundle(args.root, json.loads(args.identity.read_text(encoding="utf-8")), args.target, args.kind)
+    elif args.mode == "verify":
+        verify_release(args.dist)
     else:
         release(args.dist, json.loads(args.identity.read_text(encoding="utf-8")), args.tag)
 

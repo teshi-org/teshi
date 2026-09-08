@@ -49,6 +49,10 @@ class UpdateManifestTests(unittest.TestCase):
             self.assertIn("update-manifest.json", (root / "SHA256SUMS").read_text())
             self.assertIn("teshi-v0.7.10-x64-setup.exe", (root / "SHA256SUMS").read_text())
             self.assertEqual(len(json.loads((root / "update-manifest.json").read_text())["assets"]), 5)
+            manifest.verify_release(root)
+            (root / "teshi-v0.7.10-x64.msi").write_bytes(b"tampered")
+            with self.assertRaises(ValueError):
+                manifest.verify_release(root)
 
 
 if __name__ == "__main__":

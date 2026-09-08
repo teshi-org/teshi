@@ -479,22 +479,7 @@ jobs:
           cp "${artifacts_dir}/teshi-msi/"*.msi dist/
           cp "${artifacts_dir}/teshi-setup/"*-setup.exe dist/
           python scripts/update_manifest.py release --dist dist --identity "${artifacts_dir}/teshi-x86_64-pc-windows-msvc/build-identity.json" --tag "$version"
-          python -c '
-from pathlib import Path
-import hashlib, json
-dist = Path("dist")
-sums = {}
-for line in (dist / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
-    digest, name = line.split(None, 1)
-    sums[name.strip()] = digest
-manifest = json.loads((dist / "update-manifest.json").read_text(encoding="utf-8"))
-for asset in manifest["assets"]:
-    path = dist / asset["name"]
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    assert digest == asset["sha256"] == sums[asset["name"]], asset["name"]
-raw = (dist / "update-manifest.json").read_bytes()
-assert sums["update-manifest.json"] == hashlib.sha256(raw).hexdigest()
-'
+          python scripts/update_manifest.py verify --dist dist
 
       - name: Refuse changes to a published release
         env:
