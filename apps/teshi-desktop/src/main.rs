@@ -1,5 +1,7 @@
 //! Native GPUI desktop shell for teshi.
 
+mod titlebar;
+
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,7 +10,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use gpui::{
     App, AppContext, Bounds, Context as GpuiContext, Entity, IntoElement, ParentElement, Render,
-    Styled, Window, WindowBounds, WindowOptions, div, px, size,
+    Styled, Window, WindowBounds, WindowDecorations, WindowOptions, div, px, size,
 };
 use teshi_engine::{ApiStyle, ModelProfile, ModelProfileList, ModelProfilePublic, PROVIDER_OPENAI};
 #[cfg(windows)]
@@ -22,6 +24,7 @@ use teshi_ui::{
     LlmConfigSnapshot, LlmConfigUpdate, ModelProfileListSnapshot, ModelProfileSnapshot,
     ModelProfileUpdate, WinAppPreview, bind_llm_config_keys,
 };
+use titlebar::Titlebar;
 
 #[cfg_attr(not(windows), allow(dead_code))]
 enum PreviewEvent {
@@ -475,6 +478,7 @@ impl ApiRunBackend for NativePlatformBackend {
 }
 
 struct DesktopRoot {
+    titlebar: Entity<Titlebar>,
     shell: Entity<AppShell>,
     updates: Entity<teshi_update_ui::UpdateView>,
 }
@@ -485,6 +489,7 @@ impl Render for DesktopRoot {
             .size_full()
             .flex()
             .flex_col()
+            .child(self.titlebar.clone())
             .child(div().flex_1().min_h_0().child(self.shell.clone()))
             .child(self.updates.clone())
     }
@@ -525,9 +530,16 @@ fn main() -> anyhow::Result<()> {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some("teshi".into()),
+                    appears_transparent: true,
+                    ..Default::default()
+                }),
+                window_decorations: Some(WindowDecorations::Client),
                 ..Default::default()
             },
             |window, cx| {
+                let titlebar = cx.new(|_| Titlebar::new());
                 let shell = cx.new(|cx| {
                     AppShell::new(
                         llm_backend.clone(),
@@ -545,7 +557,11 @@ fn main() -> anyhow::Result<()> {
                         cx,
                     )
                 });
-                cx.new(|_| DesktopRoot { shell, updates })
+                cx.new(|_| DesktopRoot {
+                    titlebar,
+                    shell,
+                    updates,
+                })
             },
         )
         .expect("open teshi-desktop window");
