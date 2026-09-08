@@ -441,6 +441,7 @@ async fn handle_connection(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _update_participant = teshi_update::transaction::participate(&std::env::current_exe()?)?;
     // ── Bind on a random loopback port ────────────────────────────────────
     let std_listener =
         std::net::TcpListener::bind("127.0.0.1:0").context("bind TCP listener on 127.0.0.1:0")?;

@@ -52,6 +52,10 @@ pub struct AppShell {
 }
 
 impl AppShell {
+    /// Whether native update restart must wait for settings to be saved.
+    pub fn has_unsaved_changes(&self, cx: &App) -> bool {
+        self.llm_config.read(cx).has_unsaved_changes()
+    }
     /// Create the root shell and an embedded LLM config view (shown under settings).
     ///
     /// Does not focus the LLM form until the user opens settings, so the main

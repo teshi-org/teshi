@@ -18,6 +18,7 @@ pub mod project_settings;
 pub mod render;
 pub mod step_index;
 pub mod venv;
+pub mod version;
 
 pub use api_bdd::{
     EngineMismatch, EngineMode, is_engine_tag, normalize_tag, resolve_engine_mode,

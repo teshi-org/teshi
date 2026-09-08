@@ -179,6 +179,15 @@ pub fn run() -> Result<()> {
     let requirements_root = cli_args.requirements_root.clone();
 
     match cli_args.command {
+        Some(cli::Command::Update {
+            status,
+            check,
+            channel,
+            yes,
+            json,
+        }) => {
+            return cli::update::handle_update(status, check, channel.as_deref(), yes, json);
+        }
         Some(cli::Command::Auth { action }) => {
             return cli::auth::handle_auth_command(&action);
         }

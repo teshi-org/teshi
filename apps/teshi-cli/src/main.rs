@@ -11,6 +11,19 @@ struct WebCommand {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
+    if args.get(1).is_some_and(|arg| arg == "--update-identity") {
+        println!(
+            "{}",
+            serde_json::to_string(&teshi_core::version::build_identity())?
+        );
+        return Ok(());
+    }
+    let _update_participant = if teshi_update::transaction::registers_install_participant(&args) {
+        teshi_update::transaction::participate(&std::env::current_exe()?)?
+    } else {
+        None
+    };
+
     if args.iter().any(|arg| arg == "--daemon-internal") {
         let options = teshi_daemon::DaemonInternalOptions::parse_from(args);
         let runtime = tokio::runtime::Runtime::new().context("create tokio runtime")?;

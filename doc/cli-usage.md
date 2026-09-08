@@ -14,6 +14,28 @@ If no `.feature` files are found, the TUI opens an empty project buffer.
 
 Global flag (all subcommands): `--requirements-root PATH` overrides the user-level requirement library for this process.
 
+### Application updates (`teshi update`)
+
+```bash
+teshi update                         # check, confirm, download, and hand off installation
+teshi update --check                 # metadata only; no archive, helper, or install
+teshi update --check --json          # one JSON object; progress still goes to stderr
+teshi update --channel nightly       # explicit channel switch (requires confirmation)
+teshi update --yes                   # skip Teshi confirmation (not OS elevation)
+teshi update --status                # last local helper result without contacting GitHub
+```
+
+`--json` prints one final object. Installation in a non-TTY or with `--json` also requires `--yes`; otherwise the command fails before download.
+
+| Exit code | Meaning |
+|-----------|---------|
+| 0 | The requested operation completed, including `--check` when an update is available |
+| 1 | Failure |
+| 2 | Invalid arguments |
+| 3 | Helper accepted a pending installation; the next invocation reports the persisted result |
+
+Pending MUST NOT be printed as installed. Only the Windows per-user setup.exe install can replace files. Portable archives, MSI/WinGet, source/Cargo builds, and explicitly externally managed installs can check for a release but cannot replace files. See [Installation](installation.md) for the install matrix, first-release bootstrap, and checksum trust boundary.
+
 ### Requirement library (`teshi requirements`)
 
 Requirement Markdown lives in a **user-level store**, not in the project you have open. Test points remain per-project under `testpoints/testpoints.json`.

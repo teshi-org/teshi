@@ -9,6 +9,7 @@ repository = "https://github.com/teshi-org/teshi"
 publish = false
 
 [dependencies]
+teshi-update.workspace = true
 anyhow.workspace = true
 arboard = "3"
 base64.workspace = true
@@ -37,4 +38,3 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 
 [dev-dependencies]
 tempfile = "3"
-

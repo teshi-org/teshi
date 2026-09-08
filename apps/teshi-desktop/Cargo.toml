@@ -8,6 +8,9 @@ license = "MIT"
 publish = false
 
 [dependencies]
+teshi-core.workspace = true
+teshi-update.workspace = true
+teshi-update-ui.workspace = true
 anyhow = { workspace = true }
 base64 = { workspace = true }
 gpui = { workspace = true }

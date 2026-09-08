@@ -7,6 +7,9 @@ the response ``events`` array (and optionally NDJSON on stdout).
 
 from __future__ import annotations
 
+from update_participant import register as _register_update_participant
+_update_participant = _register_update_participant(__file__)
+
 import argparse
 import asyncio
 import json

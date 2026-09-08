@@ -6,7 +6,10 @@ use std::time::Duration;
 
 #[cfg(windows)]
 use base64::Engine as _;
-use gpui::{App, AppContext, Bounds, Entity, WindowBounds, WindowOptions, px, size};
+use gpui::{
+    App, AppContext, Bounds, Context as GpuiContext, Entity, IntoElement, ParentElement, Render,
+    Styled, Window, WindowBounds, WindowOptions, div, px, size,
+};
 use teshi_engine::{ApiStyle, ModelProfile, ModelProfileList, ModelProfilePublic, PROVIDER_OPENAI};
 #[cfg(windows)]
 use teshi_engine::{
@@ -466,7 +469,31 @@ impl ApiRunBackend for NativePlatformBackend {
     }
 }
 
-fn main() {
+struct DesktopRoot {
+    shell: Entity<AppShell>,
+    updates: Entity<teshi_update_ui::UpdateView>,
+}
+
+impl Render for DesktopRoot {
+    fn render(&mut self, _: &mut Window, _: &mut GpuiContext<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(div().flex_1().min_h_0().child(self.shell.clone()))
+            .child(self.updates.clone())
+    }
+}
+
+fn main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--update-identity") {
+        println!(
+            "{}",
+            serde_json::to_string(&teshi_core::version::build_identity())?
+        );
+        return Ok(());
+    }
+    let _update_participant = teshi_update::transaction::participate(&std::env::current_exe()?)?;
     gpui_platform::application().run(|cx: &mut App| {
         bind_llm_config_keys(cx);
         let bounds = Bounds::centered(None, size(px(960.0), px(720.0)), cx);
@@ -496,7 +523,7 @@ fn main() {
                 ..Default::default()
             },
             |window, cx| {
-                cx.new(|cx| {
+                let shell = cx.new(|cx| {
                     AppShell::new(
                         llm_backend.clone(),
                         browser_backend.clone(),
@@ -505,10 +532,19 @@ fn main() {
                         window,
                         cx,
                     )
-                })
+                });
+                let for_exit = shell.clone();
+                let updates = cx.new(|cx| {
+                    teshi_update_ui::UpdateView::new(
+                        Rc::new(move |cx| !for_exit.read(cx).has_unsaved_changes(cx)),
+                        cx,
+                    )
+                });
+                cx.new(|_| DesktopRoot { shell, updates })
             },
         )
         .expect("open teshi-desktop window");
         cx.activate(true);
     });
+    Ok(())
 }

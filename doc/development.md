@@ -196,6 +196,8 @@ Local full MSI build (Windows, matches CI): install [WiX Toolset](https://wixtoo
 cargo wix --package teshi-cli --nocapture --no-build -C -dStagingRoot=staging/msi-root -C -dWebRoot=staging/msi-root/share/web -C -dBridgeRoot=staging/msi-root/share/teshi-bridge -o target/wix/teshi-local-x64.msi
 ```
 
+Per-user setup.exe (in-app updates): install [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`choco install innosetup`), stage the same tree as `staging/exe-root` with `python scripts/update_manifest.py bundle ... --kind exe`, then `./scripts/build-exe-setup.ps1`.
+
 cargo-wix 0.3.x no longer accepts `--define`; pass WiX preprocessor variables with `-C -dName=value` (candle).
 
 ### Publishing with GitHub CLI

@@ -135,6 +135,7 @@ pub struct LlmConfigView {
     headers_json: String,
     chat_options_json: String,
     status: SharedString,
+    clean_draft: Value,
 }
 
 impl LlmConfigView {
@@ -154,8 +155,10 @@ impl LlmConfigView {
             headers_json: "{}".into(),
             chat_options_json: "{}".into(),
             status: "Loading…".into(),
+            clean_draft: Value::Null,
         };
         view.reload_list();
+        view.clean_draft = view.draft_snapshot();
         view
     }
 
@@ -215,6 +218,16 @@ impl LlmConfigView {
         if self.field == Field::ApiStyle && self.draft.provider != "openai" {
             self.field = Field::Name;
         }
+        self.clean_draft = self.draft_snapshot();
+    }
+
+    fn draft_snapshot(&self) -> Value {
+        serde_json::json!({"draft": self.draft, "headers": self.headers_json, "options": self.chat_options_json})
+    }
+
+    /// Whether closing the shell would discard an edited settings draft.
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.draft_snapshot() != self.clean_draft
     }
 
     fn start_new_draft(&mut self) {

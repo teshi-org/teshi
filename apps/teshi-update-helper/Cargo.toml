@@ -1,0 +1,15 @@
+[package]
+name = "teshi-update-helper"
+version.workspace = true
+edition = "2024"
+publish = false
+license = "MIT"
+
+[dependencies]
+teshi-update.workspace = true
+teshi-core.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

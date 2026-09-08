@@ -73,6 +73,7 @@ jobs:
       skip_winget: ${{ steps.meta.outputs.skip_winget }}
       run_scope: ${{ steps.meta.outputs.run_scope }}
       release_body: ${{ steps.meta.outputs.release_body }}
+      build_timestamp: ${{ steps.meta.outputs.build_timestamp }}
     steps:
       - name: Resolve tag and build ref
         id: meta
@@ -144,6 +145,7 @@ jobs:
             echo "prerelease=${prerelease}"
             echo "skip_winget=${skip_winget}"
             echo "run_scope=${run_scope}"
+            echo "build_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "${GITHUB_OUTPUT}"
 
           if [ -n "${release_body}" ]; then
@@ -185,26 +187,44 @@ jobs:
         with:
           prefix-key: teshi-${{ needs.resolve.outputs.tag }}
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Resolve Teshi build identity
-        id: build_id
         shell: bash
         env:
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          TESHI_RELEASE_TIMESTAMP: ${{ needs.resolve.outputs.build_timestamp }}
         run: |
           set -euo pipefail
-          tag="${RELEASE_TAG}"
-          if [[ "${tag}" =~ ^v[0-9.]+-nightly\.([0-9]{8})\.([0-9a-f]+)$ ]]; then
-            echo "channel=nightly" >> "${GITHUB_OUTPUT}"
-            echo "date=${BASH_REMATCH[1]}" >> "${GITHUB_OUTPUT}"
-            echo "sha=${BASH_REMATCH[2]}" >> "${GITHUB_OUTPUT}"
-          fi
+          python scripts/update_manifest.py identity --tag "$RELEASE_TAG" --sequence "$GITHUB_RUN_ID"
+          python scripts/test_update_manifest.py
 
       - name: Build teshi CLI
-        env:
-          TESHI_BUILD_CHANNEL: ${{ steps.build_id.outputs.channel }}
-          TESHI_BUILD_DATE: ${{ steps.build_id.outputs.date }}
-          TESHI_GIT_SHA: ${{ steps.build_id.outputs.sha }}
-        run: cargo build --release --target ${{ matrix.target }} --bin teshi
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin teshi --bin teshi-update-helper
+
+      - name: Build native desktop
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin teshi-desktop
+
+      - name: Verify compiled build identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          binaries="teshi teshi-update-helper"
+          [[ "${{ matrix.target }}" == *windows* ]] && binaries="$binaries teshi-desktop"
+          for binary in $binaries; do
+            executable="target/${{ matrix.target }}/release/$binary"
+            [[ "${{ matrix.target }}" == *windows* ]] && executable="${executable}.exe"
+            "$executable" --update-identity > compiled-identity.json
+            python -c 'import json; assert json.load(open("build-identity.json")) == json.load(open("compiled-identity.json"))'
+          done
+          cp build-identity.json "target/${{ matrix.target }}/release/build-identity.json"
+
+      - name: Verify updater contracts and native helper transactions
+        run: cargo test --locked -p teshi-update -p teshi-update-helper
 
       # Windows-only: build teshi-desktop + combined MSI installer
       - name: Install nightly WASM target
@@ -234,7 +254,7 @@ jobs:
       - name: Install WiX Toolset
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
-        run: choco install wixtoolset --no-progress -y
+        run: choco install wixtoolset innosetup --no-progress -y
 
       - name: Cache cargo-wix
         id: cache_cargo_wix
@@ -276,7 +296,10 @@ jobs:
             ForEach-Object { if (-not (Test-Path $_)) { throw "Missing: $_" } }
 
           Copy-Item $builtExe   (Join-Path $binDir "teshi.exe")          -Force
+          Copy-Item "target/${{ matrix.target }}/release/teshi-update-helper.exe" (Join-Path $binDir "teshi-update-helper.exe")
+          Copy-Item "target/${{ matrix.target }}/release/teshi-desktop.exe" (Join-Path $binDir "teshi-desktop.exe")
           Copy-Item "resources/browser_service.py" (Join-Path $shareDir "browser_service.py") -Force
+          Copy-Item "resources/update_participant.py" (Join-Path $shareDir "update_participant.py") -Force
           Copy-Item "resources/browser_agent_broker.py" (Join-Path $shareDir "browser_agent_broker.py") -Force
           Copy-Item "resources/winapp_service.py"  (Join-Path $shareDir "winapp_service.py") -Force
           Copy-Item "resources/api_service.py" (Join-Path $shareDir "api_service.py") -Force
@@ -288,6 +311,8 @@ jobs:
           Copy-Item -Path "agent-packages/teshi-browser-testing/.codex-plugin" -Destination $agentDir -Recurse -Force
           Copy-Item -Path "agent-packages/teshi-browser-testing/.mcp.json" -Destination $agentDir -Force
           Copy-Item -Path "extension/teshi-bridge/*" -Destination $agentBridgeDir -Recurse -Force
+          python scripts/update_manifest.py bundle --root $stagingRoot --identity build-identity.json --target "${{ matrix.target }}" --kind msi
+          if ($LASTEXITCODE -ne 0) { throw "MSI bundle manifest generation failed" }
 
           # Generate WiX fragments for web, bridge, and browser-agent files
           $heat = Join-Path $env:WIX "bin/heat.exe"
@@ -318,6 +343,19 @@ jobs:
             --include wix/browser-agent-files.wxs `
             --nocapture --no-build -o "target/wix/teshi-$tag-x64.msi"
 
+      - name: Build per-user setup.exe
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          $identity = Get-Content build-identity.json | ConvertFrom-Json
+          Copy-Item -Path "staging/msi-root" -Destination "staging/exe-root" -Recurse -Force
+          python scripts/update_manifest.py bundle --root staging/exe-root --identity build-identity.json --target "${{ matrix.target }}" --kind exe
+          if ($LASTEXITCODE -ne 0) { throw "EXE bundle manifest generation failed" }
+          ./scripts/build-exe-setup.ps1 -StagingRoot "staging/exe-root" -Tag $tag -Version $identity.semver
+
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
@@ -325,6 +363,10 @@ jobs:
           path: |
             target/${{ matrix.target }}/release/teshi
             target/${{ matrix.target }}/release/teshi.exe
+            target/${{ matrix.target }}/release/teshi-update-helper
+            target/${{ matrix.target }}/release/teshi-update-helper.exe
+            target/${{ matrix.target }}/release/teshi-desktop.exe
+            target/${{ matrix.target }}/release/build-identity.json
           if-no-files-found: error
 
       - name: Upload MSI artifact
@@ -333,6 +375,14 @@ jobs:
         with:
           name: teshi-msi
           path: target/wix/teshi-*-x64.msi
+          if-no-files-found: error
+
+      - name: Upload setup.exe artifact
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: teshi-setup
+          path: target/inno/teshi-*-x64-setup.exe
           if-no-files-found: error
 
       - name: Upload web dist artifact
@@ -381,8 +431,13 @@ jobs:
             mkdir -p "${stage_dir}/share/teshi-bridge"
             mkdir -p "${stage_dir}/share/teshi-browser-testing/extension/teshi-bridge"
             cp "${artifacts_dir}/teshi-${target}/${binary_name}" "${stage_dir}/"
+            helper_name="teshi-update-helper"
+            [[ "${target}" == *"windows"* ]] && helper_name="${helper_name}.exe"
+            cp "${artifacts_dir}/teshi-${target}/${helper_name}" "${stage_dir}/"
+            python -c 'import json,sys; assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2]))' "${artifacts_dir}/teshi-${target}/build-identity.json" "${artifacts_dir}/teshi-x86_64-pc-windows-msvc/build-identity.json"
 
             cp "${repo_dir}/resources/browser_service.py" "${stage_dir}/share/browser_service.py"
+            cp "${repo_dir}/resources/update_participant.py" "${stage_dir}/share/update_participant.py"
             cp "${repo_dir}/resources/browser_agent_broker.py" "${stage_dir}/share/browser_agent_broker.py"
             cp "${repo_dir}/resources/api_service.py" "${stage_dir}/share/api_service.py"
             cp "${repo_dir}/resources/teshi_api.py" "${stage_dir}/share/teshi_api.py"
@@ -392,12 +447,16 @@ jobs:
             cp -a "${repo_dir}/extension/teshi-bridge/." "${stage_dir}/share/teshi-browser-testing/extension/teshi-bridge/"
 
             if [[ "${target}" == *"windows"* ]]; then
+              cp "${artifacts_dir}/teshi-${target}/teshi-desktop.exe" "${stage_dir}/"
               mkdir -p "${stage_dir}/share/web"
               cp "${repo_dir}/resources/winapp_service.py"  "${stage_dir}/share/winapp_service.py"
               cp -a "${artifacts_dir}/teshi-web-dist/."      "${stage_dir}/share/web/"
             else
               chmod +x "${stage_dir}/teshi"
+              chmod +x "${stage_dir}/teshi-update-helper"
             fi
+
+            python scripts/update_manifest.py bundle --root "${stage_dir}" --identity "${artifacts_dir}/teshi-${target}/build-identity.json" --target "${target}" --kind portable
 
             if [[ "${target}" == *"windows"* ]]; then
               (cd dist && zip -r "teshi-${version}-${target}.zip" "teshi-${version}-${target}")
@@ -418,9 +477,38 @@ jobs:
           (cd dist && zip -r "teshi-browser-testing-${version}.zip" "teshi-browser-testing-${version}")
 
           cp "${artifacts_dir}/teshi-msi/"*.msi dist/
-          cd dist
-          find . -maxdepth 1 \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.msi" \) \
-            -exec sha256sum {} + | sed 's|\./||' > SHA256SUMS
+          cp "${artifacts_dir}/teshi-setup/"*-setup.exe dist/
+          python scripts/update_manifest.py release --dist dist --identity "${artifacts_dir}/teshi-x86_64-pc-windows-msvc/build-identity.json" --tag "$version"
+          python -c '
+from pathlib import Path
+import hashlib, json
+dist = Path("dist")
+sums = {}
+for line in (dist / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+    digest, name = line.split(None, 1)
+    sums[name.strip()] = digest
+manifest = json.loads((dist / "update-manifest.json").read_text(encoding="utf-8"))
+for asset in manifest["assets"]:
+    path = dist / asset["name"]
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert digest == asset["sha256"] == sums[asset["name"]], asset["name"]
+raw = (dist / "update-manifest.json").read_bytes()
+assert sums["update-manifest.json"] == hashlib.sha256(raw).hexdigest()
+'
+
+      - name: Refuse changes to a published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --json isDraft > release-state.json 2> release-error.txt; then
+            python -c 'import json; assert json.load(open("release-state.json"))["isDraft"], "Published releases are immutable; use a new tag"'
+          elif ! grep -qi 'release not found' release-error.txt; then
+            cat release-error.txt >&2
+            exit 1
+          fi
 
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
@@ -428,13 +516,23 @@ jobs:
           tag_name: ${{ needs.resolve.outputs.tag }}
           target_commitish: ${{ needs.resolve.outputs.source_ref }}
           prerelease: ${{ needs.resolve.outputs.prerelease == 'true' }}
+          draft: true
           generate_release_notes: ${{ needs.resolve.outputs.prerelease != 'true' }}
           body: ${{ needs.resolve.outputs.release_body }}
           files: |
             dist/*.zip
             dist/*.tar.gz
             dist/*.msi
+            dist/*-setup.exe
             dist/SHA256SUMS
+            dist/update-manifest.json
+
+      - name: Publish completed draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+        shell: bash
+        run: gh release edit "$RELEASE_TAG" --draft=false
 
   submit_winget:
     name: Submit WinGet manifest
@@ -569,4 +667,3 @@ jobs:
             --data "$payload" \
             | jq -e '.ok == true' >/dev/null
           echo "Telegram notification sent."
-

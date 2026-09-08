@@ -13,6 +13,7 @@ pub mod requirements;
 pub mod steps;
 pub mod terminal;
 pub mod trace;
+pub mod update;
 pub mod winapp;
 
 use std::path::PathBuf;
@@ -59,6 +60,24 @@ pub fn parse_cli() -> Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Check for and install a verified Teshi release bundle
+    Update {
+        /// Read the last local helper result without contacting GitHub
+        #[arg(long, conflicts_with_all = ["check", "channel", "yes"])]
+        status: bool,
+        /// Only check metadata; do not download or install a bundle
+        #[arg(long)]
+        check: bool,
+        /// Explicitly switch to a release stream
+        #[arg(long, value_parser = ["stable", "nightly"])]
+        channel: Option<String>,
+        /// Skip Teshi confirmation (does not bypass operating-system elevation)
+        #[arg(long)]
+        yes: bool,
+        /// Print one JSON result, with progress on stderr
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage API credentials
     Auth {
         #[command(subcommand)]

@@ -1,0 +1,11 @@
+[package]
+name = "teshi-update-ui"
+version.workspace = true
+edition = "2024"
+publish = false
+license = "MIT"
+
+[dependencies]
+gpui.workspace = true
+teshi-update.workspace = true
+teshi-core.workspace = true

@@ -98,6 +98,7 @@
 
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
         <Property Id='DiskPrompt' Value='teshi Installation'/>
+        <Property Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]'/>
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
             <Directory Id='ProgramMenuFolder'>
@@ -118,8 +119,17 @@
                             Source='wix\License.rtf'
                             KeyPath='yes'/>
                     </Component>
+                    <Component Id='BundleManifest' Guid='*'>
+                        <File Id='BundleManifestFile' Source='$(var.StagingRoot)\teshi-bundle.json' KeyPath='yes'/>
+                    </Component>
                     
                     <Directory Id='Bin' Name='bin'>
+                        <Component Id='UpdateHelper' Guid='*'>
+                            <File Id='UpdateHelperExe' Source='$(var.StagingRoot)\bin\teshi-update-helper.exe' KeyPath='yes'/>
+                        </Component>
+                        <Component Id='NativeDesktop' Guid='*'>
+                            <File Id='NativeDesktopExe' Source='$(var.StagingRoot)\bin\teshi-desktop.exe' KeyPath='yes'/>
+                        </Component>
                         <Component Id='Path' Guid='2A4E0E87-5244-498C-BEAD-F2D99002FFB4' KeyPath='yes'>
                             <Environment
                                 Id='PATH'
@@ -160,6 +170,15 @@
                         </Component>
                     </Directory>
                     <Directory Id='Share' Name='share'>
+                        <Component Id='UpdateParticipant' Guid='*'>
+                            <File Id='UpdateParticipantFile' Source='$(var.StagingRoot)\share\update_participant.py' KeyPath='yes'/>
+                        </Component>
+                        <Component Id='ApiService' Guid='*'>
+                            <File Id='ApiServiceFile' Source='$(var.StagingRoot)\share\api_service.py' KeyPath='yes'/>
+                        </Component>
+                        <Component Id='ApiLibrary' Guid='*'>
+                            <File Id='ApiLibraryFile' Source='$(var.StagingRoot)\share\teshi_api.py' KeyPath='yes'/>
+                        </Component>
                         <Component Id='BrowserServiceScript' Guid='*'>
                             <File
                                 Id='browserServiceScriptFile'
@@ -208,6 +227,12 @@
             <ComponentRef Id='License'/>
             
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='UpdateHelper'/>
+            <ComponentRef Id='NativeDesktop'/>
+            <ComponentRef Id='BundleManifest'/>
+            <ComponentRef Id='UpdateParticipant'/>
+            <ComponentRef Id='ApiService'/>
+            <ComponentRef Id='ApiLibrary'/>
             <ComponentRef Id='StartMenuShortcut'/>
             <ComponentRef Id='BrowserServiceScript'/>
             <ComponentRef Id='BrowserAgentBrokerScript'/>

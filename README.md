@@ -12,7 +12,7 @@ Explore · MindMap · AI — three tabs for browsing, editing, and AI-assisted a
 
 ---
 
-**Install** — `winget install teshi-org.teshi` · [releases](https://github.com/teshi-org/teshi/releases)
+**Install** — Windows user setup `teshi-*-x64-setup.exe` (in-app updates) · `winget install teshi-org.teshi` (MSI, check-only) · [releases](https://github.com/teshi-org/teshi/releases)
 
 Please read https://github.com/teshi-org/teshi/blob/main/AI_INSTALL.md and follow it to install the teshi CLI, load the teshi-bridge Chrome extension, and add the teshi agent skills.
 

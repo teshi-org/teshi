@@ -6,6 +6,7 @@ publish = false
 description = "Standalone terminal sidecar with VTE screen grid for CLI automation"
 
 [dependencies]
+teshi-update.workspace = true
 anyhow = { workspace = true }
 futures-util = "0.3"
 portable-pty = "0.8"

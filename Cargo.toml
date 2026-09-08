@@ -15,6 +15,9 @@ members = [
     "apps/teshi-terminal-sidecar",
     "apps/teshi-desktop",
     "apps/teshi-web",
+    "crates/teshi-update",
+    "apps/teshi-update-helper",
+    "crates/teshi-update-ui",
     "tests/steps/requirement-cli",
 ]
 exclude = ["runner"]
@@ -40,3 +43,5 @@ teshi-core = { path = "crates/teshi-core" }
 teshi-engine = { path = "crates/teshi-engine" }
 teshi-tui = { path = "crates/teshi-tui" }
 teshi-ui = { path = "crates/teshi-ui" }
+teshi-update = { path = "crates/teshi-update" }
+teshi-update-ui = { path = "crates/teshi-update-ui" }
