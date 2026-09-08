@@ -68,10 +68,10 @@ pub fn run_silent_setup(package: &Path, app_dir: &Path) -> Result<()> {
     #[cfg(not(windows))]
     {
         let _ = (package, app_dir);
-        return Err(crate::UpdateError::new(
+        Err(crate::UpdateError::new(
             crate::ErrorCode::Unsupported,
             "Windows setup updates are not available on this operating system",
-        ));
+        ))
     }
     #[cfg(windows)]
     {
