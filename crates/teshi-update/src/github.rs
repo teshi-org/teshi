@@ -169,6 +169,7 @@ fn windows_update_root_certificates() -> Result<Vec<reqwest::Certificate>> {
 ///
 /// # Errors
 /// Returns a network error when no usable root remains.
+#[cfg(any(windows, test))]
 pub(crate) fn certificates_from_ders<'a>(
     ders: impl IntoIterator<Item = &'a [u8]>,
     load_errors: Vec<String>,
@@ -196,6 +197,7 @@ pub(crate) fn certificates_from_ders<'a>(
     Ok(certs)
 }
 
+#[cfg(any(windows, test))]
 fn is_plausible_cert_der(der: &[u8]) -> bool {
     // X.509 certificates are DER SEQUENCEs; skip empty or truncated blobs so one
     // unreadable store entry cannot disable the entire update client.
