@@ -34,7 +34,9 @@ teshi update --status                # last local helper result without contacti
 | 2 | Invalid arguments |
 | 3 | Helper accepted a pending installation; the next invocation reports the persisted result |
 
-Pending MUST NOT be printed as installed. Only the Windows per-user setup.exe install can replace files. Portable archives, MSI/WinGet, source/Cargo builds, and explicitly externally managed installs can check for a release but cannot replace files. See [Installation](installation.md) for the install matrix, first-release bootstrap, and checksum trust boundary.
+Pending MUST NOT be printed as installed. Only the Windows per-user setup.exe install can replace files. Portable archives, MSI/WinGet, source/Cargo builds, and explicitly externally managed installs can check for a release but cannot replace files. See [Installation](installation.md) for the install matrix, first-release bootstrap, checksum trust boundary, and proxy/TLS notes.
+
+GitHub metadata and payload downloads follow `HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` and the static Windows/macOS system proxy. PAC/WPAD is not supported. Windows update TLS skips online CRL lookups but still verifies certificates; it never uses `danger_accept_invalid_certs`.
 
 ### Requirement library (`teshi requirements`)
 

@@ -47,6 +47,18 @@ Shipped release binaries include `teshi update`. The first updater-enabled **set
 
 `teshi update --check` never downloads payloads. Installation requires confirmation or `--yes`. Checksums in `SHA256SUMS` and `update-manifest.json` detect corrupt or mismatched GitHub assets; they are not an independent signature if GitHub itself is compromised.
 
+### Proxies and TLS
+
+Update checks and downloads use reqwest's proxy discovery:
+
+- Environment variables `HTTPS_PROXY`/`https_proxy`, `ALL_PROXY`/`all_proxy`, and `NO_PROXY`/`no_proxy` (the more specific HTTPS variable wins over `ALL_PROXY`).
+- When those variables are unset, Teshi also reads the static Windows **Internet Settings** proxy (`ProxyEnable`/`ProxyServer`/`ProxyOverride`) and the equivalent macOS manual proxy. Process-level environment variables still take precedence.
+- Desktop launched from Explorer only sees user or machine environment variables that exist at logon. Set a persistent `HTTPS_PROXY` or the Windows system proxy if GitHub is not reachable directly.
+- PAC/WPAD automatic proxy scripts and NTLM/Kerberos integrated authentication are not implemented. Use an explicit `http://proxy-host:port` URL, including Basic credentials in the proxy URL when the proxy requires them.
+- Local browser-bridge requests from Desktop and `teshi web` ignore proxies (`no_proxy`) so loopback traffic is never sent to a corporate proxy.
+
+On Windows, update TLS verifies GitHub (or a TLS-inspecting proxy) with a snapshot of the Windows root store and does **not** contact Microsoft CRL/OCSP endpoints. Certificate chain, hostname, expiry, and signatures are still checked. Teshi does not disable TLS verification. If an intercepting proxy re-signs GitHub with an enterprise CA, install that CA in the Windows trust store; otherwise the update client rejects the connection.
+
 Updating Teshi does not refresh skills or browser extensions that were copied outside the bundle. Use `teshi install-skill` and the existing extension reload workflow for those.
 
 See [CLI usage](cli-usage.md) for flags and exit codes.

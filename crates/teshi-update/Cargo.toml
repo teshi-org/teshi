@@ -23,3 +23,7 @@ tar = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+rustls-native-certs = "0.8"
+
+[dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }

@@ -81,28 +81,149 @@ pub fn allowed_url(url: &reqwest::Url) -> bool {
 impl GithubHttp {
     /// Builds a bounded-time GitHub client with a constrained redirect policy.
     ///
+    /// The client follows `HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` and, with reqwest's
+    /// `system-proxy` feature, Windows/macOS static system proxy settings. On
+    /// Windows it verifies TLS with a snapshot of the system root store so
+    /// online CRL/OCSP fetches cannot block update traffic.
+    ///
     /// # Errors
-    /// Returns errors initializing the HTTP client.
+    /// Returns errors initializing the HTTP client or loading Windows roots.
     pub fn new() -> Result<Self> {
-        let client = reqwest::blocking::Client::builder()
-            .user_agent(concat!("teshi-update/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(600))
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() < 5 && allowed_url(attempt.url()) {
-                    attempt.follow()
-                } else {
-                    attempt.error("Disallowed release redirect")
-                }
-            }))
-            .build()
-            .map_err(network)?;
-        Ok(Self { client })
+        Ok(Self {
+            client: github_http_client()?,
+        })
     }
 }
 
+fn github_http_client() -> Result<reqwest::blocking::Client> {
+    apply_env_all_proxy(apply_update_tls(github_http_client_builder())?)?
+        .build()
+        .map_err(network)
+}
+
+fn github_http_client_builder() -> reqwest::blocking::ClientBuilder {
+    reqwest::blocking::Client::builder()
+        .user_agent(concat!("teshi-update/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(600))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() < 5 && allowed_url(attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.error("Disallowed release redirect")
+            }
+        }))
+}
+
+fn apply_update_tls(
+    builder: reqwest::blocking::ClientBuilder,
+) -> Result<reqwest::blocking::ClientBuilder> {
+    #[cfg(windows)]
+    {
+        Ok(builder.tls_certs_only(windows_update_root_certificates()?))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(builder)
+    }
+}
+
+fn apply_env_all_proxy(
+    builder: reqwest::blocking::ClientBuilder,
+) -> Result<reqwest::blocking::ClientBuilder> {
+    // reqwest copies the Windows/macOS system proxy into the HTTPS slot when
+    // HTTPS_PROXY is unset, which would hide a configured ALL_PROXY. GitHub
+    // traffic is HTTPS-only, so prefer an explicit ALL_PROXY in that case.
+    if !first_proxy_env(&["HTTPS_PROXY", "https_proxy"]).is_empty() {
+        return Ok(builder);
+    }
+    let all = first_proxy_env(&["ALL_PROXY", "all_proxy"]);
+    if all.is_empty() {
+        return Ok(builder);
+    }
+    let proxy = reqwest::Proxy::all(&all)
+        .map_err(network)?
+        .no_proxy(reqwest::NoProxy::from_env());
+    Ok(builder.proxy(proxy))
+}
+
+fn first_proxy_env(names: &[&str]) -> String {
+    names
+        .iter()
+        .find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn windows_update_root_certificates() -> Result<Vec<reqwest::Certificate>> {
+    let loaded = rustls_native_certs::load_native_certs();
+    let load_errors = loaded.errors.iter().map(ToString::to_string).collect();
+    certificates_from_ders(loaded.certs.iter().map(AsRef::as_ref), load_errors)
+}
+
+/// Converts DER roots into reqwest certificates, skipping unusable blobs.
+///
+/// # Errors
+/// Returns a network error when no usable root remains.
+pub(crate) fn certificates_from_ders<'a>(
+    ders: impl IntoIterator<Item = &'a [u8]>,
+    load_errors: Vec<String>,
+) -> Result<Vec<reqwest::Certificate>> {
+    let mut certs = Vec::new();
+    for der in ders {
+        if !is_plausible_cert_der(der) {
+            continue;
+        }
+        if let Ok(cert) = reqwest::Certificate::from_der(der) {
+            certs.push(cert);
+        }
+    }
+    if certs.is_empty() {
+        let detail = if load_errors.is_empty() {
+            "the certificate store returned no usable roots".to_string()
+        } else {
+            load_errors.join("; ")
+        };
+        return Err(UpdateError::new(
+            ErrorCode::Network,
+            format!("Unable to load Windows root certificates for update TLS: {detail}"),
+        ));
+    }
+    Ok(certs)
+}
+
+fn is_plausible_cert_der(der: &[u8]) -> bool {
+    // X.509 certificates are DER SEQUENCEs; skip empty or truncated blobs so one
+    // unreadable store entry cannot disable the entire update client.
+    der.len() >= 64 && der[0] == 0x30
+}
+
 fn network(error: reqwest::Error) -> UpdateError {
-    UpdateError::new(ErrorCode::Network, error.to_string())
+    UpdateError::new(ErrorCode::Network, redact_proxy_secrets(&error.to_string()))
+}
+
+fn redact_proxy_secrets(message: &str) -> String {
+    let mut out = String::new();
+    let mut rest = message;
+    while let Some(scheme) = rest.find("://") {
+        out.push_str(&rest[..scheme + 3]);
+        rest = &rest[scheme + 3..];
+        let end = rest.find([' ', '\'', '"', '\n']).unwrap_or(rest.len());
+        let authority = &rest[..end];
+        if let Some(at) = authority.rfind('@') {
+            out.push_str("***:***@");
+            out.push_str(&authority[at + 1..]);
+        } else {
+            out.push_str(authority);
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 impl Http for GithubHttp {
@@ -468,4 +589,112 @@ pub fn verify_checksum_text(sums: &str, name: &str, bytes: &[u8]) -> Result<()> 
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_cert_der() -> &'static [u8] {
+        include_bytes!("../tests/fixtures/teshi-update_test.crt.der")
+    }
+
+    #[test]
+    fn allowed_url_accepts_github_https_origins_only() {
+        for url in [
+            "https://api.github.com/repos/teshi-org/teshi/releases",
+            "https://github.com/teshi-org/teshi/releases/download/v1/a.zip",
+            "https://release-assets.githubusercontent.com/a",
+            "https://objects.githubusercontent.com/a",
+        ] {
+            assert!(allowed_url(&reqwest::Url::parse(url).unwrap()), "{url}");
+        }
+        for url in [
+            "http://api.github.com/repos/teshi-org/teshi/releases",
+            "https://api.github.com:8443/repos/teshi-org/teshi/releases",
+            "https://evil.example/payload",
+            "https://user:pass@api.github.com/repos/teshi-org/teshi/releases",
+            "http://127.0.0.1:8888",
+        ] {
+            assert!(!allowed_url(&reqwest::Url::parse(url).unwrap()), "{url}");
+        }
+    }
+
+    #[test]
+    fn github_http_rejects_disallowed_urls_before_network() {
+        let http = GithubHttp::new().expect("github client");
+        let Err(error) = http.get("https://evil.example/payload", None) else {
+            panic!("policy");
+        };
+        assert_eq!(error.message, "Disallowed release URL");
+    }
+
+    #[test]
+    fn github_http_constructs_a_strict_tls_client() {
+        GithubHttp::new().expect("github client should construct");
+    }
+
+    #[test]
+    #[ignore = "optional live GitHub network check"]
+    fn live_github_tls_succeeds_without_online_revocation() {
+        let http = GithubHttp::new().expect("github client");
+        let result = http.get(
+            "https://api.github.com/repos/teshi-org/teshi/releases?per_page=1",
+            None,
+        );
+        match result {
+            Ok(response) => assert!(
+                matches!(response.status, 200 | 403 | 429),
+                "unexpected GitHub status {}",
+                response.status
+            ),
+            Err(error) => panic!("GitHub TLS/proxy request failed: {error}"),
+        }
+    }
+
+    #[test]
+    fn certificates_from_ders_skips_invalid_blobs_and_keeps_usable_roots() {
+        let certs = certificates_from_ders(
+            [test_cert_der(), b"", b"not-a-cert", &[0xff; 80]],
+            Vec::new(),
+        )
+        .expect("usable root");
+        assert_eq!(certs.len(), 1);
+    }
+
+    #[test]
+    fn certificates_from_ders_fail_when_no_usable_roots_remain() {
+        let error = certificates_from_ders(
+            [b"".as_slice(), b"not-a-cert", &[0xff; 80]],
+            vec!["store read failed".into()],
+        )
+        .expect_err("empty roots");
+        assert_eq!(error.code, ErrorCode::Network);
+        assert!(
+            error
+                .message
+                .contains("Unable to load Windows root certificates for update TLS")
+        );
+        assert!(error.message.contains("store read failed"));
+    }
+
+    #[test]
+    fn certificates_from_ders_fail_without_load_errors_when_store_is_empty() {
+        let error = certificates_from_ders(std::iter::empty(), Vec::new()).expect_err("empty");
+        assert!(error.message.contains("no usable roots"));
+    }
+
+    #[test]
+    fn proxy_credentials_are_redacted_from_network_errors() {
+        assert_eq!(
+            redact_proxy_secrets(
+                "error sending request for url (https://user:secret@proxy.local:8080/)"
+            ),
+            "error sending request for url (https://***:***@proxy.local:8080/)"
+        );
+        assert_eq!(
+            redact_proxy_secrets("connection failed for https://github.com"),
+            "connection failed for https://github.com"
+        );
+    }
 }

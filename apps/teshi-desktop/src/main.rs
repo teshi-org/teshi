@@ -330,13 +330,18 @@ impl LlmConfigBackend for NativePlatformBackend {
     }
 }
 
+/// HTTP client for loopback desktop services; ignores process and system proxies.
+fn loopback_http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(timeout)
+        .build()
+        .map_err(|error| error.to_string())
+}
+
 impl NativePlatformBackend {
     fn browser_client() -> Result<reqwest::blocking::Client, String> {
-        reqwest::blocking::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(3))
-            .build()
-            .map_err(|error| error.to_string())
+        loopback_http_client(Duration::from_secs(3))
     }
 
     fn browser_bridge_value(&self) -> Result<serde_json::Value, String> {
@@ -547,4 +552,59 @@ fn main() -> anyhow::Result<()> {
         cx.activate(true);
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        process::Command,
+        thread,
+        time::Duration,
+    };
+
+    #[test]
+    fn browser_client_ignores_https_proxy_for_loopback() {
+        if std::env::var_os("TESHI_DESKTOP_PROXY_CHILD").is_some() {
+            let url = std::env::var("TESHI_LOOPBACK_URL").unwrap();
+            let client = loopback_http_client(Duration::from_secs(3)).unwrap();
+            let response = client.get(url).send().unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+            return;
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 256];
+            let _ = stream.read(&mut buf);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .unwrap();
+        });
+
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::browser_client_ignores_https_proxy_for_loopback",
+                "--nocapture",
+            ])
+            .env("TESHI_DESKTOP_PROXY_CHILD", "1")
+            .env("TESHI_LOOPBACK_URL", format!("http://{addr}/v1/bridge"))
+            .env("HTTPS_PROXY", "http://127.0.0.1:1")
+            .env("HTTP_PROXY", "http://127.0.0.1:1")
+            .env("ALL_PROXY", "http://127.0.0.1:1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout:\n{}stderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        server.join().unwrap();
+    }
 }

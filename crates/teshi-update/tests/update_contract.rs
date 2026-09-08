@@ -319,6 +319,25 @@ fn truncated_download_and_cancellation_remove_partial_files() {
     assert!(!destination.exists());
 }
 
+#[test]
+fn download_rejects_checksum_mismatch_before_install() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut http = FakeHttp::default();
+    http.pages
+        .insert("https://github.com/payload".into(), "wrong".into());
+    let destination = temp.path().join("payload.zip");
+    let error = download::download(
+        &http,
+        &candidate(b"right"),
+        &destination,
+        &AtomicBool::new(false),
+        &mut |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Verification);
+    assert!(!destination.exists());
+}
+
 fn archive(files: &[(&str, &[u8])]) -> Vec<u8> {
     use std::io::Write;
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
