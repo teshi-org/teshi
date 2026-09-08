@@ -178,7 +178,13 @@ fn real_helper_rolls_back_when_a_managed_file_is_locked() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(root.join("share"), fs::Permissions::from_mode(0o555)).unwrap();
+        // Deny opening the file. chmod on the parent directory also blocks rollback
+        // temp files, so the helper would die while still Installing.
+        fs::set_permissions(
+            root.join("share/version.txt"),
+            fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
     }
     let result = preparation.handoff(&root, &old, &new, None).unwrap();
     assert_eq!(result.status, UpdateStatus::WaitingForExit);
@@ -202,7 +208,11 @@ fn real_helper_rolls_back_when_a_managed_file_is_locked() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(root.join("share"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(
+            root.join("share/version.txt"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
     }
     verify_bundle(&root, &old).unwrap();
     assert_eq!(

@@ -196,7 +196,8 @@ mod tests {
             }
         });
         let path = artifact_path_from_screenshot_payload(&payload).unwrap();
-        assert!(path.ends_with("shot.jpg"));
+        // Sidecar payloads use Windows paths; PathBuf::ends_with is separator-sensitive.
+        assert!(path.to_string_lossy().ends_with("shot.jpg"), "{path:?}");
     }
 
     #[test]
