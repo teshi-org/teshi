@@ -2121,15 +2121,23 @@ fn hosted_private_component(name: &str) -> bool {
         || lower == ".ssh"
         || lower == ".env"
         || lower.starts_with(".env.")
+        || matches!(lower.as_str(), ".aws" | ".docker" | ".kube")
         || matches!(
             lower.as_str(),
-            "auth.json"
+            ".npmrc"
+                | ".netrc"
+                | ".pypirc"
+                | "auth.json"
                 | "token.json"
                 | "tokens.json"
                 | "cookie.json"
                 | "cookies.json"
                 | "id_rsa"
                 | "id_ed25519"
+                | "id_ecdsa"
+                | "id_dsa"
+                | "credentials.json"
+                | "service-account.json"
         )
         || lower.contains("secret")
         || lower.contains("credential")
