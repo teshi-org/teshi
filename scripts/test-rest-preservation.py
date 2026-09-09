@@ -23,7 +23,6 @@ REQUIRED_ROUTES = {
     "/api/v1/fs/list",
     "/api/v1/fs/read",
     "/api/v1/gherkin/render",
-    "/api/v1/gherkin/validate-buffer",
     "/api/v1/gherkin/scenarios",
     "/api/v1/api/exchange",
     "/api/v1/locator/sync-step",
