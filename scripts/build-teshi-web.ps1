@@ -1,4 +1,5 @@
-# Build GPUI WASM shell into apps/teshi-web/dist for Path 1 (daemon --dist).
+# Build the GPUI WASM shell into apps/teshi-web/dist for Pages/artifact
+# diagnostics. Production `teshi web` opens the hosted Pages UI instead.
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
@@ -52,5 +53,4 @@ $IndexHtml = $IndexHtml.Replace(
 Set-Content -Path (Join-Path $OutDir "index.html") -Value $IndexHtml -NoNewline
 
 Write-Host "==> done: $OutDir (cache bust $CacheBust)"
-Write-Host "Path 1: cargo run -p teshi-cli -- web --no-open --dist `"$OutDir`""
-Write-Host "Open: http://127.0.0.1:20253/index.html?v=$CacheBust  (or hard-refresh if an old tab is open)"
+Write-Host "Diagnostic artifact ready at: $OutDir"

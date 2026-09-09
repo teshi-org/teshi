@@ -143,15 +143,52 @@ class TeshiApiHelperTests(unittest.TestCase):
 
     def test_redact_authorization_header(self) -> None:
         exchange = {
+            "url": "https://user:password@example.test/users?access_token=super-secret#fragment",
             "request_headers": {"Authorization": "Bearer super-secret", "Accept": "json"},
             "request_body": {"password": "hidden", "name": "Ada"},
+            "response_body": "access_token=super-secret",
         }
         redacted = redact_exchange(exchange)
+        self.assertEqual(redacted["url"], "https://example.test/")
         self.assertEqual(redacted["request_headers"]["Authorization"], "***")
         self.assertEqual(redacted["request_headers"]["Accept"], "json")
         self.assertEqual(redacted["request_body"]["password"], "***")
         self.assertEqual(redacted["request_body"]["name"], "Ada")
+        self.assertEqual(redacted["response_body"], "***")
         self.assertTrue(redacted["redacted"])
+
+    def test_redact_url_fails_closed_for_malformed_or_relative_credentials(self) -> None:
+        for value in (
+            "https://user:pw@[",
+            "https://user:pw@example.test:bad/x",
+            "//user:pw@example.test/x",
+        ):
+            with self.subTest(value=value):
+                redacted = redact_exchange({"url": value})
+                self.assertEqual(redacted["url"], "***")
+
+    def test_redact_exchange_scrubs_nested_urls_and_assertion_values(self) -> None:
+        redacted = redact_exchange(
+            {
+                "request_body": {
+                    "callback_url": "https://user:pw@example.test/private?id=secret",
+                    "payload_uri": "data:text/plain,secret-value",
+                    "malformed_uri": "https://user:pw@[",
+                    "name": "Ada",
+                },
+                "asserts": [
+                    {"passed": False, "actual": "secret-value", "expected": "other"}
+                ],
+            }
+        )
+        self.assertEqual(redacted["request_body"]["callback_url"], "https://example.test/")
+        self.assertEqual(redacted["request_body"]["payload_uri"], "***")
+        self.assertEqual(redacted["request_body"]["malformed_uri"], "***")
+        self.assertEqual(redacted["request_body"]["name"], "Ada")
+        self.assertEqual(
+            redacted["asserts"],
+            [{"passed": False, "actual": "***", "expected": "***"}],
+        )
 
     def test_scenario_vars_cleared_between_scenarios(self) -> None:
         http = FakeHttp()

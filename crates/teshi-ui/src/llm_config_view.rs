@@ -157,41 +157,77 @@ impl LlmConfigView {
             status: "Loading…".into(),
             clean_draft: Value::Null,
         };
-        view.reload_list();
+        view.reload_list(cx);
         view.clean_draft = view.draft_snapshot();
         view
     }
 
-    fn reload_list(&mut self) {
-        match self.backend.list_profiles() {
-            Ok(list) => {
-                self.profiles = list.profiles;
-                self.active_id = list.active_id;
-                if self.profiles.is_empty() {
-                    self.start_new_draft();
-                    self.status = "No profiles — fill fields and Save".into();
-                } else {
-                    if self.selected_index >= self.profiles.len() {
-                        self.selected_index = 0;
-                    }
-                    let id = self.profiles[self.selected_index].id.clone();
-                    self.load_profile_into_draft(&id);
-                    self.status = format!("{} profile(s)", self.profiles.len()).into();
+    fn reload_list(&mut self, cx: &mut Context<Self>) {
+        let backend = self.backend.clone();
+        self.status = "Loading…".into();
+        cx.spawn(async move |this, cx| {
+            let result = backend.list_profiles().await;
+            let profile_result = match result {
+                Ok(list) => {
+                    let profile_id = list.profiles.first().map(|profile| profile.id.clone());
+                    let loaded = match profile_id {
+                        Some(id) => Some((id.clone(), backend.get_profile(&id).await)),
+                        None => None,
+                    };
+                    Ok((list, loaded))
                 }
-            }
-            Err(err) => {
-                self.status = format!("Load failed: {err}").into();
-            }
-        }
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |view, cx| {
+                match profile_result {
+                    Ok((list, loaded)) => {
+                        view.profiles = list.profiles;
+                        view.active_id = list.active_id;
+                        if view.profiles.is_empty() {
+                            view.start_new_draft();
+                            view.status = "No profiles — fill fields and Save".into();
+                        } else {
+                            if view.selected_index >= view.profiles.len() {
+                                view.selected_index = 0;
+                            }
+                            if let Some((id, Ok(snapshot))) = loaded {
+                                if let Some(index) =
+                                    view.profiles.iter().position(|profile| profile.id == id)
+                                {
+                                    view.selected_index = index;
+                                }
+                                view.apply_snapshot(snapshot);
+                            } else if let Some((_, Err(error))) = loaded {
+                                view.status = format!("Load profile failed: {error}").into();
+                            }
+                            if view.status == "Loading…" {
+                                view.status = format!("{} profile(s)", view.profiles.len()).into();
+                            }
+                        }
+                    }
+                    Err(error) => view.status = format!("Load failed: {error}").into(),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
-    fn load_profile_into_draft(&mut self, id: &str) {
-        match self.backend.get_profile(id) {
-            Ok(snap) => self.apply_snapshot(snap),
-            Err(err) => {
-                self.status = format!("Load profile failed: {err}").into();
-            }
-        }
+    fn load_profile_into_draft(&mut self, id: &str, cx: &mut Context<Self>) {
+        let backend = self.backend.clone();
+        let id = id.to_string();
+        self.status = "Loading profile…".into();
+        cx.spawn(async move |this, cx| {
+            let result = backend.get_profile(&id).await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(snapshot) => view.apply_snapshot(snapshot),
+                    Err(error) => view.status = format!("Load profile failed: {error}").into(),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn apply_snapshot(&mut self, snap: ModelProfileSnapshot) {
@@ -410,16 +446,22 @@ impl LlmConfigView {
             return;
         }
         let id = self.draft.id.clone();
-        match self.backend.delete_profile(&id) {
-            Ok(()) => {
-                self.reload_list();
-                self.status = "Deleted".into();
-            }
-            Err(err) => {
-                self.status = format!("Delete failed: {err}").into();
-            }
-        }
-        cx.notify();
+        let backend = self.backend.clone();
+        self.status = "Deleting…".into();
+        cx.spawn(async move |this, cx| {
+            let result = backend.delete_profile(&id).await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(()) => {
+                        view.status = "Deleted".into();
+                        view.reload_list(cx);
+                    }
+                    Err(error) => view.status = format!("Delete failed: {error}").into(),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn on_activate(&mut self, _: &ActivateProfile, _: &mut Window, cx: &mut Context<Self>) {
@@ -429,16 +471,22 @@ impl LlmConfigView {
             return;
         }
         let id = self.draft.id.clone();
-        match self.backend.activate_profile(&id) {
-            Ok(()) => {
-                self.reload_list();
-                self.status = "Activated".into();
-            }
-            Err(err) => {
-                self.status = format!("Activate failed: {err}").into();
-            }
-        }
-        cx.notify();
+        let backend = self.backend.clone();
+        self.status = "Activating…".into();
+        cx.spawn(async move |this, cx| {
+            let result = backend.activate_profile(&id).await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(()) => {
+                        view.status = "Activated".into();
+                        view.reload_list(cx);
+                    }
+                    Err(error) => view.status = format!("Activate failed: {error}").into(),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn parse_extras(&mut self) -> Result<(), String> {
@@ -457,22 +505,30 @@ impl LlmConfigView {
             cx.notify();
             return;
         }
-        match self.backend.save_profile(self.draft.clone()) {
-            Ok(snap) => {
-                let id = snap.id.clone();
-                self.apply_snapshot(snap);
-                self.reload_list();
-                if let Some(idx) = self.profiles.iter().position(|p| p.id == id) {
-                    self.selected_index = idx;
+        let backend = self.backend.clone();
+        let draft = self.draft.clone();
+        self.status = "Saving…".into();
+        cx.spawn(async move |this, cx| {
+            let result = backend.save_profile(draft).await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(snapshot) => {
+                        let id = snapshot.id.clone();
+                        view.apply_snapshot(snapshot);
+                        if let Some(index) =
+                            view.profiles.iter().position(|profile| profile.id == id)
+                        {
+                            view.selected_index = index;
+                        }
+                        view.status = "Saved".into();
+                        view.reload_list(cx);
+                    }
+                    Err(error) => view.status = format!("Save failed: {error}").into(),
                 }
-                self.load_profile_into_draft(&id);
-                self.status = "Saved".into();
-            }
-            Err(err) => {
-                self.status = format!("Save failed: {err}").into();
-            }
-        }
-        cx.notify();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn select_profile(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -481,7 +537,7 @@ impl LlmConfigView {
         }
         self.selected_index = index;
         let id = self.profiles[index].id.clone();
-        self.load_profile_into_draft(&id);
+        self.load_profile_into_draft(&id, cx);
         cx.notify();
     }
 
@@ -739,16 +795,24 @@ impl Render for LlmConfigView {
                                     return;
                                 }
                                 let id = this.draft.id.clone();
-                                match this.backend.delete_profile(&id) {
-                                    Ok(()) => {
-                                        this.reload_list();
-                                        this.status = "Deleted".into();
-                                    }
-                                    Err(err) => {
-                                        this.status = format!("Delete failed: {err}").into();
-                                    }
-                                }
-                                cx.notify();
+                                let backend = this.backend.clone();
+                                this.status = "Deleting…".into();
+                                cx.spawn(async move |entity, cx| {
+                                    let result = backend.delete_profile(&id).await;
+                                    let _ = entity.update(cx, |view, cx| {
+                                        match result {
+                                            Ok(()) => {
+                                                view.status = "Deleted".into();
+                                                view.reload_list(cx);
+                                            }
+                                            Err(error) => {
+                                                view.status = format!("Delete failed: {error}").into();
+                                            }
+                                        }
+                                        cx.notify();
+                                    });
+                                })
+                                .detach();
                             }))
                             .child(self.action_button("btn-activate", "Activate", cx, |this, cx| {
                                 if this.draft.id.is_empty() {
@@ -757,16 +821,24 @@ impl Render for LlmConfigView {
                                     return;
                                 }
                                 let id = this.draft.id.clone();
-                                match this.backend.activate_profile(&id) {
-                                    Ok(()) => {
-                                        this.reload_list();
-                                        this.status = "Activated".into();
-                                    }
-                                    Err(err) => {
-                                        this.status = format!("Activate failed: {err}").into();
-                                    }
-                                }
-                                cx.notify();
+                                let backend = this.backend.clone();
+                                this.status = "Activating…".into();
+                                cx.spawn(async move |entity, cx| {
+                                    let result = backend.activate_profile(&id).await;
+                                    let _ = entity.update(cx, |view, cx| {
+                                        match result {
+                                            Ok(()) => {
+                                                view.status = "Activated".into();
+                                                view.reload_list(cx);
+                                            }
+                                            Err(error) => {
+                                                view.status = format!("Activate failed: {error}").into();
+                                            }
+                                        }
+                                        cx.notify();
+                                    });
+                                })
+                                .detach();
                             }))
                             .child(
                                 div()

@@ -1,0 +1,10 @@
+[package]
+name = "teshi-web-protocol"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Versioned WebSocket protocol types shared by the Teshi daemon and hosted WASM UI"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

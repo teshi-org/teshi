@@ -4,7 +4,7 @@
 //! goes through [`LlmConfigBackend`] and [`BrowserSessionsBackend`].
 
 mod app_shell;
-mod backend;
+pub mod backend;
 mod browser_sessions_view;
 mod llm_config_view;
 mod run_view;
@@ -12,10 +12,10 @@ mod winapp_preview;
 
 pub use app_shell::{AppShell, ShellSurface};
 pub use backend::{
-    ApiRunBackend, ApiRunEventDto, ApiScenarioSnapshot, ApiStyleDto, BrowserLeaseSnapshot,
-    BrowserMetadataSnapshot, BrowserSessionIdentitySnapshot, BrowserSessionListSnapshot,
-    BrowserSessionSnapshot, BrowserSessionsBackend, BrowserTabSnapshot, BrowserTabTarget,
-    BrowserWindowSnapshot, LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate,
+    ApiRunBackend, ApiRunEventDto, ApiScenarioSnapshot, ApiStyleDto, BackendFuture,
+    BrowserLeaseSnapshot, BrowserMetadataSnapshot, BrowserSessionIdentitySnapshot,
+    BrowserSessionListSnapshot, BrowserSessionSnapshot, BrowserSessionsBackend, BrowserTabSnapshot,
+    BrowserTabTarget, BrowserWindowSnapshot, LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate,
     ModelProfileListSnapshot, ModelProfileSnapshot, ModelProfileUpdate, SharedApiRunBackend,
     SharedBrowserSessionsBackend, SharedLlmBackend,
 };

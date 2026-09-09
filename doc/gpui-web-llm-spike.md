@@ -1,10 +1,12 @@
 # GPUI WASM web shell
 
-Supported web product path: shared GPUI `teshi-ui`, native `teshi-desktop`, WASM `teshi-web`, and `teshi-daemon` same-origin hosting.
+Supported web product path: shared GPUI `teshi-ui`, native `teshi-desktop`, WASM
+`teshi-web`, and the loopback daemon connected to the hosted `teshi.org` shell.
 
 ## Scope
 
-- **In:** browser-profile discovery and explicit selection, LLM configuration, daemon same-origin APIs, and `--dist` serving GPUI assets.
+- **In:** browser-profile discovery, explicit selection, LLM configuration, and
+  the hosted control/preview WebSocket adapters. `--dist` is diagnostic only.
 - **Out:** Hugo `/app` publish, the full feature editor, and agent chat.
 
 Marketing remains Hugo (`teshi-org.github.io`). The retired React/Vite application has been removed and is not served or shipped by `teshi web`.
@@ -29,20 +31,22 @@ bash ./scripts/build-teshi-web.sh
 
 Output: `apps/teshi-web/dist/`.
 
-## Path 1 run (daemon hosts GPUI)
+## Hosted run
 
-The daemon resolves the GPUI dist by default; `--dist` is useful for an explicit build path:
+The daemon no longer hosts the production GPUI bundle. Launch the hosted shell:
 
 ```powershell
-cargo run -p teshi-cli -- web --no-open --dist "apps/teshi-web/dist"
+cargo run -p teshi-cli -- web
 ```
 
-Open the printed `http://127.0.0.1:<port>/` URL. The initial surface is Browser Profiles; Settings opens the shared LLM profile form.
+The CLI opens `https://teshi.org/app/#port=<port>&token=<session-token>` and
+keeps the token out of logs. The initial surface is Browser Profiles; Settings
+opens the shared LLM profile form.
 
-API check:
+For source/artifact-only checks:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:<port>/api/v1/llm/config
+python scripts/test-hosted-ui-transport.py
 ```
 
 ## Desktop

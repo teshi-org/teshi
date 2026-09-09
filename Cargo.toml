@@ -11,6 +11,7 @@ members = [
     "crates/teshi-agent",
     "crates/teshi-engine",
     "crates/teshi-ui",
+    "crates/teshi-web-protocol",
     "apps/teshi-daemon",
     "apps/teshi-terminal-sidecar",
     "apps/teshi-desktop",
@@ -43,5 +44,6 @@ teshi-core = { path = "crates/teshi-core" }
 teshi-engine = { path = "crates/teshi-engine" }
 teshi-tui = { path = "crates/teshi-tui" }
 teshi-ui = { path = "crates/teshi-ui" }
+teshi-web-protocol = { path = "crates/teshi-web-protocol" }
 teshi-update = { path = "crates/teshi-update" }
 teshi-update-ui = { path = "crates/teshi-update-ui" }

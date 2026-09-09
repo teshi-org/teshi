@@ -1,10 +1,19 @@
 //! Backend port for LLM configuration and model-profile CRUD.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Object-safe, single-threaded future used by shared GPUI backends.
+///
+/// The hosted WASM client is intentionally `!Send`; using a local future here
+/// keeps the same service boundary usable by both the browser and native
+/// shells without requiring a synchronous transport API.
+pub type BackendFuture<T> = Pin<Box<dyn Future<Output = Result<T, String>> + 'static>>;
 
 /// Public LLM settings returned to the UI (API key never fully exposed).
 ///
@@ -161,49 +170,49 @@ pub trait LlmConfigBackend {
     /// # Errors
     ///
     /// Returns an error string when the store or network call fails.
-    fn get_llm_config(&self) -> Result<LlmConfigSnapshot, String>;
+    fn get_llm_config(&self) -> BackendFuture<LlmConfigSnapshot>;
 
     /// Persist a flat update onto the active profile.
     ///
     /// # Errors
     ///
     /// Returns an error string when the store or network call fails.
-    fn set_llm_config(&self, update: LlmConfigUpdate) -> Result<(), String>;
+    fn set_llm_config(&self, update: LlmConfigUpdate) -> BackendFuture<()>;
 
     /// List all model profiles (masked keys).
     ///
     /// # Errors
     ///
     /// Returns an error string when the store or network call fails.
-    fn list_profiles(&self) -> Result<ModelProfileListSnapshot, String>;
+    fn list_profiles(&self) -> BackendFuture<ModelProfileListSnapshot>;
 
     /// Get one profile by id (masked key).
     ///
     /// # Errors
     ///
     /// Returns an error string when the profile is missing or I/O fails.
-    fn get_profile(&self, id: &str) -> Result<ModelProfileSnapshot, String>;
+    fn get_profile(&self, id: &str) -> BackendFuture<ModelProfileSnapshot>;
 
     /// Create or update a profile.
     ///
     /// # Errors
     ///
     /// Returns an error string on validation or I/O failure.
-    fn save_profile(&self, update: ModelProfileUpdate) -> Result<ModelProfileSnapshot, String>;
+    fn save_profile(&self, update: ModelProfileUpdate) -> BackendFuture<ModelProfileSnapshot>;
 
     /// Delete a profile by id.
     ///
     /// # Errors
     ///
     /// Returns an error string when delete is rejected or I/O fails.
-    fn delete_profile(&self, id: &str) -> Result<(), String>;
+    fn delete_profile(&self, id: &str) -> BackendFuture<()>;
 
     /// Activate a profile by id.
     ///
     /// # Errors
     ///
     /// Returns an error string when the profile is missing or I/O fails.
-    fn activate_profile(&self, id: &str) -> Result<(), String>;
+    fn activate_profile(&self, id: &str) -> BackendFuture<()>;
 }
 
 /// Shared backend handle used by [`crate::AppShell`] / [`crate::LlmConfigView`].
@@ -351,21 +360,21 @@ pub trait BrowserSessionsBackend {
     /// # Errors
     ///
     /// Returns an actionable error when this host cannot start the broker.
-    fn start_browser_bridge(&self) -> Result<(), String>;
+    fn start_browser_bridge(&self) -> BackendFuture<()>;
 
     /// Read the latest browser-extension session inventory.
     ///
     /// # Errors
     ///
     /// Returns an actionable error when the broker is unavailable or malformed.
-    fn list_browser_sessions(&self) -> Result<BrowserSessionListSnapshot, String>;
+    fn list_browser_sessions(&self) -> BackendFuture<BrowserSessionListSnapshot>;
 
     /// Activate one explicitly selected tab.
     ///
     /// # Errors
     ///
     /// Returns an error when the target disappeared, is busy, or cannot be debugged.
-    fn activate_browser_tab(&self, target: &BrowserTabTarget) -> Result<(), String>;
+    fn activate_browser_tab(&self, target: &BrowserTabTarget) -> BackendFuture<()>;
 }
 
 /// Shared backend handle used by [`crate::BrowserSessionsView`].
@@ -406,7 +415,7 @@ pub trait ApiRunBackend {
     /// # Errors
     ///
     /// Returns an error when the project cannot be read.
-    fn list_scenarios(&self) -> Result<Vec<ApiScenarioSnapshot>, String>;
+    fn list_scenarios(&self) -> BackendFuture<Vec<ApiScenarioSnapshot>>;
 
     /// Start a run for the selected scenario ids and return collected events.
     ///
@@ -415,14 +424,14 @@ pub trait ApiRunBackend {
     /// # Errors
     ///
     /// Returns an error when the run cannot start.
-    fn start_run(&self, scenario_ids: &[String]) -> Result<Vec<ApiRunEventDto>, String>;
+    fn start_run(&self, scenario_ids: &[String]) -> BackendFuture<Vec<ApiRunEventDto>>;
 
     /// Fetch one HTTP exchange; `redact` false is inspector expand-to-plaintext.
     ///
     /// # Errors
     ///
     /// Returns an error when the sidecar is down or the id is unknown.
-    fn get_exchange(&self, exchange_id: &str, redact: bool) -> Result<Value, String>;
+    fn get_exchange(&self, exchange_id: &str, redact: bool) -> BackendFuture<Value>;
 }
 
 /// Shared backend handle used by [`crate::ApiRunView`].

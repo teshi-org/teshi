@@ -68,7 +68,11 @@ cargo run -p teshi-desktop
 
 The default target is `TargetApp.exe`. Set `TESHI_WINAPP_PROCESS` to the executable name you want to preview. Set `TESHI_WINAPP_WS_URL` to reuse an already running WinApp sidecar instead of starting one. The preview status identifies `Windows Graphics Capture` or `ImageGrab fallback` and includes the fallback reason.
 
-For GPUI WASM, build `apps/teshi-web/dist` with `scripts/build-teshi-web.ps1`, then serve it through `teshi web`. The shell starts WinApp mode through `/api/v1/browser/start`, then receives frames from the daemon's same-origin `/api/v1/browser/stream` WebSocket. The Python sidecar stays on the Teshi host's loopback interface, so the preview also works when the page is opened from another machine on the LAN. For diagnostics, `?winapp_ws=<url-encoded-websocket-url>` overrides the proxy endpoint.
+For hosted GPUI WASM, run `teshi web` and let the latest `https://teshi.org/app/`
+shell start WinApp mode through the authenticated `browser.start` control RPC.
+Frames then use the independent `/ws/preview` channel; the Python sidecar URL
+remains private on the Teshi host loopback interface. The old `/api/v1/*`
+routes remain only for staged migration and legacy clients.
 
 WGC captures the target's composited window surface, so another window may occlude the target without replacing its preview pixels. If ImageGrab fallback is active, the target must remain restored, visible, and unobscured. Neither backend can capture protected content, and a closed HWND produces a stream error rather than falling back to unrelated screen pixels. The proxy fixes transport reachability but does not change WebGPU's secure-context requirement: plain HTTP on a LAN address may still fail before the preview opens. Use HTTPS, localhost on the browser machine, or Chromium's development-only `unsafely-treat-insecure-origin-as-secure` setting. When TLS terminates at a reverse proxy, forward `X-Forwarded-Proto: https` so the daemon's same-origin guard accepts the WebSocket upgrade.
 

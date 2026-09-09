@@ -35,14 +35,13 @@ impl ApiRunView {
             expand_plaintext: false,
             expanded_exchange: None,
         };
-        view.reload_scenarios();
+        view.reload_scenarios(cx);
         view
     }
 
     /// Reload the scenario list from the host backend.
     pub fn reload_scenarios_public(&mut self, cx: &mut Context<Self>) {
-        self.reload_scenarios();
-        cx.notify();
+        self.reload_scenarios(cx);
     }
 
     /// Start the currently selected scenario.
@@ -50,7 +49,7 @@ impl ApiRunView {
         self.run_selected(cx);
     }
 
-    /// Toggle plaintext expansion of the latest HTTP exchange.
+    /// Toggle expansion of the latest HTTP exchange.
     pub fn toggle_expand_public(&mut self, cx: &mut Context<Self>) {
         self.toggle_expand(cx);
     }
@@ -81,24 +80,33 @@ impl ApiRunView {
             .join(" | ")
     }
 
-    /// Whether the inspect surface is showing plaintext secrets.
+    /// Whether the inspect surface is showing expanded exchange details.
     pub fn secrets_expanded(&self) -> bool {
         self.expand_plaintext
     }
 
-    fn reload_scenarios(&mut self) {
-        match self.backend.list_scenarios() {
-            Ok(list) => {
-                self.scenarios = list;
-                if self.selected >= self.scenarios.len() {
-                    self.selected = self.scenarios.len().saturating_sub(1);
+    fn reload_scenarios(&mut self, cx: &mut Context<Self>) {
+        let backend = self.backend.clone();
+        self.status = "Loading scenarios…".into();
+        cx.spawn(async move |this, cx| {
+            let result = backend.list_scenarios().await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(list) => {
+                        view.scenarios = list;
+                        if view.selected >= view.scenarios.len() {
+                            view.selected = view.scenarios.len().saturating_sub(1);
+                        }
+                        view.status = format!("{} scenarios", view.scenarios.len()).into();
+                    }
+                    Err(error) => {
+                        view.status = format!("Failed to list scenarios: {error}").into();
+                    }
                 }
-                self.status = format!("{} scenarios", self.scenarios.len()).into();
-            }
-            Err(err) => {
-                self.status = format!("Failed to list scenarios: {err}").into();
-            }
-        }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn run_selected(&mut self, cx: &mut Context<Self>) {
@@ -108,19 +116,24 @@ impl ApiRunView {
             return;
         };
         let id = scenario.id.clone();
+        let backend = self.backend.clone();
         self.status = format!("Running {}…", scenario.name).into();
         cx.notify();
-        match self.backend.start_run(&[id]) {
-            Ok(events) => {
-                self.events = events;
-                self.expanded_exchange = None;
-                self.status = format!("Run finished ({} events)", self.events.len()).into();
-            }
-            Err(err) => {
-                self.status = format!("Run failed: {err}").into();
-            }
-        }
-        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = backend.start_run(&[id]).await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(events) => {
+                        view.events = events;
+                        view.expanded_exchange = None;
+                        view.status = format!("Run finished ({} events)", view.events.len()).into();
+                    }
+                    Err(error) => view.status = format!("Run failed: {error}").into(),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn toggle_expand(&mut self, cx: &mut Context<Self>) {
@@ -147,17 +160,35 @@ impl ApiRunView {
             cx.notify();
             return;
         };
-        match self.backend.get_exchange(&id, false) {
-            Ok(value) => {
-                self.expanded_exchange = Some(value);
-                self.status = "Showing plaintext for latest exchange".into();
-            }
-            Err(err) => {
-                self.expand_plaintext = false;
-                self.status = format!("Expand failed: {err}").into();
-            }
-        }
-        cx.notify();
+        let backend = self.backend.clone();
+        self.status = "Loading exchange details…".into();
+        cx.spawn(async move |this, cx| {
+            let result = backend.get_exchange(&id, false).await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(value) => {
+                        view.expanded_exchange = Some(value);
+                        let redacted = view
+                            .expanded_exchange
+                            .as_ref()
+                            .and_then(|value| value.get("redacted"))
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true);
+                        view.status = if redacted {
+                            "Showing redacted details for latest exchange".into()
+                        } else {
+                            "Showing plaintext for latest exchange".into()
+                        };
+                    }
+                    Err(error) => {
+                        view.expand_plaintext = false;
+                        view.status = format!("Expand failed: {error}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn render_event_summary(event: &ApiRunEventDto) -> String {
@@ -259,8 +290,7 @@ impl Render for ApiRunView {
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(|this, _, _, cx| {
-                                            this.reload_scenarios();
-                                            cx.notify();
+                                            this.reload_scenarios(cx);
                                         }),
                                     ),
                             )

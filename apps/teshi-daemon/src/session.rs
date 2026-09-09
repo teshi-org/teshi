@@ -17,6 +17,10 @@ pub enum Role {
     AgentRecorder,
     /// Batch runner — can execute scenarios but not modify project structure.
     BatchRunner,
+    /// Hosted GPUI Web UI session. This is intentionally separate from Admin;
+    /// WebSocket authorization is capability-based and never inferred from a
+    /// loopback TCP peer.
+    HostedWebUi,
 }
 
 impl Role {
@@ -58,6 +62,11 @@ impl Role {
                     | "/api/v1/fs/read"
                     | "/api/v1/steps/statuses"
             ),
+            // Hosted pages use the authenticated WebSocket protocols only.
+            // Keeping this role out of the legacy REST allowlist prevents a
+            // leaked hosted token from reaching raw browser, filesystem, or
+            // exchange responses. Local/Admin REST clients remain supported.
+            Role::HostedWebUi => false,
         }
     }
 }
@@ -109,6 +118,30 @@ impl SessionStore {
         token
     }
 
+    /// Create the short-lived session used by the hosted GPUI Web UI.
+    ///
+    /// A new launcher replaces any previous hosted launch session. This keeps
+    /// an old URL from remaining usable after the user starts `teshi web`
+    /// again while preserving unrelated local automation sessions.
+    pub fn create_hosted_session(&self) -> String {
+        let raw = uuid::Uuid::new_v4().to_string().replace('-', "");
+        let token = format!("tk_{raw}");
+        let created_at_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let session = Session {
+            token: token.clone(),
+            role: Role::HostedWebUi,
+            created_at_secs,
+            metadata: None,
+        };
+        let mut sessions = self.inner.lock().unwrap();
+        sessions.retain(|_, session| session.role != Role::HostedWebUi);
+        sessions.insert(token.clone(), session);
+        token
+    }
+
     /// Look up a session by token. Returns `None` if the token is unknown.
     pub fn get_session(&self, token: &str) -> Option<Session> {
         self.inner.lock().unwrap().get(token).cloned()
@@ -117,6 +150,18 @@ impl SessionStore {
     /// Remove a session (logout / cleanup).
     pub fn remove_session(&self, token: &str) {
         self.inner.lock().unwrap().remove(token);
+    }
+
+    /// Invalidate every hosted launch session while retaining local sessions.
+    ///
+    /// This is used when the daemon's project/runtime session is explicitly
+    /// torn down. The connected hosted socket observes the removal and closes
+    /// without allowing another business request to run.
+    pub fn remove_hosted_sessions(&self) {
+        self.inner
+            .lock()
+            .unwrap()
+            .retain(|_, session| session.role != Role::HostedWebUi);
     }
 
     /// Number of active sessions.
@@ -185,5 +230,41 @@ mod tests {
     fn unknown_token_returns_none() {
         let store = SessionStore::new();
         assert!(store.get_session("tk_nonexistent").is_none());
+    }
+
+    #[test]
+    fn hosted_ui_is_not_admin() {
+        assert!(!Role::HostedWebUi.can_execute("/api/v1/gherkin/scenarios"));
+        assert!(!Role::HostedWebUi.can_execute("/api/v1/browser/sessions"));
+        assert!(!Role::HostedWebUi.can_execute("/api/v1/fs/read"));
+        assert!(!Role::HostedWebUi.can_execute("/api/v1/api/exchange"));
+        assert!(!Role::HostedWebUi.can_execute("/api/v1/daemon/shutdown"));
+        assert!(!Role::HostedWebUi.can_execute("/api/v1/_ping"));
+    }
+
+    #[test]
+    fn new_hosted_launch_replaces_only_previous_hosted_session() {
+        let store = SessionStore::new();
+        let previous = store.create_hosted_session();
+        let local = store.create_session(Role::Admin, None);
+
+        let current = store.create_hosted_session();
+
+        assert_ne!(previous, current);
+        assert!(store.get_session(&previous).is_none());
+        assert_eq!(store.get_session(&current).unwrap().role, Role::HostedWebUi);
+        assert_eq!(store.get_session(&local).unwrap().role, Role::Admin);
+    }
+
+    #[test]
+    fn teardown_removes_hosted_sessions_but_keeps_local_sessions() {
+        let store = SessionStore::new();
+        let hosted = store.create_hosted_session();
+        let local = store.create_session(Role::AgentRecorder, None);
+
+        store.remove_hosted_sessions();
+
+        assert!(store.get_session(&hosted).is_none());
+        assert!(store.get_session(&local).is_some());
     }
 }

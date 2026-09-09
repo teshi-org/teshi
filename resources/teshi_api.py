@@ -19,6 +19,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, TextIO
+from urllib.parse import urlsplit, urlunsplit
 
 try:
     from jinja2 import BaseLoader, Environment, StrictUndefined, TemplateNotFound
@@ -262,6 +263,13 @@ def redact_value(value: Any, extra_keys: list[str] | None = None) -> Any:
         }
     if isinstance(value, list):
         return [redact_value(item, extra_keys) for item in value]
+    if isinstance(value, str):
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            return REDACTED
+        if parsed.scheme or "://" in value or value.startswith("//"):
+            return redact_url(value)
     return value
 
 
@@ -273,19 +281,65 @@ def redact_headers(headers: dict[str, str], extra_keys: list[str] | None = None)
     }
 
 
+def redact_url(value: Any) -> Any:
+    """Remove URL credentials and query/fragment material from a public view."""
+    if not isinstance(value, str):
+        return value
+    try:
+        parsed = urlsplit(value)
+        if not parsed.scheme or not parsed.netloc:
+            return REDACTED
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return REDACTED
+        hostname = parsed.hostname or ""
+        if ":" in hostname and not hostname.startswith("["):
+            hostname = f"[{hostname}]"
+        netloc = hostname
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+        return urlunsplit((parsed.scheme, netloc, "/", "", ""))
+    except ValueError:
+        return REDACTED
+
+
+def redact_body(value: Any, extra_keys: list[str] | None = None) -> Any:
+    """Redact unstructured bodies while preserving safe structured fields."""
+    if isinstance(value, (dict, list)):
+        return redact_value(value, extra_keys)
+    if value is None:
+        return None
+    return REDACTED
+
+
 def redact_exchange(exchange: dict[str, Any], extra_keys: list[str] | None = None) -> dict[str, Any]:
     """Return a copy of an ``http_exchange`` payload with secrets masked."""
     redacted = dict(exchange)
+    if "url" in redacted:
+        redacted["url"] = redact_url(redacted["url"])
     if isinstance(redacted.get("request_headers"), dict):
         redacted["request_headers"] = redact_headers(redacted["request_headers"], extra_keys)
     if isinstance(redacted.get("response_headers"), dict):
         redacted["response_headers"] = redact_headers(redacted["response_headers"], extra_keys)
     if "request_body" in redacted:
-        redacted["request_body"] = redact_value(redacted["request_body"], extra_keys)
+        redacted["request_body"] = redact_body(redacted["request_body"], extra_keys)
     if "response_body" in redacted:
-        redacted["response_body"] = redact_value(redacted["response_body"], extra_keys)
+        redacted["response_body"] = redact_body(redacted["response_body"], extra_keys)
     if isinstance(redacted.get("extract"), dict):
         redacted["extract"] = redact_value(redacted["extract"], extra_keys)
+    if "asserts" in redacted:
+        assertions = redacted["asserts"]
+        if isinstance(assertions, list):
+            redacted["asserts"] = [
+                {
+                    key: (value if key == "passed" and isinstance(value, bool) else REDACTED)
+                    for key, value in assertion.items()
+                }
+                if isinstance(assertion, dict)
+                else REDACTED
+                for assertion in assertions
+            ]
+        else:
+            redacted["asserts"] = REDACTED
     redacted["redacted"] = True
     return redacted
 

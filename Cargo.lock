@@ -6802,6 +6802,7 @@ dependencies = [
  "serde_json",
  "teshi-core",
  "teshi-engine",
+ "teshi-web-protocol",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "tokio-util",
@@ -6976,14 +6977,25 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "console_error_panic_hook",
+ "futures-channel",
  "gpui",
  "gpui_platform",
  "js-sys",
  "serde",
  "serde_json",
  "teshi-ui",
+ "teshi-web-protocol",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "teshi-web-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -223,6 +223,7 @@ fn poll_preview_events(preview: Entity<WinAppPreview>, slot: LatestPreviewEvent,
     .detach();
 }
 
+#[derive(Clone, Copy)]
 struct NativePlatformBackend;
 
 fn map_api_style(style: ApiStyle) -> ApiStyleDto {
@@ -266,70 +267,86 @@ fn map_list(list: ModelProfileList) -> ModelProfileListSnapshot {
 }
 
 impl LlmConfigBackend for NativePlatformBackend {
-    fn get_llm_config(&self) -> Result<LlmConfigSnapshot, String> {
-        let public = teshi_engine::load_llm_config_public().map_err(|e| e.to_string())?;
-        Ok(LlmConfigSnapshot {
-            base_url: public.base_url,
-            model: public.model,
-            api_key_configured: public.api_key_configured,
-            api_key_masked: public.api_key_masked,
+    fn get_llm_config(&self) -> teshi_ui::backend::BackendFuture<LlmConfigSnapshot> {
+        Box::pin(async {
+            let public = teshi_engine::load_llm_config_public().map_err(|e| e.to_string())?;
+            Ok(LlmConfigSnapshot {
+                base_url: public.base_url,
+                model: public.model,
+                api_key_configured: public.api_key_configured,
+                api_key_masked: public.api_key_masked,
+            })
         })
     }
 
-    fn set_llm_config(&self, update: LlmConfigUpdate) -> Result<(), String> {
-        let write = teshi_engine::LlmConfigWrite {
-            base_url: update.base_url,
-            model: update.model,
-            api_key: update.api_key,
-        };
-        teshi_engine::save_stored_llm_config(&write).map_err(|e| e.to_string())?;
-        Ok(())
+    fn set_llm_config(&self, update: LlmConfigUpdate) -> teshi_ui::backend::BackendFuture<()> {
+        Box::pin(async move {
+            let write = teshi_engine::LlmConfigWrite {
+                base_url: update.base_url,
+                model: update.model,
+                api_key: update.api_key,
+            };
+            teshi_engine::save_stored_llm_config(&write).map_err(|e| e.to_string())?;
+            Ok(())
+        })
     }
 
-    fn list_profiles(&self) -> Result<ModelProfileListSnapshot, String> {
-        let list = teshi_engine::list_profiles().map_err(|e| e.to_string())?;
-        Ok(map_list(list))
+    fn list_profiles(&self) -> teshi_ui::backend::BackendFuture<ModelProfileListSnapshot> {
+        Box::pin(async {
+            let list = teshi_engine::list_profiles().map_err(|e| e.to_string())?;
+            Ok(map_list(list))
+        })
     }
 
-    fn get_profile(&self, id: &str) -> Result<ModelProfileSnapshot, String> {
-        let p = teshi_engine::get_profile_public(id).map_err(|e| e.to_string())?;
-        Ok(map_profile(p))
+    fn get_profile(&self, id: &str) -> teshi_ui::backend::BackendFuture<ModelProfileSnapshot> {
+        let id = id.to_string();
+        Box::pin(async move {
+            let p = teshi_engine::get_profile_public(&id).map_err(|e| e.to_string())?;
+            Ok(map_profile(p))
+        })
     }
 
-    fn save_profile(&self, update: ModelProfileUpdate) -> Result<ModelProfileSnapshot, String> {
-        let id = if update.id.trim().is_empty() {
-            teshi_engine::generate_id()
-        } else {
-            update.id
-        };
-        let mut profile = ModelProfile {
-            id,
-            name: update.name,
-            provider: if update.provider.is_empty() {
-                PROVIDER_OPENAI.into()
+    fn save_profile(
+        &self,
+        update: ModelProfileUpdate,
+    ) -> teshi_ui::backend::BackendFuture<ModelProfileSnapshot> {
+        Box::pin(async move {
+            let id = if update.id.trim().is_empty() {
+                teshi_engine::generate_id()
             } else {
-                update.provider
-            },
-            api_style: map_api_style_in(update.api_style),
-            model_id: update.model_id,
-            max_context_tokens: update.max_context_tokens,
-            max_output_tokens: update.max_output_tokens,
-            base_url: update.base_url,
-            api_key: update.api_key,
-            stream: update.stream,
-            http_headers: update.http_headers,
-            chat_options: update.chat_options,
-        };
-        let public = teshi_engine::save_profile(&mut profile).map_err(|e| e.to_string())?;
-        Ok(map_profile(public))
+                update.id
+            };
+            let mut profile = ModelProfile {
+                id,
+                name: update.name,
+                provider: if update.provider.is_empty() {
+                    PROVIDER_OPENAI.into()
+                } else {
+                    update.provider
+                },
+                api_style: map_api_style_in(update.api_style),
+                model_id: update.model_id,
+                max_context_tokens: update.max_context_tokens,
+                max_output_tokens: update.max_output_tokens,
+                base_url: update.base_url,
+                api_key: update.api_key,
+                stream: update.stream,
+                http_headers: update.http_headers,
+                chat_options: update.chat_options,
+            };
+            let public = teshi_engine::save_profile(&mut profile).map_err(|e| e.to_string())?;
+            Ok(map_profile(public))
+        })
     }
 
-    fn delete_profile(&self, id: &str) -> Result<(), String> {
-        teshi_engine::delete_profile(id).map_err(|e| e.to_string())
+    fn delete_profile(&self, id: &str) -> teshi_ui::backend::BackendFuture<()> {
+        let id = id.to_string();
+        Box::pin(async move { teshi_engine::delete_profile(&id).map_err(|e| e.to_string()) })
     }
 
-    fn activate_profile(&self, id: &str) -> Result<(), String> {
-        teshi_engine::set_active_id(id).map_err(|e| e.to_string())
+    fn activate_profile(&self, id: &str) -> teshi_ui::backend::BackendFuture<()> {
+        let id = id.to_string();
+        Box::pin(async move { teshi_engine::set_active_id(&id).map_err(|e| e.to_string()) })
     }
 }
 
@@ -359,121 +376,151 @@ impl NativePlatformBackend {
 }
 
 impl BrowserSessionsBackend for NativePlatformBackend {
-    fn start_browser_bridge(&self) -> Result<(), String> {
-        self.browser_bridge_value().map(|_| ()).map_err(|_| {
-            "the native shell does not own a Chrome bridge yet; start it through `teshi web` or the browser CLI, then Refresh".into()
+    fn start_browser_bridge(&self) -> teshi_ui::backend::BackendFuture<()> {
+        let backend = *self;
+        Box::pin(async move {
+            backend.browser_bridge_value().map(|_| ()).map_err(|_| {
+                "the native shell does not own a Chrome bridge yet; start it through `teshi web` or the browser CLI, then Refresh".into()
+            })
         })
     }
 
-    fn list_browser_sessions(&self) -> Result<BrowserSessionListSnapshot, String> {
-        serde_json::from_value(self.browser_bridge_value()?)
-            .map_err(|error| format!("decode browser sessions: {error}"))
+    fn list_browser_sessions(
+        &self,
+    ) -> teshi_ui::backend::BackendFuture<BrowserSessionListSnapshot> {
+        let backend = *self;
+        Box::pin(async move {
+            serde_json::from_value(backend.browser_bridge_value()?)
+                .map_err(|error| format!("decode browser sessions: {error}"))
+        })
     }
 
-    fn activate_browser_tab(&self, target: &BrowserTabTarget) -> Result<(), String> {
-        let bridge = self.browser_bridge_value()?;
-        let project_root = bridge
-            .get("project_root")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "browser bridge did not report its project root".to_string())?;
-        let broker_token = bridge
-            .get("ws_url")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|url| reqwest::Url::parse(url).ok())
-            .and_then(|url| {
-                url.query_pairs()
-                    .find(|(key, _)| key == "token")
-                    .map(|(_, value)| value.into_owned())
-            })
-            .filter(|token| !token.is_empty())
-            .ok_or_else(|| "browser bridge did not report its command token".to_string())?;
-        let body = serde_json::json!({
-            "project_root": project_root,
-            "extension_instance_id": target.extension_instance_id,
-            "window_id": target.window_id,
-            "tab_id": target.tab_id,
-        });
-        let response = Self::browser_client()?
-            .post("http://127.0.0.1:17373/v1/bridge/activate_tab")
-            .header("X-Teshi-Broker-Token", broker_token)
-            .json(&body)
-            .send()
-            .and_then(reqwest::blocking::Response::error_for_status)
-            .map_err(|error| error.to_string())?
-            .json::<serde_json::Value>()
-            .map_err(|error| error.to_string())?;
-        if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
-            Ok(())
-        } else {
-            Err(response
-                .get("error")
+    fn activate_browser_tab(
+        &self,
+        target: &BrowserTabTarget,
+    ) -> teshi_ui::backend::BackendFuture<()> {
+        let backend = *self;
+        let target = target.clone();
+        Box::pin(async move {
+            let bridge = backend.browser_bridge_value()?;
+            let project_root = bridge
+                .get("project_root")
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or("browser broker rejected tab activation")
-                .to_string())
-        }
+                .ok_or_else(|| "browser bridge did not report its project root".to_string())?;
+            let broker_token = bridge
+                .get("ws_url")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|url| reqwest::Url::parse(url).ok())
+                .and_then(|url| {
+                    url.query_pairs()
+                        .find(|(key, _)| key == "token")
+                        .map(|(_, value)| value.into_owned())
+                })
+                .filter(|token| !token.is_empty())
+                .ok_or_else(|| "browser bridge did not report its command token".to_string())?;
+            let body = serde_json::json!({
+                "project_root": project_root,
+                "extension_instance_id": target.extension_instance_id,
+                "window_id": target.window_id,
+                "tab_id": target.tab_id,
+            });
+            let response = Self::browser_client()?
+                .post("http://127.0.0.1:17373/v1/bridge/activate_tab")
+                .header("X-Teshi-Broker-Token", broker_token)
+                .json(&body)
+                .send()
+                .and_then(reqwest::blocking::Response::error_for_status)
+                .map_err(|error| error.to_string())?
+                .json::<serde_json::Value>()
+                .map_err(|error| error.to_string())?;
+            if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+                Ok(())
+            } else {
+                Err(response
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("browser broker rejected tab activation")
+                    .to_string())
+            }
+        })
     }
 }
 
 impl ApiRunBackend for NativePlatformBackend {
-    fn list_scenarios(&self) -> Result<Vec<ApiScenarioSnapshot>, String> {
-        let root = std::env::current_dir().map_err(|e| e.to_string())?;
-        Ok(teshi_engine::list_runnable_scenarios(&root)
-            .into_iter()
-            .map(|item| ApiScenarioSnapshot {
-                id: item.id,
-                feature_path: item.feature_path,
-                name: item.name,
-                tags: item.tags,
-                engine_mode: item.engine_mode,
-            })
-            .collect())
+    fn list_scenarios(&self) -> teshi_ui::backend::BackendFuture<Vec<ApiScenarioSnapshot>> {
+        Box::pin(async {
+            let root = std::env::current_dir().map_err(|e| e.to_string())?;
+            Ok(teshi_engine::list_runnable_scenarios(&root)
+                .into_iter()
+                .map(|item| ApiScenarioSnapshot {
+                    id: item.id,
+                    feature_path: item.feature_path,
+                    name: item.name,
+                    tags: item.tags,
+                    engine_mode: item.engine_mode,
+                })
+                .collect())
+        })
     }
 
-    fn start_run(&self, scenario_ids: &[String]) -> Result<Vec<ApiRunEventDto>, String> {
-        let root = std::env::current_dir().map_err(|e| e.to_string())?;
-        let listed = teshi_engine::list_runnable_scenarios(&root);
-        let cases: Vec<teshi_engine::DispatchCase> = listed
-            .into_iter()
-            .filter(|item| scenario_ids.iter().any(|id| id == &item.id))
-            .map(|item| teshi_engine::DispatchCase {
-                id: item.id,
-                feature_path: std::path::PathBuf::from(item.feature_path),
-                scenario: item.name,
-            })
-            .collect();
-        let mut events = Vec::new();
-        teshi_engine::dispatch_cases(
-            &root,
-            &teshi_engine::default_api_service_script(),
-            &cases,
-            |value| {
-                events.push(ApiRunEventDto {
-                    type_name: value
-                        .get("type")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    payload: value,
-                });
-            },
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(events)
+    fn start_run(
+        &self,
+        scenario_ids: &[String],
+    ) -> teshi_ui::backend::BackendFuture<Vec<ApiRunEventDto>> {
+        let scenario_ids = scenario_ids.to_vec();
+        Box::pin(async move {
+            let root = std::env::current_dir().map_err(|e| e.to_string())?;
+            let listed = teshi_engine::list_runnable_scenarios(&root);
+            let cases: Vec<teshi_engine::DispatchCase> = listed
+                .into_iter()
+                .filter(|item| scenario_ids.iter().any(|id| id == &item.id))
+                .map(|item| teshi_engine::DispatchCase {
+                    id: item.id,
+                    feature_path: std::path::PathBuf::from(item.feature_path),
+                    scenario: item.name,
+                })
+                .collect();
+            let mut events = Vec::new();
+            teshi_engine::dispatch_cases(
+                &root,
+                &teshi_engine::default_api_service_script(),
+                &cases,
+                |value| {
+                    events.push(ApiRunEventDto {
+                        type_name: value
+                            .get("type")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        payload: value,
+                    });
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(events)
+        })
     }
 
-    fn get_exchange(&self, exchange_id: &str, redact: bool) -> Result<serde_json::Value, String> {
-        let root = std::env::current_dir().map_err(|e| e.to_string())?;
-        teshi_engine::send_api_command(
-            &root,
-            serde_json::json!({
-                "cmd": "get_exchange",
-                "request_id": "desktop-expand",
-                "exchange_id": exchange_id,
-                "redact": redact,
-            }),
-            Duration::from_secs(5),
-        )
-        .map_err(|e| e.to_string())
+    fn get_exchange(
+        &self,
+        exchange_id: &str,
+        redact: bool,
+    ) -> teshi_ui::backend::BackendFuture<serde_json::Value> {
+        let exchange_id = exchange_id.to_string();
+        Box::pin(async move {
+            let root = std::env::current_dir().map_err(|e| e.to_string())?;
+            teshi_engine::send_api_command(
+                &root,
+                serde_json::json!({
+                    "cmd": "get_exchange",
+                    "request_id": "desktop-expand",
+                    "exchange_id": exchange_id,
+                    "redact": redact,
+                }),
+                Duration::from_secs(5),
+            )
+            .map_err(|e| e.to_string())
+        })
     }
 }
 

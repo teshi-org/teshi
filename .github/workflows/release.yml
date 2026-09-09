@@ -183,6 +183,9 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.source_ref }}
 
+      - name: Verify release workflow contract
+        run: python scripts/test-release-workflow-contract.py
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -236,7 +239,7 @@ jobs:
 
       # Windows-only: build teshi-desktop + combined MSI installer
       - name: Install nightly WASM target
-        if: matrix.target == 'x86_64-pc-windows-msvc'
+        if: matrix.target == 'x86_64-pc-windows-msvc' && needs.resolve.outputs.run_scope != 'windows-installer'
         shell: pwsh
         run: |
           rustup toolchain install nightly --profile minimal
@@ -244,18 +247,18 @@ jobs:
 
       - name: Cache wasm-bindgen CLI
         id: cache_wasm_bindgen
-        if: matrix.target == 'x86_64-pc-windows-msvc'
+        if: matrix.target == 'x86_64-pc-windows-msvc' && needs.resolve.outputs.run_scope != 'windows-installer'
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/wasm-bindgen.exe
           key: ${{ runner.os }}-wasm-bindgen-0.2.126
 
       - name: Install wasm-bindgen CLI
-        if: matrix.target == 'x86_64-pc-windows-msvc' && steps.cache_wasm_bindgen.outputs.cache-hit != 'true'
+        if: matrix.target == 'x86_64-pc-windows-msvc' && needs.resolve.outputs.run_scope != 'windows-installer' && steps.cache_wasm_bindgen.outputs.cache-hit != 'true'
         run: cargo install wasm-bindgen-cli --locked --version 0.2.126
 
       - name: Build GPUI WASM web UI
-        if: matrix.target == 'x86_64-pc-windows-msvc'
+        if: matrix.target == 'x86_64-pc-windows-msvc' && needs.resolve.outputs.run_scope != 'windows-installer'
         shell: pwsh
         run: ./scripts/build-teshi-web.ps1
 
@@ -382,18 +385,21 @@ jobs:
           $binDir    = Join-Path $stagingRoot "bin"
           $shareDir  = Join-Path $stagingRoot "share"
           $webDir    = Join-Path $stagingRoot "share/web"
+          $includeWeb = '${{ needs.resolve.outputs.run_scope }}' -ne 'windows-installer'
           $bridgeDir = Join-Path $stagingRoot "share/teshi-bridge"
           $agentDir  = Join-Path $stagingRoot "share/teshi-browser-testing"
           $agentBridgeDir = Join-Path $agentDir "extension/teshi-bridge"
-          New-Item -ItemType Directory -Force -Path $binDir, $webDir, $bridgeDir, $agentBridgeDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $binDir, $bridgeDir, $agentBridgeDir | Out-Null
+          if ($includeWeb) { New-Item -ItemType Directory -Force -Path $webDir | Out-Null }
 
           $builtExe    = "target/${{ matrix.target }}/release/teshi.exe"
-          @($builtExe, "apps/teshi-web/dist", "apps/teshi-web/dist/pkg/teshi_web_bg.wasm", "resources/browser_service.py",
+          $required = @($builtExe, "resources/browser_service.py",
             "resources/browser_agent_broker.py", "resources/winapp_service.py",
             "resources/api_service.py", "resources/teshi_api.py",
             "extension/teshi-bridge/manifest.json",
-            "agent-packages/teshi-browser-testing/.codex-plugin/plugin.json") |
-            ForEach-Object { if (-not (Test-Path $_)) { throw "Missing: $_" } }
+            "agent-packages/teshi-browser-testing/.codex-plugin/plugin.json")
+          if ($includeWeb) { $required += @("apps/teshi-web/dist", "apps/teshi-web/dist/pkg/teshi_web_bg.wasm") }
+          $required | ForEach-Object { if (-not (Test-Path $_)) { throw "Missing: $_" } }
 
           Copy-Item $builtExe   (Join-Path $binDir "teshi.exe")          -Force
           Copy-Item "target/${{ matrix.target }}/release/teshi-update-helper.exe" (Join-Path $binDir "teshi-update-helper.exe")
@@ -404,7 +410,7 @@ jobs:
           Copy-Item "resources/winapp_service.py"  (Join-Path $shareDir "winapp_service.py") -Force
           Copy-Item "resources/api_service.py" (Join-Path $shareDir "api_service.py") -Force
           Copy-Item "resources/teshi_api.py" (Join-Path $shareDir "teshi_api.py") -Force
-          Copy-Item -Path "apps/teshi-web/dist/*" -Destination $webDir -Recurse -Force
+          if ($includeWeb) { Copy-Item -Path "apps/teshi-web/dist/*" -Destination $webDir -Recurse -Force }
           Copy-Item -Path "extension/teshi-bridge/*" -Destination $bridgeDir -Recurse -Force
           Copy-Item -Path "agent-packages/teshi-browser-testing/*" -Destination $agentDir -Recurse -Force
           Copy-Item -LiteralPath "skills/teshi", "skills/bdd-feature", "skills/winapp-regression" -Destination (Join-Path $agentDir "skills") -Recurse -Force
@@ -413,9 +419,13 @@ jobs:
           Copy-Item -Path "extension/teshi-bridge/*" -Destination $agentBridgeDir -Recurse -Force
           python scripts/update_manifest.py bundle --root $stagingRoot --identity build-identity.json --target "${{ matrix.target }}" --kind exe
           if ($LASTEXITCODE -ne 0) { throw "EXE bundle manifest generation failed" }
-
           $identity = Get-Content build-identity.json | ConvertFrom-Json
           ./scripts/build-exe-setup.ps1 -StagingRoot $stagingRoot -Tag $tag -Version $identity.semver
+
+      - name: Verify nightly installer staging excludes hosted Web UI
+        if: matrix.target == 'x86_64-pc-windows-msvc' && needs.resolve.outputs.run_scope == 'windows-installer'
+        shell: pwsh
+        run: python scripts/test-nightly-artifact.py --root staging/exe-root
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4

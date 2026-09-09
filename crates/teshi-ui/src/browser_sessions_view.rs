@@ -73,14 +73,13 @@ impl BrowserSessionsView {
             model: BrowserSessionSelection::default(),
             status: "Loading browser sessions…".into(),
         };
-        view.refresh();
+        view.refresh(cx);
         view
     }
 
     /// Reload sessions from the host backend.
     pub fn refresh_public(&mut self, cx: &mut Context<Self>) {
-        self.refresh();
-        cx.notify();
+        self.refresh(cx);
     }
 
     /// Start the Chrome bridge from the Browser Profiles surface.
@@ -124,37 +123,53 @@ impl BrowserSessionsView {
         self.model.explicitly_selected && self.model.selected().is_some()
     }
 
-    fn refresh(&mut self) {
-        match self.backend.list_browser_sessions() {
-            Ok(BrowserSessionListSnapshot { sessions, .. }) => {
-                self.model.replace(sessions);
-                self.status = match self.model.sessions.len() {
-                    0 => "No browser extension sessions. Start the Chrome bridge, then reload the extension.".into(),
-                    1 => "One browser profile connected.".into(),
-                    count if self.model.selected_id.is_none() => format!(
-                        "{count} browser profiles connected. Select one explicitly before viewing tabs."
-                    )
-                    .into(),
-                    count => format!("{count} browser profiles connected.").into(),
-                };
-                if self.model.has_missing_explicit_selection() {
-                    self.status = "The selected browser profile disconnected. It was not replaced automatically.".into();
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        let backend = self.backend.clone();
+        self.status = "Loading browser sessions…".into();
+        cx.spawn(async move |this, cx| {
+            let result = backend.list_browser_sessions().await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(BrowserSessionListSnapshot { sessions, .. }) => {
+                        view.model.replace(sessions);
+                        view.status = match view.model.sessions.len() {
+                            0 => "No browser extension sessions. Start the Chrome bridge, then reload the extension.".into(),
+                            1 => "One browser profile connected.".into(),
+                            count if view.model.selected_id.is_none() => format!(
+                                "{count} browser profiles connected. Select one explicitly before viewing tabs."
+                            )
+                            .into(),
+                            count => format!("{count} browser profiles connected.").into(),
+                        };
+                        if view.model.has_missing_explicit_selection() {
+                            view.status = "The selected browser profile disconnected. It was not replaced automatically.".into();
+                        }
+                    }
+                    Err(error) => {
+                        view.model.replace(Vec::new());
+                        view.status = format!("Browser bridge unavailable: {error}").into();
+                    }
                 }
-            }
-            Err(error) => {
-                self.model.replace(Vec::new());
-                self.status = format!("Browser bridge unavailable: {error}").into();
-            }
-        }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn start_bridge(&mut self, cx: &mut Context<Self>) {
+        let backend = self.backend.clone();
         self.status = "Starting Chrome bridge…".into();
-        match self.backend.start_browser_bridge() {
-            Ok(()) => self.refresh(),
-            Err(error) => self.status = format!("Start Chrome bridge failed: {error}").into(),
-        }
-        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = backend.start_browser_bridge().await;
+            let _ = this.update(cx, |view, cx| match result {
+                Ok(()) => view.refresh(cx),
+                Err(error) => {
+                    view.status = format!("Start Chrome bridge failed: {error}").into();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn select_session(&mut self, extension_instance_id: String, cx: &mut Context<Self>) {
@@ -164,15 +179,23 @@ impl BrowserSessionsView {
     }
 
     fn activate_tab(&mut self, target: BrowserTabTarget, cx: &mut Context<Self>) {
-        match self.backend.activate_browser_tab(&target) {
-            Ok(()) => {
-                self.status =
-                    "Tab activation queued; refresh after the next extension heartbeat.".into();
-                self.refresh();
-            }
-            Err(error) => self.status = format!("Tab activation failed: {error}").into(),
-        }
-        cx.notify();
+        let backend = self.backend.clone();
+        self.status = "Activating browser tab…".into();
+        cx.spawn(async move |this, cx| {
+            let result = backend.activate_browser_tab(&target).await;
+            let _ = this.update(cx, |view, cx| match result {
+                Ok(()) => {
+                    view.status =
+                        "Tab activation queued; refresh after the next extension heartbeat.".into();
+                    view.refresh(cx);
+                }
+                Err(error) => {
+                    view.status = format!("Tab activation failed: {error}").into();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn action_button(
@@ -488,8 +511,7 @@ impl Render for BrowserSessionsView {
                                 "Refresh",
                                 cx,
                                 |this, cx| {
-                                    this.refresh();
-                                    cx.notify();
+                                    this.refresh(cx);
                                 },
                             )),
                     ),
