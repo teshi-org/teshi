@@ -19,8 +19,12 @@ use tracing::info;
 
 pub use server::{run_server, run_server_with_listener};
 
+/// GitHub Pages is the reachable canonical hosted UI entrypoint. The custom
+/// domain remains supported by the daemon's hosted-origin allowlist.
+const HOSTED_WEB_ORIGIN: &str = "https://teshi-org.github.io";
+
 fn hosted_launch_url(port: u16, token: &str) -> String {
-    format!("https://teshi.org/app/#port={port}&token={token}")
+    format!("{HOSTED_WEB_ORIGIN}/app/#port={port}&token={token}")
 }
 
 fn resolve_project_root(explicit: Option<&std::path::Path>) -> PathBuf {
@@ -202,7 +206,7 @@ pub async fn run_client(opts: WebOptions) -> Result<()> {
         });
     }
 
-    info!("teshi web → https://teshi.org/app/#port={port}&token=<redacted>");
+    info!("teshi web → {HOSTED_WEB_ORIGIN}/app/#port={port}&token=<redacted>");
     Ok(())
 }
 
@@ -356,9 +360,9 @@ mod tests {
         let url = hosted_launch_url(43123, token);
         assert_eq!(
             url,
-            "https://teshi.org/app/#port=43123&token=tk_test_1234567890"
+            "https://teshi-org.github.io/app/#port=43123&token=tk_test_1234567890"
         );
-        assert!(url.starts_with("https://teshi.org/app/#"));
+        assert!(url.starts_with("https://teshi-org.github.io/app/#"));
         assert!(!url[..url.find('#').unwrap()].contains(token));
     }
 

@@ -475,7 +475,10 @@ fn validate_manifest_against_bundle(manifest: UiManifest) -> Result<UiManifest, 
         (None, None) => {
             let production_host = web_sys::window()
                 .and_then(|window| window.location().hostname().ok())
-                .is_some_and(|hostname| hostname.eq_ignore_ascii_case("teshi.org"));
+                .is_some_and(|hostname| {
+                    hostname.eq_ignore_ascii_case("teshi.org")
+                        || hostname.eq_ignore_ascii_case("teshi-org.github.io")
+                });
             if production_host {
                 Err("hosted UI bundle is missing its compiled compatibility identity".into())
             } else {

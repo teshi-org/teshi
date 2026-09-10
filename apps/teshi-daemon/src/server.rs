@@ -284,7 +284,7 @@ pub async fn run_server_with_listener(
 
 // ---- WebSocket ----
 
-const HOSTED_WEB_ORIGIN: &str = "https://teshi.org";
+const HOSTED_WEB_ORIGINS: [&str; 2] = ["https://teshi.org", "https://teshi-org.github.io"];
 const CONTROL_RESPONSE_QUEUE_CAPACITY: usize = 64;
 const CONTROL_EVENT_QUEUE_CAPACITY: usize = 64;
 const CONTROL_REQUEST_CONCURRENCY: usize = 16;
@@ -3432,15 +3432,17 @@ mod integration {
     #[tokio::test]
     async fn hosted_websocket_origin_is_exactly_allowlisted() {
         let router = build_router(test_state());
-        let accepted = router
-            .clone()
-            .oneshot(websocket_upgrade_request("/ws/control", HOSTED_WEB_ORIGIN))
-            .await
-            .unwrap();
-        // Axum may reject the synthetic in-process upgrade with 426 because
-        // there is no live upgrade transport; origin middleware must still
-        // allow it past the trust gate (i.e. not return 403).
-        assert_ne!(accepted.status(), StatusCode::FORBIDDEN);
+        for origin in ["https://teshi.org", "https://teshi-org.github.io"] {
+            let accepted = router
+                .clone()
+                .oneshot(websocket_upgrade_request("/ws/control", origin))
+                .await
+                .unwrap();
+            // Axum may reject the synthetic in-process upgrade with 426
+            // because there is no live upgrade transport; origin middleware
+            // must still allow it past the trust gate (i.e. not return 403).
+            assert_ne!(accepted.status(), StatusCode::FORBIDDEN);
+        }
 
         for origin in [
             "https://attacker.example",

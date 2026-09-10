@@ -1,8 +1,9 @@
 # Hosted GPUI Web UI
 
 The production browser UI is the latest GPUI WASM bundle published at
-`https://teshi.org/app/`. The nightly CLI does not contain or serve a complete
-Web UI.
+`https://teshi-org.github.io/app/`. The custom domain
+`https://teshi.org/app/` remains a compatible alternate entrypoint. The nightly
+CLI does not contain or serve a complete Web UI.
 
 ## Launch lifecycle
 
@@ -12,7 +13,7 @@ port in `.teshi/daemon.json`, and the CLI mints an in-memory `HostedWebUi`
 session. It then opens:
 
 ```text
-https://teshi.org/app/#port=<port>&token=<session-token>
+https://teshi-org.github.io/app/#port=<port>&token=<session-token>
 ```
 
 The token is never logged or written to disk. The hosted page reads the
@@ -26,8 +27,9 @@ request and closes.
 
 The page negotiates a versioned `ws://127.0.0.1:<port>/ws/control` connection
 for RPC and ordered runtime events. Browser and WinApp frames use a separate
-`/ws/preview` connection. Both sockets require the exact
-`Origin: https://teshi.org` and a first-message session/protocol handshake.
+`/ws/preview` connection. Both sockets require one of the exact trusted
+Origins `https://teshi.org` or `https://teshi-org.github.io`, plus a
+first-message session/protocol handshake.
 For a local hosted-page harness only, a debug/test daemon may set
 `TESHI_DEV_WEB_ORIGIN` to one explicit origin; release binaries ignore this
 override and never use a wildcard.
