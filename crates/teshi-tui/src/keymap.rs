@@ -631,8 +631,6 @@ impl Action {
                     };
                 }
                 return match (event.code, event.modifiers) {
-                    (KeyCode::Tab, _) => Some(Self::FocusNextColumn),
-                    (KeyCode::BackTab, _) => Some(Self::FocusPrevColumn),
                     (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
                         Some(Self::MoveLeft)
                     }
@@ -675,8 +673,6 @@ impl Action {
                 };
             }
             return match (event.code, event.modifiers) {
-                (KeyCode::Tab, _) => Some(Self::FocusNextColumn),
-                (KeyCode::BackTab, _) => Some(Self::FocusPrevColumn),
                 (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
                     Some(Self::FocusPrevColumn)
                 }
@@ -1600,7 +1596,7 @@ mod tests {
         );
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
-            Some(Action::FocusNextColumn)
+            None
         );
         context.requirements_editor_mode = RequirementsEditorMode::Insert;
         for (key, modifiers, expected) in [

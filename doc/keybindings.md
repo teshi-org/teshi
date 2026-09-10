@@ -28,7 +28,7 @@ The Markdown editor starts in **Browse** mode. Press `i` in the editor to enter
 
 | Key | Action |
 |-----|--------|
-| `Tab` / `Shift+Tab` | Next / previous pane in Browse |
+| `←` / `→` / `h` / `l` | Move between panes from the tree or linked test points |
 | `hjkl` / arrows | Move the cursor in Browse |
 | `n` | Create a Proposed test point from the active non-empty selection |
 | `Ctrl+n` | Create a new requirement Markdown document |
@@ -40,7 +40,7 @@ The Markdown editor starts in **Browse** mode. Press `i` in the editor to enter
 In Insert, all printable ASCII and Unicode characters are text, including
 `s`, `q`, `hjkl`, and `1`–`5`. Arrows, Home/End, Enter, Backspace, and Delete edit
 the document; `Tab` inserts four spaces. `Ctrl+S` saves and stays in Insert.
-Bracketed paste accepts text in Insert. Use `Esc`, then `Tab`, to change panes.
+Bracketed paste accepts text in Insert.
 Mouse dragging selects Markdown text for creating a test point in Browse.
 
 Leaving a dirty document through document selection, a filter that hides it,

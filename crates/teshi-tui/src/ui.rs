@@ -373,7 +373,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             if app.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor {
                 Line::raw(match app.authoring_ui.editor_mode {
                     crate::authoring_tab::RequirementsEditorMode::Browse =>
-                        " [BROWSE] hjkl/arrows Move  i Insert  s Save  n Test point  I Iteration  Tab Pane",
+                        " [BROWSE] hjkl/arrows Move  i Insert  s Save  n Test point  I Iteration",
                     crate::authoring_tab::RequirementsEditorMode::Insert =>
                         " [INSERT] Esc Browse  Ctrl+S Save  Tab Indent  Arrows/Home/End Move",
                 })
