@@ -63,8 +63,18 @@ fn existing_daemon_port(project_root: &std::path::Path) -> Option<u16> {
     }
 }
 
+fn loopback_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        // Session/bootstrap traffic is always directed at the local daemon.
+        // Never send it through a corporate or system HTTP proxy: proxies can
+        // return misleading gateway errors for an otherwise healthy daemon.
+        .no_proxy()
+        .build()
+        .context("create loopback daemon HTTP client")
+}
+
 async fn mint_hosted_session(port: u16) -> Result<String> {
-    let client = reqwest::Client::new();
+    let client = loopback_http_client()?;
     let session_url = format!("http://127.0.0.1:{port}/api/v1/sessions");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
@@ -175,7 +185,7 @@ pub async fn run_client(opts: WebOptions) -> Result<()> {
 
     if opts.start_embedded {
         // Use reqwest to trigger embedded browser start via daemon API
-        let client = reqwest::Client::new();
+        let client = loopback_http_client()?;
         let api_url = format!("http://127.0.0.1:{port}/api/v1/browser/start");
         let session_token = token.to_owned();
         tokio::spawn(async move {
