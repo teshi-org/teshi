@@ -293,9 +293,21 @@ impl AuthoringUiState {
             self.select_document_by_id(first);
         }
         if let Some(id) = &self.selected_document_id {
-            self.tree_state
-                .select(vec![format!("{TREE_DOC_PREFIX}{id}")]);
+            if let Some(path) = find_tree_path(&self.tree_items, &format!("{TREE_DOC_PREFIX}{id}"))
+            {
+                self.select_document_tree_path(path);
+            }
         }
+    }
+
+    fn select_document_tree_path(&mut self, path: Vec<String>) {
+        // A selected child is not rendered as highlighted while one of its
+        // ancestors is collapsed. Open the ancestors whenever selection is
+        // changed programmatically (keyboard navigation, reload, or click).
+        for depth in 1..path.len() {
+            self.tree_state.open(path[..depth].to_vec());
+        }
+        self.tree_state.select(path);
     }
 
     /// Iteration names currently present in the loaded index.
@@ -560,7 +572,9 @@ impl AuthoringUiState {
         if let Some(doc_id) = node_id.strip_prefix(TREE_DOC_PREFIX) {
             self.select_document_by_id(doc_id);
             if self.selected_document_id.as_deref() == Some(doc_id) {
-                self.tree_state.select(vec![node_id.to_string()]);
+                if let Some(path) = find_tree_path(&self.tree_items, node_id) {
+                    self.select_document_tree_path(path);
+                }
             }
         }
     }
@@ -835,34 +849,26 @@ impl AuthoringUiState {
     }
 
     pub fn move_tree_selection(&mut self, delta: isize) {
-        let doc_ids: Vec<String> = self
-            .artifacts
-            .as_ref()
-            .map(|a| {
-                visible_document_ids(&a.index, &self.iteration_filter)
-                    .into_iter()
-                    .map(|id| format!("{TREE_DOC_PREFIX}{id}"))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if doc_ids.is_empty() {
+        let mut documents = Vec::new();
+        collect_tree_documents(&self.tree_items, &mut Vec::new(), &mut documents);
+        if documents.is_empty() {
             return;
         }
-        let current = self.tree_state.selected().first().cloned().or_else(|| {
-            self.selected_document_id
-                .as_ref()
-                .map(|id| format!("{TREE_DOC_PREFIX}{id}"))
-        });
-        let pos = current
-            .and_then(|id| doc_ids.iter().position(|x| x == &id))
+        let pos = self
+            .selected_document_id
+            .as_ref()
+            .and_then(|id| documents.iter().position(|(_, doc_id)| doc_id == id))
             .unwrap_or(0);
         let next = if delta < 0 {
             pos.saturating_sub(1)
         } else {
-            pos.saturating_add(1).min(doc_ids.len().saturating_sub(1))
+            pos.saturating_add(1).min(documents.len().saturating_sub(1))
         };
-        if let Some(id) = doc_ids.get(next) {
-            self.select_tree_node(id);
+        if let Some((path, doc_id)) = documents.get(next) {
+            self.select_document_by_id(doc_id);
+            if self.selected_document_id.as_deref() == Some(doc_id) {
+                self.select_document_tree_path(path.clone());
+            }
         }
     }
 
@@ -989,6 +995,36 @@ fn visible_document_ids(
         .filter(|doc| doc.matches_iteration_filter(filter))
         .map(|doc| doc.id.clone())
         .collect()
+}
+
+fn find_tree_path(items: &[TreeItem<'static, String>], target: &str) -> Option<Vec<String>> {
+    for item in items {
+        let mut path = vec![item.identifier().clone()];
+        if item.identifier() == target {
+            return Some(path);
+        }
+        if let Some(mut child_path) = find_tree_path(item.children(), target) {
+            path.append(&mut child_path);
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn collect_tree_documents(
+    items: &[TreeItem<'static, String>],
+    parent_path: &mut Vec<String>,
+    documents: &mut Vec<(Vec<String>, String)>,
+) {
+    for item in items {
+        parent_path.push(item.identifier().clone());
+        if let Some(doc_id) = item.identifier().strip_prefix(TREE_DOC_PREFIX) {
+            documents.push((parent_path.clone(), doc_id.to_string()));
+        } else {
+            collect_tree_documents(item.children(), parent_path, documents);
+        }
+        parent_path.pop();
+    }
 }
 
 fn build_path_tree(
@@ -1373,6 +1409,25 @@ mod tests {
             assert_eq!(state.group_mode, RequirementGroupMode::Iteration);
             let encoded = format!("{:?}", state.tree_items);
             assert!(encoded.contains(TREE_ITER_PREFIX));
+        });
+    }
+
+    #[test]
+    fn tree_navigation_selects_documents_inside_iteration_groups() {
+        with_isolated_app_data(|| {
+            let mut state = sample_authoring_state();
+            state.toggle_group_mode();
+            assert_eq!(state.selected_document_id.as_deref(), Some("doc-sprint"));
+
+            state.move_tree_selection(1);
+            assert_eq!(state.selected_document_id.as_deref(), Some("doc-open"));
+            assert_eq!(
+                state.tree_state.selected().last().map(String::as_str),
+                Some("req-doc:doc-open")
+            );
+
+            state.move_tree_selection(-1);
+            assert_eq!(state.selected_document_id.as_deref(), Some("doc-sprint"));
         });
     }
 

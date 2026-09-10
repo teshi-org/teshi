@@ -338,6 +338,13 @@ pub enum Action {
 impl Action {
     pub fn from_key_event(event: KeyEvent, context: KeyContext) -> Option<Self> {
         if let Some(pending_char) = context.pending_char {
+            if context.active_tab == MainTab::Requirements && pending_char == 'w' {
+                return match (event.code, event.modifiers) {
+                    (KeyCode::Char('h'), KeyModifiers::NONE) => Some(Self::FocusPrevColumn),
+                    (KeyCode::Char('l'), KeyModifiers::NONE) => Some(Self::FocusNextColumn),
+                    _ => None,
+                };
+            }
             match (pending_char, event.code, event.modifiers) {
                 ('d', KeyCode::Char('d'), KeyModifiers::NONE) => return Some(Self::DeleteNode),
                 ('y', KeyCode::Char('y'), KeyModifiers::NONE) => return Some(Self::CopyStep),
@@ -611,6 +618,7 @@ impl Action {
                         (KeyCode::End, _) => Some(Self::MoveEnd),
                         (KeyCode::Enter, _) => Some(Self::Enter),
                         (KeyCode::Tab, KeyModifiers::NONE) => Some(Self::Insert('\t')),
+                        (KeyCode::Char('w'), KeyModifiers::CONTROL) => Some(Self::PendingChar('w')),
                         (KeyCode::Backspace, _) => Some(Self::Backspace),
                         (KeyCode::Delete, _) => Some(Self::Delete),
                         (KeyCode::Char(ch), modifiers)
@@ -680,6 +688,7 @@ impl Action {
                     Some(Self::MoveDown)
                 }
                 (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::ReqNewDocument),
+                (KeyCode::Char('w'), KeyModifiers::CONTROL) => Some(Self::PendingChar('w')),
                 (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Self::ReqFilterOverlay),
                 (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Self::ReqGroupToggle),
                 (KeyCode::Char('I'), KeyModifiers::SHIFT) => Some(Self::ReqEditIteration),
@@ -1607,6 +1616,11 @@ mod tests {
             ),
             (KeyCode::Tab, KeyModifiers::NONE, Some(Action::Insert('\t'))),
             (KeyCode::BackTab, KeyModifiers::SHIFT, None),
+            (
+                KeyCode::Char('w'),
+                KeyModifiers::CONTROL,
+                Some(Action::PendingChar('w')),
+            ),
             (KeyCode::Home, KeyModifiers::NONE, Some(Action::MoveHome)),
             (KeyCode::End, KeyModifiers::NONE, Some(Action::MoveEnd)),
         ] {
@@ -1615,6 +1629,26 @@ mod tests {
                 expected
             );
         }
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+                KeyContext {
+                    pending_char: Some('w'),
+                    ..context
+                }
+            ),
+            Some(Action::FocusPrevColumn)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+                KeyContext {
+                    pending_char: Some('w'),
+                    ..context
+                }
+            ),
+            Some(Action::FocusNextColumn)
+        );
     }
 
     fn requirements_tree_context() -> KeyContext {
