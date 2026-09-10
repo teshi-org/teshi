@@ -43,7 +43,7 @@ def identity(tag, sha, sequence):
                 git_sha=sha, build_timestamp=timestamp, build_sequence=sequence)
 
 
-def bundle(root, build, target, kind):
+def bundle(root, build, target, kind, require_desktop=True):
     if target not in TARGETS or kind not in ("portable", "msi", "exe"):
         raise ValueError("Unsupported target/installation kind")
     if kind == "exe" and "windows" not in target:
@@ -51,7 +51,7 @@ def bundle(root, build, target, kind):
     suffix = ".exe" if "windows" in target else ""
     prefix = "bin/" if kind in ("msi", "exe") else ""
     required = [prefix + "teshi" + suffix, prefix + "teshi-update-helper" + suffix]
-    if "windows" in target:
+    if "windows" in target and require_desktop:
         required.append(prefix + "teshi-desktop.exe")
     for name in required:
         if not (root / name).is_file():
@@ -143,6 +143,7 @@ def main():
     pack.add_argument("--identity", type=Path, required=True)
     pack.add_argument("--target", required=True)
     pack.add_argument("--kind", choices=("portable", "msi", "exe"), required=True)
+    pack.add_argument("--omit-desktop", action="store_true")
     publish = modes.add_parser("release")
     publish.add_argument("--dist", type=Path, required=True)
     publish.add_argument("--identity", type=Path, required=True)
@@ -166,7 +167,13 @@ def main():
                               TESHI_BUILD_TIMESTAMP=value["build_timestamp"], TESHI_BUILD_SEQUENCE=str(value["build_sequence"]))
                 stream.writelines(f"{key}={value}\n" for key, value in values.items())
     elif args.mode == "bundle":
-        bundle(args.root, json.loads(args.identity.read_text(encoding="utf-8")), args.target, args.kind)
+        bundle(
+            args.root,
+            json.loads(args.identity.read_text(encoding="utf-8")),
+            args.target,
+            args.kind,
+            require_desktop=not args.omit_desktop,
+        )
     elif args.mode == "verify":
         verify_release(args.dist)
     else:

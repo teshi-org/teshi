@@ -17,6 +17,7 @@ def main() -> int:
 
     required = [
         root / "bin" / "teshi.exe",
+        root / "bin" / "teshi-update-helper.exe",
         root / "share" / "browser_service.py",
         root / "share" / "api_service.py",
     ]
@@ -45,6 +46,9 @@ def main() -> int:
             continue
         if path.suffix.lower() in forbidden_suffixes or path.name in forbidden_names:
             offenders.append(str(path.relative_to(root)))
+    desktop = root / "bin" / "teshi-desktop.exe"
+    if desktop.is_file():
+        offenders.append(str(desktop.relative_to(root)))
     if offenders:
         raise SystemExit(
             "nightly installer staging contains hosted UI files: " + ", ".join(offenders)

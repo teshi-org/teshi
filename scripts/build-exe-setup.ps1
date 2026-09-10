@@ -6,7 +6,8 @@ param(
     [string] $Tag,
     [Parameter(Mandatory = $true)]
     [string] $Version,
-    [string] $OutputDir = "target/inno"
+    [string] $OutputDir = "target/inno",
+    [switch] $CliOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,6 +28,7 @@ $outputName = "teshi-$Tag-x64-setup"
 
 & $iscc `
     "/DAppVersion=$Version" `
+    "/DCliOnly=$(if ($CliOnly) { 1 } else { 0 })" `
     "/DSourceRoot=$staging" `
     "/DOutputDir=$out" `
     "/DOutputName=$outputName" `

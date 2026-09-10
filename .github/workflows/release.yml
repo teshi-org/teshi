@@ -194,7 +194,9 @@ jobs:
       - name: Cache cargo build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: teshi-${{ needs.resolve.outputs.tag }}
+          # Keep the cache reusable across nightly tags; rust-cache already
+          # separates incompatible lockfiles/toolchains in its generated key.
+          prefix-key: teshi-${{ matrix.target }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -215,7 +217,7 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }} --bin teshi --bin teshi-update-helper
 
       - name: Build native desktop
-        if: matrix.target == 'x86_64-pc-windows-msvc'
+        if: matrix.target == 'x86_64-pc-windows-msvc' && needs.resolve.outputs.run_scope != 'windows-installer'
         run: cargo build --release --locked --target ${{ matrix.target }} --bin teshi-desktop
 
       - name: Verify compiled build identity
@@ -223,7 +225,7 @@ jobs:
         run: |
           set -euo pipefail
           binaries="teshi teshi-update-helper"
-          [[ "${{ matrix.target }}" == *windows* ]] && binaries="$binaries teshi-desktop"
+          [[ "${{ matrix.target }}" == *windows* && "${{ needs.resolve.outputs.run_scope }}" != "windows-installer" ]] && binaries="$binaries teshi-desktop"
           for binary in $binaries; do
             executable="target/${{ matrix.target }}/release/$binary"
             [[ "${{ matrix.target }}" == *windows* ]] && executable="${executable}.exe"
@@ -300,6 +302,7 @@ jobs:
           $bridgeDir = Join-Path $stagingRoot "share/teshi-bridge"
           $agentDir  = Join-Path $stagingRoot "share/teshi-browser-testing"
           $agentBridgeDir = Join-Path $agentDir "extension/teshi-bridge"
+          $includeDesktop = '${{ needs.resolve.outputs.run_scope }}' -ne 'windows-installer'
           New-Item -ItemType Directory -Force -Path $binDir, $webDir, $bridgeDir, $agentBridgeDir | Out-Null
 
           # Verify required files
@@ -399,11 +402,12 @@ jobs:
             "extension/teshi-bridge/manifest.json",
             "agent-packages/teshi-browser-testing/.codex-plugin/plugin.json")
           if ($includeWeb) { $required += @("apps/teshi-web/dist", "apps/teshi-web/dist/pkg/teshi_web_bg.wasm") }
+          if ($includeDesktop) { $required += "target/${{ matrix.target }}/release/teshi-desktop.exe" }
           $required | ForEach-Object { if (-not (Test-Path $_)) { throw "Missing: $_" } }
 
           Copy-Item $builtExe   (Join-Path $binDir "teshi.exe")          -Force
           Copy-Item "target/${{ matrix.target }}/release/teshi-update-helper.exe" (Join-Path $binDir "teshi-update-helper.exe")
-          Copy-Item "target/${{ matrix.target }}/release/teshi-desktop.exe" (Join-Path $binDir "teshi-desktop.exe")
+          if ($includeDesktop) { Copy-Item "target/${{ matrix.target }}/release/teshi-desktop.exe" (Join-Path $binDir "teshi-desktop.exe") }
           Copy-Item "resources/browser_service.py" (Join-Path $shareDir "browser_service.py") -Force
           Copy-Item "resources/update_participant.py" (Join-Path $shareDir "update_participant.py") -Force
           Copy-Item "resources/browser_agent_broker.py" (Join-Path $shareDir "browser_agent_broker.py") -Force
@@ -417,10 +421,14 @@ jobs:
           Copy-Item -Path "agent-packages/teshi-browser-testing/.codex-plugin" -Destination $agentDir -Recurse -Force
           Copy-Item -Path "agent-packages/teshi-browser-testing/.mcp.json" -Destination $agentDir -Force
           Copy-Item -Path "extension/teshi-bridge/*" -Destination $agentBridgeDir -Recurse -Force
-          python scripts/update_manifest.py bundle --root $stagingRoot --identity build-identity.json --target "${{ matrix.target }}" --kind exe
+          $bundleArgs = @("scripts/update_manifest.py", "bundle", "--root", $stagingRoot, "--identity", "build-identity.json", "--target", "${{ matrix.target }}", "--kind", "exe")
+          if (-not $includeDesktop) { $bundleArgs += "--omit-desktop" }
+          python @bundleArgs
           if ($LASTEXITCODE -ne 0) { throw "EXE bundle manifest generation failed" }
           $identity = Get-Content build-identity.json | ConvertFrom-Json
-          ./scripts/build-exe-setup.ps1 -StagingRoot $stagingRoot -Tag $tag -Version $identity.semver
+          $setupArgs = @{ StagingRoot = $stagingRoot; Tag = $tag; Version = $identity.semver }
+          if (-not $includeDesktop) { $setupArgs.CliOnly = $true }
+          ./scripts/build-exe-setup.ps1 @setupArgs
 
       - name: Verify nightly installer staging excludes hosted Web UI
         if: matrix.target == 'x86_64-pc-windows-msvc' && needs.resolve.outputs.run_scope == 'windows-installer'

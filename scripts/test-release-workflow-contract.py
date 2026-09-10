@@ -18,6 +18,19 @@ def require(text: str, needle: str, label: str) -> None:
 
 def main() -> int:
     require(NIGHTLY, "run_scope: windows-installer", "nightly installer scope")
+    desktop_block_start = RELEASE.index("      - name: Build native desktop")
+    desktop_block = RELEASE[desktop_block_start : RELEASE.find("\n      - name:", desktop_block_start + 1)]
+    require(
+        desktop_block,
+        "needs.resolve.outputs.run_scope != 'windows-installer'",
+        "nightly guard for native desktop",
+    )
+    require(
+        RELEASE,
+        'needs.resolve.outputs.run_scope }}" != "windows-installer"',
+        "nightly guard for desktop identity verification",
+    )
+    require(RELEASE, "prefix-key: teshi-${{ matrix.target }}", "cross-nightly Rust cache key")
     for label in (
         "Install nightly WASM target",
         "Cache wasm-bindgen CLI",
@@ -34,6 +47,9 @@ def main() -> int:
     require(RELEASE, "$includeWeb = '${{ needs.resolve.outputs.run_scope }}' -ne 'windows-installer'", "setup web gate")
     require(RELEASE, "if ($includeWeb) { $required +=", "setup required-file gate")
     require(RELEASE, "if ($includeWeb) { Copy-Item -Path \"apps/teshi-web/dist/*\"", "setup copy gate")
+    require(RELEASE, "$includeDesktop = '${{ needs.resolve.outputs.run_scope }}' -ne 'windows-installer'", "desktop packaging gate")
+    require(RELEASE, "if (-not $includeDesktop) { $bundleArgs += \"--omit-desktop\" }", "CLI-only bundle gate")
+    require(RELEASE, "if (-not $includeDesktop) { $setupArgs.CliOnly = $true }", "CLI-only installer gate")
     require(RELEASE, "name: Upload web dist artifact", "web artifact step")
     web_upload = RELEASE[RELEASE.index("      - name: Upload web dist artifact") :]
     require(

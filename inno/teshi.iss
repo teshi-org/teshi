@@ -12,6 +12,15 @@
 #ifndef OutputName
   #define OutputName "teshi-setup"
 #endif
+#ifndef CliOnly
+  #define CliOnly 0
+#endif
+
+#if CliOnly
+  #define MainExe "teshi.exe"
+#else
+  #define MainExe "teshi-desktop.exe"
+#endif
 
 [Setup]
 AppId={{6D2F8E91-4B17-4C3A-A8E2-7F1B9C04D5E8}
@@ -31,7 +40,7 @@ SolidCompression=yes
 WizardStyle=modern
 OutputDir={#OutputDir}
 OutputBaseFilename={#OutputName}
-UninstallDisplayIcon={app}\bin\teshi-desktop.exe
+UninstallDisplayIcon={app}\bin\{#MainExe}
 ChangesEnvironment=yes
 CloseApplications=no
 UsePreviousAppDir=yes
@@ -46,14 +55,21 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Source: "{#SourceRoot}\*"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\teshi"; Filename: "{app}\bin\teshi-desktop.exe"; Check: not IsUpdating
+#if CliOnly
 Name: "{autoprograms}\teshi CLI"; Filename: "{app}\bin\teshi.exe"; Check: not IsUpdating
+#else
+Name: "{autoprograms}\teshi CLI"; Filename: "{app}\bin\teshi.exe"; Check: not IsUpdating
+Name: "{autoprograms}\teshi"; Filename: "{app}\bin\teshi-desktop.exe"; Check: not IsUpdating
+#endif
 
 [Registry]
 Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}\bin"; Flags: preservestringtype noerror; Check: NeedsAddPath and not IsUpdating
 
 [Run]
+#if CliOnly
+#else
 Filename: "{app}\bin\teshi-desktop.exe"; Description: "Launch teshi"; Flags: nowait postinstall skipifsilent; Check: not IsUpdating
+#endif
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\install"

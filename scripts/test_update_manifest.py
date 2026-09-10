@@ -35,6 +35,18 @@ class UpdateManifestTests(unittest.TestCase):
             self.assertNotIn(manifest.MANIFEST, [f["path"] for f in result["files"]])
             self.assertEqual(json.loads((root / manifest.MANIFEST).read_text()), result)
 
+    def test_windows_exe_bundle_can_omit_desktop_for_nightly_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bin").mkdir()
+            for name in ("teshi.exe", "teshi-update-helper.exe"):
+                (root / "bin" / name).write_bytes(b"executable")
+            result = manifest.bundle(root, {}, manifest.TARGETS[0], "exe", require_desktop=False)
+            self.assertEqual(
+                [file["path"] for file in result["files"]],
+                ["bin/teshi-update-helper.exe", "bin/teshi.exe"],
+            )
+
     def test_publication_requires_every_target_and_checksums_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
