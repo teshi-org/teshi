@@ -60,6 +60,25 @@ pub fn staged_payload(root: &Path) -> PathBuf {
     root.join(STAGED_DIR)
 }
 
+/// Converts a Windows extended path to the syntax accepted by Inno Setup.
+///
+/// `fs::canonicalize` may return paths prefixed with `\\?\`. That prefix is
+/// useful for Win32 filesystem operations, but Inno interprets the `?` as an
+/// invalid folder-name character when it is passed through `/DIR=`.
+fn inno_dir_arg(path: &Path) -> Result<String> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| invalid("Install path is not valid Unicode"))?;
+
+    if value.len() >= 8 && value[..8].eq_ignore_ascii_case(r"\\?\UNC\") {
+        return Ok(format!(r"\\{}", &value[8..]));
+    }
+    if value.len() >= 4 && value[..4].eq_ignore_ascii_case(r"\\?\") {
+        return Ok(value[4..].to_string());
+    }
+    Ok(value.to_string())
+}
+
 /// Runs the downloaded setup.exe to stage files beside the live install.
 ///
 /// # Errors
@@ -76,12 +95,9 @@ pub fn run_silent_setup(package: &Path, app_dir: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         let mut command = Command::new(package);
-        command.args(silent_update_args()).arg(format!(
-            "/DIR={}",
-            app_dir
-                .to_str()
-                .ok_or_else(|| invalid("Install path is not valid Unicode"))?
-        ));
+        command
+            .args(silent_update_args())
+            .arg(format!("/DIR={}", inno_dir_arg(app_dir)?));
         let status = command.status().map_err(|error| {
             crate::UpdateError::new(
                 crate::ErrorCode::Installation,
@@ -129,6 +145,30 @@ mod tests {
         assert!(args.contains(&"/update=true"));
         assert!(args.contains(&"/CURRENTUSER"));
         assert!(!args.iter().any(|a| a.eq_ignore_ascii_case("/forcerestart")));
+    }
+
+    #[test]
+    fn inno_dir_arg_removes_verbatim_drive_prefix() {
+        assert_eq!(
+            inno_dir_arg(Path::new(r"\\?\C:\Users\tester\teshi")).unwrap(),
+            r"C:\Users\tester\teshi"
+        );
+    }
+
+    #[test]
+    fn inno_dir_arg_converts_verbatim_unc_prefix() {
+        assert_eq!(
+            inno_dir_arg(Path::new(r"\\?\UNC\server\share\teshi")).unwrap(),
+            r"\\server\share\teshi"
+        );
+    }
+
+    #[test]
+    fn inno_dir_arg_preserves_normal_paths() {
+        assert_eq!(
+            inno_dir_arg(Path::new(r"C:\Users\tester\teshi")).unwrap(),
+            r"C:\Users\tester\teshi"
+        );
     }
 
     #[test]
