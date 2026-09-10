@@ -313,7 +313,7 @@ async fn trusted_hosted_origin_only(request: Request, next: Next) -> Response {
 }
 
 fn is_trusted_hosted_origin(origin: &str) -> bool {
-    if origin == HOSTED_WEB_ORIGIN {
+    if HOSTED_WEB_ORIGINS.contains(&origin) {
         return true;
     }
     // Development/test builds may opt into one explicit origin for a local
