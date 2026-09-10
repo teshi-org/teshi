@@ -98,19 +98,24 @@ Path resolution: `--requirements-root` → non-empty `TESHI_REQUIREMENTS_DIR` �
 
 ### Browser GUI (`teshi web`)
 
-GPUI WASM workspace UI served over loopback HTTP by the local daemon:
+Latest GPUI WASM workspace UI hosted at `https://teshi-org.github.io/app/`; the local
+daemon supplies authenticated WebSocket control and preview channels:
 
 ```bash
-teshi web [--project PATH] [--port 20253] [--no-open] [--dist PATH]
+teshi web [--project PATH] [--port PORT] [--no-open] [--dist PATH]
 ```
 
-On Windows, the full MSI and release zip bundle web assets under `share/web/` next to `teshi.exe`.
-For development from source, build the frontend first:
+The default port is OS-selected on `127.0.0.1`; the CLI opens a one-time
+fragment URL containing the port and session token. Nightly packages do not
+bundle `share/web`. `--dist` is reserved for explicit local diagnostics:
 
 ```bash
-bash scripts/build-teshi-web.sh
-teshi web --dist apps/teshi-web/dist
+bash scripts/run-web-ui-smoke.sh
+teshi web --project PATH
 ```
+
+See [hosted-web-ui.md](hosted-web-ui.md) for the handshake, compatibility gate,
+and staged REST migration.
 
 ### Native desktop (`teshi desktop` / `teshi-desktop`)
 
@@ -150,6 +155,20 @@ TESHI_BIN=./target/debug/teshi teshi run --runner-cmd ./target/debug/teshi-requi
 TESHI_BIN=./target/debug/teshi teshi run --runner-cmd ./target/debug/teshi-requirement-cli-runner features/zh-CN/需求编写.feature
 TESHI_BIN=./target/debug/teshi teshi run --runner-cmd ./target/debug/teshi-requirement-cli-runner features/zh-CN/需求标签页.feature
 ```
+
+The validation command and execution gates have a separate bilingual
+self-bootstrap suite. It uses an independent runner and launches the selected
+Teshi build as a child process, so malformed source is fixture data rather than
+the executable test Feature itself:
+
+```bash
+cargo test --locked -p teshi-cli --test validation_cli_bdd -- --nocapture
+```
+
+The suite runs the `@validation-e2e` Features in both locales and reports the
+actual `end_run` counts. Parser partial-AST and editor rendering contracts stay
+in Rust tests because they cannot be proven by making the same target binary its
+own assertion oracle.
 
 For the supported GPUI WASM web UI smoke gate:
 

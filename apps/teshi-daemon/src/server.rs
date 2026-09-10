@@ -12,7 +12,7 @@ use std::time::Instant;
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
-use axum::http::{header, Method, StatusCode};
+use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -21,7 +21,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use teshi_core::{BddFeature, BddProject, FeatureRenderPayload, StepIndex};
+use teshi_core::{BddFeature, BddProject, FeatureRenderPayload, StepIndex, ValidationReport};
 use teshi_web_protocol::{
     Channel, ClientHello, ClientMessage, ErrorCode, HostedCapability, ProtocolError,
     Request as ProtocolRequest, ServerMessage, CONTROL_PROTOCOL_VERSION, PREVIEW_PROTOCOL_VERSION,
@@ -35,16 +35,49 @@ use teshi_engine::{
     load_llm_config_public, load_project_settings, open_project, reject_locator, render_feature,
     resize_terminal, save_profile, save_stored_llm_config, send_api_command, set_active_id,
     spawn_terminal, start_browser_sidecar, step_binding_statuses, stop_browser_sidecar,
-    sync_active_step, teardown_runtime, unbind_step, write_terminal, ActiveStep, ApiStyle,
-    BrowserError, BrowserMode, BrowserStartResult, DirEntry, DispatchCase, LlmConfigPublic,
-    LlmConfigWrite, ModelProfile, ModelProfileList, ModelProfilePublic, PendingLocator,
-    ProjectSettings, RuntimeEvent, StepBinding, StepBindingStatus, TeshiEngine, PROVIDER_OPENAI,
+    sync_active_step, teardown_runtime, unbind_step, validate_feature_scope, write_terminal,
+    ActiveStep, ApiStyle, BrowserError, BrowserMode, BrowserStartResult, DirEntry, DispatchCase,
+    LlmConfigPublic, LlmConfigWrite, ModelProfile, ModelProfileList, ModelProfilePublic,
+    PendingLocator, ProjectSettings, RuntimeEvent, StepBinding, StepBindingStatus, TeshiEngine,
+    PROVIDER_OPENAI,
 };
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 
 type SharedRuntime = Arc<TeshiEngine>;
+
+const VALIDATION_REPORT_HEADER: &str = "x-teshi-validation-report";
+
+fn validation_header_value(report: &ValidationReport) -> Option<HeaderValue> {
+    if report.diagnostics.is_empty() {
+        return None;
+    }
+    serde_json::to_string(report)
+        .ok()
+        .and_then(|value| HeaderValue::from_bytes(value.as_bytes()).ok())
+}
+
+fn attach_validation_header(response: &mut Response, report: &ValidationReport) {
+    if let Some(value) = validation_header_value(report) {
+        response
+            .headers_mut()
+            .insert(VALIDATION_REPORT_HEADER, value);
+    }
+}
+
+struct ValidatedResponse<T> {
+    value: T,
+    report: ValidationReport,
+}
+
+impl<T: Serialize> IntoResponse for ValidatedResponse<T> {
+    fn into_response(self) -> Response {
+        let mut response = Json(self.value).into_response();
+        attach_validation_header(&mut response, &self.report);
+        response
+    }
+}
 
 /// Shared state with idle tracking and session store for the daemon.
 #[derive(Clone)]
@@ -73,6 +106,7 @@ fn browser_cors_layer() -> CorsLayer {
         // mutations are rejected separately by the explicit origin middleware.
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers(Any)
+        .expose_headers([header::HeaderName::from_static(VALIDATION_REPORT_HEADER)])
 }
 
 async fn same_origin_only(request: Request, next: Next) -> Response {
@@ -187,6 +221,7 @@ pub async fn run_server_with_listener(
         .route("/api/v1/settings/recent", get(api_recent))
         .route("/api/v1/fs/list", get(api_list_dir))
         .route("/api/v1/gherkin/render", post(api_render_feature))
+        .route("/api/v1/gherkin/validate-buffer", post(api_validate_buffer))
         .route("/api/v1/gherkin/scenarios", get(api_gherkin_scenarios))
         .route("/api/v1/api/exchange", post(api_get_exchange))
         .route("/api/v1/locator/sync-step", post(api_sync_step))
@@ -832,7 +867,9 @@ fn control_api_error(error: ApiError) -> ProtocolError {
     ProtocolError {
         code: ErrorCode::RequestFailed,
         message: hosted_error_message(error.message),
-        details: None,
+        details: error
+            .details
+            .map(|details| redact_hosted_value(details, None)),
     }
 }
 
@@ -853,16 +890,23 @@ fn control_status(status: StatusCode) -> Value {
 
 fn control_route_error(error: (StatusCode, Json<Value>)) -> ProtocolError {
     let (status, Json(payload)) = error;
-    let message = match payload.get("error") {
-        Some(Value::Object(error)) => hosted_error_message(
-            error
+    let (message, details) = match payload.get("error") {
+        Some(Value::Object(error)) => {
+            let message = error
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("local route failed")
-                .to_string(),
-        ),
-        Some(Value::String(message)) => hosted_error_message(message.clone()),
-        _ => "local route failed".to_string(),
+                .to_string();
+            let details = (error.get("code").and_then(Value::as_str)
+                == Some("feature_validation_failed"))
+            .then(|| Value::Object(error.clone()));
+            (
+                hosted_error_message(message),
+                details.map(|value| redact_hosted_value(value, None)),
+            )
+        }
+        Some(Value::String(message)) => (hosted_error_message(message.clone()), None),
+        _ => ("local route failed".to_string(), None),
     };
     let code = if status == StatusCode::FORBIDDEN {
         ErrorCode::Forbidden
@@ -872,15 +916,21 @@ fn control_route_error(error: (StatusCode, Json<Value>)) -> ProtocolError {
     ProtocolError {
         code,
         message,
-        details: None,
+        details,
     }
+}
+
+#[derive(Debug)]
+struct ControlDispatchResult {
+    value: Value,
+    validation: Option<ValidationReport>,
 }
 
 async fn dispatch_control_request(
     state: &DaemonState,
     method: &str,
     params: Value,
-) -> Result<Value, ProtocolError> {
+) -> Result<ControlDispatchResult, ProtocolError> {
     state.touch();
     if method == "runtime.shutdown" {
         return Err(handshake_error(
@@ -894,6 +944,7 @@ async fn dispatch_control_request(
             format!("control method '{method}' is unknown"),
         ));
     }
+    let mut validation = None;
     let value = match method {
         "project.open" => {
             let body = decode_control_params::<OpenProjectBody>(params)?;
@@ -932,6 +983,13 @@ async fn dispatch_control_request(
                 .map_err(control_api_error)?;
             hosted_control_value(state, encode_control_value(result.0)?)
         }
+        "bdd.validate_buffer" => {
+            let body = decode_control_params::<ValidateBufferBody>(params)?;
+            let result = api_validate_buffer(State(state.clone()), Json(body))
+                .await
+                .map_err(control_api_error)?;
+            hosted_control_value(state, encode_control_value(result.0)?)
+        }
         "bdd.list_scenarios" => {
             let root = state
                 .rt
@@ -959,6 +1017,15 @@ async fn dispatch_control_request(
             let response = api_run(State(state.clone()), Json(body))
                 .await
                 .map_err(control_api_error)?;
+            if let Some(value) = response.headers().get(VALIDATION_REPORT_HEADER) {
+                let report = serde_json::from_slice(value.as_bytes()).map_err(|error| {
+                    handshake_error(
+                        ErrorCode::RequestFailed,
+                        format!("decode validation report: {error}"),
+                    )
+                })?;
+                validation = Some(report);
+            }
             let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
                 .await
                 .map_err(|error| handshake_error(ErrorCode::RequestFailed, error.to_string()))?;
@@ -997,7 +1064,8 @@ async fn dispatch_control_request(
             let result = api_sync_step(State(state.clone()), Json(body))
                 .await
                 .map_err(control_api_error)?;
-            hosted_control_value(state, encode_control_value(result.0)?)
+            validation = Some(result.report);
+            hosted_control_value(state, encode_control_value(result.value)?)
         }
         "locator.active_step" => {
             let result = api_active_step(State(state.clone()))
@@ -1020,7 +1088,8 @@ async fn dispatch_control_request(
             )
             .await
             .map_err(control_api_error)?;
-            hosted_control_value(state, encode_control_value(result.0)?)
+            validation = Some(result.report);
+            hosted_control_value(state, encode_control_value(result.value)?)
         }
         "steps.unbind" => {
             let mut body = decode_control_params::<UnbindStepBody>(params)?;
@@ -1028,7 +1097,8 @@ async fn dispatch_control_request(
             let result = api_unbind_step(State(state.clone()), Json(body))
                 .await
                 .map_err(control_api_error)?;
-            hosted_control_value(state, encode_control_value(result.0)?)
+            validation = Some(result.report);
+            hosted_control_value(state, encode_control_value(result.value)?)
         }
         "project.get_settings" => {
             let result = api_project_settings(State(state.clone()))
@@ -1181,7 +1251,7 @@ async fn dispatch_control_request(
             ));
         }
     };
-    Ok(value)
+    Ok(ControlDispatchResult { value, validation })
 }
 
 async fn dispatch_authenticated_control_request(
@@ -1189,7 +1259,7 @@ async fn dispatch_authenticated_control_request(
     token: &str,
     method: &str,
     params: Value,
-) -> Result<Value, ProtocolError> {
+) -> Result<ControlDispatchResult, ProtocolError> {
     // Project teardown owns the write side inside `api_teardown`; taking a
     // read guard here would deadlock. Every other request holds a read guard
     // across the domain operation, so session replacement/teardown waits for
@@ -1367,6 +1437,7 @@ async fn handle_control_socket(state: DaemonState, mut socket: WebSocket) {
                             };
                             let state_for_request = state.clone();
                             let response_for_request = response_tx.clone();
+                            let event_for_request = event_tx.clone();
                             let token_for_request = active_token.clone();
                             request_tasks.spawn(async move {
                                 let response = match dispatch_authenticated_control_request(
@@ -1375,12 +1446,31 @@ async fn handle_control_socket(state: DaemonState, mut socket: WebSocket) {
                                     &method,
                                     params,
                                 ).await {
-                                    Ok(result) => ServerMessage::Response {
-                                        id,
-                                        ok: true,
-                                        result: Some(result),
-                                        error: None,
-                                    },
+                                    Ok(result) => {
+                                        if let Some(report) = result
+                                            .validation
+                                            .filter(|report| !report.diagnostics.is_empty())
+                                        {
+                                            let _ = event_for_request
+                                                .send(ServerMessage::Event {
+                                                    event: "gherkin.validation".into(),
+                                                    payload: hosted_control_value(
+                                                        &state_for_request,
+                                                        json!({
+                                                            "request_id": id.clone(),
+                                                            "report": report,
+                                                        }),
+                                                    ),
+                                                })
+                                                .await;
+                                        }
+                                        ServerMessage::Response {
+                                            id,
+                                            ok: true,
+                                            result: Some(result.value),
+                                            error: None,
+                                        }
+                                    }
                                     Err(error) => ServerMessage::Response {
                                         id,
                                         ok: false,
@@ -2251,12 +2341,32 @@ struct RenderBody {
     path: String,
 }
 
+#[derive(Deserialize)]
+struct ValidateBufferBody {
+    path: String,
+    content: String,
+}
+
 async fn api_render_feature(
     State(state): State<DaemonState>,
     Json(body): Json<RenderBody>,
 ) -> Result<Json<FeatureRenderPayload>, ApiError> {
     state.touch();
     Ok(Json(render_feature(&state.rt, body.path)?))
+}
+
+async fn api_validate_buffer(
+    State(state): State<DaemonState>,
+    Json(body): Json<ValidateBufferBody>,
+) -> Result<Json<teshi_core::ValidationReport>, ApiError> {
+    state.touch();
+    if state.rt.project.root.lock().unwrap().is_none() {
+        return Err(ApiError::internal("no project open"));
+    }
+    Ok(Json(teshi_core::validate_feature_source(
+        &body.content,
+        body.path,
+    )))
 }
 
 #[derive(Deserialize)]
@@ -2268,11 +2378,20 @@ struct SyncStepBody {
 async fn api_sync_step(
     State(state): State<DaemonState>,
     Json(body): Json<SyncStepBody>,
-) -> Result<Json<ActiveStep>, ApiError> {
+) -> Result<ValidatedResponse<ActiveStep>, ApiError> {
     state.touch();
-    Ok(Json(
-        sync_active_step(&state.rt, body.feature_path, body.step_line).await?,
-    ))
+    let project_root = state
+        .rt
+        .project
+        .root
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| ApiError::internal("no project open"))?;
+    let report =
+        validate_feature_scope_for_daemon(&project_root, Some(FsPath::new(&body.feature_path)))?;
+    let value = sync_active_step(&state.rt, body.feature_path, body.step_line).await?;
+    Ok(ValidatedResponse { value, report })
 }
 
 async fn api_active_step(
@@ -2297,7 +2416,7 @@ struct StepStatusesQuery {
 async fn api_step_statuses(
     State(state): State<DaemonState>,
     Query(q): Query<StepStatusesQuery>,
-) -> Result<Json<Vec<StepBindingStatus>>, ApiError> {
+) -> Result<ValidatedResponse<Vec<StepBindingStatus>>, ApiError> {
     state.touch();
     let project_root = state
         .rt
@@ -2307,9 +2426,10 @@ async fn api_step_statuses(
         .unwrap()
         .clone()
         .ok_or_else(|| "no project open".to_string())?;
-    Ok(Json(
-        step_binding_statuses(&project_root, &q.feature_path).map_err(|e| e.to_string())?,
-    ))
+    let report =
+        validate_feature_scope_for_daemon(&project_root, Some(FsPath::new(&q.feature_path)))?;
+    let value = step_binding_statuses(&project_root, &q.feature_path).map_err(|e| e.to_string())?;
+    Ok(ValidatedResponse { value, report })
 }
 
 #[derive(Deserialize)]
@@ -2321,13 +2441,22 @@ struct UnbindStepBody {
 async fn api_unbind_step(
     State(state): State<DaemonState>,
     Json(body): Json<UnbindStepBody>,
-) -> Result<Json<Option<StepBinding>>, ApiError> {
+) -> Result<ValidatedResponse<Option<StepBinding>>, ApiError> {
     state.touch();
-    Ok(Json(
-        unbind_step(&state.rt, body.feature_path, body.step_line)
-            .await
-            .map_err(|e| e.to_string())?,
-    ))
+    let project_root = state
+        .rt
+        .project
+        .root
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| ApiError::internal("no project open"))?;
+    let report =
+        validate_feature_scope_for_daemon(&project_root, Some(FsPath::new(&body.feature_path)))?;
+    let value = unbind_step(&state.rt, body.feature_path, body.step_line)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(ValidatedResponse { value, report })
 }
 
 async fn api_project_settings(
@@ -2895,6 +3024,7 @@ async fn api_get_exchange(
 async fn dispatch_run_ndjson(
     project_root: PathBuf,
     cases: Vec<Value>,
+    validation: &ValidationReport,
 ) -> Result<Response, ApiError> {
     let dispatch: Vec<DispatchCase> = cases
         .iter()
@@ -2907,8 +3037,18 @@ async fn dispatch_run_ndjson(
         })
         .collect();
     let script = default_api_service_script();
+    let mut validation_lines = Vec::new();
+    if !validation.diagnostics.is_empty() {
+        validation_lines.push(
+            json!({
+                "type": "validation",
+                "report": validation,
+            })
+            .to_string(),
+        );
+    }
     let lines = tokio::task::spawn_blocking(move || {
-        let mut lines = Vec::new();
+        let mut lines = validation_lines;
         dispatch_cases(&project_root, &script, &dispatch, |value| {
             lines.push(value.to_string());
         })
@@ -2918,11 +3058,13 @@ async fn dispatch_run_ndjson(
     .map_err(|e| ApiError::internal(e.to_string()))?
     .map_err(|e| ApiError::internal(e.to_string()))?;
     let body = lines.join("\n") + "\n";
-    Response::builder()
+    let mut response = Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/x-ndjson")
         .body(axum::body::Body::from(body))
-        .map_err(|e| ApiError::internal(e.to_string()))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    attach_validation_header(&mut response, validation);
+    Ok(response)
 }
 
 #[derive(Deserialize)]
@@ -2954,6 +3096,7 @@ async fn api_run(
     } else {
         project_root.clone()
     };
+    let validation = validate_feature_scope_for_daemon(&project_root, Some(&feature_path))?;
 
     // Collect cases from feature file(s)
     let mut cases = Vec::new();
@@ -3014,7 +3157,7 @@ async fn api_run(
 
     let teshi_dispatch = body.scenario_ids.is_some() || cases.iter().any(case_is_mixed);
     if teshi_dispatch {
-        return dispatch_run_ndjson(project_root, cases).await;
+        return dispatch_run_ndjson(project_root, cases, &validation).await;
     }
 
     let request = serde_json::json!({
@@ -3057,11 +3200,13 @@ async fn api_run(
     let stream = ReaderStream::new(stdout);
     let body = Body::from_stream(stream);
 
-    Response::builder()
+    let mut response = Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/x-ndjson")
         .body(body)
-        .map_err(|e| ApiError::internal(e.to_string()))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    attach_validation_header(&mut response, &validation);
+    Ok(response)
 }
 
 /// Load runner config from project's `teshi.toml` for daemon use.
@@ -3116,6 +3261,7 @@ fn load_daemon_runner_config(
 struct ApiError {
     status: StatusCode,
     message: String,
+    details: Option<Value>,
 }
 
 impl From<String> for ApiError {
@@ -3123,6 +3269,7 @@ impl From<String> for ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message,
+            details: None,
         }
     }
 }
@@ -3132,6 +3279,7 @@ impl From<BrowserError> for ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: serde_json::to_string(&err).unwrap_or(err.message),
+            details: None,
         }
     }
 }
@@ -3141,16 +3289,42 @@ impl ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: message.into(),
+            details: None,
+        }
+    }
+
+    fn validation(report: &ValidationReport) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: "Feature validation failed".to_string(),
+            details: Some(json!({
+                "code": "feature_validation_failed",
+                "message": "Feature validation failed",
+                "report": report,
+            })),
         }
     }
 }
 
+fn validate_feature_scope_for_daemon(
+    project_root: &FsPath,
+    feature_path: Option<&FsPath>,
+) -> Result<ValidationReport, ApiError> {
+    let report = validate_feature_scope(project_root, feature_path)
+        .map_err(|error| ApiError::from(error.to_string()))?;
+    if report.has_errors() {
+        return Err(ApiError::validation(&report));
+    }
+    Ok(report)
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let error = self.details.unwrap_or(Value::String(self.message));
         (
             self.status,
             [(header::CONTENT_TYPE, "application/json")],
-            Json(json!({ "error": self.message })),
+            Json(json!({ "error": error })),
         )
             .into_response()
     }
@@ -3254,6 +3428,41 @@ mod integration {
         assert_eq!(value, json!({ "mode": "chrome", "nested": [{"ok": true}] }));
     }
 
+    #[test]
+    fn hosted_validation_events_redact_absolute_diagnostic_paths() {
+        let base =
+            std::env::temp_dir().join(format!("teshi-hosted-validation-{}", uuid::Uuid::new_v4()));
+        let project = base.join("project");
+        let feature = project.join("features/login.feature");
+        std::fs::create_dir_all(feature.parent().unwrap()).unwrap();
+        std::fs::write(&feature, "Feature: Login\n").unwrap();
+
+        let value = redact_hosted_value(
+            json!({
+                "request_id": "req-1",
+                "report": {
+                    "scope": [feature.to_string_lossy()],
+                    "diagnostics": [{
+                        "path": feature.to_string_lossy(),
+                        "line": 1,
+                        "message": "invalid feature"
+                    }]
+                }
+            }),
+            Some(&project),
+        );
+
+        assert_eq!(value["report"]["scope"][0], "features/login.feature");
+        assert_eq!(
+            value["report"]["diagnostics"][0]["path"],
+            "features/login.feature"
+        );
+        assert!(!value
+            .to_string()
+            .contains(project.to_string_lossy().as_ref()));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     #[tokio::test]
     async fn shutdown_endpoint_releases_listener_and_cleans_manifest() {
         let project_root =
@@ -3300,6 +3509,178 @@ mod integration {
             std::time::Duration::from_millis(200)
         )
         .is_err());
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[test]
+    fn daemon_validation_adapter_matches_direct_core_report() {
+        let project_root =
+            std::env::temp_dir().join(format!("teshi-daemon-validation-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(project_root.join("features")).unwrap();
+        let content = "# language: zh-CN\n功能: 登录\n  场景: 成功\n    当用户登录\n";
+        std::fs::write(project_root.join("features").join("login.feature"), content).unwrap();
+
+        let feature_path = FsPath::new("features/login.feature");
+        let direct = teshi_core::validate_feature_source(content, feature_path);
+        let scoped = teshi_engine::validate_feature_scope(&project_root, Some(feature_path))
+            .expect("daemon filesystem adapter report");
+        assert_eq!(scoped, direct);
+
+        let error = validate_feature_scope_for_daemon(&project_root, Some(feature_path))
+            .expect_err("invalid source must be rejected by daemon preflight");
+        assert_eq!(error.message, "Feature validation failed");
+        let daemon_report = error
+            .details
+            .as_ref()
+            .and_then(|details| details.get("report"))
+            .expect("daemon error contains structured report");
+        assert_eq!(daemon_report, &serde_json::to_value(&direct).unwrap());
+
+        std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[test]
+    fn daemon_rest_transport_exposes_warning_report_without_changing_body_shape() {
+        let content = "Feature: Setup\n  Scenario: Preconditions only\n    Given the account exists\n    And the account is active\n";
+        let report =
+            teshi_core::validate_feature_source(content, FsPath::new("features/setup.feature"));
+        assert!(!report.has_errors());
+        assert_eq!(report.summary.warnings, 2);
+
+        let response = ValidatedResponse {
+            value: json!({ "ok": true }),
+            report: report.clone(),
+        }
+        .into_response();
+        let header = response
+            .headers()
+            .get(VALIDATION_REPORT_HEADER)
+            .expect("warning report should be available on REST response");
+        let transported: Value = serde_json::from_slice(header.as_bytes()).unwrap();
+        assert_eq!(transported, serde_json::to_value(&report).unwrap());
+    }
+
+    #[tokio::test]
+    async fn daemon_ndjson_transport_starts_with_warning_report_event() {
+        let report = teshi_core::validate_feature_source(
+            "Feature: Setup\n  Scenario: Preconditions only\n    Given the account exists\n    And the account is active\n",
+            FsPath::new("features/setup.feature"),
+        );
+        let response = dispatch_run_ndjson(PathBuf::from("."), Vec::new(), &report)
+            .await
+            .expect("empty dispatch should still produce an NDJSON response");
+        let header = response
+            .headers()
+            .get(VALIDATION_REPORT_HEADER)
+            .expect("NDJSON response should expose the warning report");
+        assert_eq!(
+            serde_json::from_slice::<Value>(header.as_bytes()).unwrap(),
+            serde_json::to_value(&report).unwrap()
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let lines: Vec<Value> = String::from_utf8(body.to_vec())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines[0]["type"], "validation");
+        assert_eq!(lines[0]["report"], serde_json::to_value(&report).unwrap());
+        assert_eq!(lines[1]["type"], "start_run");
+    }
+
+    #[tokio::test]
+    async fn daemon_validation_errors_keep_structured_reports_in_rest_and_control() {
+        let report = teshi_core::validate_feature_source(
+            "Feature: Broken\n  Scenario: Missing separator\n    当用户登录\n",
+            FsPath::new("features/broken.feature"),
+        );
+        assert!(report.has_errors());
+
+        let response = ApiError::validation(&report).into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "feature_validation_failed");
+        assert_eq!(body["error"]["message"], "Feature validation failed");
+        assert_eq!(
+            body["error"]["report"],
+            serde_json::to_value(&report).unwrap()
+        );
+
+        let protocol = control_api_error(ApiError::validation(&report));
+        assert_eq!(protocol.message, "Feature validation failed");
+        assert_eq!(
+            protocol
+                .details
+                .as_ref()
+                .and_then(|details| details.get("report")),
+            Some(&serde_json::to_value(&report).unwrap())
+        );
+    }
+
+    #[test]
+    fn control_route_errors_preserve_structured_error_payloads() {
+        let report = json!({
+            "scope": ["features/broken.feature"],
+            "summary": {"errors": 1, "warnings": 0, "suggestions": 0},
+            "diagnostics": [{"code": "missing_step_separator"}]
+        });
+        let error = control_route_error((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "code": "feature_validation_failed",
+                    "message": "Feature validation failed",
+                    "report": report,
+                }
+            })),
+        ));
+        assert_eq!(error.message, "Feature validation failed");
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("report")),
+            Some(&report)
+        );
+
+        let generic = control_route_error((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {"message": "sidecar failed", "token": "must not cross"}
+            })),
+        ));
+        assert!(generic.details.is_none());
+    }
+
+    #[tokio::test]
+    async fn control_dispatch_returns_warning_report_for_step_requests() {
+        let project_root = std::env::temp_dir().join(format!(
+            "teshi-daemon-control-validation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(project_root.join("features")).unwrap();
+        std::fs::write(
+            project_root.join("features/setup.feature"),
+            "Feature: Setup\n  Scenario: Preconditions only\n    Given the account exists\n    And the account is active\n",
+        )
+        .unwrap();
+
+        let state = test_state();
+        *state.rt.project.root.lock().unwrap() = Some(project_root.clone());
+        let result = dispatch_control_request(
+            &state,
+            "steps.statuses",
+            json!({ "feature_path": "features/setup.feature" }),
+        )
+        .await
+        .expect("warning-only step request should remain successful");
+        let report = result
+            .validation
+            .expect("step control request should carry validation report");
+        assert!(!report.has_errors());
+        assert_eq!(report.summary.warnings, 2);
+
         std::fs::remove_dir_all(project_root).unwrap();
     }
 
@@ -3567,7 +3948,7 @@ mod integration {
         let allowed = dispatch_control_request(&state, "project.switch_allowed", json!({}))
             .await
             .unwrap();
-        assert!(allowed.is_boolean());
+        assert!(allowed.value.is_boolean());
         let forbidden = dispatch_control_request(&state, "runtime.shutdown", json!({}))
             .await
             .unwrap_err();
@@ -3612,8 +3993,8 @@ mod integration {
             dispatch_control_request(&state, "project.switch_allowed", json!({})),
             dispatch_control_request(&state, "project.switch_allowed", json!({})),
         );
-        assert!(first.unwrap().is_boolean());
-        assert!(second.unwrap().is_boolean());
+        assert!(first.unwrap().value.is_boolean());
+        assert!(second.unwrap().value.is_boolean());
     }
 
     #[tokio::test]
@@ -3970,8 +4351,10 @@ mod integration {
 
     #[test]
     fn hosted_project_paths_reject_common_tool_credentials() {
-        let base =
-            std::env::temp_dir().join(format!("teshi-hosted-credentials-{}", uuid::Uuid::new_v4()));
+        let base = std::env::temp_dir().join(format!(
+            "teshi-hosted-credentials-{}",
+            uuid::Uuid::new_v4()
+        ));
         let project = base.join("project");
         fs::create_dir_all(&project).unwrap();
         for name in [

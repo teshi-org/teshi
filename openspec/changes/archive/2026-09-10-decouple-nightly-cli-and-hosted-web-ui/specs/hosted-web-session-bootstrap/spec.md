@@ -13,7 +13,7 @@ Production `teshi web` SHALL start or select its daemon on `127.0.0.1` using an 
 - **THEN** production `teshi web` SHALL still start the daemon and open the hosted application
 
 ### Requirement: Launch data stays in the URL fragment
-The launcher SHALL open `https://teshi.org/app/#port=<port>&token=<session-token>`, and the hosted application SHALL consume the port and token from the fragment without sending them in the initial HTTP request.
+The launcher SHALL open `https://teshi-org.github.io/app/#port=<port>&token=<session-token>`, and the hosted application SHALL consume the port and token from the fragment without sending them in the initial HTTP request. The compatible custom-domain entrypoint `https://teshi.org/app/` SHALL remain supported.
 
 #### Scenario: Hosted page is requested
 - **WHEN** the system browser navigates to the launch URL
@@ -37,10 +37,10 @@ A hosted-UI session SHALL be stored only in daemon memory, SHALL be scoped to th
 - **AND** non-idempotent requests from the lost connection SHALL NOT be replayed automatically
 
 ### Requirement: WebSocket upgrades require the trusted hosted Origin
-Production `/ws/control` and `/ws/preview` upgrades SHALL accept the exact `Origin` value `https://teshi.org` and SHALL reject every other browser Origin before any sidecar connection or business processing.
+Production `/ws/control` and `/ws/preview` upgrades SHALL accept the exact `Origin` value `https://teshi.org` or `https://teshi-org.github.io` and SHALL reject every other browser Origin before any sidecar connection or business processing.
 
 #### Scenario: Trusted hosted UI upgrades
-- **WHEN** a WebSocket upgrade carries `Origin: https://teshi.org`
+- **WHEN** a WebSocket upgrade carries `Origin: https://teshi.org` or `Origin: https://teshi-org.github.io`
 - **THEN** the daemon SHALL allow the upgrade to proceed to application-level authentication
 
 #### Scenario: Untrusted or missing Origin upgrades

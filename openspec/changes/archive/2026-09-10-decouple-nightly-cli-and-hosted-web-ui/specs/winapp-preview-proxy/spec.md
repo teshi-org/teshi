@@ -3,6 +3,10 @@
 ### Requirement: Same-origin preview endpoint
 The daemon SHALL expose browser and WinApp preview through `/ws/preview`, SHALL accept upgrades only from the exact trusted hosted Origin, and SHALL require a valid preview-channel first-message handshake before connecting to a sidecar or relaying output.
 
+#### Scenario: LAN browser connects through daemon
+- **WHEN** a browser loaded from the daemon origin upgrades `/api/v1/browser/stream` after WinApp mode starts
+- **THEN** the daemon connects to its loopback sidecar and relays preview protocol messages to that browser
+
 #### Scenario: Hosted browser connects through daemon
 - **WHEN** the trusted hosted UI upgrades `/ws/preview` and authenticates a live hosted session compatible with the preview protocol
 - **THEN** the daemon SHALL connect to the active loopback sidecar and relay supported preview protocol messages to that browser
@@ -17,6 +21,10 @@ The daemon SHALL expose browser and WinApp preview through `/ws/preview`, SHALL 
 
 ### Requirement: Sidecar remains private
 The daemon SHALL keep capture sidecars bound to loopback and SHALL NOT require the hosted browser to connect to or know a sidecar URL. The hosted client SHALL derive only the daemon `/ws/preview` endpoint from validated launch fragment data.
+
+#### Scenario: Remote client selects endpoint
+- **WHEN** the GPUI WASM client starts WinApp preview without a diagnostic endpoint override
+- **THEN** it derives the daemon endpoint from validated launch state and uses `/ws/preview`
 
 #### Scenario: Hosted client selects preview endpoint
 - **WHEN** the GPUI WASM client starts browser or WinApp preview without a diagnostic endpoint override

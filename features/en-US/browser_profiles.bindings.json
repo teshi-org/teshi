@@ -32,6 +32,95 @@
       "confirmed_at": "2026-08-28T11:26:16.583130200+00:00"
     },
     {
+      "step_line": 14,
+      "step_keyword": "Then",
+      "step_text": "the Browser Profiles surface is shown",
+      "step_text_normalized": "the browser profiles surface is shown",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-surface']",
+        "action": "assert_text",
+        "value_arg": "browser"
+      },
+      "confirmed_at": "2026-09-09T14:45:15.239906+00:00"
+    },
+    {
+      "step_line": 17,
+      "step_keyword": "Given",
+      "step_text": "more than one browser profile is available",
+      "step_text_normalized": "more than one browser profile is available",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-profile-count']",
+        "action": "assert_text",
+        "value_arg": "2"
+      },
+      "confirmed_at": "2026-09-09T15:07:43.083343500+00:00"
+    },
+    {
+      "step_line": 18,
+      "step_keyword": "When",
+      "step_text": "the teshi web page finishes loading",
+      "step_text_normalized": "the teshi web page finishes loading",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-root']",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-09-09T15:08:09.443567900+00:00"
+    },
+    {
+      "step_line": 19,
+      "step_keyword": "Then",
+      "step_text": "no browser profile is selected automatically",
+      "step_text_normalized": "no browser profile is selected automatically",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-auto-selected']",
+        "action": "assert_text",
+        "value_arg": "false"
+      },
+      "confirmed_at": "2026-09-09T15:08:21.597597200+00:00"
+    },
+    {
+      "step_line": 22,
+      "step_keyword": "Given",
+      "step_text": "more than one browser profile is available",
+      "step_text_normalized": "more than one browser profile is available",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-profile-count']",
+        "action": "assert_text",
+        "value_arg": "2"
+      },
+      "confirmed_at": "2026-09-09T15:08:49.643415+00:00"
+    },
+    {
+      "step_line": 23,
+      "step_keyword": "And",
+      "step_text": "no browser profile is selected",
+      "step_text_normalized": "no browser profile is selected",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-auto-selected']",
+        "action": "assert_text",
+        "value_arg": "false"
+      },
+      "confirmed_at": "2026-09-09T15:08:51.349308700+00:00"
+    },
+    {
       "step_line": 24,
       "step_keyword": "When",
       "step_text": "the user selects a browser profile",
@@ -68,11 +157,12 @@
       "source": "binding",
       "status": "confirmed",
       "primary": {
-        "strategy": "testid",
-        "value": "[data-testid=open-browser-sessions]",
-        "action": "click"
+        "strategy": "css",
+        "value": "[data-testid='e2e-surface']",
+        "action": "assert_text",
+        "value_arg": "browser"
       },
-      "confirmed_at": "2026-08-28T11:26:21.033142900+00:00"
+      "confirmed_at": "2026-09-09T15:09:52.512920100+00:00"
     },
     {
       "step_line": 29,
@@ -101,6 +191,50 @@
         "action": "assert_visible"
       },
       "confirmed_at": "2026-08-28T11:26:23.104162400+00:00"
+    },
+    {
+      "step_line": 33,
+      "step_keyword": "Given",
+      "step_text": "the Chrome bridge is unavailable",
+      "step_text_normalized": "the chrome bridge is unavailable",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-bridge-unavailable']",
+        "action": "assert_text",
+        "value_arg": "true"
+      },
+      "confirmed_at": "2026-09-09T15:09:20.541999600+00:00"
+    },
+    {
+      "step_line": 34,
+      "step_keyword": "When",
+      "step_text": "the user requests a Chrome connection",
+      "step_text_normalized": "the user requests a chrome connection",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='start-browser-bridge']",
+        "action": "click"
+      },
+      "confirmed_at": "2026-09-09T15:09:22.249757100+00:00"
+    },
+    {
+      "step_line": 35,
+      "step_keyword": "Then",
+      "step_text": "teshi web attempts to start the Chrome bridge",
+      "step_text_normalized": "teshi web attempts to start the chrome bridge",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-bridge-attempted']",
+        "action": "assert_text",
+        "value_arg": "true"
+      },
+      "confirmed_at": "2026-09-09T15:09:24.744270700+00:00"
     }
   ]
 }

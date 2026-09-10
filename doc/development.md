@@ -18,7 +18,8 @@ cargo build --workspace --exclude teshi-web --locked --release    # optimized bu
 cargo run -p teshi-cli -- [args]                                  # build + run CLI
 ```
 
-To build the GPUI WASM frontend for `teshi web`:
+To build the GPUI WASM artifact for the hosted Pages deployment or local
+artifact diagnostics:
 
 ```bash
 bash scripts/build-teshi-web.sh
@@ -38,8 +39,10 @@ cargo fmt --all --check                                           # check format
 ### Test layout
 
 - Unit tests live at the bottom of each source file (in `#[cfg(test)]` modules)
-- Product Gherkin: `features/en-US/` and `features/zh-CN/` (`@web-ui` for Teshi Web, `@cli` for requirement CLI E2E)
-- Requirement CLI E2E is executed by `teshi run` and `teshi-requirement-cli-runner` (`tests/steps/requirement-cli`) against `@cli` files only (English `requirement_*.feature`, Chinese titles such as `需求列表.feature` and `需求标签页.feature`)
+- Product Gherkin: `features/en-US/` and `features/zh-CN/`; every Feature has an explicit verification route and runner tag (`@web-ui`, `@cli`, `@validation-e2e`, or `@api`)
+- Feature catalog ownership is checked by `python scripts/check-feature-e2e-catalog.py`; Core, architecture, CI packaging, and protocol-internal contracts belong in OpenSpec or Rust/workflow tests
+- Requirement CLI E2E is executed by `teshi run` and `teshi-requirement-cli-runner` (`tests/steps/requirement-cli`) against requirement-tagged CLI files (English `requirement_*.feature`, Chinese titles such as `需求列表.feature` and `需求标签页.feature`)
+- Validation self-bootstrap E2E is executed by `validation_cli_bdd.rs` with `teshi-validation-cli-runner` (`tests/steps/validation-cli`). It creates malformed source as isolated fixture data, then starts the exact built Teshi binary as a child process; it does not use the target validator API for assertions.
 - Key test areas:
   - Gherkin parsing edge cases (`crates/teshi-core/src/gherkin.rs`)
   - Editor buffer operations (`crates/teshi-tui/src/editor_buffer.rs`)
@@ -50,14 +53,17 @@ Requirement documents used by the TUI live in the user-level store (`<app_data>/
 
 ## Running `teshi web`
 
-The browser GUI is served by `apps/teshi-daemon` and requires the prebuilt GPUI WASM bundle:
+The production launcher starts the loopback daemon and opens the latest hosted
+UI at `https://teshi-org.github.io/app/#port=<port>&token=<session-token>`. It no longer
+requires an installed `share/web` directory or a local WASM build:
 
 ```bash
-bash scripts/build-teshi-web.sh
-./target/debug/teshi web --project <dir> --host 127.0.0.1 --port 20253 --no-open --dist apps/teshi-web/dist
+./target/debug/teshi web --project <dir>
 ```
 
-When run from the repo root, `--dist apps/teshi-web/dist` is optional because the daemon auto-resolves that path.
+Use `--no-open` for daemon/session lifecycle checks. `--port` and `--dist` are
+explicit diagnostic controls; `--dist` is not part of the nightly package or
+the production hosted launch path. See [hosted-web-ui.md](hosted-web-ui.md).
 
 ## Project structure
 

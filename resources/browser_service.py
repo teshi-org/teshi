@@ -62,6 +62,19 @@ ALLOWED_CONTENT_SETTINGS = {
 PRIVILEGED_POLICY_FILENAME = "browser-policy.json"
 
 
+def embedded_browser_headless() -> bool:
+    """Return whether embedded Chromium should run headless by default.
+
+    GPUI WebGPU requires a browser adapter, which is unavailable in some
+    headless Chromium environments. Keep the existing CI-friendly default,
+    while allowing local Web E2E runs to opt into a headed browser explicitly.
+    """
+    value = os.environ.get("TESHI_EMBEDDED_HEADLESS")
+    if value is None:
+        return True
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
 def load_browser_privileged_policy(project_root: Path) -> set[str]:
     """Load explicit user/project privileged capability allowlists; default deny."""
     candidates = [project_root / ".teshi" / PRIVILEGED_POLICY_FILENAME]
@@ -657,7 +670,7 @@ class EmbeddedSession:
 
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(
-            headless=True,
+            headless=embedded_browser_headless(),
             args=[f"--remote-debugging-port={cdp_port}"],
         )
         self.context = await self.browser.new_context(
@@ -698,6 +711,12 @@ class EmbeddedSession:
             if self.page is None or self.cdp_session is None:
                 return {"ok": False, "error": "browser not ready"}
 
+            # DOM.requestNode requires the DOM domain to be enabled for a
+            # Playwright-created CDP session. Without this, the selector can
+            # execute successfully but locator verification cannot record the
+            # required visual highlight.
+            await self.cdp_session.send("DOM.enable")
+            await self.cdp_session.send("Overlay.enable")
             await self.cdp_session.send("Overlay.hideHighlight", {})
             locator = self.page.locator(selector)
             count = await locator.count()
@@ -709,20 +728,15 @@ class EmbeddedSession:
                     "error": f"selector matched {count} elements; refine selector",
                 }
 
-            object_result = await self.cdp_session.send(
-                "Runtime.evaluate",
-                {
-                    "expression": f"document.querySelector({json.dumps(selector)})",
-                    "returnByValue": False,
-                },
+            document_result = await self.cdp_session.send(
+                "DOM.getDocument", {"depth": -1, "pierce": True}
             )
-            object_id = object_result.get("result", {}).get("objectId")
-            if not object_id:
-                return {"ok": False, "error": "could not evaluate selector in page context"}
-
+            root_node_id = document_result.get("root", {}).get("nodeId")
+            if not root_node_id:
+                return {"ok": False, "error": "could not resolve document node"}
             node_result = await self.cdp_session.send(
-                "DOM.requestNode",
-                {"objectId": object_id},
+                "DOM.querySelector",
+                {"nodeId": root_node_id, "selector": selector},
             )
             node_id = node_result.get("nodeId")
             if not node_id:
@@ -1351,9 +1365,12 @@ async def handle_embedded_command(
             "capture_browser_screenshot",
             "generate_browser_pdf",
             "execute_browser_action",
-            "navigate",
-            "go_back",
-        } or (cmd == "get_page_snapshot" and data.get("target") is not None):
+        } or (
+            cmd in {"navigate", "go_back"} and data.get("target") is not None
+        ) or (cmd == "get_page_snapshot" and data.get("target") is not None):
+            # Embedded Playwright commands without a target are the local sidecar
+            # transport used by the self-test workflow. Targeted commands still
+            # go through the broker authorization path above.
             try:
                 _record, target, _ephemeral = broker.authorize_command(
                     data, legacy_compatibility=False

@@ -27,3 +27,17 @@ Choose the Teshi surface that completes the user's task. Use explicit CLI subcom
 Load only the relevant reference. The packaged `playwright-locator` is the browser-control specialist; this skill owns the Gherkin binding handoff. If a specialist is absent, consult command help and the user's checkout documentation when available; do not assume repository-relative files exist in an installed skill.
 
 Keep the requested action and target explicit. Session discovery, UI selection, and existing connection files provide context, not permission to perform unrelated actions. Reuse authorization already given by the user.
+
+## Validate before binding or execution
+
+Teshi is the authority for Gherkin syntax and source diagnostics. Before binding
+steps or executing/replaying a Feature, run:
+
+~~~text
+teshi check --feature <path> --json
+~~~
+
+Continue only when the command exits successfully. Consume the returned
+summary and diagnostics fields; do not recreate dialect keyword, separator,
+or structure rules in a Skill. teshi steps, teshi run, and replay commands also
+enforce this gate themselves.

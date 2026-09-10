@@ -8,6 +8,10 @@ The official Web UI SHALL be the distribution built from `apps/teshi-web` and ho
 - **THEN** the loaded application SHALL come from `https://teshi.org/app/` and SHALL identify itself as the GPUI WASM shell
 - **AND** startup SHALL succeed without `apps/teshi-web/dist`, installed `share/web`, or `--dist`
 
+#### Scenario: Release package is assembled
+- **WHEN** an installer or release archive advertising browser locator support is built
+- **THEN** its nightly payload SHALL NOT contain `apps/teshi-web/dist`, `share/web`, or another complete Web UI bundle
+
 #### Scenario: Nightly package is assembled
 - **WHEN** a nightly installer or release payload is built
 - **THEN** it SHALL NOT contain `apps/teshi-web/dist`, `share/web`, or another complete Web UI bundle
@@ -19,6 +23,10 @@ The official Web UI SHALL be the distribution built from `apps/teshi-web` and ho
 
 ### Requirement: Same-origin broker adapter
 The hosted GPUI WASM application SHALL discover sessions and activate selected tabs through authenticated methods on its negotiated loopback `/ws/control` connection, while the extension broker remains loopback-only and undisclosed to the page.
+
+#### Scenario: Web shell is served through a non-loopback daemon address
+- **WHEN** the GPUI WASM page requests browser-session inventory or tab activation
+- **THEN** it SHALL use the authenticated daemon control connection and the daemon SHALL proxy only the corresponding loopback broker operation
 
 #### Scenario: Hosted shell requests browser-session inventory
 - **WHEN** the authenticated hosted UI lists browser sessions or activates an explicit tab

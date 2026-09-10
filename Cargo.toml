@@ -20,6 +20,7 @@ members = [
     "apps/teshi-update-helper",
     "crates/teshi-update-ui",
     "tests/steps/requirement-cli",
+    "tests/steps/validation-cli",
 ]
 exclude = ["runner"]
 

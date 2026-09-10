@@ -6,6 +6,7 @@
 mod app_shell;
 pub mod backend;
 mod browser_sessions_view;
+mod gherkin_diagnostics_view;
 mod llm_config_view;
 mod run_view;
 mod winapp_preview;
@@ -15,11 +16,13 @@ pub use backend::{
     ApiRunBackend, ApiRunEventDto, ApiScenarioSnapshot, ApiStyleDto, BackendFuture,
     BrowserLeaseSnapshot, BrowserMetadataSnapshot, BrowserSessionIdentitySnapshot,
     BrowserSessionListSnapshot, BrowserSessionSnapshot, BrowserSessionsBackend, BrowserTabSnapshot,
-    BrowserTabTarget, BrowserWindowSnapshot, LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate,
-    ModelProfileListSnapshot, ModelProfileSnapshot, ModelProfileUpdate, SharedApiRunBackend,
-    SharedBrowserSessionsBackend, SharedLlmBackend,
+    BrowserTabTarget, BrowserWindowSnapshot, GherkinEditorBackend, LlmConfigBackend,
+    LlmConfigSnapshot, LlmConfigUpdate, ModelProfileListSnapshot, ModelProfileSnapshot,
+    ModelProfileUpdate, SharedApiRunBackend, SharedBrowserSessionsBackend,
+    SharedGherkinEditorBackend, SharedLlmBackend,
 };
 pub use browser_sessions_view::BrowserSessionsView;
+pub use gherkin_diagnostics_view::GherkinDiagnosticsView;
 pub use llm_config_view::{LlmConfigView, bind_llm_config_keys};
 pub use run_view::ApiRunView;
 pub use winapp_preview::{PreviewStatus, WinAppPreview};

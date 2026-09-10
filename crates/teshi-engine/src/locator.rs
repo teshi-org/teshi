@@ -20,6 +20,7 @@ pub use teshi_core::locator::{
 };
 
 use crate::sidecar::{send_sidecar_command, SidecarState};
+use crate::validation::validate_feature_scope;
 use crate::TeshiEngine;
 
 /// Watches `.teshi/pending-locator.json` for agent proposals.
@@ -351,13 +352,12 @@ fn upsert_binding(
     candidate: &LocatorCandidate,
 ) -> Result<()> {
     let mut bindings = read_step_bindings_file(project_root, &step.feature_relative_path)?;
-    let normalized_text = normalize_step_text(&step.step_text);
     let binding = binding_from_candidate(step, candidate);
-    if let Some(existing) = bindings
-        .steps
-        .iter_mut()
-        .find(|s| s.step_text_normalized == normalized_text)
-    {
+    // A feature may intentionally repeat the same step text in different
+    // scenarios.  The source line is the executable binding identity; using
+    // only normalized text would make confirming the later occurrence replace
+    // the earlier one and leave that step unbound again.
+    if let Some(existing) = bindings.steps.iter_mut().find(|s| s.step_line == step.step_line) {
         *existing = binding;
     } else {
         bindings.steps.push(binding);
@@ -415,10 +415,32 @@ fn reject_pending_locator_file(project_root: &Path) -> Result<PendingLocator> {
     Ok(pending)
 }
 
-async fn clear_browser_highlight(sidecar: &SidecarState) -> Result<(), String> {
-    let ws_url = sidecar
+fn persisted_browser_ws_url(project_root: &Path) -> Option<String> {
+    let endpoint_path = project_root.join(".teshi").join("cdp-endpoint.json");
+    let text = fs::read_to_string(endpoint_path).ok()?;
+    let payload: serde_json::Value = serde_json::from_str(&text).ok()?;
+    payload
+        .get("ws_url")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+}
+
+async fn clear_browser_highlight(
+    sidecar: &SidecarState,
+    project_root: &Path,
+) -> Result<(), String> {
+    // The CLI can own a sidecar independently of the daemon.  Its endpoint is
+    // persisted in the project so daemon-mediated confirmation can still
+    // clear the highlight created by `teshi browser verify`.
+    let Some(ws_url) = sidecar
         .browser_ws_url()
-        .ok_or_else(|| "browser sidecar not running".to_string())?;
+        .or_else(|| persisted_browser_ws_url(project_root))
+    else {
+        // Confirmation is a file operation; there is no highlight to clear
+        // when no browser sidecar has ever been started.
+        return Ok(());
+    };
     send_sidecar_command(
         &ws_url,
         serde_json::json!({ "cmd": "clear_highlight", "request_id": "clear" }),
@@ -482,6 +504,7 @@ pub async fn sync_active_step(
                 .into(),
         );
     }
+    validate_feature_before_binding(&project_root, &feature_path).map_err(|e| e.to_string())?;
 
     let active = resolve_step_context(&project_root, Path::new(&feature_path), step_line as usize)
         .map_err(|e| e.to_string())?;
@@ -552,6 +575,7 @@ pub fn read_pending(project_root: &Path) -> Result<Option<PendingLocator>> {
 ///
 /// Returns an error when the proposal cannot be serialized or written.
 pub fn propose_locator(project_root: &Path, pending: PendingLocator) -> Result<()> {
+    validate_feature_before_binding(project_root, &pending.step_ref.feature_relative_path)?;
     ensure_teshi_dir(project_root)?;
     write_pending_locator(project_root, &pending)
 }
@@ -567,6 +591,9 @@ pub fn confirm_pending_locator(
     candidate_rank: u32,
     edited_value: Option<String>,
 ) -> Result<PendingLocator> {
+    let pending = read_pending_locator(project_root)?
+        .ok_or_else(|| anyhow::anyhow!("no pending locator proposal"))?;
+    validate_feature_before_binding(project_root, &pending.step_ref.feature_relative_path)?;
     confirm_pending_locator_file(project_root, candidate_rank, edited_value)
 }
 
@@ -601,6 +628,7 @@ pub fn unbind_step_binding(
     feature_relative_path: &str,
     step_line: usize,
 ) -> Result<Option<StepBinding>> {
+    validate_feature_before_binding(project_root, feature_relative_path)?;
     let feature_relative = normalize_feature_relative_path(project_root, feature_relative_path)?;
     let mut bindings = read_step_bindings_file(project_root, &feature_relative)?;
     let Some(idx) = bindings.steps.iter().position(|s| s.step_line == step_line) else {
@@ -647,6 +675,7 @@ pub fn resolve_step_bindings(
     feature_relative_path: &str,
     until_line: Option<usize>,
 ) -> Result<Vec<StepBinding>> {
+    validate_feature_before_binding(project_root, feature_relative_path)?;
     let bindings = read_step_bindings_file(project_root, feature_relative_path)?;
     Ok(bindings
         .steps
@@ -676,6 +705,7 @@ pub fn write_active_step(
     feature_path: &str,
     step_line: usize,
 ) -> Result<ActiveStep> {
+    validate_feature_before_binding(project_root, feature_path)?;
     if pending_is_blocking(project_root)? {
         anyhow::bail!(
             "A locator proposal is pending confirmation. Accept or reject it before selecting another step."
@@ -742,6 +772,7 @@ pub fn list_feature_step_refs(
     project_root: &Path,
     feature_path: &str,
 ) -> Result<Vec<FeatureStepRef>> {
+    validate_feature_before_binding(project_root, feature_path)?;
     let feature_relative = normalize_feature_relative_path(project_root, feature_path)?;
     let feature_abs = project_root.join(&feature_relative);
     let content = fs::read_to_string(&feature_abs).context("read feature file")?;
@@ -792,6 +823,7 @@ pub fn step_binding_statuses(
     project_root: &Path,
     feature_relative_path: &str,
 ) -> Result<Vec<StepBindingStatus>> {
+    validate_feature_before_binding(project_root, feature_relative_path)?;
     let feature_relative_path =
         normalize_feature_relative_path(project_root, feature_relative_path)?;
     let mut statuses = BTreeMap::<String, StepBindingStatus>::new();
@@ -823,6 +855,17 @@ pub fn step_binding_statuses(
         }
     }
     Ok(statuses.into_values().collect())
+}
+
+fn validate_feature_before_binding(project_root: &Path, feature_path: &str) -> Result<()> {
+    let report = validate_feature_scope(project_root, Some(Path::new(feature_path)))?;
+    if report.has_errors() {
+        anyhow::bail!(
+            "Feature validation failed: {}",
+            serde_json::to_string(&report)?
+        );
+    }
+    Ok(())
 }
 
 /// Waits until the pending proposal reaches the requested terminal state.
@@ -906,7 +949,7 @@ pub async fn confirm_locator(
 
     confirm_pending_locator_file(&project_root, candidate_rank, edited_value)
         .map_err(|e| e.to_string())?;
-    clear_browser_highlight(&rt.sidecar)
+    clear_browser_highlight(&rt.sidecar, &project_root)
         .await
         .map_err(|e| e.to_string())?;
     emit_pending_locator(rt, &project_root);
@@ -924,7 +967,7 @@ pub async fn reject_locator(rt: &TeshiEngine) -> Result<(), String> {
         .ok_or_else(|| "no project open".to_string())?;
 
     reject_pending_locator_file(&project_root).map_err(|e| e.to_string())?;
-    clear_browser_highlight(&rt.sidecar)
+    clear_browser_highlight(&rt.sidecar, &project_root)
         .await
         .map_err(|e| e.to_string())?;
     emit_pending_locator(rt, &project_root);
@@ -1046,5 +1089,60 @@ mod tests {
             bindings.steps[0].primary.value,
             "uia:automation_id=LoginButton"
         );
+    }
+
+    #[test]
+    fn persisted_browser_endpoint_is_used_for_daemon_confirmation() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join(".teshi")).unwrap();
+        fs::write(
+            dir.path().join(".teshi/cdp-endpoint.json"),
+            r#"{"mode":"embedded","ws_url":"ws://127.0.0.1:43123"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            persisted_browser_ws_url(dir.path()).as_deref(),
+            Some("ws://127.0.0.1:43123")
+        );
+    }
+
+    #[test]
+    fn missing_persisted_browser_endpoint_is_not_an_error() {
+        let dir = TempDir::new().unwrap();
+        assert!(persisted_browser_ws_url(dir.path()).is_none());
+    }
+
+    #[test]
+    fn repeated_step_text_keeps_distinct_line_bindings() {
+        let dir = TempDir::new().unwrap();
+        let feature_path = dir.path().join("duplicate.feature");
+        fs::write(
+            &feature_path,
+            "Feature: Duplicate\n\n  Scenario: First\n    Then the same result is shown\n\n  Scenario: Second\n    Then the same result is shown\n",
+        )
+        .unwrap();
+
+        let first = resolve_step_context(dir.path(), &feature_path, 4).unwrap();
+        let second = resolve_step_context(dir.path(), &feature_path, 7).unwrap();
+        let candidate = |value: &str| LocatorCandidate {
+            rank: 1,
+            strategy: "css".to_string(),
+            value: value.to_string(),
+            action: "assert_visible".to_string(),
+            value_arg: None,
+            confidence: 0.9,
+            rationale: "distinct fixture target".to_string(),
+        };
+
+        upsert_binding(dir.path(), &first, &candidate("#first")).unwrap();
+        upsert_binding(dir.path(), &second, &candidate("#second")).unwrap();
+
+        let bindings = list_step_bindings(dir.path(), "duplicate.feature").unwrap();
+        assert_eq!(bindings.steps.len(), 2);
+        assert_eq!(bindings.steps[0].step_line, 4);
+        assert_eq!(bindings.steps[0].primary.value, "#first");
+        assert_eq!(bindings.steps[1].step_line, 7);
+        assert_eq!(bindings.steps[1].primary.value, "#second");
     }
 }

@@ -14,6 +14,7 @@ use teshi_engine::{
     wait_for_step_status, write_active_step,
 };
 
+use super::check::preflight_feature;
 use super::locator_verify::locator_verify_satisfied;
 use teshi_core::{BddProject, StepIndex};
 
@@ -22,6 +23,8 @@ use super::{
     StepsProposeArgs, StepsResolveArgs, StepsSelectArgs, StepsUnbindArgs, StepsWaitArgs,
     WaitUntilArg,
 };
+
+const VALIDATION_REPORT_HEADER: &str = "x-teshi-validation-report";
 
 /// Handles `teshi steps ...` subcommands.
 pub fn handle_steps_command(action: &StepsCommand) -> Result<()> {
@@ -32,7 +35,7 @@ pub fn handle_steps_command(action: &StepsCommand) -> Result<()> {
     if let Some(manifest) = teshi_engine::DaemonManifest::load_manifest(&project_root)
         && manifest.is_daemon_alive()
     {
-        return handle_steps_via_daemon(&manifest, action);
+        return handle_steps_via_daemon(&project_root, &manifest, action);
     }
 
     // Fallback: direct file I/O
@@ -53,6 +56,7 @@ pub fn handle_steps_command(action: &StepsCommand) -> Result<()> {
 
 /// Route steps commands through the daemon's REST API.
 fn handle_steps_via_daemon(
+    project_root: &Path,
     manifest: &teshi_engine::DaemonManifest,
     action: &StepsCommand,
 ) -> Result<()> {
@@ -121,15 +125,13 @@ fn handle_steps_via_daemon(
         // For read-only ops that don't have direct daemon API equivalents,
         // fall back to direct file I/O:
         _ => {
-            let project_root = teshi_engine::find_project_root(None)
-                .unwrap_or_else(|| std::env::current_dir().unwrap());
             return match action {
-                StepsCommand::NextUnbound(args) => next_unbound(&project_root, args),
-                StepsCommand::Propose(args) => propose(&project_root, args),
-                StepsCommand::Wait(args) => wait(&project_root, args),
-                StepsCommand::Resolve(args) => resolve(&project_root, args),
-                StepsCommand::List(args) => list(&project_root, args),
-                StepsCommand::Unbind(args) => unbind(&project_root, args),
+                StepsCommand::NextUnbound(args) => next_unbound(project_root, args),
+                StepsCommand::Propose(args) => propose(project_root, args),
+                StepsCommand::Wait(args) => wait(project_root, args),
+                StepsCommand::Resolve(args) => resolve(project_root, args),
+                StepsCommand::List(args) => list(project_root, args),
+                StepsCommand::Unbind(args) => unbind(project_root, args),
                 _ => unreachable!(),
             };
         }
@@ -138,6 +140,15 @@ fn handle_steps_via_daemon(
 }
 
 fn print_response(resp: reqwest::blocking::Response) -> Result<()> {
+    let validation_report = resp
+        .headers()
+        .get(VALIDATION_REPORT_HEADER)
+        .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned());
+    if let Some(report) = validation_report {
+        let report: serde_json::Value = serde_json::from_str(&report)
+            .context("decode validation report from daemon response")?;
+        eprintln!("{}", serde_json::to_string_pretty(&report)?);
+    }
     if !resp.status().is_success() {
         anyhow::bail!(
             "daemon returned {}: {}",
@@ -173,6 +184,7 @@ fn resolve_feature_arg_daemon(
 }
 
 fn select(project_root: &Path, args: &StepsSelectArgs) -> Result<()> {
+    preflight_feature(project_root, &args.feature)?;
     let active = write_active_step(project_root, &args.feature, args.line)?;
     println!("{}", serde_json::to_string_pretty(&active)?);
     Ok(())
@@ -180,6 +192,7 @@ fn select(project_root: &Path, args: &StepsSelectArgs) -> Result<()> {
 
 fn unbound(project_root: &Path, args: &StepsFeatureArgs) -> Result<()> {
     let feature = resolve_feature_arg(project_root, args.feature.as_deref())?;
+    preflight_feature(project_root, &feature)?;
     let steps: Vec<_> = list_feature_step_refs(project_root, &feature)?
         .into_iter()
         .filter(|s| s.status == "unbound")
@@ -190,6 +203,7 @@ fn unbound(project_root: &Path, args: &StepsFeatureArgs) -> Result<()> {
 
 fn next_unbound(project_root: &Path, args: &StepsFeatureArgs) -> Result<()> {
     let feature = resolve_feature_arg(project_root, args.feature.as_deref())?;
+    preflight_feature(project_root, &feature)?;
     let Some(step) = first_unbound_feature_step(project_root, &feature)? else {
         println!(
             "{}",
@@ -359,6 +373,7 @@ fn wait(project_root: &Path, args: &StepsWaitArgs) -> Result<()> {
 }
 
 fn unbind(project_root: &Path, args: &StepsUnbindArgs) -> Result<()> {
+    preflight_feature(project_root, &args.feature)?;
     let removed = unbind_step_binding(project_root, &args.feature, args.line)?;
     match removed {
         Some(binding) => {
@@ -393,6 +408,7 @@ fn effective_wait_timeout(args: &StepsWaitArgs) -> u64 {
 
 fn resolve(project_root: &Path, args: &StepsResolveArgs) -> Result<()> {
     let feature = resolve_feature_arg(project_root, args.feature.as_deref())?;
+    preflight_feature(project_root, &feature)?;
     let steps = resolve_step_bindings(project_root, &feature, args.until_line)?;
     println!("{}", serde_json::to_string_pretty(&steps)?);
     Ok(())
@@ -400,6 +416,7 @@ fn resolve(project_root: &Path, args: &StepsResolveArgs) -> Result<()> {
 
 fn list(project_root: &Path, args: &StepsListArgs) -> Result<()> {
     let feature = resolve_feature_arg(project_root, args.feature.as_deref())?;
+    preflight_feature(project_root, &feature)?;
     let bindings = list_step_bindings(project_root, &feature)?;
     let statuses = step_binding_statuses(project_root, &feature)?;
     println!(
@@ -648,5 +665,44 @@ fn debug_log(project_root: &Path, mut payload: serde_json::Value) {
     let path = log_dir.join("cli-browser.log");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "{}", payload);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_routing_keeps_the_selected_project_root_for_fallback_steps() {
+        let project_root = std::env::temp_dir().join(format!(
+            "teshi-tui-steps-root-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(project_root.join(".teshi")).unwrap();
+        std::fs::create_dir_all(project_root.join("features")).unwrap();
+        std::fs::write(
+            project_root.join("features/setup.feature"),
+            "Feature: Setup\n  Scenario: Ready\n    Given the account exists\n    When the account opens\n    Then the account is ready\n",
+        )
+        .unwrap();
+
+        let manifest: teshi_engine::DaemonManifest = serde_json::from_value(json!({
+            "pid": 1,
+            "port": 1,
+            "started": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        let action = StepsCommand::NextUnbound(StepsFeatureArgs {
+            feature: Some("features/setup.feature".into()),
+        });
+
+        handle_steps_via_daemon(&project_root, &manifest, &action)
+            .expect("fallback step operation should use the selected project root");
+        assert!(project_root.join(".teshi/active-step.json").is_file());
+
+        std::fs::remove_dir_all(project_root).unwrap();
     }
 }

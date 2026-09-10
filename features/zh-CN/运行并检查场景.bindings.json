@@ -32,6 +32,21 @@
       "confirmed_at": "2026-08-28T12:00:00+00:00"
     },
     {
+      "step_line": 12,
+      "step_keyword": "并且",
+      "step_text": "浏览器配置表面已显示",
+      "step_text_normalized": "浏览器配置表面已显示",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-surface']",
+        "action": "assert_text",
+        "value_arg": "browser"
+      },
+      "confirmed_at": "2026-09-09T15:21:48.894057400+00:00"
+    },
+    {
       "step_line": 15,
       "step_keyword": "当",
       "step_text": "用户打开运行界面",
@@ -44,6 +59,21 @@
         "action": "click"
       },
       "confirmed_at": "2026-08-28T12:00:00+00:00"
+    },
+    {
+      "step_line": 16,
+      "step_keyword": "那么",
+      "step_text": "运行检查界面已显示",
+      "step_text_normalized": "运行检查界面已显示",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-surface']",
+        "action": "assert_text",
+        "value_arg": "run"
+      },
+      "confirmed_at": "2026-09-09T15:22:14.846267+00:00"
     },
     {
       "step_line": 17,
@@ -61,6 +91,21 @@
       "confirmed_at": "2026-08-28T12:00:00+00:00"
     },
     {
+      "step_line": 20,
+      "step_keyword": "假如",
+      "step_text": "运行检查界面已显示",
+      "step_text_normalized": "运行检查界面已显示",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-surface']",
+        "action": "assert_text",
+        "value_arg": "run"
+      },
+      "confirmed_at": "2026-09-09T15:22:43.271032100+00:00"
+    },
+    {
       "step_line": 21,
       "step_keyword": "当",
       "step_text": "用户查看场景列表",
@@ -73,6 +118,21 @@
         "action": "click"
       },
       "confirmed_at": "2026-08-28T12:00:00+00:00"
+    },
+    {
+      "step_line": 22,
+      "step_keyword": "那么",
+      "step_text": "teshi web 列出当前项目中的 Gherkin 场景",
+      "step_text_normalized": "teshi web 列出当前项目中的 gherkin 场景",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-scenarios']",
+        "action": "assert_text",
+        "value_arg": "[api] Create a user then fetch by extracted id"
+      },
+      "confirmed_at": "2026-09-09T15:23:37.077167500+00:00"
     },
     {
       "step_line": 26,

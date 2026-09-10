@@ -32,6 +32,21 @@
       "confirmed_at": "2026-08-28T11:26:54.299732+00:00"
     },
     {
+      "step_line": 12,
+      "step_keyword": "And",
+      "step_text": "the Browser Profiles surface is shown",
+      "step_text_normalized": "the browser profiles surface is shown",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-surface']",
+        "action": "assert_text",
+        "value_arg": "browser"
+      },
+      "confirmed_at": "2026-09-09T14:54:53.389456500+00:00"
+    },
+    {
       "step_line": 15,
       "step_keyword": "When",
       "step_text": "the user opens the Run surface",
@@ -44,6 +59,21 @@
         "action": "click"
       },
       "confirmed_at": "2026-08-28T11:23:15.300073200+00:00"
+    },
+    {
+      "step_line": 16,
+      "step_keyword": "Then",
+      "step_text": "the Run inspect surface is shown",
+      "step_text_normalized": "the run inspect surface is shown",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-surface']",
+        "action": "assert_text",
+        "value_arg": "run"
+      },
+      "confirmed_at": "2026-09-09T15:11:47.234754400+00:00"
     },
     {
       "step_line": 17,
@@ -61,6 +91,21 @@
       "confirmed_at": "2026-08-28T11:23:22.874975500+00:00"
     },
     {
+      "step_line": 20,
+      "step_keyword": "Given",
+      "step_text": "the Run inspect surface is shown",
+      "step_text_normalized": "the run inspect surface is shown",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-surface']",
+        "action": "assert_text",
+        "value_arg": "run"
+      },
+      "confirmed_at": "2026-09-09T15:11:48.953187600+00:00"
+    },
+    {
       "step_line": 21,
       "step_keyword": "When",
       "step_text": "the user views the scenario list",
@@ -73,6 +118,36 @@
         "action": "click"
       },
       "confirmed_at": "2026-08-28T11:23:25.175968200+00:00"
+    },
+    {
+      "step_line": 22,
+      "step_keyword": "Then",
+      "step_text": "teshi web lists Gherkin scenarios from the open project",
+      "step_text_normalized": "teshi web lists gherkin scenarios from the open project",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-scenarios']",
+        "action": "assert_text",
+        "value_arg": "[api] Create a user then fetch by extracted id"
+      },
+      "confirmed_at": "2026-09-09T15:16:37.124409+00:00"
+    },
+    {
+      "step_line": 25,
+      "step_keyword": "Given",
+      "step_text": "the Run inspect surface is shown",
+      "step_text_normalized": "the run inspect surface is shown",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-surface']",
+        "action": "assert_text",
+        "value_arg": "run"
+      },
+      "confirmed_at": "2026-09-09T15:11:50.677028300+00:00"
     },
     {
       "step_line": 26,
@@ -102,6 +177,21 @@
         "value_arg": "[api] Create a user then fetch by extracted id"
       },
       "confirmed_at": "2026-08-28T11:23:29.611254700+00:00"
+    },
+    {
+      "step_line": 30,
+      "step_keyword": "Given",
+      "step_text": "the Run inspect surface is shown",
+      "step_text_normalized": "the run inspect surface is shown",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-surface']",
+        "action": "assert_text",
+        "value_arg": "run"
+      },
+      "confirmed_at": "2026-09-09T15:12:05.417316900+00:00"
     },
     {
       "step_line": 31,
@@ -139,12 +229,26 @@
       "source": "binding",
       "status": "confirmed",
       "primary": {
-        "strategy": "testid",
-        "value": "[data-testid=e2e-run-status]",
-        "action": "assert_text",
-        "value_arg": "Run finished"
+        "strategy": "css",
+        "value": "[data-testid='e2e-events']",
+        "action": "assert_visible"
       },
-      "confirmed_at": "2026-08-28T11:23:35.751560400+00:00"
+      "confirmed_at": "2026-09-09T15:19:47.259034300+00:00"
+    },
+    {
+      "step_line": 36,
+      "step_keyword": "Given",
+      "step_text": "the Run inspect surface is shown",
+      "step_text_normalized": "the run inspect surface is shown",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "css",
+        "value": "[data-testid='e2e-surface']",
+        "action": "assert_text",
+        "value_arg": "run"
+      },
+      "confirmed_at": "2026-09-09T15:16:00.484003800+00:00"
     },
     {
       "step_line": 37,
@@ -211,11 +315,12 @@
       "source": "binding",
       "status": "confirmed",
       "primary": {
-        "strategy": "testid",
-        "value": "[data-testid=e2e-run-status]",
-        "action": "assert_visible"
+        "strategy": "css",
+        "value": "[data-testid='e2e-run-status']",
+        "action": "assert_text",
+        "value_arg": "Showing plaintext"
       },
-      "confirmed_at": "2026-08-28T11:24:15.266061900+00:00"
+      "confirmed_at": "2026-09-09T15:20:11.406999900+00:00"
     },
     {
       "step_line": 46,
@@ -225,11 +330,12 @@
       "source": "binding",
       "status": "confirmed",
       "primary": {
-        "strategy": "testid",
-        "value": "[data-testid=open-api-run]",
-        "action": "click"
+        "strategy": "css",
+        "value": "[data-testid='e2e-surface']",
+        "action": "assert_text",
+        "value_arg": "run"
       },
-      "confirmed_at": "2026-08-28T11:24:16.391204100+00:00"
+      "confirmed_at": "2026-09-09T15:20:32.181414200+00:00"
     },
     {
       "step_line": 47,
@@ -253,12 +359,12 @@
       "source": "binding",
       "status": "confirmed",
       "primary": {
-        "strategy": "testid",
-        "value": "[data-testid=e2e-surface]",
+        "strategy": "css",
+        "value": "[data-testid='e2e-surface']",
         "action": "assert_text",
         "value_arg": "browser"
       },
-      "confirmed_at": "2026-08-28T11:24:18.518070400+00:00"
+      "confirmed_at": "2026-09-09T15:21:05.866992800+00:00"
     }
   ]
 }

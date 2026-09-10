@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use teshi_core::ValidationReport;
 
 /// Object-safe, single-threaded future used by shared GPUI backends.
 ///
@@ -379,6 +380,21 @@ pub trait BrowserSessionsBackend {
 
 /// Shared backend handle used by [`crate::BrowserSessionsView`].
 pub type SharedBrowserSessionsBackend = Rc<dyn BrowserSessionsBackend>;
+
+/// Platform adapter for validating the current, possibly unsaved Feature
+/// buffer. Implementations return core diagnostics without blocking editing
+/// or replacing the permissive parsed buffer.
+pub trait GherkinEditorBackend {
+    /// Validate one in-memory Feature buffer.
+    fn validate_feature_buffer(
+        &self,
+        path: String,
+        content: String,
+    ) -> BackendFuture<ValidationReport>;
+}
+
+/// Shared editor diagnostics backend used by Desktop and Web shells.
+pub type SharedGherkinEditorBackend = Rc<dyn GherkinEditorBackend>;
 
 /// One scenario listed on the GPUI Run surface.
 #[derive(Debug, Clone, Serialize, Deserialize)]

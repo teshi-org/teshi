@@ -188,6 +188,9 @@ pub fn run() -> Result<()> {
         }) => {
             return cli::update::handle_update(status, check, channel.as_deref(), yes, json);
         }
+        Some(cli::Command::Check(args)) => {
+            return cli::check::handle_check_command(&args);
+        }
         Some(cli::Command::Auth { action }) => {
             return cli::auth::handle_auth_command(&action);
         }

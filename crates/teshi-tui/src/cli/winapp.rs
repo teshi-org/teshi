@@ -10,6 +10,7 @@ use teshi_engine::{
 };
 
 use super::browser_endpoint::read_cdp_endpoint;
+use super::check::preflight_feature;
 use super::replay_screenshots::{
     ReplayScreenshotEntry, capture_and_save_screenshot, iso_now, load_or_create_index, save_index,
 };
@@ -124,12 +125,6 @@ fn execute(project_root: &Path, args: &WinAppExecuteArgs) -> Result<()> {
 }
 
 fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
-    if let Some(path) = args.launch.as_deref() {
-        ensure_winapp_attached(project_root, Some(path))?;
-    } else {
-        ensure_winapp_attached(project_root, None)?;
-    }
-
     let feature = match args.feature.as_deref() {
         Some(feature) => feature.replace('\\', "/"),
         None => {
@@ -138,6 +133,14 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
                 .feature_relative_path
         }
     };
+    preflight_feature(project_root, &feature)?;
+
+    if let Some(path) = args.launch.as_deref() {
+        ensure_winapp_attached(project_root, Some(path))?;
+    } else {
+        ensure_winapp_attached(project_root, None)?;
+    }
+
     let steps = resolve_step_bindings(project_root, &feature, args.until_line)?;
     if steps.is_empty() {
         return Err(anyhow!("no confirmed bindings found for {feature}"));

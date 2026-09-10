@@ -6,8 +6,11 @@ use gpui::{
     px, rgb,
 };
 
-use crate::backend::{SharedApiRunBackend, SharedBrowserSessionsBackend, SharedLlmBackend};
+use crate::backend::{
+    SharedApiRunBackend, SharedBrowserSessionsBackend, SharedGherkinEditorBackend, SharedLlmBackend,
+};
 use crate::browser_sessions_view::BrowserSessionsView;
+use crate::gherkin_diagnostics_view::GherkinDiagnosticsView;
 use crate::llm_config_view::LlmConfigView;
 use crate::run_view::ApiRunView;
 use crate::winapp_preview::WinAppPreview;
@@ -22,6 +25,8 @@ pub enum ShellSurface {
     WinApp,
     /// Run and inspect HTTP API / mixed Gherkin scenarios (no editor).
     Run,
+    /// Inspect the current Feature buffer and its non-blocking diagnostics.
+    Diagnostics,
     /// Settings host (LLM config and future panels).
     Settings,
 }
@@ -33,6 +38,7 @@ impl ShellSurface {
             Self::Browser => "browser",
             Self::WinApp => "winapp",
             Self::Run => "run",
+            Self::Diagnostics => "diagnostics",
             Self::Settings => "settings",
         }
     }
@@ -49,6 +55,7 @@ pub struct AppShell {
     browser_sessions: Entity<BrowserSessionsView>,
     winapp_preview: Entity<WinAppPreview>,
     api_run: Entity<ApiRunView>,
+    gherkin_diagnostics: Entity<GherkinDiagnosticsView>,
 }
 
 impl AppShell {
@@ -64,6 +71,7 @@ impl AppShell {
         llm_backend: SharedLlmBackend,
         browser_backend: SharedBrowserSessionsBackend,
         api_run_backend: SharedApiRunBackend,
+        gherkin_backend: SharedGherkinEditorBackend,
         winapp_preview: Entity<WinAppPreview>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -73,6 +81,8 @@ impl AppShell {
         let llm_config = cx.new(|cx| LlmConfigView::new(llm_backend, window, cx));
         let browser_sessions = cx.new(|cx| BrowserSessionsView::new(browser_backend, window, cx));
         let api_run = cx.new(|cx| ApiRunView::new(api_run_backend, window, cx));
+        let gherkin_diagnostics =
+            cx.new(|cx| GherkinDiagnosticsView::new(gherkin_backend, window, cx));
         Self {
             surface: ShellSurface::Browser,
             focus_handle,
@@ -80,6 +90,7 @@ impl AppShell {
             browser_sessions,
             winapp_preview,
             api_run,
+            gherkin_diagnostics,
         }
     }
 
@@ -91,6 +102,18 @@ impl AppShell {
     /// Run/API inspect view (used by the web e2e DOM bridge).
     pub fn api_run(&self) -> &Entity<ApiRunView> {
         &self.api_run
+    }
+
+    /// Shared Feature diagnostics surface (used by a host editor or e2e bridge).
+    pub fn gherkin_diagnostics(&self) -> &Entity<GherkinDiagnosticsView> {
+        &self.gherkin_diagnostics
+    }
+
+    /// Push a current raw Feature buffer into the shared diagnostics surface.
+    pub fn set_gherkin_buffer_public(&self, path: String, content: String, cx: &mut Context<Self>) {
+        self.gherkin_diagnostics.update(cx, |view, cx| {
+            view.set_buffer_public(path, content, cx);
+        });
     }
 
     /// Browser-profile view (used by the web e2e DOM bridge).
@@ -115,6 +138,7 @@ impl AppShell {
                 ShellSurface::Settings => self.llm_config.read(cx).focus_handle(cx),
                 ShellSurface::WinApp => self.focus_handle.clone(),
                 ShellSurface::Run => self.api_run.read(cx).focus_handle(cx),
+                ShellSurface::Diagnostics => self.gherkin_diagnostics.read(cx).focus_handle(cx),
             };
             window.focus(&handle, cx);
         }
@@ -166,6 +190,7 @@ impl AppShell {
             ShellSurface::Browser => "Teshi · Browser Profiles",
             ShellSurface::WinApp => "Teshi · Screenshot Stream",
             ShellSurface::Run => "Teshi · Run / API",
+            ShellSurface::Diagnostics => "Teshi · Gherkin Diagnostics",
             ShellSurface::Settings => "Settings",
         };
 
@@ -204,6 +229,12 @@ impl AppShell {
                     ))
                     .child(self.nav_button("open-api-run", "Run", ShellSurface::Run, cx))
                     .child(self.nav_button(
+                        "open-gherkin-diagnostics",
+                        "Diagnostics",
+                        ShellSurface::Diagnostics,
+                        cx,
+                    ))
+                    .child(self.nav_button(
                         "open-settings",
                         "Settings",
                         ShellSurface::Settings,
@@ -236,6 +267,9 @@ impl Render for AppShell {
             })
             .when(self.surface == ShellSurface::Run, |this| {
                 this.child(div().size_full().child(self.api_run.clone()))
+            })
+            .when(self.surface == ShellSurface::Diagnostics, |this| {
+                this.child(div().size_full().child(self.gherkin_diagnostics.clone()))
             })
             .when(self.surface == ShellSurface::Settings, |this| {
                 this.child(

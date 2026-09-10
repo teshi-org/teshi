@@ -638,7 +638,6 @@ impl Action {
                         (KeyCode::End, _) => Some(Self::MoveEnd),
                         (KeyCode::Enter, _) => Some(Self::Enter),
                         (KeyCode::Tab, KeyModifiers::NONE) => Some(Self::Insert('\t')),
-                        (KeyCode::Char('w'), KeyModifiers::CONTROL) => Some(Self::PendingChar('w')),
                         (KeyCode::Backspace, _) => Some(Self::Backspace),
                         (KeyCode::Delete, _) => Some(Self::Delete),
                         (KeyCode::Char(ch), modifiers)

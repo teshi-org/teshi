@@ -2,6 +2,7 @@ pub mod api;
 pub mod auth;
 pub mod browser;
 pub mod browser_endpoint;
+pub mod check;
 pub mod daemon;
 pub mod desktop;
 pub mod export;
@@ -78,6 +79,8 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Validate Feature source and report syntax or authoring diagnostics
+    Check(CheckArgs),
     /// Manage API credentials
     Auth {
         #[command(subcommand)]
@@ -193,6 +196,19 @@ pub enum Command {
         #[command(subcommand)]
         action: TraceCommand,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct CheckArgs {
+    /// Validate one Feature path relative to the project root
+    #[arg(long, value_name = "PATH", conflicts_with = "all")]
+    pub feature: Option<PathBuf>,
+    /// Explicitly validate every discovered Feature in the project
+    #[arg(long, conflicts_with = "feature")]
+    pub all: bool,
+    /// Emit the stable machine-readable report envelope
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]

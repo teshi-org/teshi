@@ -23,6 +23,7 @@ use super::browser_endpoint::{
     reconnect_embedded, resolve_browser_project_root, write_cdp_endpoint_from_rust,
     write_chrome_broker_endpoint,
 };
+use super::check::preflight_feature;
 use super::locator_verify::{LocatorVerifyRecord, append_locator_verify, verify_record_json};
 use super::replay_screenshots::{
     ReplayScreenshotEntry, artifact_path_from_screenshot_payload, capture_and_save_screenshot,
@@ -1161,6 +1162,7 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                 .feature_relative_path
         }
     };
+    preflight_feature(project_root, &feature)?;
     let steps = resolve_step_bindings(project_root, &feature, args.until_line)?;
     if steps.is_empty() {
         return Err(anyhow!("no confirmed bindings found for {feature}"));

@@ -3,6 +3,7 @@
 //! Interactive and mixed runs walk Gherkin steps: `[API]` is executed by
 //! `api_service.py`; other steps use existing browser/WinApp locator bindings.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -19,6 +20,7 @@ use teshi_core::{
 
 use crate::locator::resolve_step_bindings;
 use crate::sidecar::send_sidecar_command_with_timeout;
+use crate::validation::validate_feature_scope;
 use crate::venv::{build_import_check_command, resolve_project_venv};
 
 /// Loopback discovery record written by `api_service.py`.
@@ -262,6 +264,18 @@ pub fn dispatch_cases<F>(
 where
     F: FnMut(Value),
 {
+    let feature_paths: BTreeSet<PathBuf> =
+        cases.iter().map(|case| case.feature_path.clone()).collect();
+    for feature_path in feature_paths {
+        let report = validate_feature_scope(project_root, Some(&feature_path))?;
+        if report.has_errors() {
+            anyhow::bail!(
+                "Feature validation failed before dispatch: {}",
+                serde_json::to_string(&report)?
+            );
+        }
+    }
+
     emit(json!({
         "type": "start_run",
         "total": cases.len(),
@@ -529,5 +543,36 @@ mod tests {
         );
         let scenario = &feature.scenarios[0];
         assert!(validate_feature_scenario(&feature, scenario).is_err());
+    }
+
+    #[test]
+    fn dispatch_fails_before_emitting_run_events_for_invalid_source() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let features = dir.path().join("features");
+        fs::create_dir_all(&features).unwrap();
+        fs::write(
+            features.join("broken.feature"),
+            "Feature: Broken\n  Scenario: Missing separator\n    Givenready\n",
+        )
+        .unwrap();
+
+        let mut events = Vec::new();
+        let result = dispatch_cases(
+            dir.path(),
+            Path::new("runner-that-must-not-start"),
+            &[DispatchCase {
+                id: "s0".into(),
+                feature_path: PathBuf::from("features/broken.feature"),
+                scenario: "Missing separator".into(),
+            }],
+            |event| events.push(event),
+        );
+
+        let error = result.expect_err("invalid Feature must stop dispatch");
+        assert!(error.to_string().contains("missing_step_separator"));
+        assert!(
+            events.is_empty(),
+            "dispatch emitted events before validation"
+        );
     }
 }

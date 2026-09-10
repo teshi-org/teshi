@@ -39,6 +39,18 @@ jobs:
       - name: Compilation check
         run: cargo check --workspace --exclude teshi-web --locked
 
+      - name: Check Feature E2E ownership
+        run: python scripts/check-feature-e2e-catalog.py
+
+      - name: Check hosted UI WebSocket operation coverage
+        run: python scripts/test-hosted-ui-transport.py
+
+      - name: Validate Gherkin Features
+        run: cargo run --locked -p teshi-cli -- check --all
+
+      - name: Run validation CLI self-bootstrap E2E
+        run: cargo test --locked -p teshi-cli --test validation_cli_bdd -- --nocapture
+
       - name: Run tests
         run: cargo test --workspace --exclude teshi-web --locked
 

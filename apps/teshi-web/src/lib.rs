@@ -9,9 +9,9 @@ use futures_channel::oneshot;
 use gpui::{AppCell, Entity, prelude::*};
 use teshi_ui::{
     ApiRunBackend, ApiRunEventDto, ApiScenarioSnapshot, AppShell, BackendFuture,
-    BrowserSessionListSnapshot, BrowserSessionsBackend, BrowserTabTarget, LlmConfigBackend,
-    LlmConfigSnapshot, LlmConfigUpdate, ModelProfileListSnapshot, ModelProfileSnapshot,
-    ModelProfileUpdate, WinAppPreview, bind_llm_config_keys,
+    BrowserSessionListSnapshot, BrowserSessionsBackend, BrowserTabTarget, GherkinEditorBackend,
+    LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate, ModelProfileListSnapshot,
+    ModelProfileSnapshot, ModelProfileUpdate, WinAppPreview, bind_llm_config_keys,
 };
 use teshi_web_protocol::{
     CONTROL_PROTOCOL_VERSION, Channel, CliBuildIdentity, ClientHello, ClientMessage, ErrorCode,
@@ -833,6 +833,27 @@ impl LlmConfigBackend for WasmBackend {
     }
 }
 
+impl GherkinEditorBackend for WasmBackend {
+    fn validate_feature_buffer(
+        &self,
+        path: String,
+        content: String,
+    ) -> BackendFuture<teshi_core::ValidationReport> {
+        let control = self.control.clone();
+        Box::pin(async move {
+            serde_json::from_value(
+                control
+                    .request(
+                        "bdd.validate_buffer",
+                        serde_json::json!({ "path": path, "content": content }),
+                    )
+                    .await?,
+            )
+            .map_err(|error| error.to_string())
+        })
+    }
+}
+
 impl BrowserSessionsBackend for WasmBackend {
     fn start_browser_bridge(&self) -> BackendFuture<()> {
         let control = self.control.clone();
@@ -946,9 +967,19 @@ pub fn run(on_ready: js_sys::Function, on_error: js_sys::Function) -> Result<(),
         let platform = Rc::new(WasmBackend {
             control: control.clone(),
         });
+        let e2e_mode = e2e::e2e_enabled();
         let llm_backend: Rc<dyn LlmConfigBackend> = platform.clone();
-        let browser_backend: Rc<dyn BrowserSessionsBackend> = platform.clone();
-        let api_backend: Rc<dyn ApiRunBackend> = platform;
+        let browser_backend: Rc<dyn BrowserSessionsBackend> = if e2e_mode {
+            e2e::browser_backend()
+        } else {
+            platform.clone()
+        };
+        let gherkin_backend: Rc<dyn GherkinEditorBackend> = platform.clone();
+        let api_backend: Rc<dyn ApiRunBackend> = if e2e_mode {
+            e2e::api_run_backend()
+        } else {
+            platform
+        };
         let preview = cx.new(|_| WinAppPreview::new("browser tab"));
         let shell_slot: Rc<std::cell::RefCell<Option<gpui::Entity<AppShell>>>> =
             Rc::new(std::cell::RefCell::new(None));
@@ -960,6 +991,7 @@ pub fn run(on_ready: js_sys::Function, on_error: js_sys::Function) -> Result<(),
                     llm_backend.clone(),
                     browser_backend.clone(),
                     api_backend.clone(),
+                    gherkin_backend.clone(),
                     preview_for_window.clone(),
                     window,
                     cx,

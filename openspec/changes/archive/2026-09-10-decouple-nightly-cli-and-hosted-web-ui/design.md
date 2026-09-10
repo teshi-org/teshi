@@ -1,6 +1,6 @@
 ## Context
 
-This change crosses the Teshi CLI, daemon, WASM shell, release packaging, and the separate `teshi-org.github.io` Pages repository. The architecture is already selected: the latest full GPUI WASM UI runs at `https://teshi.org/app/`, while `teshi web` starts a loopback-only local daemon and opens the hosted application with ephemeral launch data in the URL fragment.
+This change crosses the Teshi CLI, daemon, WASM shell, release packaging, and the separate `teshi-org.github.io` Pages repository. The architecture is already selected: the latest full GPUI WASM UI runs at `https://teshi-org.github.io/app/`, with `https://teshi.org/app/` retained as a compatible alternate entrypoint, while `teshi web` starts a loopback-only local daemon and opens the hosted application with ephemeral launch data in the URL fragment.
 
 ### Current architecture facts
 
@@ -8,7 +8,7 @@ This change crosses the Teshi CLI, daemon, WASM shell, release packaging, and th
 2. `WebOptions` says the port is auto-picked, but `ensure_daemon` actually uses fixed port `20253` when `--port` is absent. The daemon manifest is project-scoped and a live daemon is reused. No launch session is minted by `teshi web`.
 3. The daemon currently serves `dist` as its HTTP fallback. Most Web UI operations are synchronous same-origin XHR calls to `/api/v1/*`.
 4. Existing browser-facing WebSockets are `/api/v1/events` for server events and `/api/v1/browser/stream` for preview relay. The latter uses a latest-frame watch buffer plus a bounded control queue and keeps the underlying browser/WinApp sidecar URL private.
-5. Browser routes use permissive CORS at the outer layer but explicit `same_origin_only` middleware on protected/session/preview routes. Cross-origin upgrades from `https://teshi.org` therefore do not satisfy the current policy.
+5. Browser routes use permissive CORS at the outer layer but explicit `same_origin_only` middleware on protected/session/preview routes. Hosted WebSocket upgrades use an exact allowlist containing the two supported hosted origins.
 6. HTTP authentication reads `X-Teshi-Token`. A supplied invalid token fails closed, but a tokenless request whose TCP peer is loopback currently receives implicit `Admin`; browser WebSocket clients also cannot set this custom header with the standard WebSocket API.
 7. `SessionStore` holds random UUID-based tokens in memory and supports `Admin`, `AgentRecorder`, and `BatchRunner`; it does not define a hosted-Web-UI scope or a connection-level first-message handshake.
 8. `scripts/build-teshi-web.sh` and its PowerShell counterpart build `apps/teshi-web` with nightly Rust and `wasm-bindgen`. The reusable `release.yml` installs that toolchain, builds the WASM distribution for every Windows matrix build, stages it into `share/web`, and uploads a web-dist artifact. `nightly.yml` calls this workflow in `windows-installer` mode, so ordinary nightly CLI updates still build and package the UI.
@@ -54,7 +54,7 @@ This change crosses the Teshi CLI, daemon, WASM shell, release packaging, and th
 
 ### 1. The hosted page owns UI assets; the daemon owns local state and execution
 
-The canonical application URL is `https://teshi.org/app/`. The Pages artifact contains the loader, JavaScript glue, WASM, static resources, and `ui-manifest.json`. The daemon no longer needs a Web UI distribution to satisfy `teshi web`; it owns only local APIs, runtime state, sidecars, sessions, and WebSocket endpoints.
+The canonical application URL is `https://teshi-org.github.io/app/`; `https://teshi.org/app/` is a compatible alternate entrypoint. The Pages artifact contains the loader, JavaScript glue, WASM, static resources, and `ui-manifest.json`. The daemon no longer needs a Web UI distribution to satisfy `teshi web`; it owns only local APIs, runtime state, sidecars, sessions, and WebSocket endpoints.
 
 The `apps/teshi-web` source remains in the Teshi repository so it can share Rust UI crates. The Hugo Pages workflow checks out an immutable Teshi source SHA, performs the GPUI WASM build itself, places the result under Hugo's `/app/` output, emits the manifest, then deploys one Pages artifact. A dispatch/manual input is resolved to and recorded as a full source SHA. Rebuilding the UI is a Web UI deployment action, not a side effect of each CLI nightly.
 
@@ -67,7 +67,7 @@ When no explicit diagnostic port is requested, the launcher binds or reserves po
 The launch URL is:
 
 ```text
-https://teshi.org/app/#port=<port>&token=<session-token>
+https://teshi-org.github.io/app/#port=<port>&token=<session-token>
 ```
 
 The hosted page copies the values from `location.hash` into memory and immediately removes the sensitive fragment from browser history with `history.replaceState`. URL fragments are not part of the HTTP request to GitHub Pages or `teshi.org`; the `/app/` page must also avoid third-party scripts and set a restrictive policy so hosted dependencies cannot read the token.
@@ -78,7 +78,7 @@ The existing `--port`/`--no-open` flags may remain diagnostic controls. `--dist`
 
 ### 3. WebSocket upgrade trust and first-message authentication are separate gates
 
-Both `/ws/control` and `/ws/preview` accept browser upgrades only when the `Origin` header exactly matches the configured production origin `https://teshi.org` (with an explicit development allowlist available only in development/test configuration). Missing, malformed, `null`, HTTP, subdomain, lookalike, or unrelated origins are rejected before upgrade. WebSocket Origin validation is used instead of CORS, which does not authorize WebSocket upgrades.
+Both `/ws/control` and `/ws/preview` accept browser upgrades only when the `Origin` header exactly matches one of the configured production origins `https://teshi.org` or `https://teshi-org.github.io` (with an explicit development allowlist available only in development/test configuration). Missing, malformed, `null`, HTTP, subdomain, lookalike, or unrelated origins are rejected before upgrade. WebSocket Origin validation is used instead of CORS, which does not authorize WebSocket upgrades.
 
 After upgrade, the first application message must be a versioned `client_hello` carrying the launch token, channel (`control` or `preview`), and client protocol/UI compatibility identity. Until it succeeds, the connection has no business authorization. A timeout, malformed first message, invalid/expired token, wrong channel, or incompatible protocol closes the socket with a stable machine-readable error and performs no domain operation.
 

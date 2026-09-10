@@ -41,6 +41,9 @@ class BrowserP0ActionTests(unittest.IsolatedAsyncioTestCase):
             await self.session.playwright.stop()
 
     async def test_dom_pointer_text_select_key_and_reactive_waits(self) -> None:
+        highlighted = await self.session.highlight_selector("#dom")
+        self.assertTrue(highlighted["ok"])
+
         dom = await self.session.execute_locator("#dom", "click", timeout_ms=2000)
         self.assertTrue(dom["ok"])
         waited = await self.session.wait_for_browser_condition(

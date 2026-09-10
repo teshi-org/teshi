@@ -9,6 +9,7 @@ use crate::gherkin::{
 };
 use crate::gherkin_lang::GherkinLanguages;
 use crate::highlight::{HighlightSpan, StepHighlightState, highlight_line_spans};
+use crate::validation::{ValidationDiagnostic, validate_feature_source};
 
 /// One step in a rendered scenario block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +76,9 @@ pub struct FeatureRenderPayload {
     pub relative_path: String,
     pub structured: Vec<RenderBlock>,
     pub raw_lines: Vec<RenderLine>,
+    /// Non-blocking source diagnostics for the current buffer.
+    #[serde(default)]
+    pub diagnostics: Vec<ValidationDiagnostic>,
     pub error: Option<RenderError>,
 }
 
@@ -88,6 +92,7 @@ pub fn render_feature(
     let raw_lines = highlight_raw_lines(content, &detect_language(content));
     let feature = parse_feature(content, file_path.clone());
     let structured = build_structured_blocks(&feature);
+    let diagnostics = validate_feature_source(content, &file_path).diagnostics;
 
     // The parser is lenient; add a minimal check: missing Feature header → parse failure,
     // so the UI can show an error bar and fall back to a raw text view.
@@ -103,6 +108,7 @@ pub fn render_feature(
             structured
         },
         raw_lines,
+        diagnostics,
         error,
     }
 }
@@ -217,4 +223,27 @@ fn path_relative_to_project(file_path: &Path, project_root: &Path) -> String {
         .strip_prefix(project_root)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|_| file_path.to_string_lossy().replace('\\', "/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_payload_keeps_partial_source_and_exposes_diagnostics() {
+        let path = PathBuf::from("features/login.feature");
+        let payload = render_feature(
+            "# language: zh-CN\n功能: 登录\n  场景: 成功\n    当用户登录\n",
+            path,
+            Path::new("features"),
+        );
+
+        assert!(!payload.raw_lines.is_empty());
+        assert!(
+            payload
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "missing_step_separator")
+        );
+    }
 }

@@ -20,9 +20,9 @@ use teshi_engine::{
 };
 use teshi_ui::{
     ApiRunBackend, ApiRunEventDto, ApiScenarioSnapshot, ApiStyleDto, AppShell,
-    BrowserSessionListSnapshot, BrowserSessionsBackend, BrowserTabTarget, LlmConfigBackend,
-    LlmConfigSnapshot, LlmConfigUpdate, ModelProfileListSnapshot, ModelProfileSnapshot,
-    ModelProfileUpdate, WinAppPreview, bind_llm_config_keys,
+    BrowserSessionListSnapshot, BrowserSessionsBackend, BrowserTabTarget, GherkinEditorBackend,
+    LlmConfigBackend, LlmConfigSnapshot, LlmConfigUpdate, ModelProfileListSnapshot,
+    ModelProfileSnapshot, ModelProfileUpdate, WinAppPreview, bind_llm_config_keys,
 };
 use titlebar::Titlebar;
 
@@ -350,6 +350,16 @@ impl LlmConfigBackend for NativePlatformBackend {
     }
 }
 
+impl GherkinEditorBackend for NativePlatformBackend {
+    fn validate_feature_buffer(
+        &self,
+        path: String,
+        content: String,
+    ) -> teshi_ui::backend::BackendFuture<teshi_core::ValidationReport> {
+        Box::pin(async move { Ok(teshi_core::validate_feature_source(&content, path)) })
+    }
+}
+
 /// HTTP client for loopback desktop services; ignores process and system proxies.
 fn loopback_http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
@@ -557,6 +567,7 @@ fn main() -> anyhow::Result<()> {
         let platform = Rc::new(NativePlatformBackend);
         let llm_backend: Rc<dyn LlmConfigBackend> = platform.clone();
         let browser_backend: Rc<dyn BrowserSessionsBackend> = platform.clone();
+        let gherkin_backend: Rc<dyn GherkinEditorBackend> = platform.clone();
         let api_backend: Rc<dyn ApiRunBackend> = platform;
         let process_name = std::env::var("TESHI_WINAPP_PROCESS")
             .ok()
@@ -592,6 +603,7 @@ fn main() -> anyhow::Result<()> {
                         llm_backend.clone(),
                         browser_backend.clone(),
                         api_backend.clone(),
+                        gherkin_backend.clone(),
                         preview.clone(),
                         window,
                         cx,

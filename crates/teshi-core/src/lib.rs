@@ -17,6 +17,7 @@ pub mod mindmap;
 pub mod project_settings;
 pub mod render;
 pub mod step_index;
+pub mod validation;
 pub mod venv;
 pub mod version;
 
@@ -35,3 +36,4 @@ pub use render::{
     RenderStep, render_feature,
 };
 pub use step_index::*;
+pub use validation::*;

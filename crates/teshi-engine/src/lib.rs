@@ -20,6 +20,7 @@ mod project_settings;
 mod screen;
 mod sidecar;
 mod terminal;
+pub mod validation;
 mod venv;
 mod watcher;
 
@@ -120,6 +121,9 @@ pub use sidecar::{
     ChromeBrokerEndpoint, SidecarState, CHROME_DISCOVERY_PORT,
 };
 pub use terminal::{resize_terminal, spawn_terminal, stop_terminal, write_terminal, TerminalState};
+pub use validation::{
+    discover_feature_files, display_feature_path, resolve_feature_path, validate_feature_scope,
+};
 pub use watcher::FileWatcherState;
 
 use std::path::PathBuf;

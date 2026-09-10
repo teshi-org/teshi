@@ -1898,22 +1898,18 @@ fn execute_validate_feature(app: &mut crate::app::App, args_json: &str) -> Resul
 
     let file_path_opt = args.get("file_path").and_then(|v| v.as_str());
 
-    // Build a temporary project filtered by file if needed
     let project = &app.project;
-
-    let issues = if let Some(fp) = file_path_opt {
-        // Filter to just the requested file
-        let filtered: Vec<_> = project
+    let selected = if let Some(fp) = file_path_opt {
+        let selected: Vec<_> = project
             .features
             .iter()
             .filter(|f| {
-                let path_str = f.file_path.to_string_lossy();
+                let path_str = f.file_path.to_string_lossy().replace('\\', "/");
                 path_str == fp || path_str.ends_with(fp)
             })
-            .cloned()
             .collect();
 
-        if filtered.is_empty() {
+        if selected.is_empty() {
             let available: Vec<_> = project
                 .features
                 .iter()
@@ -1929,15 +1925,26 @@ fn execute_validate_feature(app: &mut crate::app::App, args_json: &str) -> Resul
                 }
             );
         }
-
-        let temp_project = teshi_core::gherkin::BddProject {
-            root_dir: project.root_dir.clone(),
-            features: filtered,
-        };
-        teshi_agent::validator::validate_project(&temp_project)
+        selected
     } else {
-        teshi_agent::validator::validate_project(project)
+        project.features.iter().collect()
     };
+
+    let mut issues = Vec::new();
+    for feature in selected {
+        match std::fs::read_to_string(&feature.file_path) {
+            Ok(content) => issues.extend(teshi_agent::validator::validate_feature(
+                &content,
+                &feature.file_path,
+            )),
+            Err(_) => issues.extend(teshi_agent::validator::validate_project(
+                &teshi_core::gherkin::BddProject {
+                    root_dir: project.root_dir.clone(),
+                    features: vec![feature.clone()],
+                },
+            )),
+        }
+    }
 
     if issues.is_empty() {
         app.generation_stage = teshi_agent::pipeline::GenerationStage::Complete;

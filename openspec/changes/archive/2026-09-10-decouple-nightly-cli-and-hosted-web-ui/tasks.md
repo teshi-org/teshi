@@ -8,7 +8,7 @@
 ## 2. Add Ephemeral Hosted Sessions and Secure WebSocket Handshakes
 
 - [x] 2.1 Extend daemon session state to mint cryptographically random, process-memory-only hosted launch sessions with teardown/restart invalidation and safe redaction in diagnostics.
-- [x] 2.2 Add exact production `Origin: https://teshi.org` upgrade validation for `/ws/control` and `/ws/preview`, with explicit development/test configuration rather than a production wildcard.
+- [x] 2.2 Add exact production Origin validation for `https://teshi.org` and `https://teshi-org.github.io` on `/ws/control` and `/ws/preview`, with explicit development/test configuration rather than a production wildcard.
 - [x] 2.3 Implement the first-message timeout and token/channel/protocol/build handshake so no business handler or sidecar connection runs before authentication and negotiation succeed.
 - [x] 2.4 Enforce `HostedWebUi` authorization independently of TCP peer address and add negative tests for tokenless loopback, invalid/expired tokens, wrong channels, malformed hellos, untrusted Origins, and forbidden methods.
 - [x] 2.5 Implement deterministic single-control-connection ownership and authenticated reconnect behavior without automatic replay of non-idempotent requests.
@@ -40,7 +40,7 @@
 ## 6. Change teshi web into a Hosted-UI Launcher
 
 - [x] 6.1 Refactor daemon startup to use an OS-selected available port on `127.0.0.1` by default and return the actually bound port without a fixed-port race.
-- [x] 6.2 Mint the hosted launch session before opening the browser and open exactly `https://teshi.org/app/#port=<port>&token=<session-token>` without logging the token.
+- [x] 6.2 Mint the hosted launch session before opening the browser and open exactly `https://teshi-org.github.io/app/#port=<port>&token=<session-token>` without logging the token; retain `teshi.org` as a compatible alternate entrypoint.
 - [x] 6.3 Remove the production startup dependency on `apps/teshi-web/dist`, installed `share/web`, and `--dist`, while preserving only explicitly documented development diagnostics if still required.
 - [x] 6.4 Verify `--no-open`, explicit diagnostic port behavior, project selection/reuse semantics, daemon idle shutdown, session teardown, and stale-manifest recovery under the new launch lifecycle.
 
@@ -61,9 +61,9 @@
 
 ## 9. End-to-End Acceptance and Staged Migration Evidence
 
-- [ ] 9.1 Run a supported Chromium end-to-end test from the real `https://teshi.org/app/` secure context to both `ws://127.0.0.1` endpoints, including browser mixed-content/private-network behavior and actionable failure diagnostics.
-- [ ] 9.2 Capture the initial hosted-page request and prove the fragment port/token never reaches the hosting service, referrer, logs, or browser persistence.
-- [ ] 9.3 Verify valid launch, exact-Origin rejection, pre-handshake rejection, non-Admin authorization, session expiry/restart, reconnection, and old-nightly upgrade refusal.
-- [ ] 9.4 Exercise every checked UI operation over `/ws/control` and browser/WinApp streams over `/ws/preview`, and prove normal hosted workflows make no `/api/v1/*` request.
+- [x] 9.1 Run a supported Chromium end-to-end test from the real `https://teshi.org/app/` secure context to both `ws://127.0.0.1` endpoints, including browser mixed-content/private-network behavior and actionable failure diagnostics.
+- [x] 9.2 Capture the initial hosted-page request and prove the fragment port/token never reaches the hosting service, referrer, logs, or browser persistence.
+- [x] 9.3 Verify valid launch, exact-Origin rejection, pre-handshake rejection, non-Admin authorization, session expiry/restart, reconnection, and old-nightly upgrade refusal.
+- [x] 9.4 Exercise every checked UI operation over `/ws/control` and browser/WinApp streams over `/ws/preview`, and prove normal hosted workflows make no `/api/v1/*` request.
 - [x] 9.5 Run daemon, WASM smoke, release-manifest, installer-content, and repository quality gates while confirming all existing `/api/v1/*` routes and REST regressions remain present.
 - [x] 9.6 Publish a migration coverage report and defer every REST deletion/deprecation item to a separate future OpenSpec change.

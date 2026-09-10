@@ -48,12 +48,14 @@ fn features_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../features")
 }
 
-/// True when the feature is tagged `@cli`, independent of English or Chinese filenames.
-fn is_cli_feature(path: &Path) -> bool {
+/// True when the feature is a requirement-library CLI feature.
+///
+/// Validation self-bootstrap Features also use `@cli`, but have a dedicated
+/// runner and are intentionally excluded from this requirement runner.
+fn is_requirement_cli_feature(path: &Path) -> bool {
     fs::read_to_string(path).is_ok_and(|content| {
-        content
-            .lines()
-            .any(|line| line.split_whitespace().any(|token| token == "@cli"))
+        let tags: Vec<&str> = content.lines().flat_map(str::split_whitespace).collect();
+        tags.contains(&"@cli") && !tags.contains(&"@validation-e2e")
     })
 }
 
@@ -65,7 +67,7 @@ fn copy_cli_features(locale: &str, dst: &Path) {
         let entry = entry.unwrap();
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if name_str.ends_with(".feature") && is_cli_feature(&entry.path()) {
+        if name_str.ends_with(".feature") && is_requirement_cli_feature(&entry.path()) {
             fs::copy(entry.path(), dest.join(name)).unwrap();
         }
     }

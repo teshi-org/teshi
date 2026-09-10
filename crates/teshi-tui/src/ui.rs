@@ -285,6 +285,10 @@ fn status_color(status: RunStatus) -> Color {
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
+    // Validate the raw editor buffer on every redraw.  The parser-backed
+    // project remains permissive; these diagnostics are only an editor aid
+    // and never prevent Browse/Insert rendering or input handling.
+    app.refresh_buffer_diagnostics();
     app.clickable_regions.clear();
 
     let chunks = Layout::default()
@@ -2594,9 +2598,28 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
         title_base
     };
     let editor_block = Block::default().borders(Borders::ALL).title(title);
-    let editor_area = editor_block.inner(area);
+    let editor_inner = editor_block.inner(area);
     frame.render_widget(editor_block, area);
-    frame.render_widget(Clear, editor_area);
+    frame.render_widget(Clear, editor_inner);
+
+    // Keep a small, non-blocking diagnostics pane inside the editor.  The
+    // source area retains at least two rows in normal terminal sizes, while
+    // very small terminals keep the editor fully usable and omit the pane.
+    let (editor_area, diagnostics_area) =
+        if !preview && !app.buffer_diagnostics.is_empty() && editor_inner.height >= 4 {
+            let diagnostic_height = (app.buffer_diagnostics.len().min(4) as u16 + 2)
+                .min(editor_inner.height.saturating_sub(2));
+            if diagnostic_height >= 2 {
+                let [source_area, diagnostics_area] =
+                    Layout::vertical([Constraint::Min(2), Constraint::Length(diagnostic_height)])
+                        .areas(editor_inner);
+                (source_area, diagnostics_area)
+            } else {
+                (editor_inner, Rect::default())
+            }
+        } else {
+            (editor_inner, Rect::default())
+        };
 
     let visible_lines = editor_area.height as usize;
     let buffer = if preview {
@@ -2676,6 +2699,22 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
         };
         let mut styled =
             highlight_line_with_state(&display_line, &mut step_state, buffer.language());
+
+        // Mark source rows with errors while preserving the editor's normal
+        // highlighting and cursor/selection behavior.
+        if !preview
+            && app.buffer_diagnostics.iter().any(|diagnostic| {
+                diagnostic.line == row.saturating_add(1)
+                    && diagnostic.severity == teshi_core::DiagnosticSeverity::Error
+            })
+        {
+            styled = apply_line_background(
+                styled,
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::UNDERLINED),
+            );
+        }
 
         // When a scenario is focused, dim steps in non-focused scenarios
         if !preview && let Some(focus_row) = app.editor_focus_scenario_row {
@@ -2829,10 +2868,64 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
     } else {
         app.scroll_row = visible_rows.get(scroll_idx).copied().unwrap_or(0);
         app.editor_panel_rect = Some(editor_area);
+        render_buffer_diagnostics(frame, app, diagnostics_area);
     }
     if !preview {
         render_step_keyword_picker(frame, app, editor_area);
     }
+}
+
+/// Render source-aware diagnostics without replacing the permissive editor
+/// buffer.  Each finding is kept on one line so locations and repair hints
+/// remain visible even when a source line contains wide Unicode text.
+fn render_buffer_diagnostics(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    if area.width < 4 || area.height < 2 {
+        return;
+    }
+
+    let title = format!("Diagnostics ({})", app.buffer_diagnostics.len());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let lines = app
+        .buffer_diagnostics
+        .iter()
+        .take(inner.height as usize)
+        .map(|diagnostic| {
+            let severity = match diagnostic.severity {
+                teshi_core::DiagnosticSeverity::Error => ("error", Color::Red),
+                teshi_core::DiagnosticSeverity::Warning => ("warning", Color::Yellow),
+                teshi_core::DiagnosticSeverity::Suggestion => ("suggestion", Color::Cyan),
+            };
+            let suggestion = diagnostic
+                .suggestion
+                .as_deref()
+                .map(|value| format!(" -> {value}"))
+                .unwrap_or_default();
+            let text = format!(
+                " {} {}:{}:{} [{}] {}{}",
+                severity.0,
+                diagnostic.path,
+                diagnostic.line,
+                diagnostic.column,
+                diagnostic.code,
+                diagnostic.message,
+                suggestion,
+            );
+            Line::styled(
+                truncate_string_to_cols(&text, inner.width),
+                Style::default().fg(severity.1),
+            )
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
 /// Draws the step-keyword overlay when [`App::step_keyword_picker`] is active.

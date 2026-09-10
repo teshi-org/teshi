@@ -457,6 +457,14 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
     let project_root = teshi_engine::find_project_root(Some(&feature_path))
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
+    let validation = teshi_engine::validate_feature_scope(&project_root, Some(&feature_path))?;
+    if !validation.diagnostics.is_empty() {
+        eprintln!("{}", serde_json::to_string_pretty(&validation)?);
+    }
+    if validation.has_errors() {
+        anyhow::bail!("Feature validation failed; runner was not started");
+    }
+
     let runner_config = load_runner_config(Some(RunnerCliOverride {
         cmd: opts.runner_cmd.clone(),
         args: opts.runner_args.clone(),

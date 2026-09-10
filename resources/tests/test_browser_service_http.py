@@ -4,21 +4,68 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 RESOURCES = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RESOURCES))
 
 from browser_service import (  # noqa: E402
+    BrowserSessionBroker,
     _bind_websocket_listener,
     _read_http_request,
+    embedded_browser_headless,
+    handle_embedded_command,
     paths_equal,
 )
 
 
+class FakeEmbeddedSession:
+    def __init__(self) -> None:
+        self.url = "about:blank"
+
+    def current_url(self) -> str:
+        return self.url
+
+    async def navigate(self, url: str) -> None:
+        self.url = url
+
+    async def wait_for_browser_condition(
+        self,
+        _wait: dict[str, object] | None,
+        _timeout_ms: int,
+        _selector: str,
+        _candidate: dict[str, object] | None,
+    ) -> dict[str, object]:
+        return {"ok": True}
+
+
 class BrowserServiceHttpTests(unittest.IsolatedAsyncioTestCase):
+    def test_embedded_browser_defaults_to_headless_and_can_be_opted_into_headed(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TESHI_EMBEDDED_HEADLESS", None)
+            self.assertTrue(embedded_browser_headless())
+        with patch.dict(os.environ, {"TESHI_EMBEDDED_HEADLESS": "0"}):
+            self.assertFalse(embedded_browser_headless())
+
+    async def test_embedded_navigation_without_target_uses_local_transport(self) -> None:
+        session = FakeEmbeddedSession()
+        result = await handle_embedded_command(
+            session,
+            {
+                "cmd": "navigate",
+                "request_id": "embedded-navigation",
+                "url": "http://127.0.0.1:20253/?e2e=1",
+            },
+            BrowserSessionBroker(),
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["url"], "http://127.0.0.1:20253/?e2e=1")
+
     def test_windows_extended_project_path_matches_plain_path(self) -> None:
         plain = Path(r"D:\Dev\Rust\teshi\dev")
         extended = r"\\?\D:\Dev\Rust\teshi\dev"

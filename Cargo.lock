@@ -6927,6 +6927,7 @@ dependencies = [
  "gpui",
  "serde",
  "serde_json",
+ "teshi-core",
 ]
 
 [[package]]
@@ -6972,6 +6973,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "teshi-validation-cli-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "teshi-core",
+]
+
+[[package]]
 name = "teshi-web"
 version = "0.1.0"
 dependencies = [
@@ -6983,6 +6995,7 @@ dependencies = [
  "js-sys",
  "serde",
  "serde_json",
+ "teshi-core",
  "teshi-ui",
  "teshi-web-protocol",
  "wasm-bindgen",

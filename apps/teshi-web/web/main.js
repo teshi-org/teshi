@@ -175,6 +175,43 @@ async function fetchWasmWithProgress(url, onProgress) {
   return bytes;
 }
 
+/**
+ * The repository's Web E2E Features use a stable, token-free loopback URL.
+ * Mint the normal hosted-Web session only for that explicit local harness;
+ * production pages must continue to receive their token in the launch
+ * fragment from `teshi web`.
+ */
+async function ensureLocalE2eLaunchFragment() {
+  const url = new URL(window.location.href);
+  const loopback = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+  if (url.searchParams.get("e2e") !== "1" || !loopback.has(url.hostname)) {
+    return;
+  }
+
+  const fragment = new URLSearchParams(url.hash.replace(/^#/, ""));
+  const existingToken = fragment.get("token") || "";
+  const port = fragment.get("port") || url.port;
+  if (port && /^[1-9][0-9]{0,4}$/.test(port) && /^[A-Za-z0-9_-]{16,256}$/.test(existingToken)) {
+    return;
+  }
+
+  const response = await fetch("/api/v1/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role: "hosted_web_ui" }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to create local E2E session (${response.status})`);
+  }
+  const session = await response.json();
+  const token = typeof session.token === "string" ? session.token : "";
+  if (!port || !/^[1-9][0-9]{0,4}$/.test(port) || !/^[A-Za-z0-9_-]{16,256}$/.test(token)) {
+    throw new Error("Local E2E session response is missing a valid port or token");
+  }
+  url.hash = `port=${encodeURIComponent(port)}&token=${encodeURIComponent(token)}`;
+  window.history.replaceState(null, "", url.toString());
+}
+
 try {
   setProgress({
     label: "Downloading…",
@@ -212,6 +249,8 @@ try {
     indeterminate: true,
     detail: "Initializing GPU…",
   });
+
+  await ensureLocalE2eLaunchFragment();
 
   startupTimer = setTimeout(() => {
     showError(

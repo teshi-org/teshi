@@ -466,6 +466,10 @@ pub struct App {
     /// The editor buffer currently displayed in the editor panel.
     pub buffer: EditorBuffer,
     pub file_path: Option<PathBuf>,
+    /// Diagnostics for the current raw editor buffer.  This is deliberately
+    /// separate from the permissive parsed project so incomplete content can
+    /// remain visible and editable while errors are reported beside it.
+    pub buffer_diagnostics: Vec<teshi_core::ValidationDiagnostic>,
     pub cursor_row: usize,
     pub cursor_col: usize,
     pub desired_col: usize,
@@ -707,6 +711,19 @@ impl App {
             .collect()
     }
 
+    /// Refresh diagnostics for the raw buffer currently shown in the editor.
+    ///
+    /// A newly created, file-less buffer has no source location yet, so it is
+    /// left without diagnostics until it is associated with a Feature file.
+    pub fn refresh_buffer_diagnostics(&mut self) {
+        let Some(path) = self.file_path.clone() else {
+            self.buffer_diagnostics.clear();
+            return;
+        };
+        self.buffer_diagnostics =
+            teshi_core::validate_feature_source(&self.buffer.as_string(), &path).diagnostics;
+    }
+
     /// Builds the editor state from process arguments.
     ///
     /// Accepts a directory path or a single file path. Directory scans follow the
@@ -820,6 +837,7 @@ impl App {
             tree_state,
             buffer,
             file_path,
+            buffer_diagnostics: Vec::new(),
             cursor_row: 0,
             cursor_col: 0,
             desired_col: 0,
@@ -981,6 +999,7 @@ impl App {
             tree_state,
             buffer: EditorBuffer::from_string(content),
             file_path: Some(path.clone()),
+            buffer_diagnostics: Vec::new(),
             cursor_row: 0,
             cursor_col: 0,
             desired_col: 0,
@@ -1131,6 +1150,7 @@ impl App {
             tree_state,
             buffer: EditorBuffer::from_string(String::new()),
             file_path: None,
+            buffer_diagnostics: Vec::new(),
             cursor_row: 0,
             cursor_col: 0,
             desired_col: 0,
@@ -8143,6 +8163,63 @@ mod tests {
     }
 
     #[test]
+    fn test_buffer_diagnostics_update_without_replacing_partial_source() {
+        let malformed = "# language: zh-CN\n功能: 登录\n  场景: 用户登录\n    当用户登录\n";
+        let corrected = "# language: zh-CN\n功能: 登录\n  场景: 用户登录\n    当 用户登录\n";
+        let (mut app, path) = feature_file_app("buffer-diagnostics", malformed);
+
+        app.refresh_buffer_diagnostics();
+        assert_eq!(app.buffer.as_string(), malformed);
+        assert!(app.buffer_diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == teshi_core::diagnostic_codes::MISSING_STEP_SEPARATOR
+                && diagnostic.line == 4
+                && diagnostic.column == 6
+        }));
+
+        app.buffer = EditorBuffer::from_string(corrected.to_string());
+        app.refresh_buffer_diagnostics();
+        assert_eq!(app.buffer.as_string(), corrected);
+        assert!(!app.buffer_diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == teshi_core::diagnostic_codes::MISSING_STEP_SEPARATOR
+        }));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_editor_renders_buffer_diagnostics_without_hiding_source() {
+        let mut app = editor_test_app();
+        app.active_tab = MainTab::Explore;
+        app.explore_edit_mode = true;
+        app.file_path = Some(PathBuf::from("login.feature"));
+        app.buffer = EditorBuffer::from_string(
+            "# language: zh-CN\n功能: 登录\n  场景: 成功\n    当用户登录\n".to_string(),
+        );
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal should initialize");
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .expect("editor should render");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        let compact_screen = screen.replace(' ', "");
+        assert!(
+            compact_screen.contains("当用户登录"),
+            "source disappeared from editor"
+        );
+        assert!(
+            screen.contains("missing_step_separator"),
+            "diagnostic disappeared from editor"
+        );
+    }
+
+    #[test]
     fn test_step_edit_boundary_detection() {
         let en = en();
         assert_eq!(step_edit_start_col("  Given I log in", en), Some(8));
@@ -8711,6 +8788,7 @@ mod tests {
             tree_state,
             buffer: EditorBuffer::from_string(content.to_string()),
             file_path: Some(PathBuf::from("test.feature")),
+            buffer_diagnostics: Vec::new(),
             cursor_row: 0,
             cursor_col: 0,
             desired_col: 0,
@@ -8875,6 +8953,7 @@ Feature: B
             tree_state,
             buffer: EditorBuffer::from_string(String::new()),
             file_path: None,
+            buffer_diagnostics: Vec::new(),
             cursor_row: 0,
             cursor_col: 0,
             desired_col: 0,

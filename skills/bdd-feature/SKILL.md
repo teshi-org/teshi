@@ -99,6 +99,17 @@ CLI JSON contract steps must say JSON in the When that produces JSON. Do not ass
 
 ## After writing
 
+Validate the exact source before handing it to binding or execution:
+
+~~~bash
+TESHI=teshi
+$TESHI check --feature features/en-US/<name>.feature --json
+~~~
+
+Use the same command for the Chinese pair. Treat a non-zero result as a
+blocking diagnostic report and use its code, location, and suggestion;
+Gherkin dialect and separator validation belongs to Teshi, not this Skill.
+
 For `@web-ui` files:
 
 ```bash
