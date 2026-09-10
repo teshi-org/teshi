@@ -339,11 +339,22 @@ impl Action {
     pub fn from_key_event(event: KeyEvent, context: KeyContext) -> Option<Self> {
         if let Some(pending_char) = context.pending_char {
             if context.active_tab == MainTab::Requirements && pending_char == 'w' {
-                return match (event.code, event.modifiers) {
-                    (KeyCode::Char('h'), KeyModifiers::NONE) => Some(Self::FocusPrevColumn),
-                    (KeyCode::Char('l'), KeyModifiers::NONE) => Some(Self::FocusNextColumn),
-                    _ => None,
-                };
+                // Some terminal/input paths retain CONTROL (or add SHIFT for
+                // an uppercase character) on the second key of the chord.
+                // Treat h/H and l/L equivalently so Ctrl-W h/l works across
+                // the native and VT input paths.
+                let has_only_supported_modifiers = event.modifiers.is_empty()
+                    || event.modifiers == KeyModifiers::SHIFT
+                    || event.modifiers == KeyModifiers::CONTROL
+                    || event.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+                if has_only_supported_modifiers {
+                    return match event.code {
+                        KeyCode::Char('h') | KeyCode::Char('H') => Some(Self::FocusPrevColumn),
+                        KeyCode::Char('l') | KeyCode::Char('L') => Some(Self::FocusNextColumn),
+                        _ => None,
+                    };
+                }
+                return None;
             }
             match (pending_char, event.code, event.modifiers) {
                 ('d', KeyCode::Char('d'), KeyModifiers::NONE) => return Some(Self::DeleteNode),
@@ -605,6 +616,15 @@ impl Action {
 
         // Requirements tab: three-pane navigation and plain-text editing
         if context.active_tab == MainTab::Requirements {
+            // Windows console input can normalize Ctrl+W to an uppercase
+            // character while retaining CONTROL. Normalize both spellings
+            // before entering the two-key pane-navigation chord.
+            let requirements_ctrl_w = matches!(event.code, KeyCode::Char('w') | KeyCode::Char('W'))
+                && event.modifiers.contains(KeyModifiers::CONTROL);
+            if requirements_ctrl_w {
+                return Some(Self::PendingChar('w'));
+            }
+
             if context.requirements_focus == RequirementsFocus::Editor {
                 if context.requirements_editor_mode == RequirementsEditorMode::Insert {
                     return match (event.code, event.modifiers) {
@@ -673,18 +693,13 @@ impl Action {
                 };
             }
             return match (event.code, event.modifiers) {
-                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
-                    Some(Self::FocusPrevColumn)
-                }
-                (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
-                    Some(Self::FocusNextColumn)
-                }
+                (KeyCode::Left, _) => Some(Self::FocusPrevColumn),
+                (KeyCode::Right, _) => Some(Self::FocusNextColumn),
                 (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => Some(Self::MoveUp),
                 (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                     Some(Self::MoveDown)
                 }
                 (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::ReqNewDocument),
-                (KeyCode::Char('w'), KeyModifiers::CONTROL) => Some(Self::PendingChar('w')),
                 (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Self::ReqFilterOverlay),
                 (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Self::ReqGroupToggle),
                 (KeyCode::Char('I'), KeyModifiers::SHIFT) => Some(Self::ReqEditIteration),
@@ -1617,6 +1632,11 @@ mod tests {
                 KeyModifiers::CONTROL,
                 Some(Action::PendingChar('w')),
             ),
+            (
+                KeyCode::Char('W'),
+                KeyModifiers::CONTROL,
+                Some(Action::PendingChar('w')),
+            ),
             (KeyCode::Home, KeyModifiers::NONE, Some(Action::MoveHome)),
             (KeyCode::End, KeyModifiers::NONE, Some(Action::MoveEnd)),
         ] {
@@ -1645,6 +1665,34 @@ mod tests {
             ),
             Some(Action::FocusNextColumn)
         );
+        for (key, modifiers, expected) in [
+            (
+                KeyCode::Char('H'),
+                KeyModifiers::SHIFT,
+                Action::FocusPrevColumn,
+            ),
+            (
+                KeyCode::Char('l'),
+                KeyModifiers::CONTROL,
+                Action::FocusNextColumn,
+            ),
+            (
+                KeyCode::Char('L'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                Action::FocusNextColumn,
+            ),
+        ] {
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(key, modifiers),
+                    KeyContext {
+                        pending_char: Some('w'),
+                        ..context
+                    }
+                ),
+                Some(expected)
+            );
+        }
     }
 
     fn requirements_tree_context() -> KeyContext {
@@ -1682,6 +1730,49 @@ mod tests {
     #[test]
     fn requirements_tree_binds_filter_group_and_iteration() {
         let context = requirements_tree_context();
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+                context
+            ),
+            None
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+                context
+            ),
+            None
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), context),
+            Some(Action::FocusPrevColumn)
+        );
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), context),
+            Some(Action::FocusNextColumn)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::MoveDown)
+        );
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::MoveUp)
+        );
+        assert!(!matches!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+                context
+            ),
+            Some(Action::FocusNextColumn | Action::FocusPrevColumn)
+        ));
         assert_eq!(
             Action::from_key_event(
                 KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),

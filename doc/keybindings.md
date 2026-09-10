@@ -26,9 +26,12 @@
 The Markdown editor starts in **Browse** mode. Press `i` in the editor to enter
 **Insert**, and `Esc` to return to Browse. Browse never inserts ordinary text.
 
+Use `Ctrl+W` followed by `h`/`l` to move focus to the previous/next pane;
+bare `h`/`l` do not switch panes.
+
 | Key | Action |
 |-----|--------|
-| `←` / `→` / `h` / `l` | Move between panes from the tree or linked test points |
+| `←` / `→` | Move between panes from the tree or linked test points |
 | `hjkl` / arrows | Move the cursor in Browse |
 | `n` | Create a Proposed test point from the active non-empty selection |
 | `Ctrl+n` | Create a new requirement Markdown document |
