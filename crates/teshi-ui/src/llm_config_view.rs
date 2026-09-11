@@ -83,7 +83,9 @@ enum Field {
 impl Field {
     fn all(provider: &str) -> Vec<Self> {
         let mut fields = vec![Self::Name, Self::Provider];
-        if provider == "openai" || provider == "deepseek" {
+        // DeepSeek Responses remains supported by the engine for experiments,
+        // but is intentionally not exposed as a selectable UI capability yet.
+        if provider == "openai" {
             fields.push(Self::ApiStyle);
         }
         if provider == "deepseek" || provider == "deepseek-openai" {
@@ -284,7 +286,7 @@ impl LlmConfigView {
             model_id: "deepseek-flash".into(),
             max_context_tokens: None,
             max_output_tokens: 1024,
-            base_url: default_base_url("openai").into(),
+            base_url: default_base_url("deepseek").into(),
             api_key: String::new(),
             stream: true,
             http_headers: HashMap::new(),
@@ -313,6 +315,11 @@ impl LlmConfigView {
         self.draft.provider = next.to_string();
         if !custom {
             self.draft.base_url = default_base_url(next).into();
+        }
+        if next != "openai" {
+            // Responses is experimental for DeepSeek and other non-OpenAI
+            // providers; keep newly switched profiles on the proven route.
+            self.draft.api_style = ApiStyleDto::ChatCompletions;
         }
         if next == "anthropic" {
             self.draft.api_style = ApiStyleDto::ChatCompletions;
@@ -948,6 +955,13 @@ pub fn bind_llm_config_keys(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_deepseek_profile_uses_deepseek_base_url_and_hides_responses() {
+        assert_eq!(default_base_url("deepseek"), "https://api.deepseek.com");
+        assert!(!Field::all("deepseek").contains(&Field::ApiStyle));
+        assert!(Field::all("openai").contains(&Field::ApiStyle));
+    }
 
     #[test]
     fn clone_draft_clears_masked_and_known_credential_headers() {

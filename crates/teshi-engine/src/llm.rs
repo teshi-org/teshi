@@ -1390,6 +1390,208 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deepseek_http_sse_tool_loop_preserves_reasoning_for_five_requests() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn read_request(socket: &mut tokio::net::TcpStream) -> (String, Value) {
+            let mut bytes = Vec::new();
+            let mut header_end;
+            let mut content_length;
+            loop {
+                let mut chunk = [0u8; 4096];
+                let n = socket.read(&mut chunk).await.expect("read request");
+                assert!(n > 0, "client closed before sending a complete request");
+                bytes.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                    header_end = pos + 4;
+                    let headers = String::from_utf8_lossy(&bytes[..pos]);
+                    content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .expect("request Content-Length");
+                    if bytes.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+            }
+            let request = String::from_utf8_lossy(&bytes[..header_end]).to_string();
+            let body = &bytes[header_end..header_end + content_length];
+            (
+                request,
+                serde_json::from_slice(body).expect("JSON request body"),
+            )
+        }
+
+        fn sse_response(round: usize) -> String {
+            let reasoning = format!("reasoning-round-{round}");
+            let event = if matches!(round, 0 | 1 | 3) {
+                format!(
+                    "data: {{\"model\":\"deepseek-flash\",\"choices\":[{{\"delta\":{{\"reasoning_content\":\"{reasoning}\"}},\"finish_reason\":null}}]}}\n\n"
+                ) + &format!(
+                    "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"call-{round}\",\"function\":{{\"name\":\"lookup\",\"arguments\":\"{{\\\"round\\\":{round}}}\"}}}}]}},\"finish_reason\":\"tool_calls\"}}]}}\n\n"
+                )
+            } else {
+                format!(
+                    "data: {{\"model\":\"deepseek-flash\",\"choices\":[{{\"delta\":{{\"reasoning_content\":\"{reasoning}\",\"content\":\"answer-{round}\"}},\"finish_reason\":\"stop\"}}]}}\n\n"
+                )
+            };
+            let body = event + "data: [DONE]\n\n";
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock DeepSeek server");
+        let addr = listener.local_addr().expect("mock server address");
+        let server = tokio::spawn(async move {
+            let mut captured = Vec::new();
+            for round in 0..5 {
+                let (mut socket, _) = listener.accept().await.expect("accept request");
+                let (request, body) = read_request(&mut socket).await;
+                assert!(request.starts_with("POST /chat/completions HTTP/1.1"));
+                captured.push(body);
+                socket
+                    .write_all(sse_response(round).as_bytes())
+                    .await
+                    .expect("write SSE response");
+            }
+            captured
+        });
+
+        let mut config = base_config();
+        config.provider = PROVIDER_DEEPSEEK.into();
+        config.model = "deepseek-flash".into();
+        config.base_url = format!("http://{addr}");
+        let tools = vec![ToolDefinition {
+            name: "lookup".into(),
+            description: "Look up a round".into(),
+            parameters: json!({"type": "object"}),
+        }];
+        let mut messages = vec![ChatMessage {
+            role: "user".into(),
+            content: "start".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }];
+
+        for round in 0..5 {
+            let (tx, events) = mpsc::channel();
+            let cancel = Arc::new(AtomicBool::new(false));
+            chat_completions_request(
+                &config,
+                None,
+                messages.clone(),
+                Some(tools.clone()),
+                &tx,
+                &cancel,
+            )
+            .await
+            .expect("complete mock chat request");
+
+            let mut terminal = None;
+            while terminal.is_none() {
+                let event = events
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .expect("mock response event");
+                if matches!(
+                    event,
+                    LlmEvent::ToolCallRequest { .. } | LlmEvent::Done { .. }
+                ) {
+                    terminal = Some(event);
+                } else if let LlmEvent::Error { message } = event {
+                    panic!("mock response produced transport error: {message}");
+                }
+            }
+
+            match terminal.expect("terminal event") {
+                LlmEvent::ToolCallRequest {
+                    tool_calls,
+                    reasoning_content,
+                    ..
+                } => {
+                    assert!(matches!(round, 0 | 1 | 3));
+                    let call_id = tool_calls.first().expect("tool call").id.clone();
+                    messages.push(ChatMessage {
+                        role: "assistant".into(),
+                        content: String::new(),
+                        tool_calls: Some(tool_calls),
+                        tool_call_id: None,
+                        reasoning_content,
+                    });
+                    messages.push(ChatMessage {
+                        role: "tool".into(),
+                        content: format!("result-{round}"),
+                        tool_calls: None,
+                        tool_call_id: Some(call_id),
+                        reasoning_content: None,
+                    });
+                }
+                LlmEvent::Done {
+                    full_text,
+                    reasoning_content,
+                    ..
+                } => {
+                    assert!(!matches!(round, 0 | 1 | 3));
+                    messages.push(ChatMessage {
+                        role: "assistant".into(),
+                        content: full_text,
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content,
+                    });
+                }
+                other => panic!("unexpected terminal event: {other:?}"),
+            }
+        }
+
+        let requests = server.await.expect("mock server join");
+        assert_eq!(requests.len(), 5);
+        for (round, body) in requests.iter().enumerate() {
+            assert!(body["tools"].is_array(), "round {round} dropped tools");
+            let messages = body["messages"].as_array().expect("messages array");
+            let mut assistant_rounds = Vec::new();
+            for (index, message) in messages.iter().enumerate() {
+                if message["role"] == "assistant" {
+                    assert!(
+                        message["content"].is_string(),
+                        "round {round} assistant {index} content was null"
+                    );
+                    let reasoning = message["reasoning_content"]
+                        .as_str()
+                        .expect("assistant reasoning_content");
+                    assistant_rounds.push(reasoning.to_string());
+                    if message.get("tool_calls").is_some() {
+                        let next = messages.get(index + 1).expect("tool result after call");
+                        assert_eq!(next["role"], "tool");
+                        assert_eq!(next["tool_call_id"], message["tool_calls"][0]["id"]);
+                    }
+                }
+            }
+            assert_eq!(
+                assistant_rounds,
+                (0..round)
+                    .map(|n| format!("reasoning-round-{n}"))
+                    .collect::<Vec<_>>()
+            );
+            if round >= 3 {
+                assert_eq!(messages[5]["role"], "assistant");
+                assert_eq!(messages[5]["content"], "answer-2");
+                assert_eq!(messages[5]["reasoning_content"], "reasoning-round-2");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn provider_aware_tool_call_uses_responses_transport() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
