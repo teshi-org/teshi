@@ -36,10 +36,10 @@ use teshi_engine::{
     resize_terminal, save_profile, save_stored_llm_config, send_api_command, set_active_id,
     spawn_terminal, start_browser_sidecar, step_binding_statuses, stop_browser_sidecar,
     sync_active_step, teardown_runtime, unbind_step, validate_feature_scope, write_terminal,
-    ActiveStep, ApiStyle, BrowserError, BrowserMode, BrowserStartResult, DeepSeekThinking, DirEntry, DispatchCase,
-    LlmConfigPublic, LlmConfigWrite, ModelProfile, ModelProfileList, ModelProfilePublic,
-    PendingLocator, ProjectSettings, RuntimeEvent, StepBinding, StepBindingStatus, TeshiEngine,
-    PROVIDER_OPENAI,
+    ActiveStep, ApiStyle, BrowserError, BrowserMode, BrowserStartResult, DeepSeekThinking,
+    DirEntry, DispatchCase, LlmConfigPublic, LlmConfigWrite, ModelProfile, ModelProfileList,
+    ModelProfilePublic, PendingLocator, ProjectSettings, RuntimeEvent, StepBinding,
+    StepBindingStatus, TeshiEngine, PROVIDER_OPENAI,
 };
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
@@ -4354,10 +4354,8 @@ mod integration {
 
     #[test]
     fn hosted_project_paths_reject_common_tool_credentials() {
-        let base = std::env::temp_dir().join(format!(
-            "teshi-hosted-credentials-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("teshi-hosted-credentials-{}", uuid::Uuid::new_v4()));
         let project = base.join("project");
         fs::create_dir_all(&project).unwrap();
         for name in [

@@ -376,15 +376,19 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         frame.render_widget(
             if app.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor {
                 Line::raw(match app.authoring_ui.editor_mode {
-                    crate::authoring_tab::RequirementsEditorMode::Browse =>
-                        " [BROWSE] hjkl/arrows Move  i Insert  s Save  n Test point  I Iteration",
-                    crate::authoring_tab::RequirementsEditorMode::Insert =>
-                        " [INSERT] Esc Browse  Ctrl+S Save  Tab Indent  Arrows/Home/End Move",
+                    crate::authoring_tab::RequirementsEditorMode::Browse => {
+                        " [BROWSE] hjkl/arrows Move  i Insert  s Save  n Test point  I Iteration"
+                    }
+                    crate::authoring_tab::RequirementsEditorMode::Insert => {
+                        " [INSERT] Esc Browse  Ctrl+S Save  Tab Indent  Arrows/Home/End Move"
+                    }
                 })
-            } else { crate::authoring_tab::requirements_footer_line(
-                &app.requirements_root,
-                &app.authoring_ui.iteration_filter,
-            ) },
+            } else {
+                crate::authoring_tab::requirements_footer_line(
+                    &app.requirements_root,
+                    &app.authoring_ui.iteration_filter,
+                )
+            },
             chunks[3],
         );
     } else if app.active_tab == MainTab::TestPoints {

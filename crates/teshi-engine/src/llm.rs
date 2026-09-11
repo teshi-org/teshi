@@ -23,13 +23,13 @@
 //! Pure DTOs (`ChatMessage`, `ToolDefinition`, `ToolCall`) live in `teshi-core::llm`.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 
 use anyhow::{Context, Result};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 pub use teshi_core::llm::{ChatMessage, ToolCall, ToolDefinition};
 

@@ -20,8 +20,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::model_profile::{
-    ApiStyle, ModelProfile, PROVIDER_ANTHROPIC, PROVIDER_DEEPSEEK, PROVIDER_OPENAI, generate_id,
-    save_profile_in, set_active_id_in,
+    generate_id, save_profile_in, set_active_id_in, ApiStyle, ModelProfile, PROVIDER_ANTHROPIC,
+    PROVIDER_DEEPSEEK, PROVIDER_OPENAI,
 };
 
 const TUI_IMPORT_MARKER: &str = ".migrated-from-tui-config";
@@ -214,7 +214,11 @@ fn read_legacy_active_id(config_dir: &Path) -> Option<String> {
     let path = config_dir.join("model_profile");
     let raw = fs::read_to_string(path).ok()?;
     let id = raw.trim().to_string();
-    if id.is_empty() { None } else { Some(id) }
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
 }
 
 fn import_toml_models(profiles_dir: &Path, models_dir: &Path) -> Result<Vec<String>> {

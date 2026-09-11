@@ -1,16 +1,16 @@
 //! OpenAI Responses API transport, adapted to [`crate::llm::LlmEvent`].
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
-use serde_json::{Map, Value, json};
+use anyhow::{bail, Context, Result};
+use serde_json::{json, Map, Value};
 
 use crate::llm::{
-    ChatMessage, LlmConfig, LlmEvent, ToolCall, ToolDefinition, apply_extra_headers,
-    merge_chat_options,
+    apply_extra_headers, merge_chat_options, ChatMessage, LlmConfig, LlmEvent, ToolCall,
+    ToolDefinition,
 };
 
 /// Build the Responses endpoint URL under the configured base URL.

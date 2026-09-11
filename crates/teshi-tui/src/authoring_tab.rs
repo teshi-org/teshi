@@ -292,11 +292,10 @@ impl AuthoringUiState {
         } else if let Some(first) = visible.first() {
             self.select_document_by_id(first);
         }
-        if let Some(id) = &self.selected_document_id {
-            if let Some(path) = find_tree_path(&self.tree_items, &format!("{TREE_DOC_PREFIX}{id}"))
-            {
-                self.select_document_tree_path(path);
-            }
+        if let Some(id) = &self.selected_document_id
+            && let Some(path) = find_tree_path(&self.tree_items, &format!("{TREE_DOC_PREFIX}{id}"))
+        {
+            self.select_document_tree_path(path);
         }
     }
 
@@ -571,10 +570,10 @@ impl AuthoringUiState {
     pub fn select_tree_node(&mut self, node_id: &str) {
         if let Some(doc_id) = node_id.strip_prefix(TREE_DOC_PREFIX) {
             self.select_document_by_id(doc_id);
-            if self.selected_document_id.as_deref() == Some(doc_id) {
-                if let Some(path) = find_tree_path(&self.tree_items, node_id) {
-                    self.select_document_tree_path(path);
-                }
+            if self.selected_document_id.as_deref() == Some(doc_id)
+                && let Some(path) = find_tree_path(&self.tree_items, node_id)
+            {
+                self.select_document_tree_path(path);
             }
         }
     }

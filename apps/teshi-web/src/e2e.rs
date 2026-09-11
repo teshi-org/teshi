@@ -54,9 +54,7 @@ struct E2eBrowserSessionsBackend;
 impl BrowserSessionsBackend for E2eBrowserSessionsBackend {
     fn start_browser_bridge(&self) -> BackendFuture<()> {
         mark_bridge_attempted();
-        Box::pin(async {
-            Err("E2E fixture: Chrome bridge unavailable".to_string())
-        })
+        Box::pin(async { Err("E2E fixture: Chrome bridge unavailable".to_string()) })
     }
 
     fn list_browser_sessions(&self) -> BackendFuture<BrowserSessionListSnapshot> {
@@ -386,9 +384,8 @@ fn sync_status() {
         let scenarios = run.scenario_list_text();
         let events = run.events_text();
         let _ = run;
-        let bridge_attempted = BRIDGE_ATTEMPTED.with(|attempted| {
-            if attempted.get() { "true" } else { "false" }
-        });
+        let bridge_attempted =
+            BRIDGE_ATTEMPTED.with(|attempted| if attempted.get() { "true" } else { "false" });
         set_text("e2e-surface", &surface);
         set_text("e2e-browser-status", &browser_status);
         set_text("e2e-run-status", &run_status);

@@ -1,16 +1,16 @@
 //! Anthropic Messages API transport, adapted to [`crate::llm::LlmEvent`].
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 use crate::llm::{
-    ChatMessage, LlmConfig, LlmEvent, ToolCall, ToolDefinition, apply_extra_headers,
-    merge_chat_options,
+    apply_extra_headers, merge_chat_options, ChatMessage, LlmConfig, LlmEvent, ToolCall,
+    ToolDefinition,
 };
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";

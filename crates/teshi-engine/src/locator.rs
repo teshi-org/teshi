@@ -357,7 +357,11 @@ fn upsert_binding(
     // scenarios.  The source line is the executable binding identity; using
     // only normalized text would make confirming the later occurrence replace
     // the earlier one and leave that step unbound again.
-    if let Some(existing) = bindings.steps.iter_mut().find(|s| s.step_line == step.step_line) {
+    if let Some(existing) = bindings
+        .steps
+        .iter_mut()
+        .find(|s| s.step_line == step.step_line)
+    {
         *existing = binding;
     } else {
         bindings.steps.push(binding);
