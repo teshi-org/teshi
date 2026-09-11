@@ -5739,85 +5739,7 @@ impl App {
                 if let Some(cmd) = user_msg.strip_prefix('/') {
                     self.slash_suggestion_active = false;
                     self.slash_suggestion_selection = 0;
-                    let cmd = cmd.trim();
-                    if cmd == "auth" || cmd.starts_with("auth ") {
-                        self.open_auth_panel(cmd.strip_prefix("auth ").unwrap_or(""));
-                        return Ok(());
-                    }
-                    if cmd == "new" {
-                        return self.cmd_new();
-                    }
-                    if cmd == "exit" || cmd == "quit" {
-                        return self.cmd_exit();
-                    }
-                    if cmd == "resume" {
-                        return self.cmd_resume();
-                    }
-                    if cmd == "copy" || cmd.starts_with("copy ") {
-                        let n = cmd
-                            .strip_prefix("copy ")
-                            .and_then(|s| s.trim().parse().ok())
-                            .unwrap_or(1);
-                        return self.cmd_copy(n);
-                    }
-                    if cmd == "models" || cmd == "model" {
-                        return self.cmd_models();
-                    }
-                    if cmd == "sessions" || cmd == "session" {
-                        return self.cmd_sessions();
-                    }
-                    if cmd == "approval" || cmd == "approve" || cmd == "app" {
-                        self.approval_panel_active = true;
-                        self.approval_panel_selection = teshi_agent::approval::ApprovalMode::ALL
-                            .iter()
-                            .position(|m| *m == self.approval_mode)
-                            .unwrap_or(0);
-                        self.status = "Approval mode".to_string();
-                        return Ok(());
-                    }
-                    if cmd == "agent" || cmd == "agents" {
-                        self.agent_registry = teshi_agent::registry::AgentRegistry::load(Some(
-                            self.find_project_dir(),
-                        ));
-                        self.agent_profile_panel_active = true;
-                        self.agent_panel_mode = AgentPanelMode::List;
-                        self.agent_profile_panel_selection = self
-                            .agent_registry
-                            .iter()
-                            .position(|p| {
-                                Some(p.id.as_str()) == self.agent().profile_id.as_deref()
-                                    || (self.agent().profile_id.is_none() && p.id == "default")
-                            })
-                            .unwrap_or(0);
-                        self.status =
-                            "Agent profiles: a add · e edit · d delete · ↑↓ select · Enter apply · Esc close".to_string();
-                        return Ok(());
-                    }
-                    if cmd == "generate" || cmd.starts_with("generate ") {
-                        let rest = cmd
-                            .strip_prefix("generate")
-                            .unwrap_or("")
-                            .trim()
-                            .to_string();
-                        let pending_user_message = if rest.is_empty() {
-                            "I want to generate a feature from requirements. Start the Feature Generation Pipeline: gather requirements (I can paste detailed text next), propose non-Gherkin test points for human review, then plan and write Gherkin .feature files. Do not use FreeMind or mock HTML.".to_string()
-                        } else {
-                            format!(
-                                "Please generate a feature from these requirements using the Feature Generation Pipeline. Propose non-Gherkin test points for human review before planning scenarios. Write Gherkin .feature files only (no FreeMind or mock HTML).\n\nRequirements:\n{rest}"
-                            )
-                        };
-                        self.generation_scope_prompt = Some(GenerationScopePrompt {
-                            iteration: self.authoring_ui.iteration_filter.clone(),
-                            pending_user_message,
-                        });
-                        self.status = "Confirm generation source scope (Enter confirm · Esc cancel · i change iteration)".to_string();
-                        return Ok(());
-                    } else if cmd == "continue" || cmd == "continue-generation" {
-                        return self.continue_test_point_generation();
-                    } else {
-                        self.status = "Unknown slash command. Try /new, /exit, /resume, /copy, /models, /sessions, /approval, /agent, /generate, /continue".to_string();
-                        return Ok(());
-                    }
+                    return self.execute_slash_command(cmd);
                 }
 
                 self.dispatch_user_message(user_msg)?;
@@ -5915,47 +5837,13 @@ impl App {
                     // Clear the input (cmd is about to execute); "copy" will override below
                     self.agent_mut().input.clear();
                     self.agent_mut().input_cursor = 0;
-                    // Execute the command directly
-                    return match *name {
-                        "new" => self.cmd_new(),
-                        "exit" => self.cmd_exit(),
-                        "resume" => self.cmd_resume(),
-                        "copy" => {
-                            self.agent_mut().input = "/copy ".into();
-                            self.agent_mut().input_cursor = self.agent().input.len();
-                            Ok(())
-                        }
-                        "models" => self.cmd_models(),
-                        "sessions" => self.cmd_sessions(),
-                        "approval" => {
-                            self.approval_panel_active = true;
-                            self.approval_panel_selection =
-                                teshi_agent::approval::ApprovalMode::ALL
-                                    .iter()
-                                    .position(|m| *m == self.approval_mode)
-                                    .unwrap_or(0);
-                            self.status = "Approval mode".to_string();
-                            Ok(())
-                        }
-                        "agent" => {
-                            self.agent_registry = teshi_agent::registry::AgentRegistry::load(Some(
-                                self.find_project_dir(),
-                            ));
-                            self.agent_profile_panel_active = true;
-                            self.agent_panel_mode = AgentPanelMode::List;
-                            self.agent_profile_panel_selection = self
-                                .agent_registry
-                                .iter()
-                                .position(|p| {
-                                    Some(p.id.as_str()) == self.agent().profile_id.as_deref()
-                                        || (self.agent().profile_id.is_none() && p.id == "default")
-                                })
-                                .unwrap_or(0);
-                            self.status =
-                                "Agent profiles: a add · e edit · d delete · ↑↓ select · Enter apply · Esc close".to_string();
-                            Ok(())
-                        }
-                        _ => Ok(()),
+                    // Execute the command through the same dispatcher as submitted commands.
+                    return if *name == "copy" {
+                        self.agent_mut().input = "/copy ".into();
+                        self.agent_mut().input_cursor = self.agent().input.len();
+                        Ok(())
+                    } else {
+                        self.execute_slash_command(name)
                     };
                 }
                 // If nothing matches, keep the popup open so the user can keep typing
@@ -7748,6 +7636,95 @@ impl App {
 
     // ── Slash command handlers ─────────────────────────────────────────
 
+    /// Execute a slash command from either submitted input or the suggestion menu.
+    ///
+    /// The suggestion menu clears the input before calling this method, so all
+    /// commands that have executable behavior must be handled here rather than
+    /// in a second dispatcher.
+    fn execute_slash_command(&mut self, command: &str) -> Result<()> {
+        let command = command.trim();
+        if command == "auth" || command.starts_with("auth ") {
+            self.open_auth_panel(command.strip_prefix("auth ").unwrap_or(""));
+            return Ok(());
+        }
+        if command == "new" {
+            return self.cmd_new();
+        }
+        if command == "exit" || command == "quit" {
+            return self.cmd_exit();
+        }
+        if command == "resume" {
+            return self.cmd_resume();
+        }
+        if command == "copy" || command.starts_with("copy ") {
+            let n = command
+                .strip_prefix("copy ")
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(1);
+            return self.cmd_copy(n);
+        }
+        if command == "models" || command == "model" {
+            return self.cmd_models();
+        }
+        if command == "sessions" || command == "session" {
+            return self.cmd_sessions();
+        }
+        if command == "approval" || command == "approve" || command == "app" {
+            self.approval_panel_active = true;
+            self.approval_panel_selection = teshi_agent::approval::ApprovalMode::ALL
+                .iter()
+                .position(|m| *m == self.approval_mode)
+                .unwrap_or(0);
+            self.status = "Approval mode".to_string();
+            return Ok(());
+        }
+        if command == "agent" || command == "agents" {
+            self.agent_registry =
+                teshi_agent::registry::AgentRegistry::load(Some(self.find_project_dir()));
+            self.agent_profile_panel_active = true;
+            self.agent_panel_mode = AgentPanelMode::List;
+            self.agent_profile_panel_selection = self
+                .agent_registry
+                .iter()
+                .position(|p| {
+                    Some(p.id.as_str()) == self.agent().profile_id.as_deref()
+                        || (self.agent().profile_id.is_none() && p.id == "default")
+                })
+                .unwrap_or(0);
+            self.status =
+                "Agent profiles: a add · e edit · d delete · ↑↓ select · Enter apply · Esc close"
+                    .to_string();
+            return Ok(());
+        }
+        if command == "generate" || command.starts_with("generate ") {
+            let rest = command
+                .strip_prefix("generate")
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let pending_user_message = if rest.is_empty() {
+                "I want to generate a feature from requirements. Start the Feature Generation Pipeline: gather requirements (I can paste detailed text next), propose non-Gherkin test points for human review, then plan and write Gherkin .feature files. Do not use FreeMind or mock HTML.".to_string()
+            } else {
+                format!(
+                    "Please generate a feature from these requirements using the Feature Generation Pipeline. Propose non-Gherkin test points for human review before planning scenarios. Write Gherkin .feature files only (no FreeMind or mock HTML).\n\nRequirements:\n{rest}"
+                )
+            };
+            self.generation_scope_prompt = Some(GenerationScopePrompt {
+                iteration: self.authoring_ui.iteration_filter.clone(),
+                pending_user_message,
+            });
+            self.status =
+                "Confirm generation source scope (Enter confirm · Esc cancel · i change iteration)"
+                    .to_string();
+            return Ok(());
+        }
+        if command == "continue" || command == "continue-generation" {
+            return self.continue_test_point_generation();
+        }
+        self.status = "Unknown slash command. Try /new, /exit, /resume, /copy, /models, /sessions, /approval, /agent, /generate, /continue".to_string();
+        Ok(())
+    }
+
     /// Handle `/new` — start a new session.
     fn cmd_new(&mut self) -> Result<()> {
         // Save current session if there are messages
@@ -7894,6 +7871,49 @@ mod tests {
             .unwrap();
         app.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Editor;
         (app, project, store)
+    }
+
+    fn slash_test_app() -> (App, tempfile::TempDir, tempfile::TempDir) {
+        let project = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        let feature = project.path().join("sample.feature");
+        fs::write(&feature, "Feature: Sample\n").unwrap();
+        let app = App::from_file(
+            &feature,
+            crate::config::load_config().unwrap(),
+            store.path().to_path_buf(),
+        )
+        .unwrap();
+        (app, project, store)
+    }
+
+    #[test]
+    fn slash_menu_generate_uses_command_dispatcher() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agent_mut().input = "/generate".into();
+        app.slash_suggestion_active = true;
+
+        app.handle_action(Action::AiSlashSelect).unwrap();
+
+        assert!(app.generation_scope_prompt.is_some());
+        assert!(app.status.contains("Confirm generation source scope"));
+    }
+
+    #[test]
+    fn slash_menu_continue_uses_command_dispatcher() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.generation_stage = teshi_agent::pipeline::GenerationStage::ReviewingTestPoints;
+        app.agent_mut().input = "/continue".into();
+        app.slash_suggestion_active = true;
+
+        app.handle_action(Action::AiSlashSelect).unwrap();
+
+        assert_eq!(
+            app.generation_stage,
+            teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
+        );
+        assert!(app.status.contains("approve at least one test point"));
     }
 
     #[test]
