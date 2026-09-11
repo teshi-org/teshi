@@ -3,8 +3,11 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use anyhow::Context;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -662,6 +665,37 @@ pub struct BrowserEvidenceReference {
     pub page_context_revision: PageContextRevision,
 }
 
+/// Binary viewport screenshot captured from the selected live browser tab.
+///
+/// The extension protocol currently transports artifact data as base64. That
+/// encoding is removed at this browser boundary so Agent and provider layers
+/// only see the canonical binary representation.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BrowserScreenshot {
+    pub observation_id: String,
+    pub image: Arc<[u8]>,
+    pub media_type: String,
+    pub url: Option<String>,
+    pub title: Option<String>,
+    pub page_context_revision: Option<PageContextRevision>,
+}
+
+impl fmt::Debug for BrowserScreenshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BrowserScreenshot")
+            .field("observation_id", &self.observation_id)
+            .field("media_type", &self.media_type)
+            .field(
+                "bytes",
+                &format_args!("<redacted {} bytes>", self.image.len()),
+            )
+            .field("url", &self.url)
+            .field("title", &self.title)
+            .field("page_context_revision", &self.page_context_revision)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrowserScreenshotFormat {
@@ -1258,6 +1292,65 @@ impl BrowserOperations {
             })?;
         parse_operation_response(operation.name(), &request_id, response)
     }
+
+    /// Capture the current viewport of the selected live tab as PNG bytes.
+    ///
+    /// This deliberately fixes `full_page` to false for Agent observations.
+    /// Artifact-oriented callers should continue using the typed operation
+    /// directly when they need a different format or clipping policy.
+    pub fn capture_viewport_png(
+        &self,
+        target: BrowserTarget,
+        lease_token: impl Into<String>,
+    ) -> anyhow::Result<BrowserScreenshot> {
+        let response = self
+            .execute(&BrowserOperation::CaptureBrowserScreenshot {
+                target,
+                lease_token: lease_token.into(),
+                page_context_revision: None,
+                format: BrowserScreenshotFormat::Png,
+                quality: None,
+                full_page: false,
+                element: None,
+            })
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let payload = &response.payload;
+        let encoded = payload
+            .get("artifact_data")
+            .and_then(Value::as_str)
+            .context("browser screenshot response missing artifact_data")?;
+        if encoded.is_empty() {
+            anyhow::bail!("browser visual observation failed: screenshot data was empty");
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .context("browser screenshot response contained invalid base64")?;
+        if bytes.is_empty() {
+            anyhow::bail!("browser visual observation failed: screenshot bytes were empty");
+        }
+        if bytes.get(..8) != Some(b"\x89PNG\r\n\x1a\n") {
+            anyhow::bail!("browser visual observation failed: capture was not a PNG");
+        }
+        Ok(BrowserScreenshot {
+            observation_id: response.request_id,
+            image: Arc::from(bytes),
+            media_type: "image/png".into(),
+            url: payload
+                .get("url")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+            title: payload
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+            page_context_revision: payload
+                .get("page_context_revision")
+                .and_then(Value::as_str)
+                .map(|value| PageContextRevision(value.to_owned())),
+        })
+    }
 }
 
 fn next_request_id() -> String {
@@ -1710,5 +1803,37 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, BrowserAgentErrorCode::MismatchedBrowserResponse);
+    }
+
+    #[test]
+    fn visual_capture_operation_is_viewport_png_by_default() {
+        let command = BrowserOperation::CaptureBrowserScreenshot {
+            target: target(),
+            lease_token: "lease-secret".into(),
+            page_context_revision: None,
+            format: BrowserScreenshotFormat::Png,
+            quality: None,
+            full_page: false,
+            element: None,
+        }
+        .to_sidecar_command("visual-1");
+        assert_eq!(command["cmd"], "capture_browser_screenshot");
+        assert_eq!(command["format"], "png");
+        assert_eq!(command["full_page"], false);
+    }
+
+    #[test]
+    fn visual_screenshot_debug_redacts_binary_payload() {
+        let screenshot = BrowserScreenshot {
+            observation_id: "visual-1".into(),
+            image: Arc::from([0_u8, 1, 2, 255]),
+            media_type: "image/png".into(),
+            url: Some("http://127.0.0.1/fixture".into()),
+            title: Some("fixture".into()),
+            page_context_revision: None,
+        };
+        let debug = format!("{screenshot:?}");
+        assert!(debug.contains("<redacted 4 bytes>"));
+        assert!(!debug.contains("255"));
     }
 }

@@ -27,6 +27,7 @@ serde_yaml = "0.9"
 teshi-agent.workspace = true
 teshi-core.workspace = true
 teshi-engine.workspace = true
+tracing.workspace = true
 tokio.workspace = true
 toml = "0.8"
 tui-tree-widget = "0.23"

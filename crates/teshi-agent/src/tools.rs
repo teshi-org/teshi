@@ -561,6 +561,15 @@ fn get_all_tools() -> Vec<ToolDefinition> {
         },
         // ── Browser agent exploration tools ──
         ToolDefinition {
+            name: "observe_page".into(),
+            description: "Capture the current browser viewport as a visual observation. The image is provided to the model in a separate user message; use structured browser tools for actions.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        ToolDefinition {
             name: "browser_snapshot".into(),
             description: "Get a structured snapshot of the current browser page, \
                           listing all interactive elements with their teshi-id ref, \
@@ -671,6 +680,7 @@ mod tests {
         let tools = get_all_tools();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"browser_snapshot"));
+        assert!(names.contains(&"observe_page"));
         assert!(names.contains(&"browser_click"));
         assert!(names.contains(&"browser_type"));
         assert!(names.contains(&"browser_assert"));

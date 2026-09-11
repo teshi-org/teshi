@@ -1593,12 +1593,16 @@ mod tests {
             let body: Value =
                 serde_json::from_slice(&bytes[header_end..header_end + content_length]).unwrap();
             assert_eq!(body["model"], "deepseek-flash");
+            assert_eq!(body["messages"][0]["role"], "assistant");
+            assert_eq!(body["messages"][0]["reasoning_content"], "inspect first");
+            assert_eq!(body["messages"][1]["role"], "tool");
+            assert_eq!(body["messages"][2]["role"], "user");
             assert_eq!(
-                body["messages"][0]["content"][0]["text"],
+                body["messages"][2]["content"][0]["text"],
                 "Inspect this screenshot"
             );
             assert_eq!(
-                body["messages"][0]["content"][1]["image_url"]["url"],
+                body["messages"][2]["content"][1]["image_url"]["url"],
                 "data:image/png;base64,AQID"
             );
             assert_eq!(body["thinking"]["type"], "enabled");
@@ -1612,6 +1616,25 @@ mod tests {
         config.model = "deepseek-flash".into();
         config.base_url = format!("http://{addr}");
         config.stream = false;
+        let assistant = ChatMessage {
+            role: "assistant".into(),
+            content: MessageContent::Text(String::new()),
+            tool_calls: Some(vec![ToolCall {
+                id: "observe-1".into(),
+                name: "observe_page".into(),
+                arguments: "{}".into(),
+                execution_duration_ms: None,
+            }]),
+            tool_call_id: None,
+            reasoning_content: Some("inspect first".into()),
+        };
+        let tool = ChatMessage {
+            role: "tool".into(),
+            content: "Visual observation captured successfully.".into(),
+            tool_calls: None,
+            tool_call_id: Some("observe-1".into()),
+            reasoning_content: None,
+        };
         let message = ChatMessage {
             role: "user".into(),
             content: MessageContent::Blocks(vec![
@@ -1633,7 +1656,7 @@ mod tests {
         chat_completions_request(
             &config,
             None,
-            vec![message],
+            vec![assistant, tool, message],
             None,
             &tx,
             &Arc::new(AtomicBool::new(false)),

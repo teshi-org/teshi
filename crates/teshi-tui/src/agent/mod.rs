@@ -126,6 +126,7 @@ fn execute_tool_impl(
         "generate_plan" => execute_generate_plan(app, args_json),
         "validate_feature" => execute_validate_feature(app, args_json),
         // Browser agent exploration tools
+        "observe_page" => execute_observe_page(app, agent_idx),
         "browser_snapshot" => execute_browser_snapshot(app),
         "browser_click" => execute_browser_click(app, args_json),
         "browser_type" => execute_browser_type(app, args_json),
@@ -1964,6 +1965,92 @@ fn execute_browser_snapshot(_app: &mut crate::app::App) -> Result<String> {
         }
     })?;
     Ok(serde_json::to_string_pretty(&response)?)
+}
+
+fn execute_observe_page(app: &mut crate::app::App, agent_idx: usize) -> Result<String> {
+    // A failed capture must not reuse a previous image as if it were current.
+    app.agents[agent_idx].latest_visual_observation = None;
+    let screenshot = execute_typed_browser_screenshot()?;
+    tracing::debug!(
+        event = "visual_observation_created",
+        observation_id = %screenshot.observation_id,
+        byte_length = screenshot.image.len(),
+        media_type = %screenshot.media_type,
+        url = screenshot.url.as_deref().unwrap_or(""),
+        title = screenshot.title.as_deref().unwrap_or(""),
+    );
+    app.agents[agent_idx].latest_visual_observation = Some(screenshot);
+    Ok("Visual observation captured successfully.".into())
+}
+
+fn execute_typed_browser_screenshot() -> Result<teshi_engine::BrowserScreenshot> {
+    use std::time::Duration;
+    let ws_url = resolve_sidecar_ws_url().ok_or_else(|| {
+        anyhow::anyhow!("browser visual observation failed: no browser sidecar connected")
+    })?;
+    let client = teshi_engine::BrowserOperations::new(ws_url, Duration::from_secs(30))
+        .with_caller_label("teshi-tui-agent");
+    let sessions = client
+        .execute(&teshi_engine::BrowserOperation::ListBrowserSessions)?
+        .payload;
+    let records = sessions
+        .get("sessions")
+        .and_then(serde_json::Value::as_array)
+        .context("browser session discovery returned no sessions array")?;
+    let eligible: Vec<_> = records
+        .iter()
+        .filter(|record| record.get("health").and_then(|value| value.as_str()) == Some("ready"))
+        .collect();
+    if eligible.len() != 1 {
+        anyhow::bail!(
+            "browser visual observation requires exactly one ready Profile; found {}",
+            eligible.len()
+        );
+    }
+    let record = eligible[0];
+    let instance_id = record
+        .pointer("/identity/extension_instance_id")
+        .and_then(serde_json::Value::as_str)
+        .context("browser session missing extension identity")?
+        .to_string();
+    let tab = record
+        .get("windows")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|windows| {
+            windows.iter().find_map(|window| {
+                let window_id = window.get("id")?.as_i64()?;
+                window
+                    .get("tabs")?
+                    .as_array()?
+                    .iter()
+                    .find(|tab| tab.get("active").and_then(|value| value.as_bool()) == Some(true))
+                    .and_then(|tab| Some((window_id, tab.get("id")?.as_i64()?)))
+            })
+        })
+        .context("ready browser session has no active tab")?;
+    let target = teshi_engine::BrowserTarget {
+        extension_instance_id: instance_id.clone(),
+        window_id: tab.0,
+        tab_id: tab.1,
+    };
+    let lease = client
+        .execute(&teshi_engine::BrowserOperation::AcquireBrowserLease {
+            extension_instance_id: instance_id.clone(),
+            owner_label: "teshi-tui-agent".into(),
+            ttl_secs: 30,
+        })?
+        .payload;
+    let lease_token = lease
+        .pointer("/lease/lease_token")
+        .and_then(serde_json::Value::as_str)
+        .context("browser lease response missing token")?
+        .to_string();
+    let result = client.capture_viewport_png(target, lease_token.clone());
+    let _ = client.execute(&teshi_engine::BrowserOperation::ReleaseBrowserLease {
+        extension_instance_id: instance_id,
+        lease_token,
+    });
+    result
 }
 
 fn execute_browser_click(_app: &mut crate::app::App, args_json: &str) -> Result<String> {

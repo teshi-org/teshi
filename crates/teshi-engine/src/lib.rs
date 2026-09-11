@@ -62,11 +62,11 @@ pub use browser_agent::{
     BrowserElementState, BrowserEvidenceReference, BrowserFeatureAvailability, BrowserFeatureId,
     BrowserFeaturePhase, BrowserLease, BrowserLeaseSummary, BrowserMetadata, BrowserOperation,
     BrowserOperationResponse, BrowserOperations, BrowserPageSnapshot, BrowserPrivilegedCapability,
-    BrowserRequestEnvelope, BrowserScreenshotFormat, BrowserSession, BrowserSessionHealth,
-    BrowserTab, BrowserTarget, BrowserWaitCondition, BrowserWindow, ExtensionIdentity,
-    LocatorContext, LocatorIntent, LocatorVerificationStatus, PageContextRevision,
-    PlaywrightLocatorCandidate, PlaywrightLocatorKind, PlaywrightLocatorResult,
-    BROWSER_AGENT_SCHEMA_VERSION, BROWSER_BROKER_PROTOCOL_VERSION,
+    BrowserRequestEnvelope, BrowserScreenshot, BrowserScreenshotFormat, BrowserSession,
+    BrowserSessionHealth, BrowserTab, BrowserTarget, BrowserWaitCondition, BrowserWindow,
+    ExtensionIdentity, LocatorContext, LocatorIntent, LocatorVerificationStatus,
+    PageContextRevision, PlaywrightLocatorCandidate, PlaywrightLocatorKind,
+    PlaywrightLocatorResult, BROWSER_AGENT_SCHEMA_VERSION, BROWSER_BROKER_PROTOCOL_VERSION,
     DEFAULT_BROWSER_CAPABILITY_GRANT_TTL_SECS, DEFAULT_BROWSER_LEASE_TTL_SECS,
 };
 pub use daemon::{

@@ -2323,6 +2323,8 @@ async function captureBrowserScreenshot(
     artifact_data: artifactData,
     format,
     page_context_revision: currentRevision,
+    url: tab.url ?? "",
+    title: tab.title ?? "",
   };
 }
 

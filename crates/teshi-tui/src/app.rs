@@ -113,6 +113,10 @@ pub struct AgentThread {
     pub last_input_tokens: Option<u32>,
     /// Selected agent profile ID (None = use default).
     pub profile_id: Option<String>,
+    /// Latest on-demand browser visual observation. Older image bytes are not
+    /// retained in the active model projection, while their text messages
+    /// remain in the durable chat history.
+    pub latest_visual_observation: Option<teshi_engine::BrowserScreenshot>,
 }
 
 impl AgentThread {
@@ -135,6 +139,7 @@ impl AgentThread {
             total_output_tokens: 0,
             last_input_tokens: None,
             profile_id: None,
+            latest_visual_observation: None,
         }
     }
 }
@@ -1578,6 +1583,32 @@ impl App {
                                             source: None,
                                         });
                                     }
+                                    if tc.name == "observe_page"
+                                        && self.agents[i].latest_visual_observation.is_some()
+                                    {
+                                        let observation = self.agents[i]
+                                            .latest_visual_observation
+                                            .as_ref()
+                                            .expect("checked above");
+                                        let mut content =
+                                            "[Browser visual observation]\nCurrent viewport after the requested observation.".to_string();
+                                        if let Some(url) = &observation.url {
+                                            content.push_str("\nURL: ");
+                                            content.push_str(url);
+                                        }
+                                        if let Some(title) = &observation.title {
+                                            content.push_str("\nTitle: ");
+                                            content.push_str(title);
+                                        }
+                                        self.agents[i].messages.push(AiChatMessage {
+                                            role: AiRole::User,
+                                            content,
+                                            tool_calls: None,
+                                            tool_call_id: None,
+                                            reasoning_content: None,
+                                            source: Some("browser_visual_observation".into()),
+                                        });
+                                    }
                                     // Update duration on the assistant message's tool call
                                     if let Some(msg) =
                                         self.agents[i].messages.get_mut(assistant_msg_idx)
@@ -1880,6 +1911,10 @@ impl App {
     /// requests.  Prepends a project-context summary as a system message.
     fn build_chat_messages_for_agent(&self, agent_idx: usize) -> Vec<crate::llm::ChatMessage> {
         let mut msgs: Vec<crate::llm::ChatMessage> = Vec::new();
+        let latest_visual_message = self.agents[agent_idx]
+            .messages
+            .iter()
+            .rposition(|message| message.source.as_deref() == Some("browser_visual_observation"));
 
         // Inject project context as a system message at the front
         if self.agents[agent_idx]
@@ -1897,14 +1932,33 @@ impl App {
         }
 
         // Original 1:1 mapping
-        for m in &self.agents[agent_idx].messages {
+        for (message_idx, m) in self.agents[agent_idx].messages.iter().enumerate() {
+            let content = if Some(message_idx) == latest_visual_message {
+                if let Some(observation) = &self.agents[agent_idx].latest_visual_observation {
+                    teshi_core::llm::MessageContent::Blocks(vec![
+                        teshi_core::llm::ContentBlock::Text {
+                            text: m.content.clone(),
+                        },
+                        teshi_core::llm::ContentBlock::Image {
+                            source: teshi_core::llm::ImageSource::Data {
+                                media_type: observation.media_type.clone(),
+                                data: observation.image.clone(),
+                            },
+                        },
+                    ])
+                } else {
+                    m.content.clone().into()
+                }
+            } else {
+                m.content.clone().into()
+            };
             msgs.push(crate::llm::ChatMessage {
                 role: match m.role {
                     AiRole::User => "user".into(),
                     AiRole::Assistant => "assistant".into(),
                     AiRole::Tool => "tool".into(),
                 },
-                content: m.content.clone().into(),
+                content,
                 tool_calls: m.tool_calls.clone(),
                 tool_call_id: m.tool_call_id.clone(),
                 reasoning_content: m.reasoning_content.clone(),
@@ -7888,6 +7942,103 @@ mod tests {
         )
         .unwrap();
         (app, project, store)
+    }
+
+    #[test]
+    fn visual_observation_projection_keeps_order_and_reasoning() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0].messages = vec![
+            super::AiChatMessage {
+                role: super::AiRole::Assistant,
+                content: String::new(),
+                tool_calls: Some(vec![crate::llm::ToolCall {
+                    id: "observe-1".into(),
+                    name: "observe_page".into(),
+                    arguments: "{}".into(),
+                    execution_duration_ms: None,
+                }]),
+                tool_call_id: None,
+                reasoning_content: Some("inspect the page".into()),
+                source: None,
+            },
+            super::AiChatMessage {
+                role: super::AiRole::Tool,
+                content: "Visual observation captured successfully.".into(),
+                tool_calls: None,
+                tool_call_id: Some("observe-1".into()),
+                reasoning_content: None,
+                source: None,
+            },
+            super::AiChatMessage {
+                role: super::AiRole::User,
+                content: "[Browser visual observation]".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: Some("browser_visual_observation".into()),
+            },
+        ];
+        app.agents[0].latest_visual_observation = Some(teshi_engine::BrowserScreenshot {
+            observation_id: "visual-1".into(),
+            image: std::sync::Arc::from([0x89, 0x50, 0x4e, 0x47]),
+            media_type: "image/png".into(),
+            url: Some("http://127.0.0.1/fixture".into()),
+            title: Some("fixture".into()),
+            page_context_revision: None,
+        });
+
+        let messages = app.build_chat_messages_for_agent(0);
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(
+            messages[1].reasoning_content.as_deref(),
+            Some("inspect the page")
+        );
+        assert_eq!(messages[2].role, "tool");
+        assert_eq!(messages[3].role, "user");
+        assert!(matches!(
+            messages[3].content,
+            teshi_core::llm::MessageContent::Blocks(ref blocks)
+                if matches!(blocks[1], teshi_core::llm::ContentBlock::Image { .. })
+        ));
+    }
+
+    #[test]
+    fn visual_context_retains_only_latest_image() {
+        let (mut app, _project, _store) = slash_test_app();
+        for round in 0..10_u8 {
+            app.agents[0].messages.push(super::AiChatMessage {
+                role: super::AiRole::User,
+                content: format!("[Browser visual observation] {round}"),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: Some("browser_visual_observation".into()),
+            });
+            app.agents[0].latest_visual_observation = Some(teshi_engine::BrowserScreenshot {
+                observation_id: format!("visual-{round}"),
+                image: std::sync::Arc::from([round]),
+                media_type: "image/png".into(),
+                url: None,
+                title: None,
+                page_context_revision: None,
+            });
+        }
+        let messages = app.build_chat_messages_for_agent(0);
+        let image_count = messages
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message.content,
+                    teshi_core::llm::MessageContent::Blocks(ref blocks)
+                        if blocks.iter().any(|block| matches!(
+                            block,
+                            teshi_core::llm::ContentBlock::Image { .. }
+                        ))
+                )
+            })
+            .count();
+        assert_eq!(image_count, 1);
+        assert_eq!(messages.len(), 11);
     }
 
     #[test]
