@@ -115,7 +115,7 @@ pub enum Command {
         #[arg(long)]
         runner_cmd: Option<String>,
         /// Runner additional arguments (repeatable)
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         runner_arg: Option<Vec<String>>,
         /// Runner working directory
         #[arg(long)]
