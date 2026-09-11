@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use serde_json::{json, Map, Value};
 
 use crate::llm::{
-    apply_extra_headers, merge_chat_options, ChatMessage, LlmConfig, LlmEvent, ToolCall,
-    ToolDefinition,
+    apply_extra_headers, merge_chat_options, text_content, ChatMessage, LlmConfig, LlmEvent,
+    ToolCall, ToolDefinition,
 };
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -31,7 +31,7 @@ pub(crate) fn build_anthropic_body(
     system: Option<String>,
     messages: &[ChatMessage],
     tools: Option<&[ToolDefinition]>,
-) -> Value {
+) -> Result<Value> {
     let mut anthropic_messages: Vec<Value> = Vec::new();
     let mut system_text = system.unwrap_or_default();
 
@@ -41,19 +41,19 @@ pub(crate) fn build_anthropic_body(
                 if !system_text.is_empty() {
                     system_text.push('\n');
                 }
-                system_text.push_str(&msg.content);
+                system_text.push_str(text_content(&msg.content)?);
             }
             "user" => {
                 anthropic_messages.push(json!({
                     "role": "user",
-                    "content": msg.content,
+                    "content": text_content(&msg.content)?,
                 }));
             }
             "assistant" => {
                 if let Some(ref tcs) = msg.tool_calls {
                     let mut blocks: Vec<Value> = Vec::new();
-                    if !msg.content.is_empty() {
-                        blocks.push(json!({ "type": "text", "text": msg.content }));
+                    if !text_content(&msg.content)?.is_empty() {
+                        blocks.push(json!({ "type": "text", "text": text_content(&msg.content)? }));
                     }
                     for tc in tcs {
                         let input: Value = serde_json::from_str(&tc.arguments)
@@ -72,7 +72,7 @@ pub(crate) fn build_anthropic_body(
                 } else {
                     anthropic_messages.push(json!({
                         "role": "assistant",
-                        "content": msg.content,
+                        "content": text_content(&msg.content)?,
                     }));
                 }
             }
@@ -83,14 +83,14 @@ pub(crate) fn build_anthropic_body(
                     "content": [{
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
-                        "content": msg.content,
+                        "content": text_content(&msg.content)?,
                     }],
                 }));
             }
             other => {
                 anthropic_messages.push(json!({
                     "role": other,
-                    "content": msg.content,
+                    "content": text_content(&msg.content)?,
                 }));
             }
         }
@@ -131,7 +131,7 @@ pub(crate) fn build_anthropic_body(
         core.insert("tools".into(), body["tools"].clone());
     }
     merge_chat_options(&mut body, &config.chat_options, &core);
-    body
+    Ok(body)
 }
 
 /// Run an Anthropic Messages request and emit [`LlmEvent`]s.
@@ -143,7 +143,15 @@ pub(crate) async fn anthropic_messages_request(
     evt_tx: &Sender<LlmEvent>,
     cancel: &Arc<AtomicBool>,
 ) -> Result<()> {
-    let request_body = build_anthropic_body(config, system, &messages, tools.as_deref());
+    let request_body = match build_anthropic_body(config, system, &messages, tools.as_deref()) {
+        Ok(body) => body,
+        Err(error) => {
+            let _ = evt_tx.send(LlmEvent::Error {
+                message: error.to_string(),
+            });
+            return Ok(());
+        }
+    };
     let url = anthropic_messages_url(&config.base_url);
 
     let client = match reqwest::Client::builder().build() {
@@ -460,7 +468,7 @@ mod tests {
             description: "Search".into(),
             parameters: json!({"type":"object"}),
         }];
-        let body = build_anthropic_body(&cfg, Some("sys".into()), &[], Some(&tools));
+        let body = build_anthropic_body(&cfg, Some("sys".into()), &[], Some(&tools)).unwrap();
         assert_eq!(body["model"], "claude-sonnet-4-5");
         assert_eq!(body["system"], "sys");
         assert_eq!(body["tools"][0]["name"], "search");

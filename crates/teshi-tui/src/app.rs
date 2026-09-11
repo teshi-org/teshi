@@ -1889,7 +1889,7 @@ impl App {
         {
             msgs.push(crate::llm::ChatMessage {
                 role: "system".into(),
-                content: self.build_project_context_summary(),
+                content: self.build_project_context_summary().into(),
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: None,
@@ -1904,7 +1904,7 @@ impl App {
                     AiRole::Assistant => "assistant".into(),
                     AiRole::Tool => "tool".into(),
                 },
-                content: m.content.clone(),
+                content: m.content.clone().into(),
                 tool_calls: m.tool_calls.clone(),
                 tool_call_id: m.tool_call_id.clone(),
                 reasoning_content: m.reasoning_content.clone(),

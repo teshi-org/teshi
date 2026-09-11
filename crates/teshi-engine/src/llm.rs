@@ -29,9 +29,12 @@ use std::sync::Arc;
 use std::thread;
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use serde_json::{json, Map, Value};
 
-pub use teshi_core::llm::{ChatMessage, ToolCall, ToolDefinition};
+pub use teshi_core::llm::{
+    ChatMessage, ContentBlock, ImageSource, MessageContent, ToolCall, ToolDefinition,
+};
 
 use crate::model_profile::{
     ApiStyle, DeepSeekThinking, PROVIDER_ANTHROPIC, PROVIDER_DEEPSEEK, PROVIDER_DEEPSEEK_OPENAI,
@@ -138,7 +141,7 @@ pub async fn call_llm_with_tool_config(
         system: Some(system.to_string()),
         messages: vec![ChatMessage {
             role: "user".into(),
-            content: user.to_string(),
+            content: user.to_string().into(),
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
@@ -591,7 +594,7 @@ fn build_request_body(
     system: Option<String>,
     messages: &[ChatMessage],
     tools: Option<&[ToolDefinition]>,
-) -> serde_json::Value {
+) -> Result<serde_json::Value> {
     let is_deepseek =
         config.provider == PROVIDER_DEEPSEEK || config.provider == PROVIDER_DEEPSEEK_OPENAI;
     let mut body = serde_json::json!({
@@ -618,8 +621,7 @@ fn build_request_body(
             "role": msg.role,
         });
 
-        // Chat Completions tool-call history must retain a string content field.
-        j["content"] = serde_json::json!(msg.content);
+        j["content"] = serialize_chat_content(config, &msg.role, &msg.content)?;
 
         if let Some(ref tcs) = msg.tool_calls {
             let tool_calls_json: Vec<serde_json::Value> = tcs
@@ -705,7 +707,75 @@ fn build_request_body(
         }
     }
 
-    body
+    Ok(body)
+}
+
+fn serialize_chat_content(
+    config: &LlmConfig,
+    role: &str,
+    content: &MessageContent,
+) -> Result<Value> {
+    match content {
+        MessageContent::Text(text) => Ok(Value::String(text.clone())),
+        MessageContent::Blocks(blocks) => {
+            let is_deepseek =
+                config.provider == PROVIDER_DEEPSEEK || config.provider == PROVIDER_DEEPSEEK_OPENAI;
+            if !is_deepseek {
+                anyhow::bail!(
+                    "multimodal image content is not enabled for provider '{}'",
+                    config.provider
+                );
+            }
+            let mut output = Vec::with_capacity(blocks.len());
+            for block in blocks {
+                match block {
+                    ContentBlock::Text { text } => {
+                        output.push(json!({"type": "text", "text": text}))
+                    }
+                    ContentBlock::Image { source } => {
+                        if role != "user" {
+                            anyhow::bail!("DeepSeek Chat Completions only supports image content in user messages");
+                        }
+                        let url = match source {
+                            ImageSource::Url(url)
+                                if url.starts_with("http://") || url.starts_with("https://") =>
+                            {
+                                url.clone()
+                            }
+                            ImageSource::Url(_) => {
+                                anyhow::bail!("DeepSeek image URL must use http:// or https://")
+                            }
+                            ImageSource::Data { media_type, data } => {
+                                if data.is_empty() {
+                                    anyhow::bail!("DeepSeek image data must not be empty");
+                                }
+                                if !matches!(
+                                    media_type.as_str(),
+                                    "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+                                ) {
+                                    anyhow::bail!(
+                                        "DeepSeek does not support image MIME type '{media_type}'"
+                                    );
+                                }
+                                format!(
+                                    "data:{media_type};base64,{}",
+                                    base64::engine::general_purpose::STANDARD.encode(data)
+                                )
+                            }
+                        };
+                        output.push(json!({"type": "image_url", "image_url": {"url": url}}));
+                    }
+                }
+            }
+            Ok(Value::Array(output))
+        }
+    }
+}
+
+pub(crate) fn text_content(content: &MessageContent) -> Result<&str> {
+    content.text().ok_or_else(|| {
+        anyhow::anyhow!("multimodal image content is not enabled for this transport")
+    })
 }
 
 /// Whether this config should use OpenAI-compatible `/chat/completions`.
@@ -771,7 +841,15 @@ async fn chat_completions_request(
     evt_tx: &Sender<LlmEvent>,
     cancel: &Arc<AtomicBool>,
 ) -> Result<()> {
-    let request_body = build_request_body(config, system, &messages, tools.as_deref());
+    let request_body = match build_request_body(config, system, &messages, tools.as_deref()) {
+        Ok(body) => body,
+        Err(error) => {
+            let _ = evt_tx.send(LlmEvent::Error {
+                message: error.to_string(),
+            });
+            return Ok(());
+        }
+    };
     let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
 
     let client = match reqwest::Client::builder().build() {
@@ -1100,17 +1178,108 @@ mod tests {
             .chat_options
             .insert("model".into(), Value::String("should-not-win".into()));
         config.chat_options.insert("top_p".into(), json!(0.9));
-        let body = build_request_body(&config, None, &[], None);
+        let body = build_request_body(&config, None, &[], None).unwrap();
         assert_eq!(body["model"], "gpt-4o-mini");
         assert_eq!(body["top_p"], 0.9);
         assert_eq!(body["stream"], true);
     }
 
     #[test]
+    fn deepseek_multimodal_serializer_preserves_text_and_encodes_images() {
+        let mut config = base_config();
+        config.provider = PROVIDER_DEEPSEEK.into();
+        config.model = "deepseek-flash".into();
+        config.stream = false;
+        let message = ChatMessage {
+            role: "user".into(),
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: "Inspect".into(),
+                },
+                ContentBlock::Image {
+                    source: ImageSource::Data {
+                        media_type: "image/png".into(),
+                        data: std::sync::Arc::from([1_u8, 2, 3]),
+                    },
+                },
+                ContentBlock::Text {
+                    text: "this".into(),
+                },
+                ContentBlock::Image {
+                    source: ImageSource::Data {
+                        media_type: "image/jpeg".into(),
+                        data: std::sync::Arc::from([4_u8]),
+                    },
+                },
+            ]),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        let body = build_request_body(&config, None, &[message], None).unwrap();
+        assert_eq!(
+            body["messages"][0]["content"][0],
+            json!({"type":"text","text":"Inspect"})
+        );
+        assert_eq!(
+            body["messages"][0]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,AQID"
+        );
+        assert_eq!(body["messages"][0]["content"][2]["text"], "this");
+        assert_eq!(
+            body["messages"][0]["content"][3]["image_url"]["url"],
+            "data:image/jpeg;base64,BA=="
+        );
+    }
+
+    #[test]
+    fn deepseek_multimodal_validation_is_local_and_role_aware() {
+        let mut config = base_config();
+        config.provider = PROVIDER_DEEPSEEK.into();
+        let image = || {
+            MessageContent::Blocks(vec![ContentBlock::Image {
+                source: ImageSource::Data {
+                    media_type: "image/bmp".into(),
+                    data: std::sync::Arc::from([1_u8]),
+                },
+            }])
+        };
+        for role in ["system", "assistant", "tool"] {
+            let message = ChatMessage {
+                role: role.into(),
+                content: image(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            };
+            let error = build_request_body(&config, None, &[message], None)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("only supports image content in user messages"));
+        }
+        let message = ChatMessage {
+            role: "user".into(),
+            content: MessageContent::Blocks(vec![ContentBlock::Image {
+                source: ImageSource::Data {
+                    media_type: "image/bmp".into(),
+                    data: std::sync::Arc::from([1_u8]),
+                },
+            }]),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        assert!(build_request_body(&config, None, &[message], None)
+            .unwrap_err()
+            .to_string()
+            .contains("MIME"));
+    }
+
+    #[test]
     fn test_stream_false_in_request_body() {
         let mut config = base_config();
         config.stream = false;
-        let body = build_request_body(&config, None, &[], None);
+        let body = build_request_body(&config, None, &[], None).unwrap();
         assert_eq!(body["stream"], false);
     }
 
@@ -1135,7 +1304,7 @@ mod tests {
             .chat_options
             .insert("reasoning_effort".into(), json!("off"));
         config.chat_options.insert("temperature".into(), json!(0.1));
-        let body = build_request_body(&config, None, &[], Some(&[]));
+        let body = build_request_body(&config, None, &[], Some(&[])).unwrap();
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["reasoning_effort"], "high");
         assert!(body.get("temperature").is_none());
@@ -1146,7 +1315,7 @@ mod tests {
         let mut config = base_config();
         config.provider = PROVIDER_DEEPSEEK.into();
         config.thinking = DeepSeekThinking::Disabled;
-        let body = build_request_body(&config, None, &[], None);
+        let body = build_request_body(&config, None, &[], None).unwrap();
         assert_eq!(body["thinking"]["type"], "disabled");
         assert!(body.get("reasoning_effort").is_none());
     }
@@ -1166,7 +1335,7 @@ mod tests {
         config.provider = PROVIDER_DEEPSEEK.into();
         let messages = vec![ChatMessage {
             role: "assistant".into(),
-            content: String::new(),
+            content: String::new().into(),
             tool_calls: Some(vec![ToolCall {
                 id: "call-1".into(),
                 name: "lookup".into(),
@@ -1176,7 +1345,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: Some("full chain".into()),
         }];
-        let body = build_request_body(&config, None, &messages, Some(&[]));
+        let body = build_request_body(&config, None, &messages, Some(&[])).unwrap();
         assert_eq!(body["messages"][0]["content"], "");
         assert_eq!(body["messages"][0]["reasoning_content"], "full chain");
         assert!(!body["messages"][0]["content"].is_null());
@@ -1189,7 +1358,7 @@ mod tests {
         let messages: Vec<_> = (0..5)
             .map(|round| ChatMessage {
                 role: "assistant".into(),
-                content: String::new(),
+                content: String::new().into(),
                 tool_calls: Some(vec![ToolCall {
                     id: format!("call-{round}"),
                     name: "lookup".into(),
@@ -1200,7 +1369,7 @@ mod tests {
                 reasoning_content: Some(format!("reasoning-round-{round}")),
             })
             .collect();
-        let body = build_request_body(&config, None, &messages, Some(&[]));
+        let body = build_request_body(&config, None, &messages, Some(&[])).unwrap();
         for round in 0..5 {
             assert_eq!(
                 body["messages"][round]["reasoning_content"],
@@ -1390,6 +1559,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deepseek_production_http_body_contains_multimodal_content() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut content_length: usize;
+            loop {
+                let mut chunk = [0_u8; 4096];
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..pos]);
+                    content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap();
+                    if bytes.len() >= pos + 4 + content_length {
+                        break;
+                    }
+                }
+            }
+            let header_end = bytes.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+            let body: Value =
+                serde_json::from_slice(&bytes[header_end..header_end + content_length]).unwrap();
+            assert_eq!(body["model"], "deepseek-flash");
+            assert_eq!(
+                body["messages"][0]["content"][0]["text"],
+                "Inspect this screenshot"
+            );
+            assert_eq!(
+                body["messages"][0]["content"][1]["image_url"]["url"],
+                "data:image/png;base64,AQID"
+            );
+            assert_eq!(body["thinking"]["type"], "enabled");
+            let response = r#"{"model":"deepseek-flash","choices":[{"message":{"content":"recognized"},"finish_reason":"stop"}]}"#;
+            let http = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response);
+            socket.write_all(http.as_bytes()).await.unwrap();
+        });
+
+        let mut config = base_config();
+        config.provider = PROVIDER_DEEPSEEK.into();
+        config.model = "deepseek-flash".into();
+        config.base_url = format!("http://{addr}");
+        config.stream = false;
+        let message = ChatMessage {
+            role: "user".into(),
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: "Inspect this screenshot".into(),
+                },
+                ContentBlock::Image {
+                    source: ImageSource::Data {
+                        media_type: "image/png".into(),
+                        data: std::sync::Arc::from([1_u8, 2, 3]),
+                    },
+                },
+            ]),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        let (tx, rx) = mpsc::channel();
+        chat_completions_request(
+            &config,
+            None,
+            vec![message],
+            None,
+            &tx,
+            &Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        assert!(rx.try_iter().any(
+            |event| matches!(event, LlmEvent::Done { full_text, .. } if full_text == "recognized")
+        ));
+    }
+
+    #[tokio::test]
     async fn deepseek_http_sse_tool_loop_preserves_reasoning_for_five_requests() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -1523,14 +1780,14 @@ mod tests {
                     let call_id = tool_calls.first().expect("tool call").id.clone();
                     messages.push(ChatMessage {
                         role: "assistant".into(),
-                        content: String::new(),
+                        content: String::new().into(),
                         tool_calls: Some(tool_calls),
                         tool_call_id: None,
                         reasoning_content,
                     });
                     messages.push(ChatMessage {
                         role: "tool".into(),
-                        content: format!("result-{round}"),
+                        content: format!("result-{round}").into(),
                         tool_calls: None,
                         tool_call_id: Some(call_id),
                         reasoning_content: None,
@@ -1544,7 +1801,7 @@ mod tests {
                     assert!(!matches!(round, 0 | 1 | 3));
                     messages.push(ChatMessage {
                         role: "assistant".into(),
-                        content: full_text,
+                        content: full_text.into(),
                         tool_calls: None,
                         tool_call_id: None,
                         reasoning_content,

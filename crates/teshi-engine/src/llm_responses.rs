@@ -9,8 +9,8 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
 
 use crate::llm::{
-    apply_extra_headers, merge_chat_options, ChatMessage, LlmConfig, LlmEvent, ToolCall,
-    ToolDefinition,
+    apply_extra_headers, merge_chat_options, text_content, ChatMessage, LlmConfig, LlmEvent,
+    ToolCall, ToolDefinition,
 };
 
 /// Build the Responses endpoint URL under the configured base URL.
@@ -44,14 +44,14 @@ pub(crate) fn build_responses_body(
                 input.push(json!({
                     "type": "function_call_output",
                     "call_id": call_id,
-                    "output": msg.content,
+                    "output": text_content(&msg.content)?,
                 }));
             }
             "assistant" if msg.tool_calls.is_some() => {
-                if !msg.content.is_empty() {
+                if !text_content(&msg.content)?.is_empty() {
                     input.push(json!({
                         "role": "assistant",
-                        "content": msg.content,
+                        "content": text_content(&msg.content)?,
                     }));
                 }
                 for tc in msg.tool_calls.as_ref().unwrap() {
@@ -66,7 +66,7 @@ pub(crate) fn build_responses_body(
             _ => {
                 input.push(json!({
                     "role": msg.role,
-                    "content": msg.content,
+                    "content": text_content(&msg.content)?,
                 }));
             }
         }
