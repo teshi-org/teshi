@@ -23,18 +23,19 @@
 //! Pure DTOs (`ChatMessage`, `ToolDefinition`, `ToolCall`) live in `teshi-core::llm`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
 use std::thread;
 
 use anyhow::{Context, Result};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 pub use teshi_core::llm::{ChatMessage, ToolCall, ToolDefinition};
 
 use crate::model_profile::{
-    ApiStyle, PROVIDER_ANTHROPIC, PROVIDER_DEEPSEEK_OPENAI, PROVIDER_OPENAI,
+    ApiStyle, DeepSeekThinking, PROVIDER_ANTHROPIC, PROVIDER_DEEPSEEK, PROVIDER_DEEPSEEK_OPENAI,
+    PROVIDER_OPENAI,
 };
 
 pub fn llm_config_from_env() -> Result<(String, String, String), String> {
@@ -211,6 +212,8 @@ pub struct LlmConfig {
     pub context_window: Option<u32>,
     /// Built-in provider id (`openai`, `anthropic`, `deepseek-openai`).
     pub provider: String,
+    /// DeepSeek thinking mode; ignored by other providers.
+    pub thinking: DeepSeekThinking,
     /// Effective API style for routing.
     pub api_style: ApiStyle,
     /// When true, use the provider streaming protocol.
@@ -250,6 +253,7 @@ impl LlmConfig {
             context_window,
             provider: PROVIDER_OPENAI.into(),
             api_style: ApiStyle::ChatCompletions,
+            thinking: DeepSeekThinking::High,
             stream: true,
             http_headers: HashMap::new(),
             chat_options: HashMap::new(),
@@ -294,6 +298,8 @@ pub enum LlmEvent {
         #[allow(dead_code)]
         output_tokens: Option<u32>,
         model: String,
+        /// Provider finish reason, when reported.
+        finish_reason: Option<String>,
     },
     /// The model requested one or more tool calls instead of a text response.
     ToolCallRequest {
@@ -301,6 +307,10 @@ pub enum LlmEvent {
         /// DeepSeek V4 thinking chain — must be preserved in the assistant
         /// message sent back in follow-up requests.
         reasoning_content: Option<String>,
+        /// Usage and finish metadata reported on the final tool-call chunk.
+        input_tokens: Option<u32>,
+        output_tokens: Option<u32>,
+        finish_reason: Option<String>,
     },
     /// A non-recoverable error occurred.
     Error { message: String },
@@ -582,13 +592,17 @@ fn build_request_body(
     messages: &[ChatMessage],
     tools: Option<&[ToolDefinition]>,
 ) -> serde_json::Value {
+    let is_deepseek =
+        config.provider == PROVIDER_DEEPSEEK || config.provider == PROVIDER_DEEPSEEK_OPENAI;
     let mut body = serde_json::json!({
         "model": config.model,
         "messages": [],
         "max_tokens": config.max_tokens,
-        "temperature": config.temperature,
         "stream": config.stream,
     });
+    if !is_deepseek {
+        body["temperature"] = json!(config.temperature);
+    }
 
     let mut json_messages: Vec<serde_json::Value> = Vec::new();
 
@@ -604,12 +618,8 @@ fn build_request_body(
             "role": msg.role,
         });
 
-        // Include content if non-empty, otherwise null
-        if msg.content.is_empty() && (msg.tool_calls.is_some() || msg.role == "assistant") {
-            j["content"] = serde_json::Value::Null;
-        } else {
-            j["content"] = serde_json::json!(msg.content);
-        }
+        // Chat Completions tool-call history must retain a string content field.
+        j["content"] = serde_json::json!(msg.content);
 
         if let Some(ref tcs) = msg.tool_calls {
             let tool_calls_json: Vec<serde_json::Value> = tcs
@@ -670,13 +680,40 @@ fn build_request_body(
     }
     merge_chat_options(&mut body, &config.chat_options, &core);
 
+    if is_deepseek {
+        if let Some(obj) = body.as_object_mut() {
+            for key in [
+                "temperature",
+                "top_p",
+                "presence_penalty",
+                "frequency_penalty",
+                "thinking",
+                "reasoning_effort",
+            ] {
+                obj.remove(key);
+            }
+            let (thinking_type, effort) = match config.thinking {
+                DeepSeekThinking::Disabled => ("disabled", None),
+                DeepSeekThinking::Low => ("enabled", Some("low")),
+                DeepSeekThinking::High => ("enabled", Some("high")),
+                DeepSeekThinking::Max => ("enabled", Some("max")),
+            };
+            obj.insert("thinking".into(), json!({"type": thinking_type}));
+            if let Some(effort) = effort {
+                obj.insert("reasoning_effort".into(), json!(effort));
+            }
+        }
+    }
+
     body
 }
 
 /// Whether this config should use OpenAI-compatible `/chat/completions`.
 fn uses_chat_completions(config: &LlmConfig) -> bool {
     match config.provider.as_str() {
-        PROVIDER_DEEPSEEK_OPENAI => true,
+        PROVIDER_DEEPSEEK | PROVIDER_DEEPSEEK_OPENAI => {
+            config.api_style == ApiStyle::ChatCompletions
+        }
         PROVIDER_OPENAI => config.api_style == ApiStyle::ChatCompletions,
         PROVIDER_ANTHROPIC => false,
         _ => config.api_style == ApiStyle::ChatCompletions,
@@ -705,7 +742,9 @@ async fn chat_completion(
         )
         .await;
     }
-    if config.provider == PROVIDER_OPENAI && config.api_style == ApiStyle::Responses {
+    if (config.provider == PROVIDER_OPENAI || config.provider == PROVIDER_DEEPSEEK)
+        && config.api_style == ApiStyle::Responses
+    {
         return crate::llm_responses::responses_request(
             config, system, messages, tools, evt_tx, cancel,
         )
@@ -799,6 +838,12 @@ pub(crate) fn emit_chat_completions_json(body: &Value, evt_tx: &Sender<LlmEvent>
         .and_then(|c| c.first())
         .map(|c| &c["message"]);
 
+    let finish_reason = body["choices"]
+        .as_array()
+        .and_then(|c| c.first())
+        .and_then(|c| c["finish_reason"].as_str())
+        .map(str::to_string);
+
     let Some(message) = message else {
         let _ = evt_tx.send(LlmEvent::Error {
             message: "chat completions response missing choices[0].message".into(),
@@ -828,6 +873,9 @@ pub(crate) fn emit_chat_completions_json(body: &Value, evt_tx: &Sender<LlmEvent>
             let _ = evt_tx.send(LlmEvent::ToolCallRequest {
                 tool_calls,
                 reasoning_content: reasoning,
+                input_tokens,
+                output_tokens,
+                finish_reason,
             });
             return;
         }
@@ -845,6 +893,7 @@ pub(crate) fn emit_chat_completions_json(body: &Value, evt_tx: &Sender<LlmEvent>
         input_tokens,
         output_tokens,
         model: model_name,
+        finish_reason,
     });
 }
 
@@ -859,6 +908,7 @@ async fn read_chat_completions_sse(
     let mut model_name = String::new();
     let mut input_tokens: Option<u32> = None;
     let mut output_tokens: Option<u32> = None;
+    let mut finish_reason: Option<String> = None;
     let mut tool_call_chunks: HashMap<u32, (Option<String>, Option<String>, String)> =
         HashMap::new();
 
@@ -910,10 +960,8 @@ async fn read_chat_completions_sse(
                 if data == "[DONE]" {
                     break;
                 }
-                let v: serde_json::Value = match serde_json::from_str(data) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
+                let v: serde_json::Value =
+                    serde_json::from_str(data).context("malformed chat-completions SSE JSON")?;
 
                 if model_name.is_empty() {
                     if let Some(m) = v["model"].as_str() {
@@ -927,6 +975,9 @@ async fn read_chat_completions_sse(
                 }
 
                 for choice in v["choices"].as_array().into_iter().flatten() {
+                    if let Some(reason) = choice["finish_reason"].as_str() {
+                        finish_reason = Some(reason.to_string());
+                    }
                     let delta = &choice["delta"];
 
                     // Text content
@@ -969,6 +1020,12 @@ async fn read_chat_completions_sse(
         }
     }
 
+    if !buf.trim().is_empty() {
+        return Err(anyhow::anyhow!(
+            "malformed chat-completions SSE: incomplete event"
+        ));
+    }
+
     // Build extracted reasoning_content
     let reasoning: Option<String> = if full_reasoning.is_empty() {
         None
@@ -993,6 +1050,9 @@ async fn read_chat_completions_sse(
         let _ = evt_tx.send(LlmEvent::ToolCallRequest {
             tool_calls,
             reasoning_content: reasoning,
+            input_tokens,
+            output_tokens,
+            finish_reason,
         });
 
         // Text content before the tool call was already sent as Chunk
@@ -1004,6 +1064,7 @@ async fn read_chat_completions_sse(
             input_tokens,
             output_tokens,
             model: model_name,
+            finish_reason,
         });
     }
 
@@ -1025,6 +1086,7 @@ mod tests {
             context_window: None,
             provider: PROVIDER_OPENAI.into(),
             api_style: ApiStyle::ChatCompletions,
+            thinking: DeepSeekThinking::High,
             stream: true,
             http_headers: HashMap::new(),
             chat_options: HashMap::new(),
@@ -1056,8 +1118,96 @@ mod tests {
     fn test_deepseek_uses_chat_completions() {
         let mut config = base_config();
         config.provider = PROVIDER_DEEPSEEK_OPENAI.into();
-        config.api_style = ApiStyle::Responses;
+        config.api_style = ApiStyle::ChatCompletions;
         assert!(uses_chat_completions(&config));
+    }
+
+    #[test]
+    fn deepseek_thinking_is_typed_and_raw_options_cannot_override_it() {
+        let mut config = base_config();
+        config.provider = PROVIDER_DEEPSEEK.into();
+        config.model = "deepseek-flash".into();
+        config.thinking = DeepSeekThinking::High;
+        config
+            .chat_options
+            .insert("thinking".into(), json!({"type": "disabled"}));
+        config
+            .chat_options
+            .insert("reasoning_effort".into(), json!("off"));
+        config.chat_options.insert("temperature".into(), json!(0.1));
+        let body = build_request_body(&config, None, &[], Some(&[]));
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn deepseek_disabled_thinking_does_not_emit_reasoning_effort() {
+        let mut config = base_config();
+        config.provider = PROVIDER_DEEPSEEK.into();
+        config.thinking = DeepSeekThinking::Disabled;
+        let body = build_request_body(&config, None, &[], None);
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn retry_contract_keeps_rate_limit_and_server_errors_transient() {
+        for status in [429, 500, 502, 503, 504] {
+            assert!(is_transient_error(&format!("API returned {status}")));
+        }
+        assert!(!is_transient_error("API returned 400: invalid request"));
+        assert!(!is_transient_error("API returned 401: unauthorized"));
+    }
+
+    #[test]
+    fn assistant_tool_history_keeps_string_content_and_reasoning() {
+        let mut config = base_config();
+        config.provider = PROVIDER_DEEPSEEK.into();
+        let messages = vec![ChatMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            tool_calls: Some(vec![ToolCall {
+                id: "call-1".into(),
+                name: "lookup".into(),
+                arguments: "{}".into(),
+                execution_duration_ms: None,
+            }]),
+            tool_call_id: None,
+            reasoning_content: Some("full chain".into()),
+        }];
+        let body = build_request_body(&config, None, &messages, Some(&[]));
+        assert_eq!(body["messages"][0]["content"], "");
+        assert_eq!(body["messages"][0]["reasoning_content"], "full chain");
+        assert!(!body["messages"][0]["content"].is_null());
+    }
+
+    #[test]
+    fn five_round_tool_history_replays_every_reasoning_chain() {
+        let mut config = base_config();
+        config.provider = PROVIDER_DEEPSEEK.into();
+        let messages: Vec<_> = (0..5)
+            .map(|round| ChatMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                tool_calls: Some(vec![ToolCall {
+                    id: format!("call-{round}"),
+                    name: "lookup".into(),
+                    arguments: "{}".into(),
+                    execution_duration_ms: None,
+                }]),
+                tool_call_id: None,
+                reasoning_content: Some(format!("reasoning-round-{round}")),
+            })
+            .collect();
+        let body = build_request_body(&config, None, &messages, Some(&[]));
+        for round in 0..5 {
+            assert_eq!(
+                body["messages"][round]["reasoning_content"],
+                format!("reasoning-round-{round}")
+            );
+            assert!(body["messages"][round]["content"].is_string());
+        }
     }
 
     #[test]
@@ -1176,6 +1326,67 @@ mod tests {
         );
         let events: Vec<_> = rx.try_iter().collect();
         assert!(events.iter().any(|e| matches!(e, LlmEvent::Done { .. })));
+    }
+
+    #[tokio::test]
+    async fn deepseek_sse_accumulates_reasoning_content_usage_and_finish_reason() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            let body = concat!(
+                "data: {\"model\":\"deepseek-flash\",\"choices\":[{\"delta\":{\"reasoning_content\":\"a\",\"content\":\"he\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"b\",\"content\":\"llo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4}}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = base_config();
+        config.provider = PROVIDER_DEEPSEEK.into();
+        config.model = "deepseek-flash".into();
+        config.base_url = format!("http://{addr}");
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        chat_completions_request(&config, None, vec![], None, &tx, &cancel)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        let events: Vec<_> = rx.try_iter().collect();
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    LlmEvent::Chunk { content } => Some(content.as_str()),
+                    _ => None,
+                })
+                .collect::<String>(),
+            "hello"
+        );
+        match events.last().unwrap() {
+            LlmEvent::Done {
+                reasoning_content,
+                input_tokens,
+                output_tokens,
+                finish_reason,
+                ..
+            } => {
+                assert_eq!(reasoning_content.as_deref(), Some("ab"));
+                assert_eq!(*input_tokens, Some(3));
+                assert_eq!(*output_tokens, Some(4));
+                assert_eq!(finish_reason.as_deref(), Some("stop"));
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 
     #[tokio::test]

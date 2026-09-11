@@ -100,9 +100,9 @@ pub use model_profile::{
     generate_id, get_profile_public, is_builtin_provider, list_profiles, load_active_profile,
     load_profile, model_profiles_dir, profile_to_llm_config, read_active_id, resolve_base_url,
     save_profile, set_active_id, to_public_profile, validate_profile, validate_profile_id,
-    ApiStyle, ModelProfile, ModelProfileList, ModelProfilePublic, DEFAULT_BASE_URL_ANTHROPIC,
-    DEFAULT_BASE_URL_DEEPSEEK, DEFAULT_BASE_URL_OPENAI, PROVIDER_ANTHROPIC,
-    PROVIDER_DEEPSEEK_OPENAI, PROVIDER_OPENAI,
+    ApiStyle, DeepSeekThinking, ModelProfile, ModelProfileList, ModelProfilePublic,
+    DEFAULT_BASE_URL_ANTHROPIC, DEFAULT_BASE_URL_DEEPSEEK, DEFAULT_BASE_URL_OPENAI,
+    PROVIDER_ANTHROPIC, PROVIDER_DEEPSEEK, PROVIDER_DEEPSEEK_OPENAI, PROVIDER_OPENAI,
 };
 pub use project::{
     check_project_switch_allowed, get_authoring_artifacts, get_project_root, list_dir,

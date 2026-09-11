@@ -54,6 +54,17 @@ pub enum ApiStyleDto {
     Responses,
 }
 
+/// DeepSeek thinking mode exposed as a first-class profile setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DeepSeekThinkingDto {
+    Disabled,
+    Low,
+    #[default]
+    High,
+    Max,
+}
+
 /// Public model profile snapshot (masked API key).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelProfileSnapshot {
@@ -65,6 +76,8 @@ pub struct ModelProfileSnapshot {
     pub provider: String,
     /// API style.
     pub api_style: ApiStyleDto,
+    #[serde(default)]
+    pub thinking: DeepSeekThinkingDto,
     /// Provider model identifier.
     pub model_id: String,
     /// Soft context window hint (tokens).
@@ -111,6 +124,8 @@ pub struct ModelProfileUpdate {
     /// API style.
     #[serde(default)]
     pub api_style: ApiStyleDto,
+    #[serde(default)]
+    pub thinking: DeepSeekThinkingDto,
     /// Provider model identifier.
     #[serde(default)]
     pub model_id: String,
@@ -152,6 +167,7 @@ impl Default for ModelProfileUpdate {
             name: "New Profile".into(),
             provider: "openai".into(),
             api_style: ApiStyleDto::ChatCompletions,
+            thinking: DeepSeekThinkingDto::High,
             model_id: "gpt-4o-mini".into(),
             max_context_tokens: None,
             max_output_tokens: 1024,

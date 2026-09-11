@@ -12,7 +12,9 @@ use gpui::{
     App, AppContext, Bounds, Context as GpuiContext, Entity, IntoElement, ParentElement, Render,
     Styled, Window, WindowBounds, WindowDecorations, WindowOptions, div, px, size,
 };
-use teshi_engine::{ApiStyle, ModelProfile, ModelProfileList, ModelProfilePublic, PROVIDER_OPENAI};
+use teshi_engine::{
+    ApiStyle, DeepSeekThinking, ModelProfile, ModelProfileList, ModelProfilePublic, PROVIDER_OPENAI,
+};
 #[cfg(windows)]
 use teshi_engine::{
     BrowserMode, RuntimeConfig, TeshiEngine, default_browser_service_script,
@@ -240,12 +242,31 @@ fn map_api_style_in(style: ApiStyleDto) -> ApiStyle {
     }
 }
 
+fn map_thinking(thinking: DeepSeekThinking) -> teshi_ui::backend::DeepSeekThinkingDto {
+    match thinking {
+        DeepSeekThinking::Disabled => teshi_ui::backend::DeepSeekThinkingDto::Disabled,
+        DeepSeekThinking::Low => teshi_ui::backend::DeepSeekThinkingDto::Low,
+        DeepSeekThinking::High => teshi_ui::backend::DeepSeekThinkingDto::High,
+        DeepSeekThinking::Max => teshi_ui::backend::DeepSeekThinkingDto::Max,
+    }
+}
+
+fn map_thinking_in(thinking: teshi_ui::backend::DeepSeekThinkingDto) -> DeepSeekThinking {
+    match thinking {
+        teshi_ui::backend::DeepSeekThinkingDto::Disabled => DeepSeekThinking::Disabled,
+        teshi_ui::backend::DeepSeekThinkingDto::Low => DeepSeekThinking::Low,
+        teshi_ui::backend::DeepSeekThinkingDto::High => DeepSeekThinking::High,
+        teshi_ui::backend::DeepSeekThinkingDto::Max => DeepSeekThinking::Max,
+    }
+}
+
 fn map_profile(p: ModelProfilePublic) -> ModelProfileSnapshot {
     ModelProfileSnapshot {
         id: p.id,
         name: p.name,
         provider: p.provider,
         api_style: map_api_style(p.api_style),
+        thinking: map_thinking(p.thinking),
         model_id: p.model_id,
         max_context_tokens: p.max_context_tokens,
         max_output_tokens: p.max_output_tokens,
@@ -325,6 +346,7 @@ impl LlmConfigBackend for NativePlatformBackend {
                     update.provider
                 },
                 api_style: map_api_style_in(update.api_style),
+                thinking: map_thinking_in(update.thinking),
                 model_id: update.model_id,
                 max_context_tokens: update.max_context_tokens,
                 max_output_tokens: update.max_output_tokens,

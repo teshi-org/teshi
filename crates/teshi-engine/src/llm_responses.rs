@@ -1,16 +1,16 @@
 //! OpenAI Responses API transport, adapted to [`crate::llm::LlmEvent`].
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
-use serde_json::{json, Map, Value};
+use anyhow::{Context, Result, bail};
+use serde_json::{Map, Value, json};
 
 use crate::llm::{
-    apply_extra_headers, merge_chat_options, ChatMessage, LlmConfig, LlmEvent, ToolCall,
-    ToolDefinition,
+    ChatMessage, LlmConfig, LlmEvent, ToolCall, ToolDefinition, apply_extra_headers,
+    merge_chat_options,
 };
 
 /// Build the Responses endpoint URL under the configured base URL.
@@ -232,6 +232,9 @@ pub(crate) fn emit_responses_json(body: &Value, evt_tx: &Sender<LlmEvent>) -> Re
         let _ = evt_tx.send(LlmEvent::ToolCallRequest {
             tool_calls,
             reasoning_content: None,
+            input_tokens: None,
+            output_tokens: None,
+            finish_reason: None,
         });
         return Ok(());
     }
@@ -247,6 +250,7 @@ pub(crate) fn emit_responses_json(body: &Value, evt_tx: &Sender<LlmEvent>) -> Re
         input_tokens,
         output_tokens,
         model,
+        finish_reason: None,
     });
     Ok(())
 }
@@ -428,6 +432,9 @@ async fn read_responses_sse(
         let _ = evt_tx.send(LlmEvent::ToolCallRequest {
             tool_calls,
             reasoning_content: None,
+            input_tokens,
+            output_tokens,
+            finish_reason: None,
         });
     } else {
         let _ = evt_tx.send(LlmEvent::Done {
@@ -436,6 +443,7 @@ async fn read_responses_sse(
             input_tokens,
             output_tokens,
             model: model_name,
+            finish_reason: None,
         });
     }
     Ok(())
@@ -466,6 +474,7 @@ mod tests {
             context_window: None,
             provider: PROVIDER_OPENAI.into(),
             api_style: ApiStyle::Responses,
+            thinking: crate::model_profile::DeepSeekThinking::High,
             stream: false,
             http_headers: HashMap::new(),
             chat_options: HashMap::new(),

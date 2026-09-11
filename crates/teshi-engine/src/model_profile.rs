@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -19,7 +19,9 @@ use crate::llm_config_store::mask_api_key;
 pub const PROVIDER_OPENAI: &str = "openai";
 /// Built-in Anthropic provider id.
 pub const PROVIDER_ANTHROPIC: &str = "anthropic";
-/// Built-in DeepSeek OpenAI-compatible provider id.
+/// Canonical DeepSeek provider id.
+pub const PROVIDER_DEEPSEEK: &str = "deepseek";
+/// Legacy DeepSeek provider id, accepted when reading old profiles.
 pub const PROVIDER_DEEPSEEK_OPENAI: &str = "deepseek-openai";
 
 /// Default base URL for [`PROVIDER_OPENAI`].
@@ -28,6 +30,18 @@ pub const DEFAULT_BASE_URL_OPENAI: &str = "https://api.openai.com/v1";
 pub const DEFAULT_BASE_URL_ANTHROPIC: &str = "https://api.anthropic.com";
 /// Default base URL for [`PROVIDER_DEEPSEEK_OPENAI`].
 pub const DEFAULT_BASE_URL_DEEPSEEK: &str = "https://api.deepseek.com";
+
+/// DeepSeek thinking mode. This is typed configuration; it is rendered into
+/// the provider's Chat Completions wire fields at request-build time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DeepSeekThinking {
+    Disabled,
+    Low,
+    #[default]
+    High,
+    Max,
+}
 
 const MIGRATION_MARKER: &str = ".migrated-from-llm-config";
 const ACTIVE_POINTER: &str = "active";
@@ -54,11 +68,14 @@ pub struct ModelProfile {
     pub id: String,
     /// Human-readable label.
     pub name: String,
-    /// Built-in provider id (`openai`, `anthropic`, `deepseek-openai`).
+    /// Built-in provider id (`deepseek`, `openai`, `anthropic`).
     pub provider: String,
     /// API style; only honored for `openai`.
     #[serde(default)]
     pub api_style: ApiStyle,
+    /// DeepSeek thinking mode (ignored by other providers).
+    #[serde(default)]
+    pub thinking: DeepSeekThinking,
     /// Provider model identifier.
     #[serde(default)]
     pub model_id: String,
@@ -98,9 +115,9 @@ impl Default for ModelProfile {
         Self {
             id: generate_id(),
             name: "New Profile".into(),
-            provider: PROVIDER_OPENAI.into(),
+            provider: PROVIDER_DEEPSEEK.into(),
             api_style: ApiStyle::ChatCompletions,
-            model_id: "gpt-4o-mini".into(),
+            model_id: "deepseek-flash".into(),
             max_context_tokens: None,
             max_output_tokens: default_max_output_tokens(),
             base_url: String::new(),
@@ -108,6 +125,7 @@ impl Default for ModelProfile {
             stream: true,
             http_headers: HashMap::new(),
             chat_options: HashMap::new(),
+            thinking: DeepSeekThinking::High,
         }
     }
 }
@@ -134,6 +152,9 @@ pub struct ModelProfilePublic {
     pub provider: String,
     /// API style.
     pub api_style: ApiStyle,
+    /// DeepSeek thinking mode.
+    #[serde(default)]
+    pub thinking: DeepSeekThinking,
     /// Provider model identifier.
     pub model_id: String,
     /// Soft context window hint (tokens).
@@ -169,8 +190,17 @@ pub struct ModelProfileList {
 pub fn is_builtin_provider(provider: &str) -> bool {
     matches!(
         provider,
-        PROVIDER_OPENAI | PROVIDER_ANTHROPIC | PROVIDER_DEEPSEEK_OPENAI
+        PROVIDER_OPENAI | PROVIDER_ANTHROPIC | PROVIDER_DEEPSEEK | PROVIDER_DEEPSEEK_OPENAI
     )
+}
+
+/// Normalize persisted legacy provider identities without rejecting profiles.
+pub fn canonical_provider_id(provider: &str) -> &str {
+    if provider == PROVIDER_DEEPSEEK_OPENAI {
+        PROVIDER_DEEPSEEK
+    } else {
+        provider
+    }
 }
 
 /// Default base URL for a built-in provider.
@@ -182,7 +212,7 @@ pub fn default_base_url_for_provider(provider: &str) -> Result<&'static str> {
     match provider {
         PROVIDER_OPENAI => Ok(DEFAULT_BASE_URL_OPENAI),
         PROVIDER_ANTHROPIC => Ok(DEFAULT_BASE_URL_ANTHROPIC),
-        PROVIDER_DEEPSEEK_OPENAI => Ok(DEFAULT_BASE_URL_DEEPSEEK),
+        PROVIDER_DEEPSEEK | PROVIDER_DEEPSEEK_OPENAI => Ok(DEFAULT_BASE_URL_DEEPSEEK),
         other => bail!("unknown provider: {other}"),
     }
 }
@@ -204,7 +234,7 @@ pub fn resolve_base_url(provider: &str, base_url: &str) -> Result<String> {
 ///
 /// Non-`openai` providers always use chat-completions semantics.
 pub fn effective_api_style(provider: &str, stored: ApiStyle) -> ApiStyle {
-    if provider == PROVIDER_OPENAI {
+    if provider == PROVIDER_OPENAI || provider == PROVIDER_DEEPSEEK {
         stored
     } else {
         ApiStyle::ChatCompletions
@@ -217,6 +247,7 @@ pub fn effective_api_style(provider: &str, stored: ApiStyle) -> ApiStyle {
 ///
 /// Returns an error when the provider is not built-in or required fields fail checks.
 pub fn validate_profile(profile: &mut ModelProfile) -> Result<()> {
+    profile.provider = canonical_provider_id(&profile.provider).to_string();
     if !is_builtin_provider(&profile.provider) {
         bail!("unknown provider: {}", profile.provider);
     }
@@ -224,8 +255,9 @@ pub fn validate_profile(profile: &mut ModelProfile) -> Result<()> {
         bail!("profile name must not be empty");
     }
     validate_profile_id(&profile.id)?;
-    // Anthropic / DeepSeek ignore stored style; normalize so public reads are consistent.
-    if profile.provider != PROVIDER_OPENAI {
+    // Anthropic has a dedicated Messages transport; retain OpenAI-family style
+    // for DeepSeek so a future Responses implementation is not schema-blocked.
+    if profile.provider == PROVIDER_ANTHROPIC {
         profile.api_style = ApiStyle::ChatCompletions;
     }
     Ok(())
@@ -311,8 +343,9 @@ pub fn to_public_profile(profile: &ModelProfile, active: bool) -> ModelProfilePu
     ModelProfilePublic {
         id: profile.id.clone(),
         name: profile.name.clone(),
-        provider: profile.provider.clone(),
+        provider: canonical_provider_id(&profile.provider).to_string(),
         api_style: profile.api_style,
+        thinking: profile.thinking,
         model_id: profile.model_id.clone(),
         max_context_tokens: profile.max_context_tokens,
         max_output_tokens: profile.max_output_tokens,
@@ -450,8 +483,9 @@ fn list_raw_profiles_in(dir: &Path) -> Result<Vec<ModelProfile>> {
         }
         let content =
             fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let profile: ModelProfile =
+        let mut profile: ModelProfile =
             serde_json::from_str(&content).with_context(|| format!("parse {}", path.display()))?;
+        profile.provider = canonical_provider_id(&profile.provider).to_string();
         profiles.push(profile);
     }
     profiles.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
@@ -513,7 +547,10 @@ fn load_profile_in(dir: &Path, id: &str) -> Result<ModelProfile> {
         bail!("profile not found: {id}");
     }
     let content = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    serde_json::from_str(&content).with_context(|| format!("parse {}", path.display()))
+    let mut profile: ModelProfile =
+        serde_json::from_str(&content).with_context(|| format!("parse {}", path.display()))?;
+    profile.provider = canonical_provider_id(&profile.provider).to_string();
+    Ok(profile)
 }
 
 /// List all profiles with masked keys and active flag.
@@ -665,7 +702,8 @@ pub fn load_active_profile() -> Result<Option<ModelProfile>> {
 ///
 /// Returns an error when the provider is unknown.
 pub fn profile_to_llm_config(profile: &ModelProfile) -> Result<crate::llm::LlmConfig> {
-    let base_url = resolve_base_url(&profile.provider, &profile.base_url)?;
+    let provider = canonical_provider_id(&profile.provider);
+    let base_url = resolve_base_url(provider, &profile.base_url)?;
     let model = if profile.model_id.is_empty() {
         "gpt-4o-mini".into()
     } else {
@@ -685,8 +723,9 @@ pub fn profile_to_llm_config(profile: &ModelProfile) -> Result<crate::llm::LlmCo
         max_tokens: profile.max_output_tokens,
         temperature,
         context_window: profile.max_context_tokens,
-        provider: profile.provider.clone(),
-        api_style: effective_api_style(&profile.provider, profile.api_style),
+        provider: provider.to_string(),
+        api_style: effective_api_style(provider, profile.api_style),
+        thinking: profile.thinking,
         stream: profile.stream,
         http_headers: profile.http_headers.clone(),
         chat_options: profile.chat_options.clone(),
@@ -729,6 +768,22 @@ mod tests {
     fn test_stream_defaults_to_true() {
         let p = ModelProfile::new("x");
         assert!(p.stream);
+    }
+
+    #[test]
+    fn new_profile_defaults_to_deepseek_flash_high_thinking() {
+        let p = ModelProfile::new("x");
+        assert_eq!(p.provider, PROVIDER_DEEPSEEK);
+        assert_eq!(p.model_id, "deepseek-flash");
+        assert_eq!(p.thinking, DeepSeekThinking::High);
+    }
+
+    #[test]
+    fn legacy_deepseek_provider_is_canonicalized_on_validation() {
+        let mut p = ModelProfile::new("legacy");
+        p.provider = PROVIDER_DEEPSEEK_OPENAI.into();
+        validate_profile(&mut p).unwrap();
+        assert_eq!(p.provider, PROVIDER_DEEPSEEK);
     }
 
     #[test]

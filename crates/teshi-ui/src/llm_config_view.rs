@@ -9,7 +9,9 @@ use gpui::{
 };
 use serde_json::Value;
 
-use crate::backend::{ApiStyleDto, ModelProfileSnapshot, ModelProfileUpdate, SharedLlmBackend};
+use crate::backend::{
+    ApiStyleDto, DeepSeekThinkingDto, ModelProfileSnapshot, ModelProfileUpdate, SharedLlmBackend,
+};
 
 actions!(
     llm_config,
@@ -25,12 +27,12 @@ actions!(
     ]
 );
 
-const PROVIDERS: &[&str] = &["openai", "anthropic", "deepseek-openai"];
+const PROVIDERS: &[&str] = &["deepseek", "openai", "anthropic"];
 
 fn default_base_url(provider: &str) -> &'static str {
     match provider {
         "anthropic" => "https://api.anthropic.com",
-        "deepseek-openai" => "https://api.deepseek.com",
+        "deepseek" | "deepseek-openai" => "https://api.deepseek.com",
         _ => "https://api.openai.com/v1",
     }
 }
@@ -38,7 +40,7 @@ fn default_base_url(provider: &str) -> &'static str {
 fn provider_label(provider: &str) -> &'static str {
     match provider {
         "anthropic" => "Anthropic",
-        "deepseek-openai" => "DeepSeek (OpenAI-compatible)",
+        "deepseek" | "deepseek-openai" => "DeepSeek",
         _ => "OpenAI",
     }
 }
@@ -67,6 +69,7 @@ enum Field {
     Name,
     Provider,
     ApiStyle,
+    Thinking,
     ModelId,
     MaxContext,
     MaxOutput,
@@ -80,8 +83,11 @@ enum Field {
 impl Field {
     fn all(provider: &str) -> Vec<Self> {
         let mut fields = vec![Self::Name, Self::Provider];
-        if provider == "openai" {
+        if provider == "openai" || provider == "deepseek" {
             fields.push(Self::ApiStyle);
+        }
+        if provider == "deepseek" || provider == "deepseek-openai" {
+            fields.push(Self::Thinking);
         }
         fields.extend([
             Self::ModelId,
@@ -101,6 +107,7 @@ impl Field {
             Self::Name => "Name",
             Self::Provider => "Provider",
             Self::ApiStyle => "API Style",
+            Self::Thinking => "Thinking",
             Self::ModelId => "Model",
             Self::MaxContext => "Max Context Tokens",
             Self::MaxOutput => "Max Output Tokens",
@@ -236,6 +243,7 @@ impl LlmConfigView {
             name: snap.name,
             provider: snap.provider,
             api_style: snap.api_style,
+            thinking: snap.thinking,
             model_id: snap.model_id,
             max_context_tokens: snap.max_context_tokens,
             max_output_tokens: snap.max_output_tokens,
@@ -270,9 +278,10 @@ impl LlmConfigView {
         self.draft = ModelProfileUpdate {
             id: String::new(),
             name: "New Profile".into(),
-            provider: "openai".into(),
+            provider: "deepseek".into(),
             api_style: ApiStyleDto::ChatCompletions,
-            model_id: "gpt-4o-mini".into(),
+            thinking: DeepSeekThinkingDto::High,
+            model_id: "deepseek-flash".into(),
             max_context_tokens: None,
             max_output_tokens: 1024,
             base_url: default_base_url("openai").into(),
@@ -305,7 +314,7 @@ impl LlmConfigView {
         if !custom {
             self.draft.base_url = default_base_url(next).into();
         }
-        if next != "openai" {
+        if next == "anthropic" {
             self.draft.api_style = ApiStyleDto::ChatCompletions;
             if self.field == Field::ApiStyle {
                 self.field = Field::ModelId;
@@ -329,6 +338,14 @@ impl LlmConfigView {
                     ApiStyleDto::Responses => ApiStyleDto::ChatCompletions,
                 };
             }
+            Field::Thinking => {
+                self.draft.thinking = match self.draft.thinking {
+                    DeepSeekThinkingDto::Disabled => DeepSeekThinkingDto::Low,
+                    DeepSeekThinkingDto::Low => DeepSeekThinkingDto::High,
+                    DeepSeekThinkingDto::High => DeepSeekThinkingDto::Max,
+                    DeepSeekThinkingDto::Max => DeepSeekThinkingDto::Disabled,
+                };
+            }
             Field::Stream => {
                 self.draft.stream = !self.draft.stream;
             }
@@ -346,7 +363,7 @@ impl LlmConfigView {
             Field::ChatOptionsJson => Some(&mut self.chat_options_json),
             Field::MaxContext => None,
             Field::MaxOutput => None,
-            Field::Provider | Field::ApiStyle | Field::Stream => None,
+            Field::Provider | Field::ApiStyle | Field::Thinking | Field::Stream => None,
         }
     }
 
@@ -571,6 +588,12 @@ impl LlmConfigView {
             Field::ApiStyle => match self.draft.api_style {
                 ApiStyleDto::ChatCompletions => "Chat Completions".into(),
                 ApiStyleDto::Responses => "Responses".into(),
+            },
+            Field::Thinking => match self.draft.thinking {
+                DeepSeekThinkingDto::Disabled => "Disabled".into(),
+                DeepSeekThinkingDto::Low => "Low".into(),
+                DeepSeekThinkingDto::High => "High".into(),
+                DeepSeekThinkingDto::Max => "Max".into(),
             },
             Field::ModelId => self.draft.model_id.clone().into(),
             Field::MaxContext => self

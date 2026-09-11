@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result, bail};
 use teshi_engine::{
-    ModelProfile, PROVIDER_ANTHROPIC, PROVIDER_DEEPSEEK_OPENAI, PROVIDER_OPENAI, app_data_dir,
+    ModelProfile, PROVIDER_ANTHROPIC, PROVIDER_DEEPSEEK, PROVIDER_OPENAI, app_data_dir,
     list_profiles, load_profile, map_legacy_provider_id, model_profiles_dir, save_profile,
     set_active_id,
 };
@@ -18,7 +18,7 @@ fn interactive_login(provider_arg: Option<String>) -> Result<()> {
         let providers = vec![
             PROVIDER_OPENAI.to_string(),
             PROVIDER_ANTHROPIC.to_string(),
-            PROVIDER_DEEPSEEK_OPENAI.to_string(),
+            PROVIDER_DEEPSEEK.to_string(),
             "ollama (openai + custom base_url)".to_string(),
         ];
         inquire::Select::new("Select provider:", providers).prompt()?
@@ -51,7 +51,7 @@ fn interactive_login(provider_arg: Option<String>) -> Result<()> {
     }
 
     let model_default = match provider.as_str() {
-        PROVIDER_DEEPSEEK_OPENAI => "deepseek-chat",
+        PROVIDER_DEEPSEEK => "deepseek-flash",
         PROVIDER_ANTHROPIC => "claude-sonnet-4-20250514",
         _ if provider_label.starts_with("ollama") => "llama3",
         _ => "gpt-4o-mini",
@@ -245,11 +245,11 @@ fn show_status() -> Result<()> {
 fn migrate_from_env() -> Result<()> {
     let known_env_pairs = [
         (PROVIDER_OPENAI, "TESHI_OPENAI_API_KEY"),
-        (PROVIDER_DEEPSEEK_OPENAI, "TESHI_DEEPSEEK_API_KEY"),
+        (PROVIDER_DEEPSEEK, "TESHI_DEEPSEEK_API_KEY"),
         (PROVIDER_ANTHROPIC, "TESHI_ANTHROPIC_API_KEY"),
         (PROVIDER_OPENAI, "OPENAI_API_KEY"),
         (PROVIDER_ANTHROPIC, "ANTHROPIC_API_KEY"),
-        (PROVIDER_DEEPSEEK_OPENAI, "DEEPSEEK_API_KEY"),
+        (PROVIDER_DEEPSEEK, "DEEPSEEK_API_KEY"),
     ];
 
     let mut migrated = 0u32;

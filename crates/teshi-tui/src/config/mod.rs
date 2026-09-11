@@ -43,11 +43,11 @@ fn hardcoded_defaults() -> AppConfig {
         "deepseek".into(),
         ProviderConfig {
             base_url: Some("https://api.deepseek.com".into()),
-            model: Some("deepseek-chat".into()),
+            model: Some("deepseek-flash".into()),
             api_key: Some("${auth:deepseek}".into()),
             max_tokens: Some(1024),
             temperature: Some(0.7),
-            context_window: Some(65536),
+            context_window: None,
         },
     );
 

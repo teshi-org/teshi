@@ -36,7 +36,7 @@ use teshi_engine::{
     resize_terminal, save_profile, save_stored_llm_config, send_api_command, set_active_id,
     spawn_terminal, start_browser_sidecar, step_binding_statuses, stop_browser_sidecar,
     sync_active_step, teardown_runtime, unbind_step, validate_feature_scope, write_terminal,
-    ActiveStep, ApiStyle, BrowserError, BrowserMode, BrowserStartResult, DirEntry, DispatchCase,
+    ActiveStep, ApiStyle, BrowserError, BrowserMode, BrowserStartResult, DeepSeekThinking, DirEntry, DispatchCase,
     LlmConfigPublic, LlmConfigWrite, ModelProfile, ModelProfileList, ModelProfilePublic,
     PendingLocator, ProjectSettings, RuntimeEvent, StepBinding, StepBindingStatus, TeshiEngine,
     PROVIDER_OPENAI,
@@ -2506,6 +2506,8 @@ struct ProfileWriteBody {
     #[serde(default)]
     api_style: ApiStyle,
     #[serde(default)]
+    thinking: DeepSeekThinking,
+    #[serde(default)]
     model_id: String,
     #[serde(default)]
     max_context_tokens: Option<u32>,
@@ -2569,6 +2571,7 @@ async fn api_put_llm_profile(
         name: body.name,
         provider: body.provider,
         api_style: body.api_style,
+        thinking: body.thinking,
         model_id: body.model_id,
         max_context_tokens: body.max_context_tokens,
         max_output_tokens: body.max_output_tokens,

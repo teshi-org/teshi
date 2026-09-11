@@ -20,8 +20,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::model_profile::{
-    generate_id, save_profile_in, set_active_id_in, ApiStyle, ModelProfile, PROVIDER_ANTHROPIC,
-    PROVIDER_DEEPSEEK_OPENAI, PROVIDER_OPENAI,
+    ApiStyle, ModelProfile, PROVIDER_ANTHROPIC, PROVIDER_DEEPSEEK, PROVIDER_OPENAI, generate_id,
+    save_profile_in, set_active_id_in,
 };
 
 const TUI_IMPORT_MARKER: &str = ".migrated-from-tui-config";
@@ -93,7 +93,7 @@ pub fn map_legacy_provider_id(name: &str) -> String {
     match name.trim().to_ascii_lowercase().as_str() {
         "openai" => PROVIDER_OPENAI.into(),
         "anthropic" | "claude" => PROVIDER_ANTHROPIC.into(),
-        "deepseek" | "deepseek-openai" => PROVIDER_DEEPSEEK_OPENAI.into(),
+        "deepseek" | "deepseek-openai" => PROVIDER_DEEPSEEK.into(),
         // Ollama and other OpenAI-compatible endpoints use the openai transport.
         _ => PROVIDER_OPENAI.into(),
     }
@@ -214,11 +214,7 @@ fn read_legacy_active_id(config_dir: &Path) -> Option<String> {
     let path = config_dir.join("model_profile");
     let raw = fs::read_to_string(path).ok()?;
     let id = raw.trim().to_string();
-    if id.is_empty() {
-        None
-    } else {
-        Some(id)
-    }
+    if id.is_empty() { None } else { Some(id) }
 }
 
 fn import_toml_models(profiles_dir: &Path, models_dir: &Path) -> Result<Vec<String>> {
@@ -272,6 +268,7 @@ fn toml_to_engine_profile(legacy: LegacyTomlProfile) -> ModelProfile {
         name,
         provider,
         api_style: ApiStyle::ChatCompletions,
+        thinking: Default::default(),
         model_id: legacy.model,
         max_context_tokens: None,
         max_output_tokens: legacy.max_tokens,
@@ -436,7 +433,7 @@ mod tests {
 
     #[test]
     fn test_map_legacy_provider_ids() {
-        assert_eq!(map_legacy_provider_id("deepseek"), PROVIDER_DEEPSEEK_OPENAI);
+        assert_eq!(map_legacy_provider_id("deepseek"), PROVIDER_DEEPSEEK);
         assert_eq!(map_legacy_provider_id("openai"), PROVIDER_OPENAI);
         assert_eq!(map_legacy_provider_id("ollama"), PROVIDER_OPENAI);
         assert_eq!(map_legacy_provider_id("anthropic"), PROVIDER_ANTHROPIC);
@@ -468,7 +465,7 @@ temperature = 0.2
         ensure_tui_legacy_imported_at(&profiles, Some(&config), None).unwrap();
         let content = fs::read_to_string(profiles.join("p1.json")).unwrap();
         let profile: ModelProfile = serde_json::from_str(&content).unwrap();
-        assert_eq!(profile.provider, PROVIDER_DEEPSEEK_OPENAI);
+        assert_eq!(profile.provider, PROVIDER_DEEPSEEK);
         assert_eq!(profile.model_id, "deepseek-chat");
         assert_eq!(profile.api_key, "sk-ds");
         let temp = profile

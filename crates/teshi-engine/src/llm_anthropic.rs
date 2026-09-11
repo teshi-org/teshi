@@ -1,16 +1,16 @@
 //! Anthropic Messages API transport, adapted to [`crate::llm::LlmEvent`].
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::llm::{
-    apply_extra_headers, merge_chat_options, ChatMessage, LlmConfig, LlmEvent, ToolCall,
-    ToolDefinition,
+    ChatMessage, LlmConfig, LlmEvent, ToolCall, ToolDefinition, apply_extra_headers,
+    merge_chat_options,
 };
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -235,6 +235,9 @@ pub(crate) fn emit_anthropic_json(body: &Value, evt_tx: &Sender<LlmEvent>) {
         let _ = evt_tx.send(LlmEvent::ToolCallRequest {
             tool_calls,
             reasoning_content: None,
+            input_tokens: None,
+            output_tokens: None,
+            finish_reason: None,
         });
         return;
     }
@@ -250,6 +253,7 @@ pub(crate) fn emit_anthropic_json(body: &Value, evt_tx: &Sender<LlmEvent>) {
         input_tokens,
         output_tokens,
         model,
+        finish_reason: None,
     });
 }
 
@@ -396,6 +400,9 @@ async fn read_anthropic_sse(
         let _ = evt_tx.send(LlmEvent::ToolCallRequest {
             tool_calls,
             reasoning_content: None,
+            input_tokens,
+            output_tokens,
+            finish_reason: None,
         });
     } else {
         let _ = evt_tx.send(LlmEvent::Done {
@@ -404,6 +411,7 @@ async fn read_anthropic_sse(
             input_tokens,
             output_tokens,
             model: model_name,
+            finish_reason: None,
         });
     }
     Ok(())
@@ -425,6 +433,7 @@ mod tests {
             context_window: None,
             provider: PROVIDER_ANTHROPIC.into(),
             api_style: ApiStyle::ChatCompletions,
+            thinking: crate::model_profile::DeepSeekThinking::High,
             stream: false,
             http_headers: HashMap::new(),
             chat_options: HashMap::new(),

@@ -1500,6 +1500,7 @@ impl App {
                         model,
                         input_tokens,
                         output_tokens,
+                        ..
                     }) => {
                         if self.agents[i].partial_response.is_empty() {
                             self.agents[i].messages.push(AiChatMessage {
@@ -1535,6 +1536,7 @@ impl App {
                     Ok(crate::llm::LlmEvent::ToolCallRequest {
                         tool_calls,
                         reasoning_content,
+                        ..
                     }) => {
                         let partial_text = std::mem::take(&mut self.agents[i].partial_response);
                         self.agents[i].messages.push(AiChatMessage {
