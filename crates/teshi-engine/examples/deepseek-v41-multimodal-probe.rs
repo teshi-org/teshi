@@ -64,6 +64,7 @@ async fn main() -> Result<()> {
             status: false,
         });
     }
+    results.extend(vision_thinking_tools(&client, &api_key, &image).await?);
     results.push(external_url(&client, &api_key).await?);
     results.push(negative(&client, &api_key, "image in system", json!({"role":"system","content":[{"type":"text","text":"Describe the image."},{"type":"image_url","image_url":{"url":image}}]})).await?);
     results.push(negative(&client, &api_key, "image in assistant", json!({"role":"assistant","content":[{"type":"text","text":"I saw this."},{"type":"image_url","image_url":{"url":image}}]})).await?);
@@ -94,6 +95,240 @@ fn image_body(image: &str, detail: bool, thinking: bool, tools: bool) -> Value {
         body["tool_choice"] = json!({"type":"function","function":{"name":"report_ui_state"}});
     }
     body
+}
+
+fn tool_definition() -> Value {
+    json!({"type":"function","function":{"name":"report_ui_state","description":"Report the visible UI state.","parameters":{"type":"object","properties":{"button_label":{"type":"string"},"error_code":{"type":"string"},"state":{"type":"string","enum":["success","error","unknown"]}},"required":["button_label","error_code","state"]}}})
+}
+
+fn thinking_tools_body(messages: Value) -> Value {
+    json!({
+        "model": MODEL,
+        "messages": messages,
+        "stream": false,
+        "max_tokens": 256,
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "high",
+        "tools": [tool_definition()]
+    })
+}
+
+fn tool_result() -> &'static str {
+    "{\"button_label\":\"RUN TEST\",\"error_code\":\"42\",\"state\":\"error\"}"
+}
+
+fn first_tool_call(message: &Value) -> Option<&Value> {
+    message["tool_calls"].as_array()?.first()
+}
+
+fn tool_arguments(call: &Value) -> Option<Value> {
+    let arguments = call["function"]["arguments"].as_str()?;
+    serde_json::from_str(arguments).ok()
+}
+
+fn arguments_match_ui(arguments: &Value) -> bool {
+    let button = arguments["button_label"]
+        .as_str()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let error = arguments["error_code"]
+        .as_str()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let state = arguments["state"]
+        .as_str()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    button.contains("run test") && error.contains("42") && state == "error"
+}
+
+async fn vision_thinking_tools(
+    client: &reqwest::Client,
+    key: &str,
+    image: &str,
+) -> Result<Vec<ProbeResult>> {
+    let first_user = json!({"role":"user","content":[
+        {"type":"text","text":"Inspect the UI screenshot carefully. You have a report_ui_state tool. Use that tool to report the UI state you observe before giving any final answer. Identify the button label, error code, and whether this represents an error state."},
+        {"type":"image_url","image_url":{"url":image}}
+    ]});
+    let mut messages = vec![first_user];
+    let mut rows = Vec::new();
+    let mut replay_rows = Vec::new();
+    let mut previous_reasoning: Option<String> = None;
+    let mut first_tool = false;
+    let mut turns = 0;
+
+    while turns < 3 {
+        turns += 1;
+        let body = thinking_tools_body(Value::Array(messages.clone()));
+        if body.get("tool_choice").is_some() {
+            bail!("combined probe constructed an unexpected tool_choice");
+        }
+        if let Some(reasoning) = previous_reasoning.as_ref() {
+            let assistant = messages
+                .iter()
+                .rev()
+                .find(|message| message["role"] == "assistant")
+                .ok_or_else(|| anyhow::anyhow!("missing assistant message for replay"))?;
+            let tool_id_matches = assistant["tool_calls"]
+                .as_array()
+                .and_then(|calls| calls.first())
+                .and_then(|call| call["id"].as_str())
+                .and_then(|id| {
+                    messages
+                        .iter()
+                        .find(|message| message["role"] == "tool" && message["tool_call_id"] == id)
+                })
+                .is_some();
+            if assistant["reasoning_content"].as_str() != Some(reasoning)
+                || !assistant["content"].is_string()
+                || first_tool_call(assistant).is_none()
+                || !tool_id_matches
+            {
+                replay_rows.push(ProbeResult {
+                    name: "reasoning replay after visual tool call",
+                    result: "FAIL".into(),
+                    detail:
+                        "outgoing assistant semantic fields did not preserve the previous response"
+                            .into(),
+                    status: false,
+                });
+                return Ok(replay_rows);
+            }
+            replay_rows.push(ProbeResult {
+                name: "reasoning replay after visual tool call",
+                result: "PASS".into(),
+                detail: format!("assistant_reasoning_replayed=true; reasoning_length={}; assistant_content_present=true; assistant_tool_calls_present=true; tool_call_id_paired={tool_id_matches}; tool_choice_absent=true", reasoning.len()),
+                status: true,
+            });
+        }
+
+        let response = client
+            .post(ENDPOINT)
+            .bearer_auth(key)
+            .json(&body)
+            .send()
+            .await?;
+        let status = response.status();
+        let value: Value = response.json().await.unwrap_or_default();
+        if !status.is_success() {
+            let row = ProbeResult {
+                name: if turns == 1 {
+                    "vision + thinking + autonomous tool call"
+                } else {
+                    "second-turn continuation"
+                },
+                result: "FAIL".into(),
+                detail: format!("{}; {}", status, error_detail(&value)),
+                status: false,
+            };
+            rows.push(row);
+            break;
+        }
+        let message = value["choices"][0]["message"].clone();
+        let reasoning = message["reasoning_content"].as_str();
+        let content = message["content"].as_str();
+        let calls = message["tool_calls"].as_array();
+        let finish = value["choices"][0]["finish_reason"].as_str().unwrap_or("");
+        let common = format!(
+            "status={status}; finish_reason={finish:?}; reasoning_content_present={}; reasoning_length={}; content_present={}; content_length={}; tool_calls_present={}; tool_choice_absent=true",
+            reasoning.is_some_and(|text| !text.is_empty()),
+            reasoning.map_or(0, str::len),
+            content.is_some(),
+            content.map_or(0, str::len),
+            calls.is_some_and(|items| !items.is_empty()),
+        );
+        if reasoning.is_none_or(str::is_empty) || content.is_none() {
+            rows.push(ProbeResult {
+                name: if turns == 1 {
+                    "vision + thinking + autonomous tool call"
+                } else {
+                    "second-turn continuation"
+                },
+                result: "FAIL".into(),
+                detail: format!(
+                    "{common}; assistant content must be present (empty string allowed)"
+                ),
+                status: false,
+            });
+            break;
+        }
+
+        if turns == 1 {
+            let Some(call) = first_tool_call(&message) else {
+                rows.push(ProbeResult {
+                    name: "vision + thinking + autonomous tool call",
+                    result: "INCONCLUSIVE".into(),
+                    detail: format!("{common}; model returned final text without tool call"),
+                    status: false,
+                });
+                break;
+            };
+            let arguments = tool_arguments(call);
+            let valid_name = call["function"]["name"] == "report_ui_state";
+            let valid_arguments = arguments.as_ref().is_some_and(arguments_match_ui);
+            let call_id = call["id"].as_str();
+            first_tool = valid_name && valid_arguments && call_id.is_some();
+            rows.push(ProbeResult {
+                name: "vision + thinking + autonomous tool call",
+                result: if first_tool { "PASS" } else { "FAIL" }.into(),
+                detail: format!("{common}; tool_name={:?}; tool_arguments_valid_json={}; button_label_run_test={}; error_code_contains_42={}; state_error={}; tool_call_id_present={}", call["function"]["name"].as_str(), arguments.is_some(), arguments.as_ref().is_some_and(|v| v["button_label"].as_str().unwrap_or("").to_ascii_lowercase().contains("run test")), arguments.as_ref().is_some_and(|v| v["error_code"].as_str().unwrap_or("").contains("42")), arguments.as_ref().is_some_and(|v| v["state"].as_str().unwrap_or("").eq_ignore_ascii_case("error")), call_id.is_some()),
+                status: first_tool,
+            });
+            if !first_tool {
+                break;
+            }
+        }
+
+        if let Some(call) = first_tool_call(&message) {
+            let Some(call_id) = call["id"].as_str() else {
+                rows.push(ProbeResult {
+                    name: "second-turn continuation",
+                    result: "FAIL".into(),
+                    detail: "tool call missing id".into(),
+                    status: false,
+                });
+                break;
+            };
+            messages.push(message.clone());
+            messages.push(json!({"role":"tool","tool_call_id":call_id,"content":tool_result()}));
+            messages.push(json!({"role":"user","content":"Based on the observed UI state and the tool result, decide what the test agent should do next. Do not call report_ui_state again unless another observation is necessary."}));
+            previous_reasoning = Some(reasoning.unwrap().to_owned());
+            if turns == 3 {
+                rows.push(ProbeResult {
+                    name: "second-turn continuation",
+                    result: "INCONCLUSIVE".into(),
+                    detail: "model did not converge within probe limit".into(),
+                    status: false,
+                });
+            }
+        } else {
+            let final_answer = !content.unwrap_or_default().is_empty();
+            rows.push(ProbeResult {
+                name: "second-turn continuation",
+                result: if final_answer { "PASS" } else { "FAIL" }.into(),
+                detail: format!(
+                    "{common}; final_answer_non_empty={final_answer}; additional_tool_call=false"
+                ),
+                status: final_answer,
+            });
+            break;
+        }
+    }
+
+    if !first_tool {
+        replay_rows.clear();
+    }
+    if replay_rows.is_empty() && first_tool {
+        replay_rows.push(ProbeResult {
+            name: "reasoning replay after visual tool call",
+            result: "FAIL".into(),
+            detail: "no second request was completed".into(),
+            status: false,
+        });
+    }
+    rows.extend(replay_rows);
+    Ok(rows)
 }
 
 async fn request(client: &reqwest::Client, key: &str, body: Value) -> Result<ProbeResult> {

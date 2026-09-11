@@ -27,8 +27,11 @@ reasoning text.
 | streaming vision | PASS | HTTP 200; content delta events, reasoning delta events, usage, terminal finish event, and `[DONE]` observed |
 | vision + thinking | PASS | HTTP 200; `thinking.type=enabled`, `reasoning_effort=high`; `reasoning_content` present |
 | `reasoning_content` | PASS | Present in text, base64-image, streaming, and explicit-thinking responses; only length/field presence recorded |
-| vision + tool call | PASS | HTTP 200; `finish_reason=tool_calls`; valid function tool call present; thinking explicitly disabled |
-| vision + tool + second turn | PASS | Tool result was appended and a second assistant text response was returned |
+| vision + tool call | PASS | HTTP 200; `finish_reason=tool_calls`; valid function tool call present; thinking explicitly disabled; `tool_choice` forced (legacy isolated probe) |
+| vision + tool + second turn | PASS | Tool result was appended and a second assistant text response was returned; legacy thinking-disabled path |
+| vision + thinking + autonomous tool call | PASS | HTTP 200; `finish_reason=tool_calls`; reasoning present/non-empty; assistant content present as empty string; autonomous `report_ui_state`; `tool_choice` absent |
+| reasoning replay after visual tool call | PASS | HTTP 200 follow-up; complete reasoning replay, assistant content/tool calls retained, and tool-call id paired before send |
+| second-turn thinking after tool result | PASS | HTTP 200; `finish_reason=length`; reasoning present; final assistant content non-empty; no third turn needed |
 | external URL image | NOT RUN | No stable public fixture URL was supplied via `TESHI_DEEPSEEK_PROBE_IMAGE_URL` |
 | image in system | REJECTED | HTTP 400 `invalid_request_error`: image in system message unsupported |
 | image in assistant | REJECTED | HTTP 400 `invalid_request_error`: image in assistant message unsupported |
@@ -42,11 +45,13 @@ row is treated as a V4.1 fact. The live run below is the current evidence;
 the probe samples response field names and SSE shape without persisting private
 reasoning.
 
-The required vision, thinking, tool-call, and second-turn probes pass, so Teshi
-can enter the Multimodal Message Model design/implementation stage. This is not
-permission to change the production model in this probe: browser screenshot
-capture, Teshi UI support, Responses API support, and production LLM integration
-remain out of scope.
+The legacy vision, thinking, tool-call, and thinking-disabled second-turn probes
+pass. The combined `vision + thinking + autonomous tool` contract also passed
+against the live provider, including complete reasoning replay and second-turn
+continuation. This satisfies the provider-contract gate for the next
+Multimodal Message Model stage. Browser screenshot capture, Teshi UI support,
+Responses API support, and production LLM integration remain out of scope for
+this probe.
 
 ## Live result (2026-09-11)
 
@@ -64,15 +69,26 @@ Observed sanitized results:
 - vision + thinking: `PASS`, with `thinking.type=enabled` and
   `reasoning_effort=high`;
 - vision + tool call: `PASS`, with `thinking.type=disabled`, a valid tool call,
-  and `finish_reason=tool_calls`;
+  forced `tool_choice`, and `finish_reason=tool_calls`;
 - vision + tool + second turn: `PASS`, with a returned assistant text response;
+- combined vision + thinking + autonomous tool call: `PASS`, HTTP 200,
+  `finish_reason=tool_calls`, non-empty reasoning, non-null empty content, valid
+  `RUN TEST`/`42`/`error` arguments, and no `tool_choice`;
+- reasoning replay after visual tool call: `PASS`, outgoing request assertion
+  matched the complete first-round reasoning string by value without recording
+  its contents;
+- second-turn thinking after tool result: `PASS`, HTTP 200,
+  `finish_reason=length`, non-empty reasoning and final content, no third turn;
 - external URL: `NOT RUN`, because no stable public URL was supplied;
 - all three negative probes: `REJECTED` with HTTP 400 and the expected
   unsupported/invalid-input errors.
 
-The current evidence supports the conclusion **YES, proceed to the Multimodal
-Message Model stage**, while keeping the implementation uncommitted to this
-provider-specific probe contract until the model design is reviewed.
+The production readiness gate is **COMPLETE** for this provider contract:
+base64 image, streaming vision, vision thinking, legacy vision tool call,
+autonomous vision-thinking tool selection, reasoning replay, and second-turn
+continuation all have live PASS evidence. This authorizes the next
+Multimodal Message Model stage; it does not itself implement that production
+model.
 
 ## Candidate wire shapes and evidence boundary
 
@@ -81,10 +97,14 @@ The probe sends the candidate Chat Completions shape
 The detail variant was also accepted with `image_url.detail=auto`; the probe
 does not record the image contents. Thinking uses top-level
 `thinking.type=enabled` plus `reasoning_effort=high`. Tool requests use the
-normal Chat Completions `tools[].function` schema, forced function
-`tool_choice`, and explicitly set `thinking.type=disabled`; omitting the
-explicit disabled value was rejected by the provider as incompatible with
-`tool_choice`.
+normal Chat Completions `tools[].function` schema. The legacy isolated tool
+probe uses forced function `tool_choice` and explicitly set
+`thinking.type=disabled`; omitting the explicit disabled value was rejected by
+the provider as incompatible with `tool_choice`. The new combined probe uses
+`thinking.type=enabled`, `reasoning_effort=high`, tools, and deliberately omits
+`tool_choice`. It retains the provider's complete assistant semantic fields
+when constructing the tool-result follow-up and asserts the serialized replay
+before sending it. It never records the reasoning text itself.
 
 The successful streaming response had SSE `data:` JSON events with
 `choices[0].delta.content` and `choices[0].delta.reasoning_content`, a finish
