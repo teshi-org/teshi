@@ -65,6 +65,7 @@ pub fn staged_payload(root: &Path) -> PathBuf {
 /// `fs::canonicalize` may return paths prefixed with `\\?\`. That prefix is
 /// useful for Win32 filesystem operations, but Inno interprets the `?` as an
 /// invalid folder-name character when it is passed through `/DIR=`.
+#[cfg(any(windows, test))]
 fn inno_dir_arg(path: &Path) -> Result<String> {
     let value = path
         .to_str()
