@@ -7897,7 +7897,7 @@ impl App {
 mod tests {
     use std::collections::{HashMap, HashSet};
     use std::fs;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::sync::mpsc;
@@ -8069,8 +8069,7 @@ mod tests {
         let api_key = match std::env::var("DEEPSEEK_API_KEY") {
             Ok(value) if !value.trim().is_empty() => value,
             _ => {
-                println!("SKIP live_browser_vision_closed_loop: DEEPSEEK_API_KEY is not set");
-                return;
+                panic!("FAIL live_browser_vision_closed_loop: DEEPSEEK_API_KEY is not set");
             }
         };
 
@@ -8093,11 +8092,16 @@ mod tests {
             },
             None,
         );
+        let original_cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("resolve Teshi workspace root")
+            .to_path_buf();
         let tokio_runtime = tokio::runtime::Runtime::new().expect("create live runtime");
         tokio_runtime
             .block_on(teshi_engine::open_project(
                 runtime.clone(),
-                project.path().to_string_lossy().into_owned(),
+                original_cwd.to_string_lossy().into_owned(),
             ))
             .expect("open live project");
         let browser = match tokio_runtime.block_on(teshi_engine::start_browser_sidecar(
@@ -8107,14 +8111,12 @@ mod tests {
             Ok(result) => result,
             Err(error) => {
                 stop_server();
-                println!(
-                    "SKIP live_browser_vision_closed_loop: browser runtime unavailable: {error:?}"
+                panic!(
+                    "FAIL live_browser_vision_closed_loop: browser runtime unavailable: {error:?}"
                 );
-                return;
             }
         };
 
-        let original_cwd = std::env::current_dir().expect("read current directory");
         std::env::set_current_dir(project.path()).expect("enter live project");
         fs::create_dir_all(project.path().join(".teshi")).expect("create endpoint directory");
         fs::write(
@@ -8130,15 +8132,30 @@ mod tests {
             )
             .with_caller_label("teshi-live-browser-vision-test");
             navigate_live_fixture(&client, &fixture_url).expect("navigate fixture");
-            let initial = snapshot_live_page(&client).expect("read initial snapshot");
+            let initial = {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    let snapshot = snapshot_live_page(&client).expect("read initial snapshot");
+                    let snapshot_text =
+                        serde_json::to_string(&snapshot).expect("serialize initial snapshot");
+                    if snapshot_text.contains("RUN TEST") && snapshot_text.contains("ERROR 42") {
+                        break snapshot;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "initial snapshot never exposed fixture controls: {snapshot_text}"
+                    );
+                    thread::sleep(Duration::from_millis(100));
+                }
+            };
             let initial_text = serde_json::to_string(&initial).expect("serialize initial snapshot");
             assert!(
                 initial_text.contains("RUN TEST"),
-                "initial snapshot lacks RUN TEST"
+                "initial snapshot lacks RUN TEST: {initial_text}"
             );
             assert!(
                 initial_text.contains("ERROR 42"),
-                "initial snapshot lacks ERROR 42"
+                "initial snapshot lacks ERROR 42: {initial_text}"
             );
 
             let store = tempdir().expect("create requirement store");
@@ -8328,6 +8345,9 @@ mod tests {
                 }
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                        let mut request = [0_u8; 8192];
+                        let _ = stream.read(&mut request);
                         let mut response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
                         response.extend_from_slice(&body);
                         let _ = stream.write_all(&response);
