@@ -8,7 +8,15 @@
     <main>
       <h1>TESHI</h1>
       <button id="run-test" type="button">RUN TEST</button>
-      <div id="error" role="alert">ERROR 42</div>
+      <div id="status" role="alert">ERROR 42</div>
     </main>
+    <script>
+      document.getElementById('run-test').addEventListener('click', () => {
+        const status = document.getElementById('status');
+        status.textContent = 'TEST PASSED';
+        status.dataset.state = 'success';
+        status.removeAttribute('role');
+      });
+    </script>
   </body>
 </html>

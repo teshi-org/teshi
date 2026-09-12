@@ -117,6 +117,8 @@ pub struct AgentThread {
     /// retained in the active model projection, while their text messages
     /// remain in the durable chat history.
     pub latest_visual_observation: Option<teshi_engine::BrowserScreenshot>,
+    /// Finish reason from the most recent production model response.
+    pub last_finish_reason: Option<String>,
 }
 
 impl AgentThread {
@@ -140,6 +142,7 @@ impl AgentThread {
             last_input_tokens: None,
             profile_id: None,
             latest_visual_observation: None,
+            last_finish_reason: None,
         }
     }
 }
@@ -1505,8 +1508,9 @@ impl App {
                         model,
                         input_tokens,
                         output_tokens,
-                        ..
+                        finish_reason,
                     }) => {
+                        self.agents[i].last_finish_reason = finish_reason;
                         if self.agents[i].partial_response.is_empty() {
                             self.agents[i].messages.push(AiChatMessage {
                                 role: AiRole::Assistant,
@@ -1541,8 +1545,10 @@ impl App {
                     Ok(crate::llm::LlmEvent::ToolCallRequest {
                         tool_calls,
                         reasoning_content,
+                        finish_reason,
                         ..
                     }) => {
+                        self.agents[i].last_finish_reason = finish_reason;
                         let partial_text = std::mem::take(&mut self.agents[i].partial_response);
                         self.agents[i].messages.push(AiChatMessage {
                             role: AiRole::Assistant,
@@ -7891,12 +7897,18 @@ impl App {
 mod tests {
     use std::collections::{HashMap, HashSet};
     use std::fs;
-    use std::path::PathBuf;
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::path::{Path, PathBuf};
+    use std::sync::mpsc;
+    use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+    use anyhow::Context;
+
     use super::{
-        AgentPanelMode, AgentThread, App, BddFocusSlot, ClickableRegion, ColumnFocus, MainTab,
-        MindMapFocus, ModelPanelMode, ViewStage, current_step_keyword_index,
+        AgentPanelMode, AgentThread, AiRole, AiStatus, App, BddFocusSlot, ClickableRegion,
+        ColumnFocus, MainTab, MindMapFocus, ModelPanelMode, ViewStage, current_step_keyword_index,
         replace_step_keyword_line,
     };
     use crate::bdd_nav::step_edit_start_col;
@@ -8039,6 +8051,426 @@ mod tests {
             .count();
         assert_eq!(image_count, 1);
         assert_eq!(messages.len(), 11);
+    }
+
+    /// Live opt-in acceptance for the complete Browser Vision agent loop.
+    ///
+    /// This intentionally lives beside the production App loop: the test sends
+    /// the prompt through `dispatch_user_message`, then lets `poll_llm_events`
+    /// execute every model-requested browser tool and continuation.
+    #[test]
+    fn live_browser_vision_closed_loop() {
+        if std::env::var("TESHI_RUN_LIVE_BROWSER_VISION_E2E").as_deref() != Ok("1") {
+            println!(
+                "SKIP live_browser_vision_closed_loop: set TESHI_RUN_LIVE_BROWSER_VISION_E2E=1"
+            );
+            return;
+        }
+        let api_key = match std::env::var("DEEPSEEK_API_KEY") {
+            Ok(value) if !value.trim().is_empty() => value,
+            _ => {
+                println!("SKIP live_browser_vision_closed_loop: DEEPSEEK_API_KEY is not set");
+                return;
+            }
+        };
+
+        let project = tempdir().expect("create live project");
+        fs::write(
+            project.path().join("live.feature"),
+            "Feature: Browser vision live loop\n\n  Scenario: run the visible test\n    Given the browser fixture is open\n",
+        )
+        .expect("write live feature");
+        let (fixture_url, stop_server) = start_visual_fixture_server();
+
+        // The browser sidecar is Teshi's existing embedded runtime. The test
+        // never launches Playwright, Chromium, or another browser itself.
+        let runtime = teshi_engine::TeshiEngine::new(
+            teshi_engine::RuntimeConfig {
+                browser_service_script: teshi_engine::default_browser_service_script(),
+                winapp_service_script: teshi_engine::default_winapp_service_script(),
+                embedded_no_preview_stream: true,
+                requirements_root: None,
+            },
+            None,
+        );
+        let tokio_runtime = tokio::runtime::Runtime::new().expect("create live runtime");
+        tokio_runtime
+            .block_on(teshi_engine::open_project(
+                runtime.clone(),
+                project.path().to_string_lossy().into_owned(),
+            ))
+            .expect("open live project");
+        let browser = match tokio_runtime.block_on(teshi_engine::start_browser_sidecar(
+            runtime.clone(),
+            teshi_engine::BrowserMode::Embedded,
+        )) {
+            Ok(result) => result,
+            Err(error) => {
+                stop_server();
+                println!(
+                    "SKIP live_browser_vision_closed_loop: browser runtime unavailable: {error:?}"
+                );
+                return;
+            }
+        };
+
+        let original_cwd = std::env::current_dir().expect("read current directory");
+        std::env::set_current_dir(project.path()).expect("enter live project");
+        fs::create_dir_all(project.path().join(".teshi")).expect("create endpoint directory");
+        fs::write(
+            project.path().join(".teshi/cdp-endpoint.json"),
+            serde_json::json!({"ws_url": browser.ws_url, "mode": "embedded"}).to_string(),
+        )
+        .expect("write browser endpoint");
+
+        let result = (|| {
+            let client = teshi_engine::BrowserOperations::new(
+                browser.ws_url.clone(),
+                Duration::from_secs(30),
+            )
+            .with_caller_label("teshi-live-browser-vision-test");
+            navigate_live_fixture(&client, &fixture_url).expect("navigate fixture");
+            let initial = snapshot_live_page(&client).expect("read initial snapshot");
+            let initial_text = serde_json::to_string(&initial).expect("serialize initial snapshot");
+            assert!(
+                initial_text.contains("RUN TEST"),
+                "initial snapshot lacks RUN TEST"
+            );
+            assert!(
+                initial_text.contains("ERROR 42"),
+                "initial snapshot lacks ERROR 42"
+            );
+
+            let store = tempdir().expect("create requirement store");
+            teshi_engine::initialize_requirement_store(store.path())
+                .expect("init requirement store");
+            let mut app = App::from_file(
+                &project.path().join("live.feature"),
+                crate::config::load_config().expect("load config"),
+                store.path().to_path_buf(),
+            )
+            .expect("create production App");
+            let config = crate::llm::LlmConfig {
+                api_key,
+                base_url: "https://api.deepseek.com".into(),
+                model: "deepseek-flash".into(),
+                max_tokens: 2048,
+                temperature: 0.2,
+                context_window: None,
+                provider: "deepseek".into(),
+                thinking: teshi_engine::DeepSeekThinking::High,
+                api_style: teshi_engine::ApiStyle::ChatCompletions,
+                stream: true,
+                http_headers: Default::default(),
+                chat_options: Default::default(),
+            };
+            let (handle, rx) = crate::llm::spawn_llm(config);
+            app.agents[0].llm_handle = Some(handle);
+            app.agents[0].llm_rx = Some(rx);
+            app.dispatch_user_message(
+                "Inspect the current page and bring this test interface into a successful state.\n\nConfirm the rendered visual state before taking the main action. Use the available browser tools as needed. Prefer structured browser tools for interaction, then verify the changed state and report the final result.".into(),
+            )?;
+
+            let deadline = Instant::now() + Duration::from_secs(180);
+            while Instant::now() < deadline {
+                app.poll_llm_events();
+                if app.agents[0].status == AiStatus::Error {
+                    anyhow::bail!(
+                        "production Agent entered error state: {:?}",
+                        app.agents[0].messages
+                    );
+                }
+                let done = app.agents[0].status == AiStatus::Idle
+                    && app.agents[0].messages.iter().any(|message| {
+                        message.role == AiRole::Assistant
+                            && message.tool_calls.is_none()
+                            && !message.content.trim().is_empty()
+                    });
+                if done {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            assert_eq!(
+                app.agents[0].status,
+                AiStatus::Idle,
+                "Agent did not finish within 180 seconds"
+            );
+
+            let tool_names: Vec<String> = app.agents[0]
+                .messages
+                .iter()
+                .filter_map(|message| message.tool_calls.as_ref())
+                .flat_map(|calls| calls.iter().map(|call| call.name.clone()))
+                .collect();
+            assert!(
+                tool_names.len() <= 12,
+                "live Agent exceeded the browser tool-call budget"
+            );
+            assert!(
+                tool_names
+                    .iter()
+                    .filter(|name| *name == "observe_page")
+                    .count()
+                    <= 3,
+                "live Agent exceeded the visual observation budget"
+            );
+            assert!(
+                app.agents[0]
+                    .messages
+                    .iter()
+                    .filter(|message| message.role == AiRole::Assistant)
+                    .count()
+                    <= 8,
+                "live Agent exceeded the model-turn budget"
+            );
+            assert!(
+                tool_names.iter().any(|name| name == "observe_page"),
+                "Agent never autonomously observed the page: {tool_names:?}"
+            );
+            assert!(
+                tool_names.iter().any(|name| name == "browser_click"),
+                "Agent never executed a structured browser click: {tool_names:?}"
+            );
+            assert!(app.agents[0].latest_visual_observation.is_some());
+            let observation = app.agents[0].latest_visual_observation.as_ref().unwrap();
+            assert_eq!(observation.media_type, "image/png");
+            assert!(observation.image.starts_with(b"\x89PNG\r\n\x1a\n"));
+            assert!(!observation.image.is_empty());
+            assert_eq!(observation.url.as_deref(), Some(fixture_url.as_str()));
+            let visual_user_index = app.agents[0]
+                .messages
+                .iter()
+                .position(|message| message.source.as_deref() == Some("browser_visual_observation"))
+                .expect("synthetic visual user message missing");
+            assert!(visual_user_index >= 2);
+            assert_eq!(
+                app.agents[0].messages[visual_user_index - 1].role,
+                AiRole::Tool
+            );
+            assert!(
+                app.agents[0].messages[visual_user_index - 2]
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| calls.iter().any(|call| call.name == "observe_page"))
+            );
+
+            let projected = app.build_chat_messages_for_agent(0);
+            let image_count = projected
+                .iter()
+                .filter(|message| matches!(message.content, teshi_core::llm::MessageContent::Blocks(ref blocks) if blocks.iter().any(|block| matches!(block, teshi_core::llm::ContentBlock::Image { .. }))))
+                .count();
+            assert_eq!(
+                image_count, 1,
+                "active model projection retained more than one image"
+            );
+            for (original, projected) in app.agents[0].messages.iter().zip(projected.iter().skip(1))
+            {
+                if original.role == AiRole::Assistant && original.reasoning_content.is_some() {
+                    assert_eq!(projected.reasoning_content, original.reasoning_content);
+                }
+            }
+
+            let final_snapshot = snapshot_live_page(&client).expect("read final snapshot");
+            let final_text =
+                serde_json::to_string(&final_snapshot).expect("serialize final snapshot");
+            assert!(
+                final_text.contains("TEST PASSED"),
+                "browser page did not reach TEST PASSED: {final_text}"
+            );
+            let final_answer = app.agents[0]
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == AiRole::Assistant && message.tool_calls.is_none())
+                .map(|message| message.content.clone())
+                .unwrap_or_default();
+            assert!(
+                !final_answer.trim().is_empty(),
+                "Agent returned no final answer"
+            );
+            write_live_browser_vision_report(
+                &original_cwd,
+                &app,
+                observation,
+                &tool_names,
+                &final_answer,
+            );
+            Ok::<(), anyhow::Error>(())
+        })();
+
+        std::env::set_current_dir(original_cwd).expect("restore current directory");
+        tokio_runtime
+            .block_on(teshi_engine::stop_browser_sidecar(&runtime))
+            .ok();
+        stop_server();
+        result.expect("live browser vision closed loop");
+    }
+
+    fn start_visual_fixture_server() -> (String, impl FnOnce()) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        let port = listener
+            .local_addr()
+            .expect("fixture server address")
+            .port();
+        listener
+            .set_nonblocking(true)
+            .expect("set fixture server nonblocking");
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+        let body =
+            include_str!("../../../resources/tests/fixtures/browser-visual-observation.html")
+                .as_bytes()
+                .to_vec();
+        let thread = thread::spawn(move || {
+            loop {
+                if stop_rx.try_recv().is_ok() {
+                    break;
+                }
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+                        response.extend_from_slice(&body);
+                        let _ = stream.write_all(&response);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/browser-visual-observation.html");
+        (url, move || {
+            let _ = stop_tx.send(());
+            let _ = thread.join();
+        })
+    }
+
+    fn live_target(
+        client: &teshi_engine::BrowserOperations,
+    ) -> anyhow::Result<(teshi_engine::BrowserTarget, String, String)> {
+        let payload = client
+            .execute(&teshi_engine::BrowserOperation::ListBrowserSessions)?
+            .payload;
+        let record = payload["sessions"]
+            .as_array()
+            .and_then(|sessions| sessions.iter().find(|session| session["health"] == "ready"))
+            .context("no ready browser session")?;
+        let instance = record["identity"]["extension_instance_id"]
+            .as_str()
+            .context("missing browser instance")?
+            .to_string();
+        let (window, tab) = record["windows"]
+            .as_array()
+            .and_then(|windows| {
+                windows.iter().find_map(|window| {
+                    let id = window["id"].as_i64()?;
+                    let tab = window["tabs"]
+                        .as_array()?
+                        .iter()
+                        .find(|tab| tab["active"] == true)?["id"]
+                        .as_i64()?;
+                    Some((id, tab))
+                })
+            })
+            .context("no active browser tab")?;
+        let lease = client
+            .execute(&teshi_engine::BrowserOperation::AcquireBrowserLease {
+                extension_instance_id: instance.clone(),
+                owner_label: "teshi-live-browser-vision-test".into(),
+                ttl_secs: 30,
+            })?
+            .payload;
+        let token = lease["lease"]["lease_token"]
+            .as_str()
+            .context("missing browser lease")?
+            .to_string();
+        Ok((
+            teshi_engine::BrowserTarget {
+                extension_instance_id: instance,
+                window_id: window,
+                tab_id: tab,
+            },
+            token,
+            record["identity"]["extension_instance_id"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
+        ))
+    }
+
+    fn navigate_live_fixture(
+        client: &teshi_engine::BrowserOperations,
+        url: &str,
+    ) -> anyhow::Result<()> {
+        let (target, token, instance) = live_target(client)?;
+        let result = client.execute(&teshi_engine::BrowserOperation::NavigateBrowser {
+            target,
+            lease_token: token.clone(),
+            url: url.into(),
+            timeout_ms: 30_000,
+            wait: Some(teshi_engine::BrowserWaitCondition::LoadComplete),
+            monitor: false,
+        });
+        let _ = client.execute(&teshi_engine::BrowserOperation::ReleaseBrowserLease {
+            extension_instance_id: instance,
+            lease_token: token,
+        });
+        result.map(|_| ()).map_err(|error| anyhow::anyhow!(error))
+    }
+
+    fn snapshot_live_page(
+        client: &teshi_engine::BrowserOperations,
+    ) -> anyhow::Result<teshi_engine::BrowserPageSnapshot> {
+        let (target, token, instance) = live_target(client)?;
+        let result = client.execute(&teshi_engine::BrowserOperation::GetPageSnapshot {
+            target,
+            lease_token: token.clone(),
+        });
+        let _ = client.execute(&teshi_engine::BrowserOperation::ReleaseBrowserLease {
+            extension_instance_id: instance,
+            lease_token: token,
+        });
+        let response = result.map_err(|error| anyhow::anyhow!(error))?;
+        Ok(serde_json::from_value(response.payload)?)
+    }
+
+    fn write_live_browser_vision_report(
+        report_root: &Path,
+        app: &App,
+        observation: &teshi_engine::BrowserScreenshot,
+        tools: &[String],
+        final_answer: &str,
+    ) {
+        let sha = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .unwrap_or_else(|| "unknown".into())
+            .trim()
+            .to_string();
+        let report = format!(
+            "# Teshi Browser Vision Live E2E\n\n- Date: 2026-09-12\n- Commit SHA: `{sha}`\n- Provider: `deepseek`\n- Model: `deepseek-flash`\n- Thinking mode: `high`\n- Fixture: `resources/tests/fixtures/browser-visual-observation.html`\n- Browser runtime: existing Teshi embedded browser sidecar\n- Live E2E result: PASS\n\n## Trace summary\n\n- Agent turns: {}\n- Tools: `{}`\n- Observation id: `{}`\n- Screenshot: `{}`, {} bytes, `full_page=false`\n- Browser URL: `{}`\n- Browser title: `{}`\n- Last model finish reason: `{}`\n- Peak active model-visible image count: `1`\n- Final answer present: `true`\n\nReasoning content was retained only as presence/length metadata in the harness; its text and screenshot bytes were not written. Final answer length: {}.\n",
+            app.agents[0]
+                .messages
+                .iter()
+                .filter(|message| message.role == AiRole::Assistant)
+                .count(),
+            tools.join(", "),
+            observation.observation_id,
+            observation.media_type,
+            observation.image.len(),
+            observation.url.as_deref().unwrap_or(""),
+            observation.title.as_deref().unwrap_or(""),
+            app.agents[0]
+                .last_finish_reason
+                .as_deref()
+                .unwrap_or("unknown"),
+            final_answer.len()
+        );
+        fs::write(report_root.join("docs/browser-vision-live-e2e.md"), report)
+            .expect("write sanitized live report");
     }
 
     #[test]
