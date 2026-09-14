@@ -11,7 +11,10 @@ use anyhow::{Context, Result};
 use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::{TeshiEngine, BROWSER_AGENT_SCHEMA_VERSION, BROWSER_BROKER_PROTOCOL_VERSION};
+use crate::{
+    ensure_winapp_runtime, TeshiEngine, BROWSER_AGENT_SCHEMA_VERSION,
+    BROWSER_BROKER_PROTOCOL_VERSION,
+};
 
 /// Browser session backend started by the sidecar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -88,6 +91,15 @@ impl SidecarState {
     /// Returns the active browser backend mode, if any.
     pub fn browser_mode(&self) -> Option<BrowserMode> {
         *self.mode.lock().unwrap()
+    }
+
+    /// Returns true when the owned sidecar child still appears to be running.
+    pub fn child_is_running(&self) -> bool {
+        self.child
+            .lock()
+            .unwrap()
+            .as_mut()
+            .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_none()))
     }
 }
 
@@ -176,6 +188,23 @@ fn python_sidecar_command(venv: &ResolvedVenv) -> Command {
 fn pick_port() -> Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0").context("bind ephemeral port")?;
     Ok(listener.local_addr()?.port())
+}
+
+fn ws_url_to_addr(ws_url: &str) -> Result<std::net::SocketAddr> {
+    let stripped = ws_url
+        .strip_prefix("ws://")
+        .or_else(|| ws_url.strip_prefix("wss://"))
+        .ok_or_else(|| anyhow::anyhow!("unsupported ws_url scheme"))?;
+    let (host, rest) = stripped
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("ws_url missing port"))?;
+    let port: u16 = rest
+        .split('/')
+        .next()
+        .unwrap_or(rest)
+        .parse()
+        .context("parse ws_url port")?;
+    Ok(format!("{host}:{port}").parse()?)
 }
 
 /// True when something accepts TCP connections on the loopback port.
@@ -599,8 +628,6 @@ pub async fn start_browser_sidecar(
     rt: Arc<TeshiEngine>,
     mode: BrowserMode,
 ) -> Result<BrowserStartResult, BrowserError> {
-    rt.sidecar.stop().await.ok();
-
     let project_root = rt
         .project
         .root
@@ -611,6 +638,29 @@ pub async fn start_browser_sidecar(
             message: "Open a project before starting the browser.".into(),
             hint: None,
         })?;
+
+    if mode != BrowserMode::Chrome
+        && rt.sidecar.browser_mode() == Some(mode)
+        && rt.sidecar.child_is_running()
+    {
+        if let Some(ws_url) = rt.sidecar.browser_ws_url() {
+            if let Ok(addr) = ws_url_to_addr(&ws_url) {
+                if port_is_open(addr.port()) {
+                    return Ok(BrowserStartResult {
+                        ws_url,
+                        cdp_endpoint_path: project_root
+                            .join(".teshi")
+                            .join("cdp-endpoint.json")
+                            .to_string_lossy()
+                            .into_owned(),
+                        mode: mode.as_str().to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    rt.sidecar.stop().await.ok();
 
     if mode == BrowserMode::Chrome {
         let endpoint = ensure_user_chrome_broker(&project_root, &rt.browser_service_script)?;
@@ -638,87 +688,94 @@ pub async fn start_browser_sidecar(
         });
     }
 
-    let venv = resolve_project_venv(&project_root).ok_or_else(|| {
-        let dot_venv = project_root.join(".venv");
-        let hint = if dot_venv.is_dir() && crate::venv::is_uv_managed_venv(&dot_venv) {
-            "uv managed .venv found but the base Python in pyvenv.cfg is missing. \
-             Run `uv python install`, then `uv pip install websockets`."
-                .into()
-        } else {
-            "Create .venv and run: pip install -r python/requirements.txt".into()
-        };
-        BrowserError {
-            message: "Python virtual environment not found or not runnable.".into(),
-            hint: Some(hint),
-        }
-    })?;
-
-    let (import_snippet, import_label, pip_hint) = match mode {
-        BrowserMode::Chrome => (
-            "import websockets",
-            "websockets",
-            format!("{} -m pip install websockets", venv.python_exe.display()),
-        ),
-        BrowserMode::Embedded => (
-            "import playwright, websockets",
-            "Playwright/websockets",
-            format!(
-                "{} -m pip install -r python/requirements.txt",
-                venv.python_exe.display()
-            ),
-        ),
-        BrowserMode::WinApp => (
-            "import websockets",
-            "websockets",
-            format!(
-                "{} -m pip install -r python/requirements.txt",
-                venv.python_exe.display()
-            ),
-        ),
+    let managed_winapp = if mode == BrowserMode::WinApp {
+        Some(ensure_winapp_runtime().map_err(|error| BrowserError {
+            message: "Failed to prepare Teshi WinApp runtime.".into(),
+            hint: Some(error.to_string()),
+        })?)
+    } else {
+        None
     };
 
-    let check = build_import_check_command(&venv)
-        .args(["-c", import_snippet])
-        .output()
-        .map_err(|e| BrowserError {
-            message: format!("Failed to run Python: {e}"),
-            hint: Some(pip_hint.clone()),
-        })?;
-    if !check.status.success() {
-        let detail = check_failure_detail(&check);
-        return Err(BrowserError {
-            message: import_check_failed_message(&check, import_label),
-            hint: Some(venv_python_failure_hint(&detail, &pip_hint, &venv.root)),
-        });
-    }
-
-    if mode == BrowserMode::Embedded {
-        let chromium_check = build_import_check_command(&venv)
-            .args(["-c", "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop()"])
-            .output();
-        if chromium_check.is_err() || !chromium_check.as_ref().unwrap().status.success() {
-            let message = match &chromium_check {
-                Ok(output) => format!(
-                    "Chromium browser is not installed for Playwright ({}).",
-                    check_failure_detail(output)
-                ),
-                Err(e) => format!("Failed to run Chromium check: {e}"),
+    let venv = if managed_winapp.is_none() {
+        Some(resolve_project_venv(&project_root).ok_or_else(|| {
+            let dot_venv = project_root.join(".venv");
+            let hint = if dot_venv.is_dir() && crate::venv::is_uv_managed_venv(&dot_venv) {
+                "uv managed .venv found but the base Python in pyvenv.cfg is missing. \
+                 Run `uv python install`, then `uv pip install websockets`."
+                    .into()
+            } else {
+                "Create .venv and run: pip install -r python/requirements.txt".into()
             };
-            return Err(BrowserError {
-                message,
-                hint: Some(format!(
-                    "{} -m playwright install chromium",
+            BrowserError {
+                message: "Python virtual environment not found or not runnable.".into(),
+                hint: Some(hint),
+            }
+        })?)
+    } else {
+        None
+    };
+
+    if let Some(venv) = &venv {
+        let (import_snippet, import_label, pip_hint) = match mode {
+            BrowserMode::Chrome => (
+                "import websockets",
+                "websockets",
+                format!("{} -m pip install websockets", venv.python_exe.display()),
+            ),
+            BrowserMode::Embedded => (
+                "import playwright, websockets",
+                "Playwright/websockets",
+                format!(
+                    "{} -m pip install -r python/requirements.txt",
                     venv.python_exe.display()
-                )),
+                ),
+            ),
+            BrowserMode::WinApp => unreachable!("WinApp uses Teshi managed runtime"),
+        };
+
+        let check = build_import_check_command(venv)
+            .args(["-c", import_snippet])
+            .output()
+            .map_err(|e| BrowserError {
+                message: format!("Failed to run Python: {e}"),
+                hint: Some(pip_hint.clone()),
+            })?;
+        if !check.status.success() {
+            let detail = check_failure_detail(&check);
+            return Err(BrowserError {
+                message: import_check_failed_message(&check, import_label),
+                hint: Some(venv_python_failure_hint(&detail, &pip_hint, &venv.root)),
             });
         }
+
+        if mode == BrowserMode::Embedded {
+            let chromium_check = build_import_check_command(venv)
+                .args(["-c", "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop()"])
+                .output();
+            if chromium_check.is_err() || !chromium_check.as_ref().unwrap().status.success() {
+                let message = match &chromium_check {
+                    Ok(output) => format!(
+                        "Chromium browser is not installed for Playwright ({}).",
+                        check_failure_detail(output)
+                    ),
+                    Err(e) => format!("Failed to run Chromium check: {e}"),
+                };
+                return Err(BrowserError {
+                    message,
+                    hint: Some(format!(
+                        "{} -m playwright install chromium",
+                        venv.python_exe.display()
+                    )),
+                });
+            }
+        }
     }
 
-    let script = if mode == BrowserMode::WinApp {
-        &rt.winapp_service_script
-    } else {
-        &rt.browser_service_script
-    };
+    let script = managed_winapp
+        .as_ref()
+        .map(|runtime| &runtime.service_script)
+        .unwrap_or(&rt.browser_service_script);
     if !script.is_file() {
         let script_name = if mode == BrowserMode::WinApp {
             "winapp_service.py"
@@ -740,7 +797,11 @@ pub async fn start_browser_sidecar(
         0
     };
 
-    let mut cmd = python_sidecar_command(&venv);
+    let mut cmd = if let Some(runtime) = &managed_winapp {
+        Command::new(&runtime.python_exe)
+    } else {
+        python_sidecar_command(venv.as_ref().expect("venv for non-WinApp sidecar"))
+    };
     cmd.arg(script).args([
         "--host",
         "127.0.0.1",

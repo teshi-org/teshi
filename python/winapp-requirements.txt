@@ -1,0 +1,8 @@
+# WinApp runtime dependencies only. CI resolves and records the exact installed
+# versions inside the immutable runtime artifact; do not use the monolithic
+# browser/API requirements file for this runtime.
+websockets>=12.0
+Pillow
+uiautomation
+comtypes
+windows-capture==2.0.1; sys_platform == "win32" and platform_machine == "AMD64"

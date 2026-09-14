@@ -6850,6 +6850,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "teshi-core",
  "tokio",
@@ -6857,6 +6858,7 @@ dependencies = [
  "tracing",
  "tungstenite 0.24.0",
  "vte",
+ "zip",
 ]
 
 [[package]]

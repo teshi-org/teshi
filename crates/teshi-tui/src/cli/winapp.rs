@@ -6,10 +6,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use serde_json::json;
 use teshi_engine::{
-    StepBinding, read_active_step, resolve_step_bindings, send_sidecar_command_with_timeout,
+    DaemonManifest, DaemonManifestExt, StepBinding, find_project_root, read_active_step,
+    remove_daemon_manifest, resolve_step_bindings, send_sidecar_command_with_timeout,
+    spawn_daemon_background,
 };
 
-use super::browser_endpoint::read_cdp_endpoint;
+use super::browser_endpoint::{read_cdp_endpoint, write_cdp_endpoint_from_rust};
 use super::check::preflight_feature;
 use super::replay_screenshots::{
     ReplayScreenshotEntry, capture_and_save_screenshot, iso_now, load_or_create_index, save_index,
@@ -21,7 +23,10 @@ use super::{
 
 /// Handles `teshi winapp ...` subcommands.
 pub fn handle_winapp_command(action: &WinAppCommand) -> Result<()> {
-    let project_root = std::env::current_dir().context("resolve current directory")?;
+    let cwd = std::env::current_dir().context("resolve current directory")?;
+    let project_root = find_project_root(Some(&cwd)).unwrap_or(cwd);
+    std::fs::create_dir_all(project_root.join(".teshi")).ok();
+    ensure_winapp_sidecar(&project_root)?;
     match action {
         WinAppCommand::ListWindows => list_windows(&project_root),
         WinAppCommand::Attach(args) => attach(&project_root, args),
@@ -319,21 +324,105 @@ fn send_winapp_command(
     command: serde_json::Value,
     timeout: Duration,
 ) -> Result<serde_json::Value> {
-    let endpoint_path = project_root.join(".teshi").join("cdp-endpoint.json");
-    let text = fs::read_to_string(&endpoint_path)
-        .with_context(|| format!("read {}", endpoint_path.display()))?;
-    let endpoint: serde_json::Value = serde_json::from_str(&text).context("parse cdp endpoint")?;
-    let mode = endpoint.get("mode").and_then(|v| v.as_str()).unwrap_or("");
-    if mode != "winapp" {
+    let endpoint = read_cdp_endpoint(project_root)?;
+    if endpoint.mode != "winapp" {
+        ensure_winapp_sidecar(project_root)?;
+    }
+    let endpoint = read_cdp_endpoint(project_root)?;
+    if endpoint.mode != "winapp" {
         return Err(anyhow!(
-            "current sidecar mode is {mode:?}, expected \"winapp\"; start Connect WinUI3 App first"
+            "Teshi WinApp service is not active for this project (current mode: {:?})",
+            endpoint.mode
         ));
     }
-    let ws_url = endpoint
+    send_sidecar_command_with_timeout(&endpoint.ws_url, command, timeout).map_err(|err| {
+        anyhow!(
+            "Teshi WinApp service did not respond. Retry the command to let Teshi recover stale runtime state. Details: {err}"
+        )
+    })
+}
+
+fn ensure_winapp_sidecar(project_root: &Path) -> Result<()> {
+    if winapp_endpoint_is_healthy(project_root) {
+        return Ok(());
+    }
+    let port = ensure_daemon_for_project(project_root)?;
+    let url = format!("http://127.0.0.1:{port}/api/v1/browser/start");
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .context("create loopback daemon client")?;
+    let response = client
+        .post(url)
+        .json(&json!({"mode": "winapp"}))
+        .send()
+        .context("ask Teshi daemon to start WinApp")?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response.text().unwrap_or_default();
+        return Err(anyhow!(
+            "Failed to start Teshi WinApp service through the Teshi daemon ({status}). {detail}"
+        ));
+    }
+    let payload: serde_json::Value = response
+        .json()
+        .context("decode daemon WinApp start response")?;
+    let ws_url = payload
         .get("ws_url")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("cdp endpoint missing ws_url"))?;
-    send_sidecar_command_with_timeout(ws_url, command, timeout).map_err(anyhow::Error::msg)
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("daemon did not return WinApp WebSocket URL"))?;
+    write_cdp_endpoint_from_rust(project_root, ws_url, "winapp", "winapp://detached")?;
+    Ok(())
+}
+
+fn winapp_endpoint_is_healthy(project_root: &Path) -> bool {
+    let Ok(endpoint) = read_cdp_endpoint(project_root) else {
+        return false;
+    };
+    endpoint.mode == "winapp" && tcp_probe_ws_url(&endpoint.ws_url)
+}
+
+fn tcp_probe_ws_url(ws_url: &str) -> bool {
+    let Some(stripped) = ws_url
+        .strip_prefix("ws://")
+        .or_else(|| ws_url.strip_prefix("wss://"))
+    else {
+        return false;
+    };
+    let Some((host, rest)) = stripped.split_once(':') else {
+        return false;
+    };
+    let Ok(port) = rest.split('/').next().unwrap_or(rest).parse::<u16>() else {
+        return false;
+    };
+    let Ok(addr) = format!("{host}:{port}").parse() else {
+        return false;
+    };
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+}
+
+fn ensure_daemon_for_project(project_root: &Path) -> Result<u16> {
+    if let Some(manifest) = DaemonManifest::load_manifest(project_root) {
+        if manifest.is_daemon_alive() {
+            return Ok(manifest.port);
+        }
+        remove_daemon_manifest(project_root);
+    }
+    let port = 0;
+    spawn_daemon_background(project_root, port, "127.0.0.1", None)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(anyhow!("Teshi daemon did not start within 15s"));
+        }
+        if let Some(manifest) = DaemonManifest::load_manifest(project_root)
+            && manifest.is_daemon_alive()
+        {
+            return Ok(manifest.port);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 fn ensure_ok(response: &serde_json::Value) -> Result<()> {

@@ -24,6 +24,9 @@ Thumbs.db
 
 # Miscellaneous working-tree artifacts
 tmp/
+.codeartsdoer/
+.wrangler/
+prompt.txt
 arch-vision.html
 tests/feature/example.feature
 !.cursor/rules/

@@ -14,6 +14,7 @@ mod llm_anthropic;
 pub mod llm_config_store;
 mod llm_responses;
 mod locator;
+mod managed_runtime;
 pub mod model_profile;
 mod project;
 mod project_settings;
@@ -94,6 +95,11 @@ pub use locator::{
     update_binding_locator, wait_for_step_status, write_active_step, ActiveStep, FeatureStepRef,
     HighlightInfo, LocatorCandidate, LocatorPrimary, LocatorWatcherState, PendingLocator,
     StepBinding, StepBindingStatus, StepBindingsFile, StepWaitResult, StepWaitUntil,
+};
+pub use managed_runtime::{
+    ensure_winapp_runtime, validate_manifest as validate_runtime_manifest, validate_runtime_dir,
+    winapp_runtime_dir_in, winapp_runtime_requirement, ManagedRuntime, RuntimeManifest,
+    RuntimeRequirement,
 };
 pub use model_profile::{
     default_base_url_for_provider, delete_profile, effective_api_style, ensure_migrated,

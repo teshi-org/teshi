@@ -203,6 +203,20 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Build WinApp managed runtime
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          ./scripts/build-winapp-runtime.ps1 -OutDir "dist" -RuntimeVersion 1 -Platform "windows-x86_64"
+          $zip = Get-Item "dist/teshi-winapp-runtime-windows-x86_64-v1.zip"
+          $manifest = Get-Content "$($zip.FullName).runtime-manifest.json" | ConvertFrom-Json
+          $url = "https://github.com/${{ github.repository }}/releases/download/$env:RELEASE_TAG/$($zip.Name)"
+          "TESHI_WINAPP_RUNTIME_URL=$url" >> $env:GITHUB_ENV
+          "TESHI_WINAPP_RUNTIME_SHA256=$($manifest.sha256)" >> $env:GITHUB_ENV
+          "TESHI_WINAPP_RUNTIME_SIZE=$($manifest.size)" >> $env:GITHUB_ENV
+
       - name: Resolve Teshi build identity
         shell: bash
         env:
@@ -464,6 +478,16 @@ jobs:
           path: target/inno/teshi-*-x64-setup.exe
           if-no-files-found: error
 
+      - name: Upload WinApp runtime artifact
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: teshi-winapp-runtime
+          path: |
+            dist/teshi-winapp-runtime-windows-x86_64-v1.zip
+            dist/teshi-winapp-runtime-windows-x86_64-v1.zip.runtime-manifest.json
+          if-no-files-found: error
+
       - name: Upload web dist artifact
         if: matrix.target == 'x86_64-pc-windows-msvc' && needs.resolve.outputs.run_scope != 'windows-installer'
         uses: actions/upload-artifact@v4
@@ -558,6 +582,7 @@ jobs:
 
           cp "${artifacts_dir}/teshi-msi/"*.msi dist/
           cp "${artifacts_dir}/teshi-setup/"*-setup.exe dist/
+          cp "${artifacts_dir}/teshi-winapp-runtime/"teshi-winapp-runtime-windows-x86_64-v1.zip* dist/
           python scripts/update_manifest.py release --dist dist --identity "${artifacts_dir}/teshi-x86_64-pc-windows-msvc/build-identity.json" --tag "$version"
           python scripts/update_manifest.py verify --dist dist
 
@@ -570,6 +595,7 @@ jobs:
           mkdir -p dist
           artifacts_dir="${{ github.workspace }}/artifacts"
           cp "${artifacts_dir}/teshi-setup/"*-setup.exe dist/
+          cp "${artifacts_dir}/teshi-winapp-runtime/"teshi-winapp-runtime-windows-x86_64-v1.zip* dist/
           python scripts/update_manifest.py release --dist dist --identity "${artifacts_dir}/teshi-x86_64-pc-windows-msvc/build-identity.json" --tag "$version" --include exe
           python scripts/update_manifest.py verify --dist dist
 
@@ -602,6 +628,7 @@ jobs:
             dist/*.tar.gz
             dist/*.msi
             dist/*-setup.exe
+            dist/teshi-winapp-runtime-windows-x86_64-v1.zip.runtime-manifest.json
             dist/SHA256SUMS
             dist/update-manifest.json
 
@@ -617,6 +644,8 @@ jobs:
           body: ${{ needs.resolve.outputs.release_body }}
           files: |
             dist/*-setup.exe
+            dist/teshi-winapp-runtime-windows-x86_64-v1.zip
+            dist/teshi-winapp-runtime-windows-x86_64-v1.zip.runtime-manifest.json
             dist/SHA256SUMS
             dist/update-manifest.json
 
