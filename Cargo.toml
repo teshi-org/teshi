@@ -9,6 +9,7 @@ members = [
     "crates/teshi-tui",
     "crates/teshi-core",
     "crates/teshi-agent",
+    "crates/teshi-acp",
     "crates/teshi-engine",
     "crates/teshi-ui",
     "crates/teshi-web-protocol",
@@ -41,6 +42,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 teshi-agent = { path = "crates/teshi-agent" }
+teshi-acp = { path = "crates/teshi-acp" }
 teshi-core = { path = "crates/teshi-core" }
 teshi-engine = { path = "crates/teshi-engine" }
 teshi-tui = { path = "crates/teshi-tui" }

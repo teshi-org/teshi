@@ -1,6 +1,7 @@
 //! Reusable agent policy, validation, and host-port contracts.
 
 pub mod approval;
+pub mod backend;
 pub mod definition;
 pub mod loader;
 pub mod pipeline;

@@ -1,0 +1,18 @@
+[package]
+name = "teshi-acp"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+agent-client-protocol = "2.1.0"
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = "2"
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
