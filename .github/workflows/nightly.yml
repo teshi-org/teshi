@@ -1,8 +1,6 @@
 name: Nightly
 
 on:
-  push:
-    branches: [dev]
   schedule:
     # Daily catch-up from dev (06:00 UTC). Skips when HEAD already has a nightly tag.
     # Note: scheduled workflows run from the repo default branch workflow file.
@@ -12,9 +10,12 @@ on:
 
 concurrency:
   group: nightly-dev
-  cancel-in-progress: true
+  # A queued/manual invocation must not cancel a run that may already be
+  # uploading the immutable release draft.
+  cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
@@ -36,6 +37,8 @@ jobs:
       - name: Compute nightly tag
         id: meta
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -53,6 +56,49 @@ jobs:
           full_sha=$(git rev-parse HEAD)
           subject=$(git log -1 --format=%s)
           tag="v${version}-nightly.${date}.${sha}"
+
+          # Nightly is a consumer of CI, not a second CI pipeline. Query the
+          # exact dev HEAD so a newer/unrelated successful run cannot unlock a
+          # different checkout. Missing, pending, failed, and API-error cases
+          # all fail closed by setting skip=true.
+          ci_runs_file="${RUNNER_TEMP}/ci-runs.json"
+          if ! gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=dev&head_sha=${full_sha}&per_page=100" \
+            > "${ci_runs_file}"; then
+            echo "Unable to query CI status for ${full_sha}; skipping Nightly (fail closed)."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if ! ci_state=$(python - "${ci_runs_file}" "${full_sha}" <<'PY'
+          import json
+          import sys
+
+          runs = json.load(open(sys.argv[1], encoding="utf-8")).get("workflow_runs", [])
+          sha = sys.argv[2]
+          matching = [run for run in runs if run.get("head_sha") == sha]
+          successful = [run for run in matching if run.get("status") == "completed" and run.get("conclusion") == "success"]
+          if successful:
+              print("success")
+          elif matching:
+              statuses = sorted({f"{run.get('status')}/{run.get('conclusion')}" for run in matching})
+              print("not-green:" + ",".join(statuses))
+          else:
+              print("missing")
+          PY
+          ); then
+            echo "Unable to parse CI status for ${full_sha}; skipping Nightly (fail closed)."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [[ "${ci_state}" != "success" ]]; then
+            echo "CI is not green for dev HEAD ${full_sha} (${ci_state}); skipping Nightly."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "CI passed for dev HEAD ${full_sha}; eligible for Nightly."
 
           if [[ ! "${tag}" =~ ^v[0-9].+-nightly\.[0-9]{8}\.[0-9a-f]{7}$ ]]; then
             echo "Computed nightly tag has unexpected format: ${tag}" >&2
