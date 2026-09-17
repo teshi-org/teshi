@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 NIGHTLY = (ROOT / ".github" / "workflows" / "nightly.yml").read_text(encoding="utf-8")
+WINAPP_RUNTIME = (ROOT / "scripts" / "build-winapp-runtime.ps1").read_text(encoding="utf-8")
 
 
 def require(text: str, needle: str, label: str) -> None:
@@ -50,6 +51,12 @@ def main() -> int:
     require(RELEASE, "$includeDesktop = '${{ needs.resolve.outputs.run_scope }}' -ne 'windows-installer'", "desktop packaging gate")
     require(RELEASE, "if (-not $includeDesktop) { $bundleArgs += \"--omit-desktop\" }", "CLI-only bundle gate")
     require(RELEASE, "if (-not $includeDesktop) { $setupArgs.CliOnly = $true }", "CLI-only installer gate")
+    require(WINAPP_RUNTIME, "$pythonSourceDir = Split-Path -Path $python -Parent", "runtime Python source directory")
+    require(
+        WINAPP_RUNTIME,
+        "Copy-Item -Path (Join-Path $pythonSourceDir '*') -Destination $pythonDir -Recurse -Force",
+        "runtime Python copy path",
+    )
     require(RELEASE, "name: Upload web dist artifact", "web artifact step")
     web_upload = RELEASE[RELEASE.index("      - name: Upload web dist artifact") :]
     require(

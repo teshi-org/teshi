@@ -21,7 +21,8 @@ if (-not $python) { throw "python command not found in CI image" }
 
 $pythonDir = Join-Path $stage "python"
 New-Item -ItemType Directory -Force $pythonDir | Out-Null
-Copy-Item -Recurse -Force (Split-Path $python -Parent)\* $pythonDir
+$pythonSourceDir = Split-Path -Path $python -Parent
+Copy-Item -Path (Join-Path $pythonSourceDir '*') -Destination $pythonDir -Recurse -Force
 
 $runtimePython = Join-Path $pythonDir "python.exe"
 & $runtimePython -m pip install --upgrade pip
