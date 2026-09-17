@@ -9,6 +9,8 @@ use teshi_agent::pipeline::GenerationStage;
 use teshi_core::llm::{ChatMessage, ToolDefinition};
 use teshi_engine::llm::{LlmConfig, LlmEvent, LlmHandle, LlmRequest};
 
+pub mod backend;
+
 /// Conversation record shared with frontends and persisted sessions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiChatMessage {

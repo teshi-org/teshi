@@ -4,6 +4,9 @@ version.workspace = true
 edition = "2024"
 publish = false
 
+[features]
+test-fixtures = []
+
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true

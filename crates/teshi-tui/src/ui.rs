@@ -675,7 +675,7 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut chat_lines: Vec<Line<'static>> = Vec::new();
 
     // Add a greeting if no messages
-    if app.agent().messages.is_empty() {
+    if app.agent().messages().is_empty() {
         let greeting = Line::raw("Welcome to AI Chat! Type a message below and press Enter.");
         chat_lines.push(greeting);
         chat_lines.push(Line::raw(""));
@@ -689,7 +689,7 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
     }
 
-    for msg in &app.agent().messages {
+    for msg in app.agent().messages() {
         // Render tool result messages with a distinct style
         if matches!(msg.role, AiRole::Tool) {
             let is_error = msg.content.starts_with("Error:");
@@ -768,11 +768,11 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                         .pending_agent_changes
                         .iter()
                         .any(|c| c.tool_call_id == tc.id);
-                let has_tool_result = app.agent().messages.iter().any(|m| {
+                let has_tool_result = app.agent().messages().iter().any(|m| {
                     matches!(m.role, AiRole::Tool) && m.tool_call_id.as_deref() == Some(&tc.id)
                 });
                 let is_error = has_tool_result
-                    && app.agent().messages.iter().any(|m| {
+                    && app.agent().messages().iter().any(|m| {
                         matches!(m.role, AiRole::Tool)
                             && m.tool_call_id.as_deref() == Some(&tc.id)
                             && m.content.starts_with("Error:")
@@ -857,7 +857,7 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     // Show streaming partial response as a live assistant message
-    if !app.agent().partial_response.is_empty() {
+    if !app.agent().partial_response().is_empty() {
         chat_lines.push(
             Line::raw("▷ 🥰:").style(
                 Style::default()
@@ -865,7 +865,7 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
         );
-        let md_lines = render_markdown(&app.agent().partial_response);
+        let md_lines = render_markdown(app.agent().partial_response());
         for md_line in md_lines {
             let mut spans = vec![Span::raw("  ")];
             spans.extend(
@@ -936,7 +936,7 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     // Handle the new AwaitingApproval status
     let status_text: String = match app.agent().status {
         AiStatus::Waiting
-            if app.agent().partial_response.is_empty() && app.agent().tool_status.is_some() =>
+            if app.agent().partial_response().is_empty() && app.agent().tool_status.is_some() =>
         {
             let spinner = spinner_frame();
             app.agent()
@@ -944,7 +944,7 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .clone()
                 .unwrap_or_else(|| format!("{spinner} Teshi is thinking..."))
         }
-        AiStatus::Waiting if app.agent().partial_response.is_empty() => {
+        AiStatus::Waiting if app.agent().partial_response().is_empty() => {
             format!("{} Teshi is thinking...", spinner_frame())
         }
         AiStatus::AwaitingApproval => {
@@ -2237,7 +2237,7 @@ pub(crate) fn render_agent_chat_inner(
     // ── Chat history ────────────────────────────────────────────────
     let mut chat_lines: Vec<Line<'static>> = Vec::new();
 
-    if app.agent().messages.is_empty() {
+    if app.agent().messages().is_empty() {
         chat_lines.push(Line::raw("Welcome to AI Chat!"));
         chat_lines.push(Line::raw(""));
         if !crate::llm::is_configured() {
@@ -2250,7 +2250,7 @@ pub(crate) fn render_agent_chat_inner(
         }
     }
 
-    for msg in &app.agent().messages {
+    for msg in app.agent().messages() {
         // Render tool result messages with a distinct style
         if matches!(msg.role, AiRole::Tool) {
             let is_error = msg.content.starts_with("Error:");
@@ -2328,11 +2328,11 @@ pub(crate) fn render_agent_chat_inner(
                         .pending_agent_changes
                         .iter()
                         .any(|c| c.tool_call_id == tc.id);
-                let has_tool_result = app.agent().messages.iter().any(|m| {
+                let has_tool_result = app.agent().messages().iter().any(|m| {
                     matches!(m.role, AiRole::Tool) && m.tool_call_id.as_deref() == Some(&tc.id)
                 });
                 let is_error = has_tool_result
-                    && app.agent().messages.iter().any(|m| {
+                    && app.agent().messages().iter().any(|m| {
                         matches!(m.role, AiRole::Tool)
                             && m.tool_call_id.as_deref() == Some(&tc.id)
                             && m.content.starts_with("Error:")
@@ -2417,7 +2417,7 @@ pub(crate) fn render_agent_chat_inner(
     }
 
     // Show streaming partial response
-    if !app.agent().partial_response.is_empty() {
+    if !app.agent().partial_response().is_empty() {
         chat_lines.push(
             Line::raw("▷ 🥰:").style(
                 Style::default()
@@ -2425,7 +2425,7 @@ pub(crate) fn render_agent_chat_inner(
                     .add_modifier(Modifier::BOLD),
             ),
         );
-        let md_lines = render_markdown(&app.agent().partial_response);
+        let md_lines = render_markdown(app.agent().partial_response());
         for md_line in md_lines {
             let mut spans = vec![Span::raw("  ")];
             spans.extend(
@@ -2467,7 +2467,7 @@ pub(crate) fn render_agent_chat_inner(
     // ── Status bar ────────────────────────────────────────────────
     let status_text: String = match app.agent().status {
         AiStatus::Waiting
-            if app.agent().partial_response.is_empty() && app.agent().tool_status.is_some() =>
+            if app.agent().partial_response().is_empty() && app.agent().tool_status.is_some() =>
         {
             let spinner = spinner_frame();
             app.agent()
@@ -2475,7 +2475,7 @@ pub(crate) fn render_agent_chat_inner(
                 .clone()
                 .unwrap_or_else(|| format!("{spinner} Teshi is thinking..."))
         }
-        AiStatus::Waiting if app.agent().partial_response.is_empty() => {
+        AiStatus::Waiting if app.agent().partial_response().is_empty() => {
             format!("{} Teshi is thinking...", spinner_frame())
         }
         AiStatus::AwaitingApproval => "◆ Waiting for approval — Y/N".into(),

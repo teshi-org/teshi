@@ -5,6 +5,62 @@
 //! distinction is intentionally not represented as an LLM provider.
 
 use serde::{Deserialize, Serialize};
+use teshi_core::llm::ToolCall;
+
+/// Product-level state of one agent turn. Permission and mandatory workflow
+/// review are distinct states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentBackendStatus {
+    Idle,
+    Running,
+    WaitingForPermission,
+    WaitingForHumanReview,
+    Completed,
+    Failed,
+    Cancelled,
+    Unavailable,
+}
+
+/// A decision after Teshi has executed a batch of host tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentBackendDecision {
+    Continue { allow_tools: bool },
+    WaitForPermission,
+    WaitForHumanReview,
+    StopEmptyProject,
+    StopAfterFailure,
+    Cancelled,
+}
+
+/// Events seen by a frontend. Neither provider nor ACP wire messages cross
+/// this boundary.
+#[derive(Debug)]
+pub enum AgentBackendEvent {
+    MessageChunk {
+        content: String,
+    },
+    Completed {
+        model: String,
+        input_tokens: Option<u32>,
+        output_tokens: Option<u32>,
+        finish_reason: Option<String>,
+    },
+    ToolActivity {
+        tool_calls: Vec<ToolCall>,
+        assistant_message_index: usize,
+        finish_reason: Option<String>,
+    },
+    Failed(String),
+    Ignored,
+}
+
+/// Result of one AgentHost operation, supplied by the application after a
+/// backend requests a tool. Permission remains separate from workflow review.
+pub struct AgentToolOutcome {
+    pub result: Result<String, String>,
+    pub pending_permission: bool,
+    pub observation_message: Option<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

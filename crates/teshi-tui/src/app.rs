@@ -77,7 +77,7 @@ pub struct AgentThread {
     pub tool_status: Option<String>,
     pub scroll_offset: usize,
     pub horizontal_scroll: usize,
-    native_runtime: teshi_agent_runtime::NativeAgentRuntime,
+    backend: teshi_agent_runtime::backend::AgentBackendRuntime,
     /// Cumulative input tokens across all requests for this agent.
     pub total_input_tokens: u64,
     /// Cumulative output tokens across all requests for this agent.
@@ -96,6 +96,14 @@ pub struct AgentThread {
 
 impl AgentThread {
     pub fn new(id: usize, title: &str) -> Self {
+        Self::new_with_backend(id, title, teshi_agent::backend::AgentBackendKind::Native)
+    }
+
+    pub fn new_with_backend(
+        id: usize,
+        title: &str,
+        kind: teshi_agent::backend::AgentBackendKind,
+    ) -> Self {
         Self {
             id,
             title: title.to_string(),
@@ -105,7 +113,8 @@ impl AgentThread {
             tool_status: None,
             scroll_offset: 0,
             horizontal_scroll: 0,
-            native_runtime: teshi_agent_runtime::NativeAgentRuntime::new(
+            backend: teshi_agent_runtime::backend::AgentBackendRuntime::new(
+                kind,
                 teshi_agent_runtime::max_agent_iterations(),
             ),
             total_input_tokens: 0,
@@ -118,17 +127,18 @@ impl AgentThread {
     }
 }
 
-impl std::ops::Deref for AgentThread {
-    type Target = teshi_agent_runtime::NativeAgentRuntime;
-
-    fn deref(&self) -> &Self::Target {
-        &self.native_runtime
+impl AgentThread {
+    pub fn messages(&self) -> &[AiChatMessage] {
+        self.backend.messages()
     }
-}
-
-impl std::ops::DerefMut for AgentThread {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.native_runtime
+    pub fn messages_mut(&mut self) -> &mut Vec<AiChatMessage> {
+        self.backend.messages_mut()
+    }
+    pub fn partial_response(&self) -> &str {
+        self.backend.partial_response()
+    }
+    pub fn partial_response_mut(&mut self) -> &mut String {
+        self.backend.partial_response_mut()
     }
 }
 
@@ -1390,7 +1400,7 @@ impl App {
 
     /// Spawn the LLM worker when the shared profile store or `TESHI_LLM_*` is usable.
     pub fn spawn_llm_if_configured(&mut self) {
-        if self.agent_mut().llm_handle.is_some() {
+        if self.agent_mut().backend.is_connected() {
             return;
         }
         match crate::llm::effective_config() {
@@ -1405,7 +1415,9 @@ impl App {
                     "LLM configured: model={}, base_url={}, provider={}",
                     config.model, config.base_url, config.provider
                 );
-                self.agent_mut().native_runtime.attach_model(config);
+                if let Err(error) = self.agent_mut().backend.attach_native_model(config) {
+                    self.status = format!("AI backend unavailable: {error}");
+                }
             }
             Ok(_) => {
                 self.status =
@@ -1418,11 +1430,22 @@ impl App {
         }
     }
 
-    fn cancel_native_turn(&mut self) {
+    fn cancel_agent_turn(&mut self) {
         let agent = self.agent_mut();
-        agent.native_runtime.cancel();
+        agent.backend.cancel();
         agent.status = AiStatus::Idle;
         agent.tool_status = None;
+    }
+
+    fn start_agent_backend(&mut self, agent_idx: usize) -> bool {
+        match self.agents[agent_idx].backend.start() {
+            Ok(()) => true,
+            Err(error) => {
+                self.agents[agent_idx].status = AiStatus::Error;
+                self.status = format!("AI backend unavailable: {error}");
+                false
+            }
+        }
     }
 
     /// Activate the saved active profile (if any) that has a matching file on disk.
@@ -1454,7 +1477,10 @@ impl App {
             );
             return;
         }
-        self.agent_mut().native_runtime.attach_model(config);
+        if let Err(error) = self.agent_mut().backend.attach_native_model(config) {
+            self.status = format!("AI backend unavailable: {error}");
+            return;
+        }
         self.agent_mut().status = AiStatus::Idle;
         self.agent_mut().tool_status = None;
         self.active_model_label = Some(format!("{} ({})", profile.name, profile.model_id));
@@ -1479,15 +1505,15 @@ impl App {
         &self.project.root_dir
     }
 
-    /// Apply native runtime progress to the TUI and provide Teshi's host tools.
-    /// The runtime owns model events, conversation records, and continuation.
+    /// Apply backend progress to the TUI and provide Teshi's host tools.
+    /// The backend owns model events, conversation records, and continuation.
     pub fn poll_llm_events(&mut self) {
-        use teshi_agent_runtime::NativeRuntimeEvent;
+        use teshi_agent::backend::AgentBackendEvent;
         for i in 0..self.agents.len() {
             loop {
-                match self.agents[i].native_runtime.try_next_event() {
-                    Ok(Some(NativeRuntimeEvent::Ignored)) => continue,
-                    Ok(Some(NativeRuntimeEvent::Completed {
+                match self.agents[i].backend.try_next_event() {
+                    Ok(Some(AgentBackendEvent::Ignored)) => continue,
+                    Ok(Some(AgentBackendEvent::Completed {
                         model,
                         input_tokens,
                         output_tokens,
@@ -1503,18 +1529,13 @@ impl App {
                             self.status = format!("AI response received ({model})");
                         }
                     }
-                    Ok(Some(NativeRuntimeEvent::ToolCalls {
+                    Ok(Some(AgentBackendEvent::ToolActivity {
                         tool_calls,
                         assistant_message_index: assistant_msg_idx,
                         finish_reason,
                     })) => {
                         self.agents[i].last_finish_reason = finish_reason;
-                        let mut runtime = std::mem::replace(
-                            &mut self.agents[i].native_runtime,
-                            teshi_agent_runtime::NativeAgentRuntime::new(
-                                teshi_agent_runtime::max_agent_iterations(),
-                            ),
-                        );
+                        let mut runtime = self.agents[i].backend.take_for_host_call();
                         let pending_queued = runtime.execute_tool_batch(
                             assistant_msg_idx,
                             &tool_calls,
@@ -1548,16 +1569,16 @@ impl App {
                                 } else {
                                     None
                                 };
-                                teshi_agent_runtime::NativeToolExecution {
+                                teshi_agent::backend::AgentToolOutcome {
                                     result,
-                                    pending_approval,
+                                    pending_permission: pending_approval,
                                     observation_message,
                                 }
                             },
                         );
-                        self.agents[i].native_runtime = runtime;
+                        self.agents[i].backend = runtime;
                         if pending_queued && !self.approval_mode.requires_manual_approval() {
-                            self.agents[i].partial_response.clear();
+                            self.agents[i].partial_response_mut().clear();
                             self.agents[i].tool_status = None;
                             while self.has_agent_change_prompt() {
                                 let agent_idx = self.pending_agent_changes[0].agent_idx;
@@ -1570,7 +1591,7 @@ impl App {
                                     }
                                 };
                                 if !tool_call_id.is_empty() {
-                                    self.agents[agent_idx].messages.push(AiChatMessage {
+                                    self.agents[agent_idx].messages_mut().push(AiChatMessage {
                                         role: AiRole::Tool,
                                         content: result,
                                         tool_calls: None,
@@ -1581,24 +1602,24 @@ impl App {
                                 }
                             }
                         }
-                        use teshi_agent_runtime::NativeContinuation;
-                        let decision = self.agents[i].native_runtime.after_tools(
+                        use teshi_agent::backend::AgentBackendDecision;
+                        let decision = self.agents[i].backend.after_tools(
                             self.generation_stage,
                             pending_queued,
                             self.approval_mode.requires_manual_approval(),
                             !self.project.features.is_empty(),
                         );
                         match decision {
-                            NativeContinuation::RequestModel { allow_tools } => {
+                            AgentBackendDecision::Continue { allow_tools } => {
                                 if !allow_tools && i == self.selected_agent {
                                     self.status =
                                         "Tool call limit reached, requesting final response…"
                                             .to_string();
                                 }
-                                self.send_native_followup(i, allow_tools);
+                                self.send_backend_followup(i, allow_tools);
                             }
-                            NativeContinuation::WaitForApproval => {
-                                self.agents[i].partial_response.clear();
+                            AgentBackendDecision::WaitForPermission => {
+                                self.agents[i].partial_response_mut().clear();
                                 self.agents[i].status = AiStatus::AwaitingApproval;
                                 self.agents[i].tool_status = None;
                                 if !matches!(
@@ -1610,43 +1631,43 @@ impl App {
                                         teshi_agent::pipeline::GenerationStage::Confirming;
                                 }
                             }
-                            NativeContinuation::WaitForHumanReview => {
-                                self.agents[i].partial_response.clear();
+                            AgentBackendDecision::WaitForHumanReview => {
+                                self.agents[i].partial_response_mut().clear();
                                 self.agents[i].status = AiStatus::Idle;
                                 self.agents[i].tool_status = None;
                                 if i == self.selected_agent {
                                     self.status = "Review proposed test points in Test Points tab [5], then press c to continue generation".to_string();
                                 }
                             }
-                            NativeContinuation::StopEmptyProject => {
-                                self.agents[i].partial_response.clear();
+                            AgentBackendDecision::StopEmptyProject => {
+                                self.agents[i].partial_response_mut().clear();
                                 self.agents[i].status = AiStatus::Idle;
                                 self.agents[i].tool_status = None;
                                 if i == self.selected_agent {
                                     self.status = "The project directory has no .feature files. Add one to begin.".to_string();
                                 }
                             }
-                            NativeContinuation::StopAfterFailure => {
+                            AgentBackendDecision::StopAfterFailure => {
                                 self.agents[i].status = AiStatus::Error;
                                 self.status =
                                     "AI error: model kept calling tools after final-response limit"
                                         .to_string();
                             }
-                            NativeContinuation::Cancelled => {}
+                            AgentBackendDecision::Cancelled => {}
                         }
                     }
-                    Ok(Some(NativeRuntimeEvent::Failed(message))) => {
-                        self.agents[i].partial_response.clear();
+                    Ok(Some(AgentBackendEvent::Failed(message))) => {
+                        self.agents[i].partial_response_mut().clear();
                         self.agents[i].status = AiStatus::Idle;
                         self.agents[i].tool_status = None;
                         if i == self.selected_agent {
                             self.status = format!("AI: {message}");
                         }
                     }
-                    Ok(Some(NativeRuntimeEvent::MessageChunk { .. })) => {}
+                    Ok(Some(AgentBackendEvent::MessageChunk { .. })) => {}
                     Ok(None) | Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        self.agents[i].partial_response.clear();
+                        self.agents[i].partial_response_mut().clear();
                         self.agents[i].status = AiStatus::Error;
                         self.agents[i].tool_status = None;
                         if i == self.selected_agent {
@@ -1659,7 +1680,7 @@ impl App {
         }
     }
 
-    fn send_native_followup(&mut self, agent_idx: usize, allow_tools: bool) {
+    fn send_backend_followup(&mut self, agent_idx: usize, allow_tools: bool) {
         self.compact_context_if_needed(agent_idx);
         let messages = self.build_chat_messages_for_agent(agent_idx);
         let system = Some(self.ai_system_prompt(None, agent_idx));
@@ -1671,8 +1692,8 @@ impl App {
             });
         let tools = allow_tools.then(|| teshi_agent::get_tools(allowed));
         if let Err(error) = self.agents[agent_idx]
-            .native_runtime
-            .send_chat(system, messages, tools)
+            .backend
+            .submit_turn(system, messages, tools)
         {
             self.agents[agent_idx].status = AiStatus::Error;
             self.status = format!("AI error: {error}");
@@ -1765,13 +1786,13 @@ impl App {
     fn build_chat_messages_for_agent(&self, agent_idx: usize) -> Vec<crate::llm::ChatMessage> {
         let mut msgs: Vec<crate::llm::ChatMessage> = Vec::new();
         let latest_visual_message = self.agents[agent_idx]
-            .messages
+            .messages()
             .iter()
             .rposition(|message| message.source.as_deref() == Some("browser_visual_observation"));
 
         // Inject project context as a system message at the front
         if self.agents[agent_idx]
-            .messages
+            .messages()
             .iter()
             .any(|m| matches!(m.role, AiRole::User))
         {
@@ -1785,7 +1806,7 @@ impl App {
         }
 
         // Original 1:1 mapping
-        for (message_idx, m) in self.agents[agent_idx].messages.iter().enumerate() {
+        for (message_idx, m) in self.agents[agent_idx].messages().iter().enumerate() {
             let content = if Some(message_idx) == latest_visual_message {
                 if let Some(observation) = &self.agents[agent_idx].latest_visual_observation {
                     teshi_core::llm::MessageContent::Blocks(vec![
@@ -1898,7 +1919,7 @@ impl App {
 
     fn dispatch_user_message(&mut self, user_msg: String) -> Result<()> {
         self.agent_mut().scroll_offset = 0;
-        self.agent_mut().messages.push(AiChatMessage {
+        self.agent_mut().messages_mut().push(AiChatMessage {
             role: AiRole::User,
             content: user_msg.clone(),
             tool_calls: None,
@@ -1918,15 +1939,17 @@ impl App {
             }
         }
         self.agent_mut().status = AiStatus::Waiting;
-        self.agent_mut().partial_response.clear();
-        self.agent_mut().native_runtime.start();
+        self.agent_mut().partial_response_mut().clear();
+        if !self.start_agent_backend(self.selected_agent) {
+            return Ok(());
+        }
         self.status = "Sending message to AI...".to_string();
 
-        if self.agent().llm_handle.is_none() {
+        if !self.agent().backend.is_connected() {
             self.spawn_llm_if_configured();
         }
         if !crate::llm::is_configured() {
-            self.agent_mut().messages.push(AiChatMessage {
+            self.agent_mut().messages_mut().push(AiChatMessage {
                 role: AiRole::Assistant,
                 content: "AI is not configured. Run 'teshi auth login', open the model panel, or set TESHI_LLM_API_KEY in your environment.".to_string(),
                 tool_calls: None,
@@ -1935,9 +1958,9 @@ impl App {
                 source: None,
             });
             self.agent_mut().status = AiStatus::Idle;
-            self.agent_mut().partial_response.clear();
+            self.agent_mut().partial_response_mut().clear();
             self.status = "AI not configured".to_string();
-        } else if self.agent().llm_handle.is_some() {
+        } else if self.agent().backend.is_connected() {
             self.compact_context_if_needed(self.selected_agent);
             let messages = self.build_chat_messages_for_agent(self.selected_agent);
             let profile = self.agent_profile(self.selected_agent);
@@ -1950,16 +1973,16 @@ impl App {
             let system = Some(self.ai_system_prompt(Some(&user_msg), self.selected_agent));
             if let Err(error) = self
                 .agent_mut()
-                .native_runtime
-                .send_chat(system, messages, tools)
+                .backend
+                .submit_turn(system, messages, tools)
             {
                 self.agent_mut().status = AiStatus::Error;
-                self.agent_mut().partial_response.clear();
+                self.agent_mut().partial_response_mut().clear();
                 self.status = format!("AI error: {error}");
             }
         } else {
             self.agent_mut().status = AiStatus::Error;
-            self.agent_mut().partial_response.clear();
+            self.agent_mut().partial_response_mut().clear();
             self.status = "AI error: LLM handle not available".to_string();
         }
         self.quit_pending_confirm = false;
@@ -2074,7 +2097,7 @@ impl App {
                     "Human approved test points [{}] and continued generation. Call `generate_plan` using only these approved test_point_ids.",
                     approved.join(", ")
                 );
-                self.agents[agent_idx].messages.push(AiChatMessage {
+                self.agents[agent_idx].messages_mut().push(AiChatMessage {
                     role: AiRole::User,
                     content: summary.clone(),
                     tool_calls: None,
@@ -2087,9 +2110,11 @@ impl App {
                     approved.len()
                 );
                 // Resume the agent loop when an LLM handle is available.
-                if self.agents[agent_idx].llm_handle.is_some() {
+                if self.agents[agent_idx].backend.is_connected() {
                     self.agents[agent_idx].status = AiStatus::Waiting;
-                    self.agents[agent_idx].native_runtime.start();
+                    if !self.start_agent_backend(agent_idx) {
+                        return Ok(());
+                    }
                     self.compact_context_if_needed(agent_idx);
                     let messages = self.build_chat_messages_for_agent(agent_idx);
                     let profile = self.agent_profile(agent_idx);
@@ -2103,8 +2128,8 @@ impl App {
                     let tools = Some(teshi_agent::get_tools(allowed));
                     let system = Some(self.ai_system_prompt(None, agent_idx));
                     if let Err(error) = self.agents[agent_idx]
-                        .native_runtime
-                        .send_chat(system, messages, tools)
+                        .backend
+                        .submit_turn(system, messages, tools)
                     {
                         self.agents[agent_idx].status = AiStatus::Error;
                         self.status = format!("AI error: {error}");
@@ -2239,12 +2264,12 @@ impl App {
         tool_call_id: String,
         result: String,
     ) {
-        if self.agents[agent_idx].native_runtime.state()
-            != teshi_agent_runtime::NativeTurnState::WaitingForApproval
+        if self.agents[agent_idx].backend.status()
+            != teshi_agent::backend::AgentBackendStatus::WaitingForPermission
         {
             return;
         }
-        self.agents[agent_idx].messages.push(AiChatMessage {
+        self.agents[agent_idx].messages_mut().push(AiChatMessage {
             role: AiRole::Tool,
             content: result,
             tool_calls: None,
@@ -2258,20 +2283,20 @@ impl App {
         if self.generation_stage == teshi_agent::pipeline::GenerationStage::Confirming {
             self.generation_stage = teshi_agent::pipeline::GenerationStage::Writing;
         }
-        use teshi_agent_runtime::NativeContinuation;
+        use teshi_agent::backend::AgentBackendDecision;
         match self.agents[agent_idx]
-            .native_runtime
+            .backend
             .resume_after_approval(!self.project.features.is_empty())
         {
-            NativeContinuation::RequestModel { allow_tools } => {
+            AgentBackendDecision::Continue { allow_tools } => {
                 self.agents[agent_idx].status = AiStatus::Waiting;
                 self.agents[agent_idx].tool_status = Some("Teshi is thinking...".into());
                 if !allow_tools {
                     self.status = "Tool call limit reached, requesting final response…".to_string();
                 }
-                self.send_native_followup(agent_idx, allow_tools);
+                self.send_backend_followup(agent_idx, allow_tools);
             }
-            NativeContinuation::StopEmptyProject => {
+            AgentBackendDecision::StopEmptyProject => {
                 self.agents[agent_idx].status = AiStatus::Idle;
                 self.agents[agent_idx].tool_status = None;
                 self.status =
@@ -2333,7 +2358,7 @@ impl App {
         task_msg.push_str("Start by calling `browser_snapshot` to see the current page.\n");
 
         // Push the task message as a user message
-        self.agents[agent_idx].messages.push(AiChatMessage {
+        self.agents[agent_idx].messages_mut().push(AiChatMessage {
             role: AiRole::User,
             content: task_msg,
             tool_calls: None,
@@ -2343,11 +2368,13 @@ impl App {
         });
 
         // Start the LLM request (same pattern as user message submit)
-        if self.agents[agent_idx].llm_handle.is_none() {
+        if !self.agents[agent_idx].backend.is_connected() {
             self.status = "AI not configured".to_string();
             return;
         }
-        self.agents[agent_idx].native_runtime.start();
+        if !self.start_agent_backend(agent_idx) {
+            return;
+        }
         self.compact_context_if_needed(agent_idx);
         let messages = self.build_chat_messages_for_agent(agent_idx);
         let profile = self.agent_profile(agent_idx);
@@ -2359,11 +2386,11 @@ impl App {
         let tools = Some(teshi_agent::get_tools(allowed));
         let system = Some(self.ai_system_prompt(None, agent_idx));
         if let Err(error) = self.agents[agent_idx]
-            .native_runtime
-            .send_chat(system, messages, tools)
+            .backend
+            .submit_turn(system, messages, tools)
         {
             self.agents[agent_idx].status = AiStatus::Error;
-            self.agents[agent_idx].partial_response.clear();
+            self.agents[agent_idx].partial_response_mut().clear();
             self.status = format!("AI error: {error}");
             return;
         }
@@ -2601,7 +2628,7 @@ impl App {
         // Estimate tokens at ~4 chars per token
         let target_chars = (threshold.saturating_sub(2000).max(1000) as usize) * 4;
 
-        let messages = &mut self.agents[agent_idx].messages;
+        let messages = self.agents[agent_idx].messages_mut();
 
         // Find oldest compactable block (User + Assistant pairs, keep Tool messages)
         let mut current_chars: usize = messages.iter().map(|m| m.content.len()).sum();
@@ -4604,7 +4631,7 @@ impl App {
                         "[MindMap] Selected step: \"{}\"\nPath: {}\nAppears in {} location(s)",
                         ctx.step_text, path_str, ctx.location_count
                     );
-                    self.agent_mut().messages.push(AiChatMessage {
+                    self.agent_mut().messages_mut().push(AiChatMessage {
                         role: AiRole::User,
                         content: msg,
                         tool_calls: None,
@@ -4614,13 +4641,15 @@ impl App {
                     });
                     self.active_tab = MainTab::Ai;
                     self.agent_mut().status = AiStatus::Waiting;
-                    self.agent_mut().partial_response.clear();
+                    self.agent_mut().partial_response_mut().clear();
                     self.agent_mut().scroll_offset = 0;
-                    self.agent_mut().native_runtime.start();
+                    if !self.start_agent_backend(self.selected_agent) {
+                        return Ok(());
+                    }
                     self.status = "Sending MindMap context to AI...".to_string();
 
                     if !crate::llm::is_configured() {
-                        self.agent_mut().messages.push(AiChatMessage {
+                        self.agent_mut().messages_mut().push(AiChatMessage {
                                 role: AiRole::Assistant,
                                 content: "AI is not configured. Run 'teshi auth login', open the model panel, or set TESHI_LLM_API_KEY in your environment.".to_string(),
                                 tool_calls: None,
@@ -4629,9 +4658,9 @@ impl App {
                                 source: None,
                             });
                         self.agent_mut().status = AiStatus::Idle;
-                        self.agent_mut().partial_response.clear();
+                        self.agent_mut().partial_response_mut().clear();
                         self.status = "AI not configured".to_string();
-                    } else if self.agent().llm_handle.is_some() {
+                    } else if self.agent().backend.is_connected() {
                         let messages = self.build_chat_messages_for_agent(self.selected_agent);
                         let profile = self.agent_profile(self.selected_agent);
                         let allowed: Option<&[String]> = profile.and_then(|p| match &p.tools {
@@ -4645,16 +4674,16 @@ impl App {
                         let system = Some(self.ai_system_prompt(None, self.selected_agent));
                         if let Err(error) = self
                             .agent_mut()
-                            .native_runtime
-                            .send_chat(system, messages, tools)
+                            .backend
+                            .submit_turn(system, messages, tools)
                         {
                             self.agent_mut().status = AiStatus::Error;
-                            self.agent_mut().partial_response.clear();
+                            self.agent_mut().partial_response_mut().clear();
                             self.status = format!("AI error: {error}");
                         }
                     } else {
                         self.agent_mut().status = AiStatus::Error;
-                        self.agent_mut().partial_response.clear();
+                        self.agent_mut().partial_response_mut().clear();
                         self.status = "AI error: LLM handle not available".to_string();
                     }
                 }
@@ -4821,7 +4850,7 @@ impl App {
                                 self.model_profiles.len().saturating_sub(1);
                         }
                         // Engine may have activated a sibling; respawn from the new active.
-                        self.cancel_native_turn();
+                        self.cancel_agent_turn();
                         if let Some(id) = self.model_active_id.clone() {
                             if let Some(p) =
                                 self.model_profiles.iter().find(|p| p.id == id).cloned()
@@ -4988,8 +5017,8 @@ impl App {
             Action::SessionPanelActivate => {
                 if let Some(session) = self.session_list.get(self.session_panel_selection).cloned()
                 {
-                    self.agent_mut().messages = session.messages;
-                    self.agent_mut().partial_response.clear();
+                    *self.agent_mut().messages_mut() = session.messages;
+                    self.agent_mut().partial_response_mut().clear();
                     self.agent_mut().input.clear();
                     self.agent_mut().input_cursor = 0;
                     self.agent_mut().status = AiStatus::Idle;
@@ -4997,7 +5026,7 @@ impl App {
                     self.session_panel_active = false;
                     self.status = format!(
                         "Loaded session with {} messages",
-                        self.agent().messages.len()
+                        self.agent().messages().len()
                     );
                 }
                 self.quit_pending_confirm = false;
@@ -5743,14 +5772,14 @@ impl App {
                     || self.agent().status == AiStatus::AwaitingApproval
                 {
                     // Cancel the LLM request
-                    self.cancel_native_turn();
+                    self.cancel_agent_turn();
                     // Reset agent state
                     let agent = self.agent_mut();
                     agent.status = AiStatus::Idle;
-                    agent.partial_response.clear();
+                    agent.partial_response_mut().clear();
                     agent.tool_status = None;
                     // Clear any tool call state by sending a cancellation message
-                    agent.messages.push(AiChatMessage {
+                    agent.messages_mut().push(AiChatMessage {
                         role: AiRole::Assistant,
                         content: "[cancelled]".to_string(),
                         tool_calls: None,
@@ -5858,11 +5887,11 @@ impl App {
                     if self.agent().status == AiStatus::Waiting
                         || self.agent().status == AiStatus::AwaitingApproval
                     {
-                        self.cancel_native_turn();
+                        self.cancel_agent_turn();
                         let agent = self.agent_mut();
-                        agent.partial_response.clear();
+                        agent.partial_response_mut().clear();
                         agent.tool_status = None;
-                        agent.messages.push(AiChatMessage {
+                        agent.messages_mut().push(AiChatMessage {
                             role: AiRole::Assistant,
                             content: "[cancelled]".to_string(),
                             tool_calls: None,
@@ -5876,7 +5905,7 @@ impl App {
                     }
                     self.agent_mut().input.clear();
                     self.agent_mut().input_cursor = 0;
-                    self.agent_mut().partial_response.clear();
+                    self.agent_mut().partial_response_mut().clear();
                     self.agent_mut().status = AiStatus::Idle;
                     self.slash_suggestion_active = false;
                     self.slash_suggestion_selection = 0;
@@ -7592,17 +7621,17 @@ impl App {
 
     /// Handle `/new` — start a new session.
     fn cmd_new(&mut self) -> Result<()> {
-        self.cancel_native_turn();
+        self.cancel_agent_turn();
         // Save current session if there are messages
-        if !self.agent().messages.is_empty() {
+        if !self.agent().messages().is_empty() {
             let session = crate::session::Session::from_messages(
-                std::mem::take(&mut self.agent_mut().messages),
+                std::mem::take(self.agent_mut().messages_mut()),
                 self.active_model_label.clone(),
             );
             let _ = session.save();
         }
-        self.agent_mut().messages.clear();
-        self.agent_mut().partial_response.clear();
+        self.agent_mut().messages_mut().clear();
+        self.agent_mut().partial_response_mut().clear();
         self.agent_mut().input.clear();
         self.agent_mut().input_cursor = 0;
         self.agent_mut().status = AiStatus::Idle;
@@ -7615,9 +7644,9 @@ impl App {
     /// Handle `/exit` or `/quit` — exit the application.
     fn cmd_exit(&mut self) -> Result<()> {
         // Save current session if there are messages
-        if !self.agent().messages.is_empty() {
+        if !self.agent().messages().is_empty() {
             let session = crate::session::Session::from_messages(
-                std::mem::take(&mut self.agent_mut().messages),
+                std::mem::take(self.agent_mut().messages_mut()),
                 self.active_model_label.clone(),
             );
             let _ = session.save();
@@ -7628,18 +7657,18 @@ impl App {
 
     /// Handle `/resume` — load the most recent session.
     fn cmd_resume(&mut self) -> Result<()> {
-        self.cancel_native_turn();
+        self.cancel_agent_turn();
         let sessions = crate::session::Session::load_all();
         if let Some(s) = sessions.into_iter().next() {
-            self.agent_mut().messages = s.messages;
-            self.agent_mut().partial_response.clear();
+            *self.agent_mut().messages_mut() = s.messages;
+            self.agent_mut().partial_response_mut().clear();
             self.agent_mut().input.clear();
             self.agent_mut().input_cursor = 0;
             self.agent_mut().status = AiStatus::Idle;
             self.agent_mut().scroll_offset = 0;
             self.status = format!(
                 "Resumed session from {} messages",
-                self.agent().messages.len()
+                self.agent().messages().len()
             );
         } else {
             self.status = "No saved sessions found".to_string();
@@ -7652,7 +7681,7 @@ impl App {
         let n = n.max(1);
         let texts: Vec<&str> = self
             .agent()
-            .messages
+            .messages()
             .iter()
             .rev()
             .filter(|m| m.role == AiRole::Assistant)
@@ -7761,11 +7790,30 @@ mod tests {
     }
 
     #[test]
+    fn selected_acp_backend_does_not_fall_back_to_native() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0] = super::AgentThread::new_with_backend(
+            0,
+            "ACP",
+            teshi_agent::backend::AgentBackendKind::Acp,
+        );
+        app.dispatch_user_message("hello".into()).unwrap();
+        assert_eq!(
+            app.agents[0].backend.kind(),
+            teshi_agent::backend::AgentBackendKind::Acp
+        );
+        assert!(app.status.contains("ACP agent backend is not implemented"));
+        assert_eq!(app.agents[0].status, AiStatus::Error);
+    }
+
+    #[test]
     fn native_stream_chunks_complete_in_order() {
         let (mut app, _project, _store) = slash_test_app();
         let (tx, rx) = mpsc::channel();
-        app.agents[0].llm_rx = Some(rx);
-        app.agents[0].native_runtime.start();
+        app.agents[0]
+            .backend
+            .attach_model_event_receiver_for_tests(rx);
+        app.agents[0].backend.start().unwrap();
         app.agents[0].status = AiStatus::Waiting;
         tx.send(crate::llm::LlmEvent::Chunk {
             content: "first ".into(),
@@ -7786,13 +7834,13 @@ mod tests {
         .unwrap();
         app.poll_llm_events();
         assert_eq!(
-            app.agents[0].messages.last().unwrap().content,
+            app.agents[0].messages().last().unwrap().content,
             "first second"
         );
         assert_eq!(app.agents[0].status, AiStatus::Idle);
         assert_eq!(
-            app.agents[0].native_runtime.state(),
-            teshi_agent_runtime::NativeTurnState::Completed
+            app.agents[0].backend.status(),
+            teshi_agent::backend::AgentBackendStatus::Completed
         );
     }
 
@@ -7800,8 +7848,10 @@ mod tests {
     fn cancelled_native_turn_ignores_late_tool_calls() {
         let (mut app, _project, _store) = slash_test_app();
         let (tx, rx) = mpsc::channel();
-        app.agents[0].llm_rx = Some(rx);
-        app.agents[0].native_runtime.start();
+        app.agents[0]
+            .backend
+            .attach_model_event_receiver_for_tests(rx);
+        app.agents[0].backend.start().unwrap();
         tx.send(crate::llm::LlmEvent::ToolCallRequest {
             tool_calls: vec![crate::llm::ToolCall {
                 id: "late".into(),
@@ -7815,12 +7865,12 @@ mod tests {
             finish_reason: None,
         })
         .unwrap();
-        app.agents[0].native_runtime.cancel();
+        app.agents[0].backend.cancel();
         app.poll_llm_events();
-        assert!(app.agents[0].messages.is_empty());
+        assert!(app.agents[0].messages().is_empty());
         assert_eq!(
-            app.agents[0].native_runtime.state(),
-            teshi_agent_runtime::NativeTurnState::Cancelled
+            app.agents[0].backend.status(),
+            teshi_agent::backend::AgentBackendStatus::Cancelled
         );
     }
 
@@ -7828,8 +7878,10 @@ mod tests {
     fn native_tool_error_stays_in_history_before_followup() {
         let (mut app, _project, _store) = slash_test_app();
         let (tx, rx) = mpsc::channel();
-        app.agents[0].llm_rx = Some(rx);
-        app.agents[0].native_runtime.start();
+        app.agents[0]
+            .backend
+            .attach_model_event_receiver_for_tests(rx);
+        app.agents[0].backend.start().unwrap();
         tx.send(crate::llm::LlmEvent::ToolCallRequest {
             tool_calls: vec![crate::llm::ToolCall {
                 id: "bad".into(),
@@ -7844,22 +7896,24 @@ mod tests {
         })
         .unwrap();
         app.poll_llm_events();
-        assert_eq!(app.agents[0].messages.len(), 2);
-        assert_eq!(app.agents[0].messages[0].role, AiRole::Assistant);
-        assert_eq!(app.agents[0].messages[1].role, AiRole::Tool);
+        assert_eq!(app.agents[0].messages().len(), 2);
+        assert_eq!(app.agents[0].messages()[0].role, AiRole::Assistant);
+        assert_eq!(app.agents[0].messages()[1].role, AiRole::Tool);
         assert_eq!(
-            app.agents[0].messages[1].tool_call_id.as_deref(),
+            app.agents[0].messages()[1].tool_call_id.as_deref(),
             Some("bad")
         );
-        assert!(app.agents[0].messages[1].content.starts_with("Error:"));
+        assert!(app.agents[0].messages()[1].content.starts_with("Error:"));
     }
 
     #[test]
     fn native_review_gate_stops_followup_after_tool_event() {
         let (mut app, _project, _store) = slash_test_app();
         let (tx, rx) = mpsc::channel();
-        app.agents[0].llm_rx = Some(rx);
-        app.agents[0].native_runtime.start();
+        app.agents[0]
+            .backend
+            .attach_model_event_receiver_for_tests(rx);
+        app.agents[0].backend.start().unwrap();
         app.generation_stage = teshi_agent::pipeline::GenerationStage::ReviewingTestPoints;
         tx.send(crate::llm::LlmEvent::ToolCallRequest {
             tool_calls: vec![crate::llm::ToolCall {
@@ -7876,11 +7930,11 @@ mod tests {
         .unwrap();
         app.poll_llm_events();
         assert_eq!(
-            app.agents[0].native_runtime.state(),
-            teshi_agent_runtime::NativeTurnState::WaitingForHumanReview
+            app.agents[0].backend.status(),
+            teshi_agent::backend::AgentBackendStatus::WaitingForHumanReview
         );
         assert_eq!(app.agents[0].status, AiStatus::Idle);
-        assert_eq!(app.agents[0].messages.len(), 2);
+        assert_eq!(app.agents[0].messages().len(), 2);
     }
 
     #[test]
@@ -7895,8 +7949,10 @@ mod tests {
         )
         .unwrap();
         let (tx, rx) = mpsc::channel();
-        app.agents[0].llm_rx = Some(rx);
-        app.agents[0].native_runtime.start();
+        app.agents[0]
+            .backend
+            .attach_model_event_receiver_for_tests(rx);
+        app.agents[0].backend.start().unwrap();
         tx.send(crate::llm::LlmEvent::ToolCallRequest {
             tool_calls: vec![crate::llm::ToolCall {
                 id: "proposal".into(),
@@ -7915,8 +7971,8 @@ mod tests {
             teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
         );
         assert_eq!(
-            app.agents[0].native_runtime.state(),
-            teshi_agent_runtime::NativeTurnState::WaitingForHumanReview
+            app.agents[0].backend.status(),
+            teshi_agent::backend::AgentBackendStatus::WaitingForHumanReview
         );
         assert_eq!(app.agents[0].status, AiStatus::Idle);
         assert_eq!(
@@ -7959,8 +8015,8 @@ mod tests {
         )
         .unwrap();
         app.agents[0]
-            .native_runtime
-            .attach_model(crate::llm::LlmConfig {
+            .backend
+            .attach_native_model(crate::llm::LlmConfig {
                 api_key: "test-only".into(),
                 base_url: format!("http://{addr}/v1"),
                 model: "mock".into(),
@@ -7973,11 +8029,12 @@ mod tests {
                 stream: false,
                 http_headers: Default::default(),
                 chat_options: Default::default(),
-            });
-        app.agents[0].native_runtime.start();
+            })
+            .unwrap();
+        app.agents[0].backend.start().unwrap();
         app.agents[0]
-            .native_runtime
-            .send_chat(
+            .backend
+            .submit_turn(
                 Some("test".into()),
                 vec![],
                 Some(teshi_agent::get_tools(None)),
@@ -7985,8 +8042,7 @@ mod tests {
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline
-            && app.agents[0].native_runtime.state()
-                == teshi_agent_runtime::NativeTurnState::WaitingForModel
+            && app.agents[0].backend.status() == teshi_agent::backend::AgentBackendStatus::Running
         {
             app.poll_llm_events();
             thread::sleep(Duration::from_millis(10));
@@ -7996,8 +8052,8 @@ mod tests {
             teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
         );
         assert_eq!(
-            app.agents[0].native_runtime.state(),
-            teshi_agent_runtime::NativeTurnState::WaitingForHumanReview
+            app.agents[0].backend.status(),
+            teshi_agent::backend::AgentBackendStatus::WaitingForHumanReview
         );
         app.active_tab = MainTab::TestPoints;
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
@@ -8062,10 +8118,13 @@ mod tests {
         });
 
         let (mut app, _project, _store) = slash_test_app();
-        app.agents[0].native_runtime = teshi_agent_runtime::NativeAgentRuntime::new(1);
+        app.agents[0].backend = teshi_agent_runtime::backend::AgentBackendRuntime::new(
+            teshi_agent::backend::AgentBackendKind::Native,
+            1,
+        );
         app.agents[0]
-            .native_runtime
-            .attach_model(crate::llm::LlmConfig {
+            .backend
+            .attach_native_model(crate::llm::LlmConfig {
                 api_key: "test-only".into(),
                 base_url: format!("http://{addr}/v1"),
                 model: "mock".into(),
@@ -8078,8 +8137,9 @@ mod tests {
                 stream: false,
                 http_headers: Default::default(),
                 chat_options: Default::default(),
-            });
-        app.agents[0].messages.push(super::AiChatMessage {
+            })
+            .unwrap();
+        app.agents[0].messages_mut().push(super::AiChatMessage {
             role: AiRole::User,
             content: "inspect project".into(),
             tool_calls: None,
@@ -8087,11 +8147,11 @@ mod tests {
             reasoning_content: None,
             source: None,
         });
-        app.agents[0].native_runtime.start();
+        app.agents[0].backend.start().unwrap();
         let messages = app.build_chat_messages_for_agent(0);
         app.agents[0]
-            .native_runtime
-            .send_chat(
+            .backend
+            .submit_turn(
                 Some("test".into()),
                 messages,
                 Some(teshi_agent::get_tools(None)),
@@ -8099,19 +8159,18 @@ mod tests {
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline
-            && app.agents[0].native_runtime.state()
-                != teshi_agent_runtime::NativeTurnState::Completed
+            && app.agents[0].backend.status() != teshi_agent::backend::AgentBackendStatus::Completed
         {
             app.poll_llm_events();
             thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(
-            app.agents[0].native_runtime.state(),
-            teshi_agent_runtime::NativeTurnState::Completed
+            app.agents[0].backend.status(),
+            teshi_agent::backend::AgentBackendStatus::Completed
         );
         assert_eq!(
             app.agents[0]
-                .messages
+                .messages()
                 .iter()
                 .map(|m| m.role)
                 .collect::<Vec<_>>(),
@@ -8124,7 +8183,7 @@ mod tests {
                 AiRole::Assistant
             ]
         );
-        assert_eq!(app.agents[0].messages[5].content, "finished");
+        assert_eq!(app.agents[0].messages()[5].content, "finished");
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 3);
         let tool_result = requests[1]["messages"]
@@ -8151,7 +8210,7 @@ mod tests {
     #[test]
     fn visual_observation_projection_keeps_order_and_reasoning() {
         let (mut app, _project, _store) = slash_test_app();
-        app.agents[0].messages = vec![
+        *app.agents[0].messages_mut() = vec![
             super::AiChatMessage {
                 role: super::AiRole::Assistant,
                 content: String::new(),
@@ -8210,7 +8269,7 @@ mod tests {
     fn visual_context_retains_only_latest_image() {
         let (mut app, _project, _store) = slash_test_app();
         for round in 0..10_u8 {
-            app.agents[0].messages.push(super::AiChatMessage {
+            app.agents[0].messages_mut().push(super::AiChatMessage {
                 role: super::AiRole::User,
                 content: format!("[Browser visual observation] {round}"),
                 tool_calls: None,
@@ -8373,7 +8432,7 @@ mod tests {
                 http_headers: Default::default(),
                 chat_options: Default::default(),
             };
-            app.agents[0].native_runtime.attach_model(config);
+            app.agents[0].backend.attach_native_model(config).unwrap();
             app.dispatch_user_message(
                 "Inspect the current page and bring this test interface into a successful state.\n\nConfirm the rendered visual state before taking the main action. Use the available browser tools as needed. Prefer structured browser tools for interaction, then verify the changed state and report the final result.".into(),
             )?;
@@ -8384,11 +8443,11 @@ mod tests {
                 if app.agents[0].status == AiStatus::Error {
                     anyhow::bail!(
                         "production Agent entered error state: {:?}",
-                        app.agents[0].messages
+                        app.agents[0].messages()
                     );
                 }
                 let done = app.agents[0].status == AiStatus::Idle
-                    && app.agents[0].messages.iter().any(|message| {
+                    && app.agents[0].messages().iter().any(|message| {
                         message.role == AiRole::Assistant
                             && message.tool_calls.is_none()
                             && !message.content.trim().is_empty()
@@ -8405,7 +8464,7 @@ mod tests {
             );
 
             let tool_names: Vec<String> = app.agents[0]
-                .messages
+                .messages()
                 .iter()
                 .filter_map(|message| message.tool_calls.as_ref())
                 .flat_map(|calls| calls.iter().map(|call| call.name.clone()))
@@ -8424,7 +8483,7 @@ mod tests {
             );
             assert!(
                 app.agents[0]
-                    .messages
+                    .messages()
                     .iter()
                     .filter(|message| message.role == AiRole::Assistant)
                     .count()
@@ -8446,17 +8505,17 @@ mod tests {
             assert!(!observation.image.is_empty());
             assert_eq!(observation.url.as_deref(), Some(fixture_url.as_str()));
             let visual_user_index = app.agents[0]
-                .messages
+                .messages()
                 .iter()
                 .position(|message| message.source.as_deref() == Some("browser_visual_observation"))
                 .expect("synthetic visual user message missing");
             assert!(visual_user_index >= 2);
             assert_eq!(
-                app.agents[0].messages[visual_user_index - 1].role,
+                app.agents[0].messages()[visual_user_index - 1].role,
                 AiRole::Tool
             );
             assert!(
-                app.agents[0].messages[visual_user_index - 2]
+                app.agents[0].messages()[visual_user_index - 2]
                     .tool_calls
                     .as_ref()
                     .is_some_and(|calls| calls.iter().any(|call| call.name == "observe_page"))
@@ -8471,7 +8530,10 @@ mod tests {
                 image_count, 1,
                 "active model projection retained more than one image"
             );
-            for (original, projected) in app.agents[0].messages.iter().zip(projected.iter().skip(1))
+            for (original, projected) in app.agents[0]
+                .messages()
+                .iter()
+                .zip(projected.iter().skip(1))
             {
                 if original.role == AiRole::Assistant && original.reasoning_content.is_some() {
                     assert_eq!(projected.reasoning_content, original.reasoning_content);
@@ -8486,7 +8548,7 @@ mod tests {
                 "browser page did not reach TEST PASSED: {final_text}"
             );
             let final_answer = app.agents[0]
-                .messages
+                .messages()
                 .iter()
                 .rev()
                 .find(|message| message.role == AiRole::Assistant && message.tool_calls.is_none())
@@ -8663,7 +8725,7 @@ mod tests {
         let report = format!(
             "# Teshi Browser Vision Live E2E\n\n- Date: 2026-09-12\n- Commit SHA: `{sha}`\n- Provider: `deepseek`\n- Model: `deepseek-flash`\n- Thinking mode: `high`\n- Fixture: `resources/tests/fixtures/browser-visual-observation.html`\n- Browser runtime: existing Teshi embedded browser sidecar\n- Live E2E result: PASS\n\n## Trace summary\n\n- Agent turns: {}\n- Tools: `{}`\n- Observation id: `{}`\n- Screenshot: `{}`, {} bytes, `full_page=false`\n- Browser URL: `{}`\n- Browser title: `{}`\n- Last model finish reason: `{}`\n- Peak active model-visible image count: `1`\n- Final answer present: `true`\n\nReasoning content was retained only as presence/length metadata in the harness; its text and screenshot bytes were not written. Final answer length: {}.\n",
             app.agents[0]
-                .messages
+                .messages()
                 .iter()
                 .filter(|message| message.role == AiRole::Assistant)
                 .count(),
