@@ -119,10 +119,12 @@ impl NativeAgentRuntime {
     }
 
     pub fn attach_model(&mut self, config: LlmConfig) {
-        if matches!(
-            self.state,
-            NativeTurnState::WaitingForModel | NativeTurnState::WaitingForApproval
-        ) {
+        if self.llm_handle.is_some()
+            && matches!(
+                self.state,
+                NativeTurnState::WaitingForModel | NativeTurnState::WaitingForApproval
+            )
+        {
             self.state = NativeTurnState::Cancelled;
             self.partial_response.clear();
         }
@@ -443,6 +445,7 @@ pub fn max_agent_iterations() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
 
     #[test]
     fn multi_loop_limit_and_final_request() {
@@ -501,6 +504,75 @@ mod tests {
             NativeContinuation::Cancelled
         );
         assert!(!runtime.accepts_model_event());
+        assert!(matches!(
+            runtime.consume_model_event(LlmEvent::Chunk {
+                content: "late".into()
+            }),
+            NativeRuntimeEvent::Ignored
+        ));
+        assert!(runtime.messages.is_empty());
+    }
+
+    #[test]
+    fn cancelled_turn_can_reconnect_and_complete_next_turn_without_stale_events() {
+        let mut runtime = NativeAgentRuntime::new(3);
+        let config = LlmConfig {
+            api_key: "test-key".into(),
+            base_url: "http://127.0.0.1:1".into(),
+            model: "test-model".into(),
+            max_tokens: 16,
+            temperature: 0.0,
+            context_window: None,
+            provider: "openai".into(),
+            thinking: teshi_engine::model_profile::DeepSeekThinking::High,
+            api_style: teshi_engine::model_profile::ApiStyle::ChatCompletions,
+            stream: false,
+            http_headers: Default::default(),
+            chat_options: Default::default(),
+        };
+        runtime.attach_model(config.clone());
+        runtime.start();
+        let (old_tx, old_rx) = mpsc::channel();
+        runtime.llm_rx = Some(old_rx);
+        old_tx
+            .send(LlmEvent::Chunk {
+                content: "queued stale".into(),
+            })
+            .unwrap();
+        runtime.cancel();
+        assert_eq!(runtime.state(), NativeTurnState::Cancelled);
+        assert!(
+            old_tx
+                .send(LlmEvent::Chunk {
+                    content: "stale".into()
+                })
+                .is_err()
+        );
+
+        // This is the TUI's order after cancel: start, then reconnect on the missing handle.
+        runtime.start();
+        runtime.attach_model(config);
+        assert_eq!(runtime.state(), NativeTurnState::WaitingForModel);
+        runtime.send_chat(None, Vec::new(), None).unwrap();
+        let (new_tx, new_rx) = mpsc::channel();
+        runtime.llm_rx = Some(new_rx);
+        new_tx
+            .send(LlmEvent::Done {
+                full_text: "second turn".into(),
+                reasoning_content: None,
+                model: "test-model".into(),
+                input_tokens: None,
+                output_tokens: None,
+                finish_reason: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            runtime.try_next_event(),
+            Ok(Some(NativeRuntimeEvent::Completed { .. }))
+        ));
+        assert_eq!(runtime.state(), NativeTurnState::Completed);
+        assert_eq!(runtime.messages.len(), 1);
+        assert_eq!(runtime.messages[0].content, "second turn");
     }
 
     #[test]

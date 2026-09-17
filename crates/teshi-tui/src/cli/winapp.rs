@@ -26,7 +26,10 @@ pub fn handle_winapp_command(action: &WinAppCommand) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let project_root = find_project_root(Some(&cwd)).unwrap_or(cwd);
     std::fs::create_dir_all(project_root.join(".teshi")).ok();
-    ensure_winapp_sidecar(&project_root)?;
+    // Replay validates the Feature before contacting the Windows-only sidecar.
+    if !matches!(action, WinAppCommand::Replay(_)) {
+        ensure_winapp_sidecar(&project_root)?;
+    }
     match action {
         WinAppCommand::ListWindows => list_windows(&project_root),
         WinAppCommand::Attach(args) => attach(&project_root, args),
