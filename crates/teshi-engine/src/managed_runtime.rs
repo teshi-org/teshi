@@ -377,7 +377,8 @@ mod tests {
         RuntimeRequirement {
             runtime: WINAPP_RUNTIME_ID,
             runtime_version: 1,
-            platform: WINAPP_RUNTIME_PLATFORM,
+            // Exercise the Windows artifact lifecycle on every CI host.
+            platform: "windows-x86_64",
         }
     }
 
@@ -397,7 +398,7 @@ mod tests {
         RuntimeManifest {
             runtime: WINAPP_RUNTIME_ID.into(),
             runtime_version: 1,
-            platform: WINAPP_RUNTIME_PLATFORM.into(),
+            platform: "windows-x86_64".into(),
             python_exe: "python/python.exe".into(),
             service_script: "resources/winapp_service.py".into(),
         }
@@ -408,6 +409,13 @@ mod tests {
         let requirement = winapp_runtime_requirement();
         assert_eq!(requirement.runtime, "winapp");
         assert_eq!(requirement.runtime_version, 1);
+    }
+
+    #[cfg(not(all(windows, target_arch = "x86_64")))]
+    #[test]
+    fn production_winapp_runtime_remains_unsupported_on_other_platforms() {
+        assert_eq!(winapp_runtime_requirement().platform, "unsupported");
+        assert!(ensure_winapp_runtime().is_err());
     }
 
     #[test]
