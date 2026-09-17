@@ -1,3 +1,4 @@
+mod acp_agents;
 mod agent;
 mod app;
 mod auth;
@@ -277,6 +278,7 @@ pub fn run() -> Result<()> {
 
     while !app.should_quit {
         app.poll_runner_events();
+        app.poll_acp_registry();
         app.poll_llm_events();
         app.poll_external_feature_changes();
         app.poll_status_message_expiry();

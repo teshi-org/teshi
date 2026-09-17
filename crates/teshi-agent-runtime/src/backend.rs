@@ -33,7 +33,7 @@ pub use crate::acp_backend::AcpBackendConfig;
 #[derive(Debug)]
 pub enum AgentBackendRuntime {
     Native(Box<NativeAgentBackend>),
-    Acp(AcpAgentBackend),
+    Acp(Box<AcpAgentBackend>),
 }
 
 impl AgentBackendRuntime {
@@ -57,7 +57,7 @@ impl AgentBackendRuntime {
     pub fn new(kind: AgentBackendKind, max_loops: u32) -> Self {
         match kind {
             AgentBackendKind::Native => Self::Native(Box::new(NativeAgentBackend::new(max_loops))),
-            AgentBackendKind::Acp => Self::Acp(AcpAgentBackend::default()),
+            AgentBackendKind::Acp => Self::Acp(Box::default()),
         }
     }
 

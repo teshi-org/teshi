@@ -34,7 +34,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("models", "Open model settings"),
     ("sessions", "Browse saved sessions"),
     ("approval", "Switch approval mode (Manual/Auto/Bypass)"),
-    ("agent", "Switch agent profile"),
+    ("agent", "Select session Agent (Native or installed ACP)"),
+    ("acp", "Manage installed ACP Agents"),
+    ("acp install", "Browse the official ACP Registry"),
+    ("agent-profile", "Select Native agent profile"),
     (
         "generate",
         "Start requirements → test points → scenarios generation",
@@ -86,6 +89,8 @@ pub struct AgentThread {
     pub last_input_tokens: Option<u32>,
     /// Selected agent profile ID (None = use default).
     pub profile_id: Option<String>,
+    /// Current conversation's ACP selection; never persisted.
+    pub selected_acp_id: Option<String>,
     /// Latest on-demand browser visual observation. Older image bytes are not
     /// retained in the active model projection, while their text messages
     /// remain in the durable chat history.
@@ -125,6 +130,7 @@ impl AgentThread {
             total_output_tokens: 0,
             last_input_tokens: None,
             profile_id: None,
+            selected_acp_id: None,
             latest_visual_observation: None,
             last_finish_reason: None,
         }
@@ -132,6 +138,9 @@ impl AgentThread {
 }
 
 impl AgentThread {
+    pub fn backend_kind(&self) -> teshi_agent::backend::AgentBackendKind {
+        self.backend.kind()
+    }
     pub fn messages(&self) -> &[AiChatMessage] {
         self.backend.messages()
     }
@@ -173,6 +182,9 @@ pub enum ModelPanelMode {
 pub enum AgentPanelMode {
     /// Show the list of profiles.
     List,
+    SelectBackend,
+    InstalledAcp,
+    Registry,
 }
 
 /// One recorded action in an exploration trace.
@@ -613,6 +625,12 @@ pub struct App {
     pub agent_profile_panel_selection: usize,
     // ── Agent profile form state ────────────────────────
     pub agent_panel_mode: AgentPanelMode,
+    pub installed_acp_agents: Vec<crate::acp_agents::InstalledAgent>,
+    pub acp_registry_agents: Vec<teshi_acp::registry::RegistryAgent>,
+    acp_registry_rx:
+        Option<Receiver<std::result::Result<Vec<teshi_acp::registry::RegistryAgent>, String>>>,
+    acp_install_rx:
+        Option<Receiver<std::result::Result<crate::acp_agents::InstalledAgent, String>>>,
     // ── Generation pipeline state ───────────────────────
     pub generation_stage: teshi_agent::pipeline::GenerationStage,
     pub pipeline_requirement: Option<teshi_agent::pipeline::Requirement>,
@@ -946,6 +964,10 @@ impl App {
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
             agent_panel_mode: AgentPanelMode::List,
+            installed_acp_agents: Vec::new(),
+            acp_registry_agents: Vec::new(),
+            acp_registry_rx: None,
+            acp_install_rx: None,
             generation_stage: teshi_agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
@@ -1106,6 +1128,10 @@ impl App {
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
             agent_panel_mode: AgentPanelMode::List,
+            installed_acp_agents: Vec::new(),
+            acp_registry_agents: Vec::new(),
+            acp_registry_rx: None,
+            acp_install_rx: None,
             generation_stage: teshi_agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
@@ -1254,6 +1280,10 @@ impl App {
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
             agent_panel_mode: AgentPanelMode::List,
+            installed_acp_agents: Vec::new(),
+            acp_registry_agents: Vec::new(),
+            acp_registry_rx: None,
+            acp_install_rx: None,
             generation_stage: teshi_agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
@@ -1450,29 +1480,38 @@ impl App {
                 == teshi_agent::backend::AgentBackendStatus::Unavailable
         {
             let cwd = self.find_project_dir().to_path_buf();
-            let command = match std::env::var_os("TESHI_ACP_PROGRAM") {
-                Some(program) => {
-                    let args = std::env::var("TESHI_ACP_ARGS_JSON")
-                        .ok()
-                        .map(|value| serde_json::from_str::<Vec<String>>(&value))
-                        .transpose();
-                    match args {
-                        Ok(args) => Ok(teshi_acp::AcpAgentCommand {
-                            program: program.into(),
-                            args: args.unwrap_or_default(),
-                            cwd,
-                            env: std::collections::HashMap::new(),
-                        }),
-                        Err(error) => Err(anyhow::anyhow!("invalid TESHI_ACP_ARGS_JSON: {error}")),
+            let command = if let Some(id) = self.agents[agent_idx].selected_acp_id.as_ref() {
+                let root = crate::acp_agents::store_dir();
+                root.and_then(|root| {
+                    crate::acp_agents::load(&root)?
+                        .into_iter()
+                        .find(|item| &item.id == id)
+                        .map(|item| item.command(cwd))
+                        .ok_or_else(|| anyhow::anyhow!("ACP Agent {id} is not installed"))
+                })
+            } else {
+                match std::env::var_os("TESHI_ACP_PROGRAM") {
+                    Some(program) => {
+                        let args = std::env::var("TESHI_ACP_ARGS_JSON")
+                            .ok()
+                            .map(|value| serde_json::from_str::<Vec<String>>(&value))
+                            .transpose();
+                        match args {
+                            Ok(args) => Ok(teshi_acp::AcpAgentCommand {
+                                program: program.into(),
+                                args: args.unwrap_or_default(),
+                                cwd,
+                                env: std::collections::HashMap::new(),
+                            }),
+                            Err(error) => {
+                                Err(anyhow::anyhow!("invalid TESHI_ACP_ARGS_JSON: {error}"))
+                            }
+                        }
                     }
+                    None => Err(anyhow::anyhow!(
+                        "No ACP Agent selected; use /agent or set TESHI_ACP_PROGRAM"
+                    )),
                 }
-                None => teshi_acp::CursorAcpConfig {
-                    executable: None,
-                    cwd,
-                    env: std::collections::HashMap::new(),
-                }
-                .command()
-                .map_err(anyhow::Error::from),
             };
             match command.and_then(|command| {
                 let mut config = teshi_agent_runtime::backend::AcpBackendConfig::new(command);
@@ -4536,6 +4575,9 @@ impl App {
 
         // Agent profile selection panel intercept.
         if self.agent_profile_panel_active {
+            if self.agent_panel_mode != AgentPanelMode::List {
+                return self.handle_acp_panel_action(action);
+            }
             return match action {
                 Action::AgentPanelUp => {
                     if self.agent_profile_panel_selection > 0 {
@@ -5077,6 +5119,7 @@ impl App {
             Action::SessionPanelActivate => {
                 if let Some(session) = self.session_list.get(self.session_panel_selection).cloned()
                 {
+                    self.select_backend(None);
                     *self.agent_mut().messages_mut() = session.messages;
                     self.agent_mut().partial_response_mut().clear();
                     self.agent_mut().input.clear();
@@ -5697,7 +5740,9 @@ impl App {
                     self.status = "Input deactivated".to_string();
                     return Ok(());
                 }
-                if self.agent().status == AiStatus::Waiting {
+                if self.agent().status == AiStatus::Waiting
+                    && !self.agent().input.trim().starts_with('/')
+                {
                     return Ok(());
                 }
 
@@ -5815,7 +5860,14 @@ impl App {
                         self.execute_slash_command(name)
                     };
                 }
-                // If nothing matches, keep the popup open so the user can keep typing
+                // Multiword commands such as `/acp install` are not suggestions;
+                // submit the typed command when the menu has no matching entry.
+                if let Some(command) = self.agent().input.strip_prefix('/').map(str::to_owned) {
+                    self.agent_mut().input.clear();
+                    self.agent_mut().input_cursor = 0;
+                    self.slash_suggestion_active = false;
+                    return self.execute_slash_command(&command);
+                }
             }
             Action::AiSlashDismiss => {
                 self.slash_suggestion_active = false;
@@ -7590,6 +7642,213 @@ impl App {
 
     // ── Slash command handlers ─────────────────────────────────────────
 
+    fn open_agent_backend_panel(&mut self, mode: AgentPanelMode) {
+        let root = match crate::acp_agents::store_dir() {
+            Ok(root) => root,
+            Err(error) => {
+                self.status = format!("ACP storage unavailable: {error}");
+                return;
+            }
+        };
+        self.installed_acp_agents = match crate::acp_agents::load(&root) {
+            Ok(agents) => agents,
+            Err(error) => {
+                self.status = format!("ACP installations unavailable: {error}");
+                return;
+            }
+        };
+        self.agent_panel_mode = mode;
+        self.agent_profile_panel_selection = 0;
+        self.agent_profile_panel_active = true;
+        self.status = match mode {
+            AgentPanelMode::SelectBackend => {
+                "Select Agent: ↑↓ move · Enter select · Esc close".into()
+            }
+            AgentPanelMode::InstalledAcp => "ACP Agents: i browse Registry · Esc close".into(),
+            _ => String::new(),
+        };
+    }
+
+    fn open_acp_registry(&mut self) {
+        self.open_agent_backend_panel(AgentPanelMode::InstalledAcp);
+        if !self.agent_profile_panel_active {
+            return;
+        }
+        self.acp_registry_agents.clear();
+        self.agent_panel_mode = AgentPanelMode::Registry;
+        self.status = "Loading official ACP Registry...".into();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.acp_registry_rx = Some(rx);
+        std::thread::spawn(move || {
+            let result = (|| -> Result<_> {
+                let runtime = tokio::runtime::Runtime::new()?;
+                Ok(runtime
+                    .block_on(teshi_acp::registry::fetch_registry(
+                        teshi_acp::registry::OFFICIAL_REGISTRY_URL,
+                        Duration::from_secs(10),
+                    ))?
+                    .agents)
+            })()
+            .map_err(|error| error.to_string());
+            let _ = tx.send(result);
+        });
+    }
+
+    pub fn poll_acp_registry(&mut self) {
+        if let Some(rx) = &self.acp_install_rx {
+            match rx.try_recv() {
+                Ok(Ok(installed)) => {
+                    self.acp_install_rx = None;
+                    self.status = format!("Installed {}. Use /agent to select it.", installed.name);
+                    if let Ok(root) = crate::acp_agents::store_dir()
+                        && let Ok(agents) = crate::acp_agents::load(&root)
+                    {
+                        self.installed_acp_agents = agents;
+                    }
+                }
+                Ok(Err(error)) => {
+                    self.acp_install_rx = None;
+                    self.status = format!("ACP install failed: {error}");
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.acp_install_rx = None;
+                    self.status = "ACP install failed: worker stopped".into();
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        let Some(rx) = &self.acp_registry_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(agents)) => {
+                self.acp_registry_rx = None;
+                if self.agent_profile_panel_active
+                    && self.agent_panel_mode == AgentPanelMode::Registry
+                {
+                    self.acp_registry_agents = agents;
+                    self.status = "ACP Registry: ↑↓ move · Enter install · Esc close".into();
+                }
+            }
+            Ok(Err(error)) => {
+                self.acp_registry_rx = None;
+                if self.agent_profile_panel_active
+                    && self.agent_panel_mode == AgentPanelMode::Registry
+                {
+                    self.agent_profile_panel_active = false;
+                    self.status = format!("ACP Registry unavailable: {error}");
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.acp_registry_rx = None;
+                if self.agent_profile_panel_active
+                    && self.agent_panel_mode == AgentPanelMode::Registry
+                {
+                    self.agent_profile_panel_active = false;
+                    self.status = "ACP Registry unavailable: fetch worker stopped".into();
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    fn select_backend(&mut self, installed: Option<crate::acp_agents::InstalledAgent>) {
+        self.cancel_agent_turn();
+        let thread = self.agent_mut();
+        let messages = std::mem::take(thread.messages_mut());
+        let selected_id = installed.as_ref().map(|agent| agent.id.clone());
+        let kind = if installed.is_some() {
+            teshi_agent::backend::AgentBackendKind::Acp
+        } else {
+            teshi_agent::backend::AgentBackendKind::Native
+        };
+        thread.backend = teshi_agent_runtime::backend::AgentBackendRuntime::new(
+            kind,
+            teshi_agent_runtime::max_agent_iterations(),
+        );
+        *thread.messages_mut() = messages;
+        thread.selected_acp_id = selected_id;
+        thread.status = AiStatus::Idle;
+        self.active_model_label = installed.as_ref().map(|agent| agent.name.clone());
+        self.status = match installed {
+            Some(agent) => format!("Selected ACP Agent {} for this session", agent.name),
+            None => "Selected Teshi Native for this session".into(),
+        };
+        self.agent_profile_panel_active = false;
+    }
+
+    fn handle_acp_panel_action(&mut self, action: Action) -> Result<()> {
+        let count = match self.agent_panel_mode {
+            AgentPanelMode::SelectBackend => self.installed_acp_agents.len() + 1,
+            AgentPanelMode::InstalledAcp => self.installed_acp_agents.len(),
+            AgentPanelMode::Registry => self.acp_registry_agents.len(),
+            AgentPanelMode::List => 0,
+        };
+        match action {
+            Action::AgentPanelUp => {
+                self.agent_profile_panel_selection =
+                    self.agent_profile_panel_selection.saturating_sub(1)
+            }
+            Action::AgentPanelDown => {
+                if self.agent_profile_panel_selection + 1 < count {
+                    self.agent_profile_panel_selection += 1;
+                }
+            }
+            Action::AgentPanelSelect => match self.agent_panel_mode {
+                AgentPanelMode::SelectBackend => {
+                    let item = if self.agent_profile_panel_selection == 0 {
+                        None
+                    } else {
+                        self.installed_acp_agents
+                            .get(self.agent_profile_panel_selection - 1)
+                            .cloned()
+                    };
+                    self.select_backend(item);
+                }
+                AgentPanelMode::Registry if self.acp_install_rx.is_none() => {
+                    if let Some(agent) = self
+                        .acp_registry_agents
+                        .get(self.agent_profile_panel_selection)
+                        .cloned()
+                    {
+                        if self
+                            .installed_acp_agents
+                            .iter()
+                            .any(|item| item.id == agent.id)
+                        {
+                            self.status = format!(
+                                "{} is already installed. Use /agent to select it.",
+                                agent.name.as_deref().unwrap_or(&agent.id)
+                            );
+                            return Ok(());
+                        }
+                        let root = crate::acp_agents::store_dir()?;
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        self.acp_install_rx = Some(rx);
+                        self.status = format!(
+                            "Installing {}...",
+                            agent.name.as_deref().unwrap_or(&agent.id)
+                        );
+                        std::thread::spawn(move || {
+                            let result = crate::acp_agents::install(&root, &agent)
+                                .map_err(|error| error.to_string());
+                            let _ = tx.send(result);
+                        });
+                    }
+                }
+                _ => {}
+            },
+            Action::AgentPanelAdd if self.agent_panel_mode == AgentPanelMode::InstalledAcp => {
+                self.open_acp_registry()
+            }
+            Action::AgentPanelClose | Action::ClearInputState => {
+                self.agent_profile_panel_active = false
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Execute a slash command from either submitted input or the suggestion menu.
     ///
     /// The suggestion menu clears the input before calling this method, so all
@@ -7633,6 +7892,35 @@ impl App {
             return Ok(());
         }
         if command == "agent" || command == "agents" {
+            self.open_agent_backend_panel(AgentPanelMode::SelectBackend);
+            return Ok(());
+        }
+        if command == "acp" {
+            self.open_agent_backend_panel(AgentPanelMode::InstalledAcp);
+            return Ok(());
+        }
+        if command == "acp install" {
+            self.open_acp_registry();
+            return Ok(());
+        }
+        if let Some(spec) = command.strip_prefix("acp add ") {
+            let Some((id, command_json)) = spec.split_once(' ') else {
+                self.status = "Usage: /acp add <id> [\"program\",\"arg\",...]".into();
+                return Ok(());
+            };
+            let result = (|| -> Result<String> {
+                let argv: Vec<String> = serde_json::from_str(command_json)?;
+                let root = crate::acp_agents::store_dir()?;
+                let installed = crate::acp_agents::add_custom(&root, id, &argv)?;
+                Ok(installed.name)
+            })();
+            self.status = match result {
+                Ok(name) => format!("Added custom ACP Agent {name}. Use /agent to select it."),
+                Err(error) => format!("Custom ACP Agent failed: {error}"),
+            };
+            return Ok(());
+        }
+        if command == "agent-profile" {
             self.agent_registry =
                 teshi_agent::registry::AgentRegistry::load(Some(self.find_project_dir()));
             self.agent_profile_panel_active = true;
@@ -7697,6 +7985,7 @@ impl App {
         self.agent_mut().status = AiStatus::Idle;
         self.agent_mut().tool_status = None;
         self.agent_mut().scroll_offset = 0;
+        self.select_backend(None);
         self.status = "New session started".to_string();
         Ok(())
     }
@@ -7720,6 +8009,7 @@ impl App {
         self.cancel_agent_turn();
         let sessions = crate::session::Session::load_all();
         if let Some(s) = sessions.into_iter().next() {
+            self.select_backend(None);
             *self.agent_mut().messages_mut() = s.messages;
             self.agent_mut().partial_response_mut().clear();
             self.agent_mut().input.clear();
@@ -7866,6 +8156,75 @@ mod tests {
             app.agents[0].backend.kind(),
             teshi_agent::backend::AgentBackendKind::Native
         );
+        if std::env::var_os("TESHI_ACP_PROGRAM").is_none() {
+            assert!(
+                app.status.contains("No ACP Agent selected"),
+                "{}",
+                app.status
+            );
+            assert_eq!(app.agents[0].status, AiStatus::Error);
+        }
+    }
+
+    #[test]
+    fn agent_panel_selection_is_session_only_and_new_resets_to_native() {
+        let (mut app, _project, _store) = slash_test_app();
+        assert_eq!(
+            app.agent().backend.kind(),
+            teshi_agent::backend::AgentBackendKind::Native
+        );
+        app.installed_acp_agents = vec![crate::acp_agents::InstalledAgent {
+            id: "fixture".into(),
+            name: "Fixture".into(),
+            program: "fixture".into(),
+            args: vec![],
+            env: Default::default(),
+        }];
+        app.agent_panel_mode = AgentPanelMode::SelectBackend;
+        app.agent_profile_panel_active = true;
+        app.handle_action(Action::AgentPanelDown).unwrap();
+        app.handle_action(Action::AgentPanelSelect).unwrap();
+        assert_eq!(app.agent().selected_acp_id.as_deref(), Some("fixture"));
+        assert_eq!(
+            app.agent().backend.kind(),
+            teshi_agent::backend::AgentBackendKind::Acp
+        );
+        app.execute_slash_command("new").unwrap();
+        assert_eq!(app.agent().selected_acp_id, None);
+        assert_eq!(
+            app.agent().backend.kind(),
+            teshi_agent::backend::AgentBackendKind::Native
+        );
+    }
+
+    #[test]
+    fn registry_panel_renders_description_and_install_state() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agent_panel_mode = AgentPanelMode::Registry;
+        app.agent_profile_panel_active = true;
+        app.acp_registry_agents = teshi_acp::registry::Registry::parse(
+            r#"{"agents":[{"id":"fixture","name":"Fixture Agent","description":"Reads test files","distribution":{"npx":{"package":"fixture"}}}]}"#
+        ).unwrap().agents;
+        app.installed_acp_agents = vec![crate::acp_agents::InstalledAgent {
+            id: "fixture".into(),
+            name: "Fixture Agent".into(),
+            program: "fixture".into(),
+            args: vec![],
+            env: Default::default(),
+        }];
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let display = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(display.contains("Fixture Agent (fixture) [installed]"));
+        assert!(display.contains("Reads test files"));
     }
 
     #[test]
@@ -8817,6 +9176,16 @@ mod tests {
 
         assert!(app.generation_scope_prompt.is_some());
         assert!(app.status.contains("Confirm generation source scope"));
+    }
+
+    #[test]
+    fn slash_menu_subcommand_enters_dispatcher() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agent_mut().input = "/acp add sample".into();
+        app.slash_suggestion_active = true;
+        app.handle_action(Action::AiSlashSelect).unwrap();
+        assert!(app.status.contains("Usage: /acp add"));
+        assert!(!app.slash_suggestion_active);
     }
 
     #[test]
@@ -9824,6 +10193,10 @@ mod tests {
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
             agent_panel_mode: AgentPanelMode::List,
+            installed_acp_agents: Vec::new(),
+            acp_registry_agents: Vec::new(),
+            acp_registry_rx: None,
+            acp_install_rx: None,
             generation_stage: teshi_agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,
@@ -9989,6 +10362,10 @@ Feature: B
             agent_profile_panel_active: false,
             agent_profile_panel_selection: 0,
             agent_panel_mode: AgentPanelMode::List,
+            installed_acp_agents: Vec::new(),
+            acp_registry_agents: Vec::new(),
+            acp_registry_rx: None,
+            acp_install_rx: None,
             generation_stage: teshi_agent::pipeline::GenerationStage::Idle,
             pipeline_requirement: None,
             pipeline_plan: None,

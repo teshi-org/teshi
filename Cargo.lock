@@ -7219,7 +7219,9 @@ dependencies = [
  "clap",
  "crossterm 0.28.1",
  "dirs",
+ "flate2",
  "futures",
+ "hex",
  "inquire",
  "ratatui",
  "reqwest",
@@ -7227,6 +7229,8 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
+ "tar",
  "tempfile",
  "termwiz",
  "teshi-acp",
@@ -7241,6 +7245,7 @@ dependencies = [
  "tui-tree-widget",
  "unicode-width 0.2.0",
  "windows-sys 0.59.0",
+ "zip",
 ]
 
 [[package]]

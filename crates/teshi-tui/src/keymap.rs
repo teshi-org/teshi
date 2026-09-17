@@ -429,6 +429,7 @@ impl Action {
                 (KeyCode::Enter, _) => Some(Self::AgentPanelSelect),
                 (KeyCode::Esc, _) => Some(Self::AgentPanelClose),
                 (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::AgentPanelAdd),
+                (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Self::AgentPanelAdd),
                 (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Self::AgentPanelEdit),
                 (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Self::AgentPanelDelete),
                 _ => None,

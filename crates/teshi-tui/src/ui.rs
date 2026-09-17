@@ -424,7 +424,11 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
 
     if app.agent_profile_panel_active {
-        render_agent_profile_panel(frame, app, frame.area());
+        if app.agent_panel_mode == crate::app::AgentPanelMode::List {
+            render_agent_profile_panel(frame, app, frame.area());
+        } else {
+            render_acp_agent_panel(frame, app, frame.area());
+        }
     }
 
     if !matches!(
@@ -3839,6 +3843,106 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 /// Sidebar width for the agent configuration modal (matches AI agent sidebar).
 const AGENT_PROFILE_SIDEBAR_WIDTH: u16 = 28;
 const AGENT_PROFILE_PANEL_MIN_WIDTH: u16 = 60;
+
+fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let panel = agent_profile_panel_rect(area);
+    frame.render_widget(Clear, panel);
+    let title = match app.agent_panel_mode {
+        crate::app::AgentPanelMode::SelectBackend => " Select Agent for this session ",
+        crate::app::AgentPanelMode::InstalledAcp => " Installed ACP Agents ",
+        crate::app::AgentPanelMode::Registry => " Official ACP Registry ",
+        _ => " Agents ",
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if app.agent_panel_mode == crate::app::AgentPanelMode::SelectBackend {
+        let marker = if app.agent_profile_panel_selection == 0 {
+            "▶ "
+        } else {
+            "  "
+        };
+        let active = if app.agent().backend_kind() == teshi_agent::backend::AgentBackendKind::Native
+        {
+            " [selected]"
+        } else {
+            ""
+        };
+        lines.push(Line::from(format!("{marker}Teshi Native{active}")));
+    }
+    match app.agent_panel_mode {
+        crate::app::AgentPanelMode::SelectBackend | crate::app::AgentPanelMode::InstalledAcp => {
+            for (index, agent) in app.installed_acp_agents.iter().enumerate() {
+                let row = index
+                    + usize::from(
+                        app.agent_panel_mode == crate::app::AgentPanelMode::SelectBackend,
+                    );
+                let marker = if row == app.agent_profile_panel_selection {
+                    "▶ "
+                } else {
+                    "  "
+                };
+                let active = if app.agent().selected_acp_id.as_deref() == Some(&agent.id) {
+                    " [selected]"
+                } else {
+                    ""
+                };
+                lines.push(Line::from(format!(
+                    "{marker}{} ({}) [installed]{active}",
+                    agent.name, agent.id
+                )));
+            }
+            if app.agent_panel_mode == crate::app::AgentPanelMode::InstalledAcp {
+                lines.push(Line::from(""));
+                lines.push(Line::from(
+                    "Press i to browse and install from the Registry.",
+                ));
+                lines.push(Line::from(
+                    "Custom: /acp add <id> [\"program\",\"arg\",...]",
+                ));
+            }
+        }
+        crate::app::AgentPanelMode::Registry => {
+            for (index, agent) in app.acp_registry_agents.iter().enumerate() {
+                let marker = if index == app.agent_profile_panel_selection {
+                    "▶ "
+                } else {
+                    "  "
+                };
+                let installed = if app
+                    .installed_acp_agents
+                    .iter()
+                    .any(|item| item.id == agent.id)
+                {
+                    "installed"
+                } else {
+                    "available"
+                };
+                lines.push(Line::from(format!(
+                    "{marker}{} ({}) [{installed}]",
+                    agent.name.as_deref().unwrap_or(&agent.id),
+                    agent.id
+                )));
+                lines.push(Line::from(format!(
+                    "   {}",
+                    agent.description.as_deref().unwrap_or("No description")
+                )));
+            }
+        }
+        _ => {}
+    }
+    let selected_line = if app.agent_panel_mode == crate::app::AgentPanelMode::Registry {
+        app.agent_profile_panel_selection * 2
+    } else {
+        app.agent_profile_panel_selection
+    };
+    let scroll = selected_line.saturating_sub(inner.height.saturating_sub(3) as usize);
+    frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), inner);
+}
 const AGENT_PROFILE_PANEL_MAX_WIDTH: u16 = 100;
 const AGENT_PROFILE_PANEL_MIN_HEIGHT: u16 = 18;
 const AGENT_PROFILE_PANEL_MAX_HEIGHT: u16 = 50;
