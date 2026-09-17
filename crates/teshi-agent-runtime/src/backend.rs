@@ -1,5 +1,4 @@
-//! Application-facing backend composition. ACP is intentionally unavailable
-//! until its execution adapter is implemented.
+//! Application-facing backend composition.
 
 use std::sync::mpsc::TryRecvError;
 use teshi_agent::backend::{
@@ -11,7 +10,7 @@ use teshi_engine::llm::LlmConfig;
 
 use crate::{
     AiChatMessage, NativeAgentRuntime, NativeContinuation, NativeRuntimeEvent, NativeToolExecution,
-    NativeTurnState,
+    NativeTurnState, acp_backend::AcpAgentBackend,
 };
 
 #[derive(Debug)]
@@ -27,11 +26,7 @@ impl NativeAgentBackend {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct AcpAgentBackend {
-    messages: Vec<AiChatMessage>,
-    partial_response: String,
-}
+pub use crate::acp_backend::AcpBackendConfig;
 
 /// One owned backend per conversation. Enum dispatch keeps the two possible
 /// implementations visible to the compiler without shared mutable UI state.
@@ -73,6 +68,16 @@ impl AgentBackendRuntime {
         }
     }
 
+    pub fn configure_acp(&mut self, config: AcpBackendConfig) -> anyhow::Result<()> {
+        match self {
+            Self::Acp(backend) => {
+                backend.configure(config);
+                Ok(())
+            }
+            Self::Native(_) => anyhow::bail!("cannot configure ACP on a Native backend"),
+        }
+    }
+
     pub fn status(&self) -> AgentBackendStatus {
         match self {
             Self::Native(backend) => match backend.runtime.state() {
@@ -84,12 +89,15 @@ impl AgentBackendRuntime {
                 NativeTurnState::Failed => AgentBackendStatus::Failed,
                 NativeTurnState::Cancelled => AgentBackendStatus::Cancelled,
             },
-            Self::Acp(_) => AgentBackendStatus::Unavailable,
+            Self::Acp(backend) => backend.status(),
         }
     }
 
     pub fn is_connected(&self) -> bool {
-        matches!(self, Self::Native(backend) if backend.runtime.llm_handle.is_some())
+        match self {
+            Self::Native(backend) => backend.runtime.llm_handle.is_some(),
+            Self::Acp(backend) => backend.is_connected(),
+        }
     }
 
     pub fn attach_native_model(&mut self, config: LlmConfig) -> anyhow::Result<()> {
@@ -98,7 +106,7 @@ impl AgentBackendRuntime {
                 backend.runtime.attach_model(config);
                 Ok(())
             }
-            Self::Acp(_) => anyhow::bail!("ACP agent backend is not implemented"),
+            Self::Acp(_) => anyhow::bail!("a Native model cannot be attached to an ACP backend"),
         }
     }
 
@@ -108,7 +116,7 @@ impl AgentBackendRuntime {
                 backend.runtime.start();
                 Ok(())
             }
-            Self::Acp(_) => anyhow::bail!("ACP agent backend is not implemented"),
+            Self::Acp(backend) => backend.start(),
         }
     }
 
@@ -122,13 +130,14 @@ impl AgentBackendRuntime {
     ) -> anyhow::Result<()> {
         match self {
             Self::Native(backend) => backend.runtime.send_chat(system, messages, tools),
-            Self::Acp(_) => anyhow::bail!("ACP agent backend is not implemented"),
+            Self::Acp(backend) => backend.submit_turn(system, &messages),
         }
     }
 
     pub fn cancel(&mut self) {
-        if let Self::Native(backend) = self {
-            backend.runtime.cancel();
+        match self {
+            Self::Native(backend) => backend.runtime.cancel(),
+            Self::Acp(backend) => backend.cancel(),
         }
     }
 
@@ -138,7 +147,7 @@ impl AgentBackendRuntime {
                 .runtime
                 .try_next_event()
                 .map(|event| event.map(Into::into)),
-            Self::Acp(_) => Ok(None),
+            Self::Acp(backend) => backend.try_next_event(),
         }
     }
 
@@ -436,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn acp_selection_is_explicitly_unavailable() {
+    fn acp_selection_requires_configuration() {
         let mut backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
         assert_eq!(backend.kind(), AgentBackendKind::Acp);
         assert_eq!(backend.status(), AgentBackendStatus::Unavailable);
@@ -445,14 +454,14 @@ mod tests {
                 .start()
                 .unwrap_err()
                 .to_string()
-                .contains("not implemented")
+                .contains("not configured")
         );
         assert!(
             backend
                 .submit_turn(None, vec![], None)
                 .unwrap_err()
                 .to_string()
-                .contains("not implemented")
+                .contains("no active turn")
         );
     }
 }

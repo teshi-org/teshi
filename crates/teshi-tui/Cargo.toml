@@ -9,6 +9,7 @@ repository = "https://github.com/teshi-org/teshi"
 publish = false
 
 [dependencies]
+teshi-acp.workspace = true
 teshi-update.workspace = true
 anyhow.workspace = true
 arboard = "3"

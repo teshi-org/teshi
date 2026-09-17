@@ -10,6 +10,12 @@ test-fixtures = []
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+teshi-acp.workspace = true
 teshi-agent.workspace = true
 teshi-core.workspace = true
 teshi-engine.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -96,7 +96,11 @@ pub struct AgentThread {
 
 impl AgentThread {
     pub fn new(id: usize, title: &str) -> Self {
-        Self::new_with_backend(id, title, teshi_agent::backend::AgentBackendKind::Native)
+        let kind = match std::env::var("TESHI_AGENT_BACKEND").as_deref() {
+            Ok("acp") => teshi_agent::backend::AgentBackendKind::Acp,
+            _ => teshi_agent::backend::AgentBackendKind::Native,
+        };
+        Self::new_with_backend(id, title, kind)
     }
 
     pub fn new_with_backend(
@@ -1400,6 +1404,9 @@ impl App {
 
     /// Spawn the LLM worker when the shared profile store or `TESHI_LLM_*` is usable.
     pub fn spawn_llm_if_configured(&mut self) {
+        if self.agent().backend.kind() == teshi_agent::backend::AgentBackendKind::Acp {
+            return;
+        }
         if self.agent_mut().backend.is_connected() {
             return;
         }
@@ -1438,6 +1445,51 @@ impl App {
     }
 
     fn start_agent_backend(&mut self, agent_idx: usize) -> bool {
+        if self.agents[agent_idx].backend.kind() == teshi_agent::backend::AgentBackendKind::Acp
+            && self.agents[agent_idx].backend.status()
+                == teshi_agent::backend::AgentBackendStatus::Unavailable
+        {
+            let cwd = self.find_project_dir().to_path_buf();
+            let command = match std::env::var_os("TESHI_ACP_PROGRAM") {
+                Some(program) => {
+                    let args = std::env::var("TESHI_ACP_ARGS_JSON")
+                        .ok()
+                        .map(|value| serde_json::from_str::<Vec<String>>(&value))
+                        .transpose();
+                    match args {
+                        Ok(args) => Ok(teshi_acp::AcpAgentCommand {
+                            program: program.into(),
+                            args: args.unwrap_or_default(),
+                            cwd,
+                            env: std::collections::HashMap::new(),
+                        }),
+                        Err(error) => Err(anyhow::anyhow!("invalid TESHI_ACP_ARGS_JSON: {error}")),
+                    }
+                }
+                None => teshi_acp::CursorAcpConfig {
+                    executable: None,
+                    cwd,
+                    env: std::collections::HashMap::new(),
+                }
+                .command()
+                .map_err(anyhow::Error::from),
+            };
+            match command.and_then(|command| {
+                let mut config = teshi_agent_runtime::backend::AcpBackendConfig::new(command);
+                config.auth_method = std::env::var("TESHI_ACP_AUTH_METHOD").ok();
+                if std::env::var("TESHI_ACP_PERMISSION_POLICY").as_deref() == Ok("auto") {
+                    config.permission_policy = teshi_acp::PermissionPolicy::Auto;
+                }
+                self.agents[agent_idx].backend.configure_acp(config)
+            }) {
+                Ok(()) => {}
+                Err(error) => {
+                    self.agents[agent_idx].status = AiStatus::Error;
+                    self.status = format!("AI backend unavailable: {error}");
+                    return false;
+                }
+            }
+        }
         match self.agents[agent_idx].backend.start() {
             Ok(()) => true,
             Err(error) => {
@@ -1663,6 +1715,12 @@ impl App {
                         if i == self.selected_agent {
                             self.status = format!("AI: {message}");
                         }
+                    }
+                    Ok(Some(AgentBackendEvent::ExternalToolActivity { title, status })) => {
+                        self.agents[i].tool_status = Some(match status {
+                            Some(status) => format!("{title}: {status}"),
+                            None => title,
+                        });
                     }
                     Ok(Some(AgentBackendEvent::MessageChunk { .. })) => {}
                     Ok(None) | Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -1948,7 +2006,9 @@ impl App {
         if !self.agent().backend.is_connected() {
             self.spawn_llm_if_configured();
         }
-        if !crate::llm::is_configured() {
+        if self.agent().backend.kind() == teshi_agent::backend::AgentBackendKind::Native
+            && !crate::llm::is_configured()
+        {
             self.agent_mut().messages_mut().push(AiChatMessage {
                 role: AiRole::Assistant,
                 content: "AI is not configured. Run 'teshi auth login', open the model panel, or set TESHI_LLM_API_KEY in your environment.".to_string(),
@@ -7802,8 +7862,10 @@ mod tests {
             app.agents[0].backend.kind(),
             teshi_agent::backend::AgentBackendKind::Acp
         );
-        assert!(app.status.contains("ACP agent backend is not implemented"));
-        assert_eq!(app.agents[0].status, AiStatus::Error);
+        assert_ne!(
+            app.agents[0].backend.kind(),
+            teshi_agent::backend::AgentBackendKind::Native
+        );
     }
 
     #[test]

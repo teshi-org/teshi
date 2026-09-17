@@ -50,6 +50,11 @@ pub enum AgentBackendEvent {
         assistant_message_index: usize,
         finish_reason: Option<String>,
     },
+    /// Progress from a tool owned and executed by the external ACP agent.
+    ExternalToolActivity {
+        title: String,
+        status: Option<String>,
+    },
     Failed(String),
     Ignored,
 }
