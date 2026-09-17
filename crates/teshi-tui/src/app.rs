@@ -5,7 +5,6 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 
 use crate::bdd_nav::{
     bdd_editor_nav_rows, bdd_step_rows, current_step_keyword_index, delete_scenario_block,
@@ -55,29 +54,7 @@ pub enum MainTab {
     TestPoints,
 }
 
-/// A single message in the AI chat history.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AiChatMessage {
-    pub role: AiRole,
-    pub content: String,
-    /// Tool calls included in an assistant message (for function calling).
-    pub tool_calls: Option<Vec<crate::llm::ToolCall>>,
-    /// The tool call ID this message responds to (for `Tool` role).
-    pub tool_call_id: Option<String>,
-    /// DeepSeek V4 thinking chain — preserved across tool-call turns.
-    pub reasoning_content: Option<String>,
-    /// Optional source tag for UI display (e.g., `"MindMap"`).
-    pub source: Option<String>,
-}
-
-/// Who sent the message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AiRole {
-    User,
-    Assistant,
-    /// A tool result message fed back to the LLM.
-    Tool,
-}
+pub use teshi_agent_runtime::{AiChatMessage, AiRole};
 
 /// Current state of the AI interaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,16 +72,12 @@ pub struct AgentThread {
     pub id: usize,
     pub title: String,
     pub status: AiStatus,
-    pub messages: Vec<AiChatMessage>,
     pub input: String,
     pub input_cursor: usize,
-    pub partial_response: String,
     pub tool_status: Option<String>,
     pub scroll_offset: usize,
     pub horizontal_scroll: usize,
-    pub llm_handle: Option<crate::llm::LlmHandle>,
-    pub llm_rx: Option<std::sync::mpsc::Receiver<crate::llm::LlmEvent>>,
-    agent_loop_count: u32,
+    native_runtime: teshi_agent_runtime::NativeAgentRuntime,
     /// Cumulative input tokens across all requests for this agent.
     pub total_input_tokens: u64,
     /// Cumulative output tokens across all requests for this agent.
@@ -127,16 +100,14 @@ impl AgentThread {
             id,
             title: title.to_string(),
             status: AiStatus::Idle,
-            messages: Vec::new(),
             input: String::new(),
             input_cursor: 0,
-            partial_response: String::new(),
             tool_status: None,
             scroll_offset: 0,
             horizontal_scroll: 0,
-            llm_handle: None,
-            llm_rx: None,
-            agent_loop_count: 0,
+            native_runtime: teshi_agent_runtime::NativeAgentRuntime::new(
+                teshi_agent_runtime::max_agent_iterations(),
+            ),
             total_input_tokens: 0,
             total_output_tokens: 0,
             last_input_tokens: None,
@@ -144,6 +115,20 @@ impl AgentThread {
             latest_visual_observation: None,
             last_finish_reason: None,
         }
+    }
+}
+
+impl std::ops::Deref for AgentThread {
+    type Target = teshi_agent_runtime::NativeAgentRuntime;
+
+    fn deref(&self) -> &Self::Target {
+        &self.native_runtime
+    }
+}
+
+impl std::ops::DerefMut for AgentThread {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.native_runtime
     }
 }
 
@@ -1420,9 +1405,7 @@ impl App {
                     "LLM configured: model={}, base_url={}, provider={}",
                     config.model, config.base_url, config.provider
                 );
-                let (handle, rx) = crate::llm::spawn_llm(config);
-                self.agent_mut().llm_handle = Some(handle);
-                self.agent_mut().llm_rx = Some(rx);
+                self.agent_mut().native_runtime.attach_model(config);
             }
             Ok(_) => {
                 self.status =
@@ -1433,6 +1416,13 @@ impl App {
                 self.status = format!("LLM not configured: {e}");
             }
         }
+    }
+
+    fn cancel_native_turn(&mut self) {
+        let agent = self.agent_mut();
+        agent.native_runtime.cancel();
+        agent.status = AiStatus::Idle;
+        agent.tool_status = None;
     }
 
     /// Activate the saved active profile (if any) that has a matching file on disk.
@@ -1464,9 +1454,9 @@ impl App {
             );
             return;
         }
-        let (handle, rx) = crate::llm::spawn_llm(config);
-        self.agent_mut().llm_handle = Some(handle);
-        self.agent_mut().llm_rx = Some(rx);
+        self.agent_mut().native_runtime.attach_model(config);
+        self.agent_mut().status = AiStatus::Idle;
+        self.agent_mut().tool_status = None;
         self.active_model_label = Some(format!("{} ({})", profile.name, profile.model_id));
         self.status = format!("Switched to model: {}", profile.name);
     }
@@ -1489,52 +1479,23 @@ impl App {
         &self.project.root_dir
     }
 
-    /// Poll the LLM response channel and push completed responses into chat history.
-    ///
-    /// When the LLM requests tool calls, this method executes them and
-    /// re-invokes the LLM with the results (the "agent loop") until a plain
-    /// text response is received or the iteration limit (10) is reached.
+    /// Apply native runtime progress to the TUI and provide Teshi's host tools.
+    /// The runtime owns model events, conversation records, and continuation.
     pub fn poll_llm_events(&mut self) {
+        use teshi_agent_runtime::NativeRuntimeEvent;
         for i in 0..self.agents.len() {
-            let Some(rx) = self.agents[i].llm_rx.take() else {
-                continue;
-            };
-            let mut keep_rx = true;
             loop {
-                match rx.try_recv() {
-                    Ok(crate::llm::LlmEvent::Done {
-                        full_text,
-                        reasoning_content,
+                match self.agents[i].native_runtime.try_next_event() {
+                    Ok(Some(NativeRuntimeEvent::Ignored)) => continue,
+                    Ok(Some(NativeRuntimeEvent::Completed {
                         model,
                         input_tokens,
                         output_tokens,
                         finish_reason,
-                    }) => {
+                    })) => {
                         self.agents[i].last_finish_reason = finish_reason;
-                        if self.agents[i].partial_response.is_empty() {
-                            self.agents[i].messages.push(AiChatMessage {
-                                role: AiRole::Assistant,
-                                content: full_text,
-                                tool_calls: None,
-                                tool_call_id: None,
-                                reasoning_content,
-                                source: None,
-                            });
-                        } else {
-                            let content = std::mem::take(&mut self.agents[i].partial_response);
-                            self.agents[i].messages.push(AiChatMessage {
-                                role: AiRole::Assistant,
-                                content,
-                                tool_calls: None,
-                                tool_call_id: None,
-                                reasoning_content,
-                                source: None,
-                            });
-                        }
-                        self.agents[i].partial_response.clear();
                         self.agents[i].status = AiStatus::Idle;
                         self.agents[i].tool_status = None;
-                        self.agents[i].agent_loop_count = 0;
                         self.agents[i].total_input_tokens += input_tokens.unwrap_or(0) as u64;
                         self.agents[i].last_input_tokens = input_tokens;
                         self.agents[i].total_output_tokens += output_tokens.unwrap_or(0) as u64;
@@ -1542,62 +1503,38 @@ impl App {
                             self.status = format!("AI response received ({model})");
                         }
                     }
-                    Ok(crate::llm::LlmEvent::ToolCallRequest {
+                    Ok(Some(NativeRuntimeEvent::ToolCalls {
                         tool_calls,
-                        reasoning_content,
+                        assistant_message_index: assistant_msg_idx,
                         finish_reason,
-                        ..
-                    }) => {
+                    })) => {
                         self.agents[i].last_finish_reason = finish_reason;
-                        let partial_text = std::mem::take(&mut self.agents[i].partial_response);
-                        self.agents[i].messages.push(AiChatMessage {
-                            role: AiRole::Assistant,
-                            content: partial_text,
-                            tool_calls: Some(tool_calls.clone()),
-                            tool_call_id: None,
-                            reasoning_content,
-                            source: None,
-                        });
-                        // Save the index of the assistant message so we can update
-                        // tool call durations after execution.
-                        let assistant_msg_idx = self.agents[i].messages.len() - 1;
-                        let mut pending_queued = false;
-                        for tc in &tool_calls {
-                            self.agents[i].tool_status =
-                                Some(format!("AI is calling {}...", tc.name));
-                            let pending_before = self.pending_agent_changes.len();
-                            let tool_start = std::time::Instant::now();
-                            match teshi_agent::execute_tool(
-                                self,
-                                &tc.name,
-                                &tc.arguments,
-                                &tc.id,
-                                i,
-                            ) {
-                                Ok(result) => {
-                                    let elapsed = tool_start.elapsed();
-                                    let pending_after = self.pending_agent_changes.len();
-                                    if pending_after > pending_before {
-                                        pending_queued = true;
-                                    } else {
-                                        self.agents[i].messages.push(AiChatMessage {
-                                            role: AiRole::Tool,
-                                            content: result,
-                                            tool_calls: None,
-                                            tool_call_id: Some(tc.id.clone()),
-                                            reasoning_content: None,
-                                            source: None,
-                                        });
-                                    }
-                                    if tc.name == "observe_page"
-                                        && self.agents[i].latest_visual_observation.is_some()
-                                    {
-                                        let observation = self.agents[i]
-                                            .latest_visual_observation
-                                            .as_ref()
-                                            .expect("checked above");
-                                        let mut content =
-                                            "[Browser visual observation]\nCurrent viewport after the requested observation.".to_string();
+                        let mut runtime = std::mem::replace(
+                            &mut self.agents[i].native_runtime,
+                            teshi_agent_runtime::NativeAgentRuntime::new(
+                                teshi_agent_runtime::max_agent_iterations(),
+                            ),
+                        );
+                        let pending_queued = runtime.execute_tool_batch(
+                            assistant_msg_idx,
+                            &tool_calls,
+                            |tc| {
+                                self.agents[i].tool_status =
+                                    Some(format!("AI is calling {}...", tc.name));
+                                let pending_before = self.pending_agent_changes.len();
+                                let result = teshi_agent::execute_tool(
+                                    self,
+                                    &tc.name,
+                                    &tc.arguments,
+                                    &tc.id,
+                                    i,
+                                )
+                                .map_err(|error| error.to_string());
+                                let pending_approval =
+                                    result.is_ok() && self.pending_agent_changes.len() > pending_before;
+                                let observation_message = if result.is_ok() && tc.name == "observe_page" {
+                                    self.agents[i].latest_visual_observation.as_ref().map(|observation| {
+                                        let mut content = "[Browser visual observation]\nCurrent viewport after the requested observation.".to_string();
                                         if let Some(url) = &observation.url {
                                             content.push_str("\nURL: ");
                                             content.push_str(url);
@@ -1606,60 +1543,64 @@ impl App {
                                             content.push_str("\nTitle: ");
                                             content.push_str(title);
                                         }
-                                        self.agents[i].messages.push(AiChatMessage {
-                                            role: AiRole::User,
-                                            content,
-                                            tool_calls: None,
-                                            tool_call_id: None,
-                                            reasoning_content: None,
-                                            source: Some("browser_visual_observation".into()),
-                                        });
-                                    }
-                                    // Update duration on the assistant message's tool call
-                                    if let Some(msg) =
-                                        self.agents[i].messages.get_mut(assistant_msg_idx)
-                                        && let Some(ref mut tcs) = msg.tool_calls
-                                    {
-                                        for t in tcs.iter_mut() {
-                                            if t.id == tc.id {
-                                                t.execution_duration_ms =
-                                                    Some(elapsed.as_millis() as u64);
-                                            }
-                                        }
-                                    }
+                                        content
+                                    })
+                                } else {
+                                    None
+                                };
+                                teshi_agent_runtime::NativeToolExecution {
+                                    result,
+                                    pending_approval,
+                                    observation_message,
                                 }
-                                Err(e) => {
-                                    let elapsed = tool_start.elapsed();
-                                    self.agents[i].messages.push(AiChatMessage {
+                            },
+                        );
+                        self.agents[i].native_runtime = runtime;
+                        if pending_queued && !self.approval_mode.requires_manual_approval() {
+                            self.agents[i].partial_response.clear();
+                            self.agents[i].tool_status = None;
+                            while self.has_agent_change_prompt() {
+                                let agent_idx = self.pending_agent_changes[0].agent_idx;
+                                let (tool_call_id, result) = match self.accept_agent_change() {
+                                    Ok((id, res)) => (id, res),
+                                    Err(e) => {
+                                        self.pending_agent_changes.remove(0);
+                                        self.clear_pending_change_state();
+                                        (String::new(), format!("Error: {e}"))
+                                    }
+                                };
+                                if !tool_call_id.is_empty() {
+                                    self.agents[agent_idx].messages.push(AiChatMessage {
                                         role: AiRole::Tool,
-                                        content: format!("Error: {e}"),
+                                        content: result,
                                         tool_calls: None,
-                                        tool_call_id: Some(tc.id.clone()),
+                                        tool_call_id: Some(tool_call_id),
                                         reasoning_content: None,
                                         source: None,
                                     });
-                                    // Update duration even on error
-                                    if let Some(msg) =
-                                        self.agents[i].messages.get_mut(assistant_msg_idx)
-                                        && let Some(ref mut tcs) = msg.tool_calls
-                                    {
-                                        for t in tcs.iter_mut() {
-                                            if t.id == tc.id {
-                                                t.execution_duration_ms =
-                                                    Some(elapsed.as_millis() as u64);
-                                            }
-                                        }
-                                    }
                                 }
                             }
                         }
-                        if pending_queued {
-                            if self.approval_mode.requires_manual_approval() {
-                                // Manual mode: pause and wait for user Y/N
+                        use teshi_agent_runtime::NativeContinuation;
+                        let decision = self.agents[i].native_runtime.after_tools(
+                            self.generation_stage,
+                            pending_queued,
+                            self.approval_mode.requires_manual_approval(),
+                            !self.project.features.is_empty(),
+                        );
+                        match decision {
+                            NativeContinuation::RequestModel { allow_tools } => {
+                                if !allow_tools && i == self.selected_agent {
+                                    self.status =
+                                        "Tool call limit reached, requesting final response…"
+                                            .to_string();
+                                }
+                                self.send_native_followup(i, allow_tools);
+                            }
+                            NativeContinuation::WaitForApproval => {
                                 self.agents[i].partial_response.clear();
                                 self.agents[i].status = AiStatus::AwaitingApproval;
                                 self.agents[i].tool_status = None;
-                                // Advance stage to Confirming when pipeline is active
                                 if !matches!(
                                     self.generation_stage,
                                     teshi_agent::pipeline::GenerationStage::Idle
@@ -1668,157 +1609,46 @@ impl App {
                                     self.generation_stage =
                                         teshi_agent::pipeline::GenerationStage::Confirming;
                                 }
-                            } else {
-                                // Auto / Bypass mode: auto-accept all pending changes
+                            }
+                            NativeContinuation::WaitForHumanReview => {
                                 self.agents[i].partial_response.clear();
+                                self.agents[i].status = AiStatus::Idle;
                                 self.agents[i].tool_status = None;
-                                while self.has_agent_change_prompt() {
-                                    let agent_idx = self.pending_agent_changes[0].agent_idx;
-                                    let (tool_call_id, result) = match self.accept_agent_change() {
-                                        Ok((id, res)) => (id, res),
-                                        Err(e) => {
-                                            self.pending_agent_changes.remove(0);
-                                            self.clear_pending_change_state();
-                                            (String::new(), format!("Error: {e}"))
-                                        }
-                                    };
-                                    if !tool_call_id.is_empty() {
-                                        self.agents[agent_idx].messages.push(AiChatMessage {
-                                            role: AiRole::Tool,
-                                            content: result,
-                                            tool_calls: None,
-                                            tool_call_id: Some(tool_call_id),
-                                            reasoning_content: None,
-                                            source: None,
-                                        });
-                                    }
-                                }
-                                // Continue the agent loop
-                                self.agents[i].agent_loop_count += 1;
-                                let max_iter = max_agent_iterations();
-                                if self.agents[i].agent_loop_count > max_iter
-                                    && self.agents[i].llm_handle.is_some()
-                                {
-                                    if i == self.selected_agent {
-                                        self.status =
-                                            "Tool call limit reached, requesting final response…"
-                                                .to_string();
-                                    }
-                                    self.compact_context_if_needed(i);
-                                    let messages = self.build_chat_messages_for_agent(i);
-                                    let _ = self.agents[i].llm_handle.as_ref().unwrap().send(
-                                        crate::llm::LlmRequest::Chat {
-                                            system: Some(self.ai_system_prompt(None, i)),
-                                            messages,
-                                            tools: None,
-                                        },
-                                    );
-                                } else if self.agents[i].llm_handle.is_some() {
-                                    self.compact_context_if_needed(i);
-                                    let messages = self.build_chat_messages_for_agent(i);
-                                    let profile = self.agent_profile(i);
-                                    let allowed: Option<&[String]> =
-                                        profile.and_then(|p| match &p.tools {
-                                            teshi_agent::definition::ToolPermission::All => None,
-                                            teshi_agent::definition::ToolPermission::None => {
-                                                Some(&[] as &[String])
-                                            }
-                                            teshi_agent::definition::ToolPermission::Whitelist(
-                                                list,
-                                            ) => Some(list.as_slice()),
-                                        });
-                                    let tools = Some(teshi_agent::get_tools(allowed));
-                                    let _ = self.agents[i].llm_handle.as_ref().unwrap().send(
-                                        crate::llm::LlmRequest::Chat {
-                                            system: Some(self.ai_system_prompt(None, i)),
-                                            messages,
-                                            tools,
-                                        },
-                                    );
-                                }
-                            }
-                        } else if self.generation_stage.is_human_review_gate() {
-                            // Hard business gate: pause for human test-point review.
-                            // ApprovalMode::{Auto, Bypass} must not advance this stage.
-                            self.agents[i].partial_response.clear();
-                            self.agents[i].status = AiStatus::Idle;
-                            self.agents[i].tool_status = None;
-                            self.agents[i].agent_loop_count = 0;
-                            if i == self.selected_agent {
-                                self.status = "Review proposed test points in Test Points tab [5], then press c to continue generation".to_string();
-                            }
-                        } else if self.project.features.is_empty() {
-                            self.agents[i].partial_response.clear();
-                            self.agents[i].status = AiStatus::Idle;
-                            self.agents[i].tool_status = None;
-                            self.agents[i].agent_loop_count = 0;
-                            if i == self.selected_agent {
-                                self.status = "The project directory has no .feature files. Add one to begin.".to_string();
-                            }
-                        } else {
-                            self.agents[i].agent_loop_count += 1;
-                            let max_iter = max_agent_iterations();
-                            if self.agents[i].agent_loop_count > max_iter {
-                                // Graceful fallback: no tools → LLM produces a text-only
-                                // wrap-up response (Chrys-style) instead of a hard error.
                                 if i == self.selected_agent {
-                                    self.status =
-                                        "Tool call limit reached, requesting final response…"
-                                            .to_string();
+                                    self.status = "Review proposed test points in Test Points tab [5], then press c to continue generation".to_string();
                                 }
-                                if self.agents[i].llm_handle.is_some() {
-                                    self.compact_context_if_needed(i);
-                                    let messages = self.build_chat_messages_for_agent(i);
-                                    let handle = self.agents[i].llm_handle.as_ref().unwrap();
-                                    let _ = handle.send(crate::llm::LlmRequest::Chat {
-                                        system: Some(self.ai_system_prompt(None, i)),
-                                        messages,
-                                        tools: None,
-                                    });
-                                }
-                            } else if self.agents[i].llm_handle.is_some() {
-                                self.compact_context_if_needed(i);
-                                let messages = self.build_chat_messages_for_agent(i);
-                                let profile = self.agent_profile(i);
-                                let allowed: Option<&[String]> =
-                                    profile.and_then(|p| match &p.tools {
-                                        teshi_agent::definition::ToolPermission::All => None,
-                                        teshi_agent::definition::ToolPermission::None => {
-                                            Some(&[] as &[String])
-                                        }
-                                        teshi_agent::definition::ToolPermission::Whitelist(
-                                            list,
-                                        ) => Some(list.as_slice()),
-                                    });
-                                let tools = Some(teshi_agent::get_tools(allowed));
-                                let handle = self.agents[i].llm_handle.as_ref().unwrap();
-                                let _ = handle.send(crate::llm::LlmRequest::Chat {
-                                    system: Some(self.ai_system_prompt(None, i)),
-                                    messages,
-                                    tools,
-                                });
                             }
+                            NativeContinuation::StopEmptyProject => {
+                                self.agents[i].partial_response.clear();
+                                self.agents[i].status = AiStatus::Idle;
+                                self.agents[i].tool_status = None;
+                                if i == self.selected_agent {
+                                    self.status = "The project directory has no .feature files. Add one to begin.".to_string();
+                                }
+                            }
+                            NativeContinuation::StopAfterFailure => {
+                                self.agents[i].status = AiStatus::Error;
+                                self.status =
+                                    "AI error: model kept calling tools after final-response limit"
+                                        .to_string();
+                            }
+                            NativeContinuation::Cancelled => {}
                         }
                     }
-                    Ok(crate::llm::LlmEvent::Error { message }) => {
+                    Ok(Some(NativeRuntimeEvent::Failed(message))) => {
                         self.agents[i].partial_response.clear();
                         self.agents[i].status = AiStatus::Idle;
                         self.agents[i].tool_status = None;
-                        self.agents[i].agent_loop_count = 0;
                         if i == self.selected_agent {
                             self.status = format!("AI: {message}");
                         }
                     }
-                    Ok(crate::llm::LlmEvent::Chunk { content }) => {
-                        self.agents[i].partial_response.push_str(&content);
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Ok(Some(NativeRuntimeEvent::MessageChunk { .. })) => {}
+                    Ok(None) | Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        keep_rx = false;
                         self.agents[i].partial_response.clear();
                         self.agents[i].status = AiStatus::Error;
                         self.agents[i].tool_status = None;
-                        self.agents[i].agent_loop_count = 0;
                         if i == self.selected_agent {
                             self.status = "AI error: background LLM thread has exited".to_string();
                         }
@@ -1826,9 +1656,26 @@ impl App {
                     }
                 }
             }
-            if keep_rx {
-                self.agents[i].llm_rx = Some(rx);
-            }
+        }
+    }
+
+    fn send_native_followup(&mut self, agent_idx: usize, allow_tools: bool) {
+        self.compact_context_if_needed(agent_idx);
+        let messages = self.build_chat_messages_for_agent(agent_idx);
+        let system = Some(self.ai_system_prompt(None, agent_idx));
+        let allowed: Option<&[String]> =
+            self.agent_profile(agent_idx).and_then(|p| match &p.tools {
+                teshi_agent::definition::ToolPermission::All => None,
+                teshi_agent::definition::ToolPermission::None => Some(&[] as &[String]),
+                teshi_agent::definition::ToolPermission::Whitelist(list) => Some(list.as_slice()),
+            });
+        let tools = allow_tools.then(|| teshi_agent::get_tools(allowed));
+        if let Err(error) = self.agents[agent_idx]
+            .native_runtime
+            .send_chat(system, messages, tools)
+        {
+            self.agents[agent_idx].status = AiStatus::Error;
+            self.status = format!("AI error: {error}");
         }
     }
 
@@ -2072,9 +1919,12 @@ impl App {
         }
         self.agent_mut().status = AiStatus::Waiting;
         self.agent_mut().partial_response.clear();
-        self.agent_mut().agent_loop_count = 0;
+        self.agent_mut().native_runtime.start();
         self.status = "Sending message to AI...".to_string();
 
+        if self.agent().llm_handle.is_none() {
+            self.spawn_llm_if_configured();
+        }
         if !crate::llm::is_configured() {
             self.agent_mut().messages.push(AiChatMessage {
                 role: AiRole::Assistant,
@@ -2089,7 +1939,6 @@ impl App {
             self.status = "AI not configured".to_string();
         } else if self.agent().llm_handle.is_some() {
             self.compact_context_if_needed(self.selected_agent);
-            use crate::llm::LlmRequest;
             let messages = self.build_chat_messages_for_agent(self.selected_agent);
             let profile = self.agent_profile(self.selected_agent);
             let allowed: Option<&[String]> = profile.and_then(|p| match &p.tools {
@@ -2098,18 +1947,15 @@ impl App {
                 teshi_agent::definition::ToolPermission::Whitelist(list) => Some(list.as_slice()),
             });
             let tools = Some(teshi_agent::get_tools(allowed));
-            let handle = self.agent().llm_handle.as_ref().unwrap();
-            if handle
-                .send(LlmRequest::Chat {
-                    system: Some(self.ai_system_prompt(Some(&user_msg), self.selected_agent)),
-                    messages,
-                    tools,
-                })
-                .is_err()
+            let system = Some(self.ai_system_prompt(Some(&user_msg), self.selected_agent));
+            if let Err(error) = self
+                .agent_mut()
+                .native_runtime
+                .send_chat(system, messages, tools)
             {
                 self.agent_mut().status = AiStatus::Error;
                 self.agent_mut().partial_response.clear();
-                self.status = "AI error: background LLM thread has exited".to_string();
+                self.status = format!("AI error: {error}");
             }
         } else {
             self.agent_mut().status = AiStatus::Error;
@@ -2243,7 +2089,7 @@ impl App {
                 // Resume the agent loop when an LLM handle is available.
                 if self.agents[agent_idx].llm_handle.is_some() {
                     self.agents[agent_idx].status = AiStatus::Waiting;
-                    self.agents[agent_idx].agent_loop_count = 0;
+                    self.agents[agent_idx].native_runtime.start();
                     self.compact_context_if_needed(agent_idx);
                     let messages = self.build_chat_messages_for_agent(agent_idx);
                     let profile = self.agent_profile(agent_idx);
@@ -2255,13 +2101,14 @@ impl App {
                         }
                     });
                     let tools = Some(teshi_agent::get_tools(allowed));
-                    let _ = self.agents[agent_idx].llm_handle.as_ref().unwrap().send(
-                        crate::llm::LlmRequest::Chat {
-                            system: Some(self.ai_system_prompt(None, agent_idx)),
-                            messages,
-                            tools,
-                        },
-                    );
+                    let system = Some(self.ai_system_prompt(None, agent_idx));
+                    if let Err(error) = self.agents[agent_idx]
+                        .native_runtime
+                        .send_chat(system, messages, tools)
+                    {
+                        self.agents[agent_idx].status = AiStatus::Error;
+                        self.status = format!("AI error: {error}");
+                    }
                 }
                 Ok(())
             }
@@ -2392,7 +2239,11 @@ impl App {
         tool_call_id: String,
         result: String,
     ) {
-        // Append tool result message
+        if self.agents[agent_idx].native_runtime.state()
+            != teshi_agent_runtime::NativeTurnState::WaitingForApproval
+        {
+            return;
+        }
         self.agents[agent_idx].messages.push(AiChatMessage {
             role: AiRole::Tool,
             content: result,
@@ -2401,58 +2252,32 @@ impl App {
             reasoning_content: None,
             source: None,
         });
-
-        // If the project is empty, terminate gracefully
-        if self.project.features.is_empty() {
-            self.agents[agent_idx].partial_response.clear();
-            self.agents[agent_idx].status = AiStatus::Idle;
-            self.agents[agent_idx].tool_status = None;
-            self.agents[agent_idx].agent_loop_count = 0;
-            self.status =
-                "The project directory has no .feature files. Add one to begin.".to_string();
+        if self.has_agent_change_prompt() {
             return;
         }
-
-        // Re-invoke the LLM to continue the agent loop
-        // Compact context before sending to avoid exceeding token limits
-        self.compact_context_if_needed(agent_idx);
-        // Restore stage from Confirming after user decision
         if self.generation_stage == teshi_agent::pipeline::GenerationStage::Confirming {
             self.generation_stage = teshi_agent::pipeline::GenerationStage::Writing;
         }
-        let messages = self.build_chat_messages_for_agent(agent_idx);
-        let system_prompt = self.ai_system_prompt(None, agent_idx);
-        let allowed_tools: Option<Vec<String>> =
-            self.agent_profile(agent_idx).and_then(|p| match &p.tools {
-                teshi_agent::definition::ToolPermission::All => None,
-                teshi_agent::definition::ToolPermission::None => Some(vec![]),
-                teshi_agent::definition::ToolPermission::Whitelist(list) => Some(list.clone()),
-            });
-        let agent = &mut self.agents[agent_idx];
-        agent.agent_loop_count += 1;
-        let max_iter = max_agent_iterations();
-        if agent.agent_loop_count > max_iter {
-            // Graceful fallback: no tools → LLM produces a text-only
-            // wrap-up response (Chrys-style) instead of a hard error.
-            self.status = "Tool call limit reached, requesting final response…".to_string();
-            if let Some(ref handle) = agent.llm_handle {
-                agent.status = AiStatus::Waiting;
-                agent.tool_status = Some("Teshi is thinking...".into());
-                let _ = handle.send(crate::llm::LlmRequest::Chat {
-                    system: Some(system_prompt),
-                    messages,
-                    tools: None,
-                });
+        use teshi_agent_runtime::NativeContinuation;
+        match self.agents[agent_idx]
+            .native_runtime
+            .resume_after_approval(!self.project.features.is_empty())
+        {
+            NativeContinuation::RequestModel { allow_tools } => {
+                self.agents[agent_idx].status = AiStatus::Waiting;
+                self.agents[agent_idx].tool_status = Some("Teshi is thinking...".into());
+                if !allow_tools {
+                    self.status = "Tool call limit reached, requesting final response…".to_string();
+                }
+                self.send_native_followup(agent_idx, allow_tools);
             }
-        } else if let Some(ref handle) = agent.llm_handle {
-            agent.status = AiStatus::Waiting;
-            agent.tool_status = Some("Teshi is thinking...".into());
-            let tools = Some(teshi_agent::get_tools(allowed_tools.as_deref()));
-            let _ = handle.send(crate::llm::LlmRequest::Chat {
-                system: Some(system_prompt),
-                messages,
-                tools,
-            });
+            NativeContinuation::StopEmptyProject => {
+                self.agents[agent_idx].status = AiStatus::Idle;
+                self.agents[agent_idx].tool_status = None;
+                self.status =
+                    "The project directory has no .feature files. Add one to begin.".to_string();
+            }
+            _ => {}
         }
     }
 
@@ -2522,6 +2347,7 @@ impl App {
             self.status = "AI not configured".to_string();
             return;
         }
+        self.agents[agent_idx].native_runtime.start();
         self.compact_context_if_needed(agent_idx);
         let messages = self.build_chat_messages_for_agent(agent_idx);
         let profile = self.agent_profile(agent_idx);
@@ -2530,20 +2356,15 @@ impl App {
             teshi_agent::definition::ToolPermission::None => Some(&[] as &[String]),
             teshi_agent::definition::ToolPermission::Whitelist(list) => Some(list.as_slice()),
         });
-        use crate::llm::LlmRequest;
         let tools = Some(teshi_agent::get_tools(allowed));
-        let handle = self.agents[agent_idx].llm_handle.as_ref().unwrap();
-        if handle
-            .send(LlmRequest::Chat {
-                system: Some(self.ai_system_prompt(None, agent_idx)),
-                messages,
-                tools,
-            })
-            .is_err()
+        let system = Some(self.ai_system_prompt(None, agent_idx));
+        if let Err(error) = self.agents[agent_idx]
+            .native_runtime
+            .send_chat(system, messages, tools)
         {
             self.agents[agent_idx].status = AiStatus::Error;
             self.agents[agent_idx].partial_response.clear();
-            self.status = "AI error: background LLM thread has exited".to_string();
+            self.status = format!("AI error: {error}");
             return;
         }
         self.agents[agent_idx].status = AiStatus::Waiting;
@@ -4795,7 +4616,7 @@ impl App {
                     self.agent_mut().status = AiStatus::Waiting;
                     self.agent_mut().partial_response.clear();
                     self.agent_mut().scroll_offset = 0;
-                    self.agent_mut().agent_loop_count = 0;
+                    self.agent_mut().native_runtime.start();
                     self.status = "Sending MindMap context to AI...".to_string();
 
                     if !crate::llm::is_configured() {
@@ -4810,7 +4631,7 @@ impl App {
                         self.agent_mut().status = AiStatus::Idle;
                         self.agent_mut().partial_response.clear();
                         self.status = "AI not configured".to_string();
-                    } else if let Some(ref handle) = self.agent().llm_handle {
+                    } else if self.agent().llm_handle.is_some() {
                         let messages = self.build_chat_messages_for_agent(self.selected_agent);
                         let profile = self.agent_profile(self.selected_agent);
                         let allowed: Option<&[String]> = profile.and_then(|p| match &p.tools {
@@ -4821,17 +4642,15 @@ impl App {
                             }
                         });
                         let tools = Some(teshi_agent::get_tools(allowed));
-                        if handle
-                            .send(crate::llm::LlmRequest::Chat {
-                                system: Some(self.ai_system_prompt(None, self.selected_agent)),
-                                messages,
-                                tools,
-                            })
-                            .is_err()
+                        let system = Some(self.ai_system_prompt(None, self.selected_agent));
+                        if let Err(error) = self
+                            .agent_mut()
+                            .native_runtime
+                            .send_chat(system, messages, tools)
                         {
                             self.agent_mut().status = AiStatus::Error;
                             self.agent_mut().partial_response.clear();
-                            self.status = "AI error: background LLM thread has exited".to_string();
+                            self.status = format!("AI error: {error}");
                         }
                     } else {
                         self.agent_mut().status = AiStatus::Error;
@@ -5002,8 +4821,7 @@ impl App {
                                 self.model_profiles.len().saturating_sub(1);
                         }
                         // Engine may have activated a sibling; respawn from the new active.
-                        self.agent_mut().llm_handle = None;
-                        self.agent_mut().llm_rx = None;
+                        self.cancel_native_turn();
                         if let Some(id) = self.model_active_id.clone() {
                             if let Some(p) =
                                 self.model_profiles.iter().find(|p| p.id == id).cloned()
@@ -5925,9 +5743,7 @@ impl App {
                     || self.agent().status == AiStatus::AwaitingApproval
                 {
                     // Cancel the LLM request
-                    if let Some(ref handle) = self.agent().llm_handle {
-                        handle.cancel();
-                    }
+                    self.cancel_native_turn();
                     // Reset agent state
                     let agent = self.agent_mut();
                     agent.status = AiStatus::Idle;
@@ -6042,9 +5858,7 @@ impl App {
                     if self.agent().status == AiStatus::Waiting
                         || self.agent().status == AiStatus::AwaitingApproval
                     {
-                        if let Some(ref handle) = self.agent().llm_handle {
-                            handle.cancel();
-                        }
+                        self.cancel_native_turn();
                         let agent = self.agent_mut();
                         agent.partial_response.clear();
                         agent.tool_status = None;
@@ -7659,17 +7473,6 @@ fn parse_case_key(id: &str) -> Option<(usize, usize)> {
     Some((f_idx, s_idx))
 }
 
-/// Maximum number of tool-call iterations before the agent loop gracefully
-/// falls back to a final no-tools LLM request (Chrys-style).
-///
-/// Read from `TESHI_AI_MAX_ITERATIONS` env var; defaults to 100.
-fn max_agent_iterations() -> u32 {
-    std::env::var("TESHI_AI_MAX_ITERATIONS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(100)
-}
-
 impl App {
     /// Opens the auth management panel in the TUI.
     ///
@@ -7789,6 +7592,7 @@ impl App {
 
     /// Handle `/new` — start a new session.
     fn cmd_new(&mut self) -> Result<()> {
+        self.cancel_native_turn();
         // Save current session if there are messages
         if !self.agent().messages.is_empty() {
             let session = crate::session::Session::from_messages(
@@ -7804,7 +7608,6 @@ impl App {
         self.agent_mut().status = AiStatus::Idle;
         self.agent_mut().tool_status = None;
         self.agent_mut().scroll_offset = 0;
-        self.agent_mut().agent_loop_count = 0;
         self.status = "New session started".to_string();
         Ok(())
     }
@@ -7825,6 +7628,7 @@ impl App {
 
     /// Handle `/resume` — load the most recent session.
     fn cmd_resume(&mut self) -> Result<()> {
+        self.cancel_native_turn();
         let sessions = crate::session::Session::load_all();
         if let Some(s) = sessions.into_iter().next() {
             self.agent_mut().messages = s.messages;
@@ -7954,6 +7758,394 @@ mod tests {
         )
         .unwrap();
         (app, project, store)
+    }
+
+    #[test]
+    fn native_stream_chunks_complete_in_order() {
+        let (mut app, _project, _store) = slash_test_app();
+        let (tx, rx) = mpsc::channel();
+        app.agents[0].llm_rx = Some(rx);
+        app.agents[0].native_runtime.start();
+        app.agents[0].status = AiStatus::Waiting;
+        tx.send(crate::llm::LlmEvent::Chunk {
+            content: "first ".into(),
+        })
+        .unwrap();
+        tx.send(crate::llm::LlmEvent::Chunk {
+            content: "second".into(),
+        })
+        .unwrap();
+        tx.send(crate::llm::LlmEvent::Done {
+            full_text: "first second".into(),
+            reasoning_content: None,
+            model: "mock".into(),
+            input_tokens: None,
+            output_tokens: None,
+            finish_reason: None,
+        })
+        .unwrap();
+        app.poll_llm_events();
+        assert_eq!(
+            app.agents[0].messages.last().unwrap().content,
+            "first second"
+        );
+        assert_eq!(app.agents[0].status, AiStatus::Idle);
+        assert_eq!(
+            app.agents[0].native_runtime.state(),
+            teshi_agent_runtime::NativeTurnState::Completed
+        );
+    }
+
+    #[test]
+    fn cancelled_native_turn_ignores_late_tool_calls() {
+        let (mut app, _project, _store) = slash_test_app();
+        let (tx, rx) = mpsc::channel();
+        app.agents[0].llm_rx = Some(rx);
+        app.agents[0].native_runtime.start();
+        tx.send(crate::llm::LlmEvent::ToolCallRequest {
+            tool_calls: vec![crate::llm::ToolCall {
+                id: "late".into(),
+                name: "unknown_tool".into(),
+                arguments: "{}".into(),
+                execution_duration_ms: None,
+            }],
+            reasoning_content: None,
+            input_tokens: None,
+            output_tokens: None,
+            finish_reason: None,
+        })
+        .unwrap();
+        app.agents[0].native_runtime.cancel();
+        app.poll_llm_events();
+        assert!(app.agents[0].messages.is_empty());
+        assert_eq!(
+            app.agents[0].native_runtime.state(),
+            teshi_agent_runtime::NativeTurnState::Cancelled
+        );
+    }
+
+    #[test]
+    fn native_tool_error_stays_in_history_before_followup() {
+        let (mut app, _project, _store) = slash_test_app();
+        let (tx, rx) = mpsc::channel();
+        app.agents[0].llm_rx = Some(rx);
+        app.agents[0].native_runtime.start();
+        tx.send(crate::llm::LlmEvent::ToolCallRequest {
+            tool_calls: vec![crate::llm::ToolCall {
+                id: "bad".into(),
+                name: "unknown_tool".into(),
+                arguments: "{}".into(),
+                execution_duration_ms: None,
+            }],
+            reasoning_content: None,
+            input_tokens: None,
+            output_tokens: None,
+            finish_reason: None,
+        })
+        .unwrap();
+        app.poll_llm_events();
+        assert_eq!(app.agents[0].messages.len(), 2);
+        assert_eq!(app.agents[0].messages[0].role, AiRole::Assistant);
+        assert_eq!(app.agents[0].messages[1].role, AiRole::Tool);
+        assert_eq!(
+            app.agents[0].messages[1].tool_call_id.as_deref(),
+            Some("bad")
+        );
+        assert!(app.agents[0].messages[1].content.starts_with("Error:"));
+    }
+
+    #[test]
+    fn native_review_gate_stops_followup_after_tool_event() {
+        let (mut app, _project, _store) = slash_test_app();
+        let (tx, rx) = mpsc::channel();
+        app.agents[0].llm_rx = Some(rx);
+        app.agents[0].native_runtime.start();
+        app.generation_stage = teshi_agent::pipeline::GenerationStage::ReviewingTestPoints;
+        tx.send(crate::llm::LlmEvent::ToolCallRequest {
+            tool_calls: vec![crate::llm::ToolCall {
+                id: "proposal".into(),
+                name: "unknown_tool".into(),
+                arguments: "{}".into(),
+                execution_duration_ms: None,
+            }],
+            reasoning_content: None,
+            input_tokens: None,
+            output_tokens: None,
+            finish_reason: None,
+        })
+        .unwrap();
+        app.poll_llm_events();
+        assert_eq!(
+            app.agents[0].native_runtime.state(),
+            teshi_agent_runtime::NativeTurnState::WaitingForHumanReview
+        );
+        assert_eq!(app.agents[0].status, AiStatus::Idle);
+        assert_eq!(app.agents[0].messages.len(), 2);
+    }
+
+    #[test]
+    fn native_propose_test_points_enters_human_review_without_followup() {
+        let (mut app, _project, _store) = requirements_test_app();
+        teshi_agent::execute_tool(
+            &mut app,
+            "submit_requirements",
+            r#"{"feature_name":"Auth","scenario_descriptions":["login"]}"#,
+            "requirements",
+            0,
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel();
+        app.agents[0].llm_rx = Some(rx);
+        app.agents[0].native_runtime.start();
+        tx.send(crate::llm::LlmEvent::ToolCallRequest {
+            tool_calls: vec![crate::llm::ToolCall {
+                id: "proposal".into(),
+                name: "propose_test_points".into(),
+                arguments: r#"{"test_points":[{"title":"Valid login","objective":"User authenticates","hierarchy_path":["Auth","Login"]}]}"#.into(),
+                execution_duration_ms: None,
+            }],
+            reasoning_content: None,
+            input_tokens: None,
+            output_tokens: None,
+            finish_reason: None,
+        }).unwrap();
+        app.poll_llm_events();
+        assert_eq!(
+            app.generation_stage,
+            teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
+        );
+        assert_eq!(
+            app.agents[0].native_runtime.state(),
+            teshi_agent_runtime::NativeTurnState::WaitingForHumanReview
+        );
+        assert_eq!(app.agents[0].status, AiStatus::Idle);
+        assert_eq!(
+            app.authoring_ui
+                .artifacts
+                .as_ref()
+                .unwrap()
+                .test_points
+                .test_points
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn native_model_proposal_pauses_before_another_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0u8; 8192];
+            assert!(socket.read(&mut request).unwrap() > 0);
+            let args = serde_json::json!({"test_points":[{"title":"Valid login","objective":"User authenticates","hierarchy_path":["Auth","Login"]}]}).to_string();
+            let body = serde_json::json!({"model":"mock","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"proposal","type":"function","function":{"name":"propose_test_points","arguments":args}}]}}]}).to_string();
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            thread::sleep(Duration::from_millis(200));
+            listener.accept().is_ok()
+        });
+        let (mut app, _project, _store) = requirements_test_app();
+        teshi_agent::execute_tool(
+            &mut app,
+            "submit_requirements",
+            r#"{"feature_name":"Auth","scenario_descriptions":["login"]}"#,
+            "requirements",
+            0,
+        )
+        .unwrap();
+        app.agents[0]
+            .native_runtime
+            .attach_model(crate::llm::LlmConfig {
+                api_key: "test-only".into(),
+                base_url: format!("http://{addr}/v1"),
+                model: "mock".into(),
+                max_tokens: 256,
+                temperature: 0.0,
+                context_window: None,
+                provider: "openai".into(),
+                thinking: teshi_engine::DeepSeekThinking::High,
+                api_style: teshi_engine::ApiStyle::ChatCompletions,
+                stream: false,
+                http_headers: Default::default(),
+                chat_options: Default::default(),
+            });
+        app.agents[0].native_runtime.start();
+        app.agents[0]
+            .native_runtime
+            .send_chat(
+                Some("test".into()),
+                vec![],
+                Some(teshi_agent::get_tools(None)),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline
+            && app.agents[0].native_runtime.state()
+                == teshi_agent_runtime::NativeTurnState::WaitingForModel
+        {
+            app.poll_llm_events();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            app.generation_stage,
+            teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
+        );
+        assert_eq!(
+            app.agents[0].native_runtime.state(),
+            teshi_agent_runtime::NativeTurnState::WaitingForHumanReview
+        );
+        app.active_tab = MainTab::TestPoints;
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        assert!(
+            !server.join().unwrap(),
+            "human review must prevent another model request"
+        );
+    }
+
+    #[test]
+    fn native_model_multiple_tool_round_trips() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for round in 0..3 {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut received = Vec::new();
+                let mut buffer = [0u8; 4096];
+                loop {
+                    let n = socket.read(&mut buffer).unwrap();
+                    assert!(n > 0);
+                    received.extend_from_slice(&buffer[..n]);
+                    if let Some(header_end) =
+                        received.windows(4).position(|part| part == b"\r\n\r\n")
+                    {
+                        let headers = String::from_utf8_lossy(&received[..header_end]);
+                        let length: usize = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|value| value.trim().parse().unwrap())
+                            })
+                            .unwrap();
+                        if received.len() >= header_end + 4 + length {
+                            requests.push(
+                                serde_json::from_slice::<serde_json::Value>(
+                                    &received[header_end + 4..header_end + 4 + length],
+                                )
+                                .unwrap(),
+                            );
+                            break;
+                        }
+                    }
+                }
+                let body = if round < 2 {
+                    let call_id = format!("call-{}", round + 1);
+                    serde_json::json!({"model":"mock","choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":call_id,"type":"function","function":{"name":"get_project_info","arguments":"{}"}}]}}]})
+                } else {
+                    serde_json::json!({"model":"mock","choices":[{"message":{"role":"assistant","content":"finished"}}]})
+                }.to_string();
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            }
+            requests
+        });
+
+        let (mut app, _project, _store) = slash_test_app();
+        app.agents[0].native_runtime = teshi_agent_runtime::NativeAgentRuntime::new(1);
+        app.agents[0]
+            .native_runtime
+            .attach_model(crate::llm::LlmConfig {
+                api_key: "test-only".into(),
+                base_url: format!("http://{addr}/v1"),
+                model: "mock".into(),
+                max_tokens: 256,
+                temperature: 0.0,
+                context_window: None,
+                provider: "openai".into(),
+                thinking: teshi_engine::DeepSeekThinking::High,
+                api_style: teshi_engine::ApiStyle::ChatCompletions,
+                stream: false,
+                http_headers: Default::default(),
+                chat_options: Default::default(),
+            });
+        app.agents[0].messages.push(super::AiChatMessage {
+            role: AiRole::User,
+            content: "inspect project".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+        });
+        app.agents[0].native_runtime.start();
+        let messages = app.build_chat_messages_for_agent(0);
+        app.agents[0]
+            .native_runtime
+            .send_chat(
+                Some("test".into()),
+                messages,
+                Some(teshi_agent::get_tools(None)),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline
+            && app.agents[0].native_runtime.state()
+                != teshi_agent_runtime::NativeTurnState::Completed
+        {
+            app.poll_llm_events();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            app.agents[0].native_runtime.state(),
+            teshi_agent_runtime::NativeTurnState::Completed
+        );
+        assert_eq!(
+            app.agents[0]
+                .messages
+                .iter()
+                .map(|m| m.role)
+                .collect::<Vec<_>>(),
+            vec![
+                AiRole::User,
+                AiRole::Assistant,
+                AiRole::Tool,
+                AiRole::Assistant,
+                AiRole::Tool,
+                AiRole::Assistant
+            ]
+        );
+        assert_eq!(app.agents[0].messages[5].content, "finished");
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        let tool_result = requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .unwrap();
+        assert_eq!(tool_result["tool_call_id"], "call-1");
+        assert!(
+            requests[2]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["tool_call_id"] == "call-2")
+        );
+        assert!(
+            requests[2]
+                .get("tools")
+                .is_none_or(serde_json::Value::is_null)
+        );
     }
 
     #[test]
@@ -8181,9 +8373,7 @@ mod tests {
                 http_headers: Default::default(),
                 chat_options: Default::default(),
             };
-            let (handle, rx) = crate::llm::spawn_llm(config);
-            app.agents[0].llm_handle = Some(handle);
-            app.agents[0].llm_rx = Some(rx);
+            app.agents[0].native_runtime.attach_model(config);
             app.dispatch_user_message(
                 "Inspect the current page and bring this test interface into a successful state.\n\nConfirm the rendered visual state before taking the main action. Use the available browser tools as needed. Prefer structured browser tools for interaction, then verify the changed state and report the final result.".into(),
             )?;

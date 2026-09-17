@@ -1,0 +1,12 @@
+[package]
+name = "teshi-agent-runtime"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+teshi-agent.workspace = true
+teshi-core.workspace = true
+teshi-engine.workspace = true
