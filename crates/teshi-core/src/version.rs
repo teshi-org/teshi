@@ -82,18 +82,19 @@ impl VersionInfo {
     /// Formats the string clap, the TUI, and logs should show.
     ///
     /// Stable builds are SemVer only. A complete nightly identity becomes
-    /// `{semver} (nightly 2026-09-07, cb4361a)`. Incomplete identity is ignored
-    /// so a half-set CI environment cannot look like a shipped nightly.
+    /// `{semver}-nightly (cb4361a)`. Incomplete identity is ignored so a
+    /// half-set CI environment cannot look like a shipped nightly.
     pub fn display_string(&self) -> String {
         match (self.channel, self.build_date, self.git_sha) {
             (Some(channel), Some(date), Some(sha)) if channel != "stable" => {
-                match hyphenate_yyyymmdd(date) {
-                    Some(pretty) => format!(
-                        "{} ({channel} {pretty}, {})",
+                if hyphenate_yyyymmdd(date).is_some() {
+                    format!(
+                        "{}-{channel} ({})",
                         self.semver,
                         sha.chars().take(7).collect::<String>()
-                    ),
-                    None => self.semver.to_string(),
+                    )
+                } else {
+                    self.semver.to_string()
                 }
             }
             _ => self.semver.to_string(),
@@ -144,17 +145,14 @@ mod tests {
     }
 
     #[test]
-    fn nightly_display_includes_channel_date_and_sha() {
+    fn nightly_display_includes_channel_and_sha() {
         let info = VersionInfo {
             semver: "0.7.10",
             channel: Some("nightly"),
             build_date: Some("20260907"),
             git_sha: Some("cb4361a"),
         };
-        assert_eq!(
-            info.display_string(),
-            "0.7.10 (nightly 2026-09-07, cb4361a)"
-        );
+        assert_eq!(info.display_string(), "0.7.10-nightly (cb4361a)");
     }
 
     #[test]
