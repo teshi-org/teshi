@@ -1,6 +1,6 @@
 param(
   [string]$OutDir = "dist",
-  [int]$RuntimeVersion = 1,
+  [int]$RuntimeVersion = 2,
   [string]$Platform = "windows-x86_64"
 )
 
@@ -32,6 +32,7 @@ $runtimePython = Join-Path $pythonDir "python.exe"
 $resources = Join-Path $stage "resources"
 New-Item -ItemType Directory -Force $resources | Out-Null
 Copy-Item (Join-Path $repo "resources/winapp_service.py") (Join-Path $resources "winapp_service.py") -Force
+Copy-Item (Join-Path $repo "resources/update_participant.py") (Join-Path $resources "update_participant.py") -Force
 
 $manifest = [ordered]@{
   runtime = "winapp"

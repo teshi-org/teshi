@@ -15,7 +15,8 @@ use sha2::{Digest, Sha256};
 use crate::app_data::app_data_dir;
 
 pub const WINAPP_RUNTIME_ID: &str = "winapp";
-pub const WINAPP_RUNTIME_VERSION: u32 = 1;
+/// Runtime v2 adds lossless UIA element screenshots and pixel assertions.
+pub const WINAPP_RUNTIME_VERSION: u32 = 2;
 
 #[cfg(all(windows, target_arch = "x86_64"))]
 pub const WINAPP_RUNTIME_PLATFORM: &str = "windows-x86_64";
@@ -408,7 +409,7 @@ mod tests {
     fn runtime_requirement_is_versioned_independent_of_teshi_version() {
         let requirement = winapp_runtime_requirement();
         assert_eq!(requirement.runtime, "winapp");
-        assert_eq!(requirement.runtime_version, 1);
+        assert_eq!(requirement.runtime_version, 2);
     }
 
     #[cfg(not(all(windows, target_arch = "x86_64")))]
@@ -422,7 +423,7 @@ mod tests {
     fn runtime_installation_path_uses_app_data_not_project() {
         let app = PathBuf::from(r"C:\Users\u\AppData\Roaming\teshi");
         let path = winapp_runtime_dir_in(&app);
-        assert!(path.ends_with(Path::new("runtimes").join("winapp").join("1")));
+        assert!(path.ends_with(Path::new("runtimes").join("winapp").join("2")));
         assert!(!path.to_string_lossy().contains(".venv"));
         assert!(!path.to_string_lossy().contains(".teshi\\runtime"));
     }
@@ -439,6 +440,28 @@ mod tests {
         manifest = good_manifest();
         manifest.platform = "windows-aarch64".into();
         assert!(validate_manifest(&manifest, &req()).is_err());
+    }
+
+    #[test]
+    fn screenshot_runtime_rejects_installed_preview_only_runtime() {
+        let mut requirement = req();
+        requirement.runtime_version = WINAPP_RUNTIME_VERSION;
+        assert!(validate_manifest(&good_manifest(), &requirement).is_err());
+        let installed = tempdir().unwrap();
+        write_runtime(installed.path(), good_manifest());
+        assert!(validate_runtime_dir(installed.path(), &requirement).is_err());
+        let mut upgraded = good_manifest();
+        upgraded.runtime_version = WINAPP_RUNTIME_VERSION;
+        validate_manifest(&upgraded, &requirement).unwrap();
+        assert!(include_str!("../../../scripts/build-winapp-runtime.ps1")
+            .contains("$RuntimeVersion = 2"));
+        assert!(
+            include_str!("../../../.github/workflows/release.yml").contains("-RuntimeVersion 2")
+        );
+        assert!(!include_str!("../../../.github/workflows/release.yml")
+            .contains("winapp-runtime-windows-x86_64-v1"));
+        assert!(include_str!("../../../scripts/build-winapp-runtime.ps1")
+            .contains("resources/update_participant.py"));
     }
 
     #[test]

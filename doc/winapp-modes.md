@@ -115,8 +115,51 @@ When `.teshi/cdp-endpoint.json` has `"mode": "winapp"`, `teshi run` forwards sce
 | `fill` | Prefer `ValuePattern.SetValue`, then focus + keyboard input |
 | `assert_visible` | Check that the resolved element has visible bounds |
 | `assert_text` | Compare expected text against `ValuePattern` or `Name` |
+| `assert_screenshot` | Compare lossless RGB pixels of one visible interactive UIA element with a PNG baseline |
 | `select` | Prefer `SelectionItemPattern.Select`, then click |
 | `press_key` | Focus the element and send keys |
+
+## Element screenshots and visual assertions
+
+```powershell
+teshi winapp screenshot --selector "uia:control_type=ButtonControl;name=Close" --out artifacts/close-normal.png
+teshi winapp assert-screenshot --selector "uia:control_type=ButtonControl;name=Close" --baseline artifacts/close-normal.png --diff-out artifacts/close-diff.png --pixel-tolerance 8
+```
+
+Both commands return JSON on operational success and failure. A failed visual assertion returns `ok: false` and a nonzero CLI exit code. Paths are relative to the project root unless absolute. Capture does not activate the target or change its hover/pressed state.
+
+Screenshot resolution uses the UIA snapshot's visible interactive elements, independently of the existing action resolver. Offscreen elements are excluded. Multiple visible matches, incomplete snapshots, missing bounds, window/element movement during capture, and unverifiable coordinate mappings fail explicitly.
+
+`bounds.x`, `bounds.y`, `bounds.width`, and `bounds.height` describe physical screen pixels; `dpi` comes from `GetDpiForWindow`. Visual commands temporarily set per-monitor thread DPI awareness. WGC uses the DWM extended frame rectangle, including caption islands and excluding invisible resize borders. ImageGrab uses the physical `GetWindowRect` screen rectangle. The element crop subtracts the captured rectangle's screen origin without scaling. Frame dimensions must exactly match that rectangle, and the complete element must fit inside it. Negative monitor origins are supported; out-of-range crops are rejected.
+
+The preview remains JPEG. Visual commands retain RGB directly from WGC's BGRA frame or ImageGrab's RGB image and save PNG; they never decode preview JPEG. A WGC visual capture restarts the existing backend to obtain a fresh first frame even when the window is static. WGC keeps `cursor_capture=False`; ImageGrab uses its screen-copy path without cursor composition. The ImageGrab fallback requires the target to remain visible and unobscured.
+
+`pixel-tolerance=8` allows an absolute difference of **at most 8 in every RGB channel**. A pixel counts once as changed if any channel exceeds 8. Dimensions must match regardless of tolerance. Generated baselines embed `teshi_bounds` and `teshi_dpi` PNG text metadata; changes to the recorded UIA width or height also fail. Position changes alone do not fail. External PNG baselines without metadata use their pixel dimensions as the size contract.
+
+Comparison failures include `changed_pixels`, `baseline_dimensions`, `actual_dimensions`, `bounds`, `dpi`, and `diff_out`. The diff is a lossless PNG with changed/missing pixels marked magenta and unchanged pixels black; different sizes use a canvas large enough for both images. A successful comparison removes an existing diff at the requested output path. The baseline and diff paths must differ.
+
+For step bindings, keep the existing schema:
+
+```json
+{
+  "strategy": "uia",
+  "value": "uia:control_type=ButtonControl;name=Close",
+  "action": "assert_screenshot",
+  "value_arg": "test/visual-baselines/close-normal.png"
+}
+```
+
+WinApp replay uses tolerance 8 and writes failures under `.teshi/artifacts/visual/<sanitized-feature>-L<line>-diff.png`. The assertion response is printed before replay reports the failing step. Existing replay JPEG evidence remains separate from visual comparison.
+
+Managed runtime v2 packages this capability. The install path and release archive are versioned separately from the Teshi application; v1 manifests cannot satisfy the v2 requirement. Release builds embed the v2 archive URL, hash, and size. Restart an already-running older daemon/sidecar after upgrading so it loads the new runtime.
+
+Run the window-independent capture, comparison, selector, CLI, and replay tests after building the CLI:
+
+```powershell
+cargo build -p teshi-cli --locked
+python -m pip install Pillow websockets
+python -m unittest discover -s resources/tests -p 'test_winapp*.py'
+```
 
 ## Dependencies
 

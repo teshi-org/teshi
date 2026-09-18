@@ -1261,6 +1261,10 @@ pub struct McpServeArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum WinAppCommand {
+    /// Save a visible UIA element as lossless PNG
+    Screenshot(WinAppScreenshotArgs),
+    /// Compare a visible UIA element with a PNG baseline
+    AssertScreenshot(WinAppAssertScreenshotArgs),
     /// List visible top-level windows for attach
     ListWindows,
     /// Attach to an existing WinUI3/native window
@@ -1352,6 +1356,34 @@ pub struct WinAppSnapshotArgs {
 pub struct WinAppSelectorArgs {
     /// UIA selector, e.g. uia:automation_id=LoginButton
     pub selector: String,
+}
+
+/// Lossless UIA element capture arguments.
+#[derive(Debug, Args)]
+pub struct WinAppScreenshotArgs {
+    /// UIA selector identifying exactly one visible interactive element
+    #[arg(long)]
+    pub selector: String,
+    /// Destination PNG path
+    #[arg(long)]
+    pub out: PathBuf,
+}
+
+/// Pixel comparison arguments for a visible UIA element.
+#[derive(Debug, Args)]
+pub struct WinAppAssertScreenshotArgs {
+    /// UIA selector identifying exactly one visible interactive element
+    #[arg(long)]
+    pub selector: String,
+    /// Baseline PNG path
+    #[arg(long)]
+    pub baseline: PathBuf,
+    /// Failure difference PNG path
+    #[arg(long)]
+    pub diff_out: PathBuf,
+    /// Maximum allowed absolute difference in each RGB channel
+    #[arg(long, default_value_t = 8)]
+    pub pixel_tolerance: u8,
 }
 
 #[derive(Debug, Args)]

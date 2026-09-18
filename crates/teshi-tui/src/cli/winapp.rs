@@ -26,6 +26,23 @@ pub fn handle_winapp_command(action: &WinAppCommand) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let project_root = find_project_root(Some(&cwd)).unwrap_or(cwd);
     std::fs::create_dir_all(project_root.join(".teshi")).ok();
+    let visual = match action {
+        WinAppCommand::Screenshot(args) => Some(json!({
+            "cmd": "element_screenshot", "selector": args.selector, "out": args.out
+        })),
+        WinAppCommand::AssertScreenshot(args) => Some(json!({
+            "cmd": "assert_screenshot", "selector": args.selector, "baseline": args.baseline,
+            "diff_out": args.diff_out, "pixel_tolerance": args.pixel_tolerance
+        })),
+        _ => None,
+    };
+    if let Some(command) = visual {
+        let response = ensure_winapp_sidecar(&project_root).and_then(|()| {
+            send_winapp_command(&project_root, command.clone(), Duration::from_secs(60))
+        }).unwrap_or_else(|err| json!({"ok": false, "selector": command["selector"], "error": err.to_string()}));
+        print_json_response(response.clone())?;
+        return ensure_ok(&response);
+    }
     // Replay validates the Feature before contacting the Windows-only sidecar.
     if !matches!(action, WinAppCommand::Replay(_)) {
         ensure_winapp_sidecar(&project_root)?;
@@ -39,6 +56,7 @@ pub fn handle_winapp_command(action: &WinAppCommand) -> Result<()> {
         WinAppCommand::ClearHighlight => clear_highlight(&project_root),
         WinAppCommand::Execute(args) => execute(&project_root, args),
         WinAppCommand::Replay(args) => replay(&project_root, args),
+        WinAppCommand::Screenshot(_) | WinAppCommand::AssertScreenshot(_) => unreachable!(),
     }
 }
 
@@ -128,6 +146,10 @@ fn execute(project_root: &Path, args: &WinAppExecuteArgs) -> Result<()> {
         "winapp-execute",
         &args.mode,
     )?;
+    if args.action == "assert_screenshot" {
+        print_json_response(response.clone())?;
+        return ensure_ok(&response);
+    }
     ensure_ok(&response)?;
     print_json_response(response)
 }
@@ -189,7 +211,15 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
             step.primary.value_arg.as_deref(),
             timeout_ms,
             command_timeout_for_ms(timeout_ms),
-            &format!("winapp-replay-{}", idx + 1),
+            &if step.primary.action == "assert_screenshot" {
+                format!(
+                    "{}-L{}",
+                    teshi_engine::sanitize_feature_path(&feature),
+                    step.step_line
+                )
+            } else {
+                format!("winapp-replay-{}", idx + 1)
+            },
             &args.mode,
         )?;
         // Capture screenshot after each step (before ensure_ok so we capture even on failure)
@@ -217,6 +247,9 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
                     step.step_line
                 ),
             }
+        }
+        if step.primary.action == "assert_screenshot" {
+            print_json_response(response.clone())?;
         }
         ensure_ok(&response).with_context(|| {
             format!(
@@ -274,19 +307,26 @@ fn execute_locator(
     request_id: &str,
     mode: &str,
 ) -> Result<serde_json::Value> {
-    send_winapp_command(
-        project_root,
-        json!({
-            "cmd": "execute_locator",
-            "request_id": request_id,
-            "selector": selector,
-            "action": action,
-            "value": value,
-            "timeout_ms": timeout_ms,
-            "mode": mode,
-        }),
-        sidecar_timeout,
-    )
+    let mut command = json!({
+        "cmd": "execute_locator",
+        "request_id": request_id,
+        "selector": selector,
+        "action": action,
+        "value": value,
+        "timeout_ms": timeout_ms,
+        "mode": mode,
+    });
+    if action == "assert_screenshot" {
+        command["pixel_tolerance"] = json!(8);
+        command["diff_out"] = json!(
+            project_root
+                .join(".teshi")
+                .join("artifacts")
+                .join("visual")
+                .join(format!("{request_id}-diff.png"))
+        );
+    }
+    send_winapp_command(project_root, command, sidecar_timeout)
 }
 
 fn ensure_winapp_attached(project_root: &Path, launch: Option<&str>) -> Result<()> {

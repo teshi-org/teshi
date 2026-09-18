@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,7 @@ except ImportError:
     auto = None
 
 try:
-    from PIL import Image, ImageGrab
+    from PIL import Image, ImageGrab, PngImagePlugin
 except ImportError:
     Image = None
     ImageGrab = None
@@ -137,6 +138,10 @@ class Rect(ctypes.Structure):
 
 if os.name == "nt":
     user32 = ctypes.windll.user32
+    user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+    user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+    user32.GetDpiForWindow.argtypes = [wintypes.HWND]
+    user32.GetDpiForWindow.restype = ctypes.c_uint
     user32.EnumWindows.argtypes = [
         ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM),
         wintypes.LPARAM,
@@ -317,6 +322,82 @@ def get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
     return (rect.left, rect.top, rect.right, rect.bottom)
 
 
+@contextmanager
+def physical_coordinates():
+    """Scope DPI awareness to visual commands without changing legacy UIA actions."""
+    previous = user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+    if not previous:
+        raise RuntimeError("cannot establish physical screen coordinate context")
+    try:
+        yield
+    finally:
+        if not user32.SetThreadDpiAwarenessContext(previous):
+            raise RuntimeError("cannot restore thread DPI awareness context")
+
+
+def get_capture_bounds(hwnd: int) -> tuple[int, int, int, int] | None:
+    """WGC window frames cover DWM extended frame bounds, not client bounds."""
+    if os.name != "nt":
+        return None
+    rect = Rect()
+    result = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+        wintypes.HWND(hwnd), 9, ctypes.byref(rect), ctypes.sizeof(rect)
+    )
+    if result != 0:
+        return None
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def crop_element(image: Any, frame_bounds: tuple[int, int, int, int], bounds: dict) -> Any:
+    """Translate physical UIA screen pixels into an exact, unscaled frame crop."""
+    left, top, right, bottom = frame_bounds
+    if image.size != (right - left, bottom - top):
+        raise RuntimeError("capture dimensions do not match physical screen bounds")
+    x, y, width, height = (bounds[k] for k in ("x", "y", "width", "height"))
+    if any(int(v) != v for v in (x, y, width, height)):
+        raise RuntimeError("non-integral UIA bounds cannot be mapped reliably")
+    x, y, width, height = map(int, (x, y, width, height))
+    if width <= 0 or height <= 0 or x < left or y < top or x + width > right or y + height > bottom:
+        raise RuntimeError("element bounds are outside the captured window")
+    return image.crop((x - left, y - top, x - left + width, y - top + height)).convert("RGB")
+
+
+def resolve_screenshot_element(snapshot: dict, selector: str) -> dict:
+    """Resolve uniquely among visible interactive nodes without changing action lookup."""
+    criteria = split_selector(selector)
+    allowed = {"path", "name", "automation_id", "control_type", "class_name"}
+    if not criteria or not set(criteria) <= allowed:
+        raise RuntimeError("invalid screenshot selector")
+    if snapshot.get("truncated"):
+        raise RuntimeError("UIA snapshot is incomplete; uniqueness cannot be established")
+    matches = [node for node in snapshot["interactive_elements"]
+               if node.get("is_offscreen") is False
+               and all(str(node.get(k, "")).casefold() == v.casefold() for k, v in criteria.items())]
+    if len(matches) != 1:
+        raise RuntimeError(f"screenshot selector matched {len(matches)} visible interactive elements")
+    return matches[0]
+
+
+def compare_pixels(baseline: Any, actual: Any, tolerance: int) -> tuple[int, Any]:
+    """Count each pixel once when any RGB channel exceeds the inclusive tolerance."""
+    if type(tolerance) is not int or not 0 <= tolerance <= 255:
+        raise ValueError("pixel_tolerance must be an integer from 0 to 255")
+    width, height = max(baseline.width, actual.width), max(baseline.height, actual.height)
+    diff = Image.new("RGB", (width, height))
+    base, current, output = baseline.convert("RGB").load(), actual.convert("RGB").load(), diff.load()
+    changed = 0
+    for y in range(height):
+        for x in range(width):
+            if (x >= baseline.width or y >= baseline.height) and (x >= actual.width or y >= actual.height):
+                continue
+            missing = x >= baseline.width or y >= baseline.height or x >= actual.width or y >= actual.height
+            mismatch = missing or any(abs(a - b) > tolerance for a, b in zip(base[x, y], current[x, y]))
+            if mismatch:
+                changed += 1
+                output[x, y] = (255, 0, 255)
+    return changed, diff
+
+
 def is_window(hwnd: int) -> bool:
     """Return whether `hwnd` still identifies a live window."""
     return bool(user32 is not None and user32.IsWindow(hwnd))
@@ -347,6 +428,18 @@ class ImageGrabCaptureBackend:
     def stop(self) -> None:
         """ImageGrab has no persistent capture session."""
 
+    def capture_rgb(self) -> tuple[Any, tuple[int, int, int, int]]:
+        """Capture physical screen pixels; Pillow's GDI path does not draw cursors."""
+        if ImageGrab is None:
+            raise RuntimeError("Pillow is unavailable for lossless screen capture")
+        bbox = get_window_rect(self.hwnd)
+        if bbox is None:
+            raise RuntimeError("target window has no valid bounds")
+        image = ImageGrab.grab(bbox=bbox, all_screens=True).convert("RGB")
+        if get_window_rect(self.hwnd) != bbox:
+            raise RuntimeError("window moved during capture")
+        return image, bbox
+
 
 class WgcCaptureBackend:
     """Latest-frame Windows Graphics Capture session for one HWND."""
@@ -363,9 +456,12 @@ class WgcCaptureBackend:
             raise RuntimeError("Pillow is unavailable for WGC JPEG encoding")
 
         self.hwnd = hwnd
+        self._capture_factory = factory
         self._lock = threading.Lock()
         self._first_frame = threading.Event()
         self._latest_jpeg: bytes | None = None
+        self._latest_rgb: Any = None
+        self._latest_bounds: Any = None
         self._terminal_error = ""
         self._control: Any = None
         self._capture = factory(
@@ -389,6 +485,8 @@ class WgcCaptureBackend:
                 image.save(buffer, format="JPEG", quality=JPEG_QUALITY)
                 with self._lock:
                     self._latest_jpeg = buffer.getvalue()
+                    self._latest_rgb = image
+                    self._latest_bounds = get_capture_bounds(hwnd)
                 self._first_frame.set()
             except Exception as exc:
                 with self._lock:
@@ -418,6 +516,21 @@ class WgcCaptureBackend:
         if latest is None:
             raise RuntimeError("WGC capture returned no frame")
         return latest
+
+    def capture_rgb(self) -> tuple[Any, tuple[int, int, int, int]]:
+        """Restart the same backend to obtain a fresh frame even for static windows."""
+        # WGC emits only on damage. Waiting for another preview frame can time
+        # out on a static window, while reusing it can compare stale pixels.
+        bounds_before = get_capture_bounds(self.hwnd)
+        self.stop()
+        self.__init__(self.hwnd, capture_factory=self._capture_factory)
+        self.capture_jpeg()
+        with self._lock:
+            if self._latest_bounds is None:
+                raise RuntimeError("cannot establish WGC screen bounds")
+            if bounds_before != self._latest_bounds or get_capture_bounds(self.hwnd) != self._latest_bounds:
+                raise RuntimeError("window moved during WGC capture")
+            return self._latest_rgb.copy(), self._latest_bounds
 
     def stop(self) -> None:
         control = self._control
@@ -795,13 +908,16 @@ class WinAppSession:
             raise RuntimeError("no WinUI3 window attached; run `teshi winapp attach` first")
         return auto.ControlFromHandle(self.hwnd)
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, *, for_screenshot: bool = False) -> dict[str, Any]:
         """Return a UIA tree and flattened interactive element list."""
         root = self.root_control()
         nodes: list[dict[str, Any]] = []
+        truncated = False
 
         def walk(control: Any, depth: int, path: str) -> dict[str, Any] | None:
+            nonlocal truncated
             if len(nodes) >= MAX_SNAPSHOT_NODES or depth > MAX_SNAPSHOT_DEPTH:
+                truncated = True
                 return None
             node = {
                 "path": path,
@@ -813,14 +929,28 @@ class WinAppSession:
                     get_control_property(control, "BoundingRectangle")
                 ),
                 "is_enabled": bool(get_control_property(control, "IsEnabled")),
-                "is_offscreen": bool(get_control_property(control, "IsOffscreen")),
+                "is_offscreen": get_control_property(control, "IsOffscreen") if for_screenshot else bool(get_control_property(control, "IsOffscreen")),
                 "children": [],
             }
+            if for_screenshot:
+                raw_rect = get_control_property(control, "BoundingRectangle")
+                coordinates = None
+                if raw_rect is not None and all(hasattr(raw_rect, key) for key in ("left", "top", "right", "bottom")):
+                    coordinates = tuple(getattr(raw_rect, key) for key in ("left", "top", "right", "bottom"))
+                elif isinstance(raw_rect, (tuple, list)) and len(raw_rect) >= 4:
+                    coordinates = raw_rect[:4]
+                if coordinates is not None:
+                    left, top, right, bottom = coordinates
+                    node["bounding_rectangle"] = dict(left=left, top=top, right=right, bottom=bottom,
+                                                       width=right-left, height=bottom-top)
+                if node["is_offscreen"] is None:
+                    truncated = True
             node["selector"] = selector_for_control(node)
             nodes.append(node)
             try:
                 children = control.GetChildren()
             except Exception:
+                truncated = True
                 children = []
             for idx, child in enumerate(children):
                 child_node = walk(child, depth + 1, f"{path}/{idx}")
@@ -837,19 +967,94 @@ class WinAppSession:
                 "class_name": node.get("class_name"),
                 "bounding_rectangle": node.get("bounding_rectangle"),
                 "selector": node.get("selector"),
+                "path": node.get("path"),
+                "is_offscreen": node.get("is_offscreen"),
             }
             for node in nodes
             if node.get("control_type") in INTERACTIVE_TYPES
             and not node.get("is_offscreen")
-        ][:80]
+        ]
+        if not for_screenshot:
+            interactive = interactive[:80]
         return {
             "ok": True,
+            "truncated": truncated,
             "url": self.target_url(),
             "title": get_window_title(self.hwnd or 0) or self.title,
             "accessibility_tree": tree,
             "interactive_elements": interactive,
             "target": self.target_info(),
         }
+
+    def visual_command(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Shared PNG capture and visual assertion boundary for CLI and replay."""
+        try:
+            with physical_coordinates():
+                return self._visual_command(payload)
+        except Exception as exc:
+            return {"ok": False, "selector": str(payload.get("selector") or ""), "error": str(exc)}
+
+    def _visual_command(self, payload: dict[str, Any]) -> dict[str, Any]:
+        selector = str(payload.get("selector") or "")
+        result = {"ok": False, "selector": selector}
+        try:
+            node = resolve_screenshot_element(self.snapshot(for_screenshot=True), selector)
+            rectangle = node["bounding_rectangle"]
+            if rectangle is None:
+                raise RuntimeError("element has no UIA screen bounds")
+            bounds = {"x": rectangle["left"], "y": rectangle["top"],
+                      "width": rectangle["width"], "height": rectangle["height"]}
+            result["bounds"] = bounds
+            dpi = int(user32.GetDpiForWindow(self.hwnd))
+            if not dpi:
+                raise RuntimeError("GetDpiForWindow failed")
+            result["dpi"] = dpi
+            with self._capture_switch_lock:
+                if self._capture_backend is None:
+                    raise RuntimeError("no active capture backend")
+                image, frame_bounds = self._capture_backend.capture_rgb()
+            after = resolve_screenshot_element(self.snapshot(for_screenshot=True), selector)
+            if after["bounding_rectangle"] != rectangle:
+                raise RuntimeError("element moved during capture")
+            actual = crop_element(image, frame_bounds, bounds)
+            root = self.project_root or Path.cwd()
+            def artifact(value: Any) -> Path:
+                if not value:
+                    raise ValueError("artifact path is required")
+                path = Path(str(value))
+                return path if path.is_absolute() else root / path
+            if payload.get("cmd") == "element_screenshot":
+                out = artifact(payload.get("out"))
+                out.parent.mkdir(parents=True, exist_ok=True)
+                metadata = PngImagePlugin.PngInfo()
+                metadata.add_text("teshi_bounds", json.dumps(bounds))
+                metadata.add_text("teshi_dpi", str(dpi))
+                actual.save(out, format="PNG", pnginfo=metadata)
+                return {**result, "ok": True, "out": str(payload["out"])}
+            baseline_path = artifact(payload.get("baseline"))
+            out = artifact(payload.get("diff_out"))
+            if out.resolve() == baseline_path.resolve() or (out.exists() and baseline_path.exists() and os.path.samefile(out, baseline_path)):
+                raise ValueError("diff output must not overwrite baseline")
+            with Image.open(baseline_path) as source:
+                if source.format != "PNG":
+                    raise ValueError("baseline must be lossless PNG")
+                recorded = json.loads(source.info.get("teshi_bounds", "null"))
+                baseline = source.convert("RGB")
+            tolerance = payload.get("pixel_tolerance", 8)
+            changed, diff = compare_pixels(baseline, actual, tolerance)
+            size_changed = baseline.size != actual.size or (recorded is not None and any(
+                recorded[k] != bounds[k] for k in ("width", "height")))
+            result.update(changed_pixels=changed, baseline_bounds=recorded, baseline_dimensions={"width": baseline.width, "height": baseline.height},
+                          actual_dimensions={"width": actual.width, "height": actual.height}, pixel_tolerance=tolerance)
+            if changed or size_changed:
+                out.parent.mkdir(parents=True, exist_ok=True)
+                diff.save(out, format="PNG")
+                return {**result, "diff_out": str(out), "error": "element dimensions changed" if size_changed else "screenshot pixels differ"}
+            # A previous failed run must not leave a misleading diff on success.
+            out.unlink(missing_ok=True)
+            return {**result, "ok": True}
+        except Exception as exc:
+            return {**result, "error": str(exc)}
 
     def find_control(self, selector: str) -> Any:
         """Find a UIA control from a compact selector."""
@@ -922,6 +1127,8 @@ class WinAppSession:
         mode = str(payload.get("mode") or "foreground").casefold()
         try:
             # --- exec actions (no UIA control needed) ---
+            if action == "assert_screenshot":
+                return self.visual_command({**payload, "baseline": value})
             if action == "exec":
                 return self._handle_exec(selector, str(value or ""))
 
@@ -1454,6 +1661,8 @@ async def handle_command(session: WinAppSession, payload: dict[str, Any]) -> dic
     """Dispatch one sidecar command."""
     cmd = payload.get("cmd")
     try:
+        if cmd in ("element_screenshot", "assert_screenshot"):
+            return session.visual_command(payload)
         if cmd == "list_windows":
             return {"ok": True, "windows": enum_windows()}
         if cmd == "attach_window":
