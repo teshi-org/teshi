@@ -41,6 +41,185 @@ class VisualTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             service.resolve_screenshot_element({**snapshot, "truncated": True}, selector)
 
+    def test_pointer_coordinates_support_negative_virtual_desktop_origin(self):
+        metrics = {
+            service.SM_XVIRTUALSCREEN: -100,
+            service.SM_YVIRTUALSCREEN: -50,
+            service.SM_CXVIRTUALSCREEN: 300,
+            service.SM_CYVIRTUALSCREEN: 200,
+        }
+        send_input = Mock(return_value=3)
+        fake_user32 = SimpleNamespace(
+            GetSystemMetrics=lambda metric: metrics[metric],
+            SendInput=send_input,
+        )
+        with patch.object(service, "user32", fake_user32):
+            service.send_pointer_click(-50, 25)
+
+        inputs = send_input.call_args.args[1]
+        self.assertEqual(inputs[0].mi.dwFlags,
+                         service.MOUSEEVENTF_MOVE
+                         | service.MOUSEEVENTF_ABSOLUTE
+                         | service.MOUSEEVENTF_VIRTUALDESK)
+        self.assertEqual(inputs[0].mi.dx, round(50 * 65535 / 299))
+        self.assertEqual(inputs[0].mi.dy, round(75 * 65535 / 199))
+        self.assertEqual(inputs[1].mi.dwFlags, service.MOUSEEVENTF_LEFTDOWN)
+        self.assertEqual(inputs[2].mi.dwFlags, service.MOUSEEVENTF_LEFTUP)
+
+    def test_send_input_failure_is_not_reported_as_success(self):
+        metrics = {
+            service.SM_XVIRTUALSCREEN: 0,
+            service.SM_YVIRTUALSCREEN: 0,
+            service.SM_CXVIRTUALSCREEN: 1920,
+            service.SM_CYVIRTUALSCREEN: 1080,
+        }
+        fake_user32 = SimpleNamespace(
+            GetSystemMetrics=lambda metric: metrics[metric],
+            SendInput=Mock(return_value=0),
+        )
+        with patch.object(service, "user32", fake_user32), self.assertRaisesRegex(
+            RuntimeError, "SendInput failed"
+        ):
+            service.send_pointer_click(100, 200)
+
+    def test_pointer_resolver_ignores_offscreen_and_rejects_ambiguity_or_bad_bounds(self):
+        hidden_control = SimpleNamespace(
+            Name="Close",
+            ControlTypeName="ButtonControl",
+            IsOffscreen=True,
+            BoundingRectangle=(0, 0, 10, 10),
+            GetChildren=lambda: [],
+        )
+        visible_control = SimpleNamespace(
+            Name="Close",
+            ControlTypeName="ButtonControl",
+            IsOffscreen=False,
+            BoundingRectangle=(10, 20, 30, 30),
+            GetChildren=lambda: [],
+        )
+        root = SimpleNamespace(
+            GetChildren=lambda: [hidden_control, visible_control]
+        )
+        session = service.WinAppSession(None)
+        session.root_control = Mock(return_value=root)
+        selector = "uia:control_type=ButtonControl;name=Close"
+        hidden = dict(
+            path="0/0", name="Close", control_type="ButtonControl",
+            is_offscreen=True,
+            bounding_rectangle=dict(left=0, top=0, width=10, height=10),
+        )
+        visible = dict(
+            path="0/1", name="Close", control_type="ButtonControl",
+            is_offscreen=False,
+            bounding_rectangle=dict(left=10, top=20, width=20, height=10),
+        )
+        session.snapshot = Mock(return_value={"interactive_elements": [hidden, visible]})
+        control, bounds = session.find_visible_interactive_control(selector)
+        self.assertIs(control, visible_control)
+        self.assertEqual(bounds["width"], 20)
+
+        session.snapshot.return_value = {
+            "interactive_elements": [{**visible, "path": "0/0"}]
+        }
+        with self.assertRaisesRegex(RuntimeError, "became offscreen"):
+            session.find_visible_interactive_control(selector)
+
+        session.snapshot.return_value = {
+            "interactive_elements": [visible, visible]
+        }
+        with self.assertRaisesRegex(RuntimeError, "2 visible interactive"):
+            session.find_visible_interactive_control(selector)
+
+        session.snapshot.return_value = {
+            "truncated": True,
+            "interactive_elements": [visible],
+        }
+        with self.assertRaisesRegex(RuntimeError, "snapshot is incomplete"):
+            session.find_visible_interactive_control(selector)
+
+        session.snapshot.return_value = {
+            "interactive_elements": [{**visible, "bounding_rectangle": None}]
+        }
+        with self.assertRaisesRegex(RuntimeError, "no visible UIA screen bounds"):
+            session.find_visible_interactive_control(selector)
+
+    def test_pointer_click_requires_foreground_mode(self):
+        session = service.WinAppSession(None)
+        result = session.execute(
+            dict(selector="uia:name=Close", action="pointer_click", mode="background")
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("pointer_click requires foreground mode", result["error"])
+
+    def test_pointer_click_moves_and_clicks_without_invoke_or_legacy_click(self):
+        invoke = Mock(side_effect=AssertionError("InvokePattern must not run"))
+        legacy_click = Mock(side_effect=AssertionError("legacy click must not run"))
+        control = SimpleNamespace(
+            Name="Close",
+            ControlTypeName="ButtonControl",
+            IsOffscreen=False,
+            BoundingRectangle=(10, 20, 30, 40),
+            GetChildren=lambda: [],
+            GetInvokePattern=invoke,
+            Click=legacy_click,
+        )
+        session = service.WinAppSession(None)
+        session.hwnd = 123
+        session.root_control = Mock(
+            return_value=SimpleNamespace(GetChildren=lambda: [control])
+        )
+        session.snapshot = Mock(
+            return_value={
+                "interactive_elements": [
+                    dict(
+                        path="0/0",
+                        name="Close",
+                        control_type="ButtonControl",
+                        is_offscreen=False,
+                        bounding_rectangle=dict(
+                            left=10, top=20, width=20, height=20
+                        ),
+                    )
+                ]
+            }
+        )
+        fake_user32 = SimpleNamespace(
+            SetForegroundWindow=Mock(return_value=True),
+            SetThreadDpiAwarenessContext=Mock(return_value=1),
+        )
+        with patch.object(service, "user32", fake_user32), patch.object(
+            service, "send_pointer_click"
+        ) as inject:
+            result = session.execute(
+                dict(
+                    selector="uia:control_type=ButtonControl;name=Close",
+                    action="pointer_click",
+                )
+            )
+
+        self.assertTrue(result["ok"], result)
+        inject.assert_called_once_with(20, 30)
+        invoke.assert_not_called()
+        legacy_click.assert_not_called()
+
+    def test_click_keeps_invoke_pattern_first(self):
+        invoke = Mock()
+        legacy_click = Mock()
+        control = SimpleNamespace(
+            GetInvokePattern=lambda: SimpleNamespace(Invoke=invoke),
+            Click=legacy_click,
+        )
+        session = service.WinAppSession(None)
+        session.find_control = Mock(return_value=control)
+
+        result = session.execute(
+            dict(selector="uia:name=Close", action="click")
+        )
+
+        self.assertTrue(result["ok"], result)
+        invoke.assert_called_once_with()
+        legacy_click.assert_not_called()
+
     def test_rgb_tolerance_counts_pixels_not_channels(self):
         baseline = Image.new("RGB", (3, 1), (100, 100, 100))
         self.assertEqual(service.compare_pixels(baseline, baseline, 0)[0], 0)

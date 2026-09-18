@@ -136,6 +136,47 @@ class Rect(ctypes.Structure):
     ]
 
 
+class MouseInput(ctypes.Structure):
+    """Win32 MOUSEINPUT payload used by SendInput."""
+
+    _fields_ = [
+        ("dx", ctypes.c_long),
+        ("dy", ctypes.c_long),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class InputUnion(ctypes.Union):
+    """Union payload for a Win32 INPUT structure."""
+
+    _fields_ = [("mi", MouseInput)]
+
+
+class Input(ctypes.Structure):
+    """Win32 INPUT structure limited to mouse input."""
+
+    _anonymous_ = ("union",)
+    _fields_ = [
+        ("type", wintypes.DWORD),
+        ("union", InputUnion),
+    ]
+
+
+MOUSE_INPUT = 0
+MOUSEEVENTF_MOVE = 0x0001
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_ABSOLUTE = 0x8000
+MOUSEEVENTF_VIRTUALDESK = 0x4000
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
+
+
 if os.name == "nt":
     user32 = ctypes.windll.user32
     user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
@@ -161,6 +202,10 @@ if os.name == "nt":
     user32.GetWindowRect.restype = ctypes.c_bool
     user32.SetForegroundWindow.argtypes = [wintypes.HWND]
     user32.SetForegroundWindow.restype = ctypes.c_bool
+    user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+    user32.GetSystemMetrics.restype = ctypes.c_int
+    user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(Input), ctypes.c_int]
+    user32.SendInput.restype = wintypes.UINT
     # Background (non-intrusive) input: PostMessage / SendMessage
     user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
     user32.PostMessageW.restype = ctypes.c_bool
@@ -333,6 +378,57 @@ def physical_coordinates():
     finally:
         if not user32.SetThreadDpiAwarenessContext(previous):
             raise RuntimeError("cannot restore thread DPI awareness context")
+
+
+def normalized_absolute_coordinate(value: int, origin: int, span: int) -> int:
+    """Map a physical virtual-desktop coordinate to SendInput's absolute range."""
+    if span <= 1:
+        raise RuntimeError("virtual desktop has invalid dimensions")
+    normalized = round((value - origin) * 65535 / (span - 1))
+    return max(0, min(65535, normalized))
+
+
+def virtual_desktop_coordinate(x: int, y: int) -> tuple[int, int]:
+    """Convert physical screen coordinates, including negative origins, for SendInput."""
+    if user32 is None:
+        raise RuntimeError("SendInput requires Windows user32")
+    left = int(user32.GetSystemMetrics(SM_XVIRTUALSCREEN))
+    top = int(user32.GetSystemMetrics(SM_YVIRTUALSCREEN))
+    width = int(user32.GetSystemMetrics(SM_CXVIRTUALSCREEN))
+    height = int(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN))
+    return (
+        normalized_absolute_coordinate(x, left, width),
+        normalized_absolute_coordinate(y, top, height),
+    )
+
+
+def mouse_input(dx: int, dy: int, flags: int) -> Input:
+    """Build one mouse INPUT event for a pointer move or button transition."""
+    event = Input()
+    event.type = MOUSE_INPUT
+    event.mi = MouseInput(dx, dy, 0, flags, 0, 0)
+    return event
+
+
+def send_pointer_click(x: int, y: int) -> None:
+    """Move the system pointer and inject a complete left-button click."""
+    if user32 is None:
+        raise RuntimeError("pointer_click requires Windows SendInput")
+    absolute_x, absolute_y = virtual_desktop_coordinate(x, y)
+    inputs = (Input * 3)(
+        mouse_input(
+            absolute_x,
+            absolute_y,
+            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+        ),
+        mouse_input(0, 0, MOUSEEVENTF_LEFTDOWN),
+        mouse_input(0, 0, MOUSEEVENTF_LEFTUP),
+    )
+    injected = int(user32.SendInput(3, inputs, ctypes.sizeof(Input)))
+    if injected != 3:
+        raise RuntimeError(
+            f"SendInput failed: injected {injected} of 3 pointer events"
+        )
 
 
 def get_capture_bounds(hwnd: int) -> tuple[int, int, int, int] | None:
@@ -1095,6 +1191,45 @@ class WinAppSession:
                 continue
         raise RuntimeError(f"selector did not resolve: {selector}")
 
+    def _control_at_path(self, path: str, selector: str) -> Any:
+        """Resolve a snapshot path without changing the legacy selector resolver."""
+        parts = path.split("/")
+        if not parts or parts[0] != "0":
+            raise RuntimeError(f"snapshot path did not resolve: {selector}")
+        control = self.root_control()
+        for part in parts[1:]:
+            try:
+                control = control.GetChildren()[int(part)]
+            except Exception as exc:
+                raise RuntimeError(f"snapshot path did not resolve: {selector}") from exc
+        return control
+
+    def find_visible_interactive_control(self, selector: str) -> tuple[Any, dict[str, int]]:
+        """Resolve one visible interactive UIA control and its physical bounds."""
+        node = resolve_screenshot_element(
+            self.snapshot(for_screenshot=True),
+            selector,
+        )
+        rectangle = node.get("bounding_rectangle")
+        if not rectangle or rectangle["width"] <= 0 or rectangle["height"] <= 0:
+            raise RuntimeError("element has no visible UIA screen bounds")
+        path = node.get("path")
+        if not path:
+            raise RuntimeError("visible UIA element has no snapshot path")
+        control = self._control_at_path(str(path), selector)
+        if get_control_property(control, "IsOffscreen") is True:
+            raise RuntimeError("element became offscreen before pointer_click")
+        current_rectangle = rect_to_dict(
+            get_control_property(control, "BoundingRectangle")
+        )
+        if (
+            not current_rectangle
+            or current_rectangle["width"] <= 0
+            or current_rectangle["height"] <= 0
+        ):
+            raise RuntimeError("element has no visible UIA screen bounds")
+        return control, current_rectangle
+
     def highlight(self, selector: str) -> dict[str, Any]:
         """Highlight the selected native element."""
         control = self.find_control(selector)
@@ -1112,8 +1247,12 @@ class WinAppSession:
     def execute(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Run one action against a selected UIA control, or exec a system command.
 
-        mode: "foreground" (default, SetForegroundWindow + SendInput)
+        mode: "foreground" (default; actions may activate the target window)
               "background" (PostMessage/SendMessage, no focus change)
+
+        ``pointer_click`` is the exception that always requires foreground
+        mode and uses SendInput to move the real system pointer before the
+        left-button transition. Ordinary ``click`` keeps its UIA-first order.
 
         exec actions (no selector needed):
           exec: launch <path>           spawn a process
@@ -1131,6 +1270,28 @@ class WinAppSession:
                 return self.visual_command({**payload, "baseline": value})
             if action == "exec":
                 return self._handle_exec(selector, str(value or ""))
+
+            if action == "pointer_click":
+                if mode != "foreground":
+                    return {
+                        "ok": False,
+                        "error": "pointer_click requires foreground mode",
+                    }
+                try:
+                    if self.hwnd is None or user32 is None:
+                        raise RuntimeError(
+                            "pointer_click requires an attached Windows window"
+                        )
+                    if not user32.SetForegroundWindow(self.hwnd):
+                        raise RuntimeError("SetForegroundWindow failed")
+                    with physical_coordinates():
+                        _, rectangle = self.find_visible_interactive_control(selector)
+                        center_x = rectangle["left"] + rectangle["width"] // 2
+                        center_y = rectangle["top"] + rectangle["height"] // 2
+                        send_pointer_click(center_x, center_y)
+                except Exception as exc:
+                    return {"ok": False, "error": str(exc)}
+                return {"ok": True, "selector": selector, "action": action}
 
             control = self.find_control(selector)
             if mode not in ("foreground", "background"):

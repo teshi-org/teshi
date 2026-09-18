@@ -146,7 +146,12 @@ Seed vars from `[api]` keys plus `TESHI_API_*` environment variables (`TESHI_API
 
 ## WinUI3 / Native App Recording
 
-`teshi desktop` can start a WinUI3/native Windows app bridge with **Connect WinUI3 App**. Terminal agents can then use `teshi winapp` commands through the tracked `winapp-regression` skill. Confirmed UIA bindings are stored in `.teshi/step-bindings/{feature}.json` with `strategy: "uia"`.
+`teshi desktop`/`teshi web` can expose a WinUI3/native Windows app bridge
+through the supported control in the installed build. Terminal agents can
+then use `teshi winapp` commands through the tracked `winapp-regression` skill.
+Do not assume a control named **Connect WinUI3 App** exists in every build.
+Confirmed UIA bindings are stored in `.teshi/step-bindings/{feature}.json` with
+`strategy: "uia"`.
 
 See [WinUI3 / Native Windows app mode](winapp-modes.md) for setup and limitations.
 

@@ -430,7 +430,9 @@ CLI `select` / `next-unbound` updates `active-step.json`; Desktop watches the fi
 
 ## WinUI automation (`teshi winapp`) — 0.4.0+
 
-Requires **Connect WinUI3 App** in Desktop (or `teshi web`) and `.teshi/cdp-endpoint.json` with `"mode": "winapp"`.
+Requires a live native WinApp sidecar and `.teshi/cdp-endpoint.json` with
+`"mode": "winapp"`. Start WinApp mode through the supported control available
+in the installed Desktop/web build; the UI control name is version-dependent.
 
 ```bash
 teshi winapp list-windows
@@ -440,9 +442,14 @@ teshi winapp attach --process-name MyApp.exe
 teshi winapp snapshot
 teshi winapp highlight 'uia:automation_id=LoginButton'
 teshi winapp execute --selector 'uia:automation_id=LoginButton' --action click
+teshi winapp execute --selector 'uia:control_type=ButtonControl;name=Close' --action pointer_click
 teshi winapp replay --feature test/feature/login.feature [--until-line N] [--yes] [--dry-run] \
   [--launch 'C:\path\to\App.exe']
 ```
+
+WinApp `click` prefers UIA activation and does not guarantee real pointer
+hover or pressed state. `pointer_click` moves the system pointer and sends a
+foreground left-click for controls that depend on real mouse input.
 
 `replay` checks that a window is attached before running bindings. Use `attach` or `--launch` when detached.
 
@@ -457,6 +464,11 @@ teshi export --target behave --feature test/feature/login.feature --out ./tests-
 ```
 
 Writes `behave.ini`, `features/`, `features/environment.py`, `features/steps/`, and `pages/`. Run `behave` from the output directory.
+
+`pointer_click` is currently supported by native `teshi winapp replay` only.
+`teshi export --target behave` rejects bindings using that action with
+`unsupported export action: pointer_click`; use native replay or provide a
+custom behave step definition.
 
 ---
 

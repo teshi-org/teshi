@@ -30,7 +30,7 @@ teshi can expose a native Windows app to terminal agents through the same sideca
 ## Start WinApp mode
 
 1. Open a BDD project in teshi Desktop/web.
-2. Click **Connect WinUI3 App** in the Target panel.
+2. Start WinApp mode through the installed application's supported control.
 3. Select a Gherkin step in the left panel.
 4. In the terminal, run the `winapp-regression` skill.
 
@@ -103,6 +103,11 @@ teshi winapp replay --feature features/my_bug.feature --yes
 teshi export --target behave --feature features/my_bug.feature --out ./tests-e2e
 ```
 
+`pointer_click` is currently a native WinApp replay action and is not
+supported by the behave exporter. Exporting a binding that uses it fails with
+`unsupported export action: pointer_click`; keep that scenario on native replay
+or add a custom behave step definition.
+
 See [winui-automation-ids.md](winui-automation-ids.md) for app-side `AutomationId` conventions.
 
 When `.teshi/cdp-endpoint.json` has `"mode": "winapp"`, `teshi run` forwards scenarios to `teshi winapp replay` via the NDJSON runner.
@@ -111,13 +116,24 @@ When `.teshi/cdp-endpoint.json` has `"mode": "winapp"`, `teshi run` forwards sce
 
 | Action | UIA behavior |
 |--------|--------------|
-| `click` | Prefer `InvokePattern`, then UIA click, then center-point click |
+| `click` | Prefer `InvokePattern`, then UIA click, then center-point click; does not guarantee real pointer hover or pressed state |
+| `pointer_click` | Foreground-only real pointer move to the element center followed by a Win32 `SendInput` left-click |
 | `fill` | Prefer `ValuePattern.SetValue`, then focus + keyboard input |
 | `assert_visible` | Check that the resolved element has visible bounds |
 | `assert_text` | Compare expected text against `ValuePattern` or `Name` |
 | `assert_screenshot` | Compare lossless RGB pixels of one visible interactive UIA element with a PNG baseline |
 | `select` | Prefer `SelectionItemPattern.Select`, then click |
 | `press_key` | Focus the element and send keys |
+
+Use `pointer_click` when the control depends on real pointer input, such as
+hover/pressed state, a WinUI3 custom title bar or caption island, non-client
+area interaction, or pointer messages. It moves the system pointer and brings
+the attached window to the foreground. `click` remains the UIA-activation-first
+choice for ordinary stable automation.
+
+```powershell
+teshi winapp execute --selector "uia:control_type=ButtonControl;name=Close" --action pointer_click
+```
 
 ## Element screenshots and visual assertions
 
@@ -151,7 +167,11 @@ For step bindings, keep the existing schema:
 
 WinApp replay uses tolerance 8 and writes failures under `.teshi/artifacts/visual/<sanitized-feature>-L<line>-diff.png`. The assertion response is printed before replay reports the failing step. Existing replay JPEG evidence remains separate from visual comparison.
 
-Managed runtime v2 packages this capability. The install path and release archive are versioned separately from the Teshi application; v1 manifests cannot satisfy the v2 requirement. Release builds embed the v2 archive URL, hash, and size. Restart an already-running older daemon/sidecar after upgrading so it loads the new runtime.
+Managed runtime v3 packages real pointer clicking and the existing visual
+capability. The install path and release archive are versioned separately from
+the Teshi application; v2 manifests cannot satisfy the v3 requirement. Release
+builds embed the v3 archive URL, hash, and size. Restart an already-running
+older daemon/sidecar after upgrading so it loads the new runtime.
 
 Run the window-independent capture, comparison, selector, CLI, and replay tests after building the CLI:
 

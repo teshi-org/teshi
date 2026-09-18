@@ -45,6 +45,24 @@ teshi winapp execute --selector "uia:automation_id=WelcomeMessage" --action asse
 
 Use only the actual discovered selector and the action/value supplied by the step. Mutating verification changes application state; restore the relevant scenario setup before replay or inspecting later steps when necessary. A highlight alone is not action verification. Do not retry failed mutations until you understand their outcome.
 
+## Choose the click action deliberately
+
+- `click` prefers UIA activation (`InvokePattern`), then the existing UIA click
+  fallback chain. It is suitable for ordinary stable automation, but it does
+  not guarantee real pointer hover or pressed state.
+- `pointer_click` moves the real system pointer to the unique visible
+  interactive element and sends a foreground left-button click. Use it for
+  hover, pressed state, WinUI3 custom title bars, caption islands, non-client
+  area interaction, and controls that depend on real mouse messages.
+- `pointer_click` requires `--mode foreground`; it must not be downgraded to
+  background `PostMessage` input.
+
+For example:
+
+```text
+teshi winapp execute --selector "uia:control_type=ButtonControl;name=Close" --action pointer_click
+```
+
 ## Propose and confirm
 
 After successful verification of that same assertion:
@@ -78,3 +96,8 @@ teshi export --target behave --feature features/regression.feature --out tests-e
 ```
 
 Export confirmed bindings, then read [references/behave-export.md](references/behave-export.md). Check existing output before overwriting generated artifacts. Report separately whether export, dry-run, and actual replay passed. Committing or publishing is a separate action when requested by the user.
+
+The behave exporter currently does not support the native `pointer_click`
+action. A feature using that action must use native `winapp replay`, or provide
+a custom behave step definition; export otherwise fails with
+`unsupported export action: pointer_click`.

@@ -36,7 +36,9 @@ class VisualCliTests(unittest.TestCase):
                 response = {"ok": True, "target": {"attached": True}}
             elif command["cmd"] == "screenshot":
                 response = {"ok": True, "screenshot": "AA=="}
-            elif command.get("action") in ("click", "fill", "assert_visible", "assert_text"):
+            elif command.get("action") in (
+                "click", "pointer_click", "fill", "assert_visible", "assert_text"
+            ):
                 response = {"ok": True}
             else:
                 response = self.response
@@ -94,6 +96,42 @@ class VisualCliTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertFalse(payload["ok"])
         self.assertIn("error", payload)
+
+    def test_pointer_click_binding_and_replay_preserve_action(self):
+        (self.root / "pointer.feature").write_text(
+            "Feature: Pointer action\n"
+            "  Scenario: Click the caption close button\n"
+            "    When the close button is clicked\n",
+            encoding="utf-8",
+        )
+        selected = self.cli("steps", "select", "--feature", "pointer.feature", "--line", "3")
+        self.assertEqual(selected.returncode, 0, selected.stderr)
+        proposed = self.cli(
+            "steps", "propose", "--line", "3", "--strategy", "uia",
+            "--value", "uia:control_type=ButtonControl;name=Close",
+            "--action", "pointer_click", "--confidence", "1",
+            "--rationale", "Requires real pointer hover and pressed state",
+        )
+        self.assertEqual(proposed.returncode, 0, proposed.stderr)
+        confirmed = self.cli("steps", "confirm", "--rank", "1")
+        self.assertEqual(confirmed.returncode, 0, confirmed.stderr)
+
+        binding_files = list(self.root.rglob("*.bindings.json"))
+        self.assertTrue(binding_files)
+        binding = json.loads(binding_files[0].read_text(encoding="utf-8"))
+        self.assertEqual(binding["steps"][0]["primary"]["action"], "pointer_click")
+
+        replay = self.cli(
+            "winapp", "replay", "--feature", "pointer.feature", "--non-interactive"
+        )
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        pointer_commands = [
+            command for command in self.commands
+            if command.get("action") == "pointer_click"
+        ]
+        self.assertTrue(pointer_commands)
+        self.assertEqual(pointer_commands[-1]["action"], "pointer_click")
+        self.assertEqual(pointer_commands[-1]["mode"], "foreground")
 
     def test_replay_visual_failure_and_legacy_actions(self):
         (self.root / "visual.feature").write_text(

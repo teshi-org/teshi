@@ -1391,7 +1391,8 @@ pub struct WinAppExecuteArgs {
     /// UIA selector to execute against
     #[arg(long)]
     pub selector: String,
-    /// Action to execute
+    /// Action to execute; `click` uses UIA activation, while `pointer_click`
+    /// moves the real foreground pointer before sending a left-click
     #[arg(long, default_value = "click")]
     pub action: String,
     /// Optional input value for fill/assert_text/select/press_key
@@ -1400,7 +1401,8 @@ pub struct WinAppExecuteArgs {
     /// Timeout in milliseconds
     #[arg(long, default_value_t = 5000)]
     pub timeout_ms: u64,
-    /// Input mode: foreground (default) or background (non-intrusive PostMessage)
+    /// Input mode: foreground (default) or background (non-intrusive PostMessage);
+    /// `pointer_click` requires foreground
     #[arg(long, default_value = "foreground")]
     pub mode: String,
 }
@@ -1425,7 +1427,8 @@ pub struct WinAppReplayArgs {
     /// Launch this executable and attach before replay (when not already attached)
     #[arg(long)]
     pub launch: Option<String>,
-    /// Input mode for all replay steps: foreground (default) or background (non-intrusive PostMessage)
+    /// Input mode for replay steps: foreground (default) or background
+    /// (non-intrusive PostMessage); `pointer_click` requires foreground
     #[arg(long, default_value = "foreground")]
     pub mode: String,
 }
