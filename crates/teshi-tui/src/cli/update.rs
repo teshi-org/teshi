@@ -43,6 +43,8 @@ pub fn handle_update(
                 ReleaseChannel::Stable
             }
         });
+        // Check is a multi-request GitHub metadata walk; say so before the prompt.
+        eprintln!("Checking GitHub for updates...");
         let report = manager::check(&std::env::current_exe()?, build_identity(), channel)?;
         if check_only || report.candidate.is_none() {
             return Ok((serde_json::to_value(report)?, 0));

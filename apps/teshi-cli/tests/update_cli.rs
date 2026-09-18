@@ -26,6 +26,7 @@ fn unattended_install_without_yes_has_single_json_error() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["status"], "errored");
     assert_eq!(value["error"]["code"], "cancelled");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("Checking GitHub"));
 }
 
 #[test]
@@ -44,6 +45,7 @@ fn local_status_and_identity_do_not_require_a_release_or_install_manifest() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(serde_json::from_slice::<serde_json::Value>(&output.stdout).is_ok());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("Checking GitHub"));
     }
 }
 

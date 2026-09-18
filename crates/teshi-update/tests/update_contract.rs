@@ -21,6 +21,9 @@ use teshi_update::{
 
 const TARGET: &str = "x86_64-pc-windows-msvc";
 const API: &str = "https://api.github.com/repos/teshi-org/teshi/releases?per_page=100&page=1";
+const LATEST: &str = "https://api.github.com/repos/teshi-org/teshi/releases/latest";
+/// Keep in sync with `NIGHTLY_MANIFEST_LIMIT` in teshi-update's GitHub source.
+const NIGHTLY_MANIFEST_LIMIT: usize = 8;
 
 fn identity(sequence: u64, sha: char) -> BuildIdentity {
     BuildIdentity {
@@ -45,6 +48,7 @@ struct FakeHttp {
     pages: BTreeMap<String, String>,
     calls: Mutex<Vec<(String, Option<String>)>>,
     throttled: bool,
+    not_found: bool,
 }
 impl Http for FakeHttp {
     fn get(&self, url: &str, etag: Option<&str>) -> Result<HttpResponse> {
@@ -55,6 +59,8 @@ impl Http for FakeHttp {
         Ok(HttpResponse {
             status: if self.throttled {
                 429
+            } else if self.not_found {
+                404
             } else if etag.is_some() {
                 304
             } else {
@@ -79,7 +85,24 @@ fn add_release(
     build: BuildIdentity,
     target: &str,
 ) -> serde_json::Value {
-    let tag = format!("v{}-nightly.20260908.{}", build.semver, &build.git_sha[..7]);
+    add_dated_release(http, id, build, target, "2026-09-08T13:00:00Z")
+}
+
+fn add_dated_release(
+    http: &mut FakeHttp,
+    id: u64,
+    build: BuildIdentity,
+    target: &str,
+    published_at: &str,
+) -> serde_json::Value {
+    let tag = match build.channel {
+        ReleaseChannel::Nightly => {
+            format!("v{}-nightly.20260908.{}", build.semver, &build.git_sha[..7])
+        }
+        ReleaseChannel::Stable => format!("v{}", build.semver),
+        ReleaseChannel::Dev => format!("v{}-dev", build.semver),
+    };
+    let prerelease = build.channel == ReleaseChannel::Nightly;
     let asset = ReleaseAsset {
         name: format!("teshi-{tag}-{target}.zip"),
         target: target.into(),
@@ -108,7 +131,7 @@ fn add_release(
             asset.name
         ),
     );
-    serde_json::json!({"id":id,"tag_name":tag,"draft":false,"prerelease":true,"published_at":"2026-09-08T13:00:00Z","assets":[
+    serde_json::json!({"id":id,"tag_name":tag,"draft":false,"prerelease":prerelease,"published_at":published_at,"assets":[
         {"id":id*10,"name":"update-manifest.json","size":raw.len(),"browser_download_url":meta_url},
         {"id":id*10+1,"name":"SHA256SUMS","size":200,"browser_download_url":sums_url},
         {"id":id*10+2,"name":asset.name,"size":1,"browser_download_url":"https://github.com/payload"}]})
@@ -432,6 +455,176 @@ fn github_paginates_to_the_newest_eligible_release() {
         .unwrap();
     assert_eq!(candidate.release_id, 99);
     assert_eq!(candidate.manifest.identity.build_sequence, 20);
+}
+
+#[test]
+fn github_nightly_fetches_only_a_recent_manifest_window() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut http = FakeHttp::default();
+    // Oldest-first listing: without publish-date sorting the window would pick
+    // sequence 9 instead of the newest sequence 21.
+    let listed: Vec<_> = (2..=21)
+        .map(|sequence| {
+            add_dated_release(
+                &mut http,
+                sequence,
+                nightly_build(sequence),
+                TARGET,
+                &format!("2026-09-08T{sequence:02}:00:00Z"),
+            )
+        })
+        .collect();
+    http.pages
+        .insert(API.into(), serde_json::to_string(&listed).unwrap());
+    let source = GithubSource {
+        http,
+        clock: FixedClock,
+        cache_dir: temp.path().into(),
+    };
+    let candidate = source
+        .check(
+            &identity(1, 'a'),
+            ReleaseChannel::Nightly,
+            TARGET,
+            InstallKind::Portable,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(candidate.manifest.identity.build_sequence, 21);
+    let calls = source.http.calls.lock().unwrap();
+    let manifest_fetches = calls
+        .iter()
+        .filter(|(url, _)| url.ends_with("/update-manifest.json"))
+        .count();
+    assert_eq!(manifest_fetches, NIGHTLY_MANIFEST_LIMIT);
+    let oldest_tag = format!(
+        "/v0.7.10-nightly.20260908.{}/",
+        &nightly_build(2).git_sha[..7]
+    );
+    assert!(!calls.iter().any(|(url, _)| url.contains(&oldest_tag)));
+}
+
+fn nightly_build(sequence: u64) -> BuildIdentity {
+    BuildIdentity {
+        semver: "0.7.10".into(),
+        channel: ReleaseChannel::Nightly,
+        git_sha: format!("c{sequence:03x}{}", "b".repeat(36)),
+        build_timestamp: "2026-09-08T12:00:00Z".into(),
+        build_sequence: sequence,
+    }
+}
+
+#[test]
+fn github_stable_uses_latest_release_endpoint() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut http = FakeHttp::default();
+    let mut current = identity(10, 'a');
+    current.channel = ReleaseChannel::Stable;
+    current.semver = "0.7.9".into();
+    let mut latest_build = identity(11, 'b');
+    latest_build.channel = ReleaseChannel::Stable;
+    let latest = add_release(&mut http, 9, latest_build, TARGET);
+    http.pages
+        .insert(LATEST.into(), serde_json::to_string(&latest).unwrap());
+    let source = GithubSource {
+        http,
+        clock: FixedClock,
+        cache_dir: temp.path().into(),
+    };
+    let candidate = source
+        .check(
+            &current,
+            ReleaseChannel::Stable,
+            TARGET,
+            InstallKind::Portable,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(candidate.manifest.identity.semver, "0.7.10");
+    let calls = source.http.calls.lock().unwrap();
+    assert!(
+        calls
+            .iter()
+            .any(|(url, _)| url == LATEST || url.ends_with("/releases/latest"))
+    );
+    assert!(!calls.iter().any(|(url, _)| url == API));
+}
+
+#[test]
+fn github_stable_falls_back_when_latest_is_not_newer() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut http = FakeHttp::default();
+    let mut current = identity(10, 'a');
+    current.channel = ReleaseChannel::Stable;
+    current.semver = "0.7.10".into();
+    let mut latest_build = identity(9, 'b');
+    latest_build.channel = ReleaseChannel::Stable;
+    latest_build.semver = "0.7.9".into();
+    let latest = add_release(&mut http, 9, latest_build, TARGET);
+    let mut highest_build = identity(12, 'c');
+    highest_build.channel = ReleaseChannel::Stable;
+    highest_build.semver = "0.7.11".into();
+    let highest = add_release(&mut http, 10, highest_build, TARGET);
+    http.pages
+        .insert(LATEST.into(), serde_json::to_string(&latest).unwrap());
+    http.pages.insert(
+        API.into(),
+        serde_json::to_string(&[latest, highest]).unwrap(),
+    );
+    let source = GithubSource {
+        http,
+        clock: FixedClock,
+        cache_dir: temp.path().into(),
+    };
+
+    let candidate = source
+        .check(
+            &current,
+            ReleaseChannel::Stable,
+            TARGET,
+            InstallKind::Portable,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(candidate.manifest.identity.semver, "0.7.11");
+    let calls = source.http.calls.lock().unwrap();
+    assert!(calls.iter().any(|(url, _)| url == API));
+}
+
+#[test]
+fn github_latest_404_means_no_stable_update() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut http = FakeHttp {
+        not_found: true,
+        ..Default::default()
+    };
+    http.pages.insert(LATEST.into(), "{}".into());
+    let mut current = identity(10, 'a');
+    current.channel = ReleaseChannel::Stable;
+    let source = GithubSource {
+        http,
+        clock: FixedClock,
+        cache_dir: temp.path().into(),
+    };
+
+    assert!(
+        source
+            .check(
+                &current,
+                ReleaseChannel::Stable,
+                TARGET,
+                InstallKind::Portable,
+                false,
+            )
+            .unwrap()
+            .is_none()
+    );
+    let calls = source.http.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, LATEST);
 }
 
 #[test]

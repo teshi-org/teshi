@@ -16,7 +16,14 @@ use std::{
 use teshi_core::version::{BuildIdentity, ReleaseChannel};
 
 const API: &str = "https://api.github.com/repos/teshi-org/teshi/releases";
+const LATEST_STABLE: &str = "https://api.github.com/repos/teshi-org/teshi/releases/latest";
 const METADATA_LIMIT: u64 = 8 * 1024 * 1024;
+/// Newest complete nightlies whose update-manifest.json/SHA256SUMS are fetched.
+///
+/// GitHub lists releases newest-first, and Teshi publishes several same-day
+/// nightlies. A small window still prefers the highest `build_sequence` when
+/// publish order is slightly off, without downloading months of history.
+const NIGHTLY_MANIFEST_LIMIT: usize = 8;
 
 /// Clock injected into polling/cache logic.
 pub trait Clock {
@@ -328,6 +335,15 @@ pub struct GithubSource<H, C> {
 
 impl<H: Http, C: Clock> GithubSource<H, C> {
     fn fetch(&self, cache: &mut Cache, url: &str) -> Result<String> {
+        self.fetch_optional(cache, url)?.ok_or_else(|| {
+            UpdateError::new(
+                ErrorCode::Network,
+                "GitHub metadata request returned HTTP 404",
+            )
+        })
+    }
+
+    fn fetch_optional(&self, cache: &mut Cache, url: &str) -> Result<Option<String>> {
         let previous = cache.entries.get(url);
         let response = self
             .http
@@ -335,7 +351,11 @@ impl<H: Http, C: Clock> GithubSource<H, C> {
         if response.status == 304 {
             return previous
                 .map(|v| v.body.clone())
+                .map(Some)
                 .ok_or_else(|| invalid("304 without cached metadata"));
+        }
+        if response.status == 404 {
+            return Ok(None);
         }
         if response.status == 403 || response.status == 429 {
             cache.until = self
@@ -371,10 +391,13 @@ impl<H: Http, C: Clock> GithubSource<H, C> {
                 body: body.clone(),
             },
         );
-        Ok(body)
+        Ok(Some(body))
     }
 
     /// Resolves the newest eligible release without downloading any payload archive.
+    ///
+    /// Stable checks GitHub's latest non-prerelease. Nightly paginates newest-first
+    /// and fetches update metadata only for a recent complete-release window.
     ///
     /// # Errors
     /// Returns network, rate-limit, compatibility or malformed-metadata errors.
@@ -423,27 +446,9 @@ impl<H: Http, C: Clock> GithubSource<H, C> {
         if channel == ReleaseChannel::Dev {
             return Err(invalid("Select stable or nightly"));
         }
-        let mut releases = Vec::new();
-        for page in 1..=100 {
-            let body = self.fetch(cache, &format!("{API}?per_page=100&page={page}"))?;
-            let batch: Vec<GithubRelease> = serde_json::from_str(&body)?;
-            let finished = batch.len() < 100;
-            releases.extend(
-                batch
-                    .into_iter()
-                    .filter(|r| !r.draft && r.prerelease == (channel == ReleaseChannel::Nightly)),
-            );
-            if finished {
-                break;
-            }
-            if page == 100 {
-                return Err(invalid(
-                    "Release pagination limit exceeded; refusing incomplete selection",
-                ));
-            }
-        }
         let current_version =
             semver::Version::parse(&current.semver).map_err(|e| invalid(e.to_string()))?;
+        let releases = self.list_releases(cache, channel, &current_version)?;
         let mut possible = Vec::new();
         for release in releases {
             let Some(tag) = release.tag_name.strip_prefix('v') else {
@@ -476,7 +481,18 @@ impl<H: Http, C: Clock> GithubSource<H, C> {
         {
             possible.retain(|(v, _)| *v == highest);
         }
+        // Prefer recently published nightlies so a slightly out-of-order GitHub
+        // listing still competes inside the manifest-fetch window.
+        if channel == ReleaseChannel::Nightly {
+            possible.sort_by_key(|(_, release)| std::cmp::Reverse(published_timestamp(release)));
+        }
+        let manifest_limit = match channel {
+            ReleaseChannel::Nightly => NIGHTLY_MANIFEST_LIMIT,
+            ReleaseChannel::Stable => usize::MAX,
+            ReleaseChannel::Dev => 0,
+        };
         let mut best: Option<Candidate> = None;
+        let mut manifests_fetched = 0;
         for (_, release) in possible {
             let meta = release
                 .assets
@@ -501,6 +517,9 @@ impl<H: Http, C: Clock> GithubSource<H, C> {
                     release.tag_name
                 )));
             };
+            if manifests_fetched >= manifest_limit {
+                continue;
+            }
             let sums_asset = release
                 .assets
                 .iter()
@@ -508,6 +527,7 @@ impl<H: Http, C: Clock> GithubSource<H, C> {
                 .ok_or_else(|| invalid("Release has no SHA256SUMS"))?;
             let raw = self.fetch(cache, &meta.browser_download_url)?;
             let sums = self.fetch(cache, &sums_asset.browser_download_url)?;
+            manifests_fetched += 1;
             verify_checksum_text(&sums, "update-manifest.json", raw.as_bytes())?;
             let manifest: ReleaseManifest = serde_json::from_str(&raw)?;
             manifest.validate()?;
@@ -557,6 +577,105 @@ impl<H: Http, C: Clock> GithubSource<H, C> {
         }
         Ok(best)
     }
+
+    fn list_releases(
+        &self,
+        cache: &mut Cache,
+        channel: ReleaseChannel,
+        current_version: &semver::Version,
+    ) -> Result<Vec<GithubRelease>> {
+        match channel {
+            ReleaseChannel::Stable => self.list_latest_stable(cache, current_version),
+            ReleaseChannel::Nightly => self.list_recent_nightlies(cache),
+            ReleaseChannel::Dev => Err(invalid("Select stable or nightly")),
+        }
+    }
+
+    fn list_latest_stable(
+        &self,
+        cache: &mut Cache,
+        current_version: &semver::Version,
+    ) -> Result<Vec<GithubRelease>> {
+        let Some(body) = self.fetch_optional(cache, LATEST_STABLE)? else {
+            return Ok(Vec::new());
+        };
+        let latest: GithubRelease = serde_json::from_str(&body)?;
+        if latest.draft || latest.prerelease {
+            return Ok(Vec::new());
+        }
+        let Some(tag) = latest.tag_name.strip_prefix('v') else {
+            return self.list_stable_releases(cache);
+        };
+        let Ok(version) = semver::Version::parse(tag) else {
+            return self.list_stable_releases(cache);
+        };
+        if version <= *current_version {
+            return self.list_stable_releases(cache);
+        }
+        Ok(vec![latest])
+    }
+
+    fn list_stable_releases(&self, cache: &mut Cache) -> Result<Vec<GithubRelease>> {
+        let mut releases = Vec::new();
+        for page in 1..=100 {
+            let body = self.fetch(cache, &format!("{API}?per_page=100&page={page}"))?;
+            let batch: Vec<GithubRelease> = serde_json::from_str(&body)?;
+            let finished = batch.len() < 100;
+            releases.extend(
+                batch
+                    .into_iter()
+                    .filter(|release| !release.draft && !release.prerelease),
+            );
+            if finished {
+                break;
+            }
+            if page == 100 {
+                return Err(invalid(
+                    "Release pagination limit exceeded; refusing incomplete selection",
+                ));
+            }
+        }
+        Ok(releases)
+    }
+
+    fn list_recent_nightlies(&self, cache: &mut Cache) -> Result<Vec<GithubRelease>> {
+        let mut releases = Vec::new();
+        for page in 1..=100 {
+            let body = self.fetch(cache, &format!("{API}?per_page=100&page={page}"))?;
+            let batch: Vec<GithubRelease> = serde_json::from_str(&body)?;
+            let finished = batch.len() < 100;
+            releases.extend(batch.into_iter().filter(|r| !r.draft && r.prerelease));
+            let complete = releases
+                .iter()
+                .filter(|release| has_update_manifest(release))
+                .count();
+            if finished || complete >= NIGHTLY_MANIFEST_LIMIT {
+                break;
+            }
+            if page == 100 {
+                return Err(invalid(
+                    "Release pagination limit exceeded; refusing incomplete selection",
+                ));
+            }
+        }
+        Ok(releases)
+    }
+}
+
+fn has_update_manifest(release: &GithubRelease) -> bool {
+    release
+        .assets
+        .iter()
+        .any(|asset| asset.name == "update-manifest.json")
+}
+
+fn published_timestamp(release: &GithubRelease) -> i64 {
+    release
+        .published_at
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.timestamp())
+        .unwrap_or(0)
 }
 
 /// Finds exactly one checksum entry, rejecting duplicates and malformed hashes.
