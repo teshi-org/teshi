@@ -684,6 +684,153 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delivered[1]["locator_context"], candidate["context"])
         self.assertIsNone(delivered[1]["selector"])
 
+    async def test_structured_candidate_negative_assertion_allows_zero_match_preflight(self) -> None:
+        await self.register("profile-a")
+        lease = await self.acquire("profile-a")
+        delivered: list[dict] = []
+        candidate = {
+            "kind": "role",
+            "arguments": {"role": "button", "name": "Gone"},
+            "expression": "page.getByRole('button', { name: 'Gone' })",
+        }
+
+        async def direct(instance_id: str, command: dict) -> bool:
+            delivered.append(command)
+            if command["cmd"] == "verify_playwright_locators":
+                body = {
+                    "verification": [
+                        {
+                            "expression": candidate["expression"],
+                            "match_count": 0,
+                            "visible": False,
+                            "enabled": False,
+                        }
+                    ]
+                }
+            else:
+                body = {
+                    "action_outcome": {"ok": True, "match_count": 0},
+                    "wait_outcome": None,
+                }
+            asyncio.create_task(
+                self.bridge.handle_extension_response(
+                    {
+                        "type": "response",
+                        "request_id": command["request_id"],
+                        "extension_instance_id": instance_id,
+                        "target": command["target"],
+                        "ok": True,
+                        **body,
+                    }
+                )
+            )
+            return True
+
+        self.bridge._direct_command_callback = direct
+        result = await self.bridge.forward_command(
+            {
+                "cmd": "execute_browser_action",
+                "request_id": "structured-negative-action",
+                "target": target("profile-a"),
+                "lease_token": lease,
+                "action": "assert_not_exists",
+                "element": {
+                    "candidate": candidate,
+                    "page_context_revision": "revision-a",
+                },
+            }
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["action_outcome"]["match_count"], 0)
+        self.assertEqual(
+            [item["cmd"] for item in delivered],
+            ["verify_playwright_locators", "execute_locator"],
+        )
+
+    async def test_snapshot_reference_negative_assertion_allows_zero_match_preflight(self) -> None:
+        await self.register("profile-a")
+        lease = await self.acquire("profile-a")
+        candidate = {
+            "kind": "css",
+            "arguments": {"selector": "#gone"},
+            "expression": "page.locator('#gone')",
+        }
+        snapshot = {
+            "request_id": "negative-reference-snapshot",
+            "page_context_revision": "revision-a",
+            "interactive_elements": [
+                {
+                    "element_ref": "opaque-gone",
+                    "shortSelector": "#gone",
+                    "candidate": candidate,
+                }
+            ],
+        }
+        self.bridge.broker.cache_snapshot_references(
+            self.bridge.broker.sessions["profile-a"],
+            target("profile-a"),
+            snapshot,
+        )
+        delivered: list[dict] = []
+
+        async def direct(instance_id: str, command: dict) -> bool:
+            delivered.append(command)
+            body = (
+                {
+                    "verification": [
+                        {
+                            "expression": candidate["expression"],
+                            "match_count": 0,
+                            "visible": False,
+                            "enabled": False,
+                        }
+                    ]
+                }
+                if command["cmd"] == "verify_playwright_locators"
+                else {
+                    "action_outcome": {"ok": True, "match_count": 0},
+                    "wait_outcome": None,
+                }
+            )
+            asyncio.create_task(
+                self.bridge.handle_extension_response(
+                    {
+                        "type": "response",
+                        "request_id": command["request_id"],
+                        "extension_instance_id": instance_id,
+                        "target": command["target"],
+                        "ok": True,
+                        **body,
+                    }
+                )
+            )
+            return True
+
+        self.bridge._direct_command_callback = direct
+        result = await self.bridge.forward_command(
+            {
+                "cmd": "execute_browser_action",
+                "request_id": "reference-negative-action",
+                "target": target("profile-a"),
+                "lease_token": lease,
+                "action": "assert_not_exists",
+                "element": {
+                    "reference": "@e1",
+                    "page_context_revision": "revision-a",
+                    "snapshot_id": "negative-reference-snapshot",
+                },
+            }
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["action_outcome"]["match_count"], 0)
+        self.assertEqual(
+            [item["cmd"] for item in delivered],
+            ["verify_playwright_locators", "execute_locator"],
+        )
+        self.assertEqual(delivered[1]["selector"], "#gone")
+
     async def test_tab_window_and_group_mutations_stay_on_selected_profile(self) -> None:
         await self.register("profile-a")
         await self.register("profile-b")

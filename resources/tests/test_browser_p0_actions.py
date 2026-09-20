@@ -10,7 +10,11 @@ from pathlib import Path
 RESOURCES = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RESOURCES))
 
-from browser_service import EmbeddedSession  # noqa: E402
+from browser_agent_broker import BrowserSessionBroker  # noqa: E402
+from browser_service import (  # noqa: E402
+    EmbeddedSession,
+    handle_embedded_command,
+)
 
 
 def free_port() -> int:
@@ -41,6 +45,19 @@ class BrowserP0ActionTests(unittest.IsolatedAsyncioTestCase):
             await self.session.playwright.stop()
 
     async def test_dom_pointer_text_select_key_and_reactive_waits(self) -> None:
+        missing = await self.session.execute_locator(
+            "#not-present", "assert_not_exists", timeout_ms=2000
+        )
+        self.assertTrue(missing["ok"], missing)
+        self.assertEqual(missing["match_count"], 0)
+
+        existing = await self.session.execute_locator(
+            "#dom", "assert_not_exists", timeout_ms=2000
+        )
+        self.assertFalse(existing["ok"], existing)
+        self.assertEqual(existing["code"], "assert_not_exists_failed")
+        self.assertEqual(existing["match_count"], 1)
+
         highlighted = await self.session.highlight_selector("#dom")
         self.assertTrue(highlighted["ok"])
 
@@ -83,6 +100,46 @@ class BrowserP0ActionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(timeout["ok"])
         self.assertEqual(timeout["code"], "browser_wait_timeout")
+
+    async def test_embedded_structured_negative_assertion_allows_zero_matches(self) -> None:
+        broker = BrowserSessionBroker()
+        lease_result = await handle_embedded_command(
+            self.session,
+            {
+                "cmd": "acquire_browser_lease",
+                "request_id": "embedded-negative-lease",
+                "extension_instance_id": "embedded-session",
+                "owner_label": "embedded-negative-test",
+            },
+            broker,
+        )
+        self.assertTrue(lease_result["ok"], lease_result)
+
+        candidate = {
+            "kind": "css",
+            "arguments": {"selector": "#not-present"},
+            "expression": "page.locator('#not-present')",
+        }
+        result = await handle_embedded_command(
+            self.session,
+            {
+                "cmd": "execute_browser_action",
+                "request_id": "embedded-negative-action",
+                "target": {
+                    "extension_instance_id": "embedded-session",
+                    "window_id": 0,
+                    "tab_id": 1,
+                },
+                "lease_token": lease_result["lease"]["lease_token"],
+                "action": "assert_not_exists",
+                "element": {"candidate": candidate},
+            },
+            broker,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["action_outcome"]["ok"], result)
+        self.assertEqual(result["action_outcome"]["match_count"], 0)
 
 
 if __name__ == "__main__":

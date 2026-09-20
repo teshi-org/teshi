@@ -120,6 +120,7 @@ When `.teshi/cdp-endpoint.json` has `"mode": "winapp"`, `teshi run` forwards sce
 | `pointer_click` | Foreground-only real pointer move to the element center followed by a Win32 `SendInput` left-click |
 | `fill` | Prefer `ValuePattern.SetValue`, then focus + keyboard input |
 | `assert_visible` | Check that the resolved element has visible bounds |
+| `assert_not_exists` | Pass only when the UIA selector matches no element, including hidden elements |
 | `assert_text` | Compare expected text against `ValuePattern` or `Name` |
 | `assert_screenshot` | Compare lossless RGB pixels of one visible interactive UIA element with a PNG baseline |
 | `select` | Prefer `SelectionItemPattern.Select`, then click |

@@ -306,6 +306,7 @@ The newline-delimited JSON-RPC server exposes the same typed contracts as the CL
 | `type` | Type sequentially without clearing or pressing Enter |
 | `pointer_click` | Verified CDP pointer click; add `--focus` only when focus is intended |
 | `assert_visible` | Element must be visible |
+| `assert_not_exists` | No element may match the selector, including hidden elements |
 | `assert_text` | Element text must match `--value-arg` |
 | `select` | Select option |
 | `press_key` | Press key (e.g. `Enter`) |

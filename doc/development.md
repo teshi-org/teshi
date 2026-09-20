@@ -39,7 +39,7 @@ cargo fmt --all --check                                           # check format
 ### Test layout
 
 - Unit tests live at the bottom of each source file (in `#[cfg(test)]` modules)
-- Product Gherkin: `features/en-US/` and `features/zh-CN/`; every Feature has an explicit verification route and runner tag (`@web-ui`, `@cli`, `@validation-e2e`, or `@api`)
+- Product Gherkin: `features/en-US/`, `features/zh-CN/`, and `features/winapp/`; every Feature has an explicit verification route and runner tag (`@web-ui`, `@cli`, `@validation-e2e`, `@api`, or `@winapp`)
 - Feature catalog ownership is checked by `python scripts/check-feature-e2e-catalog.py`; Core, architecture, CI packaging, and protocol-internal contracts belong in OpenSpec or Rust/workflow tests
 - Requirement CLI E2E is executed by `teshi run` and `teshi-requirement-cli-runner` (`tests/steps/requirement-cli`) against requirement-tagged CLI files (English `requirement_*.feature`, Chinese titles such as `需求列表.feature` and `需求标签页.feature`)
 - Validation self-bootstrap E2E is executed by `validation_cli_bdd.rs` with `teshi-validation-cli-runner` (`tests/steps/validation-cli`). It creates malformed source as isolated fixture data, then starts the exact built Teshi binary as a child process; it does not use the target validator API for assertions.

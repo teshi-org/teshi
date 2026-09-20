@@ -8,11 +8,17 @@ have an explicit runner owner:
 - `@cli` for requirement-library CLI E2E
 - `@web-ui` for browser/UI E2E and verified replay
 - `@api` for HTTP API E2E
+- `@winapp` for native Windows UIA regressions replayed with `teshi winapp`
 
 `@web-ui` files also require a matching `*.bindings.json` artifact. The native
 CI job checks the catalog and runs the CLI self-bootstrap; browser replay is
 run through Teshi's browser workflow. A Feature without a bound browser
 workflow is not added here just to document an internal protocol contract.
+
+`@winapp` files require a matching `*.bindings.json` artifact and a live
+Windows target for replay. They are cataloged in CI but are not replayed on the
+Linux quality job; use `teshi winapp replay` on Windows with the attached
+`teshi-desktop` target.
 
 Do not put Core unit-test intent, architecture ownership, implementation
 boundaries, CI packaging rules, or transport-internal invariants here. Keep

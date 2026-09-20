@@ -63,7 +63,9 @@ Chinese or other non-ASCII feature file names produce a safe `page_module` (e.g.
 - `uia:control_type=ButtonControl;name=Log in`
 - `uia:path=0/2/1` (last resort)
 
-`assert_text` uses **exact** UIA `Name` match, not substring. Use `exec` bindings or custom helpers for partial text.
+`assert_text` uses **exact** UIA `Name` match, not substring. `assert_not_exists`
+passes only when no control matches, including hidden controls. Use `exec` bindings
+or custom helpers for partial text.
 
 ## CI
 

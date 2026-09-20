@@ -995,7 +995,7 @@ fn execute(project_root: &Path, args: &BrowserExecuteArgs) -> Result<()> {
     let (target, lease_token) = required_target(&args.target)?;
     let action: BrowserAction = serde_json::from_value(json!(args.action)).with_context(|| {
         format!(
-            "invalid --action {}; expected click, pointer_click, fill, type, select, press_key, assert_visible, assert_text, navigate, or upload",
+            "invalid --action {}; expected click, pointer_click, fill, type, select, press_key, assert_visible, assert_not_exists, assert_text, navigate, or upload",
             args.action
         )
     })?;

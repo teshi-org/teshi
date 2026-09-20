@@ -55,6 +55,7 @@ const SUPPORTED_ACTIONS = Object.freeze([
   "fill",
   "type",
   "assert_visible",
+  "assert_not_exists",
   "assert_text",
   "select",
   "press_key",
@@ -1735,6 +1736,7 @@ async function executeLocator({ selector, candidate = null, locatorContext = nul
     "fill",
     "type",
     "assert_visible",
+    "assert_not_exists",
     "assert_text",
     "select",
     "press_key",
@@ -1829,6 +1831,32 @@ async function executeLocator({ selector, candidate = null, locatorContext = nul
       if (candidate.kind === 'css') { try { return Array.from(root.querySelectorAll(String(args.selector || ''))); } catch { return []; } }
       return [];
     };
+    if (action === "assert_not_exists") {
+      const root = resolveRoot();
+      if (!root) return { ok: false, error: "locator context is unavailable", code: "element_not_found" };
+      let matches;
+      try {
+        if (!candidate) {
+          matches = Array.from(root.querySelectorAll(selector));
+        } else if (candidate.kind === "css") {
+          const args = candidate.arguments || {};
+          matches = Array.from(root.querySelectorAll(String(args.selector || "")));
+        } else {
+          matches = findMatches();
+        }
+      } catch {
+        return { ok: false, error: "invalid selector", code: "invalid_selector" };
+      }
+      if (matches.length > 0) {
+        return {
+          ok: false,
+          error: "element exists",
+          code: "assert_not_exists_failed",
+          match_count: matches.length,
+        };
+      }
+      return { ok: true, match_count: 0 };
+    }
     return (async () => {
       let el = null;
       while (Date.now() < deadline) {

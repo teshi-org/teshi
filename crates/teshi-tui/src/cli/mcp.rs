@@ -544,7 +544,7 @@ fn tool_definitions(allow_mutations: bool) -> Vec<Value> {
                 target_schema(),
                 json!({ "type": "integer", "minimum": 1000, "maximum": 300000, "default": 5000 }),
                 json!({
-                    "action": { "type": "string", "enum": ["click", "pointer_click", "fill", "type", "select", "press_key", "assert_visible", "assert_text"] },
+                    "action": { "type": "string", "enum": ["click", "pointer_click", "fill", "type", "select", "press_key", "assert_visible", "assert_not_exists", "assert_text"] },
                     "element": { "type": "object" },
                     "value": { "type": "string" },
                     "wait": { "type": "object" },

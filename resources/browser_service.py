@@ -416,11 +416,23 @@ EXECUTE_ACTIONS = {
     "fill",
     "type",
     "assert_visible",
+    "assert_not_exists",
     "assert_text",
     "assert_text_count",
     "select",
     "press_key",
 }
+
+
+def structured_locator_preflight_passes(action: str, match_count: int) -> bool:
+    """Return whether a structured locator may reach the requested action.
+
+    Positive actions still require one unique match.  A negative existence
+    assertion is also valid when the structured locator has zero matches; the
+    action implementation must then perform the actual negative assertion.
+    """
+    return match_count == 1 or (action == "assert_not_exists" and match_count == 0)
+
 
 # ── Engine-inspired JS helpers injected into page context ──
 
@@ -783,6 +795,25 @@ class EmbeddedSession:
         async with self._lock:
             locator = self._action_locator(selector, candidate)
             try:
+                if action == "assert_not_exists":
+                    match_count = await locator.count()
+                    if match_count:
+                        return {
+                            "ok": False,
+                            "selector": selector or None,
+                            "candidate": candidate,
+                            "action": action,
+                            "match_count": match_count,
+                            "error": "element exists",
+                            "code": "assert_not_exists_failed",
+                        }
+                    return {
+                        "ok": True,
+                        "selector": selector or None,
+                        "candidate": candidate,
+                        "action": action,
+                        "match_count": 0,
+                    }
                 await locator.wait_for(state="visible", timeout=timeout_ms)
                 if action == "click":
                     await locator.click(timeout=timeout_ms)
@@ -1687,8 +1718,20 @@ async def handle_embedded_command(
                                 element.get("page_context_revision")
                             ),
                         )
-                        first = (observed.get("verification") or [{}])[0]
-                        if int(first.get("match_count") or 0) != 1:
+                        verification = observed.get("verification")
+                        first = (
+                            verification[0]
+                            if isinstance(verification, list) and verification
+                            else {}
+                        )
+                        if (
+                            not observed.get("ok")
+                            or not isinstance(first, dict)
+                            or not structured_locator_preflight_passes(
+                                str(data.get("action") or ""),
+                                int(first.get("match_count") or 0),
+                            )
+                        ):
                             raise BrokerError(
                                 "stale_element_reference",
                                 "structured locator is no longer unique",
@@ -3842,7 +3885,10 @@ class ChromeBridge:
                 }
             verification = verified.get("verification")
             first = verification[0] if isinstance(verification, list) and verification else {}
-            if not isinstance(first, dict) or int(first.get("match_count") or 0) != 1:
+            if not isinstance(first, dict) or not structured_locator_preflight_passes(
+                action,
+                int(first.get("match_count") or 0),
+            ):
                 raise BrokerError(
                     "stale_element_reference",
                     "structured locator is no longer unique; no action was executed",

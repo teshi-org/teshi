@@ -98,6 +98,7 @@ KNOWN_ACTIONS = {
     "select",
     "press_key",
     "assert_visible",
+    "assert_not_exists",
     "assert_text",
     "navigate",
     "go_back",

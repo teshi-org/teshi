@@ -37,7 +37,7 @@ class VisualCliTests(unittest.TestCase):
             elif command["cmd"] == "screenshot":
                 response = {"ok": True, "screenshot": "AA=="}
             elif command.get("action") in (
-                "click", "pointer_click", "fill", "assert_visible", "assert_text"
+                "click", "pointer_click", "fill", "assert_visible", "assert_not_exists", "assert_text"
             ):
                 response = {"ok": True}
             else:
@@ -136,8 +136,9 @@ class VisualCliTests(unittest.TestCase):
     def test_replay_visual_failure_and_legacy_actions(self):
         (self.root / "visual.feature").write_text(
             "Feature: Caption appearance\n  Scenario: Compare caption\n    Given the caption is visible\n\n"
-            "    When the caption is inspected\n\n    Then the caption matches its baseline\n", encoding="utf-8")
-        for line, action in [(3, "assert_visible"), (5, "click"), (7, "assert_screenshot")]:
+            "    When the caption is inspected\n\n    Then the caption matches its baseline\n\n"
+            "    Then the missing banner is absent\n", encoding="utf-8")
+        for line, action in [(3, "assert_visible"), (5, "click"), (7, "assert_screenshot"), (9, "assert_not_exists")]:
             selected = self.cli("steps", "select", "--feature", "visual.feature", "--line", str(line))
             self.assertEqual(selected.returncode, 0, selected.stderr)
             proposed = self.cli("steps", "propose", "--line", str(line), "--strategy", "uia", "--value", "uia:name=Close",
@@ -157,7 +158,7 @@ class VisualCliTests(unittest.TestCase):
         self.response["ok"] = True
         success = self.cli("winapp", "replay", "--feature", "visual.feature", "--non-interactive")
         self.assertEqual(success.returncode, 0, success.stderr)
-        for action in ("click", "fill", "assert_visible", "assert_text"):
+        for action in ("click", "fill", "assert_visible", "assert_not_exists", "assert_text"):
             self.assertEqual(self.cli("winapp", "execute", "--selector", "uia:name=Close", "--action", action,
                                      "--value-arg", "text").returncode, 0)
             self.assertNotIn("pixel_tolerance", self.commands[-1])

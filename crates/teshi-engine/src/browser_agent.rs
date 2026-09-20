@@ -113,6 +113,8 @@ pub enum BrowserAction {
     PressKey,
     /// Assert visibility without mutation.
     AssertVisible,
+    /// Assert that the locator matches no element without mutation.
+    AssertNotExists,
     /// Assert text without mutation.
     AssertText,
     /// Navigate the selected tab.

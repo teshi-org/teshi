@@ -67,6 +67,7 @@ test("service worker implements protocol-v1 identity and routed operations", () 
   assert.match(background, /p1\.filtered_network_capture/);
   assert.match(background, /p1\.network_batch_transport/);
   assert.match(background, /supported_actions/);
+  assert.match(background, /"assert_not_exists"/);
   assert.match(background, /supported_operations/);
   assert.match(background, /direct_command/);
   assert.match(background, /ws\.send\(JSON\.stringify\(reply\)\)/);

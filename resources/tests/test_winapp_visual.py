@@ -151,6 +151,46 @@ class VisualTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("pointer_click requires foreground mode", result["error"])
 
+    def test_assert_not_exists_passes_only_when_uia_selector_is_absent(self):
+        session = service.WinAppSession(None)
+        session.root_control = Mock(
+            return_value=SimpleNamespace(
+                Name="root",
+                GetChildren=lambda: [],
+            )
+        )
+        absent = session.execute(
+            dict(selector="uia:name=Missing", action="assert_not_exists")
+        )
+        self.assertTrue(absent["ok"], absent)
+        self.assertFalse(absent["exists"])
+
+        session.find_control = Mock(return_value=SimpleNamespace(IsOffscreen=True))
+        present = session.execute(
+            dict(selector="uia:name=Hidden", action="assert_not_exists")
+        )
+        self.assertFalse(present["ok"], present)
+        self.assertTrue(present["exists"])
+        self.assertIn("element exists", present["error"])
+
+    def test_assert_not_exists_fails_closed_when_uia_provider_is_unavailable(self):
+        session = service.WinAppSession(None)
+        provider_error = RuntimeError("provider unavailable")
+        session.root_control = Mock(
+            return_value=SimpleNamespace(
+                Name="root",
+                GetChildren=Mock(side_effect=provider_error),
+            )
+        )
+
+        result = session.execute(
+            dict(selector="uia:name=Missing", action="assert_not_exists")
+        )
+
+        self.assertFalse(result["ok"], result)
+        self.assertIn("UIA provider unavailable", result["error"])
+        self.assertIn("provider unavailable", result["error"])
+
     def test_pointer_click_moves_and_clicks_without_invoke_or_legacy_click(self):
         invoke = Mock(side_effect=AssertionError("InvokePattern must not run"))
         legacy_click = Mock(side_effect=AssertionError("legacy click must not run"))

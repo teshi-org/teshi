@@ -819,6 +819,14 @@ def get_control_property(control: Any, name: str) -> Any:
         return None
 
 
+class ControlNotFoundError(RuntimeError):
+    """The UIA tree was fully traversed without finding a matching control."""
+
+
+class ControlTraversalError(RuntimeError):
+    """The UIA provider failed while the tree was being traversed."""
+
+
 class HighlightOverlay:
     """Tiny topmost rectangle overlay used to show selected native elements."""
 
@@ -1161,9 +1169,26 @@ class WinAppSession:
             for part in criteria["path"].split("/")[1:]:
                 try:
                     idx = int(part)
-                    control = control.GetChildren()[idx]
-                except Exception as exc:
-                    raise RuntimeError(f"path selector did not resolve: {selector}") from exc
+                except (TypeError, ValueError) as exc:
+                    raise ControlNotFoundError(
+                        f"path selector did not resolve: {selector}"
+                    ) from exc
+                try:
+                    children = control.GetChildren()
+                except Exception as exc:  # noqa: BLE001
+                    raise ControlTraversalError(
+                        f"UIA provider unavailable while resolving path selector: {selector}: {exc}"
+                    ) from exc
+                try:
+                    control = children[idx]
+                except IndexError as exc:
+                    raise ControlNotFoundError(
+                        f"path selector did not resolve: {selector}"
+                    ) from exc
+                except Exception as exc:  # noqa: BLE001
+                    raise ControlTraversalError(
+                        f"UIA traversal failed while resolving path selector: {selector}: {exc}"
+                    ) from exc
             return control
 
         def matches(control: Any) -> bool:
@@ -1186,10 +1211,31 @@ class WinAppSession:
             if matches(control):
                 return control
             try:
-                stack.extend(control.GetChildren())
-            except Exception:
-                continue
-        raise RuntimeError(f"selector did not resolve: {selector}")
+                children = control.GetChildren()
+                stack.extend(children)
+            except Exception as exc:  # noqa: BLE001
+                raise ControlTraversalError(
+                    f"UIA provider unavailable while resolving selector: {selector}: {exc}"
+                ) from exc
+        raise ControlNotFoundError(f"selector did not resolve: {selector}")
+
+    def control_exists(self, selector: str) -> bool:
+        """Return whether the legacy UIA selector resolves to any control."""
+        try:
+            self.find_control(selector)
+        except ControlNotFoundError:
+            return False
+        except RuntimeError as exc:
+            # Keep compatibility with callers/tests that provide a legacy
+            # resolver returning the historical plain RuntimeError.
+            message = str(exc)
+            if message.startswith((
+                "selector did not resolve:",
+                "path selector did not resolve:",
+            )):
+                return False
+            raise
+        return True
 
     def _control_at_path(self, path: str, selector: str) -> Any:
         """Resolve a snapshot path without changing the legacy selector resolver."""
@@ -1259,6 +1305,9 @@ class WinAppSession:
           exec: close                   send WM_CLOSE to attached window
           exec: assert_process <name>   fail if no process matches
           exec: assert_no_process <name>  fail if any process matches
+
+        selector assertions:
+          assert_not_exists              pass only when the UIA selector matches no control
         """
         selector = str(payload.get("selector") or "")
         action = str(payload.get("action") or "click")
@@ -1270,6 +1319,30 @@ class WinAppSession:
                 return self.visual_command({**payload, "baseline": value})
             if action == "exec":
                 return self._handle_exec(selector, str(value or ""))
+            if action == "assert_not_exists":
+                try:
+                    exists = self.control_exists(selector)
+                except Exception as exc:
+                    return {
+                        "ok": False,
+                        "selector": selector,
+                        "action": action,
+                        "error": str(exc),
+                    }
+                if exists:
+                    return {
+                        "ok": False,
+                        "selector": selector,
+                        "action": action,
+                        "exists": True,
+                        "error": f"element exists: {selector}",
+                    }
+                return {
+                    "ok": True,
+                    "selector": selector,
+                    "action": action,
+                    "exists": False,
+                }
 
             if action == "pointer_click":
                 if mode != "foreground":

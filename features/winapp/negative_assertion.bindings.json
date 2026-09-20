@@ -1,0 +1,34 @@
+{
+  "format_version": 2,
+  "feature": "features/winapp/negative_assertion.feature",
+  "steps": [
+    {
+      "step_line": 8,
+      "step_keyword": "Given",
+      "step_text": "the teshi desktop window is visible",
+      "step_text_normalized": "the teshi desktop window is visible",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "uia",
+        "value": "uia:control_type=WindowControl;name=teshi",
+        "action": "assert_visible"
+      },
+      "confirmed_at": "2026-09-20T09:20:30.373871400+00:00"
+    },
+    {
+      "step_line": 9,
+      "step_keyword": "Then",
+      "step_text": "the missing native marker is absent",
+      "step_text_normalized": "the missing native marker is absent",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "uia",
+        "value": "uia:control_type=ButtonControl;name=Teshi missing marker",
+        "action": "assert_not_exists"
+      },
+      "confirmed_at": "2026-09-20T09:20:42.049901700+00:00"
+    }
+  ]
+}

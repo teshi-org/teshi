@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FEATURES = ROOT / "features"
-RUNNER_TAGS = {"@api", "@cli", "@validation-e2e", "@web-ui"}
+RUNNER_TAGS = {"@api", "@cli", "@validation-e2e", "@web-ui", "@winapp"}
 LANGUAGE_BY_DIRECTORY = {"en-US": "# language: en", "zh-CN": "# language: zh-CN"}
 
 
@@ -45,6 +45,23 @@ def main() -> int:
             binding_path = path.with_suffix(".bindings.json")
             if not binding_path.is_file():
                 errors.append(f"{relative}: @web-ui requires {binding_path.name}")
+            else:
+                try:
+                    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as error:
+                    errors.append(f"{relative}: invalid binding sidecar: {error}")
+                else:
+                    if not isinstance(binding, dict):
+                        errors.append(f"{relative}: binding sidecar must contain a JSON object")
+                    elif binding.get("feature") != relative:
+                        errors.append(
+                            f"{relative}: binding sidecar points to {binding.get('feature')!r}"
+                        )
+
+        if "@winapp" in tags:
+            binding_path = path.with_suffix(".bindings.json")
+            if not binding_path.is_file():
+                errors.append(f"{relative}: @winapp requires {binding_path.name}")
             else:
                 try:
                     binding = json.loads(binding_path.read_text(encoding="utf-8"))

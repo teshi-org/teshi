@@ -206,6 +206,7 @@ fn render_action_body(binding: &StepBinding, page_module: &str, with_po: bool) -
             format!("{uia}.fill({target}, {val})")
         }
         "assert_visible" => format!("{uia}.assert_visible({target})"),
+        "assert_not_exists" => format!("{uia}.assert_not_exists({target})"),
         "assert_text" => {
             let val = value_arg
                 .map(python_env_or_literal)
@@ -401,6 +402,10 @@ class UiaDriver:
     def assert_visible(self, selector: str):
         if not self._control(selector).Exists(0, 0):
             raise AssertionError(f"not visible: {selector}")
+
+    def assert_not_exists(self, selector: str):
+        if self._control(selector).Exists(0, 0):
+            raise AssertionError(f"element exists: {selector}")
 
     def assert_text(self, selector: str, expected: str):
         ctrl = self._control(selector)

@@ -43,6 +43,10 @@ For a step asserting that a welcome message is visible, an example verification 
 teshi winapp execute --selector "uia:automation_id=WelcomeMessage" --action assert_visible
 ```
 
+For a negative existence assertion, use the same verified selector with
+`--action assert_not_exists`. It succeeds only when no UIA control matches;
+hidden controls still count as existing.
+
 Use only the actual discovered selector and the action/value supplied by the step. Mutating verification changes application state; restore the relevant scenario setup before replay or inspecting later steps when necessary. A highlight alone is not action verification. Do not retry failed mutations until you understand their outcome.
 
 ## Choose the click action deliberately
