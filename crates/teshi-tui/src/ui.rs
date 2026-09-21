@@ -18,6 +18,7 @@ use crate::highlight::{
 };
 use crate::markdown::render_markdown;
 use teshi_agent::pipeline::GenerationStage;
+use teshi_core::gherkin::{BddScenario, ScenarioKind};
 use teshi_core::gherkin_lang::{
     GherkinLanguage, GherkinLanguages, StepKeywordType, StructuralType,
 };
@@ -1233,9 +1234,31 @@ fn explore_block(title: &str, focused: bool) -> Block<'_> {
 }
 
 fn feature_display_name(path: &std::path::Path) -> String {
-    path.file_stem()
+    path.file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "feature".to_string())
+}
+
+fn git_file_status_style(status: teshi_core::git::FileGitStatus) -> Style {
+    let color = match status {
+        teshi_core::git::FileGitStatus::Added | teshi_core::git::FileGitStatus::Untracked => {
+            Color::Green
+        }
+        teshi_core::git::FileGitStatus::Modified => Color::Yellow,
+        teshi_core::git::FileGitStatus::Deleted => Color::Red,
+        teshi_core::git::FileGitStatus::Unmodified => Color::DarkGray,
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+fn git_diff_status_style(status: teshi_core::git::DiffStatus) -> Style {
+    let color = match status {
+        teshi_core::git::DiffStatus::Added => Color::Green,
+        teshi_core::git::DiffStatus::Deleted => Color::Red,
+        teshi_core::git::DiffStatus::Modified => Color::Yellow,
+        teshi_core::git::DiffStatus::Unchanged => Color::DarkGray,
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
 fn truncate_string_to_cols(text: &str, max_cols: u16) -> String {
@@ -1271,21 +1294,31 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
     if app.project.features.is_empty() {
-        lines.push(Line::styled(
-            " (no features)",
-            Style::default().fg(Color::DarkGray),
-        ));
+        if app.git_status.deleted.is_empty() {
+            lines.push(Line::styled(
+                " (no features)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
     } else {
         for (i, feature) in app.project.features.iter().enumerate() {
             let label = feature_display_name(&feature.file_path);
-            let style = if i == app.explore_selected_feature {
-                highlight_style
-            } else {
-                normal
-            };
-            let mut line = Line::from(Span::styled(format!(" {label}"), style));
+            let file_status = app
+                .git_status
+                .current_at(i)
+                .map(|view| view.file_status)
+                .unwrap_or_default();
+            let selected =
+                app.explore_selected_deleted_feature.is_none() && i == app.explore_selected_feature;
+            let style = if selected { highlight_style } else { normal };
+            let marker = file_status.marker();
+            let mut line = Line::from(vec![
+                Span::raw(" "),
+                Span::styled(format!("{marker:<2} "), git_file_status_style(file_status)),
+                Span::styled(label, style),
+            ]);
             line = truncate_line_to_cols(line, inner.width);
-            let trail = if i == app.explore_selected_feature {
+            let trail = if selected {
                 highlight_style
             } else {
                 Style::default()
@@ -1293,6 +1326,35 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             line = pad_line_to_width(line, inner.width, trail);
             lines.push(line);
         }
+    }
+
+    for (deleted_idx, deleted) in app.git_status.deleted.iter().enumerate() {
+        let label = feature_display_name(&deleted.path);
+        let selected = app.explore_selected_deleted_feature == Some(deleted_idx);
+        let label_style = if selected {
+            highlight_style
+        } else {
+            Style::default().fg(Color::Red)
+        };
+        let mut line = Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                format!("{:<2} ", deleted.file_status.marker()),
+                git_file_status_style(deleted.file_status),
+            ),
+            Span::styled(label, label_style),
+        ]);
+        line = truncate_line_to_cols(line, inner.width);
+        line = pad_line_to_width(
+            line,
+            inner.width,
+            if selected {
+                highlight_style
+            } else {
+                Style::default()
+            },
+        );
+        lines.push(line);
     }
 
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
@@ -1306,6 +1368,15 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             col_right: inner.right(),
         });
     }
+    for (deleted_idx, _deleted) in app.git_status.deleted.iter().enumerate() {
+        app.clickable_regions
+            .push(ClickableRegion::ExploreDeletedFeature {
+                deleted_idx,
+                row_y: inner.y + (app.project.features.len() + deleted_idx) as u16,
+                col_x: inner.x,
+                col_right: inner.right(),
+            });
+    }
 }
 
 fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -1318,6 +1389,66 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     }
 
+    if let Some(deleted_idx) = app.explore_selected_deleted_feature {
+        let deleted_scenarios: Vec<String> = app
+            .git_status
+            .deleted
+            .get(deleted_idx)
+            .map(|view| {
+                view.deleted_scenarios()
+                    .map(|scenario| scenario.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut lines = Vec::new();
+        if deleted_scenarios.is_empty() {
+            lines.push(Line::styled(
+                " (deleted Feature; see Git diff)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        } else {
+            for (scenario_idx, name) in deleted_scenarios.iter().enumerate() {
+                let selected = scenario_idx == app.explore_selected_scenario;
+                let mut line = Line::from(vec![
+                    Span::styled(
+                        "- ",
+                        git_diff_status_style(teshi_core::git::DiffStatus::Deleted),
+                    ),
+                    Span::styled(
+                        format!("Scenario: {name}"),
+                        if selected {
+                            explore_select_style(focused)
+                        } else {
+                            Style::default().fg(Color::Red)
+                        },
+                    ),
+                ]);
+                line = truncate_line_to_cols(line, inner.width);
+                line = pad_line_to_width(
+                    line,
+                    inner.width,
+                    if selected {
+                        explore_select_style(focused)
+                    } else {
+                        Style::default()
+                    },
+                );
+                lines.push(line);
+            }
+        }
+        frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+        for (scenario_idx, _name) in deleted_scenarios.iter().enumerate() {
+            app.clickable_regions
+                .push(ClickableRegion::ExploreScenario {
+                    scenario_idx,
+                    row_y: inner.y + scenario_idx as u16,
+                    col_x: inner.x,
+                    col_right: inner.right(),
+                });
+        }
+        return;
+    }
+
     let normal = Style::default();
     let mut lines: Vec<Line> = Vec::new();
 
@@ -1326,13 +1457,20 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .features
         .get(app.explore_selected_feature)
         .map(|f| f.all_scenarios());
+    let deleted_scenarios: Vec<_> = app
+        .git_status
+        .current_at(app.explore_selected_feature)
+        .map(|view| view.deleted_scenarios().collect())
+        .unwrap_or_default();
 
-    if scenarios.as_ref().is_none_or(|s| s.is_empty()) {
+    if scenarios.as_ref().is_none_or(|s| s.is_empty()) && deleted_scenarios.is_empty() {
         lines.push(Line::styled(
             " (no scenarios)",
             Style::default().fg(Color::DarkGray),
         ));
-    } else if let Some(scenarios) = scenarios {
+    }
+    let current_scenario_count = scenarios.as_ref().map_or(0, Vec::len);
+    if let Some(scenarios) = scenarios {
         for (i, scenario) in scenarios.iter().enumerate() {
             let status = app
                 .explore_case_status
@@ -1356,8 +1494,17 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             } else {
                 format!(" [{}]", tp_ids.join(","))
             };
+            let git_status = app
+                .git_status
+                .current_at(app.explore_selected_feature)
+                .map(|view| view.scenario_status(scenario))
+                .unwrap_or_default();
+            let git_marker = Span::styled(
+                format!("{} ", git_status.marker()),
+                git_diff_status_style(git_status),
+            );
             let name = Span::styled(format!(" {}{}", scenario.name, tp_badge), normal);
-            let mut line = Line::from(vec![status_dot, name]);
+            let mut line = Line::from(vec![git_marker, status_dot, name]);
             if i == app.explore_selected_scenario {
                 line = apply_line_background(line, explore_select_style(focused));
             }
@@ -1370,6 +1517,36 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             line = pad_line_to_width(line, inner.width, trail);
             lines.push(line);
         }
+    }
+
+    for (deleted_idx, deleted) in deleted_scenarios.iter().enumerate() {
+        let scenario_idx = current_scenario_count + deleted_idx;
+        let selected = scenario_idx == app.explore_selected_scenario;
+        let mut line = Line::from(vec![
+            Span::styled(
+                "- ",
+                git_diff_status_style(teshi_core::git::DiffStatus::Deleted),
+            ),
+            Span::styled(
+                format!("Scenario: {}", deleted.name),
+                if selected {
+                    explore_select_style(focused)
+                } else {
+                    Style::default().fg(Color::Red)
+                },
+            ),
+        ]);
+        line = truncate_line_to_cols(line, inner.width);
+        line = pad_line_to_width(
+            line,
+            inner.width,
+            if selected {
+                explore_select_style(focused)
+            } else {
+                Style::default()
+            },
+        );
+        lines.push(line);
     }
 
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
@@ -1390,22 +1567,246 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     col_right: inner.right(),
                 });
         }
+        for (deleted_idx, _deleted) in deleted_scenarios.iter().enumerate() {
+            let scenario_idx = scenarios.len() + deleted_idx;
+            app.clickable_regions
+                .push(ClickableRegion::ExploreScenario {
+                    scenario_idx,
+                    row_y: inner.y + scenario_idx as u16,
+                    col_x: inner.x,
+                    col_right: inner.right(),
+                });
+        }
+    } else {
+        for (deleted_idx, _deleted) in deleted_scenarios.iter().enumerate() {
+            let scenario_idx = deleted_idx;
+            app.clickable_regions
+                .push(ClickableRegion::ExploreScenario {
+                    scenario_idx,
+                    row_y: inner.y + scenario_idx as u16,
+                    col_x: inner.x,
+                    col_right: inner.right(),
+                });
+        }
     }
 }
 
 fn explore_scenarios_title(app: &App) -> String {
-    let count = app
+    if let Some(deleted_idx) = app.explore_selected_deleted_feature {
+        let count = app
+            .git_status
+            .deleted
+            .get(deleted_idx)
+            .map(|view| view.deleted_scenarios().count())
+            .unwrap_or(0);
+        return format!("Scenarios ({count})");
+    }
+    let current_count = app
         .project
         .features
         .get(app.explore_selected_feature)
         .map(|f| f.scenario_count())
         .unwrap_or(0);
-    format!("Scenarios ({count})")
+    let deleted_count = app
+        .git_status
+        .current_at(app.explore_selected_feature)
+        .map(|view| view.deleted_scenarios().count())
+        .unwrap_or(0);
+    format!("Scenarios ({})", current_count + deleted_count)
 }
 
 const DIFF_ADDED_BG: Color = Color::Rgb(24, 72, 36);
 const DIFF_MODIFIED_BG: Color = Color::Rgb(68, 56, 16);
 const DIFF_DELETED_BG: Color = Color::Rgb(72, 24, 24);
+
+fn render_git_diff_line(diff_line: &teshi_core::git::GitDiffLine, width: u16) -> Line<'static> {
+    let marker = diff_line.status.marker();
+    let background = match diff_line.status {
+        teshi_core::git::DiffStatus::Added => DIFF_ADDED_BG,
+        teshi_core::git::DiffStatus::Deleted => DIFF_DELETED_BG,
+        teshi_core::git::DiffStatus::Modified => DIFF_MODIFIED_BG,
+        teshi_core::git::DiffStatus::Unchanged => Color::Reset,
+    };
+    let line_style = Style::default().bg(background);
+    let marker_style = git_diff_status_style(diff_line.status).bg(background);
+    let mut line = Line::from(vec![
+        Span::styled(format!("{marker} "), marker_style),
+        Span::styled(diff_line.text.clone(), line_style),
+    ]);
+    line = truncate_line_to_cols(line, width);
+    pad_line_to_width(line, width, line_style)
+}
+
+fn render_git_diff_lines(
+    lines: &[teshi_core::git::GitDiffLine],
+    width: u16,
+    output: &mut Vec<Line<'static>>,
+) {
+    for diff_line in lines {
+        output.push(render_git_diff_line(diff_line, width));
+    }
+}
+
+fn render_git_steps(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    scenario: &BddScenario,
+    view: &teshi_core::git::FeatureGitView,
+) -> Vec<(usize, u16)> {
+    let focused = app.explore_focus == ColumnFocus::Step;
+    let block = explore_block("Steps (Git diff)", focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return Vec::new();
+    }
+
+    let scenario_status = view.scenario_status(scenario);
+    let old_scenario_line = view
+        .scenarios
+        .iter()
+        .find(|item| {
+            item.new_line_number == Some(scenario.line_number) && item.name == scenario.name
+        })
+        .and_then(|item| item.old_line_number);
+    let is_scenario_header = |diff_line: &teshi_core::git::GitDiffLine| {
+        diff_line.new_line_number == Some(scenario.line_number)
+            || old_scenario_line.is_some_and(|line| diff_line.old_line_number == Some(line))
+    };
+    let mut lines = Vec::new();
+    let mut step_rows = Vec::new();
+    if !view.feature_diff_lines.is_empty() {
+        lines.push(Line::styled(
+            " Feature",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        render_git_diff_lines(&view.feature_diff_lines, inner.width, &mut lines);
+        lines.push(Line::raw(""));
+    }
+    if let Some(background) = &view.background
+        && background.status != teshi_core::git::DiffStatus::Unchanged
+    {
+        lines.push(Line::styled(
+            " Background",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        for diff_line in &background.diff_lines {
+            lines.push(render_git_diff_line(diff_line, inner.width));
+        }
+        lines.push(Line::raw(""));
+    }
+
+    lines.push(Line::styled(
+        format!(
+            " {} {}",
+            scenario_status.marker(),
+            match scenario.kind {
+                ScenarioKind::Scenario => format!("Scenario: {}", scenario.name),
+                ScenarioKind::ScenarioOutline => format!("Scenario Outline: {}", scenario.name),
+            }
+        ),
+        git_diff_status_style(scenario_status),
+    ));
+    if scenario_status != teshi_core::git::DiffStatus::Unchanged {
+        let diff_lines = view.scenario_diff_lines(scenario).unwrap_or_default();
+        if diff_lines.is_empty() {
+            if let Some(diff) = &view.diff {
+                for diff_line in &diff.lines {
+                    if is_scenario_header(diff_line) {
+                        continue;
+                    }
+                    let row_y = inner.y + lines.len() as u16;
+                    lines.push(render_git_diff_line(diff_line, inner.width));
+                    if let Some(new_line) = diff_line.new_line_number
+                        && let Some(step_idx) = scenario
+                            .steps
+                            .iter()
+                            .position(|step| step.line_number == new_line)
+                    {
+                        step_rows.push((step_idx, row_y));
+                    }
+                }
+            }
+        } else {
+            for diff_line in diff_lines {
+                if is_scenario_header(diff_line) {
+                    continue;
+                }
+                let row_y = inner.y + lines.len() as u16;
+                lines.push(render_git_diff_line(diff_line, inner.width));
+                if let Some(new_line) = diff_line.new_line_number
+                    && let Some(step_idx) = scenario
+                        .steps
+                        .iter()
+                        .position(|step| step.line_number == new_line)
+                {
+                    step_rows.push((step_idx, row_y));
+                }
+            }
+        }
+    } else {
+        for step in &scenario.steps {
+            let row_y = inner.y + lines.len() as u16;
+            lines.push(Line::raw(format!("  {} {}", step.keyword, step.text)));
+            if let Some(step_idx) = scenario
+                .steps
+                .iter()
+                .position(|candidate| candidate.line_number == step.line_number)
+            {
+                step_rows.push((step_idx, row_y));
+            }
+        }
+    }
+    for deleted in view.deleted_scenarios() {
+        if deleted.diff_lines.is_empty() {
+            continue;
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            format!(" - Scenario: {}", deleted.name),
+            git_diff_status_style(teshi_core::git::DiffStatus::Deleted),
+        ));
+        for diff_line in &deleted.diff_lines {
+            if diff_line.old_line_number == deleted.old_line_number {
+                continue;
+            }
+            lines.push(render_git_diff_line(diff_line, inner.width));
+        }
+    }
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    step_rows
+}
+
+fn render_git_file_fallback(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    view: &teshi_core::git::FeatureGitView,
+) {
+    let focused = app.explore_focus == ColumnFocus::Step;
+    let block = explore_block("Feature (Git diff)", focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let mut lines = Vec::new();
+    if let Some(diff) = &view.diff {
+        render_git_diff_lines(&diff.lines, inner.width, &mut lines);
+    }
+    if lines.is_empty() {
+        lines.push(Line::styled(
+            " (Git diff unavailable)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
 
 fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let focused = app.explore_focus == ColumnFocus::Step;
@@ -1481,6 +1882,54 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
         frame.render_widget(Paragraph::new(Text::from(lines)), inner);
         return;
+    }
+
+    if let Some(deleted_idx) = app.explore_selected_deleted_feature {
+        if let Some(view) = app.git_status.deleted.get(deleted_idx) {
+            render_git_file_fallback(frame, app, area, view);
+        }
+        return;
+    }
+
+    let feature = app.project.features.get(app.explore_selected_feature);
+    let scenario = feature.and_then(|f| f.scenario_at(app.explore_selected_scenario));
+    if let Some(view) = app.git_status.current_at(app.explore_selected_feature) {
+        let feature_changed = !view.feature_diff_lines.is_empty();
+        if let Some(scenario) = scenario {
+            let scenario_status = view.scenario_status(scenario);
+            let background_changed = view.background.as_ref().is_some_and(|background| {
+                background.status != teshi_core::git::DiffStatus::Unchanged
+            });
+            let deleted_scenario = view.deleted_scenarios().next().is_some();
+            if scenario_status != teshi_core::git::DiffStatus::Unchanged
+                || background_changed
+                || deleted_scenario
+                || feature_changed
+            {
+                let step_rows = render_git_steps(frame, app, area, scenario, view);
+                for (step_idx, row_y) in step_rows {
+                    app.clickable_regions.push(ClickableRegion::ExploreStep {
+                        step_idx,
+                        row_y,
+                        col_x: area.x,
+                        col_right: area.right(),
+                    });
+                }
+                return;
+            }
+            let has_mapped_change = view
+                .scenarios
+                .iter()
+                .any(|item| item.status != teshi_core::git::DiffStatus::Unchanged);
+            if view.file_status != teshi_core::git::FileGitStatus::Unmodified && !has_mapped_change
+            {
+                render_git_file_fallback(frame, app, area, view);
+                return;
+            }
+        } else if view.file_status != teshi_core::git::FileGitStatus::Unmodified {
+            render_git_file_fallback(frame, app, area, view);
+            return;
+        }
     }
 
     // ── Normal (browse) mode ──────────────────────────────────────────
@@ -4990,9 +5439,10 @@ mod truncate_tests {
     use std::path::PathBuf;
 
     use super::{
-        Line, Span, build_case_detail_lines, explore_scenarios_title, truncate_line_to_cols,
+        Line, Span, build_case_detail_lines, explore_scenarios_title, render, truncate_line_to_cols,
     };
-    use crate::app::{App, CaseDetail, RunStatus};
+    use crate::app::{App, CaseDetail, ClickableRegion, RunStatus};
+    use ratatui::{Terminal, backend::TestBackend};
     use teshi_core::gherkin;
 
     #[test]
@@ -5092,6 +5542,291 @@ Feature: Rule only
         app.project.features = vec![feature];
         app.explore_selected_feature = 0;
         assert_eq!(explore_scenarios_title(&app), "Scenarios (1)");
+    }
+
+    #[test]
+    fn explore_feature_list_renders_modified_git_marker() {
+        let old = "Feature: Backup\n  Scenario: Restore\n    Given a backup exists\n";
+        let new = "Feature: Backup\n  Scenario: Restore\n    Given a snapshot exists\n";
+        let mut app = App::from_args().expect("app init");
+        let path = PathBuf::from("backup.feature");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Feature;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("M  backup.feature"), "screen was: {screen}");
+    }
+
+    #[test]
+    fn deleted_feature_is_selectable_and_renders_git_diff() {
+        let old = "Feature: Deleted\n  Scenario: Removed\n    Given old content\n";
+        let path = PathBuf::from("deleted.feature");
+        let mut app = App::from_args().expect("app init");
+        app.project.features.clear();
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            deleted: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Deleted,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), None),
+            )],
+            ..Default::default()
+        };
+        app.explore_selected_deleted_feature = Some(0);
+        app.explore_focus = crate::app::ColumnFocus::Step;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(
+            screen.contains("D  deleted.feature"),
+            "screen was: {screen}"
+        );
+        assert!(
+            screen.contains("- Feature: Deleted"),
+            "screen was: {screen}"
+        );
+        assert!(app.clickable_regions.iter().any(|region| matches!(
+            region,
+            ClickableRegion::ExploreDeletedFeature { deleted_idx: 0, .. }
+        )));
+    }
+
+    #[test]
+    fn current_feature_renders_head_deleted_scenarios_when_all_are_removed() {
+        let old = "Feature: Current\n  Scenario: Removed\n    Given old content\n";
+        let new = "Feature: Current\n";
+        let path = PathBuf::from("current.feature");
+        let mut app = App::from_args().expect("app init");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(screen.contains("Scenario: Removed"), "screen was: {screen}");
+        assert!(!screen.contains("(no scenarios)"), "screen was: {screen}");
+        assert!(app.clickable_regions.iter().any(|region| matches!(
+            region,
+            ClickableRegion::ExploreScenario {
+                scenario_idx: 0,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn current_feature_head_deleted_scenario_uses_after_current_row_index() {
+        let old = "Feature: Current\n  Scenario: Keep\n    Given keep\n  Scenario: Removed\n    Given old content\n";
+        let new = "Feature: Current\n  Scenario: Keep\n    Given keep\n";
+        let path = PathBuf::from("current.feature");
+        let mut app = App::from_args().expect("app init");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_selected_scenario = 1;
+        app.explore_focus = crate::app::ColumnFocus::Scenario;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+
+        assert!(app.clickable_regions.iter().any(|region| matches!(
+            region,
+            ClickableRegion::ExploreScenario {
+                scenario_idx: 1,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn explore_steps_render_deleted_and_added_git_lines() {
+        let old = "Feature: Backup\n  Scenario: Restore\n    Given a backup exists\n    And the application is closed\n";
+        let new = "Feature: Backup\n  Scenario: Restore\n    Given a backup exists\n    And the application is not running\n";
+        let mut app = App::from_args().expect("app init");
+        let path = PathBuf::from("backup.feature");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Step;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("-     And the application is closed"));
+        assert!(screen.contains("+     And the application is not running"));
+    }
+
+    #[test]
+    fn explore_steps_render_feature_level_diff_without_scenarios() {
+        let old = "Feature: Old title\n  Old description\n";
+        let new = "Feature: New title\n  New description\n";
+        let mut app = App::from_args().expect("app init");
+        let path = PathBuf::from("empty.feature");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Step;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("Feature (Git diff)"));
+        assert!(screen.contains("- Feature: Old title"));
+        assert!(screen.contains("+ Feature: New title"));
+    }
+
+    #[test]
+    fn explore_steps_render_feature_and_scenario_changes_together() {
+        let old = "Feature: Old title\n  Scenario: Restore\n    Given a backup exists\n";
+        let new = "Feature: New title\n  Scenario: Restore\n    Given a snapshot exists\n";
+        let mut app = App::from_args().expect("app init");
+        let path = PathBuf::from("backup.feature");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Step;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("Steps (Git diff)"));
+        assert!(screen.contains("- Feature: Old title"));
+        assert!(screen.contains("+ Feature: New title"));
+        assert!(screen.contains("-     Given a backup exists"));
+        assert!(screen.contains("+     Given a snapshot exists"));
+    }
+
+    #[test]
+    fn explore_steps_render_deleted_scenario_git_lines() {
+        let old = "Feature: Backup\n  Scenario: Keep\n    Given a backup exists\n  Scenario: Removed\n    Given the old flow\n";
+        let new = "Feature: Backup\n  Scenario: Keep\n    Given a backup exists\n";
+        let mut app = App::from_args().expect("app init");
+        let path = PathBuf::from("backup.feature");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Step;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("- Scenario: Removed"));
+        assert!(screen.contains("-     Given the old flow"));
     }
 
     #[test]

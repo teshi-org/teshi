@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
@@ -24,6 +24,8 @@ use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 use teshi_core::StepIndex;
 use teshi_core::gherkin::{self, BddProject};
 use teshi_core::gherkin_lang::StructuralType;
+
+const GIT_STATUS_REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// Available slash commands: (name, description)
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -348,6 +350,11 @@ struct ExternalChangePrompt {
     disk_stamp: Option<FileStamp>,
 }
 
+struct GitStatusRefreshResult {
+    revision: u64,
+    model: teshi_core::git::FeatureGitStatusModel,
+}
+
 /// A concrete buffer mutation to apply when the user accepts the change.
 #[derive(Debug, Clone)]
 pub enum AgentMutation {
@@ -469,6 +476,16 @@ pub fn requirements_tab_without_project(
 pub struct App {
     // ── Multi-file project ──────────────────────────────────────────
     pub project: BddProject,
+    /// Optional Git status/diff projection aligned with `project.features`.
+    pub git_status: teshi_core::git::FeatureGitStatusModel,
+    /// Latest background Git projection result, if a refresh is in flight.
+    git_status_rx: Option<Receiver<GitStatusRefreshResult>>,
+    /// Whether a newer Git projection should start after the current worker exits.
+    git_status_refresh_requested: bool,
+    /// Earliest time at which a refresh requested by an editor mutation may run.
+    git_status_refresh_deadline: Option<Instant>,
+    /// Revision of the in-memory project/buffer snapshot represented by Git.
+    git_status_revision: u64,
     pub step_index: StepIndex,
     pub mindmap_index: mindmap::MindMapIndex,
     pub mindmap_location_selection: HashMap<String, usize>,
@@ -547,6 +564,9 @@ pub struct App {
     // ── Explore tab state ───────────────────────────────────────────
     pub explore_focus: ColumnFocus,
     pub explore_selected_feature: usize,
+    /// Selected HEAD-only deleted Feature row, when the selection is not a
+    /// current project Feature.
+    pub explore_selected_deleted_feature: Option<usize>,
     pub explore_selected_scenario: usize,
     pub explore_selected_step: usize,
     pub explore_edit_mode: bool,
@@ -680,6 +700,12 @@ pub enum ClickableRegion {
     },
     ExploreFeature {
         feature_idx: usize,
+        row_y: u16,
+        col_x: u16,
+        col_right: u16,
+    },
+    ExploreDeletedFeature {
+        deleted_idx: usize,
         row_y: u16,
         col_x: u16,
         col_right: u16,
@@ -826,6 +852,13 @@ impl App {
         } else {
             gherkin::parse_project_shallow(dir)
         };
+        let git_scope = if recursive {
+            teshi_core::git::GitProjectScope::Recursive
+        } else {
+            teshi_core::git::GitProjectScope::Shallow
+        };
+        let git_status =
+            teshi_core::git::FeatureGitStatusModel::empty_for_project(&project, git_scope);
         let step_index = StepIndex::build(&project);
         let mut mindmap_index = mindmap::build_index(&project);
         let disk_stamps = Self::capture_disk_stamps(&project);
@@ -851,6 +884,11 @@ impl App {
         };
         let mut app = Self {
             project,
+            git_status,
+            git_status_rx: None,
+            git_status_refresh_requested: false,
+            git_status_refresh_deadline: None,
+            git_status_revision: 0,
             step_index,
             mindmap_index,
             mindmap_location_selection: HashMap::new(),
@@ -909,6 +947,7 @@ impl App {
             change_summary_selection: 0,
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
+            explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
             explore_edit_mode: false,
@@ -981,6 +1020,7 @@ impl App {
             test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
             requirements_root,
         };
+        app.refresh_git_status();
         app.restore_generation_session_from_disk();
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -1008,6 +1048,10 @@ impl App {
             root_dir,
             features: vec![feature],
         };
+        let git_status = teshi_core::git::FeatureGitStatusModel::empty_for_project(
+            &project,
+            teshi_core::git::GitProjectScope::CurrentFiles,
+        );
         let step_index = StepIndex::build(&project);
         let mut mindmap_index = mindmap::build_index(&project);
         let buffers = vec![EditorBuffer::from_string(content.clone())];
@@ -1017,6 +1061,11 @@ impl App {
         let project_root = project.root_dir.clone();
         let mut app = Self {
             project,
+            git_status,
+            git_status_rx: None,
+            git_status_refresh_requested: false,
+            git_status_refresh_deadline: None,
+            git_status_revision: 0,
             step_index,
             mindmap_index,
             mindmap_location_selection: HashMap::new(),
@@ -1080,6 +1129,7 @@ impl App {
             change_summary_selection: 0,
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
+            explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
             explore_edit_mode: false,
@@ -1145,6 +1195,7 @@ impl App {
             test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
             requirements_root,
         };
+        app.refresh_git_status();
         app.restore_generation_session_from_disk();
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -1172,6 +1223,11 @@ impl App {
         let tree_state = mindmap::init_tree_state(&mut mindmap_index);
         let mut app = Self {
             project,
+            git_status: teshi_core::git::FeatureGitStatusModel::default(),
+            git_status_rx: None,
+            git_status_refresh_requested: false,
+            git_status_refresh_deadline: None,
+            git_status_revision: 0,
             step_index,
             mindmap_index,
             mindmap_location_selection: HashMap::new(),
@@ -1235,6 +1291,7 @@ impl App {
             change_summary_selection: 0,
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
+            explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
             explore_edit_mode: false,
@@ -1318,27 +1375,127 @@ impl App {
         self.focus_slot = BddFocusSlot::Body;
     }
 
+    fn explore_feature_item_count(&self) -> usize {
+        self.project.features.len() + self.git_status.deleted.len()
+    }
+
+    fn explore_selected_feature_row(&self) -> Option<usize> {
+        if let Some(deleted_idx) = self.explore_selected_deleted_feature {
+            return (deleted_idx < self.git_status.deleted.len())
+                .then_some(self.project.features.len() + deleted_idx);
+        }
+        (self.explore_selected_feature < self.project.features.len())
+            .then_some(self.explore_selected_feature)
+    }
+
+    fn explore_selected_scenario_count(&self) -> usize {
+        if let Some(deleted_idx) = self.explore_selected_deleted_feature {
+            return self
+                .git_status
+                .deleted
+                .get(deleted_idx)
+                .map(|view| view.deleted_scenarios().count())
+                .unwrap_or(0);
+        }
+        let current_count = self
+            .project
+            .features
+            .get(self.explore_selected_feature)
+            .map(|feature| feature.scenario_count())
+            .unwrap_or(0);
+        let deleted_count = self
+            .git_status
+            .current_at(self.explore_selected_feature)
+            .map(|view| view.deleted_scenarios().count())
+            .unwrap_or(0);
+        current_count + deleted_count
+    }
+
+    fn explore_current_scenario_count(&self) -> usize {
+        self.project
+            .features
+            .get(self.explore_selected_feature)
+            .map(|feature| feature.scenario_count())
+            .unwrap_or(0)
+    }
+
+    fn explore_selected_scenario_is_deleted(&self) -> bool {
+        self.explore_selected_deleted_feature.is_none()
+            && self.explore_selected_scenario >= self.explore_current_scenario_count()
+            && self.explore_selected_scenario < self.explore_selected_scenario_count()
+    }
+
+    fn explore_selected_step_count(&self) -> usize {
+        if self.explore_selected_deleted_feature.is_some()
+            || self.explore_selected_scenario_is_deleted()
+        {
+            return 0;
+        }
+        self.project
+            .features
+            .get(self.explore_selected_feature)
+            .and_then(|feature| feature.scenario_at(self.explore_selected_scenario))
+            .map(|scenario| scenario.steps.len())
+            .unwrap_or(0)
+    }
+
+    fn explore_set_feature_row(&mut self, row: usize) {
+        if row < self.project.features.len() {
+            self.explore_set_feature(row);
+        } else {
+            self.explore_set_deleted_feature(row - self.project.features.len());
+        }
+    }
+
     fn normalize_explore_selection(&mut self) {
+        if let Some(deleted_idx) = self.explore_selected_deleted_feature {
+            if deleted_idx >= self.git_status.deleted.len() {
+                self.explore_selected_deleted_feature = None;
+            } else {
+                let scenario_count = self.git_status.deleted[deleted_idx]
+                    .deleted_scenarios()
+                    .count();
+                if scenario_count == 0 {
+                    self.explore_selected_scenario = 0;
+                } else if self.explore_selected_scenario >= scenario_count {
+                    self.explore_selected_scenario = scenario_count - 1;
+                }
+                self.explore_selected_step = 0;
+                return;
+            }
+        }
+
         let feature_len = self.project.features.len();
         if feature_len == 0 {
-            self.explore_selected_feature = 0;
-            self.explore_selected_scenario = 0;
-            self.explore_selected_step = 0;
+            if !self.git_status.deleted.is_empty() {
+                self.explore_selected_deleted_feature = Some(0);
+                self.explore_selected_scenario = 0;
+                self.explore_selected_step = 0;
+            } else {
+                self.explore_selected_feature = 0;
+                self.explore_selected_scenario = 0;
+                self.explore_selected_step = 0;
+            }
             return;
         }
         if self.explore_selected_feature >= feature_len {
             self.explore_selected_feature = feature_len - 1;
         }
-        let feature = &self.project.features[self.explore_selected_feature];
-        let scenarios = feature.all_scenarios();
-        if scenarios.is_empty() {
+        let scenario_count = self.explore_selected_scenario_count();
+        if scenario_count == 0 {
             self.explore_selected_scenario = 0;
             self.explore_selected_step = 0;
             return;
         }
-        if self.explore_selected_scenario >= scenarios.len() {
-            self.explore_selected_scenario = scenarios.len() - 1;
+        if self.explore_selected_scenario >= scenario_count {
+            self.explore_selected_scenario = scenario_count - 1;
         }
+        if self.explore_selected_scenario_is_deleted() {
+            self.explore_selected_step = 0;
+            return;
+        }
+        let feature = &self.project.features[self.explore_selected_feature];
+        let scenarios = feature.all_scenarios();
         let steps = &scenarios[self.explore_selected_scenario].steps;
         if steps.is_empty() {
             self.explore_selected_step = 0;
@@ -1381,6 +1538,8 @@ impl App {
         } else {
             self.dirty = true;
         }
+        self.bump_git_status_revision();
+        self.schedule_git_status_refresh();
     }
 
     pub fn has_external_change_prompt(&self) -> bool {
@@ -2836,6 +2995,7 @@ impl App {
     /// Re-parse the project from the current buffer contents (applies pending
     /// text edits to the Gherkin AST, MindMap, and step index).
     pub fn refresh_project_from_buffers(&mut self) {
+        self.bump_git_status_revision();
         let selected = self.selected_tree_location();
         for (idx, buffer) in self.buffers.iter().enumerate() {
             if idx < self.project.features.len() {
@@ -2845,6 +3005,124 @@ impl App {
             }
         }
         self.rebuild_project_views(selected);
+        self.refresh_git_status();
+    }
+
+    fn bump_git_status_revision(&mut self) {
+        self.git_status_revision = self.git_status_revision.wrapping_add(1);
+    }
+
+    fn schedule_git_status_refresh(&mut self) {
+        self.git_status_refresh_requested = true;
+        self.git_status_refresh_deadline = Some(Instant::now() + GIT_STATUS_REFRESH_DEBOUNCE);
+    }
+
+    fn git_content_overrides(&self) -> HashMap<PathBuf, String> {
+        self.project
+            .features
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, feature)| {
+                if !self.buffer_dirty.get(idx).copied().unwrap_or(false) {
+                    return None;
+                }
+                let content = if self.active_buffer_idx == Some(idx) {
+                    self.buffer.as_string()
+                } else {
+                    self.buffers.get(idx)?.as_string()
+                };
+                Some((feature.file_path.clone(), content))
+            })
+            .collect()
+    }
+
+    /// Starts a background refresh of the optional Git projection.
+    ///
+    /// The worker receives a project and dirty-buffer snapshot. Results are
+    /// applied by [`Self::poll_git_status`] only when they still describe the
+    /// current in-memory revision.
+    fn refresh_git_status(&mut self) {
+        self.git_status_refresh_deadline = None;
+        if self.git_status_rx.is_some() {
+            self.git_status_refresh_requested = true;
+            return;
+        }
+        self.start_git_status_refresh();
+    }
+
+    fn start_git_status_refresh(&mut self) {
+        self.git_status_refresh_requested = false;
+        self.git_status_refresh_deadline = None;
+        let revision = self.git_status_revision;
+        let project = self.project.clone();
+        let scope = self.git_status.scope;
+        let content_overrides = self.git_content_overrides();
+        let (tx, rx) = mpsc::channel();
+        self.git_status_rx = Some(rx);
+
+        std::thread::spawn(move || {
+            let model = teshi_core::git::load_feature_git_status_with_scope_and_content_overrides(
+                &project,
+                scope,
+                &content_overrides,
+            );
+            let _ = tx.send(GitStatusRefreshResult { revision, model });
+        });
+    }
+
+    /// Applies the latest completed background Git projection without blocking
+    /// the TUI event loop.
+    pub fn poll_git_status(&mut self) {
+        let Some(rx) = self.git_status_rx.take() else {
+            self.maybe_start_git_status_refresh();
+            return;
+        };
+        let mut keep_rx = true;
+        let mut result = None;
+        loop {
+            match rx.try_recv() {
+                Ok(refresh) => result = Some(refresh),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    keep_rx = false;
+                    break;
+                }
+            }
+        }
+        if let Some(refresh) = result {
+            if refresh.revision == self.git_status_revision {
+                self.git_status = refresh.model;
+                self.git_status_refresh_requested = false;
+                self.normalize_explore_selection();
+            } else {
+                // A mutation happened while this worker was running. Keep the
+                // stale model out of the UI, then refresh from the newest
+                // buffer snapshot once this worker has exited.
+                self.git_status_refresh_requested = true;
+            }
+        }
+        if keep_rx {
+            self.git_status_rx = Some(rx);
+        } else {
+            self.maybe_start_git_status_refresh();
+        }
+    }
+
+    fn maybe_start_git_status_refresh(&mut self) {
+        if self.git_status_rx.is_some() {
+            return;
+        }
+
+        let now = Instant::now();
+        if self.git_status_refresh_requested {
+            if self
+                .git_status_refresh_deadline
+                .is_some_and(|deadline| now < deadline)
+            {
+                return;
+            }
+            self.start_git_status_refresh();
+        }
     }
 
     // ── Agent pending change queue ──────────────────────────────────────
@@ -3281,6 +3559,7 @@ impl App {
         let reloaded_buffer = EditorBuffer::from_string(content.clone());
         let feature = gherkin::parse_feature(&content, path.clone());
 
+        self.bump_git_status_revision();
         self.project.features[idx] = feature;
         self.buffers[idx] = reloaded_buffer.clone();
         self.set_buffer_dirty(idx, false);
@@ -3299,6 +3578,7 @@ impl App {
         }
 
         self.rebuild_project_views(selected_tree_location);
+        self.refresh_git_status();
         self.external_change_prompt = None;
         self.status = format!("Reloaded from disk: {}", path.display());
         self.quit_pending_confirm = false;
@@ -3641,6 +3921,10 @@ impl App {
             self.status = "Runner already active".to_string();
             return;
         }
+        if self.explore_selected_deleted_feature.is_some() {
+            self.status = "Deleted Feature cannot be run".to_string();
+            return;
+        }
         let cases = self.build_explore_cases();
         if cases.is_empty() {
             self.status = "No scenarios to run".to_string();
@@ -3709,6 +3993,9 @@ impl App {
 
     fn build_explore_cases(&self) -> Vec<RunCase> {
         let mut cases = Vec::new();
+        if self.explore_selected_deleted_feature.is_some() {
+            return cases;
+        }
         let Some(feature) = self.project.features.get(self.explore_selected_feature) else {
             return cases;
         };
@@ -3852,9 +4139,25 @@ impl App {
     }
 
     fn explore_set_feature(&mut self, idx: usize) {
+        if idx >= self.project.features.len() {
+            return;
+        }
         self.persist_explore_memory();
+        self.explore_selected_deleted_feature = None;
         self.explore_selected_feature = idx;
         self.restore_explore_memory();
+        self.explore_detail_open = false;
+        self.explore_detail_case = None;
+    }
+
+    fn explore_set_deleted_feature(&mut self, idx: usize) {
+        if idx >= self.git_status.deleted.len() {
+            return;
+        }
+        self.persist_explore_memory();
+        self.explore_selected_deleted_feature = Some(idx);
+        self.explore_selected_scenario = 0;
+        self.explore_selected_step = 0;
         self.explore_detail_open = false;
         self.explore_detail_case = None;
     }
@@ -3884,32 +4187,29 @@ impl App {
         };
         match self.explore_focus {
             ColumnFocus::Feature => {
-                let len = self.project.features.len();
-                let next = clamp_idx(self.explore_selected_feature as isize + delta, len);
-                if next != self.explore_selected_feature {
-                    self.explore_set_feature(next);
+                let len = self.explore_feature_item_count();
+                if len == 0 {
+                    return;
+                }
+                let current = self.explore_selected_feature_row().unwrap_or(0);
+                let next = clamp_idx(current as isize + delta, len);
+                if next != current {
+                    if next < self.project.features.len() {
+                        self.explore_set_feature(next);
+                    } else {
+                        self.explore_set_deleted_feature(next - self.project.features.len());
+                    }
                 }
             }
             ColumnFocus::Scenario => {
-                let scenarios = self
-                    .project
-                    .features
-                    .get(self.explore_selected_feature)
-                    .map(|f| f.scenario_count())
-                    .unwrap_or(0);
+                let scenarios = self.explore_selected_scenario_count();
                 let next = clamp_idx(self.explore_selected_scenario as isize + delta, scenarios);
                 if next != self.explore_selected_scenario {
                     self.explore_set_scenario(next);
                 }
             }
             ColumnFocus::Step => {
-                let steps = self
-                    .project
-                    .features
-                    .get(self.explore_selected_feature)
-                    .and_then(|f| f.scenario_at(self.explore_selected_scenario))
-                    .map(|s| s.steps.len())
-                    .unwrap_or(0);
+                let steps = self.explore_selected_step_count();
                 let next = clamp_idx(self.explore_selected_step as isize + delta, steps);
                 self.explore_selected_step = next;
                 self.persist_explore_memory();
@@ -3921,7 +4221,11 @@ impl App {
 
     fn explore_move_home(&mut self) {
         match self.explore_focus {
-            ColumnFocus::Feature => self.explore_set_feature(0),
+            ColumnFocus::Feature => {
+                if self.explore_feature_item_count() > 0 {
+                    self.explore_set_feature_row(0);
+                }
+            }
             ColumnFocus::Scenario => self.explore_set_scenario(0),
             ColumnFocus::Step => {
                 self.explore_selected_step = 0;
@@ -3935,26 +4239,18 @@ impl App {
     fn explore_move_end(&mut self) {
         match self.explore_focus {
             ColumnFocus::Feature => {
-                if !self.project.features.is_empty() {
-                    self.explore_set_feature(self.project.features.len() - 1);
+                if let Some(last) = self.explore_feature_item_count().checked_sub(1) {
+                    self.explore_set_feature_row(last);
                 }
             }
             ColumnFocus::Scenario => {
-                if let Some(f) = self.project.features.get(self.explore_selected_feature)
-                    && f.scenario_count() > 0
-                {
-                    self.explore_set_scenario(f.scenario_count() - 1);
+                if let Some(last) = self.explore_selected_scenario_count().checked_sub(1) {
+                    self.explore_set_scenario(last);
                 }
             }
             ColumnFocus::Step => {
-                if let Some(s) = self
-                    .project
-                    .features
-                    .get(self.explore_selected_feature)
-                    .and_then(|f| f.scenario_at(self.explore_selected_scenario))
-                    && !s.steps.is_empty()
-                {
-                    self.explore_selected_step = s.steps.len() - 1;
+                if let Some(last) = self.explore_selected_step_count().checked_sub(1) {
+                    self.explore_selected_step = last;
                     self.persist_explore_memory();
                 }
             }
@@ -3984,6 +4280,9 @@ impl App {
     }
 
     fn explore_selected_step_line(&self) -> Option<usize> {
+        if self.explore_selected_deleted_feature.is_some() {
+            return None;
+        }
         let feature = self.project.features.get(self.explore_selected_feature)?;
         let scenario = feature.scenario_at(self.explore_selected_scenario)?;
         let step = scenario.steps.get(self.explore_selected_step)?;
@@ -3991,6 +4290,10 @@ impl App {
     }
 
     fn explore_enter_edit(&mut self) {
+        if self.explore_selected_deleted_feature.is_some() {
+            self.status = "Deleted Feature cannot be edited".to_string();
+            return;
+        }
         let Some(line) = self.explore_selected_step_line() else {
             self.status = "No step to edit".to_string();
             return;
@@ -4266,12 +4569,14 @@ impl App {
         }
         // Persist current buffer
         self.buffers[idx] = self.buffer.clone();
+        self.bump_git_status_revision();
         // Re-parse
         let path = self.project.features[idx].file_path.clone();
         let content = self.buffer.as_string();
         self.project.features[idx] = gherkin::parse_feature(&content, path);
         let selected_tree_location = self.selected_tree_location();
         self.rebuild_project_views(selected_tree_location);
+        self.refresh_git_status();
     }
 
     // ── Tree navigation ─────────────────────────────────────────────
@@ -7016,6 +7321,16 @@ impl App {
                         return Some(region);
                     }
                 }
+                ClickableRegion::ExploreDeletedFeature {
+                    row_y,
+                    col_x,
+                    col_right,
+                    ..
+                } => {
+                    if *row_y == pos.y && pos.x >= *col_x && pos.x < *col_right {
+                        return Some(region);
+                    }
+                }
                 ClickableRegion::ExploreScenario {
                     row_y,
                     col_x,
@@ -7098,11 +7413,15 @@ impl App {
                 }
             }
             ClickableRegion::ExploreFeature { feature_idx, .. } => {
-                self.explore_selected_feature = *feature_idx;
+                self.explore_set_feature(*feature_idx);
                 self.explore_focus = crate::app::ColumnFocus::Feature;
                 // Reset scenario/step selection
                 self.explore_selected_scenario = 0;
                 self.explore_selected_step = 0;
+            }
+            ClickableRegion::ExploreDeletedFeature { deleted_idx, .. } => {
+                self.explore_set_deleted_feature(*deleted_idx);
+                self.explore_focus = crate::app::ColumnFocus::Feature;
             }
             ClickableRegion::ExploreScenario { scenario_idx, .. } => {
                 self.explore_selected_scenario = *scenario_idx;
@@ -8091,8 +8410,8 @@ mod tests {
 
     use super::{
         AgentPanelMode, AgentThread, AiRole, AiStatus, App, BddFocusSlot, ClickableRegion,
-        ColumnFocus, MainTab, MindMapFocus, ModelPanelMode, ViewStage, current_step_keyword_index,
-        replace_step_keyword_line,
+        ColumnFocus, GitStatusRefreshResult, MainTab, MindMapFocus, ModelPanelMode, ViewStage,
+        current_step_keyword_index, replace_step_keyword_line,
     };
     use crate::bdd_nav::step_edit_start_col;
     use crate::editor_buffer::EditorBuffer;
@@ -9950,6 +10269,195 @@ mod tests {
     }
 
     #[test]
+    fn deleted_feature_rows_participate_in_explore_keyboard_navigation() {
+        let mut app = App::from_args().expect("app init should work");
+        let current_path = PathBuf::from("current.feature");
+        let current_content = "Feature: Current\n  Scenario: S\n    Given current\n";
+        app.project.features = vec![teshi_core::gherkin::parse_feature(
+            current_content,
+            current_path.clone(),
+        )];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            current: vec![teshi_core::git::map_feature_git_diff(
+                current_path,
+                teshi_core::git::FileGitStatus::Unmodified,
+                teshi_core::git::GitFileDiff::from_contents(
+                    Some(current_content),
+                    Some(current_content),
+                ),
+            )],
+            deleted: vec![teshi_core::git::map_feature_git_diff(
+                PathBuf::from("deleted.feature"),
+                teshi_core::git::FileGitStatus::Deleted,
+                teshi_core::git::GitFileDiff::from_contents(
+                    Some("Feature: Deleted\n  Scenario: S\n    Given old\n"),
+                    None,
+                ),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = ColumnFocus::Feature;
+        app.explore_selected_feature = 0;
+        app.explore_selected_deleted_feature = None;
+
+        app.handle_action(Action::MoveDown)
+            .expect("move to deleted feature");
+        assert_eq!(app.explore_selected_deleted_feature, Some(0));
+        assert!(app.build_explore_cases().is_empty());
+
+        app.handle_action(Action::RunScenario)
+            .expect("deleted feature run should be rejected");
+        assert_eq!(app.status, "Deleted Feature cannot be run");
+
+        app.handle_action(Action::EnterEdit)
+            .expect("deleted feature edit should be rejected");
+        assert_eq!(app.status, "Deleted Feature cannot be edited");
+
+        app.handle_action(Action::MoveUp)
+            .expect("move back to current feature");
+        assert_eq!(app.explore_selected_deleted_feature, None);
+        assert_eq!(app.explore_selected_feature, 0);
+    }
+
+    #[test]
+    fn deleted_feature_scenario_navigation_uses_head_scenarios() {
+        let mut app = App::from_args().expect("app init should work");
+        let old = "Feature: Deleted\n  Scenario: First\n    Given old one\n  Scenario: Second\n    Given old two\n";
+        app.project.features.clear();
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            deleted: vec![teshi_core::git::map_feature_git_diff(
+                PathBuf::from("deleted.feature"),
+                teshi_core::git::FileGitStatus::Deleted,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), None),
+            )],
+            ..Default::default()
+        };
+        app.explore_selected_deleted_feature = Some(0);
+        app.explore_focus = ColumnFocus::Scenario;
+
+        app.handle_action(Action::MoveDown)
+            .expect("move to the second deleted scenario");
+        assert_eq!(app.explore_selected_scenario, 1);
+
+        app.handle_action(Action::MoveUp)
+            .expect("move back to the first deleted scenario");
+        assert_eq!(app.explore_selected_scenario, 0);
+    }
+
+    #[test]
+    fn current_feature_head_deleted_scenarios_participate_in_navigation() {
+        let mut app = App::from_args().expect("app init should work");
+        let old = "Feature: Current\n  Scenario: Keep\n    Given keep\n  Scenario: Removed\n    Given old\n";
+        let new = "Feature: Current\n  Scenario: Keep\n    Given keep\n";
+        let path = PathBuf::from("current.feature");
+        app.project.features = vec![teshi_core::gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = ColumnFocus::Scenario;
+        app.explore_selected_scenario = 0;
+
+        app.handle_action(Action::MoveDown)
+            .expect("move to the deleted scenario");
+        assert_eq!(app.explore_selected_scenario, 1);
+        assert_eq!(app.explore_selected_step_count(), 0);
+
+        app.handle_action(Action::MoveUp)
+            .expect("move back to the current scenario");
+        assert_eq!(app.explore_selected_scenario, 0);
+    }
+
+    #[test]
+    fn starting_git_refresh_keeps_deleted_feature_selection() {
+        let mut app = editor_test_app();
+        let old = "Feature: Deleted\n  Scenario: Removed\n    Given old\n";
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            deleted: vec![teshi_core::git::map_feature_git_diff(
+                PathBuf::from("deleted.feature"),
+                teshi_core::git::FileGitStatus::Deleted,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), None),
+            )],
+            ..Default::default()
+        };
+        app.explore_selected_deleted_feature = Some(0);
+
+        app.start_git_status_refresh();
+
+        assert_eq!(app.explore_selected_deleted_feature, Some(0));
+        assert_eq!(app.git_status.deleted.len(), 1);
+    }
+
+    #[test]
+    fn editing_a_buffer_queues_a_git_refresh_for_the_new_revision() {
+        let mut app = editor_test_app();
+        app.git_status_rx = None;
+        app.git_status_refresh_requested = false;
+        let revision = app.git_status_revision;
+
+        app.mark_current_buffer_dirty();
+
+        assert_eq!(app.git_status_revision, revision + 1);
+        assert!(app.git_status_rx.is_none());
+        assert!(app.git_status_refresh_requested);
+        assert!(app.git_status_refresh_deadline.is_some());
+    }
+
+    #[test]
+    fn debounced_git_refresh_starts_after_the_deadline() {
+        let mut app = editor_test_app();
+        app.git_status_rx = None;
+        app.git_status_refresh_requested = false;
+        app.git_status_refresh_deadline = None;
+
+        app.mark_current_buffer_dirty();
+        app.git_status_refresh_deadline = Some(Instant::now() - Duration::from_millis(1));
+        app.poll_git_status();
+
+        assert!(app.git_status_rx.is_some());
+    }
+
+    #[test]
+    fn idle_git_poll_does_not_start_a_periodic_refresh() {
+        let mut app = editor_test_app();
+        app.git_status_rx = None;
+        app.git_status_refresh_requested = false;
+        app.git_status_refresh_deadline = None;
+
+        app.poll_git_status();
+
+        assert!(app.git_status_rx.is_none());
+    }
+
+    #[test]
+    fn stale_git_refresh_is_followed_by_a_refresh_for_the_latest_revision() {
+        let mut app = editor_test_app();
+        app.git_status_rx = None;
+        app.git_status_refresh_requested = false;
+        app.git_status_revision = 7;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.git_status_rx = Some(receiver);
+        sender
+            .send(GitStatusRefreshResult {
+                revision: 6,
+                model: teshi_core::git::FeatureGitStatusModel::default(),
+            })
+            .expect("stale refresh should be delivered");
+
+        app.poll_git_status();
+        assert!(app.git_status_refresh_requested);
+
+        drop(sender);
+        app.poll_git_status();
+        assert!(app.git_status_rx.is_some());
+        assert!(!app.git_status_refresh_requested);
+    }
+
+    #[test]
     fn test_feature_outline_lines_extracts_expected_rows() {
         let mut app = App::from_args().expect("app init should work");
         app.buffer = crate::editor_buffer::EditorBuffer::from_string(
@@ -10085,6 +10593,11 @@ mod tests {
 
         let mut app = App {
             project,
+            git_status: teshi_core::git::FeatureGitStatusModel::default(),
+            git_status_rx: None,
+            git_status_refresh_requested: false,
+            git_status_refresh_deadline: None,
+            git_status_revision: 0,
             step_index,
             mindmap_index,
             mindmap_location_selection: HashMap::new(),
@@ -10138,6 +10651,7 @@ mod tests {
             change_summary_selection: 0,
             explore_focus: ColumnFocus::Step,
             explore_selected_feature: 0,
+            explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
             explore_edit_mode: false,
@@ -10254,6 +10768,11 @@ Feature: B
 
         let mut app = App {
             project,
+            git_status: teshi_core::git::FeatureGitStatusModel::default(),
+            git_status_rx: None,
+            git_status_refresh_requested: false,
+            git_status_refresh_deadline: None,
+            git_status_revision: 0,
             step_index,
             mindmap_index,
             mindmap_location_selection: HashMap::new(),
@@ -10307,6 +10826,7 @@ Feature: B
             change_summary_selection: 0,
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
+            explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
             explore_edit_mode: false,

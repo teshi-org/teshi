@@ -280,6 +280,7 @@ pub fn run() -> Result<()> {
         app.poll_runner_events();
         app.poll_acp_registry();
         app.poll_llm_events();
+        app.poll_git_status();
         app.poll_external_feature_changes();
         app.poll_status_message_expiry();
         terminal.draw(|frame| ui::render(frame, &mut app))?;

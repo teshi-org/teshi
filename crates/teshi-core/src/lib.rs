@@ -8,6 +8,7 @@ pub mod events;
 pub mod gherkin;
 pub mod gherkin_keywords;
 pub mod gherkin_lang;
+pub mod git;
 pub mod highlight;
 pub mod http_exchange;
 pub mod llm;
