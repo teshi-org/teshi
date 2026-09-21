@@ -27,7 +27,7 @@ members = [
 exclude = ["runner"]
 
 [workspace.package]
-version = "0.7.10"
+version = "0.7.11"
 
 [workspace.dependencies]
 anyhow = "1"
