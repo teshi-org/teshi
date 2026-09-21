@@ -25,8 +25,6 @@ install with `teshi install-skill --yes`. The installer copies bundled skills to
 `~/.agents/skills/` and links supported Agent discovery directories when they exist;
 existing real directories at those link destinations are preserved.
 
-Please read https://github.com/teshi-org/teshi/blob/main/AI_INSTALL.md and follow it to install the teshi CLI, load the teshi-bridge Chrome extension, and add the teshi agent skills.
-
 **Next steps** — [User Guide](doc/user-guide.md) · [Installation](doc/installation.md) · [CLI & Config](doc/cli-usage.md) · [Keybindings](doc/keybindings.md) · [Development](doc/development.md)
 
 ---
