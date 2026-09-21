@@ -37,18 +37,20 @@ pub fn handle_winapp_command(action: &WinAppCommand) -> Result<()> {
         _ => None,
     };
     if let Some(command) = visual {
-        let response = ensure_winapp_sidecar(&project_root).and_then(|()| {
+        let response = ensure_winapp_sidecar(&project_root, false).and_then(|()| {
             send_winapp_command(&project_root, command.clone(), Duration::from_secs(60))
         }).unwrap_or_else(|err| json!({"ok": false, "selector": command["selector"], "error": err.to_string()}));
         print_json_response(response.clone())?;
         return ensure_ok(&response);
     }
     // Replay validates the Feature before contacting the Windows-only sidecar.
+    let elevated = matches!(&action, WinAppCommand::Launch(args) if args.elevated);
     if !matches!(action, WinAppCommand::Replay(_)) {
-        ensure_winapp_sidecar(&project_root)?;
+        ensure_winapp_sidecar(&project_root, elevated)?;
     }
     match action {
         WinAppCommand::ListWindows => list_windows(&project_root),
+        WinAppCommand::Status => status(&project_root),
         WinAppCommand::Attach(args) => attach(&project_root, args),
         WinAppCommand::Launch(args) => launch(&project_root, args),
         WinAppCommand::Snapshot(args) => snapshot(&project_root, args),
@@ -64,6 +66,15 @@ fn list_windows(project_root: &Path) -> Result<()> {
     let response = send_winapp_command(
         project_root,
         json!({ "cmd": "list_windows", "request_id": "winapp-list-windows" }),
+        Duration::from_secs(10),
+    )?;
+    print_json_response(response)
+}
+
+fn status(project_root: &Path) -> Result<()> {
+    let response = send_winapp_command(
+        project_root,
+        json!({ "cmd": "get_status", "request_id": "winapp-status" }),
         Duration::from_secs(10),
     )?;
     print_json_response(response)
@@ -96,6 +107,7 @@ fn launch(project_root: &Path, args: &WinAppLaunchArgs) -> Result<()> {
             "args": args.args,
             "title": args.title,
             "timeout_ms": args.timeout_ms,
+            "elevated": args.elevated,
         }),
         command_timeout_for_ms(args.timeout_ms),
     )?;
@@ -369,7 +381,7 @@ fn send_winapp_command(
 ) -> Result<serde_json::Value> {
     let endpoint = read_cdp_endpoint(project_root)?;
     if endpoint.mode != "winapp" {
-        ensure_winapp_sidecar(project_root)?;
+        ensure_winapp_sidecar(project_root, false)?;
     }
     let endpoint = read_cdp_endpoint(project_root)?;
     if endpoint.mode != "winapp" {
@@ -385,8 +397,8 @@ fn send_winapp_command(
     })
 }
 
-fn ensure_winapp_sidecar(project_root: &Path) -> Result<()> {
-    if winapp_endpoint_is_healthy(project_root) {
+fn ensure_winapp_sidecar(project_root: &Path, elevated: bool) -> Result<()> {
+    if !elevated && winapp_endpoint_is_healthy(project_root) {
         return Ok(());
     }
     let port = ensure_daemon_for_project(project_root)?;
@@ -396,9 +408,14 @@ fn ensure_winapp_sidecar(project_root: &Path) -> Result<()> {
         .timeout(Duration::from_secs(120))
         .build()
         .context("create loopback daemon client")?;
+    let body = if elevated {
+        json!({"mode": "winapp", "elevated": true})
+    } else {
+        json!({"mode": "winapp"})
+    };
     let response = client
         .post(url)
-        .json(&json!({"mode": "winapp"}))
+        .json(&body)
         .send()
         .context("ask Teshi daemon to start WinApp")?;
     if !response.status().is_success() {

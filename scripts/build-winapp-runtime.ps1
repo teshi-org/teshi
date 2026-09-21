@@ -1,6 +1,6 @@
 param(
   [string]$OutDir = "dist",
-  [int]$RuntimeVersion = 3,
+  [int]$RuntimeVersion = 4,
   [string]$Platform = "windows-x86_64"
 )
 

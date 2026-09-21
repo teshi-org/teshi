@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 use crate::app_data::app_data_dir;
 
 pub const WINAPP_RUNTIME_ID: &str = "winapp";
-/// Runtime v3 adds real foreground pointer clicks through the WinApp sidecar.
-pub const WINAPP_RUNTIME_VERSION: u32 = 3;
+/// Runtime v4 adds authenticated WinApp sidecar connections.
+pub const WINAPP_RUNTIME_VERSION: u32 = 4;
 
 #[cfg(all(windows, target_arch = "x86_64"))]
 pub const WINAPP_RUNTIME_PLATFORM: &str = "windows-x86_64";
@@ -409,7 +409,7 @@ mod tests {
     fn runtime_requirement_is_versioned_independent_of_teshi_version() {
         let requirement = winapp_runtime_requirement();
         assert_eq!(requirement.runtime, "winapp");
-        assert_eq!(requirement.runtime_version, 3);
+        assert_eq!(requirement.runtime_version, 4);
     }
 
     #[cfg(not(all(windows, target_arch = "x86_64")))]
@@ -423,7 +423,7 @@ mod tests {
     fn runtime_installation_path_uses_app_data_not_project() {
         let app = PathBuf::from(r"C:\Users\u\AppData\Roaming\teshi");
         let path = winapp_runtime_dir_in(&app);
-        assert!(path.ends_with(Path::new("runtimes").join("winapp").join("3")));
+        assert!(path.ends_with(Path::new("runtimes").join("winapp").join("4")));
         assert!(!path.to_string_lossy().contains(".venv"));
         assert!(!path.to_string_lossy().contains(".teshi\\runtime"));
     }
@@ -443,11 +443,11 @@ mod tests {
     }
 
     #[test]
-    fn pointer_runtime_rejects_installed_v2_runtime() {
+    fn authenticated_runtime_rejects_installed_v3_runtime() {
         let mut requirement = req();
         requirement.runtime_version = WINAPP_RUNTIME_VERSION;
         let mut old_manifest = good_manifest();
-        old_manifest.runtime_version = 2;
+        old_manifest.runtime_version = 3;
         assert!(validate_manifest(&old_manifest, &requirement).is_err());
         let installed = tempdir().unwrap();
         write_runtime(installed.path(), old_manifest);
@@ -456,10 +456,14 @@ mod tests {
         upgraded.runtime_version = WINAPP_RUNTIME_VERSION;
         validate_manifest(&upgraded, &requirement).unwrap();
         assert!(include_str!("../../../scripts/build-winapp-runtime.ps1")
-            .contains("$RuntimeVersion = 3"));
+            .contains("$RuntimeVersion = 4"));
         assert!(
-            include_str!("../../../.github/workflows/release.yml").contains("-RuntimeVersion 3")
+            include_str!("../../../.github/workflows/release.yml").contains("-RuntimeVersion 4")
         );
+        assert!(include_str!("../../../.github/workflows/release.yml")
+            .contains("winapp-runtime-windows-x86_64-v4.zip"));
+        assert!(!include_str!("../../../.github/workflows/release.yml")
+            .contains("winapp-runtime-windows-x86_64-v3"));
         assert!(!include_str!("../../../.github/workflows/release.yml")
             .contains("winapp-runtime-windows-x86_64-v2"));
         assert!(!include_str!("../../../.github/workflows/release.yml")

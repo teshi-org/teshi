@@ -196,6 +196,7 @@ pub fn set_terminal_active(rt: &TeshiEngine, active: bool) {
 
 /// Stops browser, terminal, and file watchers without clearing the project root.
 pub async fn teardown_runtime(rt: &TeshiEngine) -> Result<(), String> {
+    rt.sidecar.stop().await.map_err(|e| e.to_string())?;
     rt.terminal.stop().map_err(|e| e.to_string())?;
     rt.watcher.clear().map_err(|e| e.to_string())?;
     rt.locator_watcher.clear().map_err(|e| e.to_string())?;

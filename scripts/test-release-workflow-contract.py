@@ -58,10 +58,12 @@ def main() -> int:
         "Copy-Item -Path (Join-Path $pythonSourceDir '*') -Destination $pythonDir -Recurse -Force",
         "runtime Python copy path",
     )
-    require(WINAPP_RUNTIME, "[int]$RuntimeVersion = 3", "WinApp runtime v3 default")
+    require(WINAPP_RUNTIME, "[int]$RuntimeVersion = 4", "WinApp runtime v4 default")
     require(WINAPP_RUNTIME, 'service_script = "resources/winapp_service.py"', "runtime service manifest path")
-    require(RELEASE, "-RuntimeVersion 3", "release WinApp runtime v3 build")
-    require(RELEASE, "winapp-runtime-windows-x86_64-v3.zip", "release WinApp runtime v3 archive")
+    require(RELEASE, "-RuntimeVersion 4", "release WinApp runtime v4 build")
+    require(RELEASE, "winapp-runtime-windows-x86_64-v4.zip", "release WinApp runtime v4 archive")
+    if "winapp-runtime-windows-x86_64-v3" in RELEASE:
+        raise SystemExit("release workflow still references the retired WinApp runtime v3 archive")
     if "winapp-runtime-windows-x86_64-v2" in RELEASE:
         raise SystemExit("release workflow still references the retired WinApp runtime v2 archive")
     require(WINAPP_SERVICE, "def send_pointer_click(", "new WinApp service in runtime package")

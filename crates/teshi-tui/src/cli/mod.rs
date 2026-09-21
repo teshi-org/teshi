@@ -1267,6 +1267,8 @@ pub enum WinAppCommand {
     AssertScreenshot(WinAppAssertScreenshotArgs),
     /// List visible top-level windows for attach
     ListWindows,
+    /// Show WinApp executor and target integrity diagnostics
+    Status,
     /// Attach to an existing WinUI3/native window
     Attach(WinAppAttachArgs),
     /// Launch an app and attach to its first visible window
@@ -1334,6 +1336,9 @@ pub struct WinAppAttachArgs {
 pub struct WinAppLaunchArgs {
     /// App executable path
     pub path: String,
+    /// Start the WinApp executor and target through the Windows UAC boundary
+    #[arg(long)]
+    pub elevated: bool,
     /// Optional title fragment to prefer after launch
     #[arg(long)]
     pub title: Option<String>,
@@ -2065,6 +2070,44 @@ mod tests {
         assert_eq!(args.selector, "uia:automation_id=SearchBox");
         assert_eq!(args.action, "fill");
         assert_eq!(args.value_arg.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn winapp_launch_accepts_elevated_mode_without_changing_path_arguments() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "winapp",
+            "launch",
+            "--elevated",
+            "C:\\Apps\\Enhook.exe",
+            "--",
+            "--profile",
+            "test",
+        ])
+        .expect("parse elevated winapp launch");
+        let Some(Command::WinApp {
+            action: WinAppCommand::Launch(args),
+        }) = cli.command
+        else {
+            panic!("expected winapp launch subcommand");
+        };
+        assert!(args.elevated);
+        assert_eq!(args.path, "C:\\Apps\\Enhook.exe");
+        assert_eq!(args.args, ["--profile", "test"]);
+    }
+
+    #[test]
+    fn winapp_launch_without_elevated_keeps_the_existing_default() {
+        let cli = Cli::try_parse_from(["teshi", "winapp", "launch", "C:\\Apps\\Enhook.exe"])
+            .expect("parse ordinary winapp launch");
+        let Some(Command::WinApp {
+            action: WinAppCommand::Launch(args),
+        }) = cli.command
+        else {
+            panic!("expected winapp launch subcommand");
+        };
+        assert!(!args.elevated);
+        assert_eq!(args.path, "C:\\Apps\\Enhook.exe");
     }
 
     #[test]

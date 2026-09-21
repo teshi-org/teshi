@@ -123,8 +123,8 @@ pub use screen::{Cell, Color, ProcessState, ScreenGrid};
 pub use sidecar::{
     chrome_broker_endpoint_path, ensure_user_chrome_broker, fetch_chrome_broker_endpoint,
     get_recent_projects, send_sidecar_command, send_sidecar_command_with_timeout,
-    start_browser_sidecar, stop_browser_sidecar, BrowserError, BrowserMode, BrowserStartResult,
-    ChromeBrokerEndpoint, SidecarState, CHROME_DISCOVERY_PORT,
+    start_browser_sidecar, start_browser_sidecar_with_options, stop_browser_sidecar, BrowserError,
+    BrowserMode, BrowserStartResult, ChromeBrokerEndpoint, SidecarState, CHROME_DISCOVERY_PORT,
 };
 pub use terminal::{resize_terminal, spawn_terminal, stop_terminal, write_terminal, TerminalState};
 pub use validation::{

@@ -1,5 +1,7 @@
 //! Python Playwright sidecar management.
 
+#[cfg(windows)]
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -10,6 +12,15 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
+
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, WAIT_TIMEOUT};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+#[cfg(windows)]
+use windows_sys::Win32::UI::Shell::{
+    ShellExecuteExW, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+};
 
 use crate::{
     ensure_winapp_runtime, TeshiEngine, BROWSER_AGENT_SCHEMA_VERSION,
@@ -41,11 +52,70 @@ impl BrowserMode {
 /// Fixed HTTP discovery port for chrome mode (`GET /v1/bridge`).
 pub const CHROME_DISCOVERY_PORT: u16 = 17373;
 
+const ELEVATION_CANCELLED_ERROR: u32 = 1223;
+
+/// Handle returned by `ShellExecuteExW` for an elevated sidecar process.
+///
+/// A standard `std::process::Child` cannot represent a process started through
+/// the Windows `runas` shell verb. Keeping the process handle in the daemon
+/// lets the daemon stop the elevated executor with the rest of the session.
+#[cfg(windows)]
+struct ElevatedProcess {
+    // Store the opaque Windows handle as an integer so SidecarState remains
+    // Send + Sync when shared with Teshi's watcher and terminal threads.
+    handle: isize,
+}
+
+#[cfg(not(windows))]
+struct ElevatedProcess;
+
+#[cfg(windows)]
+impl ElevatedProcess {
+    fn is_running(&self) -> bool {
+        unsafe { WaitForSingleObject(self.handle as HANDLE, 0) == WAIT_TIMEOUT }
+    }
+
+    fn terminate_if_running(&self) {
+        if self.is_running() {
+            unsafe {
+                let _ = TerminateProcess(self.handle as HANDLE, 1);
+                let _ = WaitForSingleObject(self.handle as HANDLE, 3_000);
+            }
+        }
+    }
+
+    fn stop(self) {
+        self.terminate_if_running();
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ElevatedProcess {
+    fn drop(&mut self) {
+        self.terminate_if_running();
+        unsafe {
+            let _ = CloseHandle(self.handle as HANDLE);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+impl ElevatedProcess {
+    fn is_running(&self) -> bool {
+        false
+    }
+
+    fn stop(self) {}
+}
+
 /// Holds the browser sidecar child process and WebSocket URL.
 pub struct SidecarState {
     child: Mutex<Option<Child>>,
+    elevated_process: Mutex<Option<ElevatedProcess>>,
     ws_url: Mutex<Option<String>>,
     mode: Mutex<Option<BrowserMode>>,
+    elevated: Mutex<bool>,
+    lifecycle_lock: tokio::sync::Mutex<()>,
 }
 
 impl Default for SidecarState {
@@ -59,13 +129,21 @@ impl SidecarState {
     pub fn new() -> Self {
         Self {
             child: Mutex::new(None),
+            elevated_process: Mutex::new(None),
             ws_url: Mutex::new(None),
             mode: Mutex::new(None),
+            elevated: Mutex::new(false),
+            lifecycle_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     /// Stops the sidecar process if running.
     pub async fn stop(&self) -> Result<()> {
+        let _lifecycle_guard = self.lifecycle_lock.lock().await;
+        self.stop_inner()
+    }
+
+    fn stop_inner(&self) -> Result<()> {
         if let Some(mut child) = self.child.lock().unwrap().take() {
             let _ = child.kill();
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -78,8 +156,13 @@ impl SidecarState {
             }
         }
 
+        if let Some(process) = self.elevated_process.lock().unwrap().take() {
+            process.stop();
+        }
+
         *self.ws_url.lock().unwrap() = None;
         *self.mode.lock().unwrap() = None;
+        *self.elevated.lock().unwrap() = false;
         Ok(())
     }
 
@@ -93,13 +176,26 @@ impl SidecarState {
         *self.mode.lock().unwrap()
     }
 
+    /// Returns true when the active WinApp executor was started elevated.
+    pub fn is_elevated(&self) -> bool {
+        *self.elevated.lock().unwrap()
+    }
+
     /// Returns true when the owned sidecar child still appears to be running.
     pub fn child_is_running(&self) -> bool {
-        self.child
+        let child_running = self
+            .child
             .lock()
             .unwrap()
             .as_mut()
-            .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_none()))
+            .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_none()));
+        let elevated_running = self
+            .elevated_process
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(ElevatedProcess::is_running);
+        child_running || elevated_running
     }
 }
 
@@ -358,13 +454,7 @@ fn read_port_from_child_stdout(child: &mut Child, timeout: Duration) -> Result<u
         // 2) JSON readiness object (winapp mode): extract port from ws_url
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
             if let Some(ws_url) = v.get("ws_url").and_then(|u| u.as_str()) {
-                if let Some(port) = ws_url
-                    .rsplit(':')
-                    .next()
-                    .and_then(|p| p.parse::<u16>().ok())
-                {
-                    return Some(port);
-                }
+                return ws_url_to_addr(ws_url).ok().map(|address| address.port());
             }
         }
         None
@@ -402,6 +492,13 @@ fn read_port_from_child_stdout(child: &mut Child, timeout: Duration) -> Result<u
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Return the sidecar WebSocket coordinate without query credentials for
+/// runtime events. The full authenticated URL remains available only through
+/// the direct start response and the private project endpoint file.
+fn public_event_ws_url(ws_url: &str) -> String {
+    ws_url.split(['?', '#']).next().unwrap_or(ws_url).to_owned()
 }
 
 fn chrome_broker_state_dir() -> Result<PathBuf, BrowserError> {
@@ -628,6 +725,27 @@ pub async fn start_browser_sidecar(
     rt: Arc<TeshiEngine>,
     mode: BrowserMode,
 ) -> Result<BrowserStartResult, BrowserError> {
+    start_browser_sidecar_with_options(rt, mode, false).await
+}
+
+/// Starts a browser sidecar, optionally giving only the WinApp executor a
+/// high-integrity token through the Windows `runas` shell verb.
+///
+/// The daemon, CLI, and all other sidecar modes remain at their existing
+/// integrity level. `elevated` is meaningful only for `BrowserMode::WinApp`.
+pub async fn start_browser_sidecar_with_options(
+    rt: Arc<TeshiEngine>,
+    mode: BrowserMode,
+    elevated: bool,
+) -> Result<BrowserStartResult, BrowserError> {
+    if elevated && mode != BrowserMode::WinApp {
+        return Err(BrowserError {
+            message: "elevation is only supported for the WinApp executor.".into(),
+            hint: None,
+        });
+    }
+    let _lifecycle_guard = rt.sidecar.lifecycle_lock.lock().await;
+
     let project_root = rt
         .project
         .root
@@ -641,6 +759,7 @@ pub async fn start_browser_sidecar(
 
     if mode != BrowserMode::Chrome
         && rt.sidecar.browser_mode() == Some(mode)
+        && rt.sidecar.is_elevated() == elevated
         && rt.sidecar.child_is_running()
     {
         if let Some(ws_url) = rt.sidecar.browser_ws_url() {
@@ -660,7 +779,8 @@ pub async fn start_browser_sidecar(
         }
     }
 
-    rt.sidecar.stop().await.ok();
+    rt.sidecar.stop_inner().ok();
+    *rt.project.browser_active.lock().unwrap() = false;
 
     if mode == BrowserMode::Chrome {
         let endpoint = ensure_user_chrome_broker(&project_root, &rt.browser_service_script)?;
@@ -670,7 +790,7 @@ pub async fn start_browser_sidecar(
         rt.events.emit(
             "browser-started",
             serde_json::json!({
-                "ws_url": endpoint.ws_url,
+                "ws_url": public_event_ws_url(&endpoint.ws_url),
                 "mode": mode.as_str(),
                 "broker_pid": endpoint.broker_pid,
                 "broker_start_id": endpoint.broker_start_id,
@@ -788,6 +908,16 @@ pub async fn start_browser_sidecar(
         });
     }
 
+    let sidecar_port = if elevated {
+        pick_port().map_err(|e| BrowserError {
+            message: e.to_string(),
+            hint: None,
+        })?
+    } else {
+        0
+    };
+    let auth_token =
+        (mode == BrowserMode::WinApp).then(|| format!("tk_{}", uuid::Uuid::new_v4().simple()));
     let cdp_port = if mode == BrowserMode::Embedded {
         pick_port().map_err(|e| BrowserError {
             message: e.to_string(),
@@ -802,49 +932,114 @@ pub async fn start_browser_sidecar(
     } else {
         python_sidecar_command(venv.as_ref().expect("venv for non-WinApp sidecar"))
     };
+    let sidecar_port_arg = sidecar_port.to_string();
     cmd.arg(script).args([
         "--host",
         "127.0.0.1",
         "--port",
-        "0",
+        &sidecar_port_arg,
         "--mode",
         mode.as_str(),
         "--project-root",
         &project_root.to_string_lossy(),
     ]);
+    if let Some(auth_token) = auth_token.as_deref() {
+        cmd.args(["--auth-token", auth_token]);
+    }
     if mode == BrowserMode::Embedded {
         cmd.args(["--cdp-port", &cdp_port.to_string()]);
         if rt.embedded_no_preview_stream {
             cmd.arg("--no-preview-stream");
         }
     }
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| BrowserError {
-            message: format!("Failed to start browser sidecar: {e}"),
-            hint: None,
-        })?;
 
-    let actual_port = read_port_from_child_stdout(&mut child, Duration::from_secs(10))?;
-    let ready = wait_until_ready(&mut child, actual_port);
-    if let Err(err) = ready {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(err);
-    }
+    let (ws_url, child, elevated_process) = if elevated {
+        #[cfg(windows)]
+        {
+            let process = spawn_elevated_winapp_service(
+                managed_winapp
+                    .as_ref()
+                    .expect("elevated WinApp uses managed runtime"),
+                script,
+                &project_root,
+                sidecar_port,
+                auth_token.as_deref().ok_or_else(|| BrowserError {
+                    message: "WinApp sidecar authentication token was not created.".into(),
+                    hint: None,
+                })?,
+            )?;
+            if let Err(error) = wait_until_elevated_ready(&process, sidecar_port) {
+                process.stop();
+                return Err(error);
+            }
+            (
+                format!(
+                    "ws://127.0.0.1:{sidecar_port}/?token={}",
+                    auth_token.as_deref().ok_or_else(|| BrowserError {
+                        message: "WinApp sidecar authentication token was not created.".into(),
+                        hint: None,
+                    })?
+                ),
+                None,
+                Some(process),
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (&managed_winapp, script, &project_root, sidecar_port);
+            return Err(BrowserError {
+                message: "elevated WinApp sessions are only supported on Windows.".into(),
+                hint: None,
+            });
+        }
+    } else {
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| BrowserError {
+                message: format!("Failed to start browser sidecar: {e}"),
+                hint: None,
+            })?;
 
-    *rt.sidecar.child.lock().unwrap() = Some(child);
-    let ws_url = format!("ws://127.0.0.1:{actual_port}");
+        let actual_port = match read_port_from_child_stdout(&mut child, Duration::from_secs(10)) {
+            Ok(port) => port,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        if let Err(error) = wait_until_ready(&mut child, actual_port) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        (
+            match auth_token.as_deref() {
+                Some(token) => format!("ws://127.0.0.1:{actual_port}/?token={token}"),
+                None => format!("ws://127.0.0.1:{actual_port}"),
+            },
+            Some(child),
+            None,
+        )
+    };
+
+    *rt.sidecar.child.lock().unwrap() = child;
+    *rt.sidecar.elevated_process.lock().unwrap() = elevated_process;
     *rt.sidecar.ws_url.lock().unwrap() = Some(ws_url.clone());
     *rt.sidecar.mode.lock().unwrap() = Some(mode);
+    *rt.sidecar.elevated.lock().unwrap() = elevated;
     *rt.project.browser_active.lock().unwrap() = true;
 
-    rt.events.emit(
-        "browser-started",
-        serde_json::json!({ "ws_url": ws_url, "mode": mode.as_str() }),
-    );
+    let mut event = serde_json::json!({
+        "ws_url": public_event_ws_url(&ws_url),
+        "mode": mode.as_str(),
+    });
+    if elevated {
+        event["elevated"] = serde_json::json!(true);
+    }
+    rt.events.emit("browser-started", event);
 
     let cdp_endpoint_path = project_root
         .join(".teshi")
@@ -857,6 +1052,149 @@ pub async fn start_browser_sidecar(
         cdp_endpoint_path,
         mode: mode.as_str().to_string(),
     })
+}
+
+fn elevation_error(error_code: u32) -> BrowserError {
+    if error_code == ELEVATION_CANCELLED_ERROR {
+        return BrowserError {
+            message: "WinApp elevation was cancelled or denied by the user.".into(),
+            hint: Some(
+                "Confirm the Windows UAC prompt to create an elevated WinApp session.".into(),
+            ),
+        };
+    }
+    BrowserError {
+        message: format!(
+            "Windows could not start the elevated WinApp executor (error {error_code})."
+        ),
+        hint: Some(
+            "The WinApp session was not elevated; retry and confirm the Windows UAC prompt.".into(),
+        ),
+    }
+}
+
+#[cfg(windows)]
+fn quote_windows_arg(value: &OsStr) -> String {
+    let value = value.to_string_lossy();
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    let mut backslashes = 0;
+    for character in value.chars() {
+        match character {
+            '\\' => backslashes += 1,
+            '"' => {
+                quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
+                quoted.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                quoted.push_str(&"\\".repeat(backslashes));
+                quoted.push(character);
+                backslashes = 0;
+            }
+        }
+    }
+    quoted.push_str(&"\\".repeat(backslashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+#[cfg(windows)]
+fn spawn_elevated_winapp_service(
+    runtime: &crate::ManagedRuntime,
+    script: &Path,
+    project_root: &Path,
+    port: u16,
+    auth_token: &str,
+) -> Result<ElevatedProcess, BrowserError> {
+    let arguments = [
+        script.to_string_lossy().into_owned(),
+        "--host".into(),
+        "127.0.0.1".into(),
+        "--port".into(),
+        port.to_string(),
+        "--mode".into(),
+        "winapp".into(),
+        "--project-root".into(),
+        project_root.to_string_lossy().into_owned(),
+        "--auth-token".into(),
+        auth_token.into(),
+    ];
+    let parameters = arguments
+        .iter()
+        .map(|argument| quote_windows_arg(OsStr::new(argument)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+    let file: Vec<u16> = runtime
+        .python_exe
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let parameters: Vec<u16> = parameters
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let directory: Vec<u16> = project_root
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut execute_info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    execute_info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    execute_info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    execute_info.lpVerb = verb.as_ptr();
+    execute_info.lpFile = file.as_ptr();
+    execute_info.lpParameters = parameters.as_ptr();
+    execute_info.lpDirectory = directory.as_ptr();
+    // Keep the executor's console hidden. The UAC consent UI is owned by
+    // Windows and remains visible to the user.
+    execute_info.nShow = 0;
+
+    let started = unsafe { ShellExecuteExW(&mut execute_info) };
+    if started == 0 {
+        let error_code = unsafe { GetLastError() };
+        return Err(elevation_error(error_code));
+    }
+    if execute_info.hProcess.is_null() {
+        return Err(BrowserError {
+            message: "Windows started the elevated WinApp executor without a process handle."
+                .into(),
+            hint: Some("The elevated session cannot be lifecycle-managed safely.".into()),
+        });
+    }
+    Ok(ElevatedProcess {
+        handle: execute_info.hProcess as isize,
+    })
+}
+
+#[cfg(windows)]
+fn wait_until_elevated_ready(process: &ElevatedProcess, port: u16) -> Result<(), BrowserError> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if !process.is_running() {
+            return Err(BrowserError {
+                message: "Elevated WinApp executor exited before it became ready.".into(),
+                hint: Some(
+                    "Check the WinApp runtime installation and its diagnostic output.".into(),
+                ),
+            });
+        }
+        if port_is_open(port) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(BrowserError {
+                message: "Elevated WinApp executor did not become ready in time.".into(),
+                hint: Some("The elevated WinApp service failed to open its WebSocket port.".into()),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 fn wait_until_ready(child: &mut Child, port: u16) -> Result<(), BrowserError> {
@@ -1051,5 +1389,42 @@ mod tests {
         assert!(state.child.lock().unwrap().is_none());
         assert!(state.browser_ws_url().is_none());
         assert!(state.browser_mode().is_none());
+    }
+
+    #[test]
+    fn elevation_cancelled_is_not_reported_as_generic_launch_failure() {
+        let error = elevation_error(ELEVATION_CANCELLED_ERROR);
+        assert!(error.message.contains("cancelled or denied"));
+        assert!(error
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("UAC")));
+    }
+
+    #[test]
+    fn authenticated_sidecar_url_keeps_port_discoverable() {
+        let address = ws_url_to_addr("ws://127.0.0.1:43123/?token=tk_secret").unwrap();
+        assert_eq!(address.port(), 43123);
+    }
+
+    #[test]
+    fn runtime_event_ws_url_drops_query_credentials() {
+        assert_eq!(
+            public_event_ws_url("ws://127.0.0.1:43123/?token=tk_secret"),
+            "ws://127.0.0.1:43123/"
+        );
+        assert_eq!(
+            public_event_ws_url("ws://127.0.0.1:43123/winapp"),
+            "ws://127.0.0.1:43123/winapp"
+        );
+    }
+
+    #[tokio::test]
+    async fn sidecar_stop_clears_elevated_session_state() {
+        let state = SidecarState::new();
+        *state.elevated.lock().unwrap() = true;
+        state.stop().await.unwrap();
+        assert!(!state.is_elevated());
+        assert!(!state.child_is_running());
     }
 }

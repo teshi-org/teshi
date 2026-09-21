@@ -19,14 +19,17 @@ import ctypes
 import io
 import json
 import os
+import secrets
 import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from ctypes import wintypes
+from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 try:
     import websockets
@@ -70,6 +73,97 @@ INTERACTIVE_TYPES = {
     "RadioButtonControl",
     "TabItemControl",
 }
+
+UIA_ACTIONS = frozenset(
+    {
+        "click",
+        "pointer_click",
+        "fill",
+        "select",
+        "press_key",
+        "assert_visible",
+        "assert_text",
+        "assert_not_exists",
+    }
+)
+
+
+class IntegrityLevel(str, Enum):
+    """Windows token integrity levels used by the WinApp execution boundary."""
+
+    UNKNOWN = "Unknown"
+    UNTRUSTED = "Untrusted"
+    LOW = "Low"
+    MEDIUM = "Medium"
+    HIGH = "High"
+    SYSTEM = "System"
+    PROTECTED = "Protected"
+
+    @property
+    def is_elevated(self) -> bool:
+        """Return whether this level is high enough to control elevated UI."""
+        return self in {
+            IntegrityLevel.HIGH,
+            IntegrityLevel.SYSTEM,
+            IntegrityLevel.PROTECTED,
+        }
+
+
+def parse_integrity_level(rid: int) -> IntegrityLevel:
+    """Map a Windows mandatory-label RID to a stable Teshi integrity level."""
+    rid = int(rid)
+    if rid < 0x1000:
+        return IntegrityLevel.UNTRUSTED
+    if rid < 0x2000:
+        return IntegrityLevel.LOW
+    if rid < 0x3000:
+        return IntegrityLevel.MEDIUM
+    if rid < 0x4000:
+        return IntegrityLevel.HIGH
+    if rid < 0x5000:
+        return IntegrityLevel.SYSTEM
+    return IntegrityLevel.PROTECTED
+
+
+def integrity_mismatch_message(
+    executor: IntegrityLevel,
+    target: IntegrityLevel,
+) -> str | None:
+    """Return an error unless executor and target integrity are exactly known and equal."""
+    if executor is IntegrityLevel.UNKNOWN or target is IntegrityLevel.UNKNOWN:
+        return (
+            "Unable to verify the Teshi WinApp executor and target integrity levels; "
+            "refusing the action."
+        )
+    if target.is_elevated and not executor.is_elevated:
+        return (
+            "Target process is elevated, but the Teshi WinApp executor is not elevated. "
+            "Restart or create an elevated WinApp session."
+        )
+    if executor is not target:
+        return (
+            f"WinApp integrity mismatch: executor is {executor.value}, but target is "
+            f"{target.value}; the levels must match exactly."
+        )
+    return None
+
+
+def _websocket_path(websocket: Any) -> str:
+    """Return the request path across supported websockets package versions."""
+    request = getattr(websocket, "request", None)
+    if request is not None:
+        return str(getattr(request, "path", "/") or "/")
+    return str(getattr(websocket, "path", "/") or "/")
+
+
+def authenticated_websocket_path(raw_path: str, expected_token: str) -> str | None:
+    """Return the route only when the WebSocket URL has exactly one valid token."""
+    request_url = urlparse(raw_path)
+    supplied_tokens = parse_qs(request_url.query, keep_blank_values=True).get("token", [])
+    supplied_token = supplied_tokens[0] if len(supplied_tokens) == 1 else ""
+    if not secrets.compare_digest(supplied_token, expected_token):
+        return None
+    return request_url.path
 
 
 def debug_enabled() -> bool:
@@ -179,6 +273,8 @@ SM_CYVIRTUALSCREEN = 79
 
 if os.name == "nt":
     user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    advapi32 = ctypes.windll.advapi32
     user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
     user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
     user32.GetDpiForWindow.argtypes = [wintypes.HWND]
@@ -224,6 +320,31 @@ if os.name == "nt":
     user32.GetClientRect.restype = ctypes.c_bool
     user32.ScreenToClient.argtypes = [wintypes.HWND, ctypes.POINTER(ctypes.c_long * 2)]
     user32.ScreenToClient.restype = ctypes.c_bool
+
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    advapi32.GetSidSubAuthorityCount.argtypes = [ctypes.c_void_p]
+    advapi32.GetSidSubAuthorityCount.restype = ctypes.POINTER(ctypes.c_ubyte)
+    advapi32.GetSidSubAuthority.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    advapi32.GetSidSubAuthority.restype = ctypes.POINTER(wintypes.DWORD)
 
     # Window messages
     WM_KEYDOWN = 0x0100
@@ -299,6 +420,85 @@ if os.name == "nt":
     VK_RMENU = 0xA5
 else:  # pragma: no cover - this sidecar is Windows-only
     user32 = None
+    kernel32 = None
+    advapi32 = None
+
+
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+TOKEN_QUERY = 0x0008
+TOKEN_INTEGRITY_LEVEL = 25
+
+
+def _token_integrity_rid(token: Any) -> int | None:
+    """Read the final sub-authority from a Windows token mandatory label."""
+    if advapi32 is None:
+        return None
+    required = wintypes.DWORD()
+    advapi32.GetTokenInformation(
+        token,
+        TOKEN_INTEGRITY_LEVEL,
+        None,
+        0,
+        ctypes.byref(required),
+    )
+    if required.value <= 0:
+        return None
+    buffer = ctypes.create_string_buffer(required.value)
+    if not advapi32.GetTokenInformation(
+        token,
+        TOKEN_INTEGRITY_LEVEL,
+        buffer,
+        required.value,
+        ctypes.byref(required),
+    ):
+        return None
+    sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p)).contents.value
+    if not sid:
+        return None
+    count = advapi32.GetSidSubAuthorityCount(ctypes.c_void_p(sid))
+    if not count or count.contents.value == 0:
+        return None
+    rid = advapi32.GetSidSubAuthority(
+        ctypes.c_void_p(sid), count.contents.value - 1
+    )
+    return int(rid.contents.value) if rid else None
+
+
+def process_integrity_level(pid: int) -> IntegrityLevel:
+    """Return a process token's integrity level, or ``Unknown`` on API failure."""
+    if os.name != "nt" or kernel32 is None or advapi32 is None:
+        return IntegrityLevel.UNKNOWN
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return IntegrityLevel.UNKNOWN
+    if pid <= 0:
+        return IntegrityLevel.UNKNOWN
+
+    is_current = pid == os.getpid()
+    process = (
+        kernel32.GetCurrentProcess()
+        if is_current
+        else kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    )
+    if not process:
+        return IntegrityLevel.UNKNOWN
+    token = wintypes.HANDLE()
+    try:
+        if not advapi32.OpenProcessToken(process, TOKEN_QUERY, ctypes.byref(token)):
+            return IntegrityLevel.UNKNOWN
+        rid = _token_integrity_rid(token)
+        return parse_integrity_level(rid) if rid is not None else IntegrityLevel.UNKNOWN
+    finally:
+        if token:
+            kernel32.CloseHandle(token)
+        if not is_current:
+            kernel32.CloseHandle(process)
+
+
+def current_process_integrity() -> IntegrityLevel:
+    """Return the integrity level of the WinApp executor process itself."""
+    return process_integrity_level(os.getpid())
 
 # Map of SendKeys-style key names to virtual-key codes.
 # Supports the same {Name} syntax as uiautomation.SendKeys.
@@ -350,8 +550,11 @@ def get_window_pid(hwnd: int) -> int:
     """Return owning process id for `hwnd`."""
     if user32 is None:
         return 0
+    get_window_thread_process_id = getattr(user32, "GetWindowThreadProcessId", None)
+    if get_window_thread_process_id is None:
+        return 0
     pid = wintypes.DWORD()
-    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    get_window_thread_process_id(hwnd, ctypes.byref(pid))
     return int(pid.value)
 
 
@@ -944,6 +1147,65 @@ class WinAppSession:
             return "winapp://detached"
         return f"winapp://hwnd/{self.hwnd}"
 
+    def integrity_status(self) -> dict[str, Any]:
+        """Return executor and attached-target integrity diagnostics."""
+        executor = current_process_integrity()
+        target_pid = get_window_pid(self.hwnd) if self.hwnd is not None else None
+        target = (
+            process_integrity_level(target_pid)
+            if target_pid is not None and target_pid > 0
+            else None
+        )
+        mismatch = (
+            integrity_mismatch_message(executor, target)
+            if target is not None
+            else None
+        )
+        return {
+            "executor_pid": os.getpid(),
+            "executor_integrity": executor.value,
+            "target_pid": target_pid,
+            "target_integrity": target.value if target is not None else None,
+            "target_elevated": target.is_elevated if target is not None else False,
+            "integrity_match": target is not None and mismatch is None,
+        }
+
+    def integrity_guard(self, action: str) -> dict[str, Any] | None:
+        """Return a deterministic error before an action crosses UIPI."""
+        integrity = self.integrity_status()
+        try:
+            executor = IntegrityLevel(integrity["executor_integrity"])
+            target = IntegrityLevel(integrity["target_integrity"] or "Unknown")
+        except ValueError:
+            executor = IntegrityLevel.UNKNOWN
+            target = IntegrityLevel.UNKNOWN
+        if integrity["target_pid"] is None:
+            # Launching before attachment has no target process to compare. The
+            # subsequent operation still has to establish a target before it can
+            # perform UIA/input/capture work.
+            mismatch = None
+        else:
+            mismatch = integrity_mismatch_message(executor, target)
+        if not mismatch:
+            return None
+        return {
+            "ok": False,
+            "action": action,
+            "code": "integrity_mismatch",
+            "executor_integrity": executor.value,
+            "target_integrity": target.value,
+            "target_pid": integrity["target_pid"],
+            "error": mismatch,
+        }
+
+    def status(self) -> dict[str, Any]:
+        """Return executor and target status without requiring an attached target."""
+        return {
+            "ok": True,
+            **self.integrity_status(),
+            "target": self.target_info(),
+        }
+
     def attach(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Attach to a visible top-level window."""
         hwnd = payload.get("hwnd")
@@ -999,6 +1261,7 @@ class WinAppSession:
             "pid": get_window_pid(self.hwnd),
             "rect": get_window_rect(self.hwnd),
             "url": self.target_url(),
+            **self.integrity_status(),
             **self.capture_metadata(),
         }
 
@@ -1092,6 +1355,8 @@ class WinAppSession:
 
     def visual_command(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Shared PNG capture and visual assertion boundary for CLI and replay."""
+        if error := self.integrity_guard("visual"):
+            return {**error, "selector": str(payload.get("selector") or "")}
         try:
             with physical_coordinates():
                 return self._visual_command(payload)
@@ -1278,6 +1543,8 @@ class WinAppSession:
 
     def highlight(self, selector: str) -> dict[str, Any]:
         """Highlight the selected native element."""
+        if error := self.integrity_guard("highlight"):
+            return {**error, "selector": selector}
         control = self.find_control(selector)
         rect = rect_to_dict(get_control_property(control, "BoundingRectangle"))
         if not rect or rect["width"] <= 0 or rect["height"] <= 0:
@@ -1318,7 +1585,12 @@ class WinAppSession:
             if action == "assert_screenshot":
                 return self.visual_command({**payload, "baseline": value})
             if action == "exec":
+                if error := self.integrity_guard(action):
+                    return {**error, "selector": selector}
                 return self._handle_exec(selector, str(value or ""))
+            if action in UIA_ACTIONS:
+                if error := self.integrity_guard(action):
+                    return {**error, "selector": selector}
             if action == "assert_not_exists":
                 try:
                     exists = self.control_exists(selector)
@@ -1433,7 +1705,11 @@ class WinAppSession:
         if sub_action == "close":
             if self.hwnd is None or user32 is None:
                 return {"ok": False, "error": "no attached window to close"}
-            user32.PostMessageW(self.hwnd, 0x0010, 0, 0)  # WM_CLOSE
+            if not user32.PostMessageW(self.hwnd, 0x0010, 0, 0):  # WM_CLOSE
+                get_last_error = getattr(ctypes, "get_last_error", lambda: 0)
+                error_code = int(get_last_error())
+                detail = f" (Win32 error {error_code})" if error_code else ""
+                return {"ok": False, "error": f"close failed{detail}"}
             return {"ok": True, "exec": "close", "hwnd": self.hwnd}
 
         if sub_action == "kill":
@@ -1852,6 +2128,8 @@ class WinAppSession:
             if self.hwnd is None:
                 continue
             try:
+                if error := self.integrity_guard("preview"):
+                    raise RuntimeError(error["error"])
                 jpg = await asyncio.to_thread(self.capture_jpeg)
                 self._frame_seq += 1
                 payload = json.dumps(
@@ -1899,11 +2177,17 @@ async def handle_command(session: WinAppSession, payload: dict[str, Any]) -> dic
             return session.visual_command(payload)
         if cmd == "list_windows":
             return {"ok": True, "windows": enum_windows()}
+        if cmd == "get_status":
+            return session.status()
         if cmd == "attach_window":
             return session.attach(payload)
         if cmd == "launch_app":
+            if error := session.integrity_guard("launch_app"):
+                return error
             return await session.launch(payload)
         if cmd == "get_ui_snapshot":
+            if error := session.integrity_guard("snapshot"):
+                return error
             return session.snapshot()
         if cmd == "highlight_selector":
             return session.highlight(str(payload.get("selector") or ""))
@@ -1912,6 +2196,8 @@ async def handle_command(session: WinAppSession, payload: dict[str, Any]) -> dic
         if cmd == "execute_locator":
             return session.execute(payload)
         if cmd == "screenshot":
+            if error := session.integrity_guard("screenshot"):
+                return error
             jpg = await asyncio.to_thread(session.capture_jpeg)
             b64 = base64.b64encode(jpg).decode("ascii")
             return {
@@ -1928,8 +2214,15 @@ async def handle_command(session: WinAppSession, payload: dict[str, Any]) -> dic
         return {"ok": False, "error": str(exc)}
 
 
-async def run_server(host: str, port: int, project_root: Path | None) -> None:
+async def run_server(
+    host: str,
+    port: int,
+    project_root: Path | None,
+    auth_token: str,
+) -> None:
     """Run the WinApp sidecar WebSocket server."""
+    if not auth_token:
+        raise ValueError("WinApp sidecar authentication token is required")
     session = WinAppSession(project_root)
 
     async def handler(websocket: Any) -> None:
@@ -1954,18 +2247,31 @@ async def run_server(host: str, port: int, project_root: Path | None) -> None:
         finally:
             session.clients.discard(websocket)
 
+    async def connection_handler(websocket: Any) -> None:
+        if authenticated_websocket_path(_websocket_path(websocket), auth_token) is None:
+            await websocket.close(code=1008, reason="invalid WinApp sidecar token")
+            return
+        await handler(websocket)
+
     frame_task = asyncio.create_task(session.broadcast_frame_loop())
-    async with websockets.serve(handler, host, port) as server:
-        actual_port = server.sockets[0].getsockname()[1]
-        ws_url = f"ws://{host}:{actual_port}"
-        if project_root is not None:
-            write_endpoint_file(project_root, mode="winapp", ws_url=ws_url)
-        print(json.dumps({"ready": True, "mode": "winapp", "ws_url": ws_url}), flush=True)
-        try:
+    try:
+        async with websockets.serve(
+            connection_handler,
+            host,
+            port,
+            origins=[None],
+        ) as server:
+            actual_port = server.sockets[0].getsockname()[1]
+            ws_url = f"ws://{host}:{actual_port}/?token={auth_token}"
+            if project_root is not None:
+                write_endpoint_file(project_root, mode="winapp", ws_url=ws_url)
+            print(json.dumps({"ready": True, "mode": "winapp", "ws_url": ws_url}), flush=True)
             await asyncio.Future()
-        finally:
-            frame_task.cancel()
-            session.close()
+    finally:
+        frame_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await frame_task
+        session.close()
 
 
 def main() -> None:
@@ -1975,12 +2281,13 @@ def main() -> None:
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--mode", default="winapp")
     parser.add_argument("--project-root")
+    parser.add_argument("--auth-token", required=True)
     args = parser.parse_args()
     project_root = Path(args.project_root).resolve() if args.project_root else None
     if os.name != "nt":
         print("winapp mode is only supported on Windows", file=sys.stderr)
         sys.exit(2)
-    asyncio.run(run_server(args.host, args.port, project_root))
+    asyncio.run(run_server(args.host, args.port, project_root, args.auth_token))
 
 
 if __name__ == "__main__":

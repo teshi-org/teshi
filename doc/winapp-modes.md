@@ -54,6 +54,22 @@ Or launch an executable and wait for its first visible window:
 teshi winapp launch "C:\path\to\MyApp.exe"
 ```
 
+For a target that requires administrator UI access, use the opt-in elevated
+session:
+
+```bash
+teshi winapp launch --elevated "C:\path\to\Enhook.exe"
+teshi winapp status
+```
+
+Windows displays the normal UAC consent prompt. Only the WinApp execution
+sidecar is started at High Integrity; the Teshi CLI, daemon, Agent, and Web UI
+remain at their normal integrity level. If a Medium executor attaches to a
+High target, action commands fail before UIA or input dispatch with an
+integrity-mismatch error. The session owner stops the elevated executor when
+the WinApp session or daemon ends; Teshi does not automate the Secure Desktop
+UAC surface or store credentials.
+
 ## GPUI preview
 
 The native and WASM GPUI shells show the same latest-frame preview on their main surface. WinApp mode prefers Windows Graphics Capture (WGC) for the exact attached HWND and automatically falls back to screen-rectangle ImageGrab when WGC cannot start or stops unexpectedly.
@@ -168,11 +184,12 @@ For step bindings, keep the existing schema:
 
 WinApp replay uses tolerance 8 and writes failures under `.teshi/artifacts/visual/<sanitized-feature>-L<line>-diff.png`. The assertion response is printed before replay reports the failing step. Existing replay JPEG evidence remains separate from visual comparison.
 
-Managed runtime v3 packages real pointer clicking and the existing visual
-capability. The install path and release archive are versioned separately from
-the Teshi application; v2 manifests cannot satisfy the v3 requirement. Release
-builds embed the v3 archive URL, hash, and size. Restart an already-running
-older daemon/sidecar after upgrading so it loads the new runtime.
+Managed runtime v4 packages authenticated sidecar connections, real pointer
+clicking, and the existing visual capability. The install path and release
+archive are versioned separately from the Teshi application; v3 manifests
+cannot satisfy the v4 requirement. Release builds embed the v4 archive URL,
+hash, and size. Restart an already-running older daemon/sidecar after upgrading
+so it loads the new runtime.
 
 Run the window-independent capture, comparison, selector, CLI, and replay tests after building the CLI:
 
@@ -194,7 +211,9 @@ WinApp mode requires `websockets` to start. UI inspection/actions require `uiaut
 
 ## Limitations
 
-- Target apps running as administrator may require teshi to run at the same integrity level.
+- Target apps already running as administrator must be attached from an elevated
+  WinApp session; a Medium executor reports an integrity mismatch instead of
+  attempting UIA or input dispatch.
 - Custom-drawn controls may expose little or no UIA metadata; prefer adding stable `AutomationId` values in the app under test.
 - WGC cannot capture protected content. ImageGrab fallback is additionally affected by occlusion and minimized windows.
 - Independent top-level popup windows are not merged into the attached main HWND's WGC stream.

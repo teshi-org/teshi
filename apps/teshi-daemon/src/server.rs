@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, Extension, Path, Query, Request, State};
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -34,12 +34,12 @@ use teshi_engine::{
     get_recent_projects, highlight_locator, list_dir, list_profiles, list_runnable_scenarios,
     load_llm_config_public, load_project_settings, open_project, reject_locator, render_feature,
     resize_terminal, save_profile, save_stored_llm_config, send_api_command, set_active_id,
-    spawn_terminal, start_browser_sidecar, step_binding_statuses, stop_browser_sidecar,
-    sync_active_step, teardown_runtime, unbind_step, validate_feature_scope, write_terminal,
-    ActiveStep, ApiStyle, BrowserError, BrowserMode, BrowserStartResult, DeepSeekThinking,
-    DirEntry, DispatchCase, LlmConfigPublic, LlmConfigWrite, ModelProfile, ModelProfileList,
-    ModelProfilePublic, PendingLocator, ProjectSettings, RuntimeEvent, StepBinding,
-    StepBindingStatus, TeshiEngine, PROVIDER_OPENAI,
+    spawn_terminal, start_browser_sidecar_with_options, step_binding_statuses,
+    stop_browser_sidecar, sync_active_step, teardown_runtime, unbind_step, validate_feature_scope,
+    write_terminal, ActiveStep, ApiStyle, BrowserError, BrowserMode, BrowserStartResult,
+    DeepSeekThinking, DirEntry, DispatchCase, LlmConfigPublic, LlmConfigWrite, ModelProfile,
+    ModelProfileList, ModelProfilePublic, PendingLocator, ProjectSettings, RuntimeEvent,
+    StepBinding, StepBindingStatus, TeshiEngine, PROVIDER_OPENAI,
 };
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
@@ -271,6 +271,7 @@ pub async fn run_server_with_listener(
     let token = shutdown_token.clone();
     let active_ws = state.active_ws.clone();
     let last_request = state.last_request.clone();
+    let runtime_for_idle = state.rt.clone();
     let idle_project_root = project_root.clone();
     tokio::spawn(async move {
         loop {
@@ -283,11 +284,13 @@ pub async fn run_server_with_listener(
                 .lock()
                 .map(|t| t.elapsed())
                 .unwrap_or(std::time::Duration::ZERO);
-            if daemon_should_shutdown_for_idle(ws_count, idle) {
+            let sidecar_active = runtime_for_idle.sidecar.child_is_running();
+            if daemon_should_shutdown_for_idle(ws_count, sidecar_active, idle) {
                 tracing::info!(
-                    "idle watchdog: {:?} since last request, {} active WS — shutting down",
+                    "idle watchdog: {:?} since last request, {} active WS, sidecar_active={} — shutting down",
                     idle,
-                    ws_count
+                    ws_count,
+                    sidecar_active
                 );
                 token.cancel();
                 return;
@@ -302,19 +305,26 @@ pub async fn run_server_with_listener(
         token_ctrlc.cancel();
     });
 
-    axum::serve(
+    let serve_result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move { shutdown_token.cancelled().await })
-    .await?;
+    .await;
+
+    // The daemon owns the WinApp session. Always stop it before returning so
+    // a runas-started executor cannot outlive an idle/API/CTRL+C shutdown.
+    if let Err(error) = state.rt.sidecar.stop().await {
+        tracing::warn!(%error, "failed to stop browser sidecar during daemon shutdown");
+    }
+    *state.rt.project.browser_active.lock().unwrap() = false;
 
     // Clean up on exit
     if let Some(root) = idle_project_root {
         teshi_engine::remove_daemon_manifest(&root);
     }
 
-    Ok(())
+    serve_result.map_err(Into::into)
 }
 
 // ---- WebSocket ----
@@ -327,8 +337,12 @@ const PREVIEW_CONTROL_QUEUE_CAPACITY: usize = 8;
 const PREVIEW_RECONNECT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 const DAEMON_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-fn daemon_should_shutdown_for_idle(active_ws: usize, idle: std::time::Duration) -> bool {
-    active_ws == 0 && idle > DAEMON_IDLE_TIMEOUT
+fn daemon_should_shutdown_for_idle(
+    active_ws: usize,
+    sidecar_active: bool,
+    idle: std::time::Duration,
+) -> bool {
+    active_ws == 0 && !sidecar_active && idle > DAEMON_IDLE_TIMEOUT
 }
 
 /// Browser WebSocket upgrades are a separate trust gate from token
@@ -856,6 +870,18 @@ fn redact_hosted_value(value: Value, project_root: Option<&FsPath>) -> Value {
 /// retaining unrelated Terminal/Agent/browser state for the hosted client.
 fn redact_hosted_event_value(value: Value) -> Value {
     redact_hosted_value(value, None)
+}
+
+/// Restrict legacy event payloads according to the authenticated API role.
+/// Admin keeps the local event contract; automation roles receive the same
+/// private-coordinate and credential redaction used at the hosted boundary.
+fn event_payload_for_role(role: Role, payload: Value) -> Value {
+    match role {
+        Role::Admin => payload,
+        Role::AgentRecorder | Role::BatchRunner | Role::HostedWebUi => {
+            redact_hosted_event_value(payload)
+        }
+    }
 }
 
 fn hosted_control_value(state: &DaemonState, value: Value) -> Value {
@@ -1662,10 +1688,14 @@ async fn handle_preview_socket(state: DaemonState, mut socket: WebSocket) {
     }
 }
 
-async fn events_ws(State(state): State<DaemonState>, ws: WebSocketUpgrade) -> Response {
+async fn events_ws(
+    State(state): State<DaemonState>,
+    Extension(role): Extension<Role>,
+    ws: WebSocketUpgrade,
+) -> Response {
     let rt = state.rt.clone();
     let active_ws = state.active_ws.clone();
-    ws.on_upgrade(move |socket| handle_events_socket(rt, active_ws, socket))
+    ws.on_upgrade(move |socket| handle_events_socket(rt, active_ws, role, socket))
 }
 
 struct WsGuard(Arc<AtomicUsize>);
@@ -1678,6 +1708,7 @@ impl Drop for WsGuard {
 async fn handle_events_socket(
     rt: SharedRuntime,
     active_ws: Arc<AtomicUsize>,
+    role: Role,
     mut socket: WebSocket,
 ) {
     active_ws.fetch_add(1, Ordering::Relaxed);
@@ -1688,7 +1719,10 @@ async fn handle_events_socket(
             msg = rx.recv() => {
                 match msg {
                     Ok(RuntimeEvent { name, payload }) => {
-                        let envelope = json!({ "event": name, "payload": payload });
+                        let envelope = json!({
+                            "event": name,
+                            "payload": event_payload_for_role(role, payload),
+                        });
                         let text = match serde_json::to_string(&envelope) {
                             Ok(t) => t,
                             Err(_) => continue,
@@ -1963,7 +1997,7 @@ async fn handle_browser_stream_socket(
 /// session token, and an invalid token always fails closed.
 async fn auth_middleware(
     State(state): State<DaemonState>,
-    req: Request,
+    mut req: Request,
     next: middleware::Next,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
     let path = req.uri().path().to_string();
@@ -2013,6 +2047,7 @@ async fn auth_middleware(
         ));
     }
 
+    req.extensions_mut().insert(role);
     Ok(next.run(req).await)
 }
 
@@ -2763,6 +2798,8 @@ async fn api_highlight_locator(
 #[derive(Deserialize)]
 struct BrowserStartBody {
     mode: Option<String>,
+    #[serde(default)]
+    elevated: bool,
 }
 
 const BROWSER_BROKER_DISCOVERY_URL: &str = "http://127.0.0.1:17373/v1/bridge";
@@ -2885,7 +2922,12 @@ async fn api_browser_start(
         Some("winapp") => BrowserMode::WinApp,
         _ => BrowserMode::Embedded,
     };
-    start_browser_sidecar(state.rt, mode)
+    if body.elevated && mode != BrowserMode::WinApp {
+        return Err(ApiError::from(
+            "elevation is only supported for the WinApp executor.".to_string(),
+        ));
+    }
+    start_browser_sidecar_with_options(state.rt, mode, body.elevated)
         .await
         .map(Json)
         .map_err(ApiError::from)
@@ -3429,6 +3471,27 @@ mod integration {
             "project_root": "C:/private/project"
         }));
         assert_eq!(value, json!({ "mode": "chrome", "nested": [{"ok": true}] }));
+    }
+
+    #[test]
+    fn restricted_event_roles_cannot_receive_sidecar_credentials() {
+        let payload = json!({
+            "mode": "winapp",
+            "ws_url": "ws://127.0.0.1:43123/?token=tk_sidecar_secret",
+            "nested": {"command_token": "tk_sidecar_secret"},
+        });
+
+        for role in [Role::AgentRecorder, Role::BatchRunner] {
+            let value = event_payload_for_role(role, payload.clone());
+            let text = value.to_string();
+            assert!(!text.contains("tk_sidecar_secret"), "role={role:?}");
+            assert!(value.get("ws_url").is_none(), "role={role:?}");
+        }
+
+        assert_eq!(
+            event_payload_for_role(Role::Admin, payload.clone()),
+            payload
+        );
     }
 
     #[test]
@@ -4122,11 +4185,22 @@ mod integration {
     fn idle_shutdown_requires_no_active_websocket_and_exceeds_timeout() {
         assert!(!daemon_should_shutdown_for_idle(
             1,
+            false,
             DAEMON_IDLE_TIMEOUT + std::time::Duration::from_secs(1)
         ));
-        assert!(!daemon_should_shutdown_for_idle(0, DAEMON_IDLE_TIMEOUT));
+        assert!(!daemon_should_shutdown_for_idle(
+            0,
+            false,
+            DAEMON_IDLE_TIMEOUT
+        ));
         assert!(daemon_should_shutdown_for_idle(
             0,
+            false,
+            DAEMON_IDLE_TIMEOUT + std::time::Duration::from_secs(1)
+        ));
+        assert!(!daemon_should_shutdown_for_idle(
+            0,
+            true,
             DAEMON_IDLE_TIMEOUT + std::time::Duration::from_secs(1)
         ));
     }

@@ -12,6 +12,19 @@ from PIL import Image, PngImagePlugin
 
 
 class VisualTests(unittest.TestCase):
+    @staticmethod
+    def allow_known_integrity(session):
+        session.integrity_status = Mock(
+            return_value={
+                "executor_pid": 10,
+                "executor_integrity": "Medium",
+                "target_pid": 20,
+                "target_integrity": "Medium",
+                "target_elevated": False,
+                "integrity_match": True,
+            }
+        )
+
     def test_crop_physical_negative_screen_origin_and_exact_pixels(self):
         image = Image.new("RGB", (10, 8))
         image.putpixel((3, 2), (21, 42, 63))
@@ -205,6 +218,7 @@ class VisualTests(unittest.TestCase):
         )
         session = service.WinAppSession(None)
         session.hwnd = 123
+        self.allow_known_integrity(session)
         session.root_control = Mock(
             return_value=SimpleNamespace(GetChildren=lambda: [control])
         )
@@ -282,6 +296,7 @@ class VisualTests(unittest.TestCase):
             root = Path(temp)
             session = service.WinAppSession(root)
             session.hwnd = 123
+            self.allow_known_integrity(session)
             node = dict(name="Close", is_offscreen=False, bounding_rectangle=dict(left=11, top=22, width=3, height=2))
             session.snapshot = Mock(return_value=dict(interactive_elements=[node]))
             backend = Mock()
@@ -350,6 +365,7 @@ class VisualTests(unittest.TestCase):
             Image.new("RGB", (2, 2), "magenta").save(root / "diff.png")
             session = service.WinAppSession(root)
             session.hwnd = 1
+            self.allow_known_integrity(session)
             session.snapshot = Mock(return_value={"interactive_elements": [dict(name="Close", is_offscreen=False,
                 bounding_rectangle=dict(left=0, top=0, width=2, height=2))]})
             session._capture_backend = Mock()

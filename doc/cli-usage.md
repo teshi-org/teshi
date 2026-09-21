@@ -437,6 +437,7 @@ in the installed Desktop/web build; the UI control name is version-dependent.
 
 ```bash
 teshi winapp list-windows
+teshi winapp status
 teshi winapp attach --hwnd 12345
 teshi winapp attach --title 'My App'
 teshi winapp attach --process-name MyApp.exe
@@ -444,6 +445,7 @@ teshi winapp snapshot
 teshi winapp highlight 'uia:automation_id=LoginButton'
 teshi winapp execute --selector 'uia:automation_id=LoginButton' --action click
 teshi winapp execute --selector 'uia:control_type=ButtonControl;name=Close' --action pointer_click
+teshi winapp launch --elevated 'C:\path\to\Enhook.exe'
 teshi winapp replay --feature test/feature/login.feature [--until-line N] [--yes] [--dry-run] \
   [--launch 'C:\path\to\App.exe']
 ```
@@ -451,6 +453,13 @@ teshi winapp replay --feature test/feature/login.feature [--until-line N] [--yes
 WinApp `click` prefers UIA activation and does not guarantee real pointer
 hover or pressed state. `pointer_click` moves the system pointer and sends a
 foreground left-click for controls that depend on real mouse input.
+
+`status` reports the executor and attached target Integrity Level. `launch
+--elevated` starts only the WinApp executor and target through the Windows UAC
+`runas` boundary; the Teshi CLI, daemon, Agent, and Web UI remain at their
+existing integrity level. UAC cancellation is reported as an elevation
+cancellation/denial, and the elevated executor is stopped with its WinApp
+session.
 
 `replay` checks that a window is attached before running bindings. Use `attach` or `--launch` when detached.
 
