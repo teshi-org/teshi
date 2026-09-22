@@ -162,7 +162,7 @@ class VisualTests(unittest.TestCase):
             dict(selector="uia:name=Close", action="pointer_click", mode="background")
         )
         self.assertFalse(result["ok"])
-        self.assertIn("pointer_click requires foreground mode", result["error"])
+        self.assertIn("pointer_click is forbidden in background mode", result["error"])
 
     def test_assert_not_exists_passes_only_when_uia_selector_is_absent(self):
         session = service.WinAppSession(None)
@@ -414,7 +414,7 @@ class VisualTests(unittest.TestCase):
         self.assertIs(session.find_control("uia:name=Close"), hidden)
         session._click = Mock()
         self.assertTrue(session.execute(dict(selector="uia:name=Close", action="click"))["ok"])
-        session._click.assert_called_once_with(hidden)
+        session._click.assert_called_once_with(hidden, "auto")
 
 
 if __name__ == "__main__":

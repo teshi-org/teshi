@@ -1410,9 +1410,13 @@ pub struct WinAppExecuteArgs {
     /// Timeout in milliseconds
     #[arg(long, default_value_t = 5000)]
     pub timeout_ms: u64,
-    /// Input mode: foreground (default) or background (non-intrusive PostMessage);
-    /// `pointer_click` requires foreground
-    #[arg(long, default_value = "foreground")]
+    /// Input policy: auto (default), background (strictly non-intrusive), or foreground
+    /// (allows focused input fallbacks); `pointer_click` is physical in auto/foreground
+    #[arg(
+        long,
+        default_value = "auto",
+        value_parser = ["auto", "background", "foreground"]
+    )]
     pub mode: String,
 }
 
@@ -1436,9 +1440,12 @@ pub struct WinAppReplayArgs {
     /// Launch this executable and attach before replay (when not already attached)
     #[arg(long)]
     pub launch: Option<String>,
-    /// Input mode for replay steps: foreground (default) or background
-    /// (non-intrusive PostMessage); `pointer_click` requires foreground
-    #[arg(long, default_value = "foreground")]
+    /// Input policy for each replay step: auto (default), background, or foreground
+    #[arg(
+        long,
+        default_value = "auto",
+        value_parser = ["auto", "background", "foreground"]
+    )]
     pub mode: String,
 }
 
@@ -2074,6 +2081,47 @@ mod tests {
         assert_eq!(args.selector, "uia:automation_id=SearchBox");
         assert_eq!(args.action, "fill");
         assert_eq!(args.value_arg.as_deref(), Some("hello"));
+        assert_eq!(args.mode, "auto");
+    }
+
+    #[test]
+    fn winapp_input_policy_accepts_three_modes_and_rejects_unknown_values() {
+        for mode in ["auto", "background", "foreground"] {
+            let cli = Cli::try_parse_from([
+                "teshi",
+                "winapp",
+                "execute",
+                "--selector",
+                "uia:name=Save",
+                "--action",
+                "click",
+                "--mode",
+                mode,
+            ])
+            .expect("parse supported WinApp input policy");
+            let Some(Command::WinApp {
+                action: WinAppCommand::Execute(args),
+            }) = cli.command
+            else {
+                panic!("expected winapp execute subcommand");
+            };
+            assert_eq!(args.mode, mode);
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "teshi",
+                "winapp",
+                "execute",
+                "--selector",
+                "uia:name=Save",
+                "--action",
+                "click",
+                "--mode",
+                "physical",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

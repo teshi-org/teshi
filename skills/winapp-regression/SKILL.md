@@ -51,15 +51,23 @@ Use only the actual discovered selector and the action/value supplied by the ste
 
 ## Choose the click action deliberately
 
-- `click` prefers UIA activation (`InvokePattern`), then the existing UIA click
-  fallback chain. It is suitable for ordinary stable automation, but it does
-  not guarantee real pointer hover or pressed state.
+- `click` prefers non-intrusive UIA activation (`InvokePattern`, then other
+  supported UIA patterns). It never silently becomes a real system-pointer
+  click. Use it for ordinary stable automation.
 - `pointer_click` moves the real system pointer to the unique visible
   interactive element and sends a foreground left-button click. Use it for
   hover, pressed state, WinUI3 custom title bars, caption islands, non-client
   area interaction, and controls that depend on real mouse messages.
-- `pointer_click` requires `--mode foreground`; it must not be downgraded to
-  background `PostMessage` input.
+- `pointer_click` is allowed in the default `--mode auto` because the action
+  itself explicitly requests physical input. It is also allowed with
+  `--mode foreground`, and is rejected by `--mode background`. It must not be
+  downgraded to background `PostMessage` input.
+
+Do not use `pointer_click` merely because `click` failed once. First inspect
+the control and determine whether it actually requires physical pointer
+semantics. A missing or broken UIA pattern, ambiguous selector, integrity
+mismatch, stale attachment, or transient provider error is not evidence that
+real pointer input is required.
 
 For example:
 

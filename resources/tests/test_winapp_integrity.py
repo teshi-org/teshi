@@ -204,7 +204,7 @@ class WinAppIntegrityTests(unittest.TestCase):
             response = session.execute({"selector": "uia:name=User", "action": "click"})
 
         self.assertTrue(response["ok"])
-        click.assert_called_once_with(control)
+        click.assert_called_once_with(control, "auto")
 
     def test_status_without_target_reports_executor_only(self) -> None:
         session = service.WinAppSession(None)

@@ -130,17 +130,33 @@ When `.teshi/cdp-endpoint.json` has `"mode": "winapp"`, `teshi run` forwards sce
 
 ## Supported actions
 
-| Action | UIA behavior |
-|--------|--------------|
-| `click` | Prefer `InvokePattern`, then UIA click, then center-point click; does not guarantee real pointer hover or pressed state |
-| `pointer_click` | Foreground-only real pointer move to the element center followed by a Win32 `SendInput` left-click |
-| `fill` | Prefer `ValuePattern.SetValue`, then focus + keyboard input |
+WinApp input is non-intrusive by default. `execute` and every step in `replay`
+use `--mode auto` unless a mode is supplied:
+
+| Mode | Policy |
+|------|--------|
+| `auto` | Prefer UIA and background messages. Do not grant foreground fallbacks implicitly. An explicit `pointer_click` action may activate the target and inject physical pointer input. |
+| `background` | Strictly forbid `SetForegroundWindow`, focus-dependent `SendKeys`, `SendInput`, and real pointer movement. Fail when UIA/background messages cannot complete the action. |
+| `foreground` | Still try UIA/background behavior first, but allow target activation, focus, and keyboard fallback when an action cannot otherwise complete. Pure reads never activate the window. |
+
+The mode is evaluated per action. A replay containing one `pointer_click` does
+not activate the window for its earlier or later assertion/UIA steps.
+
+| Action | Execution policy |
+|--------|------------------|
+| `click` | Prefer `InvokePattern`, then other non-intrusive UIA activation patterns, then background window messages. It never moves the real pointer. A foreground-only focused keyboard fallback is available when explicitly allowed. |
+| `pointer_click` | Explicit physical capability: activate the window, move the real pointer to the element center, and issue a Win32 `SendInput` left-click. Allowed in `auto`/`foreground`; rejected in `background`. |
+| `fill` | Prefer `ValuePattern.SetValue`, then background messages. Only explicit `foreground` permits focus + keyboard fallback. |
 | `assert_visible` | Check that the resolved element has visible bounds |
 | `assert_not_exists` | Pass only when the UIA selector matches no element, including hidden elements |
 | `assert_text` | Compare expected text against `ValuePattern` or `Name` |
 | `assert_screenshot` | Compare lossless RGB pixels of one visible interactive UIA element with a PNG baseline |
-| `select` | Prefer `SelectionItemPattern.Select`, then click |
-| `press_key` | Focus the element and send keys |
+| `select` | Prefer `SelectionItemPattern.Select`, then the same least-intrusive activation chain as `click` |
+| `press_key` | Prefer background window messages. Only explicit `foreground` permits focus + `SendKeys` fallback. |
+
+`snapshot`, `screenshot`, `highlight`, and all assertion actions are always
+non-intrusive, including when `--mode foreground` is supplied. They never call
+`SetForegroundWindow`, move the system pointer, or inject keyboard input.
 
 Use `pointer_click` when the control depends on real pointer input, such as
 hover/pressed state, a WinUI3 custom title bar or caption island, non-client
@@ -148,9 +164,20 @@ area interaction, or pointer messages. It moves the system pointer and brings
 the attached window to the foreground. `click` remains the UIA-activation-first
 choice for ordinary stable automation.
 
+Do not replace `click` with `pointer_click` merely because one click attempt
+failed. First determine whether the target is a hover/pressed-state control,
+custom title bar, caption island, non-client surface, or another control whose
+contract truly depends on physical pointer messages.
+
 ```powershell
 teshi winapp execute --selector "uia:control_type=ButtonControl;name=Close" --action pointer_click
 ```
+
+Existing scripts that pass `--mode foreground` or `--mode background` remain
+valid. Scripts that omitted `--mode` now receive the safer `auto` policy rather
+than unconditional foreground activation; this is an intentional behavioral
+default change. Use explicit `--mode foreground` only when a focus/keyboard
+fallback is required.
 
 ## Element screenshots and visual assertions
 

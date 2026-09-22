@@ -1560,12 +1560,13 @@ class WinAppSession:
     def execute(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Run one action against a selected UIA control, or exec a system command.
 
-        mode: "foreground" (default; actions may activate the target window)
-              "background" (PostMessage/SendMessage, no focus change)
+        mode: "auto" (default; choose the least intrusive implementation)
+              "background" (strictly forbid focus and physical input)
+              "foreground" (allow focused keyboard fallbacks when required)
 
-        ``pointer_click`` is the exception that always requires foreground
-        mode and uses SendInput to move the real system pointer before the
-        left-button transition. Ordinary ``click`` keeps its UIA-first order.
+        ``pointer_click`` explicitly requests physical pointer semantics, so
+        it may activate the window in auto or foreground mode. Ordinary
+        ``click`` never injects physical pointer input.
 
         exec actions (no selector needed):
           exec: launch <path>           spawn a process
@@ -1579,8 +1580,15 @@ class WinAppSession:
         selector = str(payload.get("selector") or "")
         action = str(payload.get("action") or "click")
         value = payload.get("value")
-        mode = str(payload.get("mode") or "foreground").casefold()
+        mode = str(payload.get("mode") or "auto").casefold()
         try:
+            if mode not in ("auto", "foreground", "background"):
+                return {
+                    "ok": False,
+                    "error": (
+                        f"invalid mode: {mode!r}; use auto, foreground, or background"
+                    ),
+                }
             # --- exec actions (no UIA control needed) ---
             if action == "assert_screenshot":
                 return self.visual_command({**payload, "baseline": value})
@@ -1617,18 +1625,16 @@ class WinAppSession:
                 }
 
             if action == "pointer_click":
-                if mode != "foreground":
+                if mode == "background":
                     return {
                         "ok": False,
-                        "error": "pointer_click requires foreground mode",
+                        "error": (
+                            "pointer_click is forbidden in background mode because it "
+                            "requires foreground activation and physical pointer input"
+                        ),
                     }
                 try:
-                    if self.hwnd is None or user32 is None:
-                        raise RuntimeError(
-                            "pointer_click requires an attached Windows window"
-                        )
-                    if not user32.SetForegroundWindow(self.hwnd):
-                        raise RuntimeError("SetForegroundWindow failed")
+                    self._activate_foreground("pointer_click")
                     with physical_coordinates():
                         _, rectangle = self.find_visible_interactive_control(selector)
                         center_x = rectangle["left"] + rectangle["width"] // 2
@@ -1639,22 +1645,12 @@ class WinAppSession:
                 return {"ok": True, "selector": selector, "action": action}
 
             control = self.find_control(selector)
-            if mode not in ("foreground", "background"):
-                return {"ok": False, "error": f"invalid mode: {mode!r}; use foreground or background"}
-            if mode == "foreground" and self.hwnd is not None and user32 is not None:
-                user32.SetForegroundWindow(self.hwnd)
             if action == "click":
-                if mode == "background":
-                    self._background_click(control)
-                else:
-                    self._click(control)
+                self._click(control, mode)
             elif action == "fill":
                 if value is None:
                     return {"ok": False, "error": "fill requires value"}
-                if mode == "background":
-                    self._background_fill(control, str(value))
-                else:
-                    self._fill(control, str(value))
+                self._fill(control, str(value), mode)
             elif action == "assert_visible":
                 rect = rect_to_dict(get_control_property(control, "BoundingRectangle"))
                 if not rect or rect["width"] <= 0 or rect["height"] <= 0:
@@ -1668,20 +1664,11 @@ class WinAppSession:
                         "error": f"expected text {expected!r}, got {actual!r}",
                     }
             elif action == "select":
-                if mode == "background":
-                    self._background_select(control)
-                else:
-                    self._select(control)
+                self._select(control, mode)
             elif action == "press_key":
                 if value is None:
                     return {"ok": False, "error": "press_key requires value"}
-                if mode == "background":
-                    self._background_press_key(control, str(value))
-                elif auto is None:
-                    return {"ok": False, "error": "uiautomation is not installed"}
-                else:
-                    control.SetFocus()
-                    auto.SendKeys(str(value), waitTime=0.05)
+                self._press_key(control, str(value), mode)
             else:
                 return {"ok": False, "error": f"unsupported_action: {action}"}
         except Exception as exc:
@@ -1733,40 +1720,115 @@ class WinAppSession:
 
         return {"ok": False, "error": f"unsupported exec action: {sub_action!r}"}
 
-    def _click(self, control: Any) -> None:
-        try:
-            control.GetInvokePattern().Invoke()
-            return
-        except Exception:
-            pass
-        try:
-            control.Click(simulateMove=False)
-            return
-        except Exception:
-            pass
-        rect = rect_to_dict(get_control_property(control, "BoundingRectangle"))
-        if auto is None or not rect:
-            raise RuntimeError("element cannot be clicked")
-        auto.Click(rect["left"] + rect["width"] // 2, rect["top"] + rect["height"] // 2)
+    def _activate_foreground(self, action: str) -> None:
+        """Activate the attached window only for an explicit intrusive path."""
+        if self.hwnd is None or user32 is None:
+            raise RuntimeError(f"{action} requires an attached Windows window")
+        if not user32.SetForegroundWindow(self.hwnd):
+            raise RuntimeError(f"SetForegroundWindow failed for {action}")
 
-    def _fill(self, control: Any, value: str) -> None:
+    @staticmethod
+    def _uia_click(control: Any) -> None:
+        """Activate a control through UIA without focus or pointer injection."""
+        attempts = (
+            lambda: control.GetInvokePattern().Invoke(),
+            lambda: control.GetLegacyIAccessiblePattern().DoDefaultAction(),
+            lambda: control.GetTogglePattern().Toggle(),
+            lambda: control.GetSelectionItemPattern().Select(),
+        )
+        for attempt in attempts:
+            try:
+                # uiautomation's pattern wrappers return False for a COM call
+                # that did not complete; raw/fake providers may return None.
+                if attempt() is not False:
+                    return
+            except Exception:
+                pass
+        raise RuntimeError("no supported non-intrusive UIA activation pattern")
+
+    def _click(self, control: Any, mode: str) -> None:
         try:
-            control.GetValuePattern().SetValue(value)
+            self._uia_click(control)
             return
-        except Exception:
-            pass
+        except RuntimeError as uia_error:
+            try:
+                self._background_click(control)
+                return
+            except RuntimeError as background_error:
+                if mode != "foreground":
+                    restriction = (
+                        "background mode forbids foreground fallback"
+                        if mode == "background"
+                        else "auto mode does not implicitly grant foreground input"
+                    )
+                    raise RuntimeError(
+                        f"click could not be completed non-intrusively: {uia_error}; "
+                        f"{background_error}; {restriction}"
+                    ) from background_error
+
+        self._activate_foreground("click keyboard fallback")
+        if auto is None:
+            raise RuntimeError("uiautomation is not installed")
+        control.SetFocus()
+        auto.SendKeys("{Enter}", waitTime=0.05)
+
+    def _fill(self, control: Any, value: str, mode: str) -> None:
+        try:
+            if control.GetValuePattern().SetValue(value) is not False:
+                return
+            raise RuntimeError("ValuePattern.SetValue reported failure")
+        except Exception as value_error:
+            try:
+                self._background_fill(control, value)
+                return
+            except RuntimeError as background_error:
+                if mode != "foreground":
+                    restriction = (
+                        "background mode forbids focus and keyboard injection"
+                        if mode == "background"
+                        else "auto mode does not implicitly grant foreground input"
+                    )
+                    raise RuntimeError(
+                        "fill could not be completed with ValuePattern or background "
+                        f"messages: {value_error}; {background_error}; {restriction}"
+                    ) from background_error
+
+        self._activate_foreground("fill keyboard fallback")
         if auto is None:
             raise RuntimeError("uiautomation is not installed")
         control.SetFocus()
         auto.SendKeys("{Ctrl}a", waitTime=0.05)
         auto.SendKeys(value, waitTime=0.05)
 
-    def _select(self, control: Any) -> None:
+    def _select(self, control: Any, mode: str) -> None:
         try:
-            control.GetSelectionItemPattern().Select()
-            return
+            if control.GetSelectionItemPattern().Select() is not False:
+                return
+            raise RuntimeError("SelectionItemPattern.Select reported failure")
         except Exception:
-            self._click(control)
+            self._click(control, mode)
+
+    def _press_key(self, control: Any, value: str, mode: str) -> None:
+        try:
+            self._background_press_key(control, value)
+            return
+        except RuntimeError as background_error:
+            if mode != "foreground":
+                restriction = (
+                    "background mode forbids focus and keyboard injection"
+                    if mode == "background"
+                    else "auto mode does not implicitly grant foreground input"
+                )
+                raise RuntimeError(
+                    f"press_key could not use background messages: {background_error}; "
+                    f"{restriction}"
+                ) from background_error
+
+        self._activate_foreground("press_key keyboard fallback")
+        if auto is None:
+            raise RuntimeError("uiautomation is not installed")
+        control.SetFocus()
+        auto.SendKeys(value, waitTime=0.05)
 
     def _control_text(self, control: Any) -> str:
         try:
@@ -1808,16 +1870,22 @@ class WinAppSession:
             pass
         return self.hwnd
 
-    def _background_click(self, control: Any) -> None:
-        """Post WM_LBUTTONDOWN/UP to the control without foreground activation."""
-        # 1) Try InvokePattern — non-intrusive UIA call, no PostMessage needed.
+    def _get_native_control_hwnd(self, control: Any) -> int | None:
+        """Return only a control-owned HWND suitable for direct text input."""
         try:
-            control.GetInvokePattern().Invoke()
-            return
+            hwnd = get_control_property(control, "NativeWindowHandle")
+            if not hwnd:
+                return None
+            hwnd = int(hwnd)
+            if hwnd == 0 or (self.hwnd is not None and hwnd == self.hwnd):
+                return None
+            return hwnd
         except Exception:
-            pass
+            return None
 
-        # 2) Get screen coordinates from UIA, convert to client coords.
+    def _background_click(self, control: Any) -> None:
+        """Post WM_LBUTTONDOWN/UP without foreground or physical input."""
+        # Get screen coordinates from UIA, convert to client coords.
         rect = rect_to_dict(get_control_property(control, "BoundingRectangle"))
         if not rect or rect["width"] <= 0 or rect["height"] <= 0:
             raise RuntimeError("element has no visible bounds for background click")
@@ -1836,62 +1904,69 @@ class WinAppSession:
         client_x, client_y = int(pt[0]), int(pt[1])
         lparam = self._mousemove_lparam(client_x, client_y)
 
-        # 3) Post the click.
-        if user32 is not None:
-            user32.PostMessageW(hwnd, WM_LBUTTONDOWN, 0x0001, lparam)  # MK_LBUTTON
-            user32.PostMessageW(hwnd, WM_LBUTTONUP, 0, lparam)
+        # Post the click. PostMessage targets the window queue and never moves
+        # the real system pointer.
+        if user32 is None:
+            raise RuntimeError("background click requires win32 messaging")
+        down = user32.PostMessageW(hwnd, WM_LBUTTONDOWN, 0x0001, lparam)  # MK_LBUTTON
+        up = user32.PostMessageW(hwnd, WM_LBUTTONUP, 0, lparam)
+        if not down or not up:
+            raise RuntimeError("background click message could not be queued")
 
     def _background_fill(self, control: Any, value: str) -> None:
-        """Set text via UIA ValuePattern or WM_SETTEXT, without foreground activation."""
-        # 1) Try ValuePattern first — pure UIA, no input sim.
-        try:
-            control.GetValuePattern().SetValue(value)
-            return
-        except Exception:
-            pass
-
-        # 2) Try WM_SETTEXT on the control or top-level window.
-        hwnd = self._get_control_hwnd(control)
-        if hwnd is not None and user32 is not None:
-            result = user32.SendMessageTimeoutW(
-                hwnd, WM_SETTEXT, 0, ctypes.c_wchar_p(value),
-                SMTO_ABORTIFHUNG, 2000, None,
-            )
-            if result != 0:
-                return
-
-        # 3) Fall back to PostMessage key sequence: Ctrl+A, then type the value.
+        """Set text through messages, without foreground activation."""
         if user32 is None:
             raise RuntimeError("background fill requires win32 API (not available)")
-        target = self._get_control_hwnd(control) or self.hwnd
+        # A missing control HWND must never fall back to the attached window:
+        # WM_SETTEXT there changes the top-level title and falsely reports success.
+        target = self._get_native_control_hwnd(control)
         if target is None:
-            raise RuntimeError("no target HWND for background fill")
+            raise RuntimeError("no control HWND for background fill")
+
+        result = user32.SendMessageTimeoutW(
+            target, WM_SETTEXT, 0, ctypes.c_wchar_p(value),
+            SMTO_ABORTIFHUNG, 2000, None,
+        )
+        if result != 0:
+            return
+
+        # Fall back to PostMessage key sequence: Ctrl+A, then type the value.
         # Select-all via Ctrl+A
         ctrl_lparam = self._make_lparam(
             scan_code=user32.MapVirtualKeyW(VK_CONTROL, MAPVK_VK_TO_VSC))
         a_vk = ord("A")
         a_lparam = self._make_lparam(
             scan_code=user32.MapVirtualKeyW(a_vk, MAPVK_VK_TO_VSC))
-        user32.PostMessageW(target, WM_KEYDOWN, VK_CONTROL, ctrl_lparam)
-        user32.PostMessageW(target, WM_KEYDOWN, a_vk, a_lparam)
-        user32.PostMessageW(target, WM_KEYUP, a_vk, a_lparam | (1 << 31) | (1 << 30))
-        user32.PostMessageW(target, WM_KEYUP, VK_CONTROL, ctrl_lparam | (1 << 31) | (1 << 30))
+        self._post_message(target, WM_KEYDOWN, VK_CONTROL, ctrl_lparam)
+        self._post_message(target, WM_KEYDOWN, a_vk, a_lparam)
+        self._post_message(
+            target, WM_KEYUP, a_vk, a_lparam | (1 << 31) | (1 << 30)
+        )
+        self._post_message(
+            target, WM_KEYUP, VK_CONTROL, ctrl_lparam | (1 << 31) | (1 << 30)
+        )
         # Type the value character by character.
         self._post_text(target, value)
 
     def _background_select(self, control: Any) -> None:
         """Select a list item via UIA SelectionItemPattern or background click."""
         try:
-            control.GetSelectionItemPattern().Select()
-            return
+            if control.GetSelectionItemPattern().Select() is not False:
+                return
+            raise RuntimeError("SelectionItemPattern.Select reported failure")
         except Exception:
-            self._background_click(control)
+            try:
+                self._uia_click(control)
+            except RuntimeError:
+                self._background_click(control)
 
     def _background_press_key(self, control: Any, key_str: str) -> None:
         """Post keystrokes to the target without foreground activation."""
         hwnd = self._get_control_hwnd(control)
         if hwnd is None:
             raise RuntimeError("no target HWND for background press_key")
+        if user32 is None:
+            raise RuntimeError("background press_key requires win32 messaging")
         self._post_key_string(hwnd, key_str)
 
     # ── key string parsing and PostMessage helpers ──────────────────
@@ -1913,78 +1988,90 @@ class WinAppSession:
           - Escaped braces: {{ → {, }} → }
         """
         tokens: list[dict[str, Any]] = []
+        pending_modifiers: list[int] = []
+        modifier_names = {
+            "ctrl": VK_CONTROL,
+            "control": VK_CONTROL,
+            "shift": VK_SHIFT,
+            "alt": VK_MENU,
+        }
+
+        def emit_key(token: dict[str, Any]) -> None:
+            """Keep brace modifiers held across the key they modify."""
+            for vk in pending_modifiers:
+                tokens.append({"type": "modifier", "vk": vk, "down": True})
+            tokens.append(token)
+            for vk in reversed(pending_modifiers):
+                tokens.append({"type": "modifier", "vk": vk, "down": False})
+            pending_modifiers.clear()
+
+        def flush_modifiers() -> None:
+            """Release a trailing bare modifier as an ordinary key press."""
+            for vk in pending_modifiers:
+                tokens.append({"type": "modifier", "vk": vk, "down": True})
+            for vk in reversed(pending_modifiers):
+                tokens.append({"type": "modifier", "vk": vk, "down": False})
+            pending_modifiers.clear()
+
         i = 0
         n = len(key_str)
         while i < n:
             ch = key_str[i]
             if ch == "{":
+                if i + 1 < n and key_str[i + 1] == "{":
+                    emit_key({"type": "char", "char": "{"})
+                    i += 2
+                    continue
                 # Find matching closing brace.
                 end = key_str.find("}", i + 1)
                 if end == -1:
-                    tokens.append({"type": "char", "char": ch})
+                    emit_key({"type": "char", "char": ch})
                     i += 1
                     continue
                 if end == i + 1:
                     # Empty braces: literal {
-                    tokens.append({"type": "char", "char": "{"})
+                    emit_key({"type": "char", "char": "{"})
                     i = end + 1
                     continue
                 inner = key_str[i + 1:end]
                 i = end + 1
 
-                # Modifier + key: {Ctrl}X, {Shift}A, {Alt}Tab, {Ctrl}{Shift}A
-                parts = inner.split("}{")
-                if len(parts) == 1:
-                    modkey = inner
-                    low = modkey.casefold()
-                    if low in ("ctrl", "control", "shift", "alt"):
-                        # Bare modifier: press and release
-                        vk = {VK_CONTROL: VK_CONTROL, "ctrl": VK_CONTROL,
-                              "control": VK_CONTROL, "shift": VK_SHIFT,
-                              "alt": VK_MENU}.get(low, 0)
-                        if vk:
-                            tokens.append({"type": "modifier", "vk": vk, "down": True})
-                            tokens.append({"type": "modifier", "vk": vk, "down": False})
-                        continue
-                    # Single token: maybe special key, maybe char
-                    vk = KEY_NAME_TO_VK.get(low)
-                    if vk is not None:
-                        tokens.append({"type": "special", "vk": vk, "name": modkey})
-                    elif len(modkey) == 1:
-                        tokens.append({"type": "char", "char": modkey})
-                    else:
-                        # Unknown — treat as literal text
-                        for c in modkey:
-                            tokens.append({"type": "char", "char": c})
+                low = inner.casefold()
+                modifier_vk = modifier_names.get(low)
+                if modifier_vk is not None:
+                    pending_modifiers.append(modifier_vk)
+                    continue
+
+                # Single token: maybe special key, maybe literal text.
+                vk = KEY_NAME_TO_VK.get(low)
+                if vk is not None:
+                    emit_key({"type": "special", "vk": vk, "name": inner})
+                elif len(inner) == 1:
+                    emit_key({"type": "char", "char": inner})
                 else:
-                    # Multiple parts: modifiers + final key
-                    mod_vks: list[int] = []
-                    for part in parts[:-1]:
-                        low = part.casefold()
-                        vk = {VK_CONTROL: VK_CONTROL, "ctrl": VK_CONTROL,
-                              "control": VK_CONTROL, "shift": VK_SHIFT,
-                              "alt": VK_MENU}.get(low, 0)
-                        if vk:
-                            mod_vks.append(vk)
-                    final = parts[-1]
-                    low_final = final.casefold()
-                    for vk in mod_vks:
-                        tokens.append({"type": "modifier", "vk": vk, "down": True})
-                    vk_final = KEY_NAME_TO_VK.get(low_final)
-                    if vk_final is not None:
-                        tokens.append({"type": "special", "vk": vk_final, "name": final})
-                    elif len(final) == 1:
-                        tokens.append({"type": "char", "char": final})
-                    for vk in reversed(mod_vks):
-                        tokens.append({"type": "modifier", "vk": vk, "down": False})
+                    # Unknown — treat as literal text.
+                    for literal in inner:
+                        emit_key({"type": "char", "char": literal})
             elif ch == "}":
+                if i + 1 < n and key_str[i + 1] == "}":
+                    emit_key({"type": "char", "char": "}"})
+                    i += 2
+                    continue
                 # Unescaped closing brace: literal }
-                tokens.append({"type": "char", "char": "}"})
+                emit_key({"type": "char", "char": "}"})
                 i += 1
             else:
-                tokens.append({"type": "char", "char": ch})
+                emit_key({"type": "char", "char": ch})
                 i += 1
+        flush_modifiers()
         return tokens
+
+    def _post_message(self, hwnd: int, message: int, wparam: int, lparam: int) -> None:
+        """Post one input message and fail closed when Windows rejects it."""
+        if user32 is None:
+            raise RuntimeError("background input requires win32 messaging")
+        if not user32.PostMessageW(hwnd, message, wparam, lparam):
+            raise RuntimeError(f"PostMessageW failed for message 0x{message:04X}")
 
     def _post_key_string(self, hwnd: int, key_str: str) -> None:
         """Parse key_str as SendKeys syntax and post to hwnd."""
@@ -2005,35 +2092,65 @@ class WinAppSession:
                 alt_down = bool(modifiers & 4)
                 if shift_down:
                     shift_scan = user32.MapVirtualKeyW(VK_SHIFT, MAPVK_VK_TO_VSC)
-                    user32.PostMessageW(hwnd, WM_KEYDOWN, VK_SHIFT,
-                                        self._make_lparam(scan_code=shift_scan))
+                    self._post_message(
+                        hwnd, WM_KEYDOWN, VK_SHIFT,
+                        self._make_lparam(scan_code=shift_scan),
+                    )
                 if ctrl_down:
                     ctrl_scan = user32.MapVirtualKeyW(VK_CONTROL, MAPVK_VK_TO_VSC)
-                    user32.PostMessageW(hwnd, WM_KEYDOWN, VK_CONTROL,
-                                        self._make_lparam(scan_code=ctrl_scan))
+                    self._post_message(
+                        hwnd, WM_KEYDOWN, VK_CONTROL,
+                        self._make_lparam(scan_code=ctrl_scan),
+                    )
                 if alt_down:
                     alt_scan = user32.MapVirtualKeyW(VK_MENU, MAPVK_VK_TO_VSC)
-                    user32.PostMessageW(hwnd, WM_SYSKEYDOWN, VK_MENU,
-                                        self._make_lparam(scan_code=alt_scan))
+                    self._post_message(
+                        hwnd, WM_SYSKEYDOWN, VK_MENU,
+                        self._make_lparam(scan_code=alt_scan),
+                    )
                 # Key-down
-                user32.PostMessageW(hwnd, WM_KEYDOWN, vk,
-                                    self._make_lparam(scan_code=scan))
+                self._post_message(
+                    hwnd, WM_KEYDOWN, vk, self._make_lparam(scan_code=scan)
+                )
                 # WM_CHAR for printable characters
-                user32.PostMessageW(hwnd, WM_CHAR, ord(ch),
-                                    self._make_lparam(scan_code=scan))
+                self._post_message(
+                    hwnd, WM_CHAR, ord(ch), self._make_lparam(scan_code=scan)
+                )
                 # Key-up
-                user32.PostMessageW(hwnd, WM_KEYUP, vk,
-                                    self._make_lparam(scan_code=scan, previous=True, transition=True))
+                self._post_message(
+                    hwnd,
+                    WM_KEYUP,
+                    vk,
+                    self._make_lparam(scan_code=scan, previous=True, transition=True),
+                )
                 # Release modifiers
                 if shift_down:
-                    user32.PostMessageW(hwnd, WM_KEYUP, VK_SHIFT,
-                                        self._make_lparam(scan_code=shift_scan, previous=True, transition=True))
+                    self._post_message(
+                        hwnd,
+                        WM_KEYUP,
+                        VK_SHIFT,
+                        self._make_lparam(
+                            scan_code=shift_scan, previous=True, transition=True
+                        ),
+                    )
                 if ctrl_down:
-                    user32.PostMessageW(hwnd, WM_KEYUP, VK_CONTROL,
-                                        self._make_lparam(scan_code=ctrl_scan, previous=True, transition=True))
+                    self._post_message(
+                        hwnd,
+                        WM_KEYUP,
+                        VK_CONTROL,
+                        self._make_lparam(
+                            scan_code=ctrl_scan, previous=True, transition=True
+                        ),
+                    )
                 if alt_down:
-                    user32.PostMessageW(hwnd, WM_SYSKEYUP, VK_MENU,
-                                        self._make_lparam(scan_code=alt_scan, previous=True, transition=True))
+                    self._post_message(
+                        hwnd,
+                        WM_SYSKEYUP,
+                        VK_MENU,
+                        self._make_lparam(
+                            scan_code=alt_scan, previous=True, transition=True
+                        ),
+                    )
             elif t == "special":
                 vk = token["vk"]
                 scan = user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)
@@ -2045,11 +2162,23 @@ class WinAppSession:
                     VK_LWIN, VK_RWIN, VK_APPS,
                 )
                 ext_flag = is_extended
-                user32.PostMessageW(hwnd, WM_KEYDOWN, vk,
-                                    self._make_lparam(scan_code=scan, extended=ext_flag))
-                user32.PostMessageW(hwnd, WM_KEYUP, vk,
-                                    self._make_lparam(scan_code=scan, extended=ext_flag,
-                                                      previous=True, transition=True))
+                self._post_message(
+                    hwnd,
+                    WM_KEYDOWN,
+                    vk,
+                    self._make_lparam(scan_code=scan, extended=ext_flag),
+                )
+                self._post_message(
+                    hwnd,
+                    WM_KEYUP,
+                    vk,
+                    self._make_lparam(
+                        scan_code=scan,
+                        extended=ext_flag,
+                        previous=True,
+                        transition=True,
+                    ),
+                )
             elif t == "modifier":
                 vk = token["vk"]
                 down = token["down"]
@@ -2059,7 +2188,7 @@ class WinAppSession:
                 lparam = self._make_lparam(scan_code=scan, extended=is_extended)
                 if not down:
                     lparam |= (1 << 30) | (1 << 31)  # previous=1, transition=1
-                user32.PostMessageW(hwnd, msg, vk, lparam)
+                self._post_message(hwnd, msg, vk, lparam)
             # "literal_brace" tokens are emitted as {"type": "char", "char": "{"} already
 
     def _post_text(self, hwnd: int, text: str) -> None:
@@ -2076,31 +2205,61 @@ class WinAppSession:
             alt_down = bool(modifiers & 4)
             if shift_down:
                 shift_scan = user32.MapVirtualKeyW(VK_SHIFT, MAPVK_VK_TO_VSC)
-                user32.PostMessageW(hwnd, WM_KEYDOWN, VK_SHIFT,
-                                    self._make_lparam(scan_code=shift_scan))
+                self._post_message(
+                    hwnd, WM_KEYDOWN, VK_SHIFT,
+                    self._make_lparam(scan_code=shift_scan),
+                )
             if ctrl_down:
                 ctrl_scan = user32.MapVirtualKeyW(VK_CONTROL, MAPVK_VK_TO_VSC)
-                user32.PostMessageW(hwnd, WM_KEYDOWN, VK_CONTROL,
-                                    self._make_lparam(scan_code=ctrl_scan))
+                self._post_message(
+                    hwnd, WM_KEYDOWN, VK_CONTROL,
+                    self._make_lparam(scan_code=ctrl_scan),
+                )
             if alt_down:
                 alt_scan = user32.MapVirtualKeyW(VK_MENU, MAPVK_VK_TO_VSC)
-                user32.PostMessageW(hwnd, WM_SYSKEYDOWN, VK_MENU,
-                                    self._make_lparam(scan_code=alt_scan))
-            user32.PostMessageW(hwnd, WM_KEYDOWN, vk,
-                                self._make_lparam(scan_code=scan))
-            user32.PostMessageW(hwnd, WM_CHAR, ord(ch),
-                                self._make_lparam(scan_code=scan))
-            user32.PostMessageW(hwnd, WM_KEYUP, vk,
-                                self._make_lparam(scan_code=scan, previous=True, transition=True))
+                self._post_message(
+                    hwnd, WM_SYSKEYDOWN, VK_MENU,
+                    self._make_lparam(scan_code=alt_scan),
+                )
+            self._post_message(
+                hwnd, WM_KEYDOWN, vk, self._make_lparam(scan_code=scan)
+            )
+            self._post_message(
+                hwnd, WM_CHAR, ord(ch), self._make_lparam(scan_code=scan)
+            )
+            self._post_message(
+                hwnd,
+                WM_KEYUP,
+                vk,
+                self._make_lparam(scan_code=scan, previous=True, transition=True),
+            )
             if shift_down:
-                user32.PostMessageW(hwnd, WM_KEYUP, VK_SHIFT,
-                                    self._make_lparam(scan_code=shift_scan, previous=True, transition=True))
+                self._post_message(
+                    hwnd,
+                    WM_KEYUP,
+                    VK_SHIFT,
+                    self._make_lparam(
+                        scan_code=shift_scan, previous=True, transition=True
+                    ),
+                )
             if ctrl_down:
-                user32.PostMessageW(hwnd, WM_KEYUP, VK_CONTROL,
-                                    self._make_lparam(scan_code=ctrl_scan, previous=True, transition=True))
+                self._post_message(
+                    hwnd,
+                    WM_KEYUP,
+                    VK_CONTROL,
+                    self._make_lparam(
+                        scan_code=ctrl_scan, previous=True, transition=True
+                    ),
+                )
             if alt_down:
-                user32.PostMessageW(hwnd, WM_SYSKEYUP, VK_MENU,
-                                    self._make_lparam(scan_code=alt_scan, previous=True, transition=True))
+                self._post_message(
+                    hwnd,
+                    WM_SYSKEYUP,
+                    VK_MENU,
+                    self._make_lparam(
+                        scan_code=alt_scan, previous=True, transition=True
+                    ),
+                )
 
     def capture_jpeg(self) -> bytes:
         """Capture the attached window as JPEG bytes."""
