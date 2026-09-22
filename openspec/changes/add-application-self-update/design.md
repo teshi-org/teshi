@@ -14,7 +14,7 @@ References: [Zed updater source](https://github.com/zed-industries/zed/blob/main
 
 **Goals:** Working CLI upgrades and native desktop discovery; exact channel/build selection; complete bundle consistency; recoverable replacement; clear installation ownership; reusable non-GPUI core.
 
-**Non-Goals:** Zed Cloud, unattended installation/restart, delta patches, arbitrary repositories, downgrades, browser-triggered host upgrades, forced shutdown of unrelated processes, changing already installed external skills or browser profiles, **in-app MSI/Windows Installer upgrades**, and in-app updates of portable ZIP/tar.gz trees. Bundled skill updates do not automatically rerun install-skill. MSI remains a WinGet/manual package only.
+**Non-Goals:** Zed Cloud, background unattended installation/restart, delta patches, arbitrary repositories, downgrades, browser-triggered host upgrades, forced shutdown of unrelated processes, changing already installed external skills or browser profiles, **in-app MSI/Windows Installer upgrades**, and in-app updates of portable ZIP/tar.gz trees. Bundled skill updates do not automatically rerun install-skill. MSI remains a WinGet/manual package only.
 
 ## Decisions
 
@@ -38,19 +38,19 @@ Use GitHub Releases with pagination, excluding drafts and matching explicit chan
 
 Pin release ID and asset IDs for a transaction. Require immutable publication: build and validate all artifacts as a draft, publish only when complete, and avoid replacing published assets. Use ETag/conditional requests and Retry-After/rate-limit backoff. Do not silently substitute stable for nightly or another CPU architecture.
 
-Channel switches require `--channel` and confirmation; reject lower base SemVer. A same-base nightly-to-stable switch is an explicit channel change, not a normal version comparison. Persist the channel only after successful installation. Arbitrary version pinning and downgrade overrides are deferred.
+Channel switches require explicit `--channel`; the explicit command is the user's approval and no second application confirmation is required. Reject lower base SemVer. A same-base nightly-to-stable switch is an explicit channel change, not a normal version comparison. Persist the channel only after successful installation. Arbitrary version pinning and downgrade overrides are deferred.
 
 ### 3. CLI and status contract
 
 ```
-teshi update                         # check, show plan, confirm, download and install/handoff
+teshi update                         # check, download and install/handoff automatically
 teshi update --check                 # metadata only; no archive/helper/install
 teshi update --channel nightly       # explicit channel switch
-teshi update --yes                   # skip Teshi confirmation; not OS elevation
+teshi update --yes                   # compatibility flag; not OS elevation
 teshi update --check --json          # one machine-readable result
 ```
 
-Without --yes, non-interactive installation fails with a clear confirmation-required error before downloading. --json suppresses interactive prompts; an installation additionally requires --yes. JSON output is one final object; progress goes to stderr. Include current/target identity, installation kind, result, transaction ID, and reboot/restart requirements. Exit 0 means the requested operation completed (including an available update in --check), 1 means failure, 2 means invalid arguments, and 3 means a helper accepted a pending installation. Pending MUST NOT be printed as installed.
+An explicit update command is the user's approval: after a verified candidate is found, installation starts without a second application confirmation. `--yes` remains accepted for compatibility and does not bypass operating-system or process-safety checks. Background checks remain discovery-only. JSON output is one final object; progress goes to stderr. Include current/target identity, installation kind, result, transaction ID, and reboot/restart requirements. Exit 0 means the requested operation completed (including an available update in --check), 1 means failure, 2 means invalid arguments, and 3 means a helper accepted a pending installation. Pending MUST NOT be printed as installed.
 
 Status model: Idle, Checking, UpToDate, UpdateAvailable, Downloading, Verifying, Staged, WaitingForExit, Installing, ReadyToRestart, Completed, Blocked, Errored. Include transaction identity and typed error codes. Staged means validated payload only; ReadyToRestart means replacement actually succeeded and an application restart remains. MSI reboot-required is a separate flag. CLI users inspect the persisted previous transaction result on the next invocation; desktop restoration reads it on startup.
 
@@ -86,7 +86,7 @@ Do not launch msiexec. Elevation is not required: the user install lives under `
 
 Native desktop checks at startup when due and then hourly for stable / every 15 minutes for nightly, with jitter, persisted cache and failure backoff. Development and external-manager installations do not poll automatically. Settings provide auto_check (default true for supported release installations) and channel. No polling task is started for short-lived CLI invocations or the WASM client.
 
-UI provides Check for Updates, release notes, Download and Install, progress/error state and restart/save coordination. Auto-check only discovers; download, install and restart require user actions. Disabling checks cancels scheduled checking and does not abort an already explicitly requested installation. UI observes events without blocking the GPUI foreground executor.
+UI provides Check for Updates, release notes, Download and Install, progress/error state and restart/save coordination. Auto-check only discovers; an explicit Download and Install action starts the operation directly without a second confirmation. Disabling checks cancels scheduled checking and does not abort an already explicitly requested installation. UI observes events without blocking the GPUI foreground executor.
 
 ## Risks / Trade-offs
 

@@ -9,7 +9,7 @@ Teshi publishes release bundles but has no built-in update command or background
 - Update only the Windows per-user setup.exe installation through a silent Inno pass and the journaled helper. Portable ZIP/tar.gz and MSI/WinGet installs are check-only; external-manager guidance remains for explicitly managed installations.
 - Add native GPUI update status, manual actions, restart coordination, and automatic checks (stable hourly, nightly every 15 minutes, development disabled).
 - Extend release packaging with an update manifest, consistent build metadata, and a bundled helper. Preserve SHA256SUMS validation.
-- Keep installation and restart user initiated by default; do not introduce background unattended installation.
+- Keep background checks discovery-only; an explicit `teshi update` command or install action starts the verified upgrade without a second confirmation. Do not introduce background unattended installation.
 
 ## Capabilities
 

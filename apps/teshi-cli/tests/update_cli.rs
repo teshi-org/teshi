@@ -1,6 +1,6 @@
-//! Update CLI parsing and unattended-operation contracts, without network requests.
+//! Update CLI parsing and automatic-operation contracts, without network requests.
 
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 #[test]
 fn update_help_exposes_check_status_channel_and_json() {
@@ -13,20 +13,7 @@ fn update_help_exposes_check_status_channel_and_json() {
     for flag in ["--check", "--status", "--channel", "--yes", "--json"] {
         assert!(help.contains(flag), "{flag}");
     }
-}
-
-#[test]
-fn unattended_install_without_yes_has_single_json_error() {
-    let output = Command::new(env!("CARGO_BIN_EXE_teshi"))
-        .args(["update", "--json"])
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["status"], "errored");
-    assert_eq!(value["error"]["code"], "cancelled");
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("Checking GitHub"));
+    assert!(help.contains("installation is automatic"));
 }
 
 #[test]

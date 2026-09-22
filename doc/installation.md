@@ -45,7 +45,7 @@ Shipped release binaries include `teshi update`. The first updater-enabled **set
 | Explicit external package-manager marker | Prints the manager guidance; never overwrites files |
 | Source/Cargo/`cargo run` builds | Check-only with manual-install guidance |
 
-`teshi update --check` never downloads payloads. Installation requires confirmation or `--yes`. Checksums in `SHA256SUMS` and `update-manifest.json` detect corrupt or mismatched GitHub assets; they are not an independent signature if GitHub itself is compromised.
+`teshi update --check` never downloads payloads. `teshi update` starts installation automatically after a verified candidate is found; `--yes` remains a compatibility flag and does not bypass operating-system or process-safety checks. Checksums in `SHA256SUMS` and `update-manifest.json` detect corrupt or mismatched GitHub assets; they are not an independent signature if GitHub itself is compromised.
 
 ### Proxies and TLS
 

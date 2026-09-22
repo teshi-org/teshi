@@ -17,15 +17,15 @@ Global flag (all subcommands): `--requirements-root PATH` overrides the user-lev
 ### Application updates (`teshi update`)
 
 ```bash
-teshi update                         # check, confirm, download, and hand off installation
+teshi update                         # check, download, and hand off installation automatically
 teshi update --check                 # metadata only; no archive, helper, or install
 teshi update --check --json          # one JSON object; progress still goes to stderr
-teshi update --channel nightly       # explicit channel switch (requires confirmation)
-teshi update --yes                   # skip Teshi confirmation (not OS elevation)
+teshi update --channel nightly       # explicit channel switch
+teshi update --yes                   # compatibility flag; automatic installation is already default
 teshi update --status                # last local helper result without contacting GitHub
 ```
 
-`--json` prints one final object. Installation in a non-TTY or with `--json` also requires `--yes`; otherwise the command fails before download.
+`teshi update` starts installation automatically after it finds a verified candidate. `--yes` is retained for compatibility and does not bypass operating-system elevation, process coordination, or installation ownership checks. `--check` remains metadata-only and never downloads or installs a payload. `--json` prints one final object; progress still goes to stderr.
 
 | Exit code | Meaning |
 |-----------|---------|

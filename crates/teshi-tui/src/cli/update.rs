@@ -1,9 +1,6 @@
 //! Thin terminal adapter for the native update core.
 
-use std::{
-    io::{self, IsTerminal, Write},
-    sync::atomic::AtomicBool,
-};
+use std::sync::atomic::AtomicBool;
 use teshi_core::version::{ReleaseChannel, build_identity};
 use teshi_update::{ErrorCode, UpdateError, manager};
 
@@ -12,7 +9,7 @@ pub fn handle_update(
     status_only: bool,
     check_only: bool,
     channel: Option<&str>,
-    yes: bool,
+    _yes: bool,
     json: bool,
 ) -> anyhow::Result<()> {
     let result = (|| -> teshi_update::Result<(serde_json::Value, i32)> {
@@ -28,12 +25,6 @@ pub fn handle_update(
             return Ok((
                 serde_json::json!({"status":"local_status", "installation":installation, "previous_transaction":previous}),
                 0,
-            ));
-        }
-        if !check_only && !yes && (json || !io::stdin().is_terminal()) {
-            return Err(UpdateError::new(
-                ErrorCode::Cancelled,
-                "Installation requires --yes when input is non-interactive or --json is set",
             ));
         }
         let channel = channel.map(|value| {
@@ -54,20 +45,6 @@ pub fn handle_update(
                 ErrorCode::Unsupported,
                 report.installation.explanation.clone().unwrap_or_default(),
             ));
-        }
-        if !yes {
-            let tag = report
-                .candidate
-                .as_ref()
-                .map(|c| c.manifest.tag.as_str())
-                .unwrap_or_default();
-            eprint!("Install {tag}? Close other Teshi processes before continuing. [y/N] ");
-            io::stderr().flush()?;
-            let mut line = String::new();
-            io::stdin().read_line(&mut line)?;
-            if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-                return Err(UpdateError::new(ErrorCode::Cancelled, "Update cancelled"));
-            }
         }
         let mut previous_percent = None;
         let transaction = manager::install(&report, &AtomicBool::new(false), &mut |event| {

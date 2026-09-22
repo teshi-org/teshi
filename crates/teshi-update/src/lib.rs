@@ -32,7 +32,7 @@ pub enum ErrorCode {
     Busy,
     /// Filesystem operation failed.
     Io,
-    /// User cancelled or confirmation was not supplied.
+    /// User cancelled an update or helper operation.
     Cancelled,
     /// Installer/helper operation failed.
     Installation,

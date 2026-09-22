@@ -11,7 +11,7 @@
 - [x] 2.2 Implement paginated GitHub resolution, explicit channel filtering, stable SemVer ordering, nightly sequence comparison and platform compatibility validation.
 - [x] 2.3 Implement conditional request cache, cross-process check coordination and rate-limit backoff; test pagination and incomplete/inconsistent releases with mock HTTP.
 - [x] 2.4 Resolve installation root and ownership using executable/manifest/MSI evidence; test portable, MSI, explicit external management and unknown builds.
-- [x] 2.5 Add update command routing, flags, confirmation rules, JSON output and exit codes; test --check has no payload mutation and non-TTY installation needs --yes.
+- [x] 2.5 Add update command routing, flags, automatic-install rules, JSON output and exit codes; test --check has no payload mutation and explicit update invocation starts without a second confirmation.
 
 ## 3. Download and portable transaction
 
@@ -33,7 +33,7 @@
 ## 5. Native desktop experience and distribution
 
 - [x] 5.1 Add native teshi-update-ui Entity adapter and nonblocking event delivery; keep native update dependencies out of the WASM build.
-- [x] 5.2 Add manual check, release notes, progress/error display, install confirmation and save/exit/restart coordination using shared core states.
+- [x] 5.2 Add manual check, release notes, progress/error display, direct install action and save/exit/restart coordination using shared core states.
 - [x] 5.3 Add auto_check/channel settings and hourly/15-minute scheduling with jitter/shared cache; test development/external-manager defaults and rate-limit recovery.
 - [x] 5.4 Build and include the native desktop executable and helper in Windows ZIP/MSI; assert packaged inventory and shared version identity in CI and fix stale installation documentation.
 - [x] 5.5 Exercise native desktop discovery through install/restart with unsaved work, active daemon runs and a competing CLI update; confirm no false installed status.

@@ -76,7 +76,7 @@ pub enum Command {
         /// Explicitly switch to a release stream
         #[arg(long, value_parser = ["stable", "nightly"])]
         channel: Option<String>,
-        /// Skip Teshi confirmation (does not bypass operating-system elevation)
+        /// Kept for compatibility; installation is automatic (does not bypass operating-system elevation)
         #[arg(long)]
         yes: bool,
         /// Print one JSON result, with progress on stderr

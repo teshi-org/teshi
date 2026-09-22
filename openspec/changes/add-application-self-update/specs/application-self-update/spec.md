@@ -23,7 +23,7 @@ The updater SHALL resolve complete non-draft GitHub releases for the selected ch
 - **THEN** the updater reports incompatibility without installing another architecture or silently downgrading
 
 ### Requirement: CLI update behavior
-Teshi SHALL expose update, --check, --channel stable|nightly, --yes and --json. Check mode SHALL fetch metadata only and SHALL NOT download archives or modify installed payloads. Installation SHALL require confirmation or --yes; non-interactive invocation without --yes SHALL fail before download. JSON SHALL be a single final object with progress on stderr. Exit codes SHALL be 0 for completed requests, 1 for failure, 2 for argument errors and 3 for accepted pending helper installation.
+Teshi SHALL expose update, --check, --channel stable|nightly, --yes and --json. Check mode SHALL fetch metadata only and SHALL NOT download archives or modify installed payloads. An explicit `teshi update` invocation SHALL begin installation automatically after a verified candidate is found; `--yes` SHALL remain accepted for compatibility and SHALL NOT be required in interactive, non-interactive or JSON modes. JSON SHALL be a single final object with progress on stderr. Exit codes SHALL be 0 for completed requests, 1 for failure, 2 for argument errors and 3 for accepted pending helper installation.
 
 #### Scenario: Automated discovery
 - **WHEN** `teshi update --check --json` finds a newer release
