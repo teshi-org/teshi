@@ -82,14 +82,15 @@ impl VersionInfo {
     /// Formats the string clap, the TUI, and logs should show.
     ///
     /// Stable builds are SemVer only. A complete nightly identity becomes
-    /// `{semver}-nightly (cb4361a)`. Incomplete identity is ignored so a
-    /// half-set CI environment cannot look like a shipped nightly.
+    /// `{semver}-nightly-2026.09.07 (cb4361a)`. Incomplete identity is
+    /// ignored so a half-set CI environment cannot look like a shipped
+    /// nightly.
     pub fn display_string(&self) -> String {
         match (self.channel, self.build_date, self.git_sha) {
             (Some(channel), Some(date), Some(sha)) if channel != "stable" => {
-                if hyphenate_yyyymmdd(date).is_some() {
+                if let Some(date) = format_yyyymmdd(date) {
                     format!(
-                        "{}-{channel} ({})",
+                        "{}-{channel}-{date} ({})",
                         self.semver,
                         sha.chars().take(7).collect::<String>()
                     )
@@ -122,16 +123,16 @@ fn nonempty_env(value: Option<&'static str>) -> Option<&'static str> {
     value.filter(|item| !item.is_empty())
 }
 
-fn hyphenate_yyyymmdd(date: &str) -> Option<String> {
+fn format_yyyymmdd(date: &str) -> Option<String> {
     if date.len() != 8 || !date.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    Some(format!("{}-{}-{}", &date[..4], &date[4..6], &date[6..8]))
+    Some(format!("{}.{}.{}", &date[..4], &date[4..6], &date[6..8]))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{VersionInfo, hyphenate_yyyymmdd};
+    use super::{VersionInfo, format_yyyymmdd};
 
     #[test]
     fn stable_display_is_semver_only() {
@@ -152,7 +153,7 @@ mod tests {
             build_date: Some("20260907"),
             git_sha: Some("cb4361a"),
         };
-        assert_eq!(info.display_string(), "0.7.10-nightly (cb4361a)");
+        assert_eq!(info.display_string(), "0.7.10-nightly-2026.09.07 (cb4361a)");
     }
 
     #[test]
@@ -175,10 +176,7 @@ mod tests {
             git_sha: Some("cb4361a"),
         };
         assert_eq!(info.display_string(), "0.7.10");
-        assert_eq!(
-            hyphenate_yyyymmdd("20260907").as_deref(),
-            Some("2026-09-07")
-        );
+        assert_eq!(format_yyyymmdd("20260907").as_deref(), Some("2026.09.07"));
     }
 
     #[test]
