@@ -19,7 +19,7 @@ pub mod winapp;
 
 use std::path::PathBuf;
 
-use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum, error::ErrorKind};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -55,6 +55,10 @@ pub fn parse_cli() -> Cli {
     let command = Cli::command().version(crate::version_display());
     match command.try_get_matches() {
         Ok(matches) => Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit()),
+        Err(err) if err.kind() == ErrorKind::DisplayVersion => {
+            println!("{}", crate::version_display());
+            std::process::exit(err.exit_code());
+        }
         Err(err) => err.exit(),
     }
 }
