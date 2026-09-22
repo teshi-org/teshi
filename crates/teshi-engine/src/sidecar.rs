@@ -52,6 +52,7 @@ impl BrowserMode {
 /// Fixed HTTP discovery port for chrome mode (`GET /v1/bridge`).
 pub const CHROME_DISCOVERY_PORT: u16 = 17373;
 
+#[cfg(windows)]
 const ELEVATION_CANCELLED_ERROR: u32 = 1223;
 
 /// Handle returned by `ShellExecuteExW` for an elevated sidecar process.
@@ -1054,6 +1055,7 @@ pub async fn start_browser_sidecar_with_options(
     })
 }
 
+#[cfg(windows)]
 fn elevation_error(error_code: u32) -> BrowserError {
     if error_code == ELEVATION_CANCELLED_ERROR {
         return BrowserError {
@@ -1392,6 +1394,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn elevation_cancelled_is_not_reported_as_generic_launch_failure() {
         let error = elevation_error(ELEVATION_CANCELLED_ERROR);
         assert!(error.message.contains("cancelled or denied"));
