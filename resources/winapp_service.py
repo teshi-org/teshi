@@ -270,6 +270,84 @@ SM_YVIRTUALSCREEN = 77
 SM_CXVIRTUALSCREEN = 78
 SM_CYVIRTUALSCREEN = 79
 
+# Win32 message, mapping, and virtual-key constants are numeric data rather
+# than platform handles. Keep them available when the Windows-only sidecar is
+# imported on another platform for parser and behavior tests.
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+WM_CHAR = 0x0102
+WM_SYSKEYDOWN = 0x0104
+WM_SYSKEYUP = 0x0105
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
+WM_MOUSEMOVE = 0x0200
+WM_RBUTTONDOWN = 0x0204
+WM_RBUTTONUP = 0x0205
+WM_SETTEXT = 0x000C
+WM_GETTEXT = 0x000D
+WM_GETTEXTLENGTH = 0x000E
+WM_KILLFOCUS = 0x0008
+WM_SETFOCUS = 0x0007
+
+# SMTO_* flags for SendMessageTimeout.
+SMTO_NORMAL = 0x0000
+SMTO_ABORTIFHUNG = 0x0002
+
+# MapVirtualKey mapping types.
+MAPVK_VK_TO_VSC = 0
+MAPVK_VSC_TO_VK = 1
+MAPVK_VK_TO_CHAR = 2
+
+# Virtual-key codes for special keys.
+VK_BACK = 0x08
+VK_TAB = 0x09
+VK_RETURN = 0x0D
+VK_SHIFT = 0x10
+VK_CONTROL = 0x11
+VK_MENU = 0x12  # Alt
+VK_PAUSE = 0x13
+VK_CAPITAL = 0x14
+VK_ESCAPE = 0x1B
+VK_SPACE = 0x20
+VK_PRIOR = 0x21  # Page Up
+VK_NEXT = 0x22  # Page Down
+VK_END = 0x23
+VK_HOME = 0x24
+VK_LEFT = 0x25
+VK_UP = 0x26
+VK_RIGHT = 0x27
+VK_DOWN = 0x28
+VK_SELECT = 0x29
+VK_PRINT = 0x2A
+VK_EXECUTE = 0x2B
+VK_SNAPSHOT = 0x2C
+VK_INSERT = 0x2D
+VK_DELETE = 0x2E
+VK_HELP = 0x2F
+VK_LWIN = 0x5B
+VK_RWIN = 0x5C
+VK_APPS = 0x5D
+VK_SLEEP = 0x5F
+VK_NUMPAD0 = 0x60
+VK_NUMPAD9 = 0x69
+VK_MULTIPLY = 0x6A
+VK_ADD = 0x6B
+VK_SEPARATOR = 0x6C
+VK_SUBTRACT = 0x6D
+VK_DECIMAL = 0x6E
+VK_DIVIDE = 0x6F
+VK_F1 = 0x70
+VK_F12 = 0x7B
+VK_F24 = 0x87
+VK_NUMLOCK = 0x90
+VK_SCROLL = 0x91
+VK_LSHIFT = 0xA0
+VK_RSHIFT = 0xA1
+VK_LCONTROL = 0xA2
+VK_RCONTROL = 0xA3
+VK_LMENU = 0xA4
+VK_RMENU = 0xA5
+
 
 if os.name == "nt":
     user32 = ctypes.windll.user32
@@ -346,78 +424,6 @@ if os.name == "nt":
     advapi32.GetSidSubAuthority.argtypes = [ctypes.c_void_p, wintypes.DWORD]
     advapi32.GetSidSubAuthority.restype = ctypes.POINTER(wintypes.DWORD)
 
-    # Window messages
-    WM_KEYDOWN = 0x0100
-    WM_KEYUP = 0x0101
-    WM_CHAR = 0x0102
-    WM_SYSKEYDOWN = 0x0104
-    WM_SYSKEYUP = 0x0105
-    WM_LBUTTONDOWN = 0x0201
-    WM_LBUTTONUP = 0x0202
-    WM_MOUSEMOVE = 0x0200
-    WM_RBUTTONDOWN = 0x0204
-    WM_RBUTTONUP = 0x0205
-    WM_SETTEXT = 0x000C
-    WM_GETTEXT = 0x000D
-    WM_GETTEXTLENGTH = 0x000E
-    WM_KILLFOCUS = 0x0008
-    WM_SETFOCUS = 0x0007
-    # SMTO_* flags for SendMessageTimeout
-    SMTO_NORMAL = 0x0000
-    SMTO_ABORTIFHUNG = 0x0002
-    # MapVirtualKey mapping types
-    MAPVK_VK_TO_VSC = 0
-    MAPVK_VSC_TO_VK = 1
-    MAPVK_VK_TO_CHAR = 2
-    # Virtual-key codes for special keys
-    VK_BACK = 0x08
-    VK_TAB = 0x09
-    VK_RETURN = 0x0D
-    VK_SHIFT = 0x10
-    VK_CONTROL = 0x11
-    VK_MENU = 0x12  # Alt
-    VK_PAUSE = 0x13
-    VK_CAPITAL = 0x14
-    VK_ESCAPE = 0x1B
-    VK_SPACE = 0x20
-    VK_PRIOR = 0x21  # Page Up
-    VK_NEXT = 0x22  # Page Down
-    VK_END = 0x23
-    VK_HOME = 0x24
-    VK_LEFT = 0x25
-    VK_UP = 0x26
-    VK_RIGHT = 0x27
-    VK_DOWN = 0x28
-    VK_SELECT = 0x29
-    VK_PRINT = 0x2A
-    VK_EXECUTE = 0x2B
-    VK_SNAPSHOT = 0x2C
-    VK_INSERT = 0x2D
-    VK_DELETE = 0x2E
-    VK_HELP = 0x2F
-    VK_LWIN = 0x5B
-    VK_RWIN = 0x5C
-    VK_APPS = 0x5D
-    VK_SLEEP = 0x5F
-    VK_NUMPAD0 = 0x60
-    VK_NUMPAD9 = 0x69
-    VK_MULTIPLY = 0x6A
-    VK_ADD = 0x6B
-    VK_SEPARATOR = 0x6C
-    VK_SUBTRACT = 0x6D
-    VK_DECIMAL = 0x6E
-    VK_DIVIDE = 0x6F
-    VK_F1 = 0x70
-    VK_F12 = 0x7B
-    VK_F24 = 0x87
-    VK_NUMLOCK = 0x90
-    VK_SCROLL = 0x91
-    VK_LSHIFT = 0xA0
-    VK_RSHIFT = 0xA1
-    VK_LCONTROL = 0xA2
-    VK_RCONTROL = 0xA3
-    VK_LMENU = 0xA4
-    VK_RMENU = 0xA5
 else:  # pragma: no cover - this sidecar is Windows-only
     user32 = None
     kernel32 = None
@@ -502,36 +508,34 @@ def current_process_integrity() -> IntegrityLevel:
 
 # Map of SendKeys-style key names to virtual-key codes.
 # Supports the same {Name} syntax as uiautomation.SendKeys.
-KEY_NAME_TO_VK: dict[str, int] = {}
-if os.name == "nt":
-    KEY_NAME_TO_VK = {
-        "backspace": VK_BACK, "bs": VK_BACK, "bksp": VK_BACK,
-        "break": VK_PAUSE,
-        "capslock": VK_CAPITAL,
-        "delete": VK_DELETE, "del": VK_DELETE,
-        "down": VK_DOWN,
-        "end": VK_END,
-        "enter": VK_RETURN, "return": VK_RETURN, "~": VK_RETURN,
-        "esc": VK_ESCAPE, "escape": VK_ESCAPE,
-        "help": VK_HELP,
-        "home": VK_HOME,
-        "ins": VK_INSERT, "insert": VK_INSERT,
-        "left": VK_LEFT,
-        "numlock": VK_NUMLOCK,
-        "pgdn": VK_NEXT, "pagedown": VK_NEXT,
-        "pgup": VK_PRIOR, "pageup": VK_PRIOR,
-        "prtsc": VK_SNAPSHOT, "printscreen": VK_SNAPSHOT,
-        "right": VK_RIGHT,
-        "scrolllock": VK_SCROLL,
-        "space": VK_SPACE, " ": VK_SPACE,
-        "tab": VK_TAB,
-        "up": VK_UP,
-        "f1": VK_F1, "f2": VK_F1 + 1, "f3": VK_F1 + 2, "f4": VK_F1 + 3,
-        "f5": VK_F1 + 4, "f6": VK_F1 + 5, "f7": VK_F1 + 6, "f8": VK_F1 + 7,
-        "f9": VK_F1 + 8, "f10": VK_F1 + 9, "f11": VK_F1 + 10, "f12": VK_F1 + 11,
-        "add": VK_ADD, "subtract": VK_SUBTRACT, "multiply": VK_MULTIPLY,
-        "divide": VK_DIVIDE, "decimal": VK_DECIMAL, "separator": VK_SEPARATOR,
-    }
+KEY_NAME_TO_VK: dict[str, int] = {
+    "backspace": VK_BACK, "bs": VK_BACK, "bksp": VK_BACK,
+    "break": VK_PAUSE,
+    "capslock": VK_CAPITAL,
+    "delete": VK_DELETE, "del": VK_DELETE,
+    "down": VK_DOWN,
+    "end": VK_END,
+    "enter": VK_RETURN, "return": VK_RETURN, "~": VK_RETURN,
+    "esc": VK_ESCAPE, "escape": VK_ESCAPE,
+    "help": VK_HELP,
+    "home": VK_HOME,
+    "ins": VK_INSERT, "insert": VK_INSERT,
+    "left": VK_LEFT,
+    "numlock": VK_NUMLOCK,
+    "pgdn": VK_NEXT, "pagedown": VK_NEXT,
+    "pgup": VK_PRIOR, "pageup": VK_PRIOR,
+    "prtsc": VK_SNAPSHOT, "printscreen": VK_SNAPSHOT,
+    "right": VK_RIGHT,
+    "scrolllock": VK_SCROLL,
+    "space": VK_SPACE, " ": VK_SPACE,
+    "tab": VK_TAB,
+    "up": VK_UP,
+    "f1": VK_F1, "f2": VK_F1 + 1, "f3": VK_F1 + 2, "f4": VK_F1 + 3,
+    "f5": VK_F1 + 4, "f6": VK_F1 + 5, "f7": VK_F1 + 6, "f8": VK_F1 + 7,
+    "f9": VK_F1 + 8, "f10": VK_F1 + 9, "f11": VK_F1 + 10, "f12": VK_F1 + 11,
+    "add": VK_ADD, "subtract": VK_SUBTRACT, "multiply": VK_MULTIPLY,
+    "divide": VK_DIVIDE, "decimal": VK_DECIMAL, "separator": VK_SEPARATOR,
+}
 
 
 def get_window_title(hwnd: int) -> str:
