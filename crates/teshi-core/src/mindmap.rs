@@ -9,7 +9,6 @@
 use std::collections::HashMap;
 
 use crate::gherkin::BddProject;
-use crate::gherkin_lang::StepKeywordType;
 
 /// Where a step node appears in the source project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,13 +312,8 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
 
         for (sci, scenario) in feature.all_scenarios().into_iter().enumerate() {
             let mut node_idx = 0usize;
-            let mut parent_idx = 0usize;
-            let mut effective_keyword: Option<StepKeywordType> = None;
-            let mut last_when_parent: usize = 0;
-            let mut has_then_since_when = false;
 
             for (text, loc) in &bg_steps {
-                parent_idx = node_idx;
                 node_idx = insert_step(&mut arena, node_idx, text, *loc, true);
             }
 
@@ -331,58 +325,7 @@ pub fn build_index(project: &BddProject) -> MindMapIndex {
                     line_number: step.line_number,
                 };
 
-                let kw_type = step.keyword_type;
-
-                let parent = if kw_type == StepKeywordType::When && has_then_since_when {
-                    last_when_parent
-                } else if matches!(kw_type, StepKeywordType::And | StepKeywordType::But) {
-                    if effective_keyword == Some(StepKeywordType::Then) {
-                        parent_idx
-                    } else {
-                        node_idx
-                    }
-                } else if Some(kw_type) == effective_keyword {
-                    if kw_type == StepKeywordType::Then {
-                        parent_idx
-                    } else {
-                        node_idx
-                    }
-                } else {
-                    node_idx
-                };
-
-                let new_idx = insert_step(&mut arena, parent, &step.text, loc, false);
-
-                match kw_type {
-                    StepKeywordType::And | StepKeywordType::But => {
-                        node_idx = new_idx;
-                    }
-                    StepKeywordType::When => {
-                        if has_then_since_when {
-                            parent_idx = last_when_parent;
-                            node_idx = new_idx;
-                            has_then_since_when = false;
-                        } else {
-                            last_when_parent = parent;
-                            parent_idx = node_idx;
-                            node_idx = new_idx;
-                        }
-                        effective_keyword = Some(StepKeywordType::When);
-                    }
-                    StepKeywordType::Then => {
-                        has_then_since_when = true;
-                        if effective_keyword != Some(StepKeywordType::Then) {
-                            parent_idx = node_idx;
-                        }
-                        node_idx = new_idx;
-                        effective_keyword = Some(StepKeywordType::Then);
-                    }
-                    StepKeywordType::Given => {
-                        parent_idx = node_idx;
-                        node_idx = new_idx;
-                        effective_keyword = Some(StepKeywordType::Given);
-                    }
-                }
+                node_idx = insert_step(&mut arena, node_idx, &step.text, loc, false);
             }
         }
     }
@@ -566,7 +509,7 @@ pub fn parse_node_line_number(
 mod tests {
     use std::path::PathBuf;
 
-    use super::{build_index, find_closest_node};
+    use super::{MindMapIndex, build_index, find_closest_node};
     use crate::gherkin::{self, BddProject};
 
     fn sample_project() -> BddProject {
@@ -585,6 +528,41 @@ Feature: F
             root_dir: PathBuf::from("."),
             features: vec![feature],
         }
+    }
+
+    fn complex_layout_project() -> BddProject {
+        let content = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../resources/tests/fixtures/mindmap-layout/features/complex_layout.feature"
+        ));
+        let feature = gherkin::parse_feature(content, PathBuf::from("complex.feature"));
+        BddProject {
+            root_dir: PathBuf::from("."),
+            features: vec![feature],
+        }
+    }
+
+    fn node_at_path(index: &MindMapIndex, labels: &[&str]) -> usize {
+        let mut node_idx = 0;
+        for label in labels {
+            node_idx = *index.arena[node_idx]
+                .child_by_label
+                .get(*label)
+                .unwrap_or_else(|| panic!("missing MindMap path segment {label:?} in {labels:?}"));
+        }
+        node_idx
+    }
+
+    fn assert_ordered_path(index: &MindMapIndex, labels: &[&str]) {
+        node_at_path(index, labels);
+    }
+
+    fn child_labels(index: &MindMapIndex, node_idx: usize) -> Vec<&str> {
+        index.arena[node_idx]
+            .children
+            .iter()
+            .map(|&child_idx| index.arena[child_idx].label.as_str())
+            .collect()
     }
 
     #[test]
@@ -632,6 +610,65 @@ Feature: Rule only
         assert!(
             find_closest_node(&index, 0, 7).is_some(),
             "should resolve a node near the nested When step"
+        );
+    }
+
+    #[test]
+    fn complex_scenarios_preserve_order_and_branch_after_their_shared_prefix() {
+        let project = complex_layout_project();
+        let index = build_index(&project);
+        let shared_prefix = [
+            "the workspace is ready",
+            "the user is authenticated",
+            "the report is open",
+            "the date filter is applied",
+            "the preview shows filtered rows",
+            "export is requested",
+        ];
+
+        let mut success_path = shared_prefix.to_vec();
+        success_path.extend([
+            "the archive downloads",
+            "the checksum is shown",
+            "no warning is visible",
+        ]);
+        assert_ordered_path(&index, &success_path);
+
+        let mut rejection_path = shared_prefix.to_vec();
+        rejection_path.extend(["a permission error is shown", "an audit event is recorded"]);
+        assert_ordered_path(&index, &rejection_path);
+
+        let export_idx = node_at_path(&index, &shared_prefix);
+        assert_eq!(
+            child_labels(&index, export_idx),
+            ["the archive downloads", "a permission error is shown"]
+        );
+        assert_eq!(index.arena[export_idx].locations.len(), 2);
+
+        let background_idx = node_at_path(&index, &["the workspace is ready"]);
+        assert_eq!(
+            index.arena[background_idx].locations.len(),
+            1,
+            "one Background source line should not be duplicated per Scenario"
+        );
+    }
+
+    #[test]
+    fn rule_nested_scenario_preserves_repeated_when_then_sequence() {
+        let project = complex_layout_project();
+        let index = build_index(&project);
+
+        assert_ordered_path(
+            &index,
+            &[
+                "the workspace is ready",
+                "the user is authenticated",
+                "the admin report is open",
+                "refresh is requested",
+                "refreshed rows appear",
+                "retry is requested",
+                "the retry succeeds",
+            ],
         );
     }
 }

@@ -1234,9 +1234,74 @@ fn explore_block(title: &str, focused: bool) -> Block<'_> {
 }
 
 fn feature_display_name(path: &std::path::Path) -> String {
-    path.file_name()
+    path.file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "feature".to_string())
+}
+
+/// Render one Explore column with an independent, two-row horizontal scrollbar.
+fn render_explore_lines<'a>(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    column: ColumnFocus,
+    inner: Rect,
+    lines: Vec<Line<'a>>,
+) -> Rect {
+    let content_width = lines.iter().map(Line::width).max().unwrap_or(0);
+    let viewport_width = inner.width as usize;
+    let overflow = content_width > viewport_width && inner.height >= 3;
+    let content_area = if overflow {
+        Rect::new(inner.x, inner.y, inner.width, inner.height - 2)
+    } else {
+        inner
+    };
+    let max_scroll = content_width.saturating_sub(viewport_width);
+    let offset = app.explore_horizontal_scroll[column.index()].min(max_scroll);
+    app.explore_horizontal_scroll[column.index()] = offset;
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).scroll((0, offset.min(u16::MAX as usize) as u16)),
+        content_area,
+    );
+
+    if overflow {
+        let scrollbar = Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 2);
+        let track_width = scrollbar.width as usize;
+        let thumb_width =
+            ((viewport_width * track_width) / content_width).clamp(4.min(track_width), track_width);
+        let travel = track_width.saturating_sub(thumb_width);
+        let thumb_start = offset
+            .saturating_mul(travel)
+            .checked_div(max_scroll)
+            .unwrap_or(0);
+        let track_style = Style::default().fg(Color::DarkGray);
+        let thumb_style = Style::default().fg(if app.explore_focus == column {
+            Color::Yellow
+        } else {
+            Color::Gray
+        });
+        let scrollbar_line = || {
+            Line::from(vec![
+                Span::styled("━".repeat(thumb_start), track_style),
+                Span::styled("█".repeat(thumb_width), thumb_style),
+                Span::styled(
+                    "━".repeat(track_width.saturating_sub(thumb_start + thumb_width)),
+                    track_style,
+                ),
+            ])
+        };
+        frame.render_widget(
+            Paragraph::new(vec![scrollbar_line(), scrollbar_line()]),
+            scrollbar,
+        );
+        app.clickable_regions
+            .push(ClickableRegion::ExploreHorizontalScrollbar {
+                column,
+                rect: scrollbar,
+                content_width,
+                viewport_width,
+            });
+    }
+    content_area
 }
 
 fn git_file_status_style(status: teshi_core::git::FileGitStatus) -> Style {
@@ -1317,7 +1382,6 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Span::styled(format!("{marker:<2} "), git_file_status_style(file_status)),
                 Span::styled(label, style),
             ]);
-            line = truncate_line_to_cols(line, inner.width);
             let trail = if selected {
                 highlight_style
             } else {
@@ -1344,7 +1408,6 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             ),
             Span::styled(label, label_style),
         ]);
-        line = truncate_line_to_cols(line, inner.width);
         line = pad_line_to_width(
             line,
             inner.width,
@@ -1357,24 +1420,24 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         lines.push(line);
     }
 
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    let content_area = render_explore_lines(frame, app, ColumnFocus::Feature, inner, lines);
 
     // Register clickable regions for each feature row
     for (i, _feature) in app.project.features.iter().enumerate() {
         app.clickable_regions.push(ClickableRegion::ExploreFeature {
             feature_idx: i,
-            row_y: inner.y + i as u16,
-            col_x: inner.x,
-            col_right: inner.right(),
+            row_y: content_area.y + i as u16,
+            col_x: content_area.x,
+            col_right: content_area.right(),
         });
     }
     for (deleted_idx, _deleted) in app.git_status.deleted.iter().enumerate() {
         app.clickable_regions
             .push(ClickableRegion::ExploreDeletedFeature {
                 deleted_idx,
-                row_y: inner.y + (app.project.features.len() + deleted_idx) as u16,
-                col_x: inner.x,
-                col_right: inner.right(),
+                row_y: content_area.y + (app.project.features.len() + deleted_idx) as u16,
+                col_x: content_area.x,
+                col_right: content_area.right(),
             });
     }
 }
@@ -1423,7 +1486,6 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                         },
                     ),
                 ]);
-                line = truncate_line_to_cols(line, inner.width);
                 line = pad_line_to_width(
                     line,
                     inner.width,
@@ -1436,14 +1498,14 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 lines.push(line);
             }
         }
-        frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+        let content_area = render_explore_lines(frame, app, ColumnFocus::Scenario, inner, lines);
         for (scenario_idx, _name) in deleted_scenarios.iter().enumerate() {
             app.clickable_regions
                 .push(ClickableRegion::ExploreScenario {
                     scenario_idx,
-                    row_y: inner.y + scenario_idx as u16,
-                    col_x: inner.x,
-                    col_right: inner.right(),
+                    row_y: content_area.y + scenario_idx as u16,
+                    col_x: content_area.x,
+                    col_right: content_area.right(),
                 });
         }
         return;
@@ -1460,7 +1522,7 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let deleted_scenarios: Vec<_> = app
         .git_status
         .current_at(app.explore_selected_feature)
-        .map(|view| view.deleted_scenarios().collect())
+        .map(|view| view.deleted_scenarios().cloned().collect())
         .unwrap_or_default();
 
     if scenarios.as_ref().is_none_or(|s| s.is_empty()) && deleted_scenarios.is_empty() {
@@ -1508,7 +1570,6 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             if i == app.explore_selected_scenario {
                 line = apply_line_background(line, explore_select_style(focused));
             }
-            line = truncate_line_to_cols(line, inner.width);
             let trail = if i == app.explore_selected_scenario {
                 explore_select_style(focused)
             } else {
@@ -1536,7 +1597,6 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 },
             ),
         ]);
-        line = truncate_line_to_cols(line, inner.width);
         line = pad_line_to_width(
             line,
             inner.width,
@@ -1549,7 +1609,7 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         lines.push(line);
     }
 
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    let content_area = render_explore_lines(frame, app, ColumnFocus::Scenario, inner, lines);
 
     // Register clickable regions for each scenario row
     if let Some(scenarios) = app
@@ -1562,9 +1622,9 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             app.clickable_regions
                 .push(ClickableRegion::ExploreScenario {
                     scenario_idx: i,
-                    row_y: inner.y + i as u16,
-                    col_x: inner.x,
-                    col_right: inner.right(),
+                    row_y: content_area.y + i as u16,
+                    col_x: content_area.x,
+                    col_right: content_area.right(),
                 });
         }
         for (deleted_idx, _deleted) in deleted_scenarios.iter().enumerate() {
@@ -1572,9 +1632,9 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             app.clickable_regions
                 .push(ClickableRegion::ExploreScenario {
                     scenario_idx,
-                    row_y: inner.y + scenario_idx as u16,
-                    col_x: inner.x,
-                    col_right: inner.right(),
+                    row_y: content_area.y + scenario_idx as u16,
+                    col_x: content_area.x,
+                    col_right: content_area.right(),
                 });
         }
     } else {
@@ -1583,9 +1643,9 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             app.clickable_regions
                 .push(ClickableRegion::ExploreScenario {
                     scenario_idx,
-                    row_y: inner.y + scenario_idx as u16,
-                    col_x: inner.x,
-                    col_right: inner.right(),
+                    row_y: content_area.y + scenario_idx as u16,
+                    col_x: content_area.x,
+                    col_right: content_area.right(),
                 });
         }
     }
@@ -1619,7 +1679,7 @@ const DIFF_ADDED_BG: Color = Color::Rgb(24, 72, 36);
 const DIFF_MODIFIED_BG: Color = Color::Rgb(68, 56, 16);
 const DIFF_DELETED_BG: Color = Color::Rgb(72, 24, 24);
 
-fn render_git_diff_line(diff_line: &teshi_core::git::GitDiffLine, width: u16) -> Line<'static> {
+fn render_git_diff_line(diff_line: &teshi_core::git::GitDiffLine) -> Line<'static> {
     let marker = diff_line.status.marker();
     let background = match diff_line.status {
         teshi_core::git::DiffStatus::Added => DIFF_ADDED_BG,
@@ -1629,27 +1689,21 @@ fn render_git_diff_line(diff_line: &teshi_core::git::GitDiffLine, width: u16) ->
     };
     let line_style = Style::default().bg(background);
     let marker_style = git_diff_status_style(diff_line.status).bg(background);
-    let mut line = Line::from(vec![
+    Line::from(vec![
         Span::styled(format!("{marker} "), marker_style),
         Span::styled(diff_line.text.clone(), line_style),
-    ]);
-    line = truncate_line_to_cols(line, width);
-    pad_line_to_width(line, width, line_style)
+    ])
 }
 
-fn render_git_diff_lines(
-    lines: &[teshi_core::git::GitDiffLine],
-    width: u16,
-    output: &mut Vec<Line<'static>>,
-) {
+fn render_git_diff_lines(lines: &[teshi_core::git::GitDiffLine], output: &mut Vec<Line<'static>>) {
     for diff_line in lines {
-        output.push(render_git_diff_line(diff_line, width));
+        output.push(render_git_diff_line(diff_line));
     }
 }
 
 fn render_git_steps(
     frame: &mut Frame<'_>,
-    app: &App,
+    app: &mut App,
     area: Rect,
     scenario: &BddScenario,
     view: &teshi_core::git::FeatureGitView,
@@ -1683,7 +1737,7 @@ fn render_git_steps(
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ));
-        render_git_diff_lines(&view.feature_diff_lines, inner.width, &mut lines);
+        render_git_diff_lines(&view.feature_diff_lines, &mut lines);
         lines.push(Line::raw(""));
     }
     if let Some(background) = &view.background
@@ -1696,7 +1750,7 @@ fn render_git_steps(
                 .add_modifier(Modifier::BOLD),
         ));
         for diff_line in &background.diff_lines {
-            lines.push(render_git_diff_line(diff_line, inner.width));
+            lines.push(render_git_diff_line(diff_line));
         }
         lines.push(Line::raw(""));
     }
@@ -1721,7 +1775,7 @@ fn render_git_steps(
                         continue;
                     }
                     let row_y = inner.y + lines.len() as u16;
-                    lines.push(render_git_diff_line(diff_line, inner.width));
+                    lines.push(render_git_diff_line(diff_line));
                     if let Some(new_line) = diff_line.new_line_number
                         && let Some(step_idx) = scenario
                             .steps
@@ -1738,7 +1792,7 @@ fn render_git_steps(
                     continue;
                 }
                 let row_y = inner.y + lines.len() as u16;
-                lines.push(render_git_diff_line(diff_line, inner.width));
+                lines.push(render_git_diff_line(diff_line));
                 if let Some(new_line) = diff_line.new_line_number
                     && let Some(step_idx) = scenario
                         .steps
@@ -1775,16 +1829,16 @@ fn render_git_steps(
             if diff_line.old_line_number == deleted.old_line_number {
                 continue;
             }
-            lines.push(render_git_diff_line(diff_line, inner.width));
+            lines.push(render_git_diff_line(diff_line));
         }
     }
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    render_explore_lines(frame, app, ColumnFocus::Step, inner, lines);
     step_rows
 }
 
 fn render_git_file_fallback(
     frame: &mut Frame<'_>,
-    app: &App,
+    app: &mut App,
     area: Rect,
     view: &teshi_core::git::FeatureGitView,
 ) {
@@ -1797,7 +1851,7 @@ fn render_git_file_fallback(
     }
     let mut lines = Vec::new();
     if let Some(diff) = &view.diff {
-        render_git_diff_lines(&diff.lines, inner.width, &mut lines);
+        render_git_diff_lines(&diff.lines, &mut lines);
     }
     if lines.is_empty() {
         lines.push(Line::styled(
@@ -1805,7 +1859,7 @@ fn render_git_file_fallback(
             Style::default().fg(Color::DarkGray),
         ));
     }
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    render_explore_lines(frame, app, ColumnFocus::Step, inner, lines);
 }
 
 fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -1874,26 +1928,29 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 let gutter = Span::styled(format!("{gutter_ch} "), gutter_style);
                 let text = Span::styled(dl.text.clone(), text_style);
                 let mut line = Line::from(vec![gutter, text]);
-                line = truncate_line_to_cols(line, inner.width);
                 line = pad_line_to_width(line, inner.width, line_style);
                 lines.push(line);
             }
         }
 
-        frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+        render_explore_lines(frame, app, ColumnFocus::Step, inner, lines);
         return;
     }
 
     if let Some(deleted_idx) = app.explore_selected_deleted_feature {
-        if let Some(view) = app.git_status.deleted.get(deleted_idx) {
-            render_git_file_fallback(frame, app, area, view);
+        if let Some(view) = app.git_status.deleted.get(deleted_idx).cloned() {
+            render_git_file_fallback(frame, app, area, &view);
         }
         return;
     }
 
     let feature = app.project.features.get(app.explore_selected_feature);
     let scenario = feature.and_then(|f| f.scenario_at(app.explore_selected_scenario));
-    if let Some(view) = app.git_status.current_at(app.explore_selected_feature) {
+    if let Some(view) = app
+        .git_status
+        .current_at(app.explore_selected_feature)
+        .cloned()
+    {
         let feature_changed = !view.feature_diff_lines.is_empty();
         if let Some(scenario) = scenario {
             let scenario_status = view.scenario_status(scenario);
@@ -1906,7 +1963,8 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 || deleted_scenario
                 || feature_changed
             {
-                let step_rows = render_git_steps(frame, app, area, scenario, view);
+                let scenario = scenario.clone();
+                let step_rows = render_git_steps(frame, app, area, &scenario, &view);
                 for (step_idx, row_y) in step_rows {
                     app.clickable_regions.push(ClickableRegion::ExploreStep {
                         step_idx,
@@ -1923,11 +1981,11 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .any(|item| item.status != teshi_core::git::DiffStatus::Unchanged);
             if view.file_status != teshi_core::git::FileGitStatus::Unmodified && !has_mapped_change
             {
-                render_git_file_fallback(frame, app, area, view);
+                render_git_file_fallback(frame, app, area, &view);
                 return;
             }
         } else if view.file_status != teshi_core::git::FileGitStatus::Unmodified {
-            render_git_file_fallback(frame, app, area, view);
+            render_git_file_fallback(frame, app, area, &view);
             return;
         }
     }
@@ -1998,7 +2056,6 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     Style::default().fg(Color::DarkGray),
                 );
                 let mut line = Line::from(vec![kw_span, body_span]);
-                line = truncate_line_to_cols(line, inner.width);
                 line = pad_line_to_width(line, inner.width, Style::default());
                 lines.push(line);
                 line_idx += 1;
@@ -2042,7 +2099,6 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Span::raw(format!(" {}", step.text))
             };
             let mut line = Line::from(vec![kw_span, body_span]);
-            line = truncate_line_to_cols(line, inner.width);
             let trail = if i == app.explore_selected_step {
                 highlight_style
             } else {
@@ -2088,7 +2144,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     let _ = line_idx;
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    render_explore_lines(frame, app, ColumnFocus::Step, inner, lines);
 }
 
 fn render_examples_table_lines(headers: &[String], rows: &[Vec<String>]) -> Vec<String> {
@@ -5573,7 +5629,46 @@ Feature: Rule only
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(screen.contains("M  backup.feature"), "screen was: {screen}");
+        assert!(screen.contains("M  backup"), "screen was: {screen}");
+        assert!(!screen.contains("backup.feature"), "screen was: {screen}");
+    }
+
+    #[test]
+    fn explore_feature_overflow_gets_thick_horizontal_scrollbar() {
+        let mut app = App::from_args().expect("app init");
+        let path = PathBuf::from("a-very-long-feature-file-name-for-horizontal-scrolling.feature");
+        app.project.features = vec![gherkin::parse_feature(
+            "Feature: Long name\n  Scenario: Short\n    Given a step\n",
+            path,
+        )];
+        app.explore_horizontal_scroll[crate::app::ColumnFocus::Feature.index()] = usize::MAX;
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 18)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+
+        let scrollbar = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::ExploreHorizontalScrollbar {
+                    column,
+                    rect,
+                    content_width,
+                    viewport_width,
+                } if *column == crate::app::ColumnFocus::Feature => {
+                    Some((*rect, *content_width, *viewport_width))
+                }
+                _ => None,
+            });
+        let (rect, content_width, viewport_width) = scrollbar.expect("feature scrollbar");
+        assert_eq!(rect.height, 2);
+        assert!(content_width > viewport_width);
+        assert_eq!(
+            app.explore_horizontal_scroll[crate::app::ColumnFocus::Feature.index()],
+            content_width - viewport_width
+        );
     }
 
     #[test]
@@ -5606,10 +5701,8 @@ Feature: Rule only
             .map(|cell| cell.symbol())
             .collect::<String>();
 
-        assert!(
-            screen.contains("D  deleted.feature"),
-            "screen was: {screen}"
-        );
+        assert!(screen.contains("D  deleted"), "screen was: {screen}");
+        assert!(!screen.contains("deleted.feature"), "screen was: {screen}");
         assert!(
             screen.contains("- Feature: Deleted"),
             "screen was: {screen}"

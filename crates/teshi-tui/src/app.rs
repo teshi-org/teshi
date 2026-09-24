@@ -247,6 +247,16 @@ pub enum ColumnFocus {
     Step,
 }
 
+impl ColumnFocus {
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::Feature => 0,
+            Self::Scenario => 1,
+            Self::Step => 2,
+        }
+    }
+}
+
 /// Focus target within the MindMap tab when the AI preview panel is visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MindMapFocus {
@@ -569,6 +579,10 @@ pub struct App {
     pub explore_selected_deleted_feature: Option<usize>,
     pub explore_selected_scenario: usize,
     pub explore_selected_step: usize,
+    /// Independent horizontal offsets for the three Explore columns.
+    pub explore_horizontal_scroll: [usize; 3],
+    /// Explore scrollbar currently controlled by a left-button drag.
+    pub explore_horizontal_scroll_drag: Option<ColumnFocus>,
     pub explore_edit_mode: bool,
     /// When set, the editor dims steps in non-focused scenarios.
     /// Stores the buffer row of the focused scenario's header line.
@@ -721,6 +735,12 @@ pub enum ClickableRegion {
         row_y: u16,
         col_x: u16,
         col_right: u16,
+    },
+    ExploreHorizontalScrollbar {
+        column: ColumnFocus,
+        rect: ratatui::layout::Rect,
+        content_width: usize,
+        viewport_width: usize,
     },
     /// Editor panel area — reserved for click-to-focus.
     #[allow(dead_code)]
@@ -950,6 +970,8 @@ impl App {
             explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
+            explore_horizontal_scroll: [0; 3],
+            explore_horizontal_scroll_drag: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
             explore_feature_scenario_memory: HashMap::new(),
@@ -1132,6 +1154,8 @@ impl App {
             explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
+            explore_horizontal_scroll: [0; 3],
+            explore_horizontal_scroll_drag: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
             explore_feature_scenario_memory: HashMap::new(),
@@ -1294,6 +1318,8 @@ impl App {
             explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
+            explore_horizontal_scroll: [0; 3],
+            explore_horizontal_scroll_drag: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
             explore_feature_scenario_memory: HashMap::new(),
@@ -7195,10 +7221,24 @@ impl App {
             }
             MouseEventKind::Drag(button) => {
                 if button == MouseButton::Left
+                    && let Some(column) = self.explore_horizontal_scroll_drag
+                {
+                    if let Some(region) = self
+                        .clickable_regions
+                        .iter()
+                        .find(|region| matches!(region, ClickableRegion::ExploreHorizontalScrollbar { column: candidate, .. } if *candidate == column))
+                        .cloned()
+                    {
+                        self.handle_region_click(&region, &pos)?;
+                    }
+                } else if button == MouseButton::Left
                     && let Some((buf_row, buf_col)) = self.screen_to_buffer_pos(col, row)
                 {
                     self.selection_end = Some((buf_row, buf_col));
                 }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.explore_horizontal_scroll_drag = None;
             }
             MouseEventKind::Up(MouseButton::Right) => {
                 // Try clickable regions first (e.g. right-click on a tab/item)
@@ -7209,6 +7249,15 @@ impl App {
                 self.handle_action(Action::CopySelection)?;
             }
             MouseEventKind::ScrollUp => {
+                // MindMap tree scroll. Route by pointer position so the tree remains
+                // scrollable even when the preview/AI panel has keyboard focus.
+                if self.active_tab == MainTab::MindMap
+                    && let Some(rect) = self.tree_panel_rect
+                    && rect.contains(pos)
+                {
+                    self.tree_state.scroll_up(3);
+                    return Ok(());
+                }
                 // Editor panel scroll
                 if let Some(rect) = self.editor_panel_rect
                     && rect.contains(pos)
@@ -7242,6 +7291,14 @@ impl App {
                 }
             }
             MouseEventKind::ScrollDown => {
+                // MindMap tree scroll. `TreeState` clamps at the last visible item.
+                if self.active_tab == MainTab::MindMap
+                    && let Some(rect) = self.tree_panel_rect
+                    && rect.contains(pos)
+                {
+                    self.tree_state.scroll_down(3);
+                    return Ok(());
+                }
                 // Editor panel scroll
                 if let Some(rect) = self.editor_panel_rect
                     && rect.contains(pos)
@@ -7278,6 +7335,11 @@ impl App {
 
     /// Find the first clickable region that contains `pos`.
     fn hit_test(&self, pos: &ratatui::layout::Position) -> Option<&ClickableRegion> {
+        if let Some(scrollbar) = self.clickable_regions.iter().find(|region| {
+            matches!(region, ClickableRegion::ExploreHorizontalScrollbar { rect, .. } if rect.contains(*pos))
+        }) {
+            return Some(scrollbar);
+        }
         for region in &self.clickable_regions {
             match region {
                 ClickableRegion::Tab { rect, .. } => {
@@ -7348,6 +7410,11 @@ impl App {
                     ..
                 } => {
                     if *row_y == pos.y && pos.x >= *col_x && pos.x < *col_right {
+                        return Some(region);
+                    }
+                }
+                ClickableRegion::ExploreHorizontalScrollbar { rect, .. } => {
+                    if rect.contains(*pos) {
                         return Some(region);
                     }
                 }
@@ -7431,6 +7498,28 @@ impl App {
             ClickableRegion::ExploreStep { step_idx, .. } => {
                 self.explore_selected_step = *step_idx;
                 self.explore_focus = crate::app::ColumnFocus::Step;
+            }
+            ClickableRegion::ExploreHorizontalScrollbar {
+                column,
+                rect,
+                content_width,
+                viewport_width,
+            } => {
+                let max_scroll = content_width.saturating_sub(*viewport_width);
+                let track_width = rect.width as usize;
+                if track_width > 0 && max_scroll > 0 {
+                    let thumb_width = ((*viewport_width * track_width) / *content_width)
+                        .clamp(4.min(track_width), track_width);
+                    let travel = track_width.saturating_sub(thumb_width);
+                    let pointer = pos.x.saturating_sub(rect.x) as usize;
+                    let thumb_start = pointer.saturating_sub(thumb_width / 2).min(travel);
+                    self.explore_horizontal_scroll[column.index()] = thumb_start
+                        .saturating_mul(max_scroll)
+                        .checked_div(travel)
+                        .unwrap_or(0);
+                    self.explore_horizontal_scroll_drag = Some(*column);
+                    self.explore_focus = *column;
+                }
             }
             ClickableRegion::ApprovalBadge { .. } => {
                 // Click opens the approval mode picker panel
@@ -9746,6 +9835,30 @@ mod tests {
         assert_eq!(app.active_tab, MainTab::Requirements);
     }
 
+    #[test]
+    fn explore_horizontal_scrollbar_click_moves_and_starts_drag() {
+        let mut app = App::from_args().expect("app init");
+        let region = ClickableRegion::ExploreHorizontalScrollbar {
+            column: ColumnFocus::Scenario,
+            rect: ratatui::layout::Rect::new(10, 5, 20, 2),
+            content_width: 100,
+            viewport_width: 20,
+        };
+
+        app.handle_region_click(&region, &ratatui::layout::Position::new(29, 5))
+            .expect("scrollbar click");
+
+        assert_eq!(
+            app.explore_horizontal_scroll[ColumnFocus::Scenario.index()],
+            80
+        );
+        assert_eq!(
+            app.explore_horizontal_scroll_drag,
+            Some(ColumnFocus::Scenario)
+        );
+        assert_eq!(app.explore_focus, ColumnFocus::Scenario);
+    }
+
     fn en() -> &'static teshi_core::gherkin_lang::GherkinLanguage {
         GherkinLanguages::global().get("en")
     }
@@ -10222,6 +10335,97 @@ mod tests {
     }
 
     #[test]
+    fn test_mouse_wheel_scrolls_mindmap_tree_under_pointer() {
+        let steps = (0..30)
+            .map(|index| format!("    Given unique step {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = format!("Feature: Scroll\n  Scenario: Many steps\n{steps}\n");
+        let (mut app, path) = feature_file_app("mindmap-mouse-scroll", &content);
+        app.active_tab = MainTab::MindMap;
+        app.mindmap_ai_panel_visible = true;
+        app.mindmap_focus = MindMapFocus::AiPanel;
+
+        for path in app
+            .mindmap_index
+            .node_paths
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            app.tree_state.open(path);
+        }
+        render_test_app(&mut app, 100);
+
+        let tree_rect = app.tree_panel_rect.expect("tree panel should be rendered");
+        assert_eq!(app.tree_state.get_offset(), 0);
+        app.handle_mouse_event(
+            MouseEventKind::ScrollDown,
+            tree_rect.x,
+            tree_rect.y,
+            KeyModifiers::NONE,
+        )
+        .expect("tree scroll down should succeed");
+        assert_eq!(app.tree_state.get_offset(), 3);
+
+        app.handle_mouse_event(
+            MouseEventKind::ScrollUp,
+            tree_rect.x,
+            tree_rect.y,
+            KeyModifiers::NONE,
+        )
+        .expect("tree scroll up should succeed");
+        assert_eq!(app.tree_state.get_offset(), 0);
+
+        fs::remove_file(path).expect("feature fixture should be removed");
+    }
+
+    #[test]
+    fn test_stale_mindmap_tree_rect_does_not_capture_explore_editor_wheel() {
+        let steps = (0..30)
+            .map(|index| format!("    Given unique step {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let content = format!("Feature: Scroll\n  Scenario: Many steps\n{steps}\n");
+        let (mut app, path) = feature_file_app("stale-mindmap-tree-rect", &content);
+        app.active_tab = MainTab::MindMap;
+
+        for path in app
+            .mindmap_index
+            .node_paths
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            app.tree_state.open(path);
+        }
+        render_test_app(&mut app, 100);
+        assert!(app.tree_panel_rect.is_some());
+
+        app.active_tab = MainTab::Explore;
+        app.explore_edit_mode = true;
+        render_test_app(&mut app, 100);
+
+        let editor_rect = app
+            .editor_panel_rect
+            .expect("editor panel should be rendered");
+        assert_eq!(app.scroll_row, 0);
+        assert_eq!(app.tree_state.get_offset(), 0);
+        app.handle_mouse_event(
+            MouseEventKind::ScrollDown,
+            editor_rect.x,
+            editor_rect.y,
+            KeyModifiers::NONE,
+        )
+        .expect("editor scroll down should succeed");
+
+        assert_eq!(app.scroll_row, 1);
+        assert_eq!(app.tree_state.get_offset(), 0);
+
+        fs::remove_file(path).expect("feature fixture should be removed");
+    }
+
+    #[test]
     fn test_requirements_create_test_point_from_selection() {
         let project = tempdir().unwrap();
         let store = tempdir().unwrap();
@@ -10654,6 +10858,8 @@ mod tests {
             explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
+            explore_horizontal_scroll: [0; 3],
+            explore_horizontal_scroll_drag: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
             explore_feature_scenario_memory: HashMap::new(),
@@ -10829,6 +11035,8 @@ Feature: B
             explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
+            explore_horizontal_scroll: [0; 3],
+            explore_horizontal_scroll_drag: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
             explore_feature_scenario_memory: HashMap::new(),
