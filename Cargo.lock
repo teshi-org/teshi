@@ -7079,6 +7079,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "teshi-browser-broker"
+version = "0.7.10"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "futures-util",
+ "hmac",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "teshi-cli"
 version = "0.7.10"
 dependencies = [
@@ -7087,11 +7108,13 @@ dependencies = [
  "reqwest",
  "serde_json",
  "tempfile",
+ "teshi-browser-broker",
  "teshi-core",
  "teshi-daemon",
  "teshi-tui",
  "teshi-update",
  "tokio",
+ "tungstenite 0.24.0",
 ]
 
 [[package]]
@@ -7171,11 +7194,13 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "teshi-browser-broker",
  "teshi-core",
  "tokio",
  "toml 0.8.23",
  "tracing",
  "tungstenite 0.24.0",
+ "url",
  "uuid",
  "vte",
  "windows-sys 0.59.0",
@@ -7664,6 +7689,7 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",

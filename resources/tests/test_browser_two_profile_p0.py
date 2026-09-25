@@ -46,6 +46,7 @@ class AcceptancePage(BaseHTTPRequestHandler):
 
 class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        self.addAsyncCleanup(self._cleanup_browser_profiles)
         if not TESHI_CLI.is_file():
             self.fail(f"built teshi CLI is missing: {TESHI_CLI}")
         self.temp = tempfile.TemporaryDirectory(prefix="teshi-p0-two-profile-")
@@ -87,7 +88,7 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
             self.contexts[1].pages[0].goto(f"http://127.0.0.1:{port}/bootstrap-b"),
         )
 
-    async def asyncTearDown(self) -> None:
+    async def _cleanup_browser_profiles(self) -> None:
         for context in reversed(getattr(self, "contexts", [])):
             await context.close()
         if getattr(self, "playwright", None) is not None:

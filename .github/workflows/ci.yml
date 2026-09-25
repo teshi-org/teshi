@@ -27,6 +27,11 @@ jobs:
         with:
           components: clippy
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Install system deps (Linux)
         run: sudo apt-get update && sudo apt-get install -y libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libglib2.0-dev libgtk-3-dev libgraphene-1.0-0 libpango1.0-dev libcairo2-dev libatk1.0-dev
 
@@ -55,6 +60,14 @@ jobs:
         run: |
           python -m pip install Pillow websockets
           python -m unittest discover -s resources/tests -p 'test_winapp*.py'
+
+      - name: Run deterministic browser broker contract tests
+        run: |
+          python -m unittest discover -s resources/tests -p 'test_browser_agent_broker.py'
+          python -m unittest discover -s resources/tests -p 'test_browser_service_http.py'
+          python -m unittest discover -s resources/tests -p 'test_browser_service_agent_flow.py'
+          python -m unittest discover -s resources/tests -p 'test_browser_p2_privileged.py' -k setup_failure
+          node --test extension/teshi-bridge/tests/protocol.test.mjs extension/teshi-bridge/tests/network-capture.test.mjs
 
       - name: Run tests
         run: cargo test --workspace --exclude teshi-web --locked

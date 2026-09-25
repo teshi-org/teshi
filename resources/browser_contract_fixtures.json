@@ -76,6 +76,118 @@
       "lease_token": "fixture-secret-not-for-discovery"
     }
   },
+  "stateful": {
+    "profile_response_race": {
+      "requests": [
+        {
+          "extension_instance_id": "profile-a",
+          "window_id": 7,
+          "tab_id": 42,
+          "request_id": "request-a",
+          "result_url": "https://profile-a.example.test/"
+        },
+        {
+          "extension_instance_id": "profile-b",
+          "window_id": 7,
+          "tab_id": 42,
+          "request_id": "request-b",
+          "result_url": "https://profile-b.example.test/"
+        }
+      ],
+      "response_order": ["request-b", "request-a"]
+    },
+    "ambiguous_implicit_target": {
+      "targets": [
+        {
+          "extension_instance_id": "profile-a",
+          "window_id": 7,
+          "tab_id": 42
+        },
+        {
+          "extension_instance_id": "profile-b",
+          "window_id": 7,
+          "tab_id": 42
+        }
+      ],
+      "expected_error": "ambiguous_browser_target",
+      "expected_dispatched_commands": 0
+    }
+  },
+  "migration_contracts": {
+    "discovery": {
+      "url": "http://127.0.0.1:17373/v1/bridge",
+      "protocol_version": 1,
+      "websocket_scheme": "ws",
+      "websocket_host": "127.0.0.1",
+      "websocket_port_is_dynamic": true,
+      "mutation_requires_bearer": true
+    },
+    "heartbeat_reconnect": {
+      "extension_instance_id": "profile-reconnect",
+      "first_url": "https://before-reconnect.example.test/",
+      "reconnected_url": "https://after-reconnect.example.test/",
+      "expected_session_count": 1,
+      "expected_current_url": "https://after-reconnect.example.test/"
+    },
+    "lease_lifecycle": {
+      "extension_instance_id": "profile-lease",
+      "owner": "agent-a",
+      "initial_ttl_seconds": 60,
+      "renewed_ttl_seconds": 120,
+      "renew_after_expiry_error": "invalid_browser_lease",
+      "released": true
+    },
+    "request_lifecycle": {
+      "duplicate_mutation_error": "duplicate_browser_mutation",
+      "disconnect_error": "browser_session_disconnected",
+      "mismatched_response_error": "mismatched_browser_response",
+      "late_response_may_complete_another_request": false
+    },
+    "locator_outcomes": {
+      "unique_match": { "match_count": 1, "verification": "verified" },
+      "missing_match": { "match_count": 0, "error": "browser_target_not_found" },
+      "ambiguous_match": { "match_count": 2, "verification": "ambiguous" },
+      "stale_revision": { "stale_page_context": true, "verification": "stale_page_context" }
+    },
+    "evidence_limits": {
+      "screenshot_max_bytes": 52428800,
+      "websocket_max_message_bytes": 75497472,
+      "network_max_events_per_batch": 100,
+      "preview_frame_meta": { "tab_id": 42, "seq": 1 }
+    },
+    "authorization": {
+      "capability": "javascript",
+      "owner_project": "project-a",
+      "owner_caller": "agent-a",
+      "owner_profile": "profile-a",
+      "cross_project_error": "browser_capability_denied",
+      "revocation_rejects_existing_token": true
+    },
+    "network_sequence": {
+      "accepted_sequences": [1, 2],
+      "duplicate_ack_sequence": 2,
+      "clear_barrier_sequence": 4,
+      "oversized_event_count": 101,
+      "oversized_reason": "batch_too_large",
+      "far_ahead_sequence": 2001,
+      "far_ahead_ack_sequence": 0
+    },
+    "malformed_transport": {
+      "incomplete_content_length": {
+        "declared_bytes": 10,
+        "received_bytes": 5,
+        "expected_status": 400
+      },
+      "unknown_privileged_operation": {
+        "expected_dispatch_count": 0,
+        "fail_closed": true
+      },
+      "untrusted_discovery_origin": {
+        "origin": "https://ordinary.example.test",
+        "must_not_receive_bearer": true
+      }
+    }
+  },
   "filtered_network": {
     "start_command": {
       "cmd": "start_network_capture",

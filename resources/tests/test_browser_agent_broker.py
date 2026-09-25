@@ -79,30 +79,42 @@ def target(instance_id: str, tab_id: int = 42, window_id: int = 7) -> dict:
     }
 
 
+def migration_contract(name: str) -> dict:
+    """Load a deterministic migration contract case shared with Rust and Node."""
+    fixture = json.loads(
+        (RESOURCES / "browser_contract_fixtures.json").read_text(encoding="utf-8")
+    )
+    return fixture["migration_contracts"][name]
+
+
 class BrowserSessionBrokerTests(unittest.IsolatedAsyncioTestCase):
     async def test_privileged_grants_bind_every_scope_and_never_leak_in_discovery(self) -> None:
+        scenario = migration_contract("authorization")
         broker = BrowserSessionBroker(broker_instance_id="broker-a", local_user="user-a")
-        record = broker.register_heartbeat(heartbeat("profile-a"))
-        lease = broker.acquire_lease("profile-a", "agent-a", 60)
+        record = broker.register_heartbeat(heartbeat(scenario["owner_profile"]))
+        lease = broker.acquire_lease(scenario["owner_profile"], scenario["owner_caller"], 60)
         issued = broker.create_capability_grant(
-            extension_instance_id="profile-a",
+            extension_instance_id=scenario["owner_profile"],
             lease_token=lease["lease_token"],
-            capability="javascript",
-            project_root="project-a",
-            caller_label="agent-a",
+            capability=scenario["capability"],
+            project_root=scenario["owner_project"],
+            caller_label=scenario["owner_caller"],
             interactive_confirmed=True,
         )
         token = issued["grant_token"]
         broker.validate_capability_grant(
             token=token,
-            capability="javascript",
-            extension_instance_id="profile-a",
-            project_root="project-a",
-            caller_label="agent-a",
+            capability=scenario["capability"],
+            extension_instance_id=scenario["owner_profile"],
+            project_root=scenario["owner_project"],
+            caller_label=scenario["owner_caller"],
         )
         discovery = json.dumps(broker.list_sessions())
         self.assertNotIn(token, discovery)
-        self.assertNotIn("grant_token", json.dumps(broker.list_capability_grants(project_root="project-a")))
+        self.assertNotIn(
+            "grant_token",
+            json.dumps(broker.list_capability_grants(project_root=scenario["owner_project"])),
+        )
         for field, value in (
             ("capability", "raw-cdp"),
             ("extension_instance_id", "profile-b"),
@@ -111,39 +123,42 @@ class BrowserSessionBrokerTests(unittest.IsolatedAsyncioTestCase):
         ):
             kwargs = {
                 "token": token,
-                "capability": "javascript",
-                "extension_instance_id": "profile-a",
-                "project_root": "project-a",
-                "caller_label": "agent-a",
+                "capability": scenario["capability"],
+                "extension_instance_id": scenario["owner_profile"],
+                "project_root": scenario["owner_project"],
+                "caller_label": scenario["owner_caller"],
             }
             kwargs[field] = value
             with self.assertRaises(BrokerError) as mismatch:
                 broker.validate_capability_grant(**kwargs)
-            self.assertEqual(mismatch.exception.code, "browser_capability_denied")
+            self.assertEqual(mismatch.exception.code, scenario["cross_project_error"])
 
         other = BrowserSessionBroker(broker_instance_id="broker-b", local_user="user-a")
         other.capability_grants = dict(broker.capability_grants)
         with self.assertRaises(BrokerError) as wrong_broker:
             other.validate_capability_grant(
                 token=token,
-                capability="javascript",
-                extension_instance_id="profile-a",
-                project_root="project-a",
-                caller_label="agent-a",
+                capability=scenario["capability"],
+                extension_instance_id=scenario["owner_profile"],
+                project_root=scenario["owner_project"],
+                caller_label=scenario["owner_caller"],
             )
         self.assertEqual(wrong_broker.exception.code, "browser_capability_denied")
 
-        broker.revoke_capability_grant(issued["grant_id"], project_root="project-a")
+        broker.revoke_capability_grant(
+            issued["grant_id"], project_root=scenario["owner_project"]
+        )
         with self.assertRaises(BrokerError) as revoked:
             broker.validate_capability_grant(
                 token=token,
-                capability="javascript",
-                extension_instance_id="profile-a",
-                project_root="project-a",
-                caller_label="agent-a",
+                capability=scenario["capability"],
+                extension_instance_id=scenario["owner_profile"],
+                project_root=scenario["owner_project"],
+                caller_label=scenario["owner_caller"],
             )
-        self.assertEqual(revoked.exception.code, "browser_capability_denied")
-        self.assertEqual(record.extension_instance_id, "profile-a")
+        self.assertEqual(revoked.exception.code, scenario["cross_project_error"])
+        self.assertTrue(scenario["revocation_rejects_existing_token"])
+        self.assertEqual(record.extension_instance_id, scenario["owner_profile"])
 
     async def test_privileged_grant_expiry_policy_and_permission_fail_closed(self) -> None:
         broker = BrowserSessionBroker()
@@ -775,6 +790,59 @@ class PlaywrightLocatorCandidateTests(unittest.TestCase):
         role = next(candidate for candidate in verified if candidate["kind"] == "role")
         self.assertEqual(role["verification"], "stale_page_context")
 
+    def test_shared_locator_outcome_fixture_covers_unique_missing_ambiguous_and_stale(self) -> None:
+        scenarios = migration_contract("locator_outcomes")
+        _element, candidates = generate_playwright_candidates(
+            self.snapshot, {"element_ref": "save-button"}
+        )
+        expression = candidates[0]["expression"]
+
+        unique = apply_verification_results(
+            candidates,
+            [
+                {
+                    "expression": expression,
+                    "match_count": scenarios["unique_match"]["match_count"],
+                    "visible": True,
+                    "enabled": True,
+                }
+            ],
+        )
+        self.assertEqual(
+            next(item for item in unique if item["kind"] == "role")["verification"],
+            scenarios["unique_match"]["verification"],
+        )
+
+        ambiguous = apply_verification_results(
+            candidates,
+            [
+                {
+                    "expression": expression,
+                    "match_count": scenarios["ambiguous_match"]["match_count"],
+                    "visible": True,
+                    "enabled": True,
+                }
+            ],
+        )
+        self.assertEqual(
+            next(item for item in ambiguous if item["kind"] == "role")["verification"],
+            scenarios["ambiguous_match"]["verification"],
+        )
+
+        stale = apply_verification_results(
+            candidates,
+            [{"expression": expression, **scenarios["stale_revision"]}],
+        )
+        self.assertEqual(
+            next(item for item in stale if item["kind"] == "role")["verification"],
+            scenarios["stale_revision"]["verification"],
+        )
+        with self.assertRaises(BrokerError) as missing:
+            generate_playwright_candidates(
+                self.snapshot, {"role": "button", "text": "missing fixture target"}
+            )
+        self.assertEqual(missing.exception.code, scenarios["missing_match"]["error"])
+
 
 class LegacyFixtureTests(unittest.TestCase):
     def test_single_session_fixture_captures_all_legacy_boundaries(self) -> None:
@@ -804,6 +872,164 @@ class LegacyFixtureTests(unittest.TestCase):
             phased["p2_optional_permissions_heartbeat"]["optional_permissions"][
                 "cookies"
             ]
+        )
+
+
+class StatefulContractFixtureTests(unittest.IsolatedAsyncioTestCase):
+    def fixture(self) -> dict:
+        return json.loads(
+            (RESOURCES / "browser_contract_fixtures.json").read_text(
+                encoding="utf-8"
+            )
+        )["stateful"]
+
+    async def test_heartbeat_reconnect_refreshes_one_session_without_duplicate(self) -> None:
+        scenario = migration_contract("heartbeat_reconnect")
+        broker = BrowserSessionBroker()
+        first = heartbeat(scenario["extension_instance_id"])
+        first["url"] = scenario["first_url"]
+        first["windows"][0]["tabs"][0]["url"] = scenario["first_url"]
+        original = broker.register_heartbeat(first)
+
+        reconnected = heartbeat(scenario["extension_instance_id"])
+        reconnected["url"] = scenario["reconnected_url"]
+        reconnected["windows"][0]["tabs"][0]["url"] = scenario["reconnected_url"]
+        current = broker.register_heartbeat(reconnected)
+
+        self.assertIs(current, original)
+        self.assertEqual(len(broker.list_sessions()), scenario["expected_session_count"])
+        self.assertEqual(current.page_url, scenario["expected_current_url"])
+        self.assertEqual(current.iter_tabs()[0]["url"], scenario["expected_current_url"])
+
+    async def test_lease_fixture_covers_renew_expiry_release_and_reacquire(self) -> None:
+        scenario = migration_contract("lease_lifecycle")
+        broker = BrowserSessionBroker()
+        record = broker.register_heartbeat(heartbeat(scenario["extension_instance_id"]))
+        initial = broker.acquire_lease(
+            scenario["extension_instance_id"],
+            scenario["owner"],
+            scenario["initial_ttl_seconds"],
+        )
+        renewed = broker.renew_lease(
+            scenario["extension_instance_id"],
+            initial["lease_token"],
+            scenario["renewed_ttl_seconds"],
+        )
+        self.assertEqual(renewed["lease_token"], initial["lease_token"])
+        self.assertEqual(renewed["owner_label"], scenario["owner"])
+
+        record.lease.expires_monotonic = time.monotonic() - 1
+        with self.assertRaises(BrokerError) as expired:
+            broker.renew_lease(
+                scenario["extension_instance_id"],
+                initial["lease_token"],
+                scenario["renewed_ttl_seconds"],
+            )
+        self.assertEqual(
+            expired.exception.code, scenario["renew_after_expiry_error"]
+        )
+        replacement = broker.acquire_lease(
+            scenario["extension_instance_id"],
+            "agent-b",
+            scenario["initial_ttl_seconds"],
+        )
+        released = broker.release_lease(
+            scenario["extension_instance_id"], replacement["lease_token"]
+        )
+        self.assertEqual(released["released"], scenario["released"])
+        self.assertIsNone(record.lease)
+
+    async def test_request_fixture_rejects_duplicate_mutation_and_disconnects_pending(self) -> None:
+        scenario = migration_contract("request_lifecycle")
+        broker = BrowserSessionBroker(heartbeat_ttl=0.01)
+        record = broker.register_heartbeat(heartbeat("profile-request"))
+        lease = broker.acquire_lease("profile-request", "agent-a", 30)
+        command = {
+            "cmd": "execute_browser_action",
+            "request_id": "fixture-mutation",
+            "target": target("profile-request"),
+            "lease_token": lease["lease_token"],
+        }
+        future = asyncio.get_running_loop().create_future()
+        broker.authorize_command(command)
+        broker.queue_command(record, command["target"], command, future)
+        with self.assertRaises(BrokerError) as duplicate:
+            broker.queue_command(
+                record,
+                command["target"],
+                command,
+                asyncio.get_running_loop().create_future(),
+            )
+        self.assertEqual(duplicate.exception.code, scenario["duplicate_mutation_error"])
+
+        broker.expire_stale(record.last_heartbeat + 1)
+        result = await future
+        self.assertEqual(result["code"], scenario["disconnect_error"])
+        self.assertFalse(scenario["late_response_may_complete_another_request"])
+        self.assertFalse(record.command_queue)
+
+    async def test_shared_fixture_keeps_out_of_order_profile_responses_isolated(self) -> None:
+        scenario = self.fixture()["profile_response_race"]
+        broker = BrowserSessionBroker()
+        pending: dict[str, asyncio.Future[dict]] = {}
+        requests = {item["request_id"]: item for item in scenario["requests"]}
+
+        for item in scenario["requests"]:
+            instance_id = item["extension_instance_id"]
+            record = broker.register_heartbeat(heartbeat(instance_id))
+            lease = broker.acquire_lease(instance_id, f"agent-{instance_id}", 30)
+            command = {
+                "cmd": "get_page_snapshot",
+                "request_id": item["request_id"],
+                "target": {
+                    "extension_instance_id": instance_id,
+                    "window_id": item["window_id"],
+                    "tab_id": item["tab_id"],
+                },
+                "lease_token": lease["lease_token"],
+            }
+            broker.authorize_command(command)
+            future = asyncio.get_running_loop().create_future()
+            broker.queue_command(record, command["target"], command, future)
+            pending[item["request_id"]] = future
+
+        for request_id in scenario["response_order"]:
+            item = requests[request_id]
+            broker.accept_response(
+                {
+                    "type": "response",
+                    "request_id": request_id,
+                    "extension_instance_id": item["extension_instance_id"],
+                    "target": {
+                        "extension_instance_id": item["extension_instance_id"],
+                        "window_id": item["window_id"],
+                        "tab_id": item["tab_id"],
+                    },
+                    "ok": True,
+                    "url": item["result_url"],
+                }
+            )
+
+        for item in scenario["requests"]:
+            result = await pending[item["request_id"]]
+            self.assertEqual(result["extension_instance_id"], item["extension_instance_id"])
+            self.assertEqual(result["url"], item["result_url"])
+        self.assertEqual(broker.pending, {})
+
+    async def test_shared_fixture_ambiguous_implicit_target_has_no_side_effect(self) -> None:
+        scenario = self.fixture()["ambiguous_implicit_target"]
+        broker = BrowserSessionBroker()
+        for target_value in scenario["targets"]:
+            broker.register_heartbeat(heartbeat(target_value["extension_instance_id"]))
+
+        with self.assertRaises(BrokerError) as caught:
+            broker.resolve_target(None)
+
+        self.assertEqual(caught.exception.code, scenario["expected_error"])
+        self.assertEqual(len(broker.pending), 0)
+        self.assertEqual(
+            sum(len(record.command_queue) for record in broker.sessions.values()),
+            scenario["expected_dispatched_commands"],
         )
 
 
@@ -1141,6 +1367,7 @@ class PhasedCapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record_a.console_captures, {})
 
     async def test_network_batch_filters_deduplicates_and_honors_barriers(self) -> None:
+        scenario = migration_contract("network_sequence")
         broker = BrowserSessionBroker()
         record = broker.register_heartbeat(heartbeat("profile-a"))
         with self.assertRaises(BrokerError):
@@ -1155,13 +1382,13 @@ class PhasedCapabilityTests(unittest.IsolatedAsyncioTestCase):
             "target": target("profile-a"),
             "events": [
                 {
-                    "seq": 1,
+                    "seq": scenario["accepted_sequences"][0],
                     "event_type": "request",
                     "request_id": "suffix",
                     "url": "https://evilapi.example.test/",
                 },
                 {
-                    "seq": 2,
+                    "seq": scenario["accepted_sequences"][1],
                     "event_type": "request",
                     "request_id": "matching",
                     "url": "https://api.example.test/",
@@ -1170,9 +1397,9 @@ class PhasedCapabilityTests(unittest.IsolatedAsyncioTestCase):
             "dropped_events": 3,
         }
         ack = broker.accept_network_batch("profile-a", payload)
-        self.assertEqual(ack["ack_seq"], 2)
+        self.assertEqual(ack["ack_seq"], scenario["duplicate_ack_sequence"])
         duplicate_ack = broker.accept_network_batch("profile-a", payload)
-        self.assertEqual(duplicate_ack["ack_seq"], 2)
+        self.assertEqual(duplicate_ack["ack_seq"], scenario["duplicate_ack_sequence"])
         listed = broker.list_network_requests(record, target("profile-a"))
         self.assertEqual(
             [request["request_id"] for request in listed["requests"]],
@@ -1182,9 +1409,13 @@ class PhasedCapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(listed["delivery"]["duplicate_events"], 2)
 
         cleared = broker.clear_network_capture(
-            record, target("profile-a"), sequence_barrier=4
+            record,
+            target("profile-a"),
+            sequence_barrier=scenario["clear_barrier_sequence"],
         )
-        self.assertEqual(cleared["delivery"]["clear_sequence"], 4)
+        self.assertEqual(
+            cleared["delivery"]["clear_sequence"], scenario["clear_barrier_sequence"]
+        )
         late_ack = broker.accept_network_batch(
             "profile-a",
             {
@@ -1192,7 +1423,7 @@ class PhasedCapabilityTests(unittest.IsolatedAsyncioTestCase):
                 "target": target("profile-a"),
                 "events": [
                     {
-                        "seq": 3,
+                        "seq": scenario["accepted_sequences"][-1] + 1,
                         "event_type": "request",
                         "request_id": "late",
                         "url": "https://api.example.test/late",
@@ -1236,6 +1467,7 @@ class PhasedCapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(late_after_stop["ack_seq"], 5)
 
     async def test_network_batch_rejects_oversized_and_far_ahead_input(self) -> None:
+        scenario = migration_contract("network_sequence")
         broker = BrowserSessionBroker()
         record = broker.register_heartbeat(heartbeat("profile-a"))
         capture = broker.start_network_capture(
@@ -1250,12 +1482,12 @@ class PhasedCapabilityTests(unittest.IsolatedAsyncioTestCase):
                 "target": target("profile-a"),
                 "events": [
                     {"seq": index + 1, "event": {}}
-                    for index in range(101)
+                    for index in range(scenario["oversized_event_count"])
                 ],
             },
         )
         self.assertFalse(oversized["accepted"])
-        self.assertEqual(oversized["reason"], "batch_too_large")
+        self.assertEqual(oversized["reason"], scenario["oversized_reason"])
 
         far_ahead = broker.accept_network_batch(
             "profile-a",
@@ -1264,7 +1496,7 @@ class PhasedCapabilityTests(unittest.IsolatedAsyncioTestCase):
                 "target": target("profile-a"),
                 "events": [
                     {
-                        "seq": 2_001,
+                        "seq": scenario["far_ahead_sequence"],
                         "event": {
                             "event_type": "request",
                             "request_id": "far-ahead",
@@ -1275,7 +1507,7 @@ class PhasedCapabilityTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertTrue(far_ahead["accepted"])
-        self.assertEqual(far_ahead["ack_seq"], 0)
+        self.assertEqual(far_ahead["ack_seq"], scenario["far_ahead_ack_sequence"])
         summary = broker.list_network_requests(record, target("profile-a"))
         self.assertEqual(summary["delivery"]["pending_sequences"], 0)
         self.assertEqual(summary["delivery"]["rejected_events"], 1)

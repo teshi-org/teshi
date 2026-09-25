@@ -33,6 +33,17 @@ from test_browser_agent_broker import heartbeat, target  # noqa: E402
 
 
 class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
+    def test_shared_evidence_limits_match_python_wire_contract(self) -> None:
+        fixture = json.loads(
+            (RESOURCES / "browser_contract_fixtures.json").read_text(encoding="utf-8")
+        )["migration_contracts"]["evidence_limits"]
+        self.assertEqual(MAX_BROWSER_ARTIFACT_BYTES, fixture["screenshot_max_bytes"])
+        self.assertEqual(
+            MAX_BROWSER_WS_MESSAGE_BYTES, fixture["websocket_max_message_bytes"]
+        )
+        self.assertEqual(fixture["preview_frame_meta"]["tab_id"], 42)
+        self.assertEqual(fixture["preview_frame_meta"]["seq"], 1)
+
     def test_encoded_artifact_fits_bounded_command_transport(self) -> None:
         encoded_bytes = ((MAX_BROWSER_ARTIFACT_BYTES + 2) // 3) * 4
         envelope_allowance = 1024 * 1024

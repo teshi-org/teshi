@@ -18,12 +18,14 @@ portable-pty = "0.8"
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.10"
+sha2 = { workspace = true }
 teshi-core = { workspace = true }
+teshi-browser-broker = { path = "../teshi-browser-broker" }
 toml = "0.8"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
+url = "2"
 vte = "0.15"
 tungstenite = "0.24"
 uuid = { version = "1", features = ["v4"] }

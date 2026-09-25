@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+teshi-browser-broker = { path = "../../crates/teshi-browser-broker" }
 teshi-daemon = { path = "../teshi-daemon" }
 teshi-tui = { workspace = true }
 tokio.workspace = true
@@ -27,3 +28,4 @@ serde_json.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 tempfile = "3"
+tungstenite = "0.24"

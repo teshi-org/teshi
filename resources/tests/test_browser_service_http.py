@@ -94,9 +94,16 @@ class BrowserServiceHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(body)["snapshot"], "x" * 200_000)
 
     async def test_incomplete_content_length_is_rejected(self) -> None:
+        fixture = json.loads(
+            (RESOURCES / "browser_contract_fixtures.json").read_text(encoding="utf-8")
+        )["migration_contracts"]["malformed_transport"]["incomplete_content_length"]
         reader = asyncio.StreamReader()
         reader.feed_data(
-            b"POST /v1/bridge/response HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc"
+            (
+                "POST /v1/bridge/response HTTP/1.1\r\n"
+                f"Content-Length: {fixture['declared_bytes']}\r\n\r\n"
+            ).encode("ascii")
+            + b"x" * fixture["received_bytes"]
         )
         reader.feed_eof()
         with self.assertRaises(asyncio.IncompleteReadError):

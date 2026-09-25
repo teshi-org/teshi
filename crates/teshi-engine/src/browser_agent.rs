@@ -1500,6 +1500,114 @@ fn sanitize_public_value(value: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    struct BrowserContractFixtures {
+        schema_version: u16,
+        legacy: LegacyFixtures,
+        phased: PhasedFixtures,
+        stateful: StatefulFixtures,
+        migration_contracts: serde_json::Value,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct LegacyFixtures {
+        heartbeat: LegacyHeartbeat,
+        command: LegacyCommand,
+        response: LegacyResponse,
+        frame_meta: LegacyFrameMetadata,
+        cdp_endpoint: LegacyEndpoint,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct LegacyHeartbeat {
+        project_root: String,
+        active_tab_id: i64,
+        tabs: Vec<serde_json::Value>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct LegacyCommand {
+        #[serde(rename = "type")]
+        message_type: String,
+        request_id: String,
+        cmd: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct LegacyResponse {
+        #[serde(rename = "type")]
+        message_type: String,
+        request_id: String,
+        cmd: String,
+        ok: bool,
+        tab_id: i64,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct LegacyFrameMetadata {
+        tab_id: i64,
+        seq: u64,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct LegacyEndpoint {
+        mode: String,
+        bridge: String,
+        ws_url: String,
+        extension_connected: bool,
+        discovery_url: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct PhasedFixtures {
+        p0_only_heartbeat: PhasedHeartbeat,
+        p0_p1_heartbeat: PhasedHeartbeat,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct PhasedHeartbeat {
+        schema_version: u16,
+        protocol_version: u16,
+        extension_instance_id: String,
+        features: Vec<PhasedFeature>,
+        supported_actions: Vec<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct PhasedFeature {
+        feature: String,
+        available: bool,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct StatefulFixtures {
+        profile_response_race: ProfileResponseRace,
+        ambiguous_implicit_target: AmbiguousImplicitTarget,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ProfileResponseRace {
+        requests: Vec<ProfileRequestFixture>,
+        response_order: Vec<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ProfileRequestFixture {
+        extension_instance_id: String,
+        window_id: i64,
+        tab_id: i64,
+        request_id: String,
+        result_url: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct AmbiguousImplicitTarget {
+        targets: Vec<BrowserTarget>,
+        expected_error: String,
+        expected_dispatched_commands: usize,
+    }
 
     fn target() -> BrowserTarget {
         BrowserTarget {
@@ -1507,6 +1615,127 @@ mod tests {
             window_id: 7,
             tab_id: 42,
         }
+    }
+
+    #[test]
+    fn shared_contract_fixture_preserves_legacy_and_versioned_messages() {
+        let fixture: BrowserContractFixtures = serde_json::from_str(include_str!(
+            "../../../resources/browser_contract_fixtures.json"
+        ))
+        .unwrap();
+
+        assert_eq!(fixture.schema_version, 1);
+        assert_eq!(fixture.legacy.heartbeat.project_root, "/work/project");
+        assert_eq!(fixture.legacy.heartbeat.active_tab_id, 42);
+        assert_eq!(fixture.legacy.heartbeat.tabs.len(), 1);
+        assert_eq!(fixture.legacy.command.message_type, "cmd");
+        assert_eq!(fixture.legacy.command.cmd, "get_page_snapshot");
+        assert_eq!(
+            fixture.legacy.command.request_id,
+            fixture.legacy.response.request_id
+        );
+        assert_eq!(fixture.legacy.response.message_type, "response");
+        assert_eq!(fixture.legacy.response.cmd, fixture.legacy.command.cmd);
+        assert!(fixture.legacy.response.ok);
+        assert_eq!(
+            fixture.legacy.response.tab_id,
+            fixture.legacy.frame_meta.tab_id
+        );
+        assert_eq!(fixture.legacy.frame_meta.seq, 1);
+        assert_eq!(fixture.legacy.cdp_endpoint.mode, "chrome");
+        assert_eq!(fixture.legacy.cdp_endpoint.bridge, "python");
+        assert!(fixture.legacy.cdp_endpoint.extension_connected);
+        assert!(fixture
+            .legacy
+            .cdp_endpoint
+            .ws_url
+            .starts_with("ws://127.0.0.1:"));
+        assert!(fixture
+            .legacy
+            .cdp_endpoint
+            .discovery_url
+            .starts_with("http://127.0.0.1:17373/"));
+
+        for heartbeat in [
+            fixture.phased.p0_only_heartbeat,
+            fixture.phased.p0_p1_heartbeat,
+        ] {
+            assert_eq!(heartbeat.schema_version, 1);
+            assert_eq!(heartbeat.protocol_version, 1);
+            assert!(!heartbeat.extension_instance_id.is_empty());
+            assert!(heartbeat
+                .features
+                .iter()
+                .any(|feature| feature.feature == "p0.control" && feature.available));
+            assert!(!heartbeat.supported_actions.is_empty());
+        }
+
+        let race = fixture.stateful.profile_response_race;
+        assert_eq!(race.requests.len(), 2);
+        assert_eq!(race.response_order, vec!["request-b", "request-a"]);
+        assert_eq!(race.requests[0].window_id, race.requests[1].window_id);
+        assert_eq!(race.requests[0].tab_id, race.requests[1].tab_id);
+        assert_ne!(
+            race.requests[0].extension_instance_id,
+            race.requests[1].extension_instance_id
+        );
+        assert_ne!(race.requests[0].result_url, race.requests[1].result_url);
+        assert!(race
+            .requests
+            .iter()
+            .all(|request| request.request_id.starts_with("request-")));
+
+        let ambiguous = fixture.stateful.ambiguous_implicit_target;
+        assert_eq!(ambiguous.targets.len(), 2);
+        assert_eq!(ambiguous.expected_error, "ambiguous_browser_target");
+        assert_eq!(ambiguous.expected_dispatched_commands, 0);
+        assert_eq!(
+            ambiguous.targets[0].window_id,
+            ambiguous.targets[1].window_id
+        );
+        assert_eq!(ambiguous.targets[0].tab_id, ambiguous.targets[1].tab_id);
+        assert_ne!(
+            ambiguous.targets[0].extension_instance_id,
+            ambiguous.targets[1].extension_instance_id
+        );
+
+        let contracts = fixture.migration_contracts;
+        assert_eq!(
+            contracts["discovery"]["url"],
+            "http://127.0.0.1:17373/v1/bridge"
+        );
+        assert_eq!(contracts["discovery"]["protocol_version"], 1);
+        assert_eq!(
+            contracts["heartbeat_reconnect"]["expected_session_count"],
+            1
+        );
+        assert_eq!(
+            contracts["lease_lifecycle"]["renew_after_expiry_error"],
+            "invalid_browser_lease"
+        );
+        assert!(
+            !contracts["request_lifecycle"]["late_response_may_complete_another_request"]
+                .as_bool()
+                .unwrap()
+        );
+        assert_eq!(
+            contracts["locator_outcomes"]["ambiguous_match"]["verification"],
+            "ambiguous"
+        );
+        assert_eq!(
+            contracts["evidence_limits"]["websocket_max_message_bytes"],
+            75_497_472
+        );
+        assert!(
+            contracts["authorization"]["revocation_rejects_existing_token"]
+                .as_bool()
+                .unwrap()
+        );
+        assert_eq!(contracts["network_sequence"]["duplicate_ack_sequence"], 2);
+        assert_eq!(
+            contracts["malformed_transport"]["incomplete_content_length"]["expected_status"],
+            400
+        );
     }
 
     #[test]
