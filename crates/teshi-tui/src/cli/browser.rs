@@ -347,6 +347,15 @@ fn tab_operation(project_root: &Path, action: &BrowserTabCommand) -> Result<()> 
 }
 
 fn ensure_cli_chrome_broker(project_root: &Path) -> Result<()> {
+    if std::env::var("TESHI_BROWSER_BROKER_USE_EXISTING_ENDPOINT").as_deref() == Ok("1") {
+        let endpoint = read_cdp_endpoint(project_root)?;
+        if endpoint.mode != "chrome" {
+            return Err(anyhow!(
+                "test broker endpoint is not a Chrome broker endpoint"
+            ));
+        }
+        return Ok(());
+    }
     let endpoint = ensure_user_chrome_broker(project_root, &default_browser_service_script())
         .map_err(|error| match error.hint {
             Some(hint) => anyhow!("{} ({hint})", error.message),

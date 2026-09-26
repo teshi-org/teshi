@@ -14,7 +14,7 @@ use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
     AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN, VARY,
 };
-use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -429,6 +429,52 @@ impl BrokerRuntime {
         }
     }
 
+    /// Install an in-process command sink for the feature-gated contract oracle.
+    ///
+    /// This is intentionally unavailable to production builds. It exercises the
+    /// same bounded direct-stream sender used by the real WebSocket path while
+    /// keeping the differential test deterministic and process-local.
+    #[cfg(feature = "contract-oracle")]
+    pub async fn contract_attach_extension_stream(
+        &self,
+        extension_instance_id: &str,
+        generation: u64,
+    ) -> mpsc::Receiver<Value> {
+        let (sender, mut outgoing) =
+            mpsc::channel::<BrokerOutgoingMessage>(EXTENSION_OUTBOUND_QUEUE_CAPACITY);
+        let (public_sender, public_receiver) = mpsc::channel(EXTENSION_OUTBOUND_QUEUE_CAPACITY);
+        self.state
+            .streams
+            .write()
+            .await
+            .insert(extension_instance_id.to_owned(), (generation, sender));
+        tokio::spawn(async move {
+            while let Some(message) = outgoing.recv().await {
+                let value = match message.message {
+                    Message::Text(text) => serde_json::from_str::<Value>(&text).ok(),
+                    _ => None,
+                };
+                let Some(value) = value else {
+                    continue;
+                };
+                if public_sender.send(value).await.is_err() {
+                    break;
+                }
+            }
+        });
+        public_receiver
+    }
+
+    /// Remove the feature-gated contract oracle's in-process command sink.
+    #[cfg(feature = "contract-oracle")]
+    pub async fn contract_detach_extension_stream(&self, extension_instance_id: &str) {
+        self.state
+            .streams
+            .write()
+            .await
+            .remove(extension_instance_id);
+    }
+
     /// Endpoint written to the per-project compatibility pointer. It contains no
     /// authentication token and no other project's filesystem path.
     pub fn endpoint_record(&self) -> EndpointRecord {
@@ -515,7 +561,10 @@ impl Drop for BrokerRuntime {
 
 fn discovery_router(state: ServerState) -> Router {
     Router::new()
-        .route("/v1/bridge", get(discovery).options(preflight))
+        .route(
+            "/v1/bridge",
+            get(discovery).post(discovery).options(preflight),
+        )
         .route(
             BROWSER_BROKER_IDENTITY_CHALLENGE_PATH,
             post(identity_challenge).options(preflight),
@@ -588,7 +637,11 @@ fn spawn_server(
     })
 }
 
-async fn discovery(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+async fn discovery(
+    State(state): State<ServerState>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
     if !host_is_loopback(&headers, state.discovery_addr.port()) {
         return error_response(BrokerError::new(
             BrokerErrorCode::BrokerOriginDenied,
@@ -596,6 +649,16 @@ async fn discovery(State(state): State<ServerState>, headers: HeaderMap) -> Resp
         ));
     }
     let origin = header_text(&headers, ORIGIN);
+    // GET remains a public, project-neutral discovery probe. The extension
+    // uses POST, which must carry the browser-supplied exact Origin before a
+    // credential-bearing discovery response is returned. This avoids treating
+    // a self-reported extension ID in a normal request header as proof.
+    if method == Method::POST && origin.is_none() {
+        return error_response(BrokerError::new(
+            BrokerErrorCode::BrokerOriginDenied,
+            "credential-bearing discovery requires a browser Origin",
+        ));
+    }
     let include_token = match origin.as_deref() {
         None => false,
         Some(value) if is_trusted_extension_origin(&state, value) => true,
@@ -2153,6 +2216,64 @@ mod tests {
         let _ = hostile.bytes().await.unwrap();
 
         let trusted_origin = format!("chrome-extension://{EXTENSION_ID}");
+        let forged_extension_header = client
+            .get(&discovery_url)
+            .header("X-Teshi-Extension-Origin", &trusted_origin)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(forged_extension_header.status(), StatusCode::OK);
+        let forged_extension_header: Value = forged_extension_header.json().await.unwrap();
+        assert!(
+            !forged_extension_header["ws_url"]
+                .as_str()
+                .unwrap()
+                .contains("token=")
+        );
+
+        let missing_origin_post = client.post(&discovery_url).send().await.unwrap();
+        assert_eq!(missing_origin_post.status(), StatusCode::FORBIDDEN);
+        let _ = missing_origin_post.bytes().await.unwrap();
+
+        let untrusted_origin_post = client
+            .post(&discovery_url)
+            .header(
+                "Origin",
+                "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(untrusted_origin_post.status(), StatusCode::FORBIDDEN);
+        let _ = untrusted_origin_post.bytes().await.unwrap();
+
+        let trusted_post = client
+            .post(&discovery_url)
+            .header("Origin", &trusted_origin)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(trusted_post.status(), StatusCode::OK);
+        assert_eq!(
+            trusted_post
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            trusted_origin.as_str()
+        );
+        let trusted_post: Value = trusted_post.json().await.unwrap();
+        assert!(trusted_post["ws_url"].as_str().unwrap().contains("token="));
+
+        let hostile_http_origin_wins = client
+            .post(&discovery_url)
+            .header("Origin", "https://attacker.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(hostile_http_origin_wins.status(), StatusCode::FORBIDDEN);
+        let _ = hostile_http_origin_wins.bytes().await.unwrap();
+
         let extension = client
             .get(&discovery_url)
             .header("Origin", &trusted_origin)

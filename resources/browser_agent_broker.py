@@ -26,6 +26,8 @@ DEFAULT_HEARTBEAT_TTL_SEC = 8.0
 DISCONNECTED_RETENTION_SEC = 60.0
 MAX_COMMAND_QUEUE = 64
 MAX_PENDING_REQUESTS = 128
+MAX_RETIRED_REQUESTS = MAX_PENDING_REQUESTS * 8
+RETIRED_REQUEST_TTL_SEC = 600.0
 MAX_ELEMENT_REFERENCES_PER_SESSION = 512
 ELEMENT_REFERENCE_TTL_SEC = 120.0
 DEFAULT_CONSOLE_MAX_AGE_MS = 300_000
@@ -223,6 +225,8 @@ class LeaseState:
 
     token: str
     owner_label: str
+    project_root: str
+    caller_label: str
     acquired_wall_time: float
     expires_monotonic: float
     expires_wall_time: float
@@ -496,12 +500,20 @@ class BrowserSessionBroker:
         *,
         broker_instance_id: str | None = None,
         local_user: str | None = None,
+        default_project_root: Any = None,
+        enforce_scoped_leases: bool = False,
     ) -> None:
         self.heartbeat_ttl = heartbeat_ttl
         self.broker_instance_id = broker_instance_id or secrets.token_hex(16)
         self.local_user = (local_user or getpass.getuser() or "local-user")[:120]
+        self.default_project_root = (
+            _canonical_project_root(default_project_root)
+            or _canonical_project_root(os.getcwd())
+        )
+        self.enforce_scoped_leases = enforce_scoped_leases
         self.sessions: dict[str, SessionRecord] = {}
         self.pending: dict[str, PendingRequest] = {}
+        self.retired_requests: dict[str, float] = {}
         self.quarantined_responses: list[dict[str, Any]] = []
         self.capability_grants: dict[str, CapabilityGrant] = {}
         self.privileged_audit: list[dict[str, Any]] = []
@@ -522,7 +534,6 @@ class BrowserSessionBroker:
     ) -> dict[str, Any]:
         """Issue one explicit grant after lease, confirmation, and policy gates."""
         record = self.require_session(extension_instance_id)
-        self.validate_lease(record, lease_token)
         name = _clean_text(capability).lower()
         if name not in PRIVILEGED_CAPABILITIES:
             raise BrokerError(
@@ -537,6 +548,12 @@ class BrowserSessionBroker:
                 "invalid_browser_operation",
                 "project_root and caller_label are required for a capability grant",
             )
+        self.validate_lease(
+            record,
+            lease_token,
+            project_root=project,
+            caller_label=caller,
+        )
         if non_interactive:
             if _clean_text(acknowledged_capability).lower() != name:
                 raise BrokerError(
@@ -966,9 +983,15 @@ class BrowserSessionBroker:
         extension_instance_id: str,
         owner_label: str,
         ttl_secs: Any = DEFAULT_LEASE_TTL_SEC,
+        *,
+        project_root: Any = None,
+        caller_label: Any = None,
+        require_scope: bool | None = None,
     ) -> dict[str, Any]:
         """Acquire an exclusive, renewable session lease."""
         record = self.require_session(extension_instance_id)
+        if require_scope is None:
+            require_scope = self.enforce_scoped_leases
         now = time.monotonic()
         self._release_expired_lease(record, now)
         if record.lease is not None:
@@ -978,11 +1001,21 @@ class BrowserSessionBroker:
                 record.lease.public_summary(),
             )
         owner = _clean_text(owner_label)[:120] or "external-agent"
+        project = _canonical_project_root(project_root)
+        caller = _clean_text(caller_label)[:120]
+        if require_scope and (not project or not caller):
+            raise BrokerError(
+                "invalid_browser_lease",
+                "project_root and caller_label are required for a browser lease",
+                {"extension_instance_id": extension_instance_id},
+            )
         ttl = _bounded_ttl(ttl_secs)
         wall_now = time.time()
         lease = LeaseState(
             token=f"lease_{secrets.token_urlsafe(32)}",
             owner_label=owner,
+            project_root=project or self.default_project_root,
+            caller_label=caller or owner,
             acquired_wall_time=wall_now,
             expires_monotonic=now + ttl,
             expires_wall_time=wall_now + ttl,
@@ -995,10 +1028,29 @@ class BrowserSessionBroker:
         extension_instance_id: str,
         lease_token: str,
         ttl_secs: Any = DEFAULT_LEASE_TTL_SEC,
+        *,
+        project_root: Any = None,
+        caller_label: Any = None,
+        require_scope: bool | None = None,
     ) -> dict[str, Any]:
         """Renew a matching live lease without changing ownership."""
         record = self.require_session(extension_instance_id)
-        lease = self.validate_lease(record, lease_token)
+        if require_scope is None:
+            require_scope = self.enforce_scoped_leases
+        project = _canonical_project_root(project_root)
+        caller = _clean_text(caller_label)[:120]
+        if require_scope and (not project or not caller):
+            raise BrokerError(
+                "invalid_browser_lease",
+                "project_root and caller_label are required to renew a browser lease",
+                {"extension_instance_id": extension_instance_id},
+            )
+        lease = self.validate_lease(
+            record,
+            lease_token,
+            project_root=project,
+            caller_label=caller,
+        )
         ttl = _bounded_ttl(ttl_secs)
         now = time.monotonic()
         wall_now = time.time()
@@ -1010,14 +1062,40 @@ class BrowserSessionBroker:
         self,
         extension_instance_id: str,
         lease_token: str,
+        *,
+        project_root: Any = None,
+        caller_label: Any = None,
+        require_scope: bool | None = None,
     ) -> dict[str, Any]:
         """Release a matching lease and make the session immediately available."""
         record = self.require_session(extension_instance_id)
-        self.validate_lease(record, lease_token)
+        if require_scope is None:
+            require_scope = self.enforce_scoped_leases
+        project = _canonical_project_root(project_root)
+        caller = _clean_text(caller_label)[:120]
+        if require_scope and (not project or not caller):
+            raise BrokerError(
+                "invalid_browser_lease",
+                "project_root and caller_label are required to release a browser lease",
+                {"extension_instance_id": extension_instance_id},
+            )
+        self.validate_lease(
+            record,
+            lease_token,
+            project_root=project,
+            caller_label=caller,
+        )
         record.lease = None
         return {"extension_instance_id": extension_instance_id, "released": True}
 
-    def validate_lease(self, record: SessionRecord, lease_token: Any) -> LeaseState:
+    def validate_lease(
+        self,
+        record: SessionRecord,
+        lease_token: Any,
+        *,
+        project_root: Any = None,
+        caller_label: Any = None,
+    ) -> LeaseState:
         """Validate the secret token and bounded lifetime for one session."""
         now = time.monotonic()
         lease = record.lease
@@ -1036,6 +1114,20 @@ class BrowserSessionBroker:
                 "a valid lease_token is required for this browser operation",
                 {"extension_instance_id": record.extension_instance_id},
             )
+        expected_project = _canonical_project_root(project_root) or self.default_project_root
+        expected_caller = _clean_text(caller_label)[:120] or lease.owner_label
+        if lease.project_root != expected_project:
+            raise BrokerError(
+                "invalid_browser_lease",
+                "browser lease scope does not match this request",
+                {"extension_instance_id": record.extension_instance_id},
+            )
+        if lease.caller_label != expected_caller:
+            raise BrokerError(
+                "invalid_browser_lease",
+                "browser lease scope does not match this request",
+                {"extension_instance_id": record.extension_instance_id},
+            )
         return lease
 
     def authorize_command(
@@ -1043,9 +1135,12 @@ class BrowserSessionBroker:
         data: dict[str, Any],
         *,
         legacy_compatibility: bool = True,
+        require_scope: bool | None = None,
     ) -> tuple[SessionRecord, dict[str, Any], str | None]:
         """Resolve a command target and enforce exclusive ownership."""
         operation = _clean_text(data.get("cmd"))
+        if require_scope is None:
+            require_scope = self.enforce_scoped_leases
         record, target, explicit = self.resolve_target(data.get("target"))
         required_features: list[str] = []
         required_feature = _clean_text(data.get("required_feature"))
@@ -1088,8 +1183,30 @@ class BrowserSessionBroker:
         if operation in LEASE_REQUIRED_COMMANDS:
             supplied = _clean_text(data.get("lease_token"))
             if supplied:
-                self.validate_lease(record, supplied)
+                project = _canonical_project_root(data.get("project_root"))
+                caller = _clean_text(data.get("caller_label"))[:120]
+                if require_scope and (not project or not caller):
+                    raise BrokerError(
+                        "invalid_browser_lease",
+                        "project_root and caller_label are required for a browser operation",
+                        {"extension_instance_id": record.extension_instance_id},
+                    )
+                self.validate_lease(
+                    record,
+                    supplied,
+                    project_root=project,
+                    caller_label=caller,
+                )
             elif operation in MUTATING_COMMANDS and not explicit and legacy_compatibility:
+                if require_scope and (
+                    not _canonical_project_root(data.get("project_root"))
+                    or not _clean_text(data.get("caller_label"))
+                ):
+                    raise BrokerError(
+                        "invalid_browser_lease",
+                        "project_root and caller_label are required for a browser operation",
+                        {"extension_instance_id": record.extension_instance_id},
+                    )
                 now = time.monotonic()
                 self._release_expired_lease(record, now)
                 if record.lease is not None:
@@ -1103,6 +1220,10 @@ class BrowserSessionBroker:
                 record.lease = LeaseState(
                     token=ephemeral_token,
                     owner_label="legacy-compatibility-adapter",
+                    project_root=_canonical_project_root(data.get("project_root"))
+                    or self.default_project_root,
+                    caller_label=_clean_text(data.get("caller_label"))[:120]
+                    or "legacy-compatibility-adapter",
                     acquired_wall_time=wall_now,
                     expires_monotonic=now + DEFAULT_LEASE_TTL_SEC,
                     expires_wall_time=wall_now + DEFAULT_LEASE_TTL_SEC,
@@ -1138,6 +1259,14 @@ class BrowserSessionBroker:
                 if operation in MUTATING_COMMANDS
                 else "invalid_browser_operation",
                 f"duplicate request_id: {request_id}",
+            )
+        self._expire_retired_requests()
+        if request_id in self.retired_requests:
+            raise BrokerError(
+                "duplicate_browser_mutation"
+                if operation in MUTATING_COMMANDS
+                else "invalid_browser_operation",
+                "request_id is still reserved after a terminal browser request; use a new id",
             )
         if len(self.pending) >= MAX_PENDING_REQUESTS:
             raise BrokerError(
@@ -2030,7 +2159,10 @@ class BrowserSessionBroker:
             return None
         pending = self.pending.get(request_id)
         if pending is None:
-            self._quarantine(payload, "unknown_request_id")
+            self._quarantine(
+                payload,
+                "late_response" if request_id in self.retired_requests else "unknown_request_id",
+            )
             raise BrokerError(
                 "mismatched_browser_response",
                 f"no pending browser request matches response {request_id}",
@@ -2051,6 +2183,7 @@ class BrowserSessionBroker:
                 "browser response target does not match its pending request",
             )
         self.pending.pop(request_id, None)
+        self._retire_request(request_id)
         response = dict(payload)
         response["schema_version"] = SCHEMA_VERSION
         response["operation"] = pending.operation
@@ -2100,6 +2233,7 @@ class BrowserSessionBroker:
         pending = self.pending.pop(request_id, None)
         if pending is None:
             return
+        self._retire_request(request_id)
         record = self.sessions.get(pending.extension_instance_id)
         if record is not None:
             record.command_queue = [
@@ -2114,6 +2248,7 @@ class BrowserSessionBroker:
     def expire_stale(self, now: float | None = None) -> None:
         """Expire sessions, pending requests, queues, and leases deterministically."""
         current = time.monotonic() if now is None else now
+        self._expire_retired_requests(current)
         self.expire_capability_grants(current)
         for record in list(self.sessions.values()):
             self._release_expired_lease(record, current)
@@ -2129,6 +2264,7 @@ class BrowserSessionBroker:
                 if pending.extension_instance_id != record.extension_instance_id:
                     continue
                 self.pending.pop(request_id, None)
+                self._retire_request(request_id, current)
                 if not pending.future.done():
                     pending.future.set_result(
                         BrokerError(
@@ -2138,6 +2274,25 @@ class BrowserSessionBroker:
                     )
             if current - record.last_heartbeat > DISCONNECTED_RETENTION_SEC:
                 self.sessions.pop(record.extension_instance_id, None)
+
+    def _expire_retired_requests(self, now: float | None = None) -> None:
+        current = time.monotonic() if now is None else now
+        expired = [
+            request_id
+            for request_id, retired_at in self.retired_requests.items()
+            if current - retired_at > RETIRED_REQUEST_TTL_SEC
+        ]
+        for request_id in expired:
+            self.retired_requests.pop(request_id, None)
+
+    def _retire_request(self, request_id: str, now: float | None = None) -> None:
+        if not request_id:
+            return
+        current = time.monotonic() if now is None else now
+        self._expire_retired_requests(current)
+        self.retired_requests[request_id] = current
+        while len(self.retired_requests) > MAX_RETIRED_REQUESTS:
+            self.retired_requests.pop(next(iter(self.retired_requests)))
 
     def update_frame(
         self,

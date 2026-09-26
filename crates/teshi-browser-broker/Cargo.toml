@@ -19,7 +19,15 @@ tracing.workspace = true
 tower = { version = "0.5", features = ["limit", "util"] }
 uuid = { version = "1", features = ["v4"] }
 
+[features]
+contract-oracle = []
+
 [dev-dependencies]
 reqwest.workspace = true
 tempfile = "3"
 tokio-tungstenite = "0.29"
+
+[[example]]
+name = "browser_contract_oracle"
+path = "examples/browser_contract_oracle.rs"
+required-features = ["contract-oracle"]

@@ -5,6 +5,17 @@
 const DISCOVERY_URL = "http://127.0.0.1:17373/v1/bridge";
 const HEARTBEAT_URL = "http://127.0.0.1:17373/v1/bridge/heartbeat";
 const RESPONSE_URL = "http://127.0.0.1:17373/v1/bridge/response";
+// A JSON POST makes Chromium perform a CORS request with its browser-supplied
+// extension Origin. Rust only returns a credential on that exact Origin; the
+// public GET probe remains project-neutral and credential-free.
+function discoveryRequestOptions() {
+  return {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+    cache: "no-store",
+  };
+}
 const PROTOCOL_VERSION = 1;
 const IDENTITY_STORAGE_KEY = "teshiBridgeIdentity";
 /** Metadata heartbeat (tabs, URL) — no screenshot. */
@@ -395,7 +406,7 @@ function applyBridgeDiscovery(info) {
 
 async function refreshExtensionFrameWsUrl() {
   try {
-    const res = await fetch(DISCOVERY_URL);
+    const res = await fetch(DISCOVERY_URL, discoveryRequestOptions());
     if (!res.ok) {
       return false;
     }
@@ -2788,7 +2799,7 @@ function setBadge(connected) {
 
 async function refreshBridgeCache() {
   try {
-    const res = await fetch(DISCOVERY_URL);
+    const res = await fetch(DISCOVERY_URL, discoveryRequestOptions());
     if (!res.ok) {
       return false;
     }

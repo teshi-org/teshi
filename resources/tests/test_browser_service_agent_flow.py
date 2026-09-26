@@ -8,6 +8,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 RESOURCES = Path(__file__).resolve().parents[1]
@@ -78,12 +79,19 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_privileged_grant_cli_flow_is_default_deny_and_lists_no_token(self) -> None:
         await self.register("profile-a")
-        lease = self.bridge.broker.acquire_lease("profile-a", "teshi-cli", 60)
+        lease = self.bridge.broker.acquire_lease(
+            "profile-a",
+            "teshi-cli",
+            60,
+            project_root=self.project_root,
+            caller_label="teshi-cli",
+        )
         command = {
             "cmd": "create_browser_capability_grant",
             "request_id": "grant-1",
             "target": target("profile-a"),
             "lease_token": lease["lease_token"],
+            "project_root": str(self.project_root),
             "capability": "javascript",
             "caller_label": "teshi-cli",
             "non_interactive": True,
@@ -118,7 +126,13 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
             ["execute_privileged_javascript", "execute_privileged_cdp"]
         )
         await self.bridge.handle_heartbeat(payload)
-        lease = self.bridge.broker.acquire_lease("profile-a", "teshi-cli", 60)
+        lease = self.bridge.broker.acquire_lease(
+            "profile-a",
+            "teshi-cli",
+            60,
+            project_root=self.project_root,
+            caller_label="teshi-cli",
+        )
         policy = self.project_root / ".teshi" / "browser-policy.json"
         policy.parent.mkdir(parents=True, exist_ok=True)
         policy.write_text(
@@ -159,6 +173,7 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
         common = {
             "target": target("profile-a"),
             "lease_token": lease["lease_token"],
+            "project_root": str(self.project_root),
             "caller_label": "teshi-cli",
         }
         denied = await self.bridge.forward_command(
@@ -225,7 +240,13 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
             "extension_management": True,
         }
         await self.bridge.handle_heartbeat(payload)
-        lease = self.bridge.broker.acquire_lease("profile-a", "teshi-cli", 60)
+        lease = self.bridge.broker.acquire_lease(
+            "profile-a",
+            "teshi-cli",
+            60,
+            project_root=self.project_root,
+            caller_label="teshi-cli",
+        )
 
         def grant(capability: str) -> dict:
             return self.bridge.broker.create_capability_grant(
@@ -273,6 +294,7 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
         self.bridge._direct_command_callback = direct
         base = {
             "target": target("profile-a"), "lease_token": lease["lease_token"],
+            "project_root": str(self.project_root),
             "caller_label": "teshi-cli",
         }
         metadata = await self.bridge.forward_command({
@@ -332,6 +354,10 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
             17373,
             "ws://127.0.0.1:20254/extension/frames",
         )
+        # These legacy flow fixtures intentionally exercise the pre-scope
+        # direct Broker API. The production ChromeBridge path enables scoped
+        # leases; the dedicated scope test covers its fail-closed behavior.
+        self.bridge.broker.enforce_scoped_leases = False
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -419,7 +445,13 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(Path(artifact["path"]).exists())
 
         await self.register("profile-a")
-        lease = self.bridge.broker.acquire_lease("profile-a", "teshi-cli", 60)
+        lease = self.bridge.broker.acquire_lease(
+            "profile-a",
+            "teshi-cli",
+            60,
+            project_root=other_root,
+            caller_label="teshi-cli",
+        )
         policy = other_root / ".teshi" / "browser-policy.json"
         policy.parent.mkdir(parents=True, exist_ok=True)
         policy.write_text(
@@ -893,6 +925,26 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             all(item["target"]["extension_instance_id"] == "profile-a" for item in delivered)
         )
+
+    async def test_activate_tab_releases_scoped_ui_lease_when_queue_rejects(self) -> None:
+        await self.register("profile-a")
+        self.bridge.broker.enforce_scoped_leases = True
+        with patch.object(
+            self.bridge.broker,
+            "queue_command",
+            side_effect=BrokerError("browser_session_busy", "test queue rejection"),
+        ):
+            result = await self.bridge.handle_activate_tab_http(
+                {
+                    "project_root": str(self.project_root),
+                    "extension_instance_id": "profile-a",
+                    "window_id": 7,
+                    "tab_id": 42,
+                }
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "browser_session_busy")
+        self.assertIsNone(self.bridge.broker.sessions["profile-a"].lease)
 
     async def test_two_extensions_complete_in_reverse_order_without_crossing(self) -> None:
         await self.register("profile-a")

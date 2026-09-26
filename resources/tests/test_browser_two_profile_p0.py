@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,7 +17,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from playwright.async_api import BrowserContext, async_playwright
+from playwright.async_api import BrowserContext, Worker, async_playwright
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -27,7 +28,8 @@ TESHI_CLI = Path(
     )
 )
 EXTENSION = REPO_ROOT / "extension" / "teshi-bridge"
-DISCOVERY_PORT = 17373
+DISCOVERY_PORT = int(os.environ.get("TESHI_P0_DISCOVERY_PORT", "17373"))
+START_ISOLATED_BROKER = os.environ.get("TESHI_P0_START_ISOLATED_BROKER") == "1"
 REDACTED = "<redacted>"
 _SECRET_FIELD = re.compile(
     r'(?i)(["\']?(?:lease_token|token|grant_token|access_token)["\']?\s*[:=]\s*["\'])[^"\']*(["\'])'
@@ -57,6 +59,14 @@ class AcceptancePage(BaseHTTPRequestHandler):
 class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.stage = "setup"
+        self.temp = tempfile.TemporaryDirectory(prefix="teshi-p0-two-profile-")
+        self.contexts: list[BrowserContext] = []
+        self.broker: subprocess.Popen[str] | None = None
+        self.broker_stderr: list[str] = []
+        self.broker_stderr_thread: threading.Thread | None = None
+        self.project_root = REPO_ROOT
+        self.extension_path = EXTENSION
+        self.workers: list[Worker] = []
         artifact_dir = os.environ.get("TESHI_P0_ARTIFACT_DIR")
         self.artifact_dir = Path(artifact_dir) if artifact_dir else None
         if self.artifact_dir is not None:
@@ -64,34 +74,55 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
             self.diagnostics_path = self.artifact_dir / "two-profile-p0.jsonl"
         else:
             self.diagnostics_path = None
+        self.addAsyncCleanup(self._cleanup_browser_profiles)
+        if not TESHI_CLI.is_file():
+            self.fail(f"built teshi CLI is missing: {TESHI_CLI}")
+        if START_ISOLATED_BROKER:
+            broker_temp = tempfile.TemporaryDirectory(prefix="teshi-p0-python-broker-")
+            self.broker_temp = broker_temp
+            self.project_root = Path(broker_temp.name).resolve()
+            self.extension_path = Path(self.temp.name) / "teshi-bridge"
+            shutil.copytree(EXTENSION, self.extension_path)
+            self._rewrite_extension_port()
+            self.previous_existing_endpoint_mode = os.environ.get(
+                "TESHI_BROWSER_BROKER_USE_EXISTING_ENDPOINT"
+            )
+            os.environ["TESHI_BROWSER_BROKER_USE_EXISTING_ENDPOINT"] = "1"
+            await self._start_isolated_broker()
         self._log(
             "test_start",
             {
                 "pid": os.getpid(),
                 "cwd": str(REPO_ROOT),
+                "project_root": str(self.project_root),
                 "cli": str(TESHI_CLI),
-                "extension": str(EXTENSION),
+                "extension": str(self.extension_path),
                 "python": sys.version,
                 "platform": platform.platform(),
+                "isolated_broker": START_ISOLATED_BROKER,
             },
         )
-        self.addAsyncCleanup(self._cleanup_browser_profiles)
-        if not TESHI_CLI.is_file():
-            self.fail(f"built teshi CLI is missing: {TESHI_CLI}")
-        self.temp = tempfile.TemporaryDirectory(prefix="teshi-p0-two-profile-")
         self.http = ThreadingHTTPServer(("127.0.0.1", 0), AcceptancePage)
         self.http_thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.http_thread.start()
         self._set_stage("discovery and broker preflight")
-        baseline_result = await self.cli("sessions", timeout=20)
-        self.baseline = {
-            session["identity"]["extension_instance_id"]
-            for session in baseline_result["sessions"]
-        }
+        if START_ISOLATED_BROKER:
+            self.baseline = set()
+            self._log(
+                "baseline_sessions",
+                {"sessions": [], "reason": "isolated broker endpoint is already prepared"},
+            )
+        else:
+            baseline_result = await self.cli("sessions", timeout=20)
+            self.baseline = {
+                session["identity"]["extension_instance_id"]
+                for session in baseline_result["sessions"]
+            }
         self._log("runtime_preflight", {
             "discovery_port": DISCOVERY_PORT,
             "port_processes": self._discovery_port_processes(),
             "endpoint": self._endpoint_record(),
+            "broker_pid": self.broker.pid if self.broker else None,
             "http_port": self.http.server_address[1],
         })
         self.playwright = await async_playwright().start()
@@ -105,12 +136,11 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
             "chromium_version": self._file_version(chromium),
             "chrome_path": os.environ.get("TESHI_CHROME_PATH", "not_selected_by_test"),
         })
-        extension_arg = str(EXTENSION.resolve())
+        extension_arg = str(self.extension_path.resolve())
         launch_args = [
             f"--disable-extensions-except={extension_arg}",
             f"--load-extension={extension_arg}",
         ]
-        self.contexts: list[BrowserContext] = []
         for name in ("profile-a", "profile-b"):
             context = await self.playwright.chromium.launch_persistent_context(
                 Path(self.temp.name) / name,
@@ -120,11 +150,20 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
                 args=[*launch_args, "--window-position=-32000,-32000", "--start-minimized"],
             )
             self.contexts.append(context)
+            if context.service_workers:
+                self.workers.append(context.service_workers[0])
+            else:
+                self.workers.append(
+                    await context.wait_for_event("serviceworker", timeout=15_000)
+                )
         port = self.http.server_address[1]
         self._set_stage("navigate bootstrap pages")
         await asyncio.gather(
             self.contexts[0].pages[0].goto(f"http://127.0.0.1:{port}/bootstrap-a"),
             self.contexts[1].pages[0].goto(f"http://127.0.0.1:{port}/bootstrap-b"),
+        )
+        await asyncio.gather(
+            *(self._log_worker_discovery(index, worker) for index, worker in enumerate(self.workers))
         )
         self._log("profiles_started", {
             "temp_root": self.temp.name,
@@ -136,6 +175,113 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
     def _set_stage(self, stage: str) -> None:
         self.stage = stage
         self._log("stage_start", {"stage": stage})
+
+    def _rewrite_extension_port(self) -> None:
+        path = self.extension_path / "background.js"
+        text = path.read_text(encoding="utf-8")
+        text, replacements = re.subn(
+            r"http://127\.0\.0\.1:\d+",
+            f"http://127.0.0.1:{DISCOVERY_PORT}",
+            text,
+        )
+        if replacements != 3:
+            self.fail(
+                f"expected three Broker URLs in copied extension, found {replacements}"
+            )
+        path.write_text(text, encoding="utf-8")
+
+    def _drain_broker_stderr(self, stream: object) -> None:
+        for line in stream:  # type: ignore[union-attr]
+            self.broker_stderr.append(str(line).rstrip())
+
+    async def _start_isolated_broker(self) -> None:
+        args = [
+            sys.executable,
+            str(REPO_ROOT / "resources" / "browser_service.py"),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--mode",
+            "chrome",
+            "--discovery-port",
+            str(DISCOVERY_PORT),
+            "--project-root",
+            str(self.project_root),
+        ]
+        self.broker = subprocess.Popen(
+            args,
+            cwd=REPO_ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        assert self.broker.stdout is not None
+        assert self.broker.stderr is not None
+        self.broker_stderr_thread = threading.Thread(
+            target=self._drain_broker_stderr,
+            args=(self.broker.stderr,),
+            daemon=True,
+        )
+        self.broker_stderr_thread.start()
+        ready_line = await asyncio.wait_for(
+            asyncio.to_thread(self.broker.stdout.readline), timeout=15
+        )
+        if not ready_line.strip().isdigit():
+            self._log(
+                "broker_start_failed",
+                {
+                    "pid": self.broker.pid,
+                    "returncode": self.broker.poll(),
+                    "stdout": ready_line,
+                    "stderr": self.broker_stderr[-40:],
+                },
+            )
+            self.fail(
+                "isolated Python Broker did not announce its WebSocket port: "
+                f"stdout={ready_line!r}, stderr={self.broker_stderr[-10:]}"
+            )
+        self._log(
+            "broker_started",
+            {
+                "pid": self.broker.pid,
+                "discovery_port": DISCOVERY_PORT,
+                "websocket_port": int(ready_line.strip()),
+            },
+        )
+
+    async def _log_worker_discovery(self, index: int, worker: Worker) -> None:
+        try:
+            diagnostics = await worker.evaluate(
+                """async () => {
+                    const response = await fetch(DISCOVERY_URL, discoveryRequestOptions());
+                    const body = await response.text();
+                    let info = {};
+                    try { info = body ? JSON.parse(body) : {}; } catch {}
+                    return {
+                        origin: globalThis.location?.origin || "",
+                        status: response.status,
+                        bodyLength: body.length,
+                        keys: Object.keys(info).sort(),
+                        hasTokenizedWs: String(info.ws_url || "").includes("token="),
+                        hasTokenizedFrameWs: String(info.extension_frame_ws_url || "").includes("token="),
+                        bridge: info.bridge || "",
+                        brokerFeatures: info.broker_features || [],
+                        cache: {
+                            projectRoot: cachedProjectRoot,
+                            projectNeutral: cachedBrokerProjectNeutral,
+                            tokenCached: Boolean(cachedBrokerToken),
+                            frameWs: Boolean(extensionFrameWsUrl),
+                            lastBridgeStatus,
+                        },
+                    };
+                }"""
+            )
+        except Exception as error:  # noqa: BLE001
+            diagnostics = {"worker_error": str(error)}
+        self._log("extension_discovery_probe", {"profile_index": index, **diagnostics})
 
     @staticmethod
     def _redact(value: object) -> object:
@@ -183,9 +329,8 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
             f"(Get-Item -LiteralPath '{escaped}').VersionInfo.FileVersion",
         )
 
-    @staticmethod
-    def _endpoint_record() -> dict:
-        path = REPO_ROOT / ".teshi" / "cdp-endpoint.json"
+    def _endpoint_record(self) -> dict:
+        path = self.project_root / ".teshi" / "cdp-endpoint.json"
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
@@ -267,6 +412,38 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
             self.http_thread.join(timeout=2)
         if getattr(self, "temp", None) is not None:
             self.temp.cleanup()
+        broker = self.broker
+        self.broker = None
+        if broker is not None:
+            if broker.poll() is None:
+                broker.terminate()
+                try:
+                    await asyncio.to_thread(broker.wait, 10)
+                except subprocess.TimeoutExpired:
+                    broker.kill()
+                    await asyncio.to_thread(broker.wait, 5)
+            if self.broker_stderr_thread is not None:
+                self.broker_stderr_thread.join(timeout=2)
+            if broker.stdout is not None:
+                broker.stdout.close()
+            if broker.stderr is not None:
+                broker.stderr.close()
+            self._log(
+                "broker_stopped",
+                {
+                    "pid": broker.pid,
+                    "returncode": broker.returncode,
+                    "stderr": self.broker_stderr[-40:],
+                },
+            )
+        if getattr(self, "broker_temp", None) is not None:
+            self.broker_temp.cleanup()
+        if hasattr(self, "previous_existing_endpoint_mode"):
+            previous = self.previous_existing_endpoint_mode
+            if previous is None:
+                os.environ.pop("TESHI_BROWSER_BROKER_USE_EXISTING_ENDPOINT", None)
+            else:
+                os.environ["TESHI_BROWSER_BROKER_USE_EXISTING_ENDPOINT"] = previous
         self._log("cleanup_complete", {"test_pid": os.getpid()})
 
     async def cli(self, *args: str, timeout: float = 30) -> dict:
@@ -275,7 +452,7 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
         def invoke() -> subprocess.CompletedProcess[str]:
             return subprocess.run(
                 [str(TESHI_CLI), "browser", *args],
-                cwd=REPO_ROOT,
+                cwd=self.project_root,
                 capture_output=True,
                 text=True,
                 timeout=timeout,

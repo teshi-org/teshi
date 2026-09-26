@@ -580,6 +580,7 @@ def write_cdp_endpoint_file(
     extension_frame_ws_url: str | None = None,
     broker_pid: int | None = None,
     broker_start_id: str | None = None,
+    broker_features: list[str] | None = None,
 ) -> None:
     teshi_dir = project_root / ".teshi"
     teshi_dir.mkdir(parents=True, exist_ok=True)
@@ -601,6 +602,8 @@ def write_cdp_endpoint_file(
         payload["broker_pid"] = broker_pid or os.getpid()
         if broker_start_id:
             payload["broker_start_id"] = broker_start_id
+        if broker_features is not None:
+            payload["broker_features"] = list(broker_features)
     if extension_frame_ws_url:
         payload["extension_frame_ws_url"] = extension_frame_ws_url
     endpoint_path = teshi_dir / "cdp-endpoint.json"
@@ -1399,6 +1402,8 @@ async def handle_embedded_command(
                     str(data.get("extension_instance_id") or ""),
                     str(data.get("owner_label") or "external-agent"),
                     data.get("ttl_secs"),
+                    project_root=data.get("project_root"),
+                    caller_label=data.get("caller_label"),
                 )
                 return operation_success(str(cmd), str(request_id or ""), lease=lease)
             except BrokerError as exc:
@@ -1409,6 +1414,8 @@ async def handle_embedded_command(
                     str(data.get("extension_instance_id") or ""),
                     str(data.get("lease_token") or ""),
                     data.get("ttl_secs"),
+                    project_root=data.get("project_root"),
+                    caller_label=data.get("caller_label"),
                 )
                 return operation_success(str(cmd), str(request_id or ""), lease=lease)
             except BrokerError as exc:
@@ -1418,6 +1425,8 @@ async def handle_embedded_command(
                 released = broker.release_lease(
                     str(data.get("extension_instance_id") or ""),
                     str(data.get("lease_token") or ""),
+                    project_root=data.get("project_root"),
+                    caller_label=data.get("caller_label"),
                 )
                 return operation_success(str(cmd), str(request_id or ""), **released)
             except BrokerError as exc:
@@ -1907,7 +1916,11 @@ async def run_embedded(
 
     session = EmbeddedSession()
     await session.start(cdp_port)
-    agent_broker = BrowserSessionBroker(HEARTBEAT_TTL_SEC)
+    agent_broker = BrowserSessionBroker(
+        HEARTBEAT_TTL_SEC,
+        default_project_root=project_root,
+        enforce_scoped_leases=True,
+    )
     cdp_meta: dict[str, Any] = {}
     if project_root is not None:
         try:
@@ -2404,7 +2417,11 @@ class ChromeBridge:
         self.ws_url = ws_url
         self.discovery_port = discovery_port
         self.extension_frame_ws_url = extension_frame_ws_url
-        self.broker = BrowserSessionBroker(HEARTBEAT_TTL_SEC)
+        self.broker = BrowserSessionBroker(
+            HEARTBEAT_TTL_SEC,
+            default_project_root=self.project_root,
+            enforce_scoped_leases=True,
+        )
         self._frame_callback = frame_callback
         self._event_callback = event_callback
         self._direct_command_callback = direct_command_callback
@@ -2464,6 +2481,7 @@ class ChromeBridge:
             extension_frame_ws_url=self.extension_frame_ws_url,
             broker_pid=self.broker_pid,
             broker_start_id=self.broker_start_id,
+            broker_features=["p0.control"],
         )
 
     def debug_log(self, event: str, payload: dict[str, Any]) -> None:
@@ -2744,8 +2762,13 @@ class ChromeBridge:
             "request_id": f"ui-activate-{time.monotonic_ns()}",
             "target": raw_target,
             "tab_id": tab_id,
+            "project_root": str(self.project_root),
+            "caller_label": "teshi-browser-panel",
         }
         ui_ephemeral_token: str | None = None
+        ui_lease_instance_id: str | None = None
+        ui_lease_project_root = str(self.project_root)
+        ui_lease_caller = "teshi-browser-panel"
         try:
             if raw_target is not None:
                 # The local browser panel is a compatibility UI, not an external
@@ -2756,10 +2779,13 @@ class ChromeBridge:
                 )
                 lease = self.broker.acquire_lease(
                     record.extension_instance_id,
-                    "teshi-browser-panel",
+                    ui_lease_caller,
                     15,
+                    project_root=ui_lease_project_root,
+                    caller_label=ui_lease_caller,
                 )
                 ui_ephemeral_token = str(lease["lease_token"])
+                ui_lease_instance_id = record.extension_instance_id
                 data["target"] = normalized_target
                 data["lease_token"] = ui_ephemeral_token
             record, target, ephemeral = self.broker.authorize_command(
@@ -2798,9 +2824,14 @@ class ChromeBridge:
                 queued=True,
             )
         except BrokerError as exc:
-            if ui_ephemeral_token and instance_id:
+            if ui_ephemeral_token and ui_lease_instance_id:
                 try:
-                    self.broker.release_lease(instance_id, ui_ephemeral_token)
+                    self.broker.release_lease(
+                        ui_lease_instance_id,
+                        ui_ephemeral_token,
+                        project_root=ui_lease_project_root,
+                        caller_label=ui_lease_caller,
+                    )
                 except BrokerError:
                     pass
             return exc.response(str(data["request_id"]), "activate_tab")
@@ -2896,6 +2927,8 @@ class ChromeBridge:
                     str(data.get("extension_instance_id") or ""),
                     str(data.get("owner_label") or "external-agent"),
                     data.get("ttl_secs"),
+                    project_root=data.get("project_root"),
+                    caller_label=data.get("caller_label"),
                 )
                 return operation_success(operation, request_id, lease=lease)
             if operation == "renew_browser_lease":
@@ -2903,12 +2936,16 @@ class ChromeBridge:
                     str(data.get("extension_instance_id") or ""),
                     str(data.get("lease_token") or ""),
                     data.get("ttl_secs"),
+                    project_root=data.get("project_root"),
+                    caller_label=data.get("caller_label"),
                 )
                 return operation_success(operation, request_id, lease=lease)
             if operation == "release_browser_lease":
                 result = self.broker.release_lease(
                     str(data.get("extension_instance_id") or ""),
                     str(data.get("lease_token") or ""),
+                    project_root=data.get("project_root"),
+                    caller_label=data.get("caller_label"),
                 )
                 return operation_success(operation, request_id, **result)
             if operation == "create_browser_capability_grant":
@@ -4050,7 +4087,15 @@ async def run_http_discovery(
                 raw_origin if CHROME_EXTENSION_ORIGIN_RE.fullmatch(raw_origin) else None
             )
 
-            if method == "POST" and not authenticated_http_post(
+            if method == "POST" and path == "/v1/bridge":
+                if extension_origin is None:
+                    writer.write(_http_response(403, b'{"error":"forbidden"}'))
+                else:
+                    payload = json.dumps(bridge.bridge_info()).encode("utf-8")
+                    writer.write(
+                        _http_response(200, payload, cors_origin=extension_origin)
+                    )
+            elif method == "POST" and not authenticated_http_post(
                 headers, command_token, raw_path
             ):
                 writer.write(

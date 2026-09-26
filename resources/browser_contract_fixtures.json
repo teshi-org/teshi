@@ -111,6 +111,85 @@
       ],
       "expected_error": "ambiguous_browser_target",
       "expected_dispatched_commands": 0
+    },
+    "lease_scope_isolation": {
+      "owner": {
+        "extension_instance_id": "profile-a",
+        "project_root": "project-a",
+        "caller_label": "caller-a"
+      },
+      "mismatches": [
+        {
+          "name": "cross_profile",
+          "extension_instance_id": "profile-b",
+          "project_root": "project-a",
+          "caller_label": "caller-a"
+        },
+        {
+          "name": "cross_project",
+          "extension_instance_id": "profile-a",
+          "project_root": "project-b",
+          "caller_label": "caller-a"
+        },
+        {
+          "name": "cross_caller",
+          "extension_instance_id": "profile-a",
+          "project_root": "project-a",
+          "caller_label": "caller-b"
+        }
+      ],
+      "expected_error": "invalid_browser_lease",
+      "expected_dispatched_commands": 0
+    },
+    "cancel_response_race": {
+      "extension_instance_id": "profile-a",
+      "window_id": 7,
+      "tab_id": 42,
+      "project_root": "project-a",
+      "caller_label": "caller-a",
+      "response_first_request_id": "cancel-race-response-first",
+      "cancel_first_request_id": "cancel-race-cancel-first",
+      "response_url": "https://response-first.example.test/",
+      "cancel_error": "browser_operation_cancelled",
+      "cancel_after_response_error": "browser_request_not_found",
+      "late_response_error": "mismatched_browser_response"
+    },
+    "timeout_late_response": {
+      "extension_instance_id": "profile-a",
+      "window_id": 7,
+      "tab_id": 42,
+      "project_root": "project-a",
+      "caller_label": "caller-a",
+      "request_id": "timeout-late-response",
+      "timeout_ms": 1,
+      "timeout_error": "browser_operation_timeout",
+      "late_response_error": "mismatched_browser_response"
+    },
+    "generation_reconnect": {
+      "extension_instance_id": "profile-a",
+      "window_id": 7,
+      "tab_id": 42,
+      "project_root": "project-a",
+      "caller_label": "caller-a",
+      "request_id": "generation-disconnect",
+      "old_generation": 10,
+      "new_generation": 11,
+      "disconnect_error": "browser_session_disconnected",
+      "old_generation_response_error": "mismatched_browser_response",
+      "reused_request_error": "duplicate_browser_mutation"
+    },
+    "queue_fairness": {
+      "blocked_profile": "profile-a",
+      "healthy_profile": "profile-b",
+      "window_id": 7,
+      "tab_id": 42,
+      "project_root": "project-a",
+      "caller_label": "caller-a",
+      "blocked_request_id": "queue-full-a",
+      "healthy_request_id": "queue-healthy-b",
+      "healthy_url": "https://profile-b.example.test/healthy",
+      "blocked_error": "browser_session_busy",
+      "healthy_dispatched": true
     }
   },
   "migration_contracts": {

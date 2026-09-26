@@ -92,7 +92,13 @@ class BrowserSessionBrokerTests(unittest.IsolatedAsyncioTestCase):
         scenario = migration_contract("authorization")
         broker = BrowserSessionBroker(broker_instance_id="broker-a", local_user="user-a")
         record = broker.register_heartbeat(heartbeat(scenario["owner_profile"]))
-        lease = broker.acquire_lease(scenario["owner_profile"], scenario["owner_caller"], 60)
+        lease = broker.acquire_lease(
+            scenario["owner_profile"],
+            scenario["owner_caller"],
+            60,
+            project_root=scenario["owner_project"],
+            caller_label=scenario["owner_caller"],
+        )
         issued = broker.create_capability_grant(
             extension_instance_id=scenario["owner_profile"],
             lease_token=lease["lease_token"],
@@ -163,7 +169,13 @@ class BrowserSessionBrokerTests(unittest.IsolatedAsyncioTestCase):
     async def test_privileged_grant_expiry_policy_and_permission_fail_closed(self) -> None:
         broker = BrowserSessionBroker()
         record = broker.register_heartbeat(heartbeat("profile-a"))
-        lease = broker.acquire_lease("profile-a", "agent-a", 60)
+        lease = broker.acquire_lease(
+            "profile-a",
+            "agent-a",
+            60,
+            project_root="project-a",
+            caller_label="agent-a",
+        )
         with self.assertRaises(BrokerError) as denied:
             broker.create_capability_grant(
                 extension_instance_id="profile-a",
@@ -938,6 +950,45 @@ class StatefulContractFixtureTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(released["released"], scenario["released"])
         self.assertIsNone(record.lease)
+
+    async def test_scoped_service_lease_rejects_missing_and_cross_scope_requests(self) -> None:
+        broker = BrowserSessionBroker(
+            default_project_root="project-a",
+            enforce_scoped_leases=True,
+        )
+        broker.register_heartbeat(heartbeat("profile-a"))
+        with self.assertRaises(BrokerError) as missing_scope:
+            broker.acquire_lease("profile-a", "agent-a", 30)
+        self.assertEqual(missing_scope.exception.code, "invalid_browser_lease")
+
+        lease = broker.acquire_lease(
+            "profile-a",
+            "agent-a",
+            30,
+            project_root="project-a",
+            caller_label="agent-a",
+        )
+        command = {
+            "cmd": "get_page_snapshot",
+            "request_id": "scoped-lease-request",
+            "target": target("profile-a"),
+            "lease_token": lease["lease_token"],
+        }
+        with self.assertRaises(BrokerError) as missing_request_scope:
+            broker.authorize_command(command)
+        self.assertEqual(
+            missing_request_scope.exception.code,
+            "invalid_browser_lease",
+        )
+        with self.assertRaises(BrokerError) as cross_scope:
+            broker.authorize_command(
+                {
+                    **command,
+                    "project_root": "project-b",
+                    "caller_label": "agent-b",
+                }
+            )
+        self.assertEqual(cross_scope.exception.code, "invalid_browser_lease")
 
     async def test_request_fixture_rejects_duplicate_mutation_and_disconnects_pending(self) -> None:
         scenario = migration_contract("request_lifecycle")

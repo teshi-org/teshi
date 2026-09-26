@@ -167,6 +167,14 @@ test("loopback HTTP mutations use the discovered broker token", () => {
   assert.doesNotMatch(background, /fetch\(HEARTBEAT_URL/);
 });
 
+test("extension Discovery uses a browser-originated credential request", () => {
+  assert.match(background, /function discoveryRequestOptions/);
+  assert.match(background, /method: "POST"/);
+  assert.match(background, /"Content-Type": "application\/json"/);
+  assert.match(background, /body: "\{\}"/);
+  assert.doesNotMatch(background, /X-Teshi-Extension-Origin/);
+});
+
 test("mutation monitoring captures bounded summaries around one action dispatch", () => {
   assert.match(background, /async function captureMonitoringSummary/);
   assert.match(background, /unique\.length >= 100/);
