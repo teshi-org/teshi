@@ -341,7 +341,13 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.05)
         return ""
 
-    async def _launch_context(self, name: str, *, keep: bool = True) -> BrowserContext:
+    async def _launch_context(
+        self,
+        name: str,
+        *,
+        keep: bool = True,
+        wait_for_worker: bool = True,
+    ) -> BrowserContext:
         profile_dir = self.temp_root / name
         extension_arg = str(self.extension_copy.resolve())
         context = await asyncio.wait_for(
@@ -361,38 +367,105 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
         )
         if keep:
             try:
-                worker = await self._wait_worker(context)
+                worker = (
+                    await self._wait_worker(context)
+                    if wait_for_worker
+                    else None
+                )
             except Exception:
                 await asyncio.wait_for(context.close(), timeout=10)
                 raise
             self.contexts[name] = context
-            self.workers[name] = worker
+            if worker is not None:
+                self.workers[name] = worker
         return context
 
-    async def _wait_worker(self, context: BrowserContext) -> Worker:
-        if context.service_workers:
-            return context.service_workers[0]
-        try:
-            return await context.wait_for_event("serviceworker", timeout=15_000)
-        except Exception as error:  # noqa: BLE001
-            raise AssertionError(
-                f"Chrome extension service worker did not start: {error}"
-            ) from error
-
-    async def _refresh_worker(self, name: str) -> Worker:
-        """Use the current worker after a persistent Profile restart."""
-        context = self.contexts[name]
+    async def _find_live_worker(self, context: BrowserContext) -> Worker | None:
+        """Probe existing worker handles before relying on a new event."""
         for worker in reversed(context.service_workers):
             try:
                 await self._evaluate_worker(worker, "true", timeout=3)
             except Exception:
                 continue
+            return worker
+        return None
+
+    async def _wait_worker(self, context: BrowserContext) -> Worker:
+        """Reconcile Playwright's worker list with service-worker events.
+
+        Persistent Chromium profiles can expose a live cached worker without
+        emitting a new ``serviceworker`` event. A live evaluation is the
+        authority; the event is only a discovery hint.
+        """
+        deadline = time.monotonic() + 15
+        event_task = asyncio.create_task(context.wait_for_event("serviceworker"))
+        event_received = False
+        try:
+            while time.monotonic() < deadline:
+                worker = await self._find_live_worker(context)
+                if worker is not None:
+                    self._log(
+                        "service_worker_selected",
+                        {
+                            "url": worker.url,
+                            "source": "existing_live"
+                            if not event_received
+                            else "event_or_existing_live",
+                        },
+                    )
+                    return worker
+
+                if event_task.done():
+                    event_received = True
+                    with contextlib.suppress(BaseException):
+                        candidate = event_task.result()
+                        await self._evaluate_worker(candidate, "true", timeout=3)
+                        self._log(
+                            "service_worker_selected",
+                            {"url": candidate.url, "source": "serviceworker_event"},
+                        )
+                        return candidate
+                    event_task = asyncio.create_task(
+                        context.wait_for_event("serviceworker")
+                    )
+                await asyncio.sleep(0.25)
+        finally:
+            if not event_task.done():
+                event_task.cancel()
+            with contextlib.suppress(BaseException):
+                await event_task
+
+        broker_sessions = []
+        if hasattr(self, "control_url"):
+            with contextlib.suppress(Exception):
+                broker_sessions = (await self._list_sessions()).get("sessions", [])
+        self._log(
+            "service_worker_unavailable",
+            {
+                "error": "no live worker after bounded event/list reconciliation",
+                "event_received": event_received,
+                "worker_urls": [worker.url for worker in context.service_workers],
+                "page_urls": [page.url for page in context.pages],
+                "broker_sessions": self._safe_sessions(broker_sessions),
+            },
+        )
+        raise AssertionError(
+            "Chrome extension service worker was not live after bounded event/list reconciliation"
+        )
+
+    async def _refresh_worker(self, name: str) -> Worker:
+        """Use the current worker after a persistent Profile restart."""
+        context = self.contexts[name]
+        worker = await self._find_live_worker(context)
+        if worker is not None:
             self.workers[name] = worker
-            self._log("service_worker_selected", {"profile": name, "url": worker.url})
+            self._log(
+                "service_worker_selected",
+                {"profile": name, "url": worker.url, "source": "refresh_existing_live"},
+            )
             return worker
         try:
-            worker = await context.wait_for_event("serviceworker", timeout=15_000)
-            await self._evaluate_worker(worker, "true", timeout=3)
+            worker = await self._wait_worker(context)
         except Exception as error:  # noqa: BLE001
             self._log(
                 "service_worker_unavailable",
@@ -410,24 +483,34 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
         self._log("service_worker_selected", {"profile": name, "url": worker.url})
         return worker
 
-    async def _wait_stream(self, name: str) -> None:
+    async def _wait_stream(self, name: str) -> int:
         worker = self.workers[name]
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             try:
                 connected = await self._evaluate_worker(
                     worker,
-                    "typeof streamWs !== 'undefined' && "
-                    "streamWs !== null && streamWs.readyState === WebSocket.OPEN",
+                    "({open: typeof streamWs !== 'undefined' && "
+                    "streamWs !== null && streamWs.readyState === WebSocket.OPEN, "
+                    "generation: typeof lastStreamGeneration !== 'undefined' "
+                    "? lastStreamGeneration : null})",
                     timeout=2,
                 )
             except asyncio.TimeoutError:
-                connected = False
+                connected = {}
             except Exception:
-                connected = False
-            if connected:
-                self._log("stream_hello_transport_ready", {"profile": name})
-                return
+                connected = {}
+            if (
+                isinstance(connected, dict)
+                and connected.get("open")
+                and isinstance(connected.get("generation"), int)
+            ):
+                generation = connected["generation"]
+                self._log(
+                    "stream_hello_transport_ready",
+                    {"profile": name, "generation": generation},
+                )
+                return generation
             await asyncio.sleep(0.25)
         try:
             diagnostics = await self._evaluate_worker(
@@ -435,7 +518,8 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                 "({bridge: lastBridgeStatus, projectNeutral: cachedBrokerProjectNeutral, "
                 "projectRoot: cachedProjectRoot, frameWs: Boolean(extensionFrameWsUrl), "
                 "streamState: streamWs ? streamWs.readyState : null, "
-                "screencastActive, streamSessionTabId})",
+                "streamGeneration: typeof lastStreamGeneration !== 'undefined' "
+                "? lastStreamGeneration : null, screencastActive, streamSessionTabId})",
                 timeout=2,
             )
         except Exception as error:  # noqa: BLE001
@@ -506,6 +590,8 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                 projectNeutral: cachedBrokerProjectNeutral,
                 frameWs: Boolean(extensionFrameWsUrl),
                 streamState: streamWs ? streamWs.readyState : null,
+                streamGeneration: typeof lastStreamGeneration !== "undefined"
+                    ? lastStreamGeneration : null,
                 screencastActive,
             };
         }"""
@@ -517,7 +603,9 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                     worker,
                     "({bridge: lastBridgeStatus, projectNeutral: cachedBrokerProjectNeutral, "
                     "projectRoot: cachedProjectRoot, frameWs: Boolean(extensionFrameWsUrl), "
-                    "streamState: streamWs ? streamWs.readyState : null, screencastActive})",
+                    "streamState: streamWs ? streamWs.readyState : null, "
+                    "streamGeneration: typeof lastStreamGeneration !== 'undefined' "
+                    "? lastStreamGeneration : null, screencastActive})",
                     timeout=2,
                 )
             except Exception as diagnostic_error:  # noqa: BLE001
@@ -577,6 +665,30 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             f"stderr={self.broker_stderr[-10:]}"
         )
 
+    async def _wait_session_stream_generation(
+        self, instance_id: str, *, greater_than: int | None = None
+    ) -> dict:
+        deadline = time.monotonic() + 30
+        last: dict = {}
+        while time.monotonic() < deadline:
+            last = await self._list_sessions()
+            for session in last.get("sessions", []):
+                if session.get("identity", {}).get("extension_instance_id") != instance_id:
+                    continue
+                generation = session.get("stream_generation")
+                if (
+                    session.get("health") == "ready"
+                    and isinstance(generation, int)
+                    and (greater_than is None or generation > greater_than)
+                ):
+                    return session
+            await asyncio.sleep(0.5)
+        raise AssertionError(
+            f"Rust Broker did not expose a new stream generation for {instance_id}: "
+            f"{self._redact(json.dumps(last, sort_keys=True))}; "
+            f"stderr={self.broker_stderr[-10:]}"
+        )
+
     @staticmethod
     def _session_for_path(sessions: list[dict], path: str) -> dict:
         for session in sessions:
@@ -619,7 +731,13 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self._set_stage("wait heartbeat stream hello and session target registration")
-        await asyncio.gather(self._wait_stream("profile-a"), self._wait_stream("profile-b"))
+        initial_a_generation, initial_b_generation = await asyncio.gather(
+            self._wait_stream("profile-a"), self._wait_stream("profile-b")
+        )
+        self.initial_stream_generations = {
+            "profile-a": initial_a_generation,
+            "profile-b": initial_b_generation,
+        }
         sessions = await self._wait_sessions(2)
         session_a = self._session_for_path(sessions, "/rust-a")
         session_b = self._session_for_path(sessions, "/rust-b")
@@ -703,7 +821,7 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self._set_stage("reconnect Profile A with its persisted extension identity")
-        await self._launch_context("profile-a")
+        await self._launch_context("profile-a", wait_for_worker=False)
         await asyncio.wait_for(
             self.contexts["profile-a"].pages[0].goto(
                 f"http://127.0.0.1:{self.http.server_address[1]}/rust-a",
@@ -711,9 +829,29 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             ),
             timeout=20,
         )
-        await self._refresh_worker("profile-a")
-        await self._force_stream("profile-a")
-        await self._wait_stream("profile-a")
+        # Chromium may restore the worker URL without exposing a new
+        # Playwright Worker event/handle. Probe once for diagnostics, then use
+        # the Broker's acknowledged stream generation as the live authority.
+        reconnected_worker = await self._find_live_worker(self.contexts["profile-a"])
+        if reconnected_worker is not None:
+            self.workers["profile-a"] = reconnected_worker
+        else:
+            self._log(
+                "service_worker_observation_gap",
+                {
+                    "profile": "profile-a",
+                    "worker_urls": [
+                        worker.url
+                        for worker in self.contexts["profile-a"].service_workers
+                    ],
+                    "reason": "worker URL exists but no live Playwright handle/event",
+                },
+            )
+        reconnected_session = await self._wait_session_stream_generation(
+            self.initial_ids["profile-a"],
+            greater_than=self.initial_stream_generations["profile-a"],
+        )
+        reconnected_a_generation = reconnected_session["stream_generation"]
         reconnected = await self._wait_sessions(2, expected_count=2)
         reconnected_a = self._session_for_path(reconnected, "/rust-a")
         reconnected_b = self._session_for_path(reconnected, "/rust-b")
@@ -724,6 +862,18 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             reconnected_b["identity"]["extension_instance_id"],
             self.initial_ids["profile-b"],
+        )
+        self._log(
+            "profile_reconnect_recovered",
+            {
+                "profile_a_generation": reconnected_a_generation,
+                "profile_a_identity": reconnected_a["identity"][
+                    "extension_instance_id"
+                ],
+                "profile_b_identity": reconnected_b["identity"][
+                    "extension_instance_id"
+                ],
+            },
         )
 
         self._set_stage("restart Rust Broker and reject old generation token")
@@ -776,13 +926,18 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
         )
 
         await asyncio.gather(
-            self._force_stream("profile-a"),
-            self._force_stream("profile-b"),
+            self._wait_session_stream_generation(self.initial_ids["profile-a"]),
+            self._wait_session_stream_generation(self.initial_ids["profile-b"]),
         )
-        await asyncio.gather(self._wait_stream("profile-a"), self._wait_stream("profile-b"))
         recovered = await self._wait_sessions(2, expected_count=2)
         recovered_a = self._session_for_path(recovered, "/rust-a")
         recovered_b = self._session_for_path(recovered, "/rust-b")
+        recovered_a_generation = recovered_a.get("stream_generation")
+        recovered_b_generation = recovered_b.get("stream_generation")
+        self.assertIsInstance(recovered_a_generation, int)
+        self.assertIsInstance(recovered_b_generation, int)
+        self.assertGreater(recovered_a_generation, 0)
+        self.assertGreater(recovered_b_generation, 0)
         self.assertEqual(
             recovered_a["identity"]["extension_instance_id"],
             self.initial_ids["profile-a"],
@@ -797,6 +952,10 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                 "profiles_ready": 2,
                 "identities_preserved": True,
                 "broker_features": self.ready_endpoint["broker_features"],
+                "stream_generations": {
+                    "profile-a": recovered_a_generation,
+                    "profile-b": recovered_b_generation,
+                },
             },
         )
 
@@ -896,6 +1055,7 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                     "extension_instance_id"
                 ),
                 "health": item.get("health"),
+                "stream_generation": item.get("stream_generation"),
                 "urls": [
                     tab.get("url")
                     for window in item.get("windows", [])

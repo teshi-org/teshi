@@ -22,7 +22,7 @@
 - [x] 3.3 Implement project/caller-bound exclusive leases, renewal, release, expiry, and immediate pre-dispatch validation.
 - [x] 3.4 Implement bounded command queues and pending request correlation, cancellation, disconnect cleanup, late-response quarantine, and exactly-once completion.
 - [x] 3.5 Implement bounded page-revision element references and test stale, duplicate, cross-Profile, cross-project, and lease-expiry races.
-- [ ] 3.6 Run deterministic Python/Rust differential state tests and real two-Profile isolation before moving routing to Rust.
+- [x] 3.6 Run deterministic Python/Rust differential state tests and real two-Profile isolation before moving routing to Rust.
 
 ## 4. Port Locator Policy and Browser Operation Coordination
 

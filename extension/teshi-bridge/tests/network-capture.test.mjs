@@ -271,6 +271,40 @@ test("discovery without a frame URL cannot retain the previous stream address", 
   assert.equal(hooks.brokerConnectionReady(), true);
 });
 
+test("authenticated posts rediscover after the broker generation rotates", async () => {
+  let rotated = false;
+  let discoveryCalls = 0;
+  const { hooks } = loadBackground(async (url) => {
+    const path = new URL(String(url)).pathname;
+    if (path.endsWith("/v1/bridge")) {
+      discoveryCalls += 1;
+      const token = rotated ? "new-generation-token" : "old-generation-token";
+      return discoveryResponse({
+        ws_url: `ws://127.0.0.1:23000/?token=${token}`,
+        extension_frame_ws_url:
+          `ws://127.0.0.1:23000/extension/frames?token=${token}`,
+      });
+    }
+    if (!rotated) {
+      return { ok: true, status: 200 };
+    }
+    if (discoveryCalls < 2) {
+      return { ok: false, status: 401 };
+    }
+    return { ok: true, status: 200 };
+  });
+
+  await hooks.refreshBridgeCache();
+  rotated = true;
+  const response = await hooks.bridgePost(
+    "http://127.0.0.1:17373/v1/bridge/heartbeat",
+    { extension_instance_id: "profile-a" },
+  );
+  assert.equal(response.status, 200);
+  assert.equal(hooks.getBridgeContextForTest().tokenCached, true);
+  assert.ok(discoveryCalls >= 2);
+});
+
 function captureState(overrides = {}) {
   return {
     active: true,
@@ -481,6 +515,24 @@ test("a reconnected authenticated socket resends unacknowledged events", async (
     .find((message) => message.type === "network_batch");
   assert.equal(resentBatch.events[0].seq, 1);
   assert.equal(state.queue.length, 1);
+});
+
+test("stream hello ack records the Rust stream generation", async () => {
+  const { hooks, FakeWebSocket } = loadBackground();
+  hooks.setBridgeContextForTest("D:/project", "ws://127.0.0.1/extension/frames");
+
+  const connection = hooks.connectStreamWebSocket();
+  const socket = FakeWebSocket.instances.at(-1);
+  socket.readyState = FakeWebSocket.OPEN;
+  await socket.onopen();
+  socket.onmessage({
+    data: JSON.stringify({ type: "stream_hello_ack", ok: true, generation: 17 }),
+  });
+  assert.equal(hooks.getStreamGenerationForTest(), 17);
+  await connection;
+  socket.readyState = FakeWebSocket.CLOSED;
+  socket.onclose();
+  assert.equal(hooks.getStreamGenerationForTest(), null);
 });
 
 test("tab activation preserves captures and lifecycle loss is target scoped", async () => {

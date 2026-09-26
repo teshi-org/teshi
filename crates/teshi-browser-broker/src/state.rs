@@ -207,6 +207,7 @@ impl BrokerState {
         }
         match result {
             Ok(previous_generation) => json!({
+                "type": "stream_hello_ack",
                 "ok": true,
                 "schema_version": BROWSER_BROKER_SCHEMA_VERSION,
                 "protocol_version": BROWSER_BROKER_PROTOCOL_VERSION,

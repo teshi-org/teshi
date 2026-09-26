@@ -127,6 +127,8 @@ let streamWs = null;
 /** @type {Promise<boolean> | null} */
 let streamWsConnectPromise = null;
 let streamWsReconnectDelay = STREAM_WS_RECONNECT_BASE_MS;
+/** Broker stream generation acknowledged by the current WebSocket. */
+let lastStreamGeneration = null;
 let screencastActive = false;
 /** @type {number | null} */
 let streamSessionTabId = null;
@@ -451,6 +453,7 @@ async function connectStreamWebSocket() {
     let settled = false;
     const ws = new WebSocket(extensionFrameWsUrl);
     streamWs = ws;
+    lastStreamGeneration = null;
     ws.binaryType = "arraybuffer";
     ws.onopen = async () => {
       streamWs = ws;
@@ -483,10 +486,14 @@ async function connectStreamWebSocket() {
       }
       try {
         const ack = JSON.parse(event.data);
-        if (ack.type === "stream_hello_ack" && ack.ok === false) {
-          void postFrameErrorDebounced(
-            ack.error || "extension stream hello rejected",
-          );
+        if (ack.type === "stream_hello_ack") {
+          if (ack.ok === false) {
+            void postFrameErrorDebounced(
+              ack.error || "extension stream hello rejected",
+            );
+          } else if (Number.isSafeInteger(ack.generation)) {
+            lastStreamGeneration = ack.generation;
+          }
         } else if (ack.type === "direct_command" && ack.command) {
           void (async () => {
             const reply = await handleCmd(ack.command);
@@ -503,6 +510,7 @@ async function connectStreamWebSocket() {
     };
     ws.onclose = () => {
       streamWs = null;
+      lastStreamGeneration = null;
       if (!settled) {
         settled = true;
         resolve(false);
@@ -2524,42 +2532,61 @@ async function postFrameErrorDebounced(error) {
 }
 
 async function bridgePost(url, payload) {
-  if (!cachedBrokerToken) {
-    await refreshBridgeCache();
-  }
-  if (!cachedBrokerToken) {
-    throw new Error("bridge discovery did not provide a command token");
-  }
-  const authenticatedUrl = new URL(url);
-  authenticatedUrl.searchParams.set("token", cachedBrokerToken);
   const body = JSON.stringify(payload);
   let lastErr = null;
+  let rediscoveryAttempted = false;
   for (let attempt = 0; attempt <= BRIDGE_POST_RETRIES; attempt += 1) {
+    if (!cachedBrokerToken) {
+      await refreshBridgeCache();
+    }
+    if (!cachedBrokerToken) {
+      lastErr = new Error("bridge discovery did not provide a command token");
+      if (attempt < BRIDGE_POST_RETRIES) {
+        await new Promise((resolve) => setTimeout(resolve, 120 * (attempt + 1)));
+        continue;
+      }
+      break;
+    }
+    const token = cachedBrokerToken;
+    const authenticatedUrl = new URL(url);
+    authenticatedUrl.searchParams.set("token", token);
+    let timer = null;
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), BRIDGE_FETCH_TIMEOUT_MS);
+      timer = setTimeout(() => controller.abort(), BRIDGE_FETCH_TIMEOUT_MS);
       const res = await fetch(authenticatedUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-Teshi-Broker-Token": cachedBrokerToken,
+          "X-Teshi-Broker-Token": token,
         },
         body,
         signal: controller.signal,
       });
-      clearTimeout(timer);
-      if (!res.ok) {
-        throw new Error(`bridge HTTP ${res.status} for ${url}`);
+      if (res.ok) {
+        return res;
       }
-      return res;
+      if ((res.status === 401 || res.status === 403) && !rediscoveryAttempted) {
+        rediscoveryAttempted = true;
+        clearBrokerCache();
+        continue;
+      }
+      lastErr = new Error(`bridge HTTP ${res.status} for ${url}`);
     } catch (err) {
       lastErr = err;
-      if (attempt < BRIDGE_POST_RETRIES) {
-        await new Promise((resolve) => setTimeout(resolve, 120 * (attempt + 1)));
-      }
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+    if (attempt < BRIDGE_POST_RETRIES) {
+      await new Promise((resolve) => setTimeout(resolve, 120 * (attempt + 1)));
     }
   }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  // A failed authenticated request must not pin the service worker to a dead
+  // broker generation. The next heartbeat will perform a fresh discovery.
+  clearBrokerCache();
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error(String(lastErr));
 }
 
 async function postFrameError(error) {
@@ -3119,6 +3146,7 @@ if (globalThis.__TESHI_BRIDGE_TEST__) {
     stopNetworkCapture,
     streamSocketNeeded,
     connectStreamWebSocket,
+    bridgePost,
     refreshBridgeCache,
     refreshExtensionFrameWsUrl,
     brokerConnectionReady,
@@ -3128,6 +3156,9 @@ if (globalThis.__TESHI_BRIDGE_TEST__) {
     reportNetworkTermination,
     setStreamWebSocketForTest(socket) {
       streamWs = socket;
+    },
+    getStreamGenerationForTest() {
+      return lastStreamGeneration;
     },
     setBridgeContextForTest(projectRoot, wsUrl) {
       cachedProjectRoot = projectRoot;

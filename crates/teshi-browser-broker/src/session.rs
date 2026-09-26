@@ -618,6 +618,7 @@ impl BrowserSessionRecord {
             },
             "health": self.health_at(now, heartbeat_ttl).as_str(),
             "last_heartbeat_age_ms": age_ms,
+            "stream_generation": self.stream_generation,
             "windows": self.windows,
             "capabilities": {
                 "features": self.features,

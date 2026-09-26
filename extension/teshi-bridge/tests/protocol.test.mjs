@@ -161,8 +161,8 @@ test("artifact transport is bounded and element clips use page coordinates", () 
 test("loopback HTTP mutations use the discovered broker token", () => {
   assert.match(background, /function cacheBrokerToken/);
   assert.match(background, /searchParams\.get\("token"\)/);
-  assert.match(background, /authenticatedUrl\.searchParams\.set\("token", cachedBrokerToken\)/);
-  assert.match(background, /"X-Teshi-Broker-Token": cachedBrokerToken/);
+  assert.match(background, /authenticatedUrl\.searchParams\.set\("token", token\)/);
+  assert.match(background, /"X-Teshi-Broker-Token": token/);
   assert.match(background, /res = await bridgePost\(HEARTBEAT_URL/);
   assert.doesNotMatch(background, /fetch\(HEARTBEAT_URL/);
 });
