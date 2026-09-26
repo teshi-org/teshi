@@ -14,8 +14,10 @@ pub use credential::{PrivateBrokerCredential, PrivateCredentialStore};
 pub use protocol::{
     BROWSER_BROKER_IDENTITY_CHALLENGE_PATH, BROWSER_BROKER_PROTOCOL_VERSION,
     BROWSER_BROKER_SCHEMA_VERSION, BrokerErrorCode, BrokerIdentityChallenge, BrokerIdentityProof,
-    BrowserTarget, CHROME_DISCOVERY_PORT, DiscoveryResponse, EndpointRecord, ExtensionHeartbeat,
-    ExtensionResponse, MAX_TRUSTED_EXTENSION_ORIGINS,
+    BrowserTarget, CHROME_DISCOVERY_PORT, DiscoveryResponse, EndpointRecord,
+    ExecuteLocatorActionRequest, ExecuteLocatorCandidate, ExecuteLocatorCandidateKind,
+    ExecuteLocatorCommand, ExecuteLocatorElement, ExecuteLocatorInput, ExtensionHeartbeat,
+    ExtensionResponse, LocatorContext, MAX_TRUSTED_EXTENSION_ORIGINS,
 };
 pub use server::{BrokerEvent, BrokerPublication, BrokerRuntime, BrokerServerConfig};
 pub use session::{

@@ -106,6 +106,7 @@ pub struct BrowserSessionRecord {
     subscriptions: BTreeSet<BrowserTarget>,
     element_references: HashMap<String, ElementReferenceRecord>,
     page_context_revisions: HashMap<BrowserTarget, String>,
+    page_snapshot_ids: HashMap<BrowserTarget, String>,
 }
 
 impl BrowserSessionRecord {
@@ -136,6 +137,7 @@ impl BrowserSessionRecord {
             subscriptions: BTreeSet::new(),
             element_references: HashMap::new(),
             page_context_revisions: HashMap::new(),
+            page_snapshot_ids: HashMap::new(),
         }
     }
 
@@ -308,6 +310,10 @@ impl BrowserSessionRecord {
         self.page_context_revisions.get(target).map(String::as_str)
     }
 
+    pub fn current_page_snapshot_id(&self, target: &BrowserTarget) -> Option<&str> {
+        self.page_snapshot_ids.get(target).map(String::as_str)
+    }
+
     pub fn cache_snapshot_references(
         &mut self,
         target: BrowserTarget,
@@ -330,13 +336,6 @@ impl BrowserSessionRecord {
             self.page_context_revisions
                 .insert(target.clone(), page_context_revision.clone());
         }
-        let Some(elements) = response
-            .get("interactive_elements")
-            .and_then(Value::as_array)
-            .cloned()
-        else {
-            return Ok(());
-        };
         let snapshot_id = response
             .get("snapshot_id")
             .and_then(Value::as_str)
@@ -345,6 +344,18 @@ impl BrowserSessionRecord {
             .chars()
             .take(256)
             .collect::<String>();
+        if !snapshot_id.is_empty() {
+            self.page_snapshot_ids
+                .insert(target.clone(), snapshot_id.clone());
+        }
+        let Some(elements) = response
+            .get("interactive_elements")
+            .and_then(Value::as_array)
+            .cloned()
+        else {
+            response["snapshot_id"] = Value::String(snapshot_id);
+            return Ok(());
+        };
         let mut published = Vec::new();
         for element in elements.into_iter().take(MAX_ELEMENT_REFERENCES) {
             let Value::Object(mut object) = element else {
@@ -419,12 +430,14 @@ impl BrowserSessionRecord {
         let Some(target) = target else {
             self.element_references.clear();
             self.page_context_revisions.clear();
+            self.page_snapshot_ids.clear();
             return;
         };
         let prefix = element_reference_target_prefix(target);
         self.element_references
             .retain(|key, _| !key.starts_with(&prefix));
         self.page_context_revisions.remove(target);
+        self.page_snapshot_ids.remove(target);
     }
 
     fn evict_element_references(&mut self, now: Instant) {
@@ -534,6 +547,7 @@ impl BrowserSessionRecord {
         self.subscriptions.clear();
         self.element_references.clear();
         self.page_context_revisions.clear();
+        self.page_snapshot_ids.clear();
     }
 
     fn attach_stream(&mut self, generation: u64) -> Result<Option<u64>, BrokerError> {

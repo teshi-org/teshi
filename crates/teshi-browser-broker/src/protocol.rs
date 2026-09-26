@@ -164,6 +164,228 @@ pub struct OperationRequest {
     pub arguments: BTreeMap<String, Value>,
 }
 
+/// Typed locator input accepted by the canonical P0 click operations.
+///
+/// The outer v1 operation envelope remains intentionally open for compatibility,
+/// but the locator element itself is strict.  This keeps unsupported structured
+/// candidates from reaching the extension while preserving the existing
+/// `execute_browser_action` envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecuteLocatorElement {
+    #[serde(default)]
+    pub css: Option<String>,
+    #[serde(default, alias = "testId")]
+    pub test_id: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub reference: Option<String>,
+    #[serde(default)]
+    pub snapshot_id: Option<String>,
+    #[serde(default)]
+    pub page_context_revision: Option<String>,
+}
+
+/// Typed source DTO for the existing `execute_browser_action` operation.
+///
+/// Rust serializes the resolved value as the extension's existing
+/// `execute_locator` command; it does not add a second execution channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecuteLocatorActionRequest {
+    pub action: String,
+    pub element: ExecuteLocatorElement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecuteLocatorInput {
+    Css(String),
+    TestId(String),
+    RoleName { role: String, name: String },
+    SnapshotReference(String),
+}
+
+/// Structured candidate shape already understood by the Extension's
+/// `execute_locator` implementation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecuteLocatorCandidate {
+    pub kind: ExecuteLocatorCandidateKind,
+    pub arguments: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecuteLocatorCandidateKind {
+    TestId,
+    Role,
+}
+
+/// Frame/shadow context retained by a Snapshot element reference.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocatorContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow_root: Option<String>,
+}
+
+/// Resolved command sent over the existing Extension `execute_locator` path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExecuteLocatorCommand {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<ExecuteLocatorCandidate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locator_context: Option<LocatorContext>,
+    pub action: String,
+    pub page_context_revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+}
+
+impl ExecuteLocatorActionRequest {
+    /// Parse only the operation-specific fields from the compatibility envelope.
+    pub fn from_operation(request: &OperationRequest) -> Result<Self, BrokerError> {
+        let action = request.arguments.get("action").cloned().ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "execute_browser_action requires an action",
+            )
+        })?;
+        let raw_element = request.arguments.get("element").cloned().ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "execute_browser_action requires an element object",
+            )
+        })?;
+        if raw_element
+            .as_object()
+            .is_some_and(|element| element.contains_key("candidate"))
+        {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserCapabilityUnavailable,
+                "Rust p0.control does not support structured candidate parameters",
+            ));
+        }
+        let element = serde_json::from_value(raw_element).map_err(|_| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "execute_browser_action contains an unsupported locator parameter",
+            )
+        })?;
+        let action = action.as_str().map(str::to_owned).ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "execute_browser_action requires a string action",
+            )
+        })?;
+        Ok(Self { action, element })
+    }
+
+    pub fn normalized_action(&self) -> Result<String, BrokerError> {
+        normalize_locator_text(&self.action, "action")
+    }
+
+    pub fn input(&self) -> Result<ExecuteLocatorInput, BrokerError> {
+        let css = normalize_optional_locator_text(self.element.css.as_deref(), "element.css")?;
+        let test_id =
+            normalize_optional_locator_text(self.element.test_id.as_deref(), "element.test_id")?;
+        let role = normalize_optional_locator_text(self.element.role.as_deref(), "element.role")?;
+        let name = normalize_optional_locator_text(self.element.name.as_deref(), "element.name")?;
+        let reference = normalize_optional_locator_text(
+            self.element.reference.as_deref(),
+            "element.reference",
+        )?;
+
+        if role.is_some() != name.is_some() {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "element.role and element.name must be supplied together",
+            ));
+        }
+        let locator_count = usize::from(css.is_some())
+            + usize::from(test_id.is_some())
+            + usize::from(role.is_some() && name.is_some())
+            + usize::from(reference.is_some());
+        if locator_count != 1 {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "exactly one of element.css, element.test_id, element.role/name, or element.reference is required",
+            ));
+        }
+        if let Some(reference) = reference {
+            if !is_snapshot_reference(&reference) {
+                return Err(BrokerError::new(
+                    BrokerErrorCode::InvalidBrowserOperation,
+                    "element.reference must be a snapshot alias such as @e1",
+                ));
+            }
+            return Ok(ExecuteLocatorInput::SnapshotReference(reference));
+        }
+        if let Some(css) = css {
+            return Ok(ExecuteLocatorInput::Css(css));
+        }
+        if let Some(test_id) = test_id {
+            return Ok(ExecuteLocatorInput::TestId(test_id));
+        }
+        Ok(ExecuteLocatorInput::RoleName {
+            role: role.expect("role/name count was validated"),
+            name: name.expect("role/name count was validated"),
+        })
+    }
+
+    pub fn page_context_revision(&self) -> Result<String, BrokerError> {
+        normalize_locator_text(
+            self.element
+                .page_context_revision
+                .as_deref()
+                .unwrap_or_default(),
+            "element.page_context_revision",
+        )
+        .map_err(|_| {
+            BrokerError::new(
+                BrokerErrorCode::StaleBrowserTarget,
+                "execute_browser_action requires the page_context_revision from a current snapshot",
+            )
+        })
+    }
+
+    pub fn snapshot_id(&self) -> Result<Option<String>, BrokerError> {
+        normalize_optional_locator_text(self.element.snapshot_id.as_deref(), "element.snapshot_id")
+    }
+}
+
+fn normalize_locator_text(value: &str, field: &str) -> Result<String, BrokerError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 4096 {
+        return Err(BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            format!("{field} must contain 1 to 4096 bytes"),
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn normalize_optional_locator_text(
+    value: Option<&str>,
+    field: &str,
+) -> Result<Option<String>, BrokerError> {
+    value
+        .map(|value| normalize_locator_text(value, field))
+        .transpose()
+}
+
+fn is_snapshot_reference(value: &str) -> bool {
+    value
+        .strip_prefix("@e")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()))
+}
+
 impl OperationRequest {
     /// Reject malformed or unknown operation names before they reach a target.
     pub fn validate(&self) -> Result<(), BrokerError> {

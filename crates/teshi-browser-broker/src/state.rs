@@ -15,7 +15,9 @@ use uuid::Uuid;
 
 use crate::protocol::{
     BROWSER_BROKER_PROTOCOL_VERSION, BROWSER_BROKER_SCHEMA_VERSION, BrokerError, BrokerErrorCode,
-    BrowserTarget, ExtensionResponse, ExtensionStreamMessage, NetworkBatch, OperationRequest,
+    BrowserTarget, ExecuteLocatorActionRequest, ExecuteLocatorCandidate,
+    ExecuteLocatorCandidateKind, ExecuteLocatorCommand, ExecuteLocatorInput, ExtensionResponse,
+    ExtensionStreamMessage, LocatorContext, NetworkBatch, OperationRequest,
 };
 use crate::server::{BrokerEvent, BrokerRuntime};
 use crate::session::{BrowserSessionRecord, SessionRegistry};
@@ -50,6 +52,7 @@ struct PendingRequest {
     project_root: String,
     caller_label: String,
     lease_token: Option<String>,
+    snapshot_id: Option<String>,
     stream_generation: Option<u64>,
     /// When a direct command falls back to HTTP heartbeat, retain the stream
     /// generation that was allowed to consume it. HTTP responses intentionally
@@ -393,6 +396,9 @@ impl BrokerState {
                 "target".into(),
                 serde_json::to_value(&pending.target).unwrap(),
             );
+            if let Some(snapshot_id) = &pending.snapshot_id {
+                object.insert("snapshot_id".into(), Value::String(snapshot_id.clone()));
+            }
         }
         if response.ok {
             if pending.operation == "get_page_snapshot" {
@@ -685,7 +691,7 @@ impl BrokerState {
         runtime: &BrokerRuntime,
     ) -> Result<Value, BrokerError> {
         let instance_id = argument_string(&request.arguments, "extension_instance_id")?;
-        let token = request_lease_token(&request)?;
+        let token = request_lease_token(request)?;
         let ttl_secs = bounded_ttl(request.arguments.get("ttl_secs"));
         self.sessions.require_live(&instance_id, Instant::now())?;
         let project = required_project_context(request)?;
@@ -713,7 +719,7 @@ impl BrokerState {
         runtime: &BrokerRuntime,
     ) -> Result<Value, BrokerError> {
         let instance_id = argument_string(&request.arguments, "extension_instance_id")?;
-        let token = request_lease_token(&request)?;
+        let token = request_lease_token(request)?;
         self.sessions.require_live(&instance_id, Instant::now())?;
         let project = required_project_context(request)?;
         let caller = required_caller_context(request)?;
@@ -780,6 +786,7 @@ impl BrokerState {
                 return;
             }
         };
+        let mut resolved_locator = None;
         let result = self
             .sessions
             .resolve_target(request.target.as_ref(), now)
@@ -843,13 +850,20 @@ impl BrokerState {
                     self.validate_lease(&instance_id, token, &project, &caller, &generation)?;
                 }
                 if request.operation == "execute_browser_action" {
-                    let session = self.sessions.get(&instance_id).ok_or_else(|| {
+                    let session = self.sessions.get_mut(&instance_id).ok_or_else(|| {
                         BrokerError::new(
                             BrokerErrorCode::BrowserTargetNotFound,
                             "browser session was not found",
                         )
                     })?;
-                    validate_execute_browser_action(&request, &target, session)?;
+                    resolved_locator = Some(resolve_execute_locator(
+                        &request,
+                        &target,
+                        session,
+                        &project,
+                        &caller,
+                        now,
+                    )?);
                 }
                 Ok((instance_id, target))
             });
@@ -861,7 +875,12 @@ impl BrokerState {
                 return;
             }
         };
-        let command = match build_extension_command(&request, &target, &instance_id) {
+        let command = match build_extension_command(
+            &request,
+            &target,
+            &instance_id,
+            resolved_locator.as_ref(),
+        ) {
             Ok(command) => command,
             Err(error) => {
                 let _ = reply.send(Err(error));
@@ -886,6 +905,9 @@ impl BrokerState {
                 project_root: project.clone(),
                 caller_label: caller.clone(),
                 lease_token: request.lease_token.clone(),
+                snapshot_id: resolved_locator
+                    .as_ref()
+                    .and_then(|locator| locator.snapshot_id.clone()),
                 stream_generation,
                 fallback_generation: None,
                 deadline: now + timeout,
@@ -1114,6 +1136,7 @@ fn build_extension_command(
     request: &OperationRequest,
     target: &BrowserTarget,
     extension_instance_id: &str,
+    resolved_locator: Option<&ExecuteLocatorCommand>,
 ) -> Result<Value, BrokerError> {
     let mut object = request
         .arguments
@@ -1151,129 +1174,295 @@ fn build_extension_command(
     object.insert("target".into(), serde_json::to_value(target).unwrap());
     object.remove("lease_token");
     if request.operation == "execute_browser_action" {
-        let locator = parse_execute_browser_action(request)?;
+        let fallback_locator;
+        let locator = if let Some(locator) = resolved_locator {
+            locator
+        } else {
+            fallback_locator = build_unvalidated_execute_locator(request)?;
+            &fallback_locator
+        };
         object.insert(
             "cmd".into(),
             Value::String(extension_operation_for(&request.operation).into()),
         );
-        object.insert("selector".into(), Value::String(locator.selector));
-        object.insert("action".into(), Value::String(locator.action));
+        if let Some(selector) = &locator.selector {
+            object.insert("selector".into(), Value::String(selector.clone()));
+        } else {
+            object.remove("selector");
+        }
+        if let Some(candidate) = &locator.candidate {
+            object.insert("candidate".into(), serde_json::to_value(candidate).unwrap());
+        } else {
+            object.remove("candidate");
+        }
+        if let Some(locator_context) = &locator.locator_context {
+            object.insert(
+                "locator_context".into(),
+                serde_json::to_value(locator_context).unwrap(),
+            );
+        } else {
+            object.remove("locator_context");
+        }
+        object.insert("action".into(), Value::String(locator.action.clone()));
         object.insert(
             "page_context_revision".into(),
-            Value::String(locator.page_context_revision),
+            Value::String(locator.page_context_revision.clone()),
         );
+        if let Some(snapshot_id) = &locator.snapshot_id {
+            object.insert("snapshot_id".into(), Value::String(snapshot_id.clone()));
+        } else {
+            object.remove("snapshot_id");
+        }
         object.remove("element");
     }
     Ok(Value::Object(object))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ExecuteLocatorCommand {
-    selector: String,
-    action: String,
-    page_context_revision: String,
-}
-
-fn parse_execute_browser_action(
+fn build_unvalidated_execute_locator(
     request: &OperationRequest,
 ) -> Result<ExecuteLocatorCommand, BrokerError> {
-    let action = request
-        .arguments
-        .get("action")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            BrokerError::new(
-                BrokerErrorCode::InvalidBrowserOperation,
-                "execute_browser_action requires an action",
-            )
-        })?
-        .to_owned();
+    let dto = ExecuteLocatorActionRequest::from_operation(request)?;
+    let action = dto.normalized_action()?;
     if !RUST_P0_EXECUTABLE_ACTIONS.contains(&action.as_str()) {
         return Err(BrokerError::new(
             BrokerErrorCode::BrowserCapabilityUnavailable,
             "Rust p0.control currently supports only click and pointer_click",
         ));
     }
-    let element = request
-        .arguments
-        .get("element")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            BrokerError::new(
-                BrokerErrorCode::InvalidBrowserOperation,
-                "execute_browser_action requires an element object",
-            )
-        })?;
-    if element.get("reference").is_some() || element.get("candidate").is_some() {
-        return Err(BrokerError::new(
-            BrokerErrorCode::BrowserCapabilityUnavailable,
-            "Rust p0.control execute_browser_action accepts only an explicit CSS selector",
-        ));
-    }
-    let selector = element
-        .get("css")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            BrokerError::new(
-                BrokerErrorCode::InvalidBrowserOperation,
-                "execute_browser_action requires a non-empty element.css selector",
-            )
-        })?
-        .to_owned();
-    let page_context_revision = element
-        .get("page_context_revision")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            BrokerError::new(
-                BrokerErrorCode::StaleBrowserTarget,
-                "execute_browser_action requires the page_context_revision from a current snapshot",
-            )
-        })?
-        .to_owned();
+    let page_context_revision = dto.page_context_revision()?;
+    let snapshot_id = dto.snapshot_id()?;
+    let (selector, candidate) = match dto.input()? {
+        ExecuteLocatorInput::Css(selector) => (Some(selector), None),
+        ExecuteLocatorInput::TestId(value) => (None, Some(test_id_candidate(value))),
+        ExecuteLocatorInput::RoleName { role, name } => {
+            (None, Some(role_name_candidate(role, name)))
+        }
+        ExecuteLocatorInput::SnapshotReference(_) => {
+            return Err(BrokerError::new(
+                BrokerErrorCode::StaleElementReference,
+                "Snapshot element reference must be resolved against its Profile before dispatch",
+            ));
+        }
+    };
     Ok(ExecuteLocatorCommand {
         selector,
+        candidate,
+        locator_context: None,
         action,
         page_context_revision,
+        snapshot_id,
     })
 }
 
-fn validate_execute_browser_action(
+fn resolve_execute_locator(
     request: &OperationRequest,
     target: &BrowserTarget,
-    session: &BrowserSessionRecord,
-) -> Result<(), BrokerError> {
-    let locator = parse_execute_browser_action(request)?;
+    session: &mut BrowserSessionRecord,
+    project_root: &str,
+    caller_label: &str,
+    now: Instant,
+) -> Result<ExecuteLocatorCommand, BrokerError> {
+    let dto = ExecuteLocatorActionRequest::from_operation(request)?;
+    let action = dto.normalized_action()?;
+    if !RUST_P0_EXECUTABLE_ACTIONS.contains(&action.as_str()) {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrowserCapabilityUnavailable,
+            "Rust p0.control currently supports only click and pointer_click",
+        ));
+    }
     if !session
         .supported_actions()
         .iter()
-        .any(|supported| supported == &locator.action)
+        .any(|supported| supported == &action)
     {
         return Err(BrokerError::new(
             BrokerErrorCode::BrowserCapabilityUnavailable,
             format!(
                 "selected browser session does not advertise action {}",
-                locator.action
+                action
             ),
         ));
     }
+    let input = dto.input()?;
+    let page_context_revision = dto.page_context_revision()?;
+    let mut snapshot_id = dto.snapshot_id()?;
+    let (selector, candidate, locator_context) = match input {
+        ExecuteLocatorInput::Css(selector) => (Some(selector), None, None),
+        ExecuteLocatorInput::TestId(value) => (None, Some(test_id_candidate(value)), None),
+        ExecuteLocatorInput::RoleName { role, name } => {
+            (None, Some(role_name_candidate(role, name)), None)
+        }
+        ExecuteLocatorInput::SnapshotReference(alias) => {
+            let snapshot_id_value = snapshot_id.clone().ok_or_else(|| {
+                BrokerError::new(
+                    BrokerErrorCode::StaleElementReference,
+                    "snapshot_id is required when executing a Snapshot element reference",
+                )
+            })?;
+            let reference = session.resolve_element_reference(
+                target,
+                &alias,
+                Some(&page_context_revision),
+                Some(&snapshot_id_value),
+                project_root,
+                caller_label,
+                now,
+            )?;
+            let (selector, candidate) = snapshot_locator(&reference.element)?;
+            let locator_context = snapshot_locator_context(&reference.context)?;
+            snapshot_id = Some(reference.snapshot_id);
+            (selector, candidate, locator_context)
+        }
+    };
     let current_revision = session
         .current_page_context_revision(target)
         .ok_or_else(|| {
             BrokerError::new(
                 BrokerErrorCode::StaleBrowserTarget,
-                "execute_browser_action requires a snapshot for the selected target",
+                "execute_locator requires a snapshot for the selected target",
             )
         })?;
-    if current_revision != locator.page_context_revision {
+    if current_revision != page_context_revision {
         return Err(BrokerError::new(
             BrokerErrorCode::StaleBrowserTarget,
             "page_context_revision is stale for the selected target",
         ));
     }
-    Ok(())
+    if let Some(snapshot_id) = &snapshot_id
+        && session.current_page_snapshot_id(target) != Some(snapshot_id.as_str())
+    {
+        return Err(BrokerError::new(
+            BrokerErrorCode::StaleElementReference,
+            "snapshot_id is stale for the selected target",
+        ));
+    }
+    Ok(ExecuteLocatorCommand {
+        selector,
+        candidate,
+        locator_context,
+        action,
+        page_context_revision,
+        snapshot_id,
+    })
+}
+
+fn test_id_candidate(value: String) -> ExecuteLocatorCandidate {
+    ExecuteLocatorCandidate {
+        kind: ExecuteLocatorCandidateKind::TestId,
+        arguments: BTreeMap::from([
+            ("attribute".into(), "data-testid".into()),
+            ("value".into(), value),
+        ]),
+    }
+}
+
+fn role_name_candidate(role: String, name: String) -> ExecuteLocatorCandidate {
+    ExecuteLocatorCandidate {
+        kind: ExecuteLocatorCandidateKind::Role,
+        arguments: BTreeMap::from([("role".into(), role), ("name".into(), name)]),
+    }
+}
+
+fn snapshot_locator(
+    element: &Value,
+) -> Result<(Option<String>, Option<ExecuteLocatorCandidate>), BrokerError> {
+    let object = element.as_object().ok_or_else(|| {
+        BrokerError::new(
+            BrokerErrorCode::StaleElementReference,
+            "Snapshot element reference does not contain a locator object",
+        )
+    })?;
+    if let Some(candidate) = object.get("candidate").and_then(Value::as_object) {
+        let kind = candidate
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let arguments = candidate
+            .get("arguments")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                BrokerError::new(
+                    BrokerErrorCode::StaleElementReference,
+                    "Snapshot element candidate is malformed",
+                )
+            })?;
+        if kind == "role" {
+            let role = snapshot_string(arguments, "role");
+            let name = snapshot_string(arguments, "name");
+            if let (Some(role), Some(name)) = (role, name) {
+                return Ok((None, Some(role_name_candidate(role, name))));
+            }
+        } else if kind == "test_id" || kind == "attribute" {
+            let attribute =
+                snapshot_string(arguments, "attribute").unwrap_or_else(|| "data-testid".into());
+            if attribute == "data-testid"
+                && let Some(value) = snapshot_string(arguments, "value")
+            {
+                return Ok((None, Some(test_id_candidate(value))));
+            }
+        } else if kind == "css"
+            && let Some(selector) = snapshot_string(arguments, "selector")
+        {
+            return Ok((Some(selector), None));
+        }
+    }
+    if let Some(value) = snapshot_string_any(object, &["testId", "test_id"]).or_else(|| {
+        object
+            .get("attributes")
+            .and_then(Value::as_object)
+            .and_then(|attributes| snapshot_string(attributes, "data-testid"))
+    }) {
+        return Ok((None, Some(test_id_candidate(value))));
+    }
+    let role = snapshot_string(object, "role");
+    let name = snapshot_string_any(
+        object,
+        &[
+            "accessible_name",
+            "accessibleName",
+            "name",
+            "ariaLabel",
+            "label",
+        ],
+    );
+    if let (Some(role), Some(name)) = (role, name) {
+        return Ok((None, Some(role_name_candidate(role, name))));
+    }
+    if let Some(selector) = snapshot_string_any(object, &["shortSelector", "short_selector", "css"])
+    {
+        return Ok((Some(selector), None));
+    }
+    Err(BrokerError::new(
+        BrokerErrorCode::StaleElementReference,
+        "Snapshot element reference has no supported CSS, test ID, or role/name locator",
+    ))
+}
+
+fn snapshot_locator_context(value: &Value) -> Result<Option<LocatorContext>, BrokerError> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|_| {
+            BrokerError::new(
+                BrokerErrorCode::StaleElementReference,
+                "Snapshot element reference has unsupported frame or shadow context",
+            )
+        })
+}
+
+fn snapshot_string(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn snapshot_string_any(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| snapshot_string(object, key))
 }
 
 fn extension_operation_for(operation: &str) -> &str {
@@ -1650,10 +1839,25 @@ mod tests {
         .unwrap()
     }
 
+    fn execute_element_request(action: &str, element: Value) -> OperationRequest {
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "request_id": format!("execute-{action}"),
+            "caller_label": "caller-a",
+            "project_root": "C:/project-a",
+            "cmd": "execute_browser_action",
+            "target": target(),
+            "lease_token": "lease-secret",
+            "action": action,
+            "element": element
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn execute_browser_action_maps_to_css_execute_locator_without_reference_fields() {
         let request = execute_request("pointer_click", "#pointer", "revision-1");
-        let command = build_extension_command(&request, &target(), "profile-a").unwrap();
+        let command = build_extension_command(&request, &target(), "profile-a", None).unwrap();
 
         assert_eq!(command["cmd"], "execute_locator");
         assert_eq!(command["action"], "pointer_click");
@@ -1665,13 +1869,153 @@ mod tests {
     }
 
     #[test]
-    fn execute_browser_action_rejects_non_css_and_unimplemented_actions() {
+    fn typed_execute_locator_inputs_map_to_existing_extension_candidate_shape() {
+        let test_id = execute_element_request(
+            "click",
+            json!({"test_id": "save-button", "page_context_revision": "revision-1"}),
+        );
+        let test_id_command =
+            build_extension_command(&test_id, &target(), "profile-a", None).unwrap();
+        assert_eq!(test_id_command["cmd"], "execute_locator");
+        assert_eq!(test_id_command["candidate"]["kind"], "test_id");
+        assert_eq!(
+            test_id_command["candidate"]["arguments"]["attribute"],
+            "data-testid"
+        );
+        assert_eq!(
+            test_id_command["candidate"]["arguments"]["value"],
+            "save-button"
+        );
+        assert!(test_id_command.get("selector").is_none());
+
+        let role = execute_element_request(
+            "pointer_click",
+            json!({
+                "role": "button",
+                "name": "Save",
+                "page_context_revision": "revision-1"
+            }),
+        );
+        let role_command = build_extension_command(&role, &target(), "profile-a", None).unwrap();
+        assert_eq!(role_command["cmd"], "execute_locator");
+        assert_eq!(role_command["candidate"]["kind"], "role");
+        assert_eq!(role_command["candidate"]["arguments"]["role"], "button");
+        assert_eq!(role_command["candidate"]["arguments"]["name"], "Save");
+        assert!(role_command.get("selector").is_none());
+    }
+
+    #[test]
+    fn snapshot_reference_resolves_to_locator_and_enforces_scope_metadata() {
+        let now = Instant::now();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        let mut snapshot = json!({
+            "snapshot_id": "snapshot-1",
+            "page_context_revision": "revision-1",
+            "interactive_elements": [{
+                "element_ref": "opaque-save",
+                "testId": "save-button",
+                "shortSelector": "#save",
+                "context": {"frame": null, "shadow_root": null}
+            }]
+        });
+        state
+            .sessions
+            .get_mut("profile-a")
+            .unwrap()
+            .cache_snapshot_references(
+                target(),
+                &mut snapshot,
+                "snapshot-1",
+                "C:/project-a",
+                "caller-a",
+                now,
+            )
+            .unwrap();
+
+        let request = execute_element_request(
+            "click",
+            json!({
+                "reference": "@e1",
+                "snapshot_id": "snapshot-1",
+                "page_context_revision": "revision-1"
+            }),
+        );
+        let locator = resolve_execute_locator(
+            &request,
+            &target(),
+            state.sessions.get_mut("profile-a").unwrap(),
+            "C:/project-a",
+            "caller-a",
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            locator.candidate.as_ref().unwrap().kind,
+            ExecuteLocatorCandidateKind::TestId
+        );
+        assert_eq!(locator.snapshot_id.as_deref(), Some("snapshot-1"));
+        let command =
+            build_extension_command(&request, &target(), "profile-a", Some(&locator)).unwrap();
+        assert_eq!(command["cmd"], "execute_locator");
+        assert_eq!(command["candidate"]["arguments"]["value"], "save-button");
+        assert_eq!(command["snapshot_id"], "snapshot-1");
+        assert!(command.get("element").is_none());
+
+        let wrong_project = resolve_execute_locator(
+            &request,
+            &target(),
+            state.sessions.get_mut("profile-a").unwrap(),
+            "C:/project-b",
+            "caller-a",
+            now,
+        )
+        .unwrap_err();
+        assert_eq!(wrong_project.code, BrokerErrorCode::StaleElementReference);
+
+        let wrong_snapshot = execute_element_request(
+            "click",
+            json!({
+                "reference": "@e1",
+                "snapshot_id": "snapshot-old",
+                "page_context_revision": "revision-1"
+            }),
+        );
+        let wrong_snapshot = resolve_execute_locator(
+            &wrong_snapshot,
+            &target(),
+            state.sessions.get_mut("profile-a").unwrap(),
+            "C:/project-a",
+            "caller-a",
+            now,
+        )
+        .unwrap_err();
+        assert_eq!(wrong_snapshot.code, BrokerErrorCode::StaleElementReference);
+    }
+
+    #[test]
+    fn execute_browser_action_rejects_unsupported_candidates_and_actions() {
         let mut reference = execute_request("click", "#save", "revision-1");
         reference
             .arguments
             .insert("element".into(), json!({"reference": "@e1"}));
         assert_eq!(
-            build_extension_command(&reference, &target(), "profile-a")
+            build_extension_command(&reference, &target(), "profile-a", None)
+                .unwrap_err()
+                .code,
+            BrokerErrorCode::StaleBrowserTarget
+        );
+
+        let mut candidate = execute_request("click", "#save", "revision-1");
+        candidate.arguments.insert(
+            "element".into(),
+            json!({
+                "candidate": {"kind": "role", "arguments": {"role": "button", "name": "Save"}},
+                "page_context_revision": "revision-1"
+            }),
+        );
+        assert_eq!(
+            build_extension_command(&candidate, &target(), "profile-a", None)
                 .unwrap_err()
                 .code,
             BrokerErrorCode::BrowserCapabilityUnavailable
@@ -1679,7 +2023,7 @@ mod tests {
 
         let unsupported = execute_request("fill", "#save", "revision-1");
         assert_eq!(
-            build_extension_command(&unsupported, &target(), "profile-a")
+            build_extension_command(&unsupported, &target(), "profile-a", None)
                 .unwrap_err()
                 .code,
             BrokerErrorCode::BrowserCapabilityUnavailable
@@ -1711,18 +2055,24 @@ mod tests {
             .unwrap();
 
         assert!(
-            validate_execute_browser_action(
+            resolve_execute_locator(
                 &execute_request("click", "#save", "revision-1"),
                 &target(),
-                state.sessions.get("profile-a").unwrap(),
+                state.sessions.get_mut("profile-a").unwrap(),
+                "C:/project-a",
+                "caller-a",
+                now,
             )
             .is_ok()
         );
         assert_eq!(
-            validate_execute_browser_action(
+            resolve_execute_locator(
                 &execute_request("click", "#save", "revision-old"),
                 &target(),
-                state.sessions.get("profile-a").unwrap(),
+                state.sessions.get_mut("profile-a").unwrap(),
+                "C:/project-a",
+                "caller-a",
+                now,
             )
             .unwrap_err()
             .code,
@@ -1747,6 +2097,7 @@ mod tests {
                 project_root: "C:/project-a".into(),
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
+                snapshot_id: None,
                 stream_generation: Some(7),
                 fallback_generation: None,
                 deadline: now + Duration::from_secs(30),
@@ -1824,6 +2175,7 @@ mod tests {
                 project_root: "C:/project-a".into(),
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
+                snapshot_id: None,
                 stream_generation: None,
                 fallback_generation: None,
                 deadline: now - Duration::from_secs(1),
@@ -1878,6 +2230,7 @@ mod tests {
                 project_root: "C:/project-a".into(),
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
+                snapshot_id: None,
                 stream_generation: None,
                 fallback_generation: None,
                 deadline: now + Duration::from_secs(30),
@@ -1960,6 +2313,7 @@ mod tests {
                 project_root: "C:/project-a".into(),
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
+                snapshot_id: None,
                 stream_generation: None,
                 fallback_generation: None,
                 deadline: now + Duration::from_secs(30),
@@ -2036,6 +2390,7 @@ mod tests {
                 project_root: "C:/project-a".into(),
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
+                snapshot_id: None,
                 stream_generation: Some(7),
                 fallback_generation: None,
                 deadline: now + Duration::from_secs(30),
@@ -2113,6 +2468,7 @@ mod tests {
                     project_root: format!("C:/{instance_id}"),
                     caller_label: format!("agent-{instance_id}"),
                     lease_token: Some(format!("lease-{instance_id}")),
+                    snapshot_id: None,
                     stream_generation: None,
                     fallback_generation: None,
                     deadline: now + Duration::from_secs(30),
@@ -2185,6 +2541,7 @@ mod tests {
                 project_root: "C:/project-a".into(),
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
+                snapshot_id: None,
                 stream_generation: None,
                 fallback_generation: None,
                 deadline: now + Duration::from_secs(30),
@@ -2273,6 +2630,7 @@ mod tests {
                 project_root: "C:/project-a".into(),
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
+                snapshot_id: None,
                 stream_generation: None,
                 fallback_generation: None,
                 deadline: now + Duration::from_secs(30),
@@ -2338,6 +2696,7 @@ mod tests {
                 project_root: "C:/project-a".into(),
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
+                snapshot_id: None,
                 stream_generation: None,
                 fallback_generation: None,
                 deadline: now + Duration::from_secs(30),
@@ -2590,6 +2949,7 @@ mod tests {
                 project_root: "C:/project-a".into(),
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
+                snapshot_id: None,
                 stream_generation: None,
                 fallback_generation: Some(7),
                 deadline: now + Duration::from_secs(30),
