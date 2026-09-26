@@ -228,6 +228,200 @@
       "ambiguous_match": { "match_count": 2, "verification": "ambiguous" },
       "stale_revision": { "stale_page_context": true, "verification": "stale_page_context" }
     },
+    "locator_semantics": {
+      "snapshot": {
+        "interactive_elements": [
+          {
+            "element_ref": "all-controls",
+            "tag": "input",
+            "role": "textbox",
+            "accessible_name": "Email",
+            "label": "Email address",
+            "placeholder": "name@example.test",
+            "text": "Email",
+            "attributes": {
+              "type": "email",
+              "data-testid": "email-input",
+              "data-qa": "email-field",
+              "id": "email",
+              "name": "email",
+              "aria-label": "Email",
+              "title": "Email field",
+              "alt": "Email input",
+              "class": "css-123"
+            },
+            "shortSelector": "input.css-123:nth-of-type(2)",
+            "context": { "frame": null, "shadow_root": null },
+            "visible": true
+          },
+          {
+            "element_ref": "frame-submit",
+            "tag": "button",
+            "role": "button",
+            "accessible_name": "Submit",
+            "text": "Submit",
+            "attributes": { "data-testid": "frame-submit" },
+            "shortSelector": "#frame-submit",
+            "context": {
+              "frame": "https://app.example.test/checkout-frame",
+              "shadow_root": null
+            },
+            "visible": true
+          },
+          {
+            "element_ref": "shadow-submit",
+            "tag": "button",
+            "role": "button",
+            "accessible_name": "Submit",
+            "text": "Submit",
+            "attributes": { "data-testid": "shadow-submit" },
+            "shortSelector": "#shadow-submit",
+            "context": { "frame": null, "shadow_root": "#checkout-widget" },
+            "visible": true
+          }
+        ]
+      },
+      "cases": [
+        {
+          "name": "all-supported-locator-semantics",
+          "intent": { "element_ref": "all-controls" },
+          "test_id_attributes": ["data-qa"],
+          "expected_element_ref": "all-controls",
+          "expected_candidates": [
+            {
+              "kind": "role",
+              "expression": "page.getByRole(\"textbox\", { name: \"Email\", exact: true })",
+              "score": 100
+            },
+            {
+              "kind": "label",
+              "expression": "page.getByLabel(\"Email address\", { exact: true })",
+              "score": 90
+            },
+            {
+              "kind": "placeholder",
+              "expression": "page.getByPlaceholder(\"name@example.test\", { exact: true })",
+              "score": 85
+            },
+            {
+              "kind": "attribute",
+              "expression": "page.locator(\"[data-qa=\\\"email-field\\\"]\")",
+              "score": 80
+            },
+            {
+              "kind": "attribute",
+              "expression": "page.locator(\"[id=\\\"email\\\"]\")",
+              "score": 70
+            },
+            {
+              "kind": "attribute",
+              "expression": "page.locator(\"[name=\\\"email\\\"]\")",
+              "score": 65
+            },
+            {
+              "kind": "attribute",
+              "expression": "page.locator(\"[aria-label=\\\"Email\\\"]\")",
+              "score": 65
+            },
+            {
+              "kind": "attribute",
+              "expression": "page.locator(\"[title=\\\"Email field\\\"]\")",
+              "score": 65
+            },
+            {
+              "kind": "attribute",
+              "expression": "page.locator(\"[alt=\\\"Email input\\\"]\")",
+              "score": 65
+            },
+            {
+              "kind": "text",
+              "expression": "page.getByText(\"Email\", { exact: true })",
+              "score": 45
+            },
+            {
+              "kind": "css",
+              "expression": "page.locator(\"input.css-123:nth-of-type(2)\")",
+              "score": 39
+            }
+          ]
+        },
+        {
+          "name": "iframe-context",
+          "intent": { "element_ref": "frame-submit" },
+          "test_id_attributes": [],
+          "expected_element_ref": "frame-submit",
+          "expected_candidates": [
+            {
+              "kind": "role",
+              "expression": "page.getByRole(\"button\", { name: \"Submit\", exact: true })",
+              "score": 100
+            },
+            {
+              "kind": "test_id",
+              "expression": "page.getByTestId(\"frame-submit\")",
+              "score": 80
+            },
+            {
+              "kind": "css",
+              "expression": "page.locator(\"#frame-submit\")",
+              "score": 55
+            },
+            {
+              "kind": "text",
+              "expression": "page.getByText(\"Submit\", { exact: true })",
+              "score": 45
+            }
+          ],
+          "expected_context": { "frame": "https://app.example.test/checkout-frame" }
+        },
+        {
+          "name": "shadow-context",
+          "intent": { "element_ref": "shadow-submit" },
+          "test_id_attributes": [],
+          "expected_element_ref": "shadow-submit",
+          "expected_candidates": [
+            {
+              "kind": "role",
+              "expression": "page.getByRole(\"button\", { name: \"Submit\", exact: true })",
+              "score": 100
+            },
+            {
+              "kind": "test_id",
+              "expression": "page.getByTestId(\"shadow-submit\")",
+              "score": 80
+            },
+            {
+              "kind": "css",
+              "expression": "page.locator(\"#shadow-submit\")",
+              "score": 55
+            },
+            {
+              "kind": "text",
+              "expression": "page.getByText(\"Submit\", { exact: true })",
+              "score": 45
+            }
+          ],
+          "expected_context": { "shadow_root": "#checkout-widget" }
+        }
+      ],
+      "error_cases": [
+        {
+          "name": "structured-intent-mismatch",
+          "intent": { "role": "link", "text": "Missing" },
+          "expected_error": "browser_target_not_found"
+        },
+        {
+          "name": "element-has-no-supported-locator",
+          "snapshot": {
+            "interactive_elements": [
+              { "element_ref": "plain-container", "tag": "div" }
+            ]
+          },
+          "intent": { "element_ref": "plain-container" },
+          "expected_error": "browser_target_not_found"
+        }
+      ]
+    },
     "evidence_limits": {
       "screenshot_max_bytes": 52428800,
       "websocket_max_message_bytes": 75497472,

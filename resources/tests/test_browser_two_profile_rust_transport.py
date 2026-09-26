@@ -41,23 +41,53 @@ SECRET_QUERY = re.compile(r"(?i)([?&]token=)[^&\s\"]+")
 
 class RustTransportPage(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib callback name
-        profile = self.path.split("?", 1)[0].strip("/") or "unknown"
-        body = (
-            f"<!doctype html><meta charset=utf-8><title>Rust {profile}</title>"
-            f"<main data-profile=\"{profile}\"><h1>Rust {profile}</h1>"
-            f"<button id=\"snapshot-action\">Snapshot {profile}</button>"
-            f"<button id=\"dom-click\" onclick=\"document.querySelector('#dom-click-count').textContent=String(Number(document.querySelector('#dom-click-count').textContent)+1)\">DOM click {profile}</button>"
-            f"<button id=\"pointer-click\" onpointerdown=\"document.querySelector('#pointerdown-count').textContent=String(Number(document.querySelector('#pointerdown-count').textContent)+1)\" onclick=\"document.querySelector('#pointer-click-count').textContent=String(Number(document.querySelector('#pointer-click-count').textContent)+1)\">Pointer click {profile}</button>"
-            f"<button id=\"test-id-click\" data-testid=\"test-id-click\" onclick=\"document.querySelector('#test-id-click-count').textContent=String(Number(document.querySelector('#test-id-click-count').textContent)+1)\">Test ID click {profile}</button>"
-            f"<button id=\"role-click\" aria-label=\"Role click\" onclick=\"document.querySelector('#role-click-count').textContent=String(Number(document.querySelector('#role-click-count').textContent)+1)\">Role click {profile}</button>"
-            f"<button data-testid=\"ambiguous-click\">Ambiguous one {profile}</button>"
-            f"<button data-testid=\"ambiguous-click\">Ambiguous two {profile}</button>"
-            f"<div id=\"dom-click-count\">0</div>"
-            f"<div id=\"pointer-click-count\">0</div>"
-            f"<div id=\"pointerdown-count\">0</div></main>"
-            f"<div id=\"test-id-click-count\">0</div>"
-            f"<div id=\"role-click-count\">0</div>"
-        ).encode()
+        path = self.path.split("?", 1)[0]
+        profile = path.strip("/") or "unknown"
+        if path.endswith("/locator-frame"):
+            body = (
+                "<!doctype html><meta charset=utf-8><title>Locator frame</title>"
+                "<button id=\"frame-submit\" data-testid=\"frame-submit\" "
+                "onclick=\"document.querySelector('#frame-click-count').textContent='1'\">"
+                "Frame submit</button><span id=\"frame-click-count\">0</span>"
+            ).encode()
+        elif path.endswith("/locator-context"):
+            port = self.server.server_address[1]
+            frame_url = f"http://127.0.0.1:{port}/locator-frame"
+            body = (
+                "<!doctype html><meta charset=utf-8><title>Locator context</title>"
+                "<label for=\"context-email\">Email address</label>"
+                "<input id=\"context-email\" name=\"email\" placeholder=\"name@example.test\" "
+                "data-qa=\"context-email\">"
+                "<input class=\"css-only-target\" onclick=\"document.querySelector('#css-click-count').textContent='1'\">"
+                "<span id=\"css-click-count\">0</span>"
+                f"<iframe name=\"checkout-frame\" src=\"{frame_url}\"></iframe>"
+                f"<iframe name=\"cross-origin-frame\" src=\"http://localhost:{port}/locator-frame\"></iframe>"
+                "<div id=\"shadow-widget\"></div>"
+                "<script>"
+                "const host=document.querySelector('#shadow-widget');"
+                "const root=host.attachShadow({mode:'open'});"
+                "root.innerHTML=\"<button id='shadow-submit' data-testid='shadow-submit' "
+                "onclick=\\\"this.nextElementSibling.textContent='1'\\\">Shadow submit</button>"
+                "<span id='shadow-click-count'>0</span>\";"
+                "</script>"
+            ).encode()
+        else:
+            body = (
+                f"<!doctype html><meta charset=utf-8><title>Rust {profile}</title>"
+                f"<main data-profile=\"{profile}\"><h1>Rust {profile}</h1>"
+                f"<button id=\"snapshot-action\">Snapshot {profile}</button>"
+                f"<button id=\"dom-click\" onclick=\"document.querySelector('#dom-click-count').textContent=String(Number(document.querySelector('#dom-click-count').textContent)+1)\">DOM click {profile}</button>"
+                f"<button id=\"pointer-click\" onpointerdown=\"document.querySelector('#pointerdown-count').textContent=String(Number(document.querySelector('#pointerdown-count').textContent)+1)\" onclick=\"document.querySelector('#pointer-click-count').textContent=String(Number(document.querySelector('#pointer-click-count').textContent)+1)\">Pointer click {profile}</button>"
+                f"<button id=\"test-id-click\" data-testid=\"test-id-click\" onclick=\"document.querySelector('#test-id-click-count').textContent=String(Number(document.querySelector('#test-id-click-count').textContent)+1)\">Test ID click {profile}</button>"
+                f"<button id=\"role-click\" aria-label=\"Role click\" onclick=\"document.querySelector('#role-click-count').textContent=String(Number(document.querySelector('#role-click-count').textContent)+1)\">Role click {profile}</button>"
+                f"<button data-testid=\"ambiguous-click\">Ambiguous one {profile}</button>"
+                f"<button data-testid=\"ambiguous-click\">Ambiguous two {profile}</button>"
+                f"<div id=\"dom-click-count\">0</div>"
+                f"<div id=\"pointer-click-count\">0</div>"
+                f"<div id=\"pointerdown-count\">0</div></main>"
+                f"<div id=\"test-id-click-count\">0</div>"
+                f"<div id=\"role-click-count\">0</div>"
+            ).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
         self.send_header("Content-Length", str(len(body)))
@@ -802,6 +832,180 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                 return session
         raise AssertionError(f"no session contains page path {path}: {sessions!r}")
 
+    async def test_locator_contexts_are_reverified_in_real_chrome(self) -> None:
+        sessions = await self._wait_sessions(2)
+        target = self._target(self._session_for_path(sessions, "/rust-a"))
+        owner = "rust-locator-context"
+        token = await self._acquire_lease(target, owner)
+        try:
+            url = f"http://127.0.0.1:{self.http.server_address[1]}/locator-context"
+            navigation = await self._control(
+                {
+                    "schema_version": 1,
+                    "request_id": "rust-locator-context-navigation",
+                    "caller_label": owner,
+                    "project_root": str(self.temp_root),
+                    "cmd": "navigate",
+                    "target": target,
+                    "lease_token": token,
+                    "url": url,
+                    "timeout_ms": 15_000,
+                }
+            )
+            self.assertTrue(navigation.get("ok"), navigation)
+            await self._wait_target_url(target, url)
+
+            snapshot = await self._control(
+                {
+                    "schema_version": 1,
+                    "request_id": "rust-locator-context-snapshot",
+                    "caller_label": owner,
+                    "project_root": str(self.temp_root),
+                    "cmd": "get_page_snapshot",
+                    "target": target,
+                    "lease_token": token,
+                }
+            )
+            self.assertTrue(snapshot.get("ok"), snapshot)
+            revision = snapshot["page_context_revision"]
+            snapshot_id = snapshot["snapshot_id"]
+            elements = snapshot["interactive_elements"]
+            page = self.contexts["profile-a"].pages[0]
+            shadow_probe = await page.evaluate(
+                """() => ({
+                    host: Boolean(document.querySelector('#shadow-widget')),
+                    shadow: Boolean(document.querySelector('#shadow-widget')?.shadowRoot),
+                    button: Boolean(document.querySelector('#shadow-widget')?.shadowRoot?.querySelector('#shadow-submit')),
+                })"""
+            )
+            self._log(
+                "locator_context_probe",
+                {"shadow_probe": shadow_probe, "element_ids": [item.get("id") for item in elements]},
+            )
+            frame_element = next(
+                item for item in elements if item.get("id") == "frame-submit"
+            )
+            css_element = next(
+                item
+                for item in elements
+                if item.get("attributes", {}).get("class") == "css-only-target"
+            )
+            shadow_element = next(
+                item for item in elements if item.get("id") == "shadow-submit"
+            )
+            email_element = next(
+                item for item in elements if item.get("id") == "context-email"
+            )
+            self.assertEqual(email_element.get("label"), "Email address")
+            self.assertEqual(email_element.get("placeholder"), "name@example.test")
+            self.assertEqual(
+                email_element.get("attributes", {}).get("data-qa"), "context-email"
+            )
+            self.assertIsNotNone(frame_element.get("context", {}).get("frame"))
+            self.assertIsNone(frame_element.get("context", {}).get("shadow_root"))
+            self.assertEqual(
+                shadow_element.get("context", {}).get("shadow_root"),
+                "#shadow-widget",
+            )
+
+            actions = []
+            for request_id, element in [
+                ("rust-locator-context-frame-click", frame_element),
+                ("rust-locator-context-css-click", css_element),
+                ("rust-locator-context-shadow-click", shadow_element),
+            ]:
+                action = await self._control(
+                    {
+                        "schema_version": 1,
+                        "request_id": request_id,
+                        "caller_label": owner,
+                        "project_root": str(self.temp_root),
+                        "cmd": "execute_browser_action",
+                        "target": target,
+                        "lease_token": token,
+                        "action": "click",
+                        "element": {
+                            "reference": element["ref"],
+                            "snapshot_id": snapshot_id,
+                            "page_context_revision": revision,
+                        },
+                    }
+                )
+                self.assertTrue(action.get("ok"), action)
+                expected_kind = "css" if element is css_element else "role"
+                self.assertEqual(
+                    action["action_outcome"]["candidate"]["kind"], expected_kind
+                )
+                actions.append(action)
+
+            frame = page.frame(name="checkout-frame")
+            self.assertIsNotNone(frame)
+            self.assertEqual(await frame.locator("#frame-click-count").text_content(), "1")
+            self.assertEqual(await page.locator("#css-click-count").text_content(), "1")
+            self.assertEqual(
+                await page.evaluate(
+                    "document.querySelector('#shadow-widget').shadowRoot.querySelector('#shadow-click-count').textContent"
+                ),
+                "1",
+            )
+            changed_url = f"{url}?revision-change=1"
+            changed_navigation = await self._control(
+                {
+                    "schema_version": 1,
+                    "request_id": "rust-locator-context-revision-change",
+                    "caller_label": owner,
+                    "project_root": str(self.temp_root),
+                    "cmd": "navigate",
+                    "target": target,
+                    "lease_token": token,
+                    "url": changed_url,
+                    "timeout_ms": 15_000,
+                }
+            )
+            self.assertTrue(changed_navigation.get("ok"), changed_navigation)
+            await self._wait_target_url(target, changed_url)
+            stale_after_navigation = await self._control(
+                {
+                    "schema_version": 1,
+                    "request_id": "rust-locator-context-stale-after-navigation",
+                    "caller_label": owner,
+                    "project_root": str(self.temp_root),
+                    "cmd": "execute_browser_action",
+                    "target": target,
+                    "lease_token": token,
+                    "action": "click",
+                    "element": {
+                        "reference": frame_element["ref"],
+                        "snapshot_id": snapshot_id,
+                        "page_context_revision": revision,
+                    },
+                }
+            )
+            self.assertFalse(stale_after_navigation.get("ok"), stale_after_navigation)
+            self.assertIn(
+                stale_after_navigation.get("code"),
+                {"stale_element_reference", "stale_browser_target"},
+                stale_after_navigation,
+            )
+            self._log(
+                "locator_contexts_verified",
+                {
+                    "frame": frame_element["context"].get("frame"),
+                    "shadow_root": shadow_element["context"].get("shadow_root"),
+                    "revision_change_error": stale_after_navigation.get("code"),
+                    "actions": [
+                        {
+                            "request_id": item["request_id"],
+                            "candidate_kind": item["action_outcome"]["candidate"]["kind"],
+                        }
+                        for item in actions
+                    ],
+                    "playwright_mutations": 0,
+                },
+            )
+        finally:
+            await self._release_lease(target, owner, token)
+
     async def test_two_profiles_stay_isolated_across_rust_transport_restart(self) -> None:
         self._set_stage("verify discovery origin and feature boundary")
         public = await asyncio.to_thread(self._http_discovery, None)
@@ -1280,9 +1484,13 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                         actions[index].get("snapshot_id"),
                         snapshots[0 if action_case[1] == target_a else 1]["snapshot_id"],
                     )
-                    self.assertEqual(
-                        actions[index]["action_outcome"].get("selector"),
-                        "#pointer-click",
+                    snapshot_outcome = actions[index]["action_outcome"]
+                    self.assertIsNone(snapshot_outcome.get("selector"))
+                    self.assertEqual(snapshot_outcome["candidate"]["kind"], "role")
+                    self.assertTrue(
+                        snapshot_outcome["candidate"]["arguments"]["name"].startswith(
+                            "Pointer click "
+                        )
                     )
                 elif action_case[-1] == "test_id":
                     self.assertEqual(

@@ -199,6 +199,25 @@ test("execute_locator keeps DOM click and pointer click semantics distinct", () 
   assert.match(executeLocator, /Input\.dispatchMouseEvent.*type: "mouseReleased"/);
 });
 
+test("locator verification preserves frame and shadow scope and fails closed", () => {
+  const verifyLocator = background.match(
+    /async function verifyPlaywrightLocators\([\s\S]*?\n}\n\nasync function captureBrowserScreenshot/,
+  )?.[0];
+  assert.ok(verifyLocator, "locator verification implementation missing");
+  assert.match(verifyLocator, /candidate\?\.context/);
+  assert.match(verifyLocator, /const resolveRoot = \(context = \{\}\)/);
+  assert.match(verifyLocator, /cross-origin iframe locator context is unsupported/);
+  assert.match(verifyLocator, /iframe locator context is ambiguous/);
+  assert.match(verifyLocator, /shadow root locator context is ambiguous/);
+  assert.match(verifyLocator, /const querySelectorAll = \(root, rawSelector\)/);
+  assert.match(verifyLocator, /querySelectorAll\(root, args\.selector\)/);
+  assert.match(verifyLocator, /:has-text\(/);
+  assert.match(background, /function accessibleName\(el\)/);
+  assert.match(background, /let shadowHosts = \[\];/);
+  assert.match(background, /if \(host\.shadowRoot\) collect\(host\.shadowRoot/);
+  assert.match(background, /candidate and locator context do not match/);
+});
+
 test("file upload resolves one actionable input and uses CDP file assignment", () => {
   assert.match(background, /async function setFileInputFiles/);
   assert.match(background, /DOM\.enable/);

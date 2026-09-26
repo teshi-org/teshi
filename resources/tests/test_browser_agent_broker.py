@@ -855,6 +855,47 @@ class PlaywrightLocatorCandidateTests(unittest.TestCase):
             )
         self.assertEqual(missing.exception.code, scenarios["missing_match"]["error"])
 
+    def test_shared_locator_semantics_fixture_matches_rust_policy(self) -> None:
+        fixture = json.loads(
+            (RESOURCES / "browser_contract_fixtures.json").read_text(encoding="utf-8")
+        )["migration_contracts"]["locator_semantics"]
+        for case in fixture["cases"]:
+            snapshot = fixture["snapshot"]
+            element, candidates = generate_playwright_candidates(
+                snapshot,
+                case["intent"],
+                case["test_id_attributes"],
+            )
+            self.assertEqual(element["element_ref"], case["expected_element_ref"])
+            self.assertEqual(
+                [
+                    (candidate["kind"], candidate["expression"], candidate["score"])
+                    for candidate in candidates
+                ],
+                [
+                    (item["kind"], item["expression"], item["score"])
+                    for item in case["expected_candidates"]
+                ],
+            )
+            expected_context = case.get("expected_context")
+            if expected_context:
+                self.assertEqual(
+                    candidates[0]["context"].get("frame"),
+                    expected_context.get("frame"),
+                )
+                self.assertEqual(
+                    candidates[0]["context"].get("shadow_root"),
+                    expected_context.get("shadow_root"),
+                )
+
+        for case in fixture["error_cases"]:
+            with self.assertRaises(BrokerError) as caught:
+                generate_playwright_candidates(
+                    case.get("snapshot", fixture["snapshot"]),
+                    case["intent"],
+                )
+            self.assertEqual(caught.exception.code, case["expected_error"])
+
 
 class LegacyFixtureTests(unittest.TestCase):
     def test_single_session_fixture_captures_all_legacy_boundaries(self) -> None:

@@ -215,6 +215,23 @@ pub struct LocatorContext {
     pub frame: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow_root: Option<String>,
+    /// Keep unknown context fields visible at the protocol boundary. They are
+    /// rejected before dispatch instead of silently narrowing the search root.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl LocatorContext {
+    pub fn validate_supported(&self) -> Result<(), BrokerError> {
+        if self.extra.is_empty() {
+            return Ok(());
+        }
+        let fields = self.extra.keys().cloned().collect::<Vec<_>>().join(", ");
+        Err(BrokerError::new(
+            BrokerErrorCode::BrowserCapabilityUnavailable,
+            format!("unsupported locator context field(s): {fields}"),
+        ))
+    }
 }
 
 /// Candidate kinds understood by the existing Extension execute_locator and
@@ -361,6 +378,8 @@ pub struct SnapshotElement {
     pub enabled: Option<bool>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+    #[serde(skip)]
+    context_error: Option<String>,
 }
 
 /// Normalized page snapshot used by locator policy and snapshot references.
@@ -477,6 +496,8 @@ impl LocatorSnapshot {
             }
         };
         let context = element.context.clone().unwrap_or_default();
+        element.validate_context()?;
+        context.validate_supported()?;
         let role = element.effective_role();
         let accessible_name = element.accessible_name_for_locator();
         let mut candidates = Vec::new();
@@ -739,6 +760,12 @@ impl ExecuteLocatorCandidate {
         self.score.unwrap_or_default()
     }
 
+    pub fn validate_context(&self) -> Result<(), BrokerError> {
+        self.context
+            .as_ref()
+            .map_or(Ok(()), LocatorContext::validate_supported)
+    }
+
     fn is_verified(&self) -> bool {
         self.verification == Some(LocatorVerificationStatus::Verified)
     }
@@ -980,10 +1007,16 @@ impl SnapshotElement {
         let element_ref =
             clean_optional_text(object.get("element_ref").or_else(|| object.get("ref")))
                 .unwrap_or_else(|| format!("e{}", index + 1));
-        let context = object
-            .get("context")
-            .and_then(Value::as_object)
-            .and_then(|value| serde_json::from_value(Value::Object(value.clone())).ok());
+        let (context, context_error) = match object.get("context") {
+            None | Some(Value::Null) => (None, None),
+            Some(value) => match serde_json::from_value(value.clone()) {
+                Ok(context) => (Some(context), None),
+                Err(_) => (
+                    None,
+                    Some("snapshot element has malformed frame or shadow context".into()),
+                ),
+            },
+        };
         Some(Self {
             element_ref,
             tag: clean_optional_text(object.get("tag")),
@@ -1007,7 +1040,20 @@ impl SnapshotElement {
             visible: object.get("visible").and_then(Value::as_bool),
             enabled: object.get("enabled").and_then(Value::as_bool),
             extra,
+            context_error,
         })
+    }
+
+    pub fn validate_context(&self) -> Result<(), BrokerError> {
+        if let Some(message) = &self.context_error {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserCapabilityUnavailable,
+                message,
+            ));
+        }
+        self.context
+            .as_ref()
+            .map_or(Ok(()), LocatorContext::validate_supported)
     }
 
     pub fn implicit_role(&self) -> String {
@@ -1988,6 +2034,62 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.code, BrokerErrorCode::BrowserTargetNotFound);
+    }
+
+    #[test]
+    fn shared_locator_semantics_fixture_matches_python_policy() {
+        let fixture = fixtures()["migration_contracts"]["locator_semantics"].clone();
+        let snapshot = LocatorSnapshot::normalize(&fixture["snapshot"]).unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let intent = LocatorIntent::from_value(&case["intent"]);
+            let test_ids = case["test_id_attributes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let resolution = snapshot.generate_candidates(&intent, &test_ids).unwrap();
+            assert_eq!(
+                resolution.element.element_ref,
+                case["expected_element_ref"].as_str().unwrap()
+            );
+            let expected = case["expected_candidates"].as_array().unwrap();
+            assert_eq!(resolution.candidates.len(), expected.len());
+            for (candidate, expected) in resolution.candidates.iter().zip(expected) {
+                let expected_kind: ExecuteLocatorCandidateKind =
+                    serde_json::from_value(expected["kind"].clone()).unwrap();
+                assert_eq!(candidate.kind, expected_kind);
+                assert_eq!(
+                    candidate.expression,
+                    expected["expression"].as_str().map(str::to_owned)
+                );
+                assert_eq!(
+                    candidate.score,
+                    expected["score"].as_i64().map(|value| value as i32)
+                );
+            }
+            if let Some(context) = case.get("expected_context") {
+                let actual = resolution.candidates[0].context.as_ref().unwrap();
+                assert_eq!(actual.frame, context["frame"].as_str().map(str::to_owned));
+                assert_eq!(
+                    actual.shadow_root,
+                    context["shadow_root"].as_str().map(str::to_owned)
+                );
+            }
+        }
+
+        for case in fixture["error_cases"].as_array().unwrap() {
+            let case_snapshot = case.get("snapshot").unwrap_or(&fixture["snapshot"]);
+            let case_snapshot = LocatorSnapshot::normalize(case_snapshot).unwrap();
+            let error = case_snapshot
+                .generate_candidates(&LocatorIntent::from_value(&case["intent"]), &[])
+                .unwrap_err();
+            assert_eq!(
+                error.code.as_str(),
+                case["expected_error"].as_str().unwrap()
+            );
+        }
     }
 
     #[test]

@@ -352,6 +352,7 @@ impl BrowserSessionRecord {
         let Some(_elements) = response
             .get("interactive_elements")
             .and_then(Value::as_array)
+            .or_else(|| response.get("elements").and_then(Value::as_array))
         else {
             response["snapshot_id"] = Value::String(snapshot_id);
             return Ok(());
@@ -362,6 +363,7 @@ impl BrowserSessionRecord {
             .into_iter()
             .take(MAX_ELEMENT_REFERENCES)
         {
+            element.validate_context()?;
             let alias = format!("@e{}", published.len() + 1);
             let Value::Object(mut object) = serde_json::to_value(&element).map_err(|_| {
                 BrokerError::new(

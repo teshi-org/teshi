@@ -1402,6 +1402,33 @@ async function collectInteractiveElements(tabId) {
       }
 
       const sel = "button, [role='button'], input, input[type='submit'], select, a[href], [role='link'], textarea";
+      function accessibleName(el) {
+        const labelledBy = (el.getAttribute?.('aria-labelledby') || '').trim();
+        if (labelledBy) {
+          const text = labelledBy.split(/\s+/).map((id) => el.ownerDocument?.getElementById(id)?.textContent || '').join(' ').trim();
+          if (text) return text;
+        }
+        const ariaLabel = (el.getAttribute?.('aria-label') || '').trim();
+        if (ariaLabel) return ariaLabel;
+        const tag = (el.tagName || '').toLowerCase();
+        if (['img', 'area'].includes(tag) || el.getAttribute?.('role') === 'img') {
+          const alt = (el.getAttribute?.('alt') || '').trim();
+          if (alt) return alt;
+        }
+        const label = (el.labels?.[0]?.textContent || '').trim();
+        if (label) return label;
+        const title = (el.getAttribute?.('title') || '').trim();
+        if (title) return title;
+        const text = (el.innerText || el.textContent || '').trim();
+        if (['button', 'a'].includes(tag) || ['button', 'link', 'menuitem'].includes(el.getAttribute?.('role'))) {
+          if (text) return text.slice(0, 120);
+        }
+        if (tag === 'input' && ['button', 'submit', 'reset'].includes((el.getAttribute?.('type') || '').toLowerCase())) {
+          const value = (el.getAttribute?.('value') || '').trim();
+          if (value) return value;
+        }
+        return (el.value || text || '').trim().slice(0, 120) || null;
+      }
       function collect(root, framePath = null, shadowPath = null, output = []) {
         let elements = [];
         try { elements = Array.from(root.querySelectorAll(sel)); } catch { elements = []; }
@@ -1422,7 +1449,7 @@ async function collectInteractiveElements(tabId) {
             classes: el.className || null,
             shortSelector: makeShortSelector(el),
             ariaLabel: el.getAttribute('aria-label'),
-            accessible_name: el.getAttribute('aria-label') || (el.labels?.[0]?.textContent || '').trim() || (el.innerText || el.value || '').trim().slice(0, 120) || null,
+            accessible_name: accessibleName(el),
             label: (el.labels?.[0]?.textContent || '').trim() || null,
             placeholder: el.getAttribute('placeholder'),
             name: el.getAttribute('name'),
@@ -1430,7 +1457,15 @@ async function collectInteractiveElements(tabId) {
             visible: Boolean(el.getClientRects().length),
             context: { frame: framePath, shadow_root: shadowPath },
           });
-          if (el.shadowRoot) collect(el.shadowRoot, framePath, makeShortSelector(el), output);
+        }
+        // A Shadow DOM host is not necessarily itself interactive (a custom
+        // element often owns the actual button/input). Walk every host so
+        // descendants are published with the host selector as their scope.
+        let shadowHosts = [];
+        try { shadowHosts = Array.from(root.querySelectorAll('*')); } catch { shadowHosts = []; }
+        for (const host of shadowHosts) {
+          if (output.length >= 200) break;
+          if (host.shadowRoot) collect(host.shadowRoot, framePath, makeShortSelector(host), output);
         }
         let frames = [];
         try { frames = Array.from(root.querySelectorAll('iframe,frame')); } catch { frames = []; }
@@ -1866,7 +1901,16 @@ async function executeLocator({ selector, candidate = null, locatorContext = nul
   const expression = `(() => {
     const selector = ${JSON.stringify(selector)};
     const candidate = ${JSON.stringify(candidate)};
-    const locatorContext = ${JSON.stringify(locatorContext)} || {};
+    const suppliedLocatorContext = ${JSON.stringify(locatorContext)};
+    const candidateContext = candidate?.context || null;
+    const hasContextValue = (context) => Boolean(context && (context.frame || context.shadow_root));
+    if (hasContextValue(suppliedLocatorContext) && hasContextValue(candidateContext) && (
+        (suppliedLocatorContext.frame || null) !== (candidateContext.frame || null) ||
+        (suppliedLocatorContext.shadow_root || null) !== (candidateContext.shadow_root || null)
+    )) {
+      return { ok: false, error: "candidate and locator context do not match", code: "browser_capability_unavailable" };
+    }
+    const locatorContext = hasContextValue(suppliedLocatorContext) ? suppliedLocatorContext : (candidateContext || {});
     const action = ${JSON.stringify(action)};
     const value = ${JSON.stringify(value ?? "")};
     const timeoutMs = ${Number(timeoutMs) || 5000};
@@ -1894,55 +1938,100 @@ async function executeLocator({ selector, candidate = null, locatorContext = nul
       if (tag === 'select') return 'combobox';
       return '';
     };
-    const accessibleName = (el) => (el.getAttribute?.('aria-label') || el.labels?.[0]?.textContent || el.innerText || el.value || el.textContent || '').trim();
+    const accessibleName = (el) => {
+      const labelledBy = (el.getAttribute?.('aria-labelledby') || '').trim();
+      if (labelledBy) {
+        const text = labelledBy.split(/\s+/).map((id) => el.ownerDocument?.getElementById(id)?.textContent || '').join(' ').trim();
+        if (text) return text;
+      }
+      const ariaLabel = (el.getAttribute?.('aria-label') || '').trim();
+      if (ariaLabel) return ariaLabel;
+      const tag = (el.tagName || '').toLowerCase();
+      if (['img', 'area'].includes(tag) || el.getAttribute?.('role') === 'img') {
+        const alt = (el.getAttribute?.('alt') || '').trim();
+        if (alt) return alt;
+      }
+      const label = (el.labels?.[0]?.textContent || '').trim();
+      if (label) return label;
+      const title = (el.getAttribute?.('title') || '').trim();
+      if (title) return title;
+      return (el.innerText || el.value || el.textContent || '').trim();
+    };
     const resolveRoot = () => {
       let root = document;
       if (locatorContext.frame) {
-        const frames = Array.from(document.querySelectorAll('iframe,frame'));
-        const frame = frames.find((item) => item.src === locatorContext.frame || item.name === locatorContext.frame || item.src?.includes(locatorContext.frame));
-        if (!frame?.contentDocument) return null;
-        root = frame.contentDocument;
+        let frames = [];
+        try { frames = Array.from(document.querySelectorAll('iframe,frame')); } catch {
+          return { root: null, code: "invalid_selector", error: "iframe locator context is invalid" };
+        }
+        const matches = frames.filter((item) => item.src === locatorContext.frame || item.name === locatorContext.frame || item.src?.includes(locatorContext.frame));
+        if (matches.length > 1) return { root: null, code: "stale_element_reference", error: "iframe locator context is ambiguous" };
+        const frame = matches[0];
+        if (!frame) return { root: null, code: "stale_element_reference", error: "iframe locator context is unavailable" };
+        let contentDocument = null;
+        try { contentDocument = frame.contentDocument; } catch { /* cross-origin */ }
+        if (!contentDocument) {
+          let crossOrigin = false;
+          try {
+            crossOrigin = new URL(frame.src || frame.getAttribute("src") || "", document.baseURI).origin !== window.location.origin;
+          } catch { /* keep the stale-context error */ }
+          return {
+            root: null,
+            code: crossOrigin ? "browser_capability_unavailable" : "stale_element_reference",
+            error: crossOrigin ? "cross-origin iframe locator context is unsupported" : "iframe locator context is unavailable",
+          };
+        }
+        root = contentDocument;
       }
       if (locatorContext.shadow_root) {
-        const host = root.querySelector(locatorContext.shadow_root);
-        if (!host?.shadowRoot) return null;
+        let hosts = [];
+        try { hosts = Array.from(root.querySelectorAll(locatorContext.shadow_root)); } catch {
+          return { root: null, code: "invalid_selector", error: "shadow root locator context is invalid" };
+        }
+        if (hosts.length > 1) return { root: null, code: "stale_element_reference", error: "shadow root locator context is ambiguous" };
+        const host = hosts[0];
+        if (!host?.shadowRoot) return { root: null, code: "stale_element_reference", error: "shadow root locator context is unavailable" };
         root = host.shadowRoot;
       }
-      return root;
+      return { root };
+    };
+    const querySelectorAll = (root, rawSelector) => {
+      const selectorText = String(rawSelector || '');
+      const marker = selectorText.lastIndexOf(':has-text(');
+      if (marker < 0 || !selectorText.endsWith(')')) {
+        return Array.from(root.querySelectorAll(selectorText));
+      }
+      const baseSelector = selectorText.slice(0, marker).trim() || '*';
+      const textArgument = selectorText.slice(marker + ':has-text('.length, -1).trim();
+      let expectedText = textArgument;
+      try { expectedText = JSON.parse(textArgument); } catch { /* keep a bounded literal */ }
+      return Array.from(root.querySelectorAll(baseSelector)).filter((el) =>
+        (el.innerText || el.textContent || '').includes(String(expectedText))
+      );
     };
     const findMatches = () => {
-      const root = resolveRoot();
-      if (!root) return [];
+      const resolved = resolveRoot();
+      if (!resolved.root) return resolved;
+      const root = resolved.root;
       if (!candidate) {
-        try { return Array.from(root.querySelectorAll(selector)); } catch { return []; }
+        try { return { matches: querySelectorAll(root, selector) }; } catch { return { matches: [], selector_error: true }; }
       }
       const args = candidate.arguments || {};
       let all = [];
       try { all = Array.from(root.querySelectorAll('*')); } catch { all = []; }
-      if (candidate.kind === 'role') return all.filter((el) => implicitRole(el) === args.role && accessibleName(el) === String(args.name || ''));
-      if (candidate.kind === 'label') return all.filter((el) => (el.labels?.[0]?.textContent || el.getAttribute?.('aria-label') || '').trim() === String(args.text || ''));
-      if (candidate.kind === 'placeholder') return all.filter((el) => (el.getAttribute?.('placeholder') || '') === String(args.text || ''));
-      if (candidate.kind === 'test_id' || candidate.kind === 'attribute') return all.filter((el) => (el.getAttribute?.(String(args.attribute || 'data-testid')) || '') === String(args.value || ''));
-      if (candidate.kind === 'text') return all.filter((el) => (el.innerText || el.textContent || '').trim() === String(args.text || ''));
-      if (candidate.kind === 'css') { try { return Array.from(root.querySelectorAll(String(args.selector || ''))); } catch { return []; } }
-      return [];
+      if (candidate.kind === 'role') return { matches: all.filter((el) => implicitRole(el) === args.role && accessibleName(el) === String(args.name || '')) };
+      if (candidate.kind === 'label') return { matches: all.filter((el) => (el.labels?.[0]?.textContent || el.getAttribute?.('aria-label') || '').trim() === String(args.text || '')) };
+      if (candidate.kind === 'placeholder') return { matches: all.filter((el) => (el.getAttribute?.('placeholder') || '') === String(args.text || '')) };
+      if (candidate.kind === 'test_id' || candidate.kind === 'attribute') return { matches: all.filter((el) => (el.getAttribute?.(String(args.attribute || 'data-testid')) || '') === String(args.value || '')) };
+      if (candidate.kind === 'text') return { matches: all.filter((el) => (el.innerText || el.textContent || '').trim() === String(args.text || '')) };
+      if (candidate.kind === 'css') { try { return { matches: querySelectorAll(root, args.selector) }; } catch { return { matches: [], selector_error: true }; } }
+      return { matches: [] };
     };
     if (action === "assert_not_exists") {
-      const root = resolveRoot();
-      if (!root) return { ok: false, error: "locator context is unavailable", code: "element_not_found" };
-      let matches;
-      try {
-        if (!candidate) {
-          matches = Array.from(root.querySelectorAll(selector));
-        } else if (candidate.kind === "css") {
-          const args = candidate.arguments || {};
-          matches = Array.from(root.querySelectorAll(String(args.selector || "")));
-        } else {
-          matches = findMatches();
-        }
-      } catch {
-        return { ok: false, error: "invalid selector", code: "invalid_selector" };
-      }
+      const resolved = findMatches();
+      if (resolved.error) return { ok: false, error: resolved.error, code: resolved.code };
+      if (resolved.selector_error) return { ok: false, error: "invalid selector", code: "invalid_selector" };
+      const matches = resolved.matches;
       if (matches.length > 0) {
         return {
           ok: false,
@@ -1956,7 +2045,9 @@ async function executeLocator({ selector, candidate = null, locatorContext = nul
     return (async () => {
       let el = null;
       while (Date.now() < deadline) {
-        const found = findMatches();
+        const resolved = findMatches();
+        if (resolved.error) return { ok: false, error: resolved.error, code: resolved.code };
+        const found = resolved.matches;
         if (found.length > 1) return { ok: false, error: "locator became ambiguous", code: "stale_element_reference", match_count: found.length };
         el = found[0] || null;
         if (visible(el)) break;
@@ -2240,32 +2331,96 @@ async function verifyPlaywrightLocators(
     const accessibleName = (el) => {
       const labelledBy = (el.getAttribute?.('aria-labelledby') || '').trim();
       if (labelledBy) {
-        const text = labelledBy.split(/\\s+/).map((id) => document.getElementById(id)?.textContent || '').join(' ').trim();
+        const text = labelledBy.split(/\s+/).map((id) => el.ownerDocument?.getElementById(id)?.textContent || '').join(' ').trim();
         if (text) return text;
       }
-      return (el.getAttribute?.('aria-label') || el.labels?.[0]?.textContent || el.getAttribute?.('alt') || el.getAttribute?.('title') || el.innerText || el.value || el.textContent || '').trim();
-    };
-    const collect = (root, output = []) => {
-      let elements = [];
-      try { elements = Array.from(root.querySelectorAll('*')); } catch { elements = []; }
-      for (const el of elements) {
-        output.push(el);
-        if (el.shadowRoot) collect(el.shadowRoot, output);
+      const ariaLabel = (el.getAttribute?.('aria-label') || '').trim();
+      if (ariaLabel) return ariaLabel;
+      const tag = (el.tagName || '').toLowerCase();
+      if (['img', 'area'].includes(tag) || el.getAttribute?.('role') === 'img') {
+        const alt = (el.getAttribute?.('alt') || '').trim();
+        if (alt) return alt;
       }
-      let frames = [];
-      try { frames = Array.from(root.querySelectorAll('iframe,frame')); } catch { frames = []; }
-      for (const frame of frames) {
-        try { if (frame.contentDocument) collect(frame.contentDocument, output); } catch { /* cross origin */ }
-      }
-      return output;
+      const label = (el.labels?.[0]?.textContent || '').trim();
+      if (label) return label;
+      const title = (el.getAttribute?.('title') || '').trim();
+      if (title) return title;
+      return (el.innerText || el.value || el.textContent || '').trim();
     };
-    const all = collect(document);
+    const resolveRoot = (context = {}) => {
+      let root = document;
+      if (context.frame) {
+        let frames = [];
+        try { frames = Array.from(document.querySelectorAll('iframe,frame')); } catch {
+          return { root: null, code: "invalid_selector", error: "iframe locator context is invalid" };
+        }
+        const matches = frames.filter((item) => item.src === context.frame || item.name === context.frame || item.src?.includes(context.frame));
+        if (matches.length > 1) return { root: null, code: "stale_element_reference", error: "iframe locator context is ambiguous" };
+        const frame = matches[0];
+        if (!frame) return { root: null, code: "stale_element_reference", error: "iframe locator context is unavailable" };
+        let contentDocument = null;
+        try { contentDocument = frame.contentDocument; } catch { /* cross-origin */ }
+        if (!contentDocument) {
+          let crossOrigin = false;
+          try {
+            crossOrigin = new URL(frame.src || frame.getAttribute("src") || "", document.baseURI).origin !== window.location.origin;
+          } catch { /* keep the stale-context error */ }
+          return {
+            root: null,
+            code: crossOrigin ? "browser_capability_unavailable" : "stale_element_reference",
+            error: crossOrigin ? "cross-origin iframe locator context is unsupported" : "iframe locator context is unavailable",
+          };
+        }
+        root = contentDocument;
+      }
+      if (context.shadow_root) {
+        let hosts = [];
+        try { hosts = Array.from(root.querySelectorAll(context.shadow_root)); } catch {
+          return { root: null, code: "invalid_selector", error: "shadow root locator context is invalid" };
+        }
+        if (hosts.length > 1) return { root: null, code: "stale_element_reference", error: "shadow root locator context is ambiguous" };
+        const host = hosts[0];
+        if (!host?.shadowRoot) return { root: null, code: "stale_element_reference", error: "shadow root locator context is unavailable" };
+        root = host.shadowRoot;
+      }
+      return { root };
+    };
+    const querySelectorAll = (root, rawSelector) => {
+      const selectorText = String(rawSelector || '');
+      const marker = selectorText.lastIndexOf(':has-text(');
+      if (marker < 0 || !selectorText.endsWith(')')) {
+        return Array.from(root.querySelectorAll(selectorText));
+      }
+      const baseSelector = selectorText.slice(0, marker).trim() || '*';
+      const textArgument = selectorText.slice(marker + ':has-text('.length, -1).trim();
+      let expectedText = textArgument;
+      try { expectedText = JSON.parse(textArgument); } catch { /* keep a bounded literal */ }
+      return Array.from(root.querySelectorAll(baseSelector)).filter((el) =>
+        (el.innerText || el.textContent || '').includes(String(expectedText))
+      );
+    };
+    for (const candidate of candidates) {
+      const contextResult = resolveRoot(candidate?.context || {});
+      if (!contextResult.root) {
+        return {
+          ok: false,
+          code: contextResult.code,
+          error: contextResult.error,
+          page_context_revision: ${JSON.stringify(currentRevision)},
+          verification: [],
+        };
+      }
+    }
     const visible = (el) => {
       const style = getComputedStyle(el);
       const rect = el.getBoundingClientRect();
       return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || '1') > 0 && rect.width > 0 && rect.height > 0;
     };
     const matches = (candidate) => {
+      const root = resolveRoot(candidate?.context || {}).root;
+      if (!root) return [];
+      let all = [];
+      try { all = Array.from(root.querySelectorAll('*')); } catch { all = []; }
       const args = candidate.arguments || {};
       if (candidate.kind === 'role') {
         return all.filter((el) => implicitRole(el) === args.role && accessibleName(el) === String(args.name || ''));
@@ -2283,7 +2438,7 @@ async function verifyPlaywrightLocators(
         return all.filter((el) => (el.innerText || el.textContent || '').trim() === String(args.text || ''));
       }
       if (candidate.kind === 'css') {
-        try { return Array.from(document.querySelectorAll(String(args.selector || ''))); } catch { return []; }
+        try { return querySelectorAll(root, args.selector); } catch { return []; }
       }
       return [];
     };

@@ -18,8 +18,8 @@ use crate::protocol::{
     BROWSER_BROKER_PROTOCOL_VERSION, BROWSER_BROKER_SCHEMA_VERSION, BrokerError, BrokerErrorCode,
     BrowserTarget, ExecuteLocatorActionRequest, ExecuteLocatorCandidate,
     ExecuteLocatorCandidateKind, ExecuteLocatorCommand, ExecuteLocatorInput, ExtensionResponse,
-    ExtensionStreamMessage, LocatorCandidateArguments, LocatorContext, NetworkBatch,
-    OperationRequest, SnapshotElement,
+    ExtensionStreamMessage, LocatorCandidateArguments, LocatorContext, LocatorIntent,
+    LocatorSnapshot, NetworkBatch, OperationRequest, SnapshotElement,
 };
 use crate::server::{BrokerEvent, BrokerRuntime};
 use crate::session::{BrowserSessionRecord, SessionRegistry};
@@ -1487,6 +1487,7 @@ fn snapshot_locator(
             "Snapshot element reference does not contain a locator object",
         )
     })?;
+    normalized.validate_context()?;
     if let Some(raw_candidate) = normalized.extra.get("candidate") {
         let candidate: ExecuteLocatorCandidate = serde_json::from_value(raw_candidate.clone())
             .map_err(|_| {
@@ -1495,50 +1496,64 @@ fn snapshot_locator(
                     "Snapshot element candidate is malformed",
                 )
             })?;
+        candidate.validate_context()?;
+        if let (Some(element_context), Some(candidate_context)) =
+            (normalized.context.as_ref(), candidate.context.as_ref())
+            && element_context != candidate_context
+        {
+            return Err(BrokerError::new(
+                BrokerErrorCode::StaleElementReference,
+                "Snapshot element and locator candidate contexts do not match",
+            ));
+        }
         let selector = (candidate.kind == ExecuteLocatorCandidateKind::Css)
             .then(|| candidate.arguments.selector.clone())
             .flatten();
         return Ok((selector, Some(candidate)));
     }
-    if let Some(value) = normalized.attributes.get("data-testid") {
-        return Ok((None, Some(test_id_candidate(value.clone()))));
+    let resolution = LocatorSnapshot {
+        snapshot_id: None,
+        page_context_revision: None,
+        url: String::new(),
+        title: String::new(),
+        interactive_elements: vec![normalized.clone()],
+        extra: BTreeMap::new(),
     }
-    let role = normalized
-        .role
-        .clone()
-        .unwrap_or_else(|| normalized.implicit_role());
-    let name = normalized
-        .accessible_name
-        .clone()
-        .or_else(|| normalized.aria_label.clone())
-        .or_else(|| normalized.label.clone())
-        .or_else(|| normalized.text.clone());
-    if !role.is_empty()
-        && let Some(name) = name
-    {
-        return Ok((None, Some(role_name_candidate(role, name))));
-    }
-    if let Some(selector) = normalized.short_selector {
-        return Ok((Some(selector), None));
-    }
-    Err(BrokerError::new(
-        BrokerErrorCode::StaleElementReference,
-        "Snapshot element reference has no supported CSS, test ID, or role/name locator",
-    ))
+    .generate_candidates(
+        &LocatorIntent {
+            element_ref: Some(normalized.element_ref.clone()),
+            ..Default::default()
+        },
+        &[],
+    )
+    .map_err(|error| match error.code {
+        BrokerErrorCode::BrowserCapabilityUnavailable => error,
+        _ => BrokerError::new(BrokerErrorCode::StaleElementReference, error.message),
+    })?;
+    let candidate = resolution.candidates.into_iter().next().ok_or_else(|| {
+        BrokerError::new(
+            BrokerErrorCode::StaleElementReference,
+            "Snapshot element reference has no supported locator",
+        )
+    })?;
+    let selector = (candidate.kind == ExecuteLocatorCandidateKind::Css)
+        .then(|| candidate.arguments.selector.clone())
+        .flatten();
+    Ok((selector, Some(candidate)))
 }
 
 fn snapshot_locator_context(value: &Value) -> Result<Option<LocatorContext>, BrokerError> {
     if value.is_null() {
         return Ok(None);
     }
-    serde_json::from_value(value.clone())
-        .map(Some)
-        .map_err(|_| {
-            BrokerError::new(
-                BrokerErrorCode::StaleElementReference,
-                "Snapshot element reference has unsupported frame or shadow context",
-            )
-        })
+    let context: LocatorContext = serde_json::from_value(value.clone()).map_err(|_| {
+        BrokerError::new(
+            BrokerErrorCode::StaleElementReference,
+            "Snapshot element reference has unsupported frame or shadow context",
+        )
+    })?;
+    context.validate_supported()?;
+    Ok(Some(context))
 }
 
 fn extension_operation_for(operation: &str) -> &str {
@@ -2082,6 +2097,136 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(wrong_snapshot.code, BrokerErrorCode::StaleElementReference);
+    }
+
+    #[test]
+    fn snapshot_reference_preserves_label_placeholder_attributes_and_context() {
+        let now = Instant::now();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        let mut snapshot = json!({
+            "snapshot_id": "snapshot-label",
+            "page_context_revision": "revision-1",
+            "interactive_elements": [{
+                "element_ref": "opaque-label",
+                "tag": "div",
+                "label": "Email address",
+                "placeholder": "name@example.test",
+                "attributes": {
+                    "id": "email",
+                    "data-qa": "email-field"
+                },
+                "shortSelector": "#email",
+                "context": {
+                    "frame": "https://example.test/checkout-frame",
+                    "shadow_root": "#checkout-widget"
+                }
+            }]
+        });
+        state
+            .sessions
+            .get_mut("profile-a")
+            .unwrap()
+            .cache_snapshot_references(
+                target(),
+                &mut snapshot,
+                "snapshot-label",
+                "C:/project-a",
+                "caller-a",
+                now,
+            )
+            .unwrap();
+
+        let request = execute_element_request(
+            "click",
+            json!({
+                "reference": "@e1",
+                "snapshot_id": "snapshot-label",
+                "page_context_revision": "revision-1"
+            }),
+        );
+        let locator = resolve_execute_locator(
+            &request,
+            &target(),
+            state.sessions.get_mut("profile-a").unwrap(),
+            "C:/project-a",
+            "caller-a",
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            locator.candidate.as_ref().unwrap().kind,
+            ExecuteLocatorCandidateKind::Label
+        );
+        assert_eq!(
+            locator
+                .candidate
+                .as_ref()
+                .unwrap()
+                .arguments
+                .text
+                .as_deref(),
+            Some("Email address")
+        );
+        assert_eq!(
+            locator
+                .locator_context
+                .as_ref()
+                .and_then(|context| context.frame.as_deref()),
+            Some("https://example.test/checkout-frame")
+        );
+        assert_eq!(
+            locator
+                .locator_context
+                .as_ref()
+                .and_then(|context| context.shadow_root.as_deref()),
+            Some("#checkout-widget")
+        );
+        let command =
+            build_extension_command(&request, &target(), "profile-a", Some(&locator)).unwrap();
+        assert_eq!(command["cmd"], "execute_locator");
+        assert_eq!(command["candidate"]["kind"], "label");
+        assert_eq!(command["candidate"]["arguments"]["text"], "Email address");
+        assert_eq!(
+            command["locator_context"]["frame"],
+            "https://example.test/checkout-frame"
+        );
+        assert_eq!(
+            command["locator_context"]["shadow_root"],
+            "#checkout-widget"
+        );
+        assert!(command.get("element").is_none());
+    }
+
+    #[test]
+    fn snapshot_context_with_unsupported_fields_fails_closed() {
+        let now = Instant::now();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        let mut snapshot = json!({
+            "snapshot_id": "snapshot-unsupported-context",
+            "page_context_revision": "revision-1",
+            "interactive_elements": [{
+                "element_ref": "unsupported",
+                "role": "button",
+                "accessible_name": "Save",
+                "context": {"frame": "checkout", "pierce_shadow": true}
+            }]
+        });
+        let error = state
+            .sessions
+            .get_mut("profile-a")
+            .unwrap()
+            .cache_snapshot_references(
+                target(),
+                &mut snapshot,
+                "snapshot-unsupported-context",
+                "C:/project-a",
+                "caller-a",
+                now,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, BrokerErrorCode::BrowserCapabilityUnavailable);
     }
 
     #[test]
