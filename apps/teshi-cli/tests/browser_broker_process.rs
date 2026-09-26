@@ -1,5 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -33,6 +34,38 @@ impl Drop for BrokerChild {
 fn unused_loopback_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     listener.local_addr().unwrap().port()
+}
+
+fn spawn_internal_broker(state_dir: &Path, port: u16) -> (BrokerChild, EndpointRecord) {
+    let mut child = BrokerChild(
+        Command::new(env!("CARGO_BIN_EXE_teshi"))
+            .args([
+                "--browser-broker-internal",
+                "--state-dir",
+                state_dir.to_str().unwrap(),
+                "--trusted-extension-origin",
+                TRUSTED_ORIGIN,
+                "--discovery-port",
+                &port.to_string(),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the Teshi Rust broker process"),
+    );
+    let mut ready_line = String::new();
+    BufReader::new(child.0.stdout.take().unwrap())
+        .read_line(&mut ready_line)
+        .expect("read Rust broker readiness line");
+    assert!(ready_line.starts_with("BROWSER_BROKER_READY "));
+    let endpoint = serde_json::from_str(
+        ready_line
+            .trim_start_matches("BROWSER_BROKER_READY ")
+            .trim(),
+    )
+    .unwrap();
+    (child, endpoint)
 }
 
 fn get_discovery(port: u16, origin: Option<&str>) -> (u16, Value) {
@@ -307,4 +340,58 @@ fn internal_cli_process_serves_authenticated_rust_transport_and_state_without_py
         "the exact child listener must close after child termination"
     );
     stdout_reader.join().unwrap();
+}
+
+#[test]
+fn internal_cli_broker_recovers_after_child_crash_without_touching_unrelated_listener() {
+    let temp = tempfile::tempdir().unwrap();
+    let state_dir = temp.path().join("user-state");
+    let port = unused_loopback_port();
+    let (mut first, first_endpoint) = spawn_internal_broker(&state_dir, port);
+    let first_pid = first.0.id();
+
+    first.0.kill().unwrap();
+    let first_status = first.0.wait().unwrap();
+    assert!(!first_status.success());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline && TcpStream::connect(("127.0.0.1", port)).is_ok() {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+
+    let (second, second_endpoint) = spawn_internal_broker(&state_dir, port);
+    assert_ne!(second.0.id(), first_pid);
+    assert_ne!(
+        second_endpoint.broker_start_id,
+        first_endpoint.broker_start_id
+    );
+    let credential = PrivateCredentialStore::new(&state_dir)
+        .read_for_endpoint(&second_endpoint)
+        .unwrap();
+    assert_eq!(
+        &credential.broker_start_id,
+        &second_endpoint.broker_start_id
+    );
+
+    let unrelated_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let unrelated_port = unrelated_listener.local_addr().unwrap().port();
+    let conflict_state = temp.path().join("conflict-state");
+    let mut conflicting_child = Command::new(env!("CARGO_BIN_EXE_teshi"))
+        .args([
+            "--browser-broker-internal",
+            "--state-dir",
+            conflict_state.to_str().unwrap(),
+            "--trusted-extension-origin",
+            TRUSTED_ORIGIN,
+            "--discovery-port",
+            &unrelated_port.to_string(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let conflict_status = conflicting_child.wait().unwrap();
+    assert!(!conflict_status.success());
+    assert!(TcpStream::connect(("127.0.0.1", unrelated_port)).is_ok());
 }

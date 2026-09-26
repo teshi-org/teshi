@@ -45,6 +45,23 @@ The broker isolates health, commands, pending requests, preview frames, diagnost
 
 For concurrent work, create one dedicated Chromium profile per agent, install the extension separately, and assign labels such as `agent-a` and `agent-b` in each popup. All profiles use the same loopback broker port.
 
+### Unpacked extension ID changes
+
+The extension manifest deliberately has no `key`: an unpacked checkout, MSI copy,
+and browser-testing package can receive different Chrome IDs. The popup displays
+the complete ID. Rust transport pairing is exact and per-user (`chrome-extension://`
+plus 32 lower-case letters `a`–`p`); ordinary pages, unknown IDs, and wildcard
+origins are rejected. The migration-only hidden broker command takes paired IDs as
+repeated `--trusted-extension-origin` values. A durable pairing editor is a
+precondition for production Chrome cutover, so the current production selector
+remains the Python broker.
+
+To upgrade an unpacked installation, add/pair the new exact ID first, connect it,
+and verify the existing `chrome.storage.local` profile identity and reconnecting
+`extension_instance_id`. Remove the old installation and old allowlist entry only
+after that verification. A moved folder must be explicitly re-paired; it is never
+implicitly trusted.
+
 Network capture is independently keyed by Profile/window/tab/capture ID. One lease owner may capture several explicit tabs in its Profile, while agents holding different Profile leases may capture concurrently. Active-tab changes move only the preview role and do not stop an explicit capture. Tab closure, Profile disconnect, broker replacement, or an external debugger detach ends only the affected capture and reports its termination reason.
 
 ## Connect Chrome (default for locators)

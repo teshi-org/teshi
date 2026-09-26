@@ -1231,6 +1231,37 @@ mod tests {
     }
 
     #[test]
+    fn shared_ambiguous_target_fixture_has_no_dispatch_side_effect() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../resources/browser_contract_fixtures.json"
+        ))
+        .unwrap();
+        let scenario = &fixture["stateful"]["ambiguous_implicit_target"];
+        let start = Instant::now();
+        let mut registry = SessionRegistry::default();
+        for item in scenario["targets"].as_array().unwrap() {
+            let instance_id = item["extension_instance_id"].as_str().unwrap();
+            registry
+                .register_heartbeat(
+                    heartbeat(Some(instance_id), &format!("https://{instance_id}.test")),
+                    start,
+                )
+                .unwrap();
+        }
+
+        let error = registry.resolve_target(None, start).unwrap_err();
+        assert_eq!(error.code, BrokerErrorCode::AmbiguousBrowserTarget);
+        assert_eq!(
+            registry
+                .sessions
+                .values()
+                .map(BrowserSessionRecord::queued_command_count)
+                .sum::<usize>(),
+            scenario["expected_dispatched_commands"].as_u64().unwrap() as usize
+        );
+    }
+
+    #[test]
     fn stream_generation_replacement_does_not_allow_old_disconnect_to_remove_new_stream() {
         let start = Instant::now();
         let mut registry = SessionRegistry::default();

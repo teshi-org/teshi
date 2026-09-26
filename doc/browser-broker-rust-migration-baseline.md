@@ -95,9 +95,31 @@ fixture also pins heartbeat reconnect, lease renewal/release/expiry, duplicate a
 requests, locator outcomes, evidence limits, capability scope/revocation, network sequence
 barriers, and malformed transport cases. Python state-transition tests consume these
 vectors. The Rust typed fixture consumer currently validates the shared records and selected
-negative cases; Rust state-machine differential coverage remains future work.
+negative cases; migration-stage state differential coverage is recorded below.
 
-The headed real-browser attempt did not reach Chromium. The existing
+## Migration-stage Rust transport and differential checks
+
+The transport-only Rust stage was validated without changing the production Chrome selector:
+
+| Command | Result |
+| --- | --- |
+| `cargo test -p teshi-browser-broker --locked` | 46 tests passed |
+| `cargo test -p teshi-cli --test browser_broker_process --locked` | 2 tests passed, including child-crash restart and unrelated-listener preservation |
+| `python -m unittest resources.tests.test_browser_agent_broker -q` | 45 tests passed; temporary Python oracle |
+| `node --test extension/teshi-bridge/tests/protocol.test.mjs extension/teshi-bridge/tests/network-capture.test.mjs` | 25 tests passed |
+
+Rust state tests now consume the same `stateful.profile_response_race` and
+`stateful.ambiguous_implicit_target` fixture vectors exercised by the Python oracle. The
+Rust transport also retains the TSH1 byte-preservation and bounded-response tests. The
+internal CLI advertises only `transport.v1`; `BrowserMode::Chrome` still starts or reuses
+`browser_service.py`, so this evidence does not constitute a production Chrome cutover.
+
+The headed `resources.tests.test_browser_two_profile_p0` attempt launched the test's
+temporary Chromium profiles and Python broker but did not complete its CLI/session wait in
+this environment. The test command was interrupted after the wait; no live two-Profile
+isolation result is claimed and task 3.6 remains open.
+
+An earlier headed real-browser attempt did not reach Chromium. The existing
 `test_browser_two_profile_p0.py` setup timed out while running `target/debug/teshi.exe
 browser sessions`; the P2 acceptance setup hit the same prerequisite. Inspection showed a
 saved per-user endpoint referring to a PID that no longer exists and no listener on port

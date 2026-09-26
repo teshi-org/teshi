@@ -26,6 +26,8 @@ const DEFAULT_LEASE_TTL_SECS: u64 = 60;
 const MAX_LEASE_TTL_SECS: u64 = 3600;
 const MAX_PENDING_REQUESTS: usize = 128;
 const MAX_QUARANTINED_RESPONSES: usize = 32;
+const MAX_RETIRED_REQUESTS: usize = MAX_PENDING_REQUESTS * 8;
+const RETIRED_REQUEST_TTL: Duration = Duration::from_secs(600);
 
 #[derive(Debug)]
 struct LeaseRecord {
@@ -47,6 +49,7 @@ struct PendingRequest {
     project_root: String,
     caller_label: String,
     lease_token: Option<String>,
+    stream_generation: Option<u64>,
     deadline: Instant,
     reply: oneshot::Sender<Result<Value, BrokerError>>,
 }
@@ -57,6 +60,10 @@ pub struct BrokerState {
     pub sessions: SessionRegistry,
     leases: HashMap<String, LeaseRecord>,
     pending: HashMap<String, PendingRequest>,
+    /// Request IDs remain reserved for a bounded quarantine window after a
+    /// terminal transition. This prevents a late response from an old command
+    /// completing a newly reused request ID.
+    retired_requests: HashMap<String, Instant>,
     quarantined_responses: Vec<Value>,
 }
 
@@ -98,12 +105,13 @@ impl BrokerState {
             } => self.handle_extension_disconnected(&extension_instance_id, generation),
             BrokerEvent::ExtensionResponse {
                 extension_instance_id,
+                generation,
                 response,
                 reply,
                 ..
             } => {
                 let response_value =
-                    self.handle_extension_response(&extension_instance_id, response);
+                    self.handle_extension_response(&extension_instance_id, generation, response);
                 if let Some(reply) = reply {
                     let _ = reply.send(response_value);
                 }
@@ -184,6 +192,15 @@ impl BrokerState {
                 self.sessions
                     .attach_stream(&extension_instance_id, generation, now)
             });
+        if matches!(&result, Ok(Some(_))) {
+            self.fail_pending_for_session(
+                &extension_instance_id,
+                BrokerError::new(
+                    BrokerErrorCode::BrowserSessionDisconnected,
+                    "browser extension stream was replaced while the operation was pending",
+                ),
+            );
+        }
         match result {
             Ok(previous_generation) => json!({
                 "ok": true,
@@ -246,6 +263,7 @@ impl BrokerState {
         if let Err(error) = validation {
             response["cmd"] = Value::Null;
             if let Some(pending) = self.pending.remove(&request_id) {
+                self.retire_request(&request_id, Instant::now());
                 let _ = pending.reply.send(Err(error));
             }
         }
@@ -269,6 +287,7 @@ impl BrokerState {
     fn handle_extension_response(
         &mut self,
         event_instance_id: &str,
+        generation: Option<u64>,
         response: ExtensionResponse,
     ) -> Value {
         if let Err(error) = response.validate() {
@@ -277,7 +296,14 @@ impl BrokerState {
         }
         let request_id = response.request_id.clone();
         let Some(pending) = self.pending.get(&request_id) else {
-            self.quarantine(&response, "unknown_request_id");
+            self.quarantine(
+                &response,
+                if self.retired_requests.contains_key(&request_id) {
+                    "late_response"
+                } else {
+                    "unknown_request_id"
+                },
+            );
             return error_value(BrokerError::new(
                 BrokerErrorCode::MismatchedBrowserResponse,
                 "no pending browser request matches this response",
@@ -291,11 +317,20 @@ impl BrokerState {
             .target
             .as_ref()
             .is_none_or(|target| target == &pending.target);
+        let generation_matches = pending.stream_generation == generation;
         if response_instance != pending.extension_instance_id
             || !target_matches
+            || !generation_matches
             || (!response.operation.is_empty() && response.operation != pending.operation)
         {
-            self.quarantine(&response, "target_or_operation_mismatch");
+            self.quarantine(
+                &response,
+                if generation_matches {
+                    "target_or_operation_mismatch"
+                } else {
+                    "stream_generation_mismatch"
+                },
+            );
             return error_value(BrokerError::new(
                 BrokerErrorCode::MismatchedBrowserResponse,
                 "browser response does not match its pending request",
@@ -308,6 +343,7 @@ impl BrokerState {
                 "browser response was already completed",
             ));
         };
+        self.retire_request(&request_id, Instant::now());
         let mut value = serde_json::to_value(&response).unwrap_or_else(|_| json!({}));
         if let Value::Object(object) = &mut value {
             object.insert("type".into(), Value::String("response".into()));
@@ -402,14 +438,20 @@ impl BrokerState {
         reply: oneshot::Sender<Result<Value, BrokerError>>,
         runtime: &BrokerRuntime,
     ) {
-        if self.pending.contains_key(&request.request_id) {
+        if self.pending.contains_key(&request.request_id)
+            || self.retired_requests.contains_key(&request.request_id)
+        {
             let _ = reply.send(Err(BrokerError::new(
                 if is_mutating_operation(&request.operation) {
                     BrokerErrorCode::DuplicateBrowserMutation
                 } else {
                     BrokerErrorCode::InvalidBrowserOperation
                 },
-                "duplicate browser request_id",
+                if self.pending.contains_key(&request.request_id) {
+                    "duplicate browser request_id"
+                } else {
+                    "request_id is still reserved after a terminal browser request; use a new id"
+                },
             )));
             return;
         }
@@ -430,10 +472,12 @@ impl BrokerState {
             "acquire_browser_lease" => Some(self.acquire_lease_response(&request, runtime)),
             "renew_browser_lease" => Some(self.renew_lease_response(&request, runtime)),
             "release_browser_lease" => Some(self.release_lease_response(&request, runtime)),
+            "cancel_browser_request" => Some(self.cancel_request_response(&request)),
             _ => None,
         };
         if let Some(result) = immediate {
             let result = result.map(|payload| operation_success(&request, payload));
+            self.retire_request(&request.request_id, Instant::now());
             let _ = reply.send(result);
             return;
         }
@@ -651,6 +695,47 @@ impl BrokerState {
         Ok(json!({"extension_instance_id": instance_id, "released": true}))
     }
 
+    fn cancel_request_response(
+        &mut self,
+        request: &OperationRequest,
+    ) -> Result<Value, BrokerError> {
+        let cancelled_request_id = argument_string(&request.arguments, "cancel_request_id")?;
+        let project = project_context(request)?;
+        let caller = caller_context(request);
+        let Some(pending) = self.pending.get(&cancelled_request_id) else {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserRequestNotFound,
+                "no pending browser request matches cancel_request_id",
+            ));
+        };
+        if pending.project_root != project || pending.caller_label != caller {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserRequestNotFound,
+                "no pending browser request matches cancel_request_id",
+            ));
+        }
+
+        let pending = self
+            .pending
+            .remove(&cancelled_request_id)
+            .expect("pending request was checked immediately above");
+        self.retire_request(&cancelled_request_id, Instant::now());
+        if let Some(session) = self.sessions.get_mut(&pending.extension_instance_id) {
+            session.remove_queued_command(&cancelled_request_id);
+        }
+        let operation = pending.operation.clone();
+        let cancellation = BrokerError::new(
+            BrokerErrorCode::BrowserOperationCancelled,
+            "browser operation was explicitly cancelled; any late response is ignored",
+        );
+        let _ = pending.reply.send(Err(cancellation));
+        Ok(json!({
+            "cancelled": true,
+            "cancel_request_id": cancelled_request_id,
+            "operation": operation,
+        }))
+    }
+
     async fn forward_operation(
         &mut self,
         request: OperationRequest,
@@ -744,6 +829,10 @@ impl BrokerState {
             .map(Duration::from_millis)
             .unwrap_or(DEFAULT_OPERATION_TIMEOUT)
             .clamp(Duration::from_millis(1), Duration::from_secs(300));
+        let stream_generation = self
+            .sessions
+            .get(&instance_id)
+            .and_then(|session| session.current_stream_generation());
         self.pending.insert(
             request.request_id.clone(),
             PendingRequest {
@@ -753,6 +842,7 @@ impl BrokerState {
                 project_root: project.clone(),
                 caller_label: caller.clone(),
                 lease_token: request.lease_token.clone(),
+                stream_generation,
                 deadline: now + timeout,
                 reply,
             },
@@ -772,9 +862,21 @@ impl BrokerState {
                     )
                 })
                 .and_then(|session| session.restore_command_front(command));
-            if let Err(error) = queue_result {
-                if let Some(pending) = self.pending.remove(&request.request_id) {
-                    let _ = pending.reply.send(Err(error));
+            match queue_result {
+                Ok(()) => {
+                    // The heartbeat HTTP path has no stream generation. The
+                    // command remains pending, but its eventual response is
+                    // now correlated to that fallback transport rather than
+                    // the failed direct WebSocket generation.
+                    if let Some(pending) = self.pending.get_mut(&request.request_id) {
+                        pending.stream_generation = None;
+                    }
+                }
+                Err(error) => {
+                    if let Some(pending) = self.pending.remove(&request.request_id) {
+                        self.retire_request(&request.request_id, Instant::now());
+                        let _ = pending.reply.send(Err(error));
+                    }
                 }
             }
         }
@@ -842,6 +944,9 @@ impl BrokerState {
 
     fn expire(&mut self, now: Instant) {
         self.sessions.expire_stale(now);
+        self.retired_requests.retain(|_, retired_at| {
+            now.saturating_duration_since(*retired_at) <= RETIRED_REQUEST_TTL
+        });
         let expired_leases = self
             .leases
             .iter()
@@ -860,6 +965,7 @@ impl BrokerState {
             .collect::<Vec<_>>();
         for request_id in expired {
             if let Some(pending) = self.pending.remove(&request_id) {
+                self.retire_request(&request_id, now);
                 if let Some(session) = self.sessions.get_mut(&pending.extension_instance_id) {
                     session.remove_queued_command(&request_id);
                 }
@@ -882,6 +988,7 @@ impl BrokerState {
             .collect::<Vec<_>>();
         for request_id in disconnected {
             if let Some(pending) = self.pending.remove(&request_id) {
+                self.retire_request(&request_id, now);
                 if let Some(session) = self.sessions.get_mut(&pending.extension_instance_id) {
                     session.remove_queued_command(&request_id);
                 }
@@ -890,6 +997,21 @@ impl BrokerState {
                     "browser extension session disconnected while the operation was pending",
                 )));
             }
+        }
+    }
+
+    fn retire_request(&mut self, request_id: &str, now: Instant) {
+        self.retired_requests.insert(request_id.to_owned(), now);
+        while self.retired_requests.len() > MAX_RETIRED_REQUESTS {
+            let oldest = self
+                .retired_requests
+                .iter()
+                .min_by_key(|(_, retired_at)| **retired_at)
+                .map(|(request_id, _)| request_id.to_owned());
+            let Some(oldest) = oldest else {
+                break;
+            };
+            self.retired_requests.remove(&oldest);
         }
     }
 
@@ -902,6 +1024,7 @@ impl BrokerState {
             .collect::<Vec<_>>();
         for request_id in request_ids {
             if let Some(pending) = self.pending.remove(&request_id) {
+                self.retire_request(&request_id, Instant::now());
                 if let Some(session) = self.sessions.get_mut(extension_instance_id) {
                     session.remove_queued_command(&request_id);
                 }
@@ -1273,6 +1396,34 @@ mod tests {
         }
     }
 
+    fn target_for(instance_id: &str, window_id: i64, tab_id: i64) -> BrowserTarget {
+        BrowserTarget {
+            extension_instance_id: instance_id.into(),
+            window_id,
+            tab_id,
+        }
+    }
+
+    fn extension_response(
+        request_id: &str,
+        operation: &str,
+        target: BrowserTarget,
+    ) -> ExtensionResponse {
+        ExtensionResponse {
+            message_type: "response".into(),
+            schema_version: Some(BROWSER_BROKER_SCHEMA_VERSION),
+            protocol_version: Some(BROWSER_BROKER_PROTOCOL_VERSION),
+            request_id: request_id.into(),
+            operation: operation.into(),
+            extension_instance_id: Some(target.extension_instance_id.clone()),
+            target: Some(target),
+            ok: true,
+            code: None,
+            error: None,
+            result: BTreeMap::new(),
+        }
+    }
+
     #[test]
     fn lease_required_operation_list_is_fail_closed() {
         assert!(requires_lease("navigate"));
@@ -1304,6 +1455,7 @@ mod tests {
                 project_root: "C:/project-a".into(),
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
+                stream_generation: None,
                 deadline: now - Duration::from_secs(1),
                 reply,
             },
@@ -1327,6 +1479,324 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_cancel_cleans_pending_and_quarantines_late_response() {
+        let mut config = crate::server::BrokerServerConfig::with_trusted_extension_origins(vec![
+            "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        ]);
+        config.discovery_addr = "127.0.0.1:0".parse().unwrap();
+        let runtime = BrokerRuntime::start(config).await.unwrap();
+        let now = Instant::now();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        state
+            .sessions
+            .get_mut("profile-a")
+            .unwrap()
+            .queue_command(json!({
+                "type": "cmd",
+                "cmd": "navigate",
+                "request_id": "request-cancelled"
+            }))
+            .unwrap();
+        let (reply, receiver) = oneshot::channel();
+        state.pending.insert(
+            "request-cancelled".into(),
+            PendingRequest {
+                operation: "navigate".into(),
+                extension_instance_id: "profile-a".into(),
+                target: target(),
+                project_root: "C:/project-a".into(),
+                caller_label: "caller-a".into(),
+                lease_token: Some("lease-secret".into()),
+                stream_generation: None,
+                deadline: now + Duration::from_secs(30),
+                reply,
+            },
+        );
+
+        let (cancel_reply, cancel_receiver) = oneshot::channel();
+        let cancel: OperationRequest = serde_json::from_value(json!({
+            "schema_version": 1,
+            "request_id": "cancel-1",
+            "caller_label": "caller-a",
+            "project_root": "C:/project-a",
+            "cmd": "cancel_browser_request",
+            "cancel_request_id": "request-cancelled"
+        }))
+        .unwrap();
+        state.handle_operation(cancel, cancel_reply, &runtime).await;
+
+        let cancellation = cancel_receiver.await.unwrap().unwrap();
+        assert_eq!(cancellation["cancelled"], true);
+        assert_eq!(cancellation["cancel_request_id"], "request-cancelled");
+        assert_eq!(
+            receiver.await.unwrap().unwrap_err().code,
+            BrokerErrorCode::BrowserOperationCancelled
+        );
+        assert!(!state.pending.contains_key("request-cancelled"));
+        assert_eq!(
+            state
+                .sessions
+                .get("profile-a")
+                .unwrap()
+                .queued_command_count(),
+            0
+        );
+
+        let late = extension_response("request-cancelled", "navigate", target());
+        assert_eq!(
+            state.handle_extension_response("profile-a", None, late)["code"],
+            BrokerErrorCode::MismatchedBrowserResponse.as_str()
+        );
+        assert_eq!(
+            state.quarantined_responses.last().unwrap()["reason"],
+            "late_response"
+        );
+
+        let (reuse_reply, reuse_receiver) = oneshot::channel();
+        let reuse: OperationRequest = serde_json::from_value(json!({
+            "request_id": "request-cancelled",
+            "caller_label": "caller-a",
+            "project_root": "C:/project-a",
+            "cmd": "execute_browser_action"
+        }))
+        .unwrap();
+        state.handle_operation(reuse, reuse_reply, &runtime).await;
+        assert_eq!(
+            reuse_receiver.await.unwrap().unwrap_err().code,
+            BrokerErrorCode::DuplicateBrowserMutation
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn response_wins_cancel_race_and_second_completion_is_quarantined() {
+        let mut config = crate::server::BrokerServerConfig::with_trusted_extension_origins(vec![
+            "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        ]);
+        config.discovery_addr = "127.0.0.1:0".parse().unwrap();
+        let runtime = BrokerRuntime::start(config).await.unwrap();
+        let now = Instant::now();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        let (reply, receiver) = oneshot::channel();
+        state.pending.insert(
+            "request-race".into(),
+            PendingRequest {
+                operation: "navigate".into(),
+                extension_instance_id: "profile-a".into(),
+                target: target(),
+                project_root: "C:/project-a".into(),
+                caller_label: "caller-a".into(),
+                lease_token: Some("lease-secret".into()),
+                stream_generation: None,
+                deadline: now + Duration::from_secs(30),
+                reply,
+            },
+        );
+
+        assert_eq!(
+            state.handle_extension_response(
+                "profile-a",
+                None,
+                extension_response("request-race", "navigate", target()),
+            )["ok"],
+            true
+        );
+        assert!(receiver.await.unwrap().is_ok());
+
+        let (cancel_reply, cancel_receiver) = oneshot::channel();
+        let cancel: OperationRequest = serde_json::from_value(json!({
+            "request_id": "cancel-after-response",
+            "caller_label": "caller-a",
+            "project_root": "C:/project-a",
+            "cmd": "cancel_browser_request",
+            "cancel_request_id": "request-race"
+        }))
+        .unwrap();
+        state.handle_operation(cancel, cancel_reply, &runtime).await;
+        assert_eq!(
+            cancel_receiver.await.unwrap().unwrap_err().code,
+            BrokerErrorCode::BrowserRequestNotFound
+        );
+        assert!(state.pending.is_empty());
+        assert_eq!(state.quarantined_responses.len(), 0);
+
+        assert_eq!(
+            state.handle_extension_response(
+                "profile-a",
+                None,
+                extension_response("request-race", "navigate", target()),
+            )["code"],
+            BrokerErrorCode::MismatchedBrowserResponse.as_str()
+        );
+        assert_eq!(
+            state.quarantined_responses.last().unwrap()["reason"],
+            "late_response"
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn disconnect_fails_pending_clears_queue_and_rejects_old_generation_response() {
+        let mut config = crate::server::BrokerServerConfig::with_trusted_extension_origins(vec![
+            "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        ]);
+        config.discovery_addr = "127.0.0.1:0".parse().unwrap();
+        let runtime = BrokerRuntime::start(config).await.unwrap();
+        let now = Instant::now();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        state.sessions.attach_stream("profile-a", 7, now).unwrap();
+        state
+            .sessions
+            .get_mut("profile-a")
+            .unwrap()
+            .queue_command(json!({"request_id": "disconnect-race"}))
+            .unwrap();
+        let (reply, receiver) = oneshot::channel();
+        state.pending.insert(
+            "disconnect-race".into(),
+            PendingRequest {
+                operation: "navigate".into(),
+                extension_instance_id: "profile-a".into(),
+                target: target(),
+                project_root: "C:/project-a".into(),
+                caller_label: "caller-a".into(),
+                lease_token: Some("lease-secret".into()),
+                stream_generation: Some(7),
+                deadline: now + Duration::from_secs(30),
+                reply,
+            },
+        );
+
+        state
+            .handle(
+                BrokerEvent::ExtensionDisconnected {
+                    extension_instance_id: "profile-a".into(),
+                    generation: 7,
+                },
+                &runtime,
+            )
+            .await;
+        assert_eq!(
+            receiver.await.unwrap().unwrap_err().code,
+            BrokerErrorCode::BrowserSessionDisconnected
+        );
+        assert!(state.pending.is_empty());
+        assert_eq!(
+            state
+                .sessions
+                .get("profile-a")
+                .unwrap()
+                .queued_command_count(),
+            0
+        );
+
+        assert_eq!(
+            state.handle_extension_response(
+                "profile-a",
+                Some(7),
+                extension_response("disconnect-race", "navigate", target()),
+            )["code"],
+            BrokerErrorCode::MismatchedBrowserResponse.as_str()
+        );
+        assert_eq!(
+            state.quarantined_responses.last().unwrap()["reason"],
+            "late_response"
+        );
+        runtime.shutdown().await;
+    }
+
+    #[test]
+    fn shared_profile_response_fixture_keeps_rust_completions_isolated() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../resources/browser_contract_fixtures.json"
+        ))
+        .unwrap();
+        let scenario = &fixture["stateful"]["profile_response_race"];
+        let request_items = scenario["requests"].as_array().unwrap();
+        let mut state = BrokerState::new();
+        let now = Instant::now();
+        let mut receivers = HashMap::new();
+
+        for item in request_items {
+            let instance_id = item["extension_instance_id"].as_str().unwrap();
+            let mut payload = heartbeat();
+            payload.extension_instance_id = Some(instance_id.into());
+            state.sessions.register_heartbeat(payload, now).unwrap();
+            let request_id = item["request_id"].as_str().unwrap().to_owned();
+            let (reply, receiver) = oneshot::channel();
+            state.pending.insert(
+                request_id.clone(),
+                PendingRequest {
+                    operation: "get_page_snapshot".into(),
+                    extension_instance_id: instance_id.into(),
+                    target: target_for(
+                        instance_id,
+                        item["window_id"].as_i64().unwrap(),
+                        item["tab_id"].as_i64().unwrap(),
+                    ),
+                    project_root: format!("C:/{instance_id}"),
+                    caller_label: format!("agent-{instance_id}"),
+                    lease_token: Some(format!("lease-{instance_id}")),
+                    stream_generation: None,
+                    deadline: now + Duration::from_secs(30),
+                    reply,
+                },
+            );
+            receivers.insert(request_id, receiver);
+        }
+
+        for request_id in scenario["response_order"].as_array().unwrap() {
+            let request_id = request_id.as_str().unwrap();
+            let item = request_items
+                .iter()
+                .find(|item| item["request_id"].as_str() == Some(request_id))
+                .unwrap();
+            let instance_id = item["extension_instance_id"].as_str().unwrap();
+            let target = target_for(
+                instance_id,
+                item["window_id"].as_i64().unwrap(),
+                item["tab_id"].as_i64().unwrap(),
+            );
+            let response = ExtensionResponse {
+                message_type: "response".into(),
+                schema_version: Some(BROWSER_BROKER_SCHEMA_VERSION),
+                protocol_version: Some(BROWSER_BROKER_PROTOCOL_VERSION),
+                request_id: request_id.into(),
+                operation: "get_page_snapshot".into(),
+                extension_instance_id: Some(instance_id.into()),
+                target: Some(target),
+                ok: true,
+                code: None,
+                error: None,
+                result: BTreeMap::from([("url".into(), item["result_url"].clone())]),
+            };
+            assert_eq!(
+                state.handle_extension_response(instance_id, None, response)["ok"],
+                true
+            );
+        }
+
+        for item in request_items {
+            let request_id = item["request_id"].as_str().unwrap();
+            let result = receivers
+                .remove(request_id)
+                .unwrap()
+                .blocking_recv()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                result["extension_instance_id"],
+                item["extension_instance_id"]
+            );
+            assert_eq!(result["url"], item["result_url"]);
+        }
+        assert!(state.pending.is_empty());
+    }
+
+    #[tokio::test]
     async fn mismatched_response_is_quarantined_and_matching_response_completes_once() {
         let now = Instant::now();
         let mut state = BrokerState::new();
@@ -1341,6 +1811,7 @@ mod tests {
                 project_root: "C:/project-a".into(),
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
+                stream_generation: None,
                 deadline: now + Duration::from_secs(30),
                 reply,
             },
@@ -1364,7 +1835,7 @@ mod tests {
             result: BTreeMap::new(),
         };
         assert_eq!(
-            state.handle_extension_response("profile-a", mismatched)["code"],
+            state.handle_extension_response("profile-a", None, mismatched)["code"],
             BrokerErrorCode::MismatchedBrowserResponse.as_str()
         );
         assert_eq!(state.pending.len(), 1);
@@ -1384,7 +1855,7 @@ mod tests {
             result: BTreeMap::from([(String::from("url"), json!("https://after.test"))]),
         };
         assert_eq!(
-            state.handle_extension_response("profile-a", matching)["ok"],
+            state.handle_extension_response("profile-a", None, matching)["ok"],
             true
         );
         let completed = receiver.await.unwrap().unwrap();
@@ -1406,7 +1877,7 @@ mod tests {
             result: BTreeMap::new(),
         };
         assert_eq!(
-            state.handle_extension_response("profile-a", late)["code"],
+            state.handle_extension_response("profile-a", None, late)["code"],
             BrokerErrorCode::MismatchedBrowserResponse.as_str()
         );
         assert_eq!(state.quarantined_responses.len(), 2);
@@ -1427,6 +1898,7 @@ mod tests {
                 project_root: "C:/project-a".into(),
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
+                stream_generation: None,
                 deadline: now + Duration::from_secs(30),
                 reply,
             },
@@ -1451,7 +1923,7 @@ mod tests {
                 ),
             ]),
         };
-        state.handle_extension_response("profile-a", response);
+        state.handle_extension_response("profile-a", None, response);
         let result = receiver.await.unwrap().unwrap();
         assert_eq!(result["snapshot_id"], "snapshot-1");
         assert_eq!(result["interactive_elements"][0]["ref"], "@e1");
@@ -1490,6 +1962,7 @@ mod tests {
                 project_root: "C:/project-a".into(),
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
+                stream_generation: None,
                 deadline: now + Duration::from_secs(30),
                 reply: existing_reply,
             },

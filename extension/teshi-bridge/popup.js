@@ -24,7 +24,8 @@ async function refreshStatus() {
     const suffix = info.identity?.extension_instance_id
       ? info.identity.extension_instance_id.slice(0, 8)
       : "unknown";
-    detailsEl.textContent = `Session ${suffix} · extension ${info.extension_version || "unknown"} · protocol ${info.protocol_version || "unknown"}`;
+    const extensionId = chrome.runtime.id || "unknown";
+    detailsEl.textContent = `Session ${suffix} · extension ID ${extensionId} · extension ${info.extension_version || "unknown"} · protocol ${info.protocol_version || "unknown"}`;
     const permissionStatus = info.optional_permissions || {};
     for (const button of permissionButtons) {
       const key = button.dataset.permission;

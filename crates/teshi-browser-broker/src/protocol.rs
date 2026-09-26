@@ -421,6 +421,8 @@ pub enum BrokerErrorCode {
     InvalidBrowserLease,
     BrowserTargetNotFound,
     BrowserOperationTimeout,
+    BrowserOperationCancelled,
+    BrowserRequestNotFound,
     InvalidBrowserOperation,
     BrowserCapabilityUnavailable,
     BrowserCapabilityDenied,
@@ -447,6 +449,8 @@ impl BrokerErrorCode {
             Self::InvalidBrowserLease => "invalid_browser_lease",
             Self::BrowserTargetNotFound => "browser_target_not_found",
             Self::BrowserOperationTimeout => "browser_operation_timeout",
+            Self::BrowserOperationCancelled => "browser_operation_cancelled",
+            Self::BrowserRequestNotFound => "browser_request_not_found",
             Self::InvalidBrowserOperation => "invalid_browser_operation",
             Self::BrowserCapabilityUnavailable => "browser_capability_unavailable",
             Self::BrowserCapabilityDenied => "browser_capability_denied",
@@ -491,6 +495,7 @@ pub fn is_supported_operation(operation: &str) -> bool {
             | "acquire_browser_lease"
             | "renew_browser_lease"
             | "release_browser_lease"
+            | "cancel_browser_request"
             | "create_browser_capability_grant"
             | "list_browser_capability_grants"
             | "revoke_browser_capability_grant"

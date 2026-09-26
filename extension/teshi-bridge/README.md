@@ -25,6 +25,28 @@ Toolbar and store icons are PNGs under `icons/`. After updating brand icons, reg
 5. When connected, explicitly select the profile and tab in the Browser panel. The panel never projects tabs or frames from several profiles into one implicit selection.
 6. For browser inspection and actions, use the packaged **playwright-locator** skill under `share/teshi-browser-testing/skills/`. For Gherkin binding and replay, use the **teshi** skill's binding workflow, including CLI step selection.
 
+## Extension identity upgrades
+
+Unpacked Chrome extensions do not have a stable ID across every install path, so
+`manifest.json` intentionally has no `key`. The Rust broker accepts only exact
+paired origins of the form `chrome-extension://<32-character-a-p-id>`; it never
+wildcards an extension ID or self-authorizes an extension that asks for discovery.
+The popup displays the full Chrome extension ID so it can be paired without
+guessing. The Rust migration bootstrap currently receives this explicit pairing
+through repeated `--trusted-extension-origin` arguments; a durable user-facing
+pairing editor is required before production Chrome routing changes.
+
+When moving an unpacked installation or changing distribution channels:
+
+1. Keep the old extension/profile installed and copy the new extension ID from its popup.
+2. Explicitly add/pair the new exact origin, then click **Connect to teshi** and verify that the existing profile label and session reconnect.
+3. Confirm that the opaque `extension_instance_id` is still present in the new installation's `chrome.storage.local` profile state and that the intended profile appears in discovery.
+4. Only after verification, remove the old extension and its old exact allowlist entry.
+
+Moving a folder may create a new Chrome ID and therefore requires re-pairing; no
+wildcard or automatic migration grant is supported. The old ID remains unchanged
+until the explicit removal step.
+
 After changing extension files, click **Reload** on `chrome://extensions` for teshi-bridge, then **Disconnect / Connect Chrome** in teshi-desktop so `browser_service.py` restarts if needed.
 
 If the preview is idle or stalled:

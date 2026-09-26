@@ -11,16 +11,16 @@
 
 - [x] 2.1 Add `teshi-browser-broker` to the Workspace and define strict typed protocol DTOs, stable errors, versions, feature negotiation, and fixture tests using existing Workspace dependency versions.
 - [x] 2.2 Implement loopback-only fixed-port discovery and dynamic WebSocket listeners with bounded HTTP headers/bodies, frame sizes, connections, queues, and timeouts.
-- [ ] 2.3 Implement token validation, trusted-origin behavior, sanitized discovery, private per-user credential storage, endpoint PID/start identity checks, and negative tests; resolve and document the supported extension identity upgrade path.
-- [ ] 2.4 Add the hidden CLI broker-serve entry point and process launcher; verify concurrent startup, compatible reuse, incompatible listeners, crashes, and no process termination of unrelated listeners.
-- [ ] 2.5 Keep the Python broker as the runtime selection and compare Rust transport responses/frames against the shared fixtures and Python oracle.
+- [x] 2.3 Implement token validation, trusted-origin behavior, sanitized discovery, private per-user credential storage, endpoint PID/start identity checks, and negative tests; resolve and document the supported extension identity upgrade path.
+- [x] 2.4 Add the hidden CLI broker-serve entry point and process launcher; verify concurrent startup, compatible reuse, incompatible listeners, crashes, and no process termination of unrelated listeners.
+- [x] 2.5 Keep the Python broker as the runtime selection and compare Rust transport responses/frames against the shared fixtures and Python oracle.
 
 ## 3. Port Session, Target, Lease, and Request State
 
 - [x] 3.1 Implement typed Profile/session records, heartbeat expiry, reconnect generations, compatibility health, and target-scoped frame/subscription state.
 - [x] 3.2 Implement explicit and legacy target resolution; reject ambiguous and mismatched targets before extension dispatch.
 - [x] 3.3 Implement project/caller-bound exclusive leases, renewal, release, expiry, and immediate pre-dispatch validation.
-- [ ] 3.4 Implement bounded command queues and pending request correlation, cancellation, disconnect cleanup, late-response quarantine, and exactly-once completion.
+- [x] 3.4 Implement bounded command queues and pending request correlation, cancellation, disconnect cleanup, late-response quarantine, and exactly-once completion.
 - [x] 3.5 Implement bounded page-revision element references and test stale, duplicate, cross-Profile, cross-project, and lease-expiry races.
 - [ ] 3.6 Run deterministic Python/Rust differential state tests and real two-Profile isolation before moving routing to Rust.
 

@@ -194,6 +194,7 @@ pub enum BrokerEvent {
     },
     ExtensionResponse {
         extension_instance_id: String,
+        generation: Option<u64>,
         response: ExtensionResponse,
         reply: Option<oneshot::Sender<Value>>,
         _budget: tokio::sync::OwnedSemaphorePermit,
@@ -833,6 +834,7 @@ async fn extension_response(
             &headers,
             BrokerEvent::ExtensionResponse {
                 extension_instance_id: instance_id,
+                generation: None,
                 response,
                 reply: Some(reply),
                 _budget,
@@ -1518,6 +1520,7 @@ async fn handle_extension_text(
                 .events
                 .try_send(BrokerEvent::ExtensionResponse {
                     extension_instance_id: instance_id.to_owned(),
+                    generation: Some(generation),
                     response,
                     reply: None,
                     _budget,
