@@ -124,8 +124,11 @@ let streamPaused = false;
 let lastStreamErrorPostedAt = 0;
 /** @type {WebSocket | null} */
 let streamWs = null;
+/** Monotonic identity for the current stream WebSocket attempt. */
+let streamWsEpoch = 0;
 /** @type {Promise<boolean> | null} */
 let streamWsConnectPromise = null;
+let streamWsConnectPromiseEpoch = null;
 let streamWsReconnectDelay = STREAM_WS_RECONNECT_BASE_MS;
 /** Broker stream generation acknowledged by the current WebSocket. */
 let lastStreamGeneration = null;
@@ -353,14 +356,21 @@ function encodeTsh1Frame(meta, jpegBytes) {
   return packet;
 }
 
+function isCurrentStreamWebSocket(ws, epoch) {
+  return streamWs === ws && streamWsEpoch === epoch;
+}
+
 function closeStreamWebSocket() {
-  if (streamWs) {
+  const ws = streamWs;
+  streamWs = null;
+  lastStreamGeneration = null;
+  streamWsEpoch += 1;
+  if (ws) {
     try {
-      streamWs.close();
+      ws.close();
     } catch {
       // ignore
     }
-    streamWs = null;
   }
 }
 
@@ -445,20 +455,37 @@ async function connectStreamWebSocket() {
   if (streamWs?.readyState === WebSocket.OPEN) {
     return true;
   }
-  if (streamWsConnectPromise) {
+  if (
+    streamWsConnectPromise
+    && streamWsConnectPromiseEpoch === streamWsEpoch
+  ) {
     return streamWsConnectPromise;
   }
   closeStreamWebSocket();
-  streamWsConnectPromise = new Promise((resolve) => {
+  const connectionEpoch = ++streamWsEpoch;
+  const connectPromise = new Promise((resolve) => {
     let settled = false;
+    const settle = (value) => {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    };
     const ws = new WebSocket(extensionFrameWsUrl);
     streamWs = ws;
     lastStreamGeneration = null;
     ws.binaryType = "arraybuffer";
     ws.onopen = async () => {
-      streamWs = ws;
-      streamWsReconnectDelay = STREAM_WS_RECONNECT_BASE_MS;
+      if (!isCurrentStreamWebSocket(ws, connectionEpoch) || ws.readyState !== WebSocket.OPEN) {
+        settle(false);
+        return;
+      }
       const identity = await getExtensionIdentity();
+      if (!isCurrentStreamWebSocket(ws, connectionEpoch) || ws.readyState !== WebSocket.OPEN) {
+        settle(false);
+        return;
+      }
+      streamWsReconnectDelay = STREAM_WS_RECONNECT_BASE_MS;
       const hello = {
         type: "stream_hello",
         extension_instance_id: identity.extension_instance_id,
@@ -475,12 +502,12 @@ async function connectStreamWebSocket() {
         }
       }
       flushNetworkBatches();
-      if (!settled) {
-        settled = true;
-        resolve(true);
-      }
+      settle(true);
     };
     ws.onmessage = (event) => {
+      if (!isCurrentStreamWebSocket(ws, connectionEpoch)) {
+        return;
+      }
       if (typeof event.data !== "string") {
         return;
       }
@@ -496,8 +523,11 @@ async function connectStreamWebSocket() {
           }
         } else if (ack.type === "direct_command" && ack.command) {
           void (async () => {
+            if (!isCurrentStreamWebSocket(ws, connectionEpoch)) {
+              return;
+            }
             const reply = await handleCmd(ack.command);
-            if (ws.readyState === WebSocket.OPEN) {
+            if (isCurrentStreamWebSocket(ws, connectionEpoch) && ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify(reply));
             }
           })();
@@ -509,16 +539,24 @@ async function connectStreamWebSocket() {
       }
     };
     ws.onclose = () => {
+      if (!isCurrentStreamWebSocket(ws, connectionEpoch)) {
+        settle(false);
+        return;
+      }
       streamWs = null;
       lastStreamGeneration = null;
-      if (!settled) {
-        settled = true;
-        resolve(false);
-      }
+      settle(false);
       if (streamSocketNeeded() && brokerConnectionReady()) {
+        const reconnectDelay = streamWsReconnectDelay;
         setTimeout(() => {
+          if (streamWsEpoch !== connectionEpoch || streamWs !== null) {
+            return;
+          }
+          if (!streamSocketNeeded() || !brokerConnectionReady()) {
+            return;
+          }
           void connectStreamWebSocket();
-        }, streamWsReconnectDelay);
+        }, reconnectDelay);
         streamWsReconnectDelay = Math.min(
           streamWsReconnectDelay * 2,
           STREAM_WS_RECONNECT_MAX_MS,
@@ -526,16 +564,21 @@ async function connectStreamWebSocket() {
       }
     };
     ws.onerror = () => {
-      if (!settled) {
-        settled = true;
-        resolve(false);
-      }
+      settle(false);
     };
   });
+  streamWsConnectPromise = connectPromise;
+  streamWsConnectPromiseEpoch = connectionEpoch;
   try {
-    return await streamWsConnectPromise;
+    return await connectPromise;
   } finally {
-    streamWsConnectPromise = null;
+    if (
+      streamWsConnectPromise === connectPromise
+      && streamWsConnectPromiseEpoch === connectionEpoch
+    ) {
+      streamWsConnectPromise = null;
+      streamWsConnectPromiseEpoch = null;
+    }
   }
 }
 

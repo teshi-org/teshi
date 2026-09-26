@@ -24,14 +24,33 @@ function listenerRegistry() {
   };
 }
 
-function loadBackground(fetchImpl = async () => ({ ok: false })) {
+function loadBackground(fetchImpl = async () => ({ ok: false }), options = {}) {
   const debuggerEvents = listenerRegistry();
   const debuggerDetaches = listenerRegistry();
   const tabActivations = listenerRegistry();
   const tabRemovals = listenerRegistry();
   const commandCalls = [];
+  const tabUpdates = [];
   const attachCalls = [];
   const detachCalls = [];
+  const timers = [];
+  let nextTimerId = 1;
+  const scheduleTimeout = (callback, delay) => {
+    const timer = {
+      id: nextTimerId,
+      callback,
+      delay,
+      cleared: false,
+      ran: false,
+    };
+    nextTimerId += 1;
+    timers.push(timer);
+    return timer.id;
+  };
+  const cancelTimeout = (id) => {
+    const timer = timers.find((entry) => entry.id === id);
+    if (timer) timer.cleared = true;
+  };
   const tabs = new Map([
     [11, { id: 11, windowId: 1, url: "https://one.example/", active: true, status: "complete" }],
     [22, { id: 22, windowId: 1, url: "https://two.example/", active: false, status: "complete" }],
@@ -58,6 +77,20 @@ function loadBackground(fetchImpl = async () => ({ ok: false })) {
 
     close() {
       this.readyState = FakeWebSocket.CLOSED;
+    }
+
+    emitOpen() {
+      this.readyState = FakeWebSocket.OPEN;
+      return this.onopen?.();
+    }
+
+    emitClose() {
+      this.readyState = FakeWebSocket.CLOSED;
+      return this.onclose?.();
+    }
+
+    emitMessage(data) {
+      return this.onmessage?.({ data });
     }
   }
 
@@ -103,7 +136,9 @@ function loadBackground(fetchImpl = async () => ({ ok: false })) {
     },
     storage: {
       local: {
-        async get() { return {}; },
+        async get(key) {
+          return options.storageGet ? options.storageGet(key) : {};
+        },
         async set() {},
       },
     },
@@ -121,6 +156,7 @@ function loadBackground(fetchImpl = async () => ({ ok: false })) {
         return values;
       },
       async update(tabId, update) {
+        tabUpdates.push({ tabId, update });
         const tab = tabs.get(tabId);
         Object.assign(tab, update);
         return tab;
@@ -153,8 +189,8 @@ function loadBackground(fetchImpl = async () => ({ ok: false })) {
     fetch: fetchImpl,
     setInterval: () => 1,
     clearInterval() {},
-    setTimeout: () => 1,
-    clearTimeout() {},
+    setTimeout: scheduleTimeout,
+    clearTimeout: cancelTimeout,
     console,
   });
   vm.runInContext(backgroundSource, context, { filename: "background.js" });
@@ -162,8 +198,18 @@ function loadBackground(fetchImpl = async () => ({ ok: false })) {
     hooks: context.__teshiBridgeTestHooks,
     FakeWebSocket,
     commandCalls,
+    tabUpdates,
     attachCalls,
     detachCalls,
+    timers,
+    runTimer(timer) {
+      if (timer.cleared || timer.ran) return undefined;
+      timer.ran = true;
+      return timer.callback();
+    },
+    pendingTimers() {
+      return timers.filter((timer) => !timer.cleared && !timer.ran);
+    },
     debuggerDetaches,
     tabActivations,
     tabRemovals,
@@ -328,6 +374,20 @@ function captureState(overrides = {}) {
     processing: Promise.resolve(),
     ...overrides,
   };
+}
+
+async function openStreamConnection(hooks, FakeWebSocket) {
+  const connection = hooks.connectStreamWebSocket();
+  const socket = FakeWebSocket.instances.at(-1);
+  await socket.emitOpen();
+  await connection;
+  return socket;
+}
+
+async function drainMicrotasks(rounds = 12) {
+  for (let i = 0; i < rounds; i += 1) {
+    await Promise.resolve();
+  }
 }
 
 test("exact hostname filtering normalizes case and rejects suffix matches", () => {
@@ -533,6 +593,174 @@ test("stream hello ack records the Rust stream generation", async () => {
   socket.readyState = FakeWebSocket.CLOSED;
   socket.onclose();
   assert.equal(hooks.getStreamGenerationForTest(), null);
+});
+
+test("late callbacks from an old socket cannot clear current generation or ack its queue", async () => {
+  const { hooks, FakeWebSocket, timers } = loadBackground();
+  hooks.setBridgeContextForTest("D:/project", "ws://127.0.0.1/extension/frames");
+  const state = captureState();
+  state.queue.push({ seq: 1, event: { event_type: "request" }, bytes: 1 });
+  state.queue_bytes = 1;
+  state.next_seq = 2;
+  hooks.networkDeliveryStates.set("profile-a:1:11:capture-a", state);
+
+  const firstSocket = await openStreamConnection(hooks, FakeWebSocket);
+  firstSocket.emitMessage(JSON.stringify({
+    type: "stream_hello_ack",
+    ok: true,
+    generation: 11,
+  }));
+
+  firstSocket.readyState = FakeWebSocket.CLOSED;
+  const secondConnection = hooks.connectStreamWebSocket();
+  const secondSocket = FakeWebSocket.instances.at(-1);
+  await secondSocket.emitOpen();
+  await secondConnection;
+  secondSocket.emitMessage(JSON.stringify({
+    type: "stream_hello_ack",
+    ok: true,
+    generation: 22,
+  }));
+  const queueLength = state.queue.length;
+
+  firstSocket.emitClose();
+  firstSocket.emitMessage(JSON.stringify({
+    type: "stream_hello_ack",
+    ok: true,
+    generation: 99,
+  }));
+  firstSocket.emitMessage(JSON.stringify({
+    type: "network_ack",
+    capture_id: state.capture_id,
+    target: state.target,
+    ack_seq: 1,
+    accepted: true,
+  }));
+
+  assert.equal(hooks.getStreamGenerationForTest(), 22);
+  assert.equal(state.queue.length, queueLength);
+  assert.equal(await hooks.connectStreamWebSocket(), true);
+  assert.equal(timers.length, 0);
+});
+
+test("a late direct command from an old socket does not dispatch a browser command", async () => {
+  const {
+    hooks,
+    FakeWebSocket,
+    commandCalls,
+    tabUpdates,
+  } = loadBackground();
+  hooks.setBridgeContextForTest("D:/project", "ws://127.0.0.1/extension/frames");
+  const firstSocket = await openStreamConnection(hooks, FakeWebSocket);
+  firstSocket.readyState = FakeWebSocket.CLOSED;
+  const secondConnection = hooks.connectStreamWebSocket();
+  const secondSocket = FakeWebSocket.instances.at(-1);
+  await secondSocket.emitOpen();
+  await secondConnection;
+
+  firstSocket.emitMessage(JSON.stringify({
+    type: "direct_command",
+    command: {
+      cmd: "start_network_capture",
+      request_id: "late-command",
+      target: { window_id: 1, tab_id: 11 },
+      capture_id: "late-capture",
+      allowed_hostnames: ["api.example.com"],
+      capture_request_bodies: false,
+      max_request_body_bytes: 0,
+    },
+  }));
+  await drainMicrotasks();
+
+  assert.equal(commandCalls.length, 0);
+  assert.equal(tabUpdates.length, 0);
+  assert.equal(hooks.networkDeliveryStates.size, 0);
+  assert.equal(
+    secondSocket.sent.filter((value) => JSON.parse(value).type === "direct_command").length,
+    0,
+  );
+});
+
+test("an invalidated async onopen sends no hello or queue and does not reset backoff", async () => {
+  let resolveStorage;
+  const storageReady = new Promise((resolve) => {
+    resolveStorage = resolve;
+  });
+  const { hooks, FakeWebSocket, timers, pendingTimers } = loadBackground(
+    undefined,
+    { storageGet: () => storageReady },
+  );
+  hooks.setBridgeContextForTest("D:/project", "ws://127.0.0.1/extension/frames");
+  const state = captureState();
+  state.queue.push({ seq: 1, event: { event_type: "request" }, bytes: 1 });
+  state.queue_bytes = 1;
+  state.next_seq = 2;
+  hooks.networkDeliveryStates.set("profile-a:1:11:capture-a", state);
+
+  const firstConnection = hooks.connectStreamWebSocket();
+  const firstSocket = FakeWebSocket.instances.at(-1);
+  const firstOpen = firstSocket.emitOpen();
+  firstSocket.emitClose();
+  await firstConnection;
+
+  const secondConnection = hooks.connectStreamWebSocket();
+  const secondSocket = FakeWebSocket.instances.at(-1);
+  resolveStorage({});
+  await firstOpen;
+  assert.equal(firstSocket.sent.length, 0);
+  assert.equal(secondSocket.sent.length, 0);
+  assert.equal(state.sent_through_seq, 0);
+
+  secondSocket.emitClose();
+  await secondConnection;
+  assert.deepEqual(
+    pendingTimers().map((timer) => timer.delay),
+    [500, 1000],
+  );
+  assert.equal(timers.length, 2);
+});
+
+test("a stale reconnect timer cannot create a duplicate and the current close still reconnects", async () => {
+  const { hooks, FakeWebSocket, runTimer, pendingTimers } = loadBackground();
+  hooks.setBridgeContextForTest("D:/project", "ws://127.0.0.1/extension/frames");
+  const state = captureState();
+  state.queue.push({ seq: 1, event: { event_type: "request" }, bytes: 1 });
+  state.queue_bytes = 1;
+  state.next_seq = 2;
+  hooks.networkDeliveryStates.set("profile-a:1:11:capture-a", state);
+
+  const firstSocket = await openStreamConnection(hooks, FakeWebSocket);
+  firstSocket.emitClose();
+  const firstReconnectTimer = pendingTimers()[0];
+
+  const secondConnection = hooks.connectStreamWebSocket();
+  const secondSocket = FakeWebSocket.instances.at(-1);
+  await secondSocket.emitOpen();
+  await secondConnection;
+  secondSocket.emitMessage(JSON.stringify({
+    type: "stream_hello_ack",
+    ok: true,
+    generation: 22,
+  }));
+  secondSocket.emitClose();
+  const secondReconnectTimer = pendingTimers().find((timer) => timer !== firstReconnectTimer);
+
+  runTimer(firstReconnectTimer);
+  await drainMicrotasks();
+  assert.equal(FakeWebSocket.instances.length, 2);
+
+  runTimer(secondReconnectTimer);
+  const thirdConnection = hooks.connectStreamWebSocket();
+  const thirdSocket = FakeWebSocket.instances.at(-1);
+  await thirdSocket.emitOpen();
+  await thirdConnection;
+  thirdSocket.emitMessage(JSON.stringify({
+    type: "stream_hello_ack",
+    ok: true,
+    generation: 33,
+  }));
+  assert.equal(FakeWebSocket.instances.length, 3);
+  assert.equal(hooks.getStreamGenerationForTest(), 33);
 });
 
 test("tab activation preserves captures and lifecycle loss is target scoped", async () => {
