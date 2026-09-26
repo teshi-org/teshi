@@ -1,7 +1,7 @@
-根因：Profile 可能只有 Worker URL，无新 Playwright `serviceworker` 事件/可评估句柄；原测试误判，Broker 已恢复。Rust 握手缺 `stream_hello_ack`，扩展未记 generation；重启后旧 token 401/403 未重发现。
+基于78b50ada；Discovery未改，生产Chrome仍走Python。
 
-文件：broker state/session、extension background+两测试、two-profile 测试、OpenSpec tasks、本交接。测试以 Broker ready+generation 判定并保留观测缺口；扩展认证失败重发现。
+修改：internal_broker.rs 增加专用 --enable-p0-control；state.rs 校验Navigation/Snapshot的Profile p0.control，修复顶层lease_token renew/release；test_browser_two_profile_rust_transport.py 增加双Profile真实导航+Snapshot。
 
-验证：Node 32/32、Rust 50/50、差分 1/1、CLI/fmt/py_compile 通过；真实 1/1：A 1→3、B 隔离，重启 A/B=1/2，旧 token 拒绝；进程/端口清理正常。
+验证：fmt；broker 51/51；CLI 2/2；Node 32/32。A/B generation=1/2，导航与Snapshot的URL、title、target、request_id、snapshot_id隔离且成功；单测覆盖断线/超时/取消/迟到响应；日志在artifact。
 
-剩余/入口：Worker 观测缺口仍是 Playwright 边界；未跑全量，未改 Discovery/P0/生产路径。下一入口 4.1，生产 Chrome 仍用 Python Broker。
+剩余：harness清理bug退出1，修复后未重复页面副作用请求；未跑全量。下一入口：execute_browser_action→Extension executeLocator 的Click/pointer_click。

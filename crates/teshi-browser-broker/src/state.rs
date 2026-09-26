@@ -688,7 +688,7 @@ impl BrokerState {
         runtime: &BrokerRuntime,
     ) -> Result<Value, BrokerError> {
         let instance_id = argument_string(&request.arguments, "extension_instance_id")?;
-        let token = argument_string(&request.arguments, "lease_token")?;
+        let token = request_lease_token(&request)?;
         let ttl_secs = bounded_ttl(request.arguments.get("ttl_secs"));
         self.sessions.require_live(&instance_id, Instant::now())?;
         let project = required_project_context(request)?;
@@ -716,7 +716,7 @@ impl BrokerState {
         runtime: &BrokerRuntime,
     ) -> Result<Value, BrokerError> {
         let instance_id = argument_string(&request.arguments, "extension_instance_id")?;
-        let token = argument_string(&request.arguments, "lease_token")?;
+        let token = request_lease_token(&request)?;
         self.sessions.require_live(&instance_id, Instant::now())?;
         let project = required_project_context(request)?;
         let caller = required_caller_context(request)?;
@@ -1189,6 +1189,21 @@ fn argument_string(arguments: &BTreeMap<String, Value>, name: &str) -> Result<St
     Ok(value.chars().take(4096).collect())
 }
 
+fn request_lease_token(request: &OperationRequest) -> Result<String, BrokerError> {
+    request
+        .lease_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(4096).collect())
+        .ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "lease_token is required",
+            )
+        })
+}
+
 fn argument_string_optional(arguments: &BTreeMap<String, Value>, name: &str) -> Option<String> {
     arguments
         .get(name)
@@ -1314,6 +1329,9 @@ fn requires_lease(operation: &str) -> bool {
 fn required_features_for_operation(request: &OperationRequest) -> Vec<String> {
     let mut required = Vec::new();
     match request.operation.as_str() {
+        "get_page_snapshot" | "navigate" => {
+            required.push("p0.control".into());
+        }
         "capture_browser_screenshot"
         | "generate_browser_pdf"
         | "start_console_capture"
@@ -2095,6 +2113,75 @@ mod tests {
                 .code,
             BrokerErrorCode::InvalidBrowserLease
         );
+    }
+
+    #[tokio::test]
+    async fn renew_and_release_read_the_top_level_lease_token() {
+        let mut config = crate::server::BrokerServerConfig::with_trusted_extension_origins(vec![
+            "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        ]);
+        config.discovery_addr = "127.0.0.1:0".parse().unwrap();
+        let runtime = BrokerRuntime::start(config).await.unwrap();
+        let now = Instant::now();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+
+        let acquire: OperationRequest = serde_json::from_value(json!({
+            "schema_version": 1,
+            "request_id": "lease-acquire",
+            "caller_label": "caller-a",
+            "project_root": "C:/project-a",
+            "cmd": "acquire_browser_lease",
+            "extension_instance_id": "profile-a",
+            "owner_label": "caller-a",
+            "ttl_secs": 60
+        }))
+        .unwrap();
+        let (acquire_reply, acquire_receiver) = oneshot::channel();
+        state
+            .handle_operation(acquire, acquire_reply, &runtime)
+            .await;
+        let acquired = acquire_receiver.await.unwrap().unwrap();
+        let token = acquired["lease_token"].as_str().unwrap().to_owned();
+
+        let renew: OperationRequest = serde_json::from_value(json!({
+            "schema_version": 1,
+            "request_id": "lease-renew",
+            "caller_label": "caller-a",
+            "project_root": "C:/project-a",
+            "cmd": "renew_browser_lease",
+            "extension_instance_id": "profile-a",
+            "lease_token": token.clone(),
+            "ttl_secs": 60
+        }))
+        .unwrap();
+        let (renew_reply, renew_receiver) = oneshot::channel();
+        state.handle_operation(renew, renew_reply, &runtime).await;
+        assert_eq!(
+            renew_receiver.await.unwrap().unwrap()["ok"].as_bool(),
+            Some(true)
+        );
+
+        let release: OperationRequest = serde_json::from_value(json!({
+            "schema_version": 1,
+            "request_id": "lease-release",
+            "caller_label": "caller-a",
+            "project_root": "C:/project-a",
+            "cmd": "release_browser_lease",
+            "extension_instance_id": "profile-a",
+            "lease_token": token
+        }))
+        .unwrap();
+        let (release_reply, release_receiver) = oneshot::channel();
+        state
+            .handle_operation(release, release_reply, &runtime)
+            .await;
+        assert_eq!(
+            release_receiver.await.unwrap().unwrap()["ok"].as_bool(),
+            Some(true)
+        );
+        assert!(!state.leases.contains_key("profile-a"));
+        runtime.shutdown().await;
     }
 
     #[test]

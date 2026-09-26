@@ -27,6 +27,9 @@ pub(crate) struct InternalBrokerOptions {
     /// Discovery port; zero selects an ephemeral port for isolated tests only.
     #[arg(long, default_value_t = CHROME_DISCOVERY_PORT)]
     discovery_port: u16,
+    /// Enable the migration-only P0 Navigation/Snapshot command surface.
+    #[arg(long)]
+    enable_p0_control: bool,
 }
 
 impl InternalBrokerOptions {
@@ -40,9 +43,10 @@ pub(crate) async fn run(options: InternalBrokerOptions) -> Result<()> {
         BrokerServerConfig::with_trusted_extension_origins(options.trusted_extension_origins);
     config.discovery_addr =
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), options.discovery_port);
-    // Transport-only is truthful until session, lease and operation policy is
-    // installed. In particular, this must not satisfy the production p0 gate.
     config.broker_features = vec!["transport.v1".into()];
+    if options.enable_p0_control {
+        config.broker_features.push("p0.control".into());
+    }
     let runtime = BrokerRuntime::start(config)
         .await
         .map_err(|error| anyhow::anyhow!(error.message))?;
@@ -78,6 +82,7 @@ mod tests {
             second_origin.into(),
             "--trusted-extension-origin".into(),
             first_origin.into(),
+            "--enable-p0-control".into(),
         ])
         .unwrap();
         assert_eq!(
@@ -95,6 +100,7 @@ mod tests {
                 .trusted_extension_origins
                 .contains(&second_origin.into())
         );
+        assert!(options.enable_p0_control);
 
         assert!(
             InternalBrokerOptions::parse(

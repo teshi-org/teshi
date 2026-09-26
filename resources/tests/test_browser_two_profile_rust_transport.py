@@ -1,4 +1,4 @@
-"""Real Chromium two-Profile transport acceptance for the Rust Broker."""
+"""Real Chromium two-Profile Navigation/Snapshot acceptance for the Rust Broker."""
 
 from __future__ import annotations
 
@@ -44,7 +44,8 @@ class RustTransportPage(BaseHTTPRequestHandler):
         profile = self.path.split("?", 1)[0].strip("/") or "unknown"
         body = (
             f"<!doctype html><meta charset=utf-8><title>Rust {profile}</title>"
-            f"<main data-profile=\"{profile}\">{profile}</main>"
+            f"<main data-profile=\"{profile}\"><h1>Rust {profile}</h1>"
+            f"<button id=\"snapshot-action\">Snapshot {profile}</button></main>"
         ).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
@@ -241,6 +242,7 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             str(state_dir),
             "--trusted-extension-origin",
             self.extension_origin,
+            "--enable-p0-control",
             "--discovery-port",
             str(self.discovery_port),
         ]
@@ -283,7 +285,9 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                 "discovery_port": self.discovery_port,
             },
         )
-        self.assertEqual(self.ready_endpoint["broker_features"], ["transport.v1"])
+        self.assertEqual(
+            self.ready_endpoint["broker_features"], ["transport.v1", "p0.control"]
+        )
         self.assertEqual(self.ready_endpoint["protocol_version"], 1)
         self.assertEqual(self.ready_endpoint["schema_version"], 1)
         trusted = await asyncio.to_thread(
@@ -634,6 +638,86 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             message = message.decode("utf-8")
         return json.loads(message)
 
+    async def _acquire_lease(self, target: dict, owner: str) -> str:
+        request_id = f"rust-lease-{owner}-{uuid.uuid4().hex}"
+        response = await self._control(
+            {
+                "schema_version": 1,
+                "request_id": request_id,
+                "caller_label": owner,
+                "project_root": str(self.temp_root),
+                "cmd": "acquire_browser_lease",
+                "extension_instance_id": target["extension_instance_id"],
+                "owner_label": owner,
+                "ttl_secs": 60,
+            }
+        )
+        self.assertTrue(response.get("ok"), response)
+        self.assertEqual(response.get("request_id"), request_id)
+        self.assertEqual(response.get("operation"), "acquire_browser_lease")
+        token = response.get("lease_token")
+        self.assertIsInstance(token, str)
+        self._log(
+            "lease_acquired",
+            {
+                "profile": target["extension_instance_id"],
+                "owner": owner,
+                "request_id": request_id,
+            },
+        )
+        return token
+
+    async def _release_lease(self, target: dict, owner: str, token: str) -> None:
+        request_id = f"rust-release-{owner}-{uuid.uuid4().hex}"
+        response = await self._control(
+            {
+                "schema_version": 1,
+                "request_id": request_id,
+                "caller_label": owner,
+                "project_root": str(self.temp_root),
+                "cmd": "release_browser_lease",
+                "extension_instance_id": target["extension_instance_id"],
+                "lease_token": token,
+            }
+        )
+        self.assertTrue(response.get("ok"), response)
+        self.assertEqual(response.get("request_id"), request_id)
+        self.assertEqual(response.get("operation"), "release_browser_lease")
+        self._log(
+            "lease_released",
+            {
+                "profile": target["extension_instance_id"],
+                "owner": owner,
+                "request_id": request_id,
+            },
+        )
+
+    async def _wait_target_url(self, target: dict, expected_url: str) -> None:
+        deadline = time.monotonic() + 15
+        last_sessions: list[dict] = []
+        while time.monotonic() < deadline:
+            response = await self._list_sessions()
+            last_sessions = response.get("sessions", [])
+            for session in last_sessions:
+                if (
+                    session.get("identity", {}).get("extension_instance_id")
+                    != target["extension_instance_id"]
+                ):
+                    continue
+                for window in session.get("windows", []):
+                    for tab in window.get("tabs", []):
+                        if (
+                            str(tab.get("window_id")) == str(target["window_id"])
+                            and str(tab.get("id")) == str(target["tab_id"])
+                            and tab.get("url") == expected_url
+                        ):
+                            return
+            await asyncio.sleep(0.2)
+        raise AssertionError(
+            f"Rust Broker did not publish {expected_url!r} for target {target}: "
+            f"{self._redact(json.dumps(self._safe_sessions(last_sessions), sort_keys=True))}"
+        )
+
     async def _list_sessions(self) -> dict:
         return await self._control(
             {
@@ -713,7 +797,9 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("token", json.dumps(trusted_get["payload"]))
         trusted = self.trusted_discovery
         self.assertIn("token=", trusted["ws_url"])
-        self.assertEqual(trusted["broker_features"], ["transport.v1"])
+        self.assertEqual(
+            trusted["broker_features"], ["transport.v1", "p0.control"]
+        )
         untrusted = await asyncio.to_thread(
             self._http_discovery,
             "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc",
@@ -757,7 +843,7 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        self._set_stage("verify target ambiguity and transport-only control gate")
+        self._set_stage("verify target ambiguity and lease pre-dispatch gate")
         ambiguous = await self._control(
             {
                 "schema_version": 1,
@@ -769,25 +855,141 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(ambiguous["code"], "ambiguous_browser_target")
         target_a = self._target(session_a)
-        gated = await self._control(
+        target_b = self._target(session_b)
+        missing_lease = await self._control(
             {
                 "schema_version": 1,
-                "request_id": "rust-p0-gate",
+                "request_id": "rust-missing-lease",
                 "caller_label": "rust-transport-test",
                 "project_root": str(self.temp_root),
                 "cmd": "get_page_snapshot",
                 "target": target_a,
             }
         )
-        self.assertEqual(gated["code"], "browser_capability_unavailable")
+        self.assertEqual(missing_lease["code"], "invalid_browser_lease")
         self._log(
             "control_boundary_verified",
             {
                 "implicit_target_error": ambiguous["code"],
-                "explicit_p0_error": gated["code"],
+                "missing_lease_error": missing_lease["code"],
                 "navigation_executed": False,
             },
         )
+
+        self._set_stage("navigate and snapshot both Profiles through Rust P0")
+        lease_owners = ["rust-p0-profile-a", "rust-p0-profile-b"]
+        tokens = await asyncio.gather(
+            self._acquire_lease(target_a, lease_owners[0]),
+            self._acquire_lease(target_b, lease_owners[1]),
+        )
+        try:
+            port = self.http.server_address[1]
+            navigation_requests = [
+                ("rust-navigate-profile-a", target_a, f"http://127.0.0.1:{port}/rust-a-nav"),
+                ("rust-navigate-profile-b", target_b, f"http://127.0.0.1:{port}/rust-b-nav"),
+            ]
+            navigation = await asyncio.gather(
+                *(
+                    self._control(
+                        {
+                            "schema_version": 1,
+                            "request_id": request_id,
+                            "caller_label": lease_owners[index],
+                            "project_root": str(self.temp_root),
+                            "cmd": "navigate",
+                            "target": target,
+                            "lease_token": tokens[index],
+                            "url": url,
+                            "timeout_ms": 15_000,
+                        }
+                    )
+                    for index, (request_id, target, url) in enumerate(navigation_requests)
+                )
+            )
+            for index, (request_id, target, url) in enumerate(navigation_requests):
+                result = navigation[index]
+                self.assertTrue(result.get("ok"), result)
+                self.assertEqual(result.get("request_id"), request_id)
+                self.assertEqual(result.get("operation"), "navigate")
+                self.assertEqual(result.get("extension_instance_id"), target["extension_instance_id"])
+                self.assertEqual(result.get("target"), target)
+                self.assertEqual(result.get("action_outcome", {}).get("url"), url)
+            await asyncio.gather(
+                self._wait_target_url(target_a, navigation_requests[0][2]),
+                self._wait_target_url(target_b, navigation_requests[1][2]),
+            )
+            self._log(
+                "navigation_verified",
+                {
+                    "request_ids": [item[0] for item in navigation_requests],
+                    "profiles": [target_a["extension_instance_id"], target_b["extension_instance_id"]],
+                    "stream_generations": [
+                        session_a["stream_generation"],
+                        session_b["stream_generation"],
+                    ],
+                },
+            )
+
+            snapshot_requests = [
+                ("rust-snapshot-profile-a", target_a, lease_owners[0], tokens[0], "rust-a-nav"),
+                ("rust-snapshot-profile-b", target_b, lease_owners[1], tokens[1], "rust-b-nav"),
+            ]
+            snapshots = await asyncio.gather(
+                *(
+                    self._control(
+                        {
+                            "schema_version": 1,
+                            "request_id": request_id,
+                            "caller_label": owner,
+                            "project_root": str(self.temp_root),
+                            "cmd": "get_page_snapshot",
+                            "target": target,
+                            "lease_token": token,
+                        }
+                    )
+                    for request_id, target, owner, token, _ in snapshot_requests
+                )
+            )
+            for index, (request_id, target, _, _, profile) in enumerate(snapshot_requests):
+                snapshot = snapshots[index]
+                self.assertTrue(snapshot.get("ok"), snapshot)
+                self.assertEqual(snapshot.get("request_id"), request_id)
+                self.assertEqual(snapshot.get("operation"), "get_page_snapshot")
+                self.assertEqual(snapshot.get("extension_instance_id"), target["extension_instance_id"])
+                self.assertEqual(snapshot.get("target"), target)
+                self.assertEqual(snapshot.get("url"), navigation_requests[index][2])
+                self.assertEqual(snapshot.get("title"), f"Rust {profile}")
+                self.assertEqual(snapshot.get("snapshot_id"), request_id)
+                self.assertTrue(snapshot.get("page_context_revision"))
+                self.assertTrue(
+                    any(
+                        f"Snapshot {profile}" in str(element.get("text"))
+                        for element in snapshot.get("interactive_elements", [])
+                    ),
+                    snapshot,
+                )
+            self.assertNotEqual(
+                snapshots[0]["url"], snapshots[1]["url"], "Profile pages crossed routing"
+            )
+            self.assertNotEqual(
+                snapshots[0]["extension_instance_id"],
+                snapshots[1]["extension_instance_id"],
+                "Snapshot responses crossed Profile identity",
+            )
+            self._log(
+                "snapshot_verified",
+                {
+                    "request_ids": [item[0] for item in snapshot_requests],
+                    "profiles": [item[1]["extension_instance_id"] for item in snapshot_requests],
+                    "urls": [snapshot["url"] for snapshot in snapshots],
+                    "snapshot_ids": [snapshot["snapshot_id"] for snapshot in snapshots],
+                },
+            )
+        finally:
+            await asyncio.gather(
+                self._release_lease(target_a, lease_owners[0], tokens[0]),
+                self._release_lease(target_b, lease_owners[1], tokens[1]),
+            )
 
         self._set_stage("disconnect Profile A and keep Profile B ready")
         context_a = self.contexts.pop("profile-a")
