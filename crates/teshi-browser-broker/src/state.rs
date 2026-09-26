@@ -17,7 +17,8 @@ use crate::protocol::{
     BROWSER_BROKER_PROTOCOL_VERSION, BROWSER_BROKER_SCHEMA_VERSION, BrokerError, BrokerErrorCode,
     BrowserTarget, ExecuteLocatorActionRequest, ExecuteLocatorCandidate,
     ExecuteLocatorCandidateKind, ExecuteLocatorCommand, ExecuteLocatorInput, ExtensionResponse,
-    ExtensionStreamMessage, LocatorContext, NetworkBatch, OperationRequest,
+    ExtensionStreamMessage, LocatorCandidateArguments, LocatorContext, NetworkBatch,
+    OperationRequest, SnapshotElement,
 };
 use crate::server::{BrokerEvent, BrokerRuntime};
 use crate::session::{BrowserSessionRecord, SessionRegistry};
@@ -1309,7 +1310,11 @@ fn resolve_execute_locator(
                 now,
             )?;
             let (selector, candidate) = snapshot_locator(&reference.element)?;
-            let locator_context = snapshot_locator_context(&reference.context)?;
+            let locator_context = snapshot_locator_context(&reference.context)?.or_else(|| {
+                candidate
+                    .as_ref()
+                    .and_then(|candidate| candidate.context.clone())
+            });
             snapshot_id = Some(reference.snapshot_id);
             (selector, candidate, locator_context)
         }
@@ -1349,87 +1354,85 @@ fn resolve_execute_locator(
 fn test_id_candidate(value: String) -> ExecuteLocatorCandidate {
     ExecuteLocatorCandidate {
         kind: ExecuteLocatorCandidateKind::TestId,
-        arguments: BTreeMap::from([
-            ("attribute".into(), "data-testid".into()),
-            ("value".into(), value),
-        ]),
+        arguments: LocatorCandidateArguments {
+            attribute: Some("data-testid".into()),
+            value: Some(value),
+            ..Default::default()
+        },
+        expression: None,
+        context: None,
+        match_count: None,
+        visible: None,
+        enabled: None,
+        verification: None,
+        score: None,
+        stability_rationale: None,
+        warnings: None,
     }
 }
 
 fn role_name_candidate(role: String, name: String) -> ExecuteLocatorCandidate {
     ExecuteLocatorCandidate {
         kind: ExecuteLocatorCandidateKind::Role,
-        arguments: BTreeMap::from([("role".into(), role), ("name".into(), name)]),
+        arguments: LocatorCandidateArguments {
+            role: Some(role),
+            name: Some(name),
+            exact: Some(true),
+            ..Default::default()
+        },
+        expression: None,
+        context: None,
+        match_count: None,
+        visible: None,
+        enabled: None,
+        verification: None,
+        score: None,
+        stability_rationale: None,
+        warnings: None,
     }
 }
 
 fn snapshot_locator(
     element: &Value,
 ) -> Result<(Option<String>, Option<ExecuteLocatorCandidate>), BrokerError> {
-    let object = element.as_object().ok_or_else(|| {
+    let normalized = SnapshotElement::normalize(0, element).ok_or_else(|| {
         BrokerError::new(
             BrokerErrorCode::StaleElementReference,
             "Snapshot element reference does not contain a locator object",
         )
     })?;
-    if let Some(candidate) = object.get("candidate").and_then(Value::as_object) {
-        let kind = candidate
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let arguments = candidate
-            .get("arguments")
-            .and_then(Value::as_object)
-            .ok_or_else(|| {
+    if let Some(raw_candidate) = normalized.extra.get("candidate") {
+        let candidate: ExecuteLocatorCandidate = serde_json::from_value(raw_candidate.clone())
+            .map_err(|_| {
                 BrokerError::new(
                     BrokerErrorCode::StaleElementReference,
                     "Snapshot element candidate is malformed",
                 )
             })?;
-        if kind == "role" {
-            let role = snapshot_string(arguments, "role");
-            let name = snapshot_string(arguments, "name");
-            if let (Some(role), Some(name)) = (role, name) {
-                return Ok((None, Some(role_name_candidate(role, name))));
-            }
-        } else if kind == "test_id" || kind == "attribute" {
-            let attribute =
-                snapshot_string(arguments, "attribute").unwrap_or_else(|| "data-testid".into());
-            if attribute == "data-testid"
-                && let Some(value) = snapshot_string(arguments, "value")
-            {
-                return Ok((None, Some(test_id_candidate(value))));
-            }
-        } else if kind == "css"
-            && let Some(selector) = snapshot_string(arguments, "selector")
-        {
-            return Ok((Some(selector), None));
-        }
+        let selector = (candidate.kind == ExecuteLocatorCandidateKind::Css)
+            .then(|| candidate.arguments.selector.clone())
+            .flatten();
+        return Ok((selector, Some(candidate)));
     }
-    if let Some(value) = snapshot_string_any(object, &["testId", "test_id"]).or_else(|| {
-        object
-            .get("attributes")
-            .and_then(Value::as_object)
-            .and_then(|attributes| snapshot_string(attributes, "data-testid"))
-    }) {
-        return Ok((None, Some(test_id_candidate(value))));
+    if let Some(value) = normalized.attributes.get("data-testid") {
+        return Ok((None, Some(test_id_candidate(value.clone()))));
     }
-    let role = snapshot_string(object, "role");
-    let name = snapshot_string_any(
-        object,
-        &[
-            "accessible_name",
-            "accessibleName",
-            "name",
-            "ariaLabel",
-            "label",
-        ],
-    );
-    if let (Some(role), Some(name)) = (role, name) {
+    let role = normalized
+        .role
+        .clone()
+        .unwrap_or_else(|| normalized.implicit_role());
+    let name = normalized
+        .accessible_name
+        .clone()
+        .or_else(|| normalized.aria_label.clone())
+        .or_else(|| normalized.label.clone())
+        .or_else(|| normalized.text.clone());
+    if !role.is_empty()
+        && let Some(name) = name
+    {
         return Ok((None, Some(role_name_candidate(role, name))));
     }
-    if let Some(selector) = snapshot_string_any(object, &["shortSelector", "short_selector", "css"])
-    {
+    if let Some(selector) = normalized.short_selector {
         return Ok((Some(selector), None));
     }
     Err(BrokerError::new(
@@ -1450,19 +1453,6 @@ fn snapshot_locator_context(value: &Value) -> Result<Option<LocatorContext>, Bro
                 "Snapshot element reference has unsupported frame or shadow context",
             )
         })
-}
-
-fn snapshot_string(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
-    object
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
-fn snapshot_string_any(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| snapshot_string(object, key))
 }
 
 fn extension_operation_for(operation: &str) -> &str {

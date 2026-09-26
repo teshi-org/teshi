@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::protocol::{
     BROWSER_BROKER_PROTOCOL_VERSION, BROWSER_BROKER_SCHEMA_VERSION, BrokerError, BrokerErrorCode,
-    BrowserTarget, ExtensionHeartbeat, ExtensionTab, ExtensionWindow,
+    BrowserTarget, ExtensionHeartbeat, ExtensionTab, ExtensionWindow, LocatorSnapshot,
 };
 
 /// Compatibility identity used by pre-v1 extensions that do not advertise a
@@ -324,9 +324,10 @@ impl BrowserSessionRecord {
         now: Instant,
     ) -> Result<(), BrokerError> {
         self.require_target(&target)?;
-        let page_context_revision = response
-            .get("page_context_revision")
-            .and_then(Value::as_str)
+        let snapshot = LocatorSnapshot::normalize(response)?;
+        let page_context_revision = snapshot
+            .page_context_revision
+            .clone()
             .unwrap_or_default()
             .chars()
             .take(256)
@@ -336,9 +337,9 @@ impl BrowserSessionRecord {
             self.page_context_revisions
                 .insert(target.clone(), page_context_revision.clone());
         }
-        let snapshot_id = response
-            .get("snapshot_id")
-            .and_then(Value::as_str)
+        let snapshot_id = snapshot
+            .snapshot_id
+            .as_deref()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(fallback_snapshot_id)
             .chars()
@@ -348,29 +349,44 @@ impl BrowserSessionRecord {
             self.page_snapshot_ids
                 .insert(target.clone(), snapshot_id.clone());
         }
-        let Some(elements) = response
+        let Some(_elements) = response
             .get("interactive_elements")
             .and_then(Value::as_array)
-            .cloned()
         else {
             response["snapshot_id"] = Value::String(snapshot_id);
             return Ok(());
         };
         let mut published = Vec::new();
-        for element in elements.into_iter().take(MAX_ELEMENT_REFERENCES) {
-            let Value::Object(mut object) = element else {
-                continue;
-            };
+        for element in snapshot
+            .interactive_elements
+            .into_iter()
+            .take(MAX_ELEMENT_REFERENCES)
+        {
             let alias = format!("@e{}", published.len() + 1);
-            let original = Value::Object(object.clone());
-            let context = object.get("context").cloned().unwrap_or(Value::Null);
+            let Value::Object(mut object) = serde_json::to_value(&element).map_err(|_| {
+                BrokerError::new(
+                    BrokerErrorCode::InvalidBrowserOperation,
+                    "normalized snapshot element could not be serialized",
+                )
+            })?
+            else {
+                return Err(BrokerError::new(
+                    BrokerErrorCode::InvalidBrowserOperation,
+                    "normalized snapshot element is not an object",
+                ));
+            };
+            let context = element
+                .context
+                .as_ref()
+                .map(|context| serde_json::to_value(context).unwrap_or(Value::Null))
+                .unwrap_or(Value::Null);
             object.insert("ref".into(), Value::String(alias.clone()));
             object.insert("snapshot_id".into(), Value::String(snapshot_id.clone()));
             object.insert(
                 "page_context_revision".into(),
                 Value::String(page_context_revision.clone()),
             );
-            let published_element = Value::Object(object);
+            let published_element = Value::Object(object.clone());
             self.element_references.insert(
                 element_reference_key(&target, &alias),
                 ElementReferenceRecord {
@@ -381,7 +397,12 @@ impl BrowserSessionRecord {
                     project_root: project_root.to_owned(),
                     caller_label: caller_label.to_owned(),
                     context,
-                    element: original,
+                    element: serde_json::to_value(&element).map_err(|_| {
+                        BrokerError::new(
+                            BrokerErrorCode::InvalidBrowserOperation,
+                            "normalized snapshot element could not be serialized",
+                        )
+                    })?,
                     created_at: now,
                 },
             );

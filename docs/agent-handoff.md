@@ -1,7 +1,7 @@
-Discovery 未改；生产 Chrome 仍走 Python。
+基线 8fcaddb；生产 Chrome 仍走 Python。
 
-修改：Rust Broker execute_locator DTO 支持 CSS/test_id/role/name/@e；执行前校验 Profile/target/project/caller/Lease/snapshot/revision/context，复用 click/pointer_click，不重试。
+本轮完成 4.1：Rust broker 增加 LocatorSnapshot/SnapshotElement normalization、LocatorIntent score、候选生成/排序、typed verification status/result 合并；session 用同一模型生成作用域 @e，state 继续复用 execute_locator，未新增通道、重试或 DOM 副作用。
 
-验证：Broker 57/57、Node 19/19、CLI build；真实双 Chrome 1/1、exit 0（临时日志）。两 Profile 四类定位副作用各1、pointerdown各1、Playwright mutations=0；过期/跨 Profile/错误 Lease/歧义(2)拒绝。
+验证：Rust broker 60/60、Python locator 8/8、真实双 Profile transport 1/1；clippy -D warnings、fmt、git diff --check、openspec strict validate 均通过。日志均为临时文件；pytest 仅有既存 .pytest_cache 权限 warning。
 
-未完成：生产切换、智能排序、Fill/断言、截图/Network/Discovery、全 workspace。下一步：OpenSpec 4.1–4.5 ranking/verification/Feature replay。
+未完成：4.2–4.5、截图/Console/Network/授权、生产切换与最终验收；不要改用生产 Rust。

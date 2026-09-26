@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
 /// Wire schema understood by the current Rust browser client.
@@ -208,29 +208,925 @@ pub enum ExecuteLocatorInput {
     SnapshotReference(String),
 }
 
-/// Structured candidate shape already understood by the Extension's
-/// `execute_locator` implementation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ExecuteLocatorCandidate {
-    pub kind: ExecuteLocatorCandidateKind,
-    pub arguments: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecuteLocatorCandidateKind {
-    TestId,
-    Role,
-}
-
 /// Frame/shadow context retained by a Snapshot element reference.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LocatorContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow_root: Option<String>,
+}
+
+/// Candidate kinds understood by the existing Extension execute_locator and
+/// verify_playwright_locators implementations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecuteLocatorCandidateKind {
+    TestId,
+    Role,
+    Label,
+    Placeholder,
+    Attribute,
+    Css,
+    Text,
+}
+
+/// Stable argument fields carried by a structured locator.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocatorCandidateArguments {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribute: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// A generated locator candidate plus the policy metadata used for ranking.
+///
+/// Metadata is optional on the wire so the existing direct execute_locator
+/// shape remains valid. Rust-generated candidates populate all policy fields;
+/// the Extension consumes only kind and arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecuteLocatorCandidate {
+    pub kind: ExecuteLocatorCandidateKind,
+    pub arguments: LocatorCandidateArguments,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<LocatorContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<LocatorVerificationStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stability_rationale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Vec<String>>,
+}
+
+pub type LocatorCandidate = ExecuteLocatorCandidate;
+pub type LocatorCandidateKind = ExecuteLocatorCandidateKind;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocatorVerificationStatus {
+    #[default]
+    Unverified,
+    Verified,
+    NotFound,
+    Ambiguous,
+    NotActionable,
+    StalePageContext,
+}
+
+/// One browser-observed verification result for a candidate expression.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocatorVerificationResult {
+    #[serde(default)]
+    pub expression: String,
+    #[serde(default, deserialize_with = "deserialize_nonnegative_u32")]
+    pub match_count: u32,
+    #[serde(default)]
+    pub visible: bool,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub stale_page_context: bool,
+}
+
+/// Structured caller intent used to select one normalized snapshot element.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocatorIntent {
+    #[serde(default)]
+    pub purpose: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default, alias = "elementRef")]
+    pub element_ref: Option<String>,
+    #[serde(default, alias = "gherkinStep")]
+    pub gherkin_step: Option<String>,
+}
+
+/// A normalized interactive element. Unknown snapshot fields are retained at
+/// the protocol edge; policy code reads only the stable fields below.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotElement {
+    pub element_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub accessible_name: Option<String>,
+    #[serde(default, rename = "ariaLabel", skip_serializing_if = "Option::is_none")]
+    pub aria_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub attributes: BTreeMap<String, String>,
+    #[serde(
+        default,
+        rename = "shortSelector",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub short_selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<LocatorContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Normalized page snapshot used by locator policy and snapshot references.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocatorSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_context_revision: Option<String>,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub interactive_elements: Vec<SnapshotElement>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocatorResolution {
+    pub element: SnapshotElement,
+    pub candidates: Vec<LocatorCandidate>,
+}
+
+impl LocatorSnapshot {
+    pub fn normalize(value: &Value) -> Result<Self, BrokerError> {
+        let object = value.as_object().ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "page snapshot must be a JSON object",
+            )
+        })?;
+        let raw_elements = object
+            .get("interactive_elements")
+            .and_then(Value::as_array)
+            .or_else(|| object.get("elements").and_then(Value::as_array));
+        let interactive_elements = raw_elements
+            .into_iter()
+            .flat_map(|elements| elements.iter().enumerate())
+            .filter_map(|(index, element)| SnapshotElement::normalize(index, element))
+            .collect();
+        let mut extra = object
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for key in [
+            "snapshot_id",
+            "page_context_revision",
+            "url",
+            "title",
+            "interactive_elements",
+            "elements",
+        ] {
+            extra.remove(key);
+        }
+        Ok(Self {
+            snapshot_id: clean_optional_text(object.get("snapshot_id")),
+            page_context_revision: clean_optional_text(object.get("page_context_revision")),
+            url: clean_optional_text(object.get("url")).unwrap_or_default(),
+            title: clean_optional_text(object.get("title")).unwrap_or_default(),
+            interactive_elements,
+            extra,
+        })
+    }
+
+    /// Select the intended element and produce deterministic, policy-ranked
+    /// candidates. This is pure; verification is merged separately below.
+    pub fn generate_candidates(
+        &self,
+        intent: &LocatorIntent,
+        test_id_attributes: &[String],
+    ) -> Result<LocatorResolution, BrokerError> {
+        if self.interactive_elements.is_empty() {
+            return Err(locator_not_found(
+                "page snapshot contains no interactive elements for locator acquisition",
+            ));
+        }
+        let matching = self
+            .interactive_elements
+            .iter()
+            .filter(|element| element.matches_explicit_intent(intent))
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            return Err(locator_not_found(
+                "locator role, text, or element reference did not match an interactive element in the selected page",
+            ));
+        }
+        let mut ranked_elements = matching
+            .into_iter()
+            .map(|element| (element.score_intent(intent), element))
+            .collect::<Vec<_>>();
+        ranked_elements.sort_by_key(|item| std::cmp::Reverse(item.0));
+        let (best_score, element) = ranked_elements[0];
+        if intent.has_explicit_fields() && best_score <= 0 {
+            return Err(locator_not_found(
+                "locator intent did not match an interactive element in the selected page",
+            ));
+        }
+
+        let configured_attributes = if test_id_attributes.is_empty() {
+            vec!["data-testid".to_owned()]
+        } else {
+            let values = test_id_attributes
+                .iter()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if values.is_empty() {
+                vec!["data-testid".to_owned()]
+            } else {
+                values
+            }
+        };
+        let context = element.context.clone().unwrap_or_default();
+        let role = element.effective_role();
+        let accessible_name = element.accessible_name_for_locator();
+        let mut candidates = Vec::new();
+        if !role.is_empty()
+            && let Some(name) = accessible_name.clone()
+        {
+            candidates.push(LocatorCandidate::role(
+                role,
+                name,
+                context.clone(),
+                100,
+                "unique accessible role and name",
+            ));
+        }
+        if let Some(label) = element.label.clone() {
+            candidates.push(LocatorCandidate::textual(
+                ExecuteLocatorCandidateKind::Label,
+                "page.getByLabel",
+                label,
+                context.clone(),
+                90,
+                "associated form label",
+                Vec::new(),
+            ));
+        }
+        if let Some(placeholder) = element.placeholder.clone() {
+            candidates.push(LocatorCandidate::textual(
+                ExecuteLocatorCandidateKind::Placeholder,
+                "page.getByPlaceholder",
+                placeholder,
+                context.clone(),
+                85,
+                "stable placeholder text",
+                Vec::new(),
+            ));
+        }
+        for attribute in configured_attributes {
+            let Some(value) = element.attributes.get(&attribute).cloned() else {
+                continue;
+            };
+            let (kind, expression, rationale) = if attribute == "data-testid" {
+                (
+                    ExecuteLocatorCandidateKind::TestId,
+                    format!("page.getByTestId({})", js_string(&value)),
+                    format!("project-configured test-id attribute {attribute}"),
+                )
+            } else {
+                (
+                    ExecuteLocatorCandidateKind::Attribute,
+                    format!(
+                        "page.locator({})",
+                        js_string(&format!("[{attribute}={}]", json_string(&value)))
+                    ),
+                    format!("project-configured test-id attribute {attribute}"),
+                )
+            };
+            candidates.push(LocatorCandidate::attribute(
+                kind,
+                attribute,
+                value,
+                expression,
+                context.clone(),
+                80,
+                rationale,
+                Vec::new(),
+            ));
+        }
+        for attribute in ["id", "name", "aria-label", "title", "alt"] {
+            let Some(value) = element.attributes.get(attribute).cloned() else {
+                continue;
+            };
+            let selector = format!("[{attribute}={}]", json_string(&value));
+            candidates.push(LocatorCandidate::attribute(
+                ExecuteLocatorCandidateKind::Attribute,
+                attribute.to_owned(),
+                value,
+                format!("page.locator({})", js_string(&selector)),
+                context.clone(),
+                if attribute == "id" { 70 } else { 65 },
+                format!("stable {attribute} attribute fallback"),
+                Vec::new(),
+            ));
+        }
+        if let Some(selector) = element.short_selector.clone() {
+            let warnings = selector_warnings(&selector);
+            candidates.push(LocatorCandidate::css(
+                selector,
+                context.clone(),
+                55 - 8 * warnings.len() as i32,
+                "CSS fallback derived from the current DOM",
+                warnings,
+            ));
+        }
+        if let Some(text) = element.text.clone() {
+            candidates.push(LocatorCandidate::textual(
+                ExecuteLocatorCandidateKind::Text,
+                "page.getByText",
+                text,
+                context,
+                45,
+                "visible text fallback may change with copy or localization",
+                vec!["text_content_may_change".into()],
+            ));
+        }
+        if candidates.is_empty() {
+            return Err(locator_not_found(
+                "the intended element has no supported stable locator attributes",
+            ));
+        }
+
+        let mut deduplicated = Vec::new();
+        for candidate in candidates {
+            let expression = candidate.expression.clone().unwrap_or_default();
+            if let Some(existing) =
+                deduplicated
+                    .iter_mut()
+                    .find(|existing: &&mut LocatorCandidate| {
+                        existing.expression.as_deref().unwrap_or_default() == expression
+                    })
+            {
+                if candidate.score_value() > existing.score_value() {
+                    *existing = candidate;
+                }
+            } else {
+                deduplicated.push(candidate);
+            }
+        }
+        deduplicated.sort_by_key(|candidate| std::cmp::Reverse(candidate.score_value()));
+        Ok(LocatorResolution {
+            element: element.clone(),
+            candidates: deduplicated,
+        })
+    }
+}
+
+impl ExecuteLocatorCandidate {
+    fn base(
+        kind: ExecuteLocatorCandidateKind,
+        arguments: LocatorCandidateArguments,
+        expression: String,
+        context: LocatorContext,
+        score: i32,
+        rationale: &str,
+        warnings: Vec<String>,
+    ) -> Self {
+        Self {
+            kind,
+            arguments,
+            expression: Some(expression),
+            context: Some(context),
+            match_count: Some(0),
+            visible: Some(false),
+            enabled: Some(false),
+            verification: Some(LocatorVerificationStatus::Unverified),
+            score: Some(score),
+            stability_rationale: Some(rationale.into()),
+            warnings: Some(warnings),
+        }
+    }
+
+    fn role(
+        role: String,
+        name: String,
+        context: LocatorContext,
+        score: i32,
+        rationale: &str,
+    ) -> Self {
+        Self::base(
+            ExecuteLocatorCandidateKind::Role,
+            LocatorCandidateArguments {
+                role: Some(role.clone()),
+                name: Some(name.clone()),
+                exact: Some(true),
+                ..Default::default()
+            },
+            format!(
+                "page.getByRole({}, {{ name: {}, exact: true }})",
+                js_string(&role),
+                js_string(&name)
+            ),
+            context,
+            score,
+            rationale,
+            Vec::new(),
+        )
+    }
+
+    fn textual(
+        kind: ExecuteLocatorCandidateKind,
+        method: &str,
+        text: String,
+        context: LocatorContext,
+        score: i32,
+        rationale: &str,
+        warnings: Vec<String>,
+    ) -> Self {
+        Self::base(
+            kind,
+            LocatorCandidateArguments {
+                text: Some(text.clone()),
+                exact: Some(true),
+                ..Default::default()
+            },
+            format!("{method}({}, {{ exact: true }})", js_string(&text)),
+            context,
+            score,
+            rationale,
+            warnings,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn attribute(
+        kind: ExecuteLocatorCandidateKind,
+        attribute: String,
+        value: String,
+        expression: String,
+        context: LocatorContext,
+        score: i32,
+        rationale: String,
+        warnings: Vec<String>,
+    ) -> Self {
+        Self::base(
+            kind,
+            LocatorCandidateArguments {
+                attribute: Some(attribute),
+                value: Some(value),
+                ..Default::default()
+            },
+            expression,
+            context,
+            score,
+            &rationale,
+            warnings,
+        )
+    }
+
+    fn css(
+        selector: String,
+        context: LocatorContext,
+        score: i32,
+        rationale: &str,
+        warnings: Vec<String>,
+    ) -> Self {
+        Self::base(
+            ExecuteLocatorCandidateKind::Css,
+            LocatorCandidateArguments {
+                selector: Some(selector.clone()),
+                ..Default::default()
+            },
+            format!("page.locator({})", js_string(&selector)),
+            context,
+            score,
+            rationale,
+            warnings,
+        )
+    }
+
+    fn score_value(&self) -> i32 {
+        self.score.unwrap_or_default()
+    }
+
+    fn is_verified(&self) -> bool {
+        self.verification == Some(LocatorVerificationStatus::Verified)
+    }
+
+    /// Merge one Extension verification result using the Python status rules.
+    pub fn with_verification(&self, result: Option<&LocatorVerificationResult>) -> Self {
+        let mut updated = self.clone();
+        let match_count = result.map(|value| value.match_count).unwrap_or_default();
+        let visible = result.is_some_and(|value| value.visible);
+        let enabled = result.is_some_and(|value| value.enabled);
+        let status = if result.is_some_and(|value| value.stale_page_context) {
+            LocatorVerificationStatus::StalePageContext
+        } else if match_count == 0 {
+            LocatorVerificationStatus::NotFound
+        } else if match_count > 1 {
+            LocatorVerificationStatus::Ambiguous
+        } else if !visible || !enabled {
+            LocatorVerificationStatus::NotActionable
+        } else {
+            LocatorVerificationStatus::Verified
+        };
+        updated.match_count = Some(match_count);
+        updated.visible = Some(visible);
+        updated.enabled = Some(enabled);
+        updated.verification = Some(status);
+        updated
+    }
+}
+
+/// Merge Extension results and retain score ordering with verified candidates
+/// first, exactly like the Python locator policy.
+pub fn apply_locator_verification_results(
+    candidates: &[LocatorCandidate],
+    verification: &[LocatorVerificationResult],
+) -> Vec<LocatorCandidate> {
+    let mut merged = candidates
+        .iter()
+        .map(|candidate| {
+            let expression = candidate.expression.as_deref().unwrap_or_default();
+            let result = verification
+                .iter()
+                .rev()
+                .find(|item| item.expression == expression);
+            candidate.with_verification(result)
+        })
+        .collect::<Vec<_>>();
+    merged.sort_by(|left, right| {
+        right
+            .is_verified()
+            .cmp(&left.is_verified())
+            .then_with(|| right.score_value().cmp(&left.score_value()))
+    });
+    merged
+}
+
+fn locator_not_found(message: &str) -> BrokerError {
+    BrokerError::new(BrokerErrorCode::BrowserTargetNotFound, message)
+}
+
+fn clean_optional_text(value: Option<&Value>) -> Option<String> {
+    let text = match value? {
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        Value::Bool(value) => value.to_string(),
+        _ => return None,
+    };
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+fn normalize_attributes(object: &serde_json::Map<String, Value>) -> BTreeMap<String, String> {
+    let mut attributes = BTreeMap::new();
+    let raw = object
+        .get("attributes")
+        .and_then(Value::as_object)
+        .filter(|attributes| !attributes.is_empty())
+        .or_else(|| object.get("allAttributes").and_then(Value::as_object));
+    if let Some(raw) = raw {
+        for (name, value) in raw {
+            if !value.is_string() && !value.is_number() && !value.is_boolean() {
+                continue;
+            }
+            if let Some(text) = clean_optional_text(Some(value)) {
+                attributes.insert(name.clone(), text.chars().take(500).collect());
+            }
+        }
+    }
+    for (source, destination) in [
+        ("id", "id"),
+        ("name", "name"),
+        ("testId", "data-testid"),
+        ("testid", "data-testid"),
+        ("ariaLabel", "aria-label"),
+        ("title", "title"),
+        ("alt", "alt"),
+    ] {
+        if let Some(value) = clean_optional_text(object.get(source)) {
+            attributes
+                .entry(destination.into())
+                .or_insert_with(|| value.chars().take(500).collect());
+        }
+    }
+    attributes
+}
+
+fn intent_words(value: &str) -> std::collections::BTreeSet<String> {
+    let normalized = value
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character.to_lowercase().collect::<String>()
+            } else {
+                " ".into()
+            }
+        })
+        .collect::<String>();
+    normalized
+        .split_whitespace()
+        .filter(|word| word.chars().count() >= 2)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|_| "\"\"".into())
+        .replace("</", "<\\/")
+}
+
+fn js_string(value: &str) -> String {
+    json_string(value)
+}
+
+fn selector_warnings(selector: &str) -> Vec<String> {
+    let lowered = selector.to_lowercase();
+    let mut warnings = Vec::new();
+    if lowered.contains(":nth-") || lowered.contains(":first") || lowered.contains(":last") {
+        warnings.push("positional_selector".into());
+    }
+    if selector.matches('>').count() >= 3 || selector.chars().count() > 160 {
+        warnings.push("long_dom_path".into());
+    }
+    if ["sc-", "__", "css-", "emotion-", "_ngcontent"]
+        .iter()
+        .any(|marker| selector.contains(marker))
+    {
+        warnings.push("generated_class".into());
+    }
+    if ["x=", "y=", "coordinate"]
+        .iter()
+        .any(|marker| lowered.contains(marker))
+    {
+        warnings.push("coordinate_selector".into());
+    }
+    warnings
+}
+
+fn deserialize_nonnegative_u32<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let parsed = match value {
+        Value::Number(number) => number
+            .as_u64()
+            .or_else(|| number.as_i64().map(|value| value.max(0) as u64))
+            .or_else(|| number.as_f64().map(|value| value.max(0.0) as u64)),
+        Value::String(value) => value.parse::<i64>().ok().map(|value| value.max(0) as u64),
+        _ => Some(0),
+    }
+    .unwrap_or_default();
+    u32::try_from(parsed).map_err(|_| D::Error::custom("match_count is too large"))
+}
+
+impl LocatorIntent {
+    /// Parse the open operation argument without changing the v1 envelope.
+    pub fn from_value(value: &Value) -> Self {
+        let Some(object) = value.as_object() else {
+            return Self::default();
+        };
+        Self {
+            purpose: clean_optional_text(object.get("purpose")),
+            text: clean_optional_text(object.get("text")),
+            role: clean_optional_text(object.get("role")),
+            element_ref: clean_optional_text(
+                object
+                    .get("element_ref")
+                    .or_else(|| object.get("elementRef")),
+            ),
+            gherkin_step: clean_optional_text(
+                object
+                    .get("gherkin_step")
+                    .or_else(|| object.get("gherkinStep")),
+            ),
+        }
+    }
+
+    fn has_explicit_fields(&self) -> bool {
+        [
+            self.purpose.as_deref(),
+            self.text.as_deref(),
+            self.role.as_deref(),
+            self.element_ref.as_deref(),
+            self.gherkin_step.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.trim().is_empty())
+    }
+}
+
+impl SnapshotElement {
+    /// Match Python _normalize_element while retaining extension fields that
+    /// are outside the typed locator policy.
+    pub fn normalize(index: usize, value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        let mut extra = object
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for key in [
+            "element_ref",
+            "tag",
+            "role",
+            "accessible_name",
+            "ariaLabel",
+            "label",
+            "placeholder",
+            "text",
+            "attributes",
+            "shortSelector",
+            "context",
+            "visible",
+            "enabled",
+        ] {
+            extra.remove(key);
+        }
+
+        let element_ref =
+            clean_optional_text(object.get("element_ref").or_else(|| object.get("ref")))
+                .unwrap_or_else(|| format!("e{}", index + 1));
+        let context = object
+            .get("context")
+            .and_then(Value::as_object)
+            .and_then(|value| serde_json::from_value(Value::Object(value.clone())).ok());
+        Some(Self {
+            element_ref,
+            tag: clean_optional_text(object.get("tag")),
+            role: clean_optional_text(object.get("role")),
+            accessible_name: clean_optional_text(
+                object
+                    .get("accessible_name")
+                    .or_else(|| object.get("computedAccessibleName")),
+            ),
+            aria_label: clean_optional_text(object.get("ariaLabel")),
+            label: clean_optional_text(object.get("label")),
+            placeholder: clean_optional_text(object.get("placeholder")),
+            text: clean_optional_text(object.get("text")),
+            attributes: normalize_attributes(object),
+            short_selector: clean_optional_text(
+                object
+                    .get("shortSelector")
+                    .or_else(|| object.get("short_selector")),
+            ),
+            context,
+            visible: object.get("visible").and_then(Value::as_bool),
+            enabled: object.get("enabled").and_then(Value::as_bool),
+            extra,
+        })
+    }
+
+    pub fn implicit_role(&self) -> String {
+        let tag = self.tag.as_deref().unwrap_or_default().to_ascii_lowercase();
+        let input_type = self
+            .attributes
+            .get("type")
+            .map(|value| value.to_ascii_lowercase())
+            .unwrap_or_default();
+        match tag.as_str() {
+            "button" => "button".into(),
+            "input" if matches!(input_type.as_str(), "button" | "submit") => "button".into(),
+            "a" => "link".into(),
+            "textarea" => "textbox".into(),
+            "input" if input_type == "checkbox" => "checkbox".into(),
+            "input" if input_type == "radio" => "radio".into(),
+            "input" => "textbox".into(),
+            "select" => "combobox".into(),
+            _ => String::new(),
+        }
+    }
+
+    fn effective_role(&self) -> String {
+        self.role.clone().unwrap_or_else(|| self.implicit_role())
+    }
+
+    fn accessible_name_for_locator(&self) -> Option<String> {
+        self.accessible_name
+            .clone()
+            .or_else(|| self.aria_label.clone())
+            .or_else(|| self.label.clone())
+            .or_else(|| self.text.clone())
+    }
+
+    fn intent_haystack(&self) -> String {
+        [
+            self.accessible_name.as_deref().unwrap_or_default(),
+            self.aria_label.as_deref().unwrap_or_default(),
+            self.label.as_deref().unwrap_or_default(),
+            self.placeholder.as_deref().unwrap_or_default(),
+            self.text.as_deref().unwrap_or_default(),
+        ]
+        .join(" ")
+    }
+
+    fn matches_explicit_intent(&self, intent: &LocatorIntent) -> bool {
+        if let Some(expected) = intent.element_ref.as_deref()
+            && self.element_ref != expected
+        {
+            return false;
+        }
+        if let Some(expected) = intent.role.as_deref()
+            && self.effective_role().to_lowercase() != expected.to_lowercase()
+        {
+            return false;
+        }
+        if let Some(expected) = intent.text.as_deref() {
+            let expected = expected.to_lowercase();
+            if ![
+                self.accessible_name.as_deref(),
+                self.aria_label.as_deref(),
+                self.label.as_deref(),
+                self.placeholder.as_deref(),
+                self.text.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|value| value.to_lowercase().contains(&expected))
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn score_intent(&self, intent: &LocatorIntent) -> i32 {
+        if let Some(expected) = intent.element_ref.as_deref() {
+            return if self.element_ref == expected {
+                10_000
+            } else {
+                -10_000
+            };
+        }
+        let mut score = 0;
+        if let Some(expected) = intent.role.as_deref() {
+            score += if self.effective_role().to_lowercase() == expected.to_lowercase() {
+                120
+            } else {
+                -60
+            };
+        }
+        let haystack = self.intent_haystack();
+        if let Some(expected) = intent.text.as_deref() {
+            let expected = expected.to_lowercase();
+            let haystack_lower = haystack.to_lowercase();
+            score += if expected == haystack_lower.trim() {
+                160
+            } else if haystack_lower.contains(&expected) {
+                100
+            } else {
+                -50
+            };
+        }
+        let context_words = intent_words(
+            &[
+                intent.purpose.as_deref().unwrap_or_default(),
+                intent.gherkin_step.as_deref().unwrap_or_default(),
+            ]
+            .join(" "),
+        );
+        if !context_words.is_empty() {
+            let element_words = intent_words(&format!("{} {}", self.effective_role(), haystack));
+            score += 8 * context_words.intersection(&element_words).count() as i32;
+        }
+        if self.visible == Some(false) {
+            score -= 80;
+        }
+        score
+    }
 }
 
 /// Resolved command sent over the existing Extension `execute_locator` path.
@@ -470,6 +1366,31 @@ impl ExtensionResponse {
             ));
         }
         Ok(())
+    }
+
+    /// Decode the existing Extension verification array without changing its
+    /// response envelope. Missing/non-array data remains an empty result set,
+    /// matching the Python policy's conservative default.
+    pub fn locator_verification_results(
+        &self,
+    ) -> Result<Vec<LocatorVerificationResult>, BrokerError> {
+        let Some(raw) = self.result.get("verification") else {
+            return Ok(Vec::new());
+        };
+        let Some(items) = raw.as_array() else {
+            return Ok(Vec::new());
+        };
+        items
+            .iter()
+            .map(|item| {
+                serde_json::from_value(item.clone()).map_err(|_| {
+                    BrokerError::new(
+                        BrokerErrorCode::BrokerProtocolError,
+                        "extension locator verification result is malformed",
+                    )
+                })
+            })
+            .collect()
     }
 }
 
@@ -926,6 +1847,203 @@ mod tests {
             .unwrap_err()
             .code,
             BrokerErrorCode::BrowserCapabilityUnavailable
+        );
+    }
+
+    #[test]
+    fn snapshot_normalization_accepts_elements_aliases_and_preserves_context() {
+        let snapshot = LocatorSnapshot::normalize(&json!({
+            "snapshot_id": "snapshot-1",
+            "page_context_revision": "revision-1",
+            "elements": [{
+                "ref": "save-button",
+                "tag": "button",
+                "computedAccessibleName": " Save ",
+                "testId": "save",
+                "allAttributes": {"class": "css-123", "disabled": false},
+                "shortSelector": "button.css-123:nth-of-type(2)",
+                "context": {"frame": "checkout-frame", "shadow_root": null},
+                "unknown_extension_field": {"kept": true}
+            }]
+        }))
+        .unwrap();
+        let element = &snapshot.interactive_elements[0];
+        assert_eq!(element.element_ref, "save-button");
+        assert_eq!(element.accessible_name.as_deref(), Some("Save"));
+        assert_eq!(element.attributes["data-testid"], "save");
+        assert_eq!(element.attributes["class"], "css-123");
+        assert_eq!(
+            element
+                .context
+                .as_ref()
+                .and_then(|context| context.frame.as_deref()),
+            Some("checkout-frame")
+        );
+        assert_eq!(element.extra["unknown_extension_field"]["kept"], true);
+    }
+
+    #[test]
+    fn candidate_generation_matches_python_order_and_structured_intent_errors() {
+        let snapshot = LocatorSnapshot::normalize(&json!({
+            "interactive_elements": [
+                {
+                    "element_ref": "save-button",
+                    "tag": "button",
+                    "role": "button",
+                    "accessible_name": "Save",
+                    "text": "Save",
+                    "attributes": {"data-testid": "save", "class": "css-123"},
+                    "shortSelector": "button.css-123:nth-of-type(2)",
+                    "visible": true
+                },
+                {
+                    "element_ref": "email-input",
+                    "tag": "input",
+                    "label": "Email",
+                    "placeholder": "name@example.test",
+                    "attributes": {"data-qa": "email-field", "name": "email"},
+                    "context": {"frame": "checkout-frame", "shadow_root": null},
+                    "visible": true
+                }
+            ]
+        }))
+        .unwrap();
+        let save = snapshot
+            .generate_candidates(
+                &LocatorIntent {
+                    element_ref: Some("save-button".into()),
+                    ..Default::default()
+                },
+                &[],
+            )
+            .unwrap();
+        assert_eq!(save.candidates[0].kind, ExecuteLocatorCandidateKind::Role);
+        assert_eq!(
+            save.candidates[0].expression.as_deref(),
+            Some("page.getByRole(\"button\", { name: \"Save\", exact: true })")
+        );
+        let css = save
+            .candidates
+            .iter()
+            .find(|candidate| candidate.kind == ExecuteLocatorCandidateKind::Css)
+            .unwrap();
+        assert!(
+            css.warnings
+                .as_ref()
+                .unwrap()
+                .contains(&"generated_class".into())
+        );
+        assert!(
+            css.warnings
+                .as_ref()
+                .unwrap()
+                .contains(&"positional_selector".into())
+        );
+
+        let email = snapshot
+            .generate_candidates(
+                &LocatorIntent {
+                    element_ref: Some("email-input".into()),
+                    ..Default::default()
+                },
+                &["data-qa".into()],
+            )
+            .unwrap();
+        assert_eq!(
+            email
+                .candidates
+                .iter()
+                .take(4)
+                .map(|candidate| candidate.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                ExecuteLocatorCandidateKind::Role,
+                ExecuteLocatorCandidateKind::Label,
+                ExecuteLocatorCandidateKind::Placeholder,
+                ExecuteLocatorCandidateKind::Attribute
+            ]
+        );
+        assert_eq!(
+            email.candidates[0]
+                .context
+                .as_ref()
+                .and_then(|context| context.frame.as_deref()),
+            Some("checkout-frame")
+        );
+
+        let error = snapshot
+            .generate_candidates(
+                &LocatorIntent {
+                    role: Some("link".into()),
+                    text: Some("Save".into()),
+                    ..Default::default()
+                },
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(error.code, BrokerErrorCode::BrowserTargetNotFound);
+    }
+
+    #[test]
+    fn verification_results_merge_to_stable_structured_statuses() {
+        let candidate = ExecuteLocatorCandidate {
+            kind: ExecuteLocatorCandidateKind::Role,
+            arguments: LocatorCandidateArguments {
+                role: Some("button".into()),
+                name: Some("Save".into()),
+                exact: Some(true),
+                ..Default::default()
+            },
+            expression: Some("page.getByRole(\"button\")".into()),
+            context: None,
+            match_count: Some(0),
+            visible: Some(false),
+            enabled: Some(false),
+            verification: Some(LocatorVerificationStatus::Unverified),
+            score: Some(100),
+            stability_rationale: Some("role".into()),
+            warnings: Some(Vec::new()),
+        };
+        let verification = serde_json::from_value::<LocatorVerificationResult>(json!({
+            "expression": "page.getByRole(\"button\")",
+            "match_count": 1,
+            "visible": true,
+            "enabled": true
+        }))
+        .unwrap();
+        let merged = apply_locator_verification_results(&[candidate], &[verification]);
+        assert_eq!(
+            merged[0].verification,
+            Some(LocatorVerificationStatus::Verified)
+        );
+        assert_eq!(merged[0].match_count, Some(1));
+
+        let stale = serde_json::from_value::<LocatorVerificationResult>(json!({
+            "expression": "page.getByRole(\"button\")",
+            "stale_page_context": true
+        }))
+        .unwrap();
+        assert_eq!(
+            apply_locator_verification_results(&merged, &[stale])[0].verification,
+            Some(LocatorVerificationStatus::StalePageContext)
+        );
+
+        let response: ExtensionResponse = serde_json::from_value(json!({
+            "type": "response",
+            "request_id": "verify-1",
+            "cmd": "verify_playwright_locators",
+            "ok": true,
+            "verification": [{
+                "expression": "page.getByRole(\"button\")",
+                "match_count": 2,
+                "visible": true,
+                "enabled": true
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            response.locator_verification_results().unwrap()[0].match_count,
+            2
         );
     }
 }

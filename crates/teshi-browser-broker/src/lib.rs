@@ -17,7 +17,10 @@ pub use protocol::{
     BrowserTarget, CHROME_DISCOVERY_PORT, DiscoveryResponse, EndpointRecord,
     ExecuteLocatorActionRequest, ExecuteLocatorCandidate, ExecuteLocatorCandidateKind,
     ExecuteLocatorCommand, ExecuteLocatorElement, ExecuteLocatorInput, ExtensionHeartbeat,
-    ExtensionResponse, LocatorContext, MAX_TRUSTED_EXTENSION_ORIGINS,
+    ExtensionResponse, LocatorCandidate, LocatorCandidateArguments, LocatorCandidateKind,
+    LocatorContext, LocatorIntent, LocatorResolution, LocatorSnapshot, LocatorVerificationResult,
+    LocatorVerificationStatus, MAX_TRUSTED_EXTENSION_ORIGINS, SnapshotElement,
+    apply_locator_verification_results,
 };
 pub use server::{BrokerEvent, BrokerPublication, BrokerRuntime, BrokerServerConfig};
 pub use session::{
