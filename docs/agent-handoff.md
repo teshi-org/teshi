@@ -1,8 +1,7 @@
-Discovery未改；Chrome仍走Python。
+Discovery 未改；生产 Chrome 仍走 Python。
 
-修改：background.js为stream WebSocket加入epoch；旧回调、direct command、重连定时器不能修改当前连接、generation、队列、backoff。network-capture.test.mjs加入Fake WebSocket/定时器回归。
+修改：Rust Broker 仅将明确 CSS 的 click/pointer_click 映射为 execute_locator；执行前校验 p0、Profile、Lease、revision；回包严格关联 request/operation/Profile/target/generation。保留 DOM/CDP pointer 语义；双 Profile 测试加入计数器、pointerdown、失败边界。
 
-验证：node --test extension/teshi-bridge/tests/protocol.test.mjs extension/teshi-bridge/tests/network-capture.test.mjs；36/36通过，0失败，退出码0。
+验证：Node 37/37；Broker 55/55；Python 编译通过。真实双 Chrome 1/1、退出码 0（日志 final6）：A click、B pointer_click 各一次，无串扰，B pointerdown=1；Playwright 仅观察；四类负例正确拒绝，无重试。
 
-未执行：未跑resources/tests/test_browser_two_profile_rust_transport.py；已有A/B导航+Snapshot证据，本轮无新增结果。真实Chrome E2E、全量workspace回归未验证。
-下一步：execute_browser_action→executeLocator Click/pointer_click。
+未完成：生产 Python、智能定位、截图/Network/Discovery、全 workspace。下一步继续 execute_locator DTO，保持 P0 fail-closed。

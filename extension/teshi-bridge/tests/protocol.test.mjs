@@ -188,6 +188,17 @@ test("mutation monitoring captures bounded summaries around one action dispatch"
   assert.match(executeBranch, /afterSummary/);
 });
 
+test("execute_locator keeps DOM click and pointer click semantics distinct", () => {
+  const executeLocator = background.match(
+    /async function executeLocator\([\s\S]*?\n}\n\nasync function waitForBrowserCondition/,
+  )?.[0];
+  assert.ok(executeLocator, "executeLocator implementation missing");
+  assert.match(executeLocator, /else if \(action === "click"\) \{\s*el\.click\(\);/);
+  assert.match(executeLocator, /else if \(action === "pointer_click"\) \{/);
+  assert.match(executeLocator, /Input\.dispatchMouseEvent.*type: "mousePressed"/);
+  assert.match(executeLocator, /Input\.dispatchMouseEvent.*type: "mouseReleased"/);
+});
+
 test("file upload resolves one actionable input and uses CDP file assignment", () => {
   assert.match(background, /async function setFileInputFiles/);
   assert.match(background, /DOM\.enable/);

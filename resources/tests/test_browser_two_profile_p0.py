@@ -681,25 +681,18 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
                     targets[1], f"http://127.0.0.1:{port}/b"
                 ),
             )
-            self._set_stage("snapshot and resolve profile-local references")
+            self._set_stage("snapshot and capture profile-local revisions")
             snapshots = await asyncio.gather(
                 self.cli("snapshot", *self.target_args(targets[0], tokens[0])),
                 self.cli("snapshot", *self.target_args(targets[1], tokens[1])),
             )
-            refs = []
             for snapshot in snapshots:
-                button = next(
-                    element
-                    for element in snapshot["interactive_elements"]
-                    if element.get("tag") == "button" or element.get("role") == "button"
-                )
-                refs.append(button["ref"])
-            self.assertEqual(refs, ["@e1", "@e1"], "aliases should be profile-local")
+                self.assertTrue(snapshot.get("page_context_revision"), snapshot)
 
             self._set_stage("click and pointer-click concurrently")
             await asyncio.gather(
-                self.cli("execute", "--reference", refs[0], "--action", "click", "--wait-text", "clicked-a", *self.target_args(targets[0], tokens[0])),
-                self.cli("execute", "--reference", refs[1], "--action", "pointer_click", "--wait-text", "clicked-b", *self.target_args(targets[1], tokens[1])),
+                self.cli("execute", "--selector", "#action", "--page-revision", snapshots[0]["page_context_revision"], "--action", "click", "--wait-text", "clicked-a", *self.target_args(targets[0], tokens[0])),
+                self.cli("execute", "--selector", "#action", "--page-revision", snapshots[1]["page_context_revision"], "--action", "pointer_click", "--wait-text", "clicked-b", *self.target_args(targets[1], tokens[1])),
             )
             pages = [context.pages[0] for context in self.contexts]
             observed = sorted([await page.locator("#status").text_content() for page in pages])

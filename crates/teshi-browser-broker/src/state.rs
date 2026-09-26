@@ -18,7 +18,7 @@ use crate::protocol::{
     BrowserTarget, ExtensionResponse, ExtensionStreamMessage, NetworkBatch, OperationRequest,
 };
 use crate::server::{BrokerEvent, BrokerRuntime};
-use crate::session::SessionRegistry;
+use crate::session::{BrowserSessionRecord, SessionRegistry};
 
 const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const MIN_LEASE_TTL_SECS: u64 = 5;
@@ -28,6 +28,7 @@ const MAX_PENDING_REQUESTS: usize = 128;
 const MAX_QUARANTINED_RESPONSES: usize = 32;
 const MAX_RETIRED_REQUESTS: usize = MAX_PENDING_REQUESTS * 8;
 const RETIRED_REQUEST_TTL: Duration = Duration::from_secs(600);
+const RUST_P0_EXECUTABLE_ACTIONS: [&str; 2] = ["click", "pointer_click"];
 
 #[derive(Debug)]
 struct LeaseRecord {
@@ -341,20 +342,16 @@ impl BrokerState {
                 "no pending browser request matches this response",
             ));
         };
-        let response_instance = response
-            .extension_instance_id
-            .as_deref()
-            .unwrap_or(event_instance_id);
+        let instance_matches = event_instance_id == pending.extension_instance_id
+            && response.extension_instance_id.as_deref()
+                == Some(pending.extension_instance_id.as_str());
         let target_matches = response
             .target
             .as_ref()
-            .is_none_or(|target| target == &pending.target);
+            .is_some_and(|target| target == &pending.target);
         let generation_matches = pending.stream_generation == generation;
-        if response_instance != pending.extension_instance_id
-            || !target_matches
-            || !generation_matches
-            || (!response.operation.is_empty() && response.operation != pending.operation)
-        {
+        let operation_matches = response.operation == extension_operation_for(&pending.operation);
+        if !instance_matches || !target_matches || !generation_matches || !operation_matches {
             self.quarantine(
                 &response,
                 if generation_matches {
@@ -845,6 +842,15 @@ impl BrokerState {
                     })?;
                     self.validate_lease(&instance_id, token, &project, &caller, &generation)?;
                 }
+                if request.operation == "execute_browser_action" {
+                    let session = self.sessions.get(&instance_id).ok_or_else(|| {
+                        BrokerError::new(
+                            BrokerErrorCode::BrowserTargetNotFound,
+                            "browser session was not found",
+                        )
+                    })?;
+                    validate_execute_browser_action(&request, &target, session)?;
+                }
                 Ok((instance_id, target))
             });
 
@@ -855,7 +861,13 @@ impl BrokerState {
                 return;
             }
         };
-        let command = build_extension_command(&request, &target, &instance_id);
+        let command = match build_extension_command(&request, &target, &instance_id) {
+            Ok(command) => command,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
         let timeout = request
             .timeout_ms
             .map(Duration::from_millis)
@@ -1102,7 +1114,7 @@ fn build_extension_command(
     request: &OperationRequest,
     target: &BrowserTarget,
     extension_instance_id: &str,
-) -> Value {
+) -> Result<Value, BrokerError> {
     let mut object = request
         .arguments
         .clone()
@@ -1138,7 +1150,138 @@ fn build_extension_command(
     );
     object.insert("target".into(), serde_json::to_value(target).unwrap());
     object.remove("lease_token");
-    Value::Object(object)
+    if request.operation == "execute_browser_action" {
+        let locator = parse_execute_browser_action(request)?;
+        object.insert(
+            "cmd".into(),
+            Value::String(extension_operation_for(&request.operation).into()),
+        );
+        object.insert("selector".into(), Value::String(locator.selector));
+        object.insert("action".into(), Value::String(locator.action));
+        object.insert(
+            "page_context_revision".into(),
+            Value::String(locator.page_context_revision),
+        );
+        object.remove("element");
+    }
+    Ok(Value::Object(object))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExecuteLocatorCommand {
+    selector: String,
+    action: String,
+    page_context_revision: String,
+}
+
+fn parse_execute_browser_action(
+    request: &OperationRequest,
+) -> Result<ExecuteLocatorCommand, BrokerError> {
+    let action = request
+        .arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "execute_browser_action requires an action",
+            )
+        })?
+        .to_owned();
+    if !RUST_P0_EXECUTABLE_ACTIONS.contains(&action.as_str()) {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrowserCapabilityUnavailable,
+            "Rust p0.control currently supports only click and pointer_click",
+        ));
+    }
+    let element = request
+        .arguments
+        .get("element")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "execute_browser_action requires an element object",
+            )
+        })?;
+    if element.get("reference").is_some() || element.get("candidate").is_some() {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrowserCapabilityUnavailable,
+            "Rust p0.control execute_browser_action accepts only an explicit CSS selector",
+        ));
+    }
+    let selector = element
+        .get("css")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "execute_browser_action requires a non-empty element.css selector",
+            )
+        })?
+        .to_owned();
+    let page_context_revision = element
+        .get("page_context_revision")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::StaleBrowserTarget,
+                "execute_browser_action requires the page_context_revision from a current snapshot",
+            )
+        })?
+        .to_owned();
+    Ok(ExecuteLocatorCommand {
+        selector,
+        action,
+        page_context_revision,
+    })
+}
+
+fn validate_execute_browser_action(
+    request: &OperationRequest,
+    target: &BrowserTarget,
+    session: &BrowserSessionRecord,
+) -> Result<(), BrokerError> {
+    let locator = parse_execute_browser_action(request)?;
+    if !session
+        .supported_actions()
+        .iter()
+        .any(|supported| supported == &locator.action)
+    {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrowserCapabilityUnavailable,
+            format!(
+                "selected browser session does not advertise action {}",
+                locator.action
+            ),
+        ));
+    }
+    let current_revision = session
+        .current_page_context_revision(target)
+        .ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::StaleBrowserTarget,
+                "execute_browser_action requires a snapshot for the selected target",
+            )
+        })?;
+    if current_revision != locator.page_context_revision {
+        return Err(BrokerError::new(
+            BrokerErrorCode::StaleBrowserTarget,
+            "page_context_revision is stale for the selected target",
+        ));
+    }
+    Ok(())
+}
+
+fn extension_operation_for(operation: &str) -> &str {
+    if operation == "execute_browser_action" {
+        "execute_locator"
+    } else {
+        operation
+    }
 }
 
 fn operation_success(request: &OperationRequest, payload: Value) -> Value {
@@ -1329,7 +1472,7 @@ fn requires_lease(operation: &str) -> bool {
 fn required_features_for_operation(request: &OperationRequest) -> Vec<String> {
     let mut required = Vec::new();
     match request.operation.as_str() {
-        "get_page_snapshot" | "navigate" => {
+        "get_page_snapshot" | "navigate" | "execute_browser_action" => {
             required.push("p0.control".into());
         }
         "capture_browser_screenshot"
@@ -1426,7 +1569,7 @@ mod tests {
                 available: true,
                 reason: None,
             }],
-            supported_actions: vec![],
+            supported_actions: vec!["click".into(), "pointer_click".into()],
             supported_operations: vec![],
             optional_permissions: BTreeMap::new(),
             browser: BTreeMap::new(),
@@ -1487,6 +1630,167 @@ mod tests {
             error: None,
             result: BTreeMap::new(),
         }
+    }
+
+    fn execute_request(action: &str, selector: &str, revision: &str) -> OperationRequest {
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "request_id": format!("execute-{action}"),
+            "caller_label": "caller-a",
+            "project_root": "C:/project-a",
+            "cmd": "execute_browser_action",
+            "target": target(),
+            "lease_token": "lease-secret",
+            "action": action,
+            "element": {
+                "css": selector,
+                "page_context_revision": revision
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn execute_browser_action_maps_to_css_execute_locator_without_reference_fields() {
+        let request = execute_request("pointer_click", "#pointer", "revision-1");
+        let command = build_extension_command(&request, &target(), "profile-a").unwrap();
+
+        assert_eq!(command["cmd"], "execute_locator");
+        assert_eq!(command["action"], "pointer_click");
+        assert_eq!(command["selector"], "#pointer");
+        assert_eq!(command["page_context_revision"], "revision-1");
+        assert_eq!(command["target"], json!(target()));
+        assert!(command.get("element").is_none());
+        assert!(command.get("lease_token").is_none());
+    }
+
+    #[test]
+    fn execute_browser_action_rejects_non_css_and_unimplemented_actions() {
+        let mut reference = execute_request("click", "#save", "revision-1");
+        reference
+            .arguments
+            .insert("element".into(), json!({"reference": "@e1"}));
+        assert_eq!(
+            build_extension_command(&reference, &target(), "profile-a")
+                .unwrap_err()
+                .code,
+            BrokerErrorCode::BrowserCapabilityUnavailable
+        );
+
+        let unsupported = execute_request("fill", "#save", "revision-1");
+        assert_eq!(
+            build_extension_command(&unsupported, &target(), "profile-a")
+                .unwrap_err()
+                .code,
+            BrokerErrorCode::BrowserCapabilityUnavailable
+        );
+    }
+
+    #[test]
+    fn execute_browser_action_requires_current_snapshot_revision_before_dispatch() {
+        let now = Instant::now();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        let mut snapshot = json!({
+            "snapshot_id": "snapshot-1",
+            "page_context_revision": "revision-1",
+            "interactive_elements": []
+        });
+        state
+            .sessions
+            .get_mut("profile-a")
+            .unwrap()
+            .cache_snapshot_references(
+                target(),
+                &mut snapshot,
+                "snapshot-1",
+                "C:/project-a",
+                "caller-a",
+                now,
+            )
+            .unwrap();
+
+        assert!(
+            validate_execute_browser_action(
+                &execute_request("click", "#save", "revision-1"),
+                &target(),
+                state.sessions.get("profile-a").unwrap(),
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            validate_execute_browser_action(
+                &execute_request("click", "#save", "revision-old"),
+                &target(),
+                state.sessions.get("profile-a").unwrap(),
+            )
+            .unwrap_err()
+            .code,
+            BrokerErrorCode::StaleBrowserTarget
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_locator_response_maps_back_to_canonical_action_and_requires_exact_association()
+    {
+        let now = Instant::now();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        state.sessions.attach_stream("profile-a", 7, now).unwrap();
+        let (reply, receiver) = oneshot::channel();
+        state.pending.insert(
+            "execute-click".into(),
+            PendingRequest {
+                operation: "execute_browser_action".into(),
+                extension_instance_id: "profile-a".into(),
+                target: target(),
+                project_root: "C:/project-a".into(),
+                caller_label: "caller-a".into(),
+                lease_token: Some("lease-secret".into()),
+                stream_generation: Some(7),
+                fallback_generation: None,
+                deadline: now + Duration::from_secs(30),
+                reply,
+            },
+        );
+
+        let wrong_wire_operation =
+            extension_response("execute-click", "execute_browser_action", target());
+        assert_eq!(
+            state.handle_extension_response("profile-a", Some(7), wrong_wire_operation)["code"],
+            BrokerErrorCode::MismatchedBrowserResponse.as_str()
+        );
+        assert!(state.pending.contains_key("execute-click"));
+
+        let mut missing_profile = extension_response("execute-click", "execute_locator", target());
+        missing_profile.extension_instance_id = None;
+        assert_eq!(
+            state.handle_extension_response("profile-a", Some(7), missing_profile)["code"],
+            BrokerErrorCode::MismatchedBrowserResponse.as_str()
+        );
+        assert!(state.pending.contains_key("execute-click"));
+
+        assert_eq!(
+            state.handle_extension_response(
+                "profile-b",
+                Some(7),
+                extension_response("execute-click", "execute_locator", target()),
+            )["code"],
+            BrokerErrorCode::MismatchedBrowserResponse.as_str()
+        );
+        assert!(state.pending.contains_key("execute-click"));
+
+        let matching = extension_response("execute-click", "execute_locator", target());
+        assert_eq!(
+            state.handle_extension_response("profile-a", Some(7), matching)["ok"],
+            true
+        );
+        let completed = receiver.await.unwrap().unwrap();
+        assert_eq!(completed["request_id"], "execute-click");
+        assert_eq!(completed["operation"], "execute_browser_action");
+        assert_eq!(completed["cmd"], "execute_locator");
+        assert_eq!(completed["extension_instance_id"], "profile-a");
+        assert_eq!(completed["target"], json!(target()));
     }
 
     #[test]

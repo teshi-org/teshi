@@ -45,7 +45,12 @@ class RustTransportPage(BaseHTTPRequestHandler):
         body = (
             f"<!doctype html><meta charset=utf-8><title>Rust {profile}</title>"
             f"<main data-profile=\"{profile}\"><h1>Rust {profile}</h1>"
-            f"<button id=\"snapshot-action\">Snapshot {profile}</button></main>"
+            f"<button id=\"snapshot-action\">Snapshot {profile}</button>"
+            f"<button id=\"dom-click\" onclick=\"document.querySelector('#dom-click-count').textContent=String(Number(document.querySelector('#dom-click-count').textContent)+1)\">DOM click {profile}</button>"
+            f"<button id=\"pointer-click\" onpointerdown=\"document.querySelector('#pointerdown-count').textContent=String(Number(document.querySelector('#pointerdown-count').textContent)+1)\" onclick=\"document.querySelector('#pointer-click-count').textContent=String(Number(document.querySelector('#pointer-click-count').textContent)+1)\">Pointer click {profile}</button>"
+            f"<div id=\"dom-click-count\">0</div>"
+            f"<div id=\"pointer-click-count\">0</div>"
+            f"<div id=\"pointerdown-count\">0</div></main>"
         ).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
@@ -623,7 +628,13 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             ) from error
         self._log("extension_force_stream", {"profile": name, "result": result})
 
-    async def _control(self, payload: dict, *, url: str | None = None) -> dict:
+    async def _control(
+        self,
+        payload: dict,
+        *,
+        url: str | None = None,
+        timeout: float = 5,
+    ) -> dict:
         control_url = url or self.control_url
         async with websockets.connect(
             control_url,
@@ -633,7 +644,7 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             max_size=2 * 1024 * 1024,
         ) as socket:
             await socket.send(json.dumps(payload))
-            message = await asyncio.wait_for(socket.recv(), timeout=5)
+            message = await asyncio.wait_for(socket.recv(), timeout=timeout)
         if isinstance(message, bytes):
             message = message.decode("utf-8")
         return json.loads(message)
@@ -983,6 +994,235 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                     "profiles": [item[1]["extension_instance_id"] for item in snapshot_requests],
                     "urls": [snapshot["url"] for snapshot in snapshots],
                     "snapshot_ids": [snapshot["snapshot_id"] for snapshot in snapshots],
+                },
+            )
+
+            revision_a = snapshots[0]["page_context_revision"]
+            revision_b = snapshots[1]["page_context_revision"]
+            self._set_stage("verify click pre-dispatch rejection boundaries")
+            missing_element = await self._control(
+                {
+                    "schema_version": 1,
+                    "request_id": "rust-click-missing-element",
+                    "caller_label": lease_owners[0],
+                    "project_root": str(self.temp_root),
+                    "cmd": "execute_browser_action",
+                    "target": target_a,
+                    "lease_token": tokens[0],
+                    "action": "click",
+                    "element": {
+                        "css": "#missing-action",
+                        "page_context_revision": revision_a,
+                    },
+                },
+                timeout=10,
+            )
+            wrong_lease = await self._control(
+                {
+                    "schema_version": 1,
+                    "request_id": "rust-click-wrong-lease",
+                    "caller_label": lease_owners[0],
+                    "project_root": str(self.temp_root),
+                    "cmd": "execute_browser_action",
+                    "target": target_b,
+                    "lease_token": tokens[0],
+                    "action": "click",
+                    "element": {
+                        "css": "#dom-click",
+                        "page_context_revision": revision_b,
+                    },
+                }
+            )
+            wrong_profile_target = {
+                **target_a,
+                "extension_instance_id": "profile-does-not-exist",
+            }
+            wrong_profile = await self._control(
+                {
+                    "schema_version": 1,
+                    "request_id": "rust-click-wrong-profile",
+                    "caller_label": lease_owners[0],
+                    "project_root": str(self.temp_root),
+                    "cmd": "execute_browser_action",
+                    "target": wrong_profile_target,
+                    "lease_token": tokens[0],
+                    "action": "click",
+                    "element": {
+                        "css": "#dom-click",
+                        "page_context_revision": revision_a,
+                    },
+                }
+            )
+            stale_revision = await self._control(
+                {
+                    "schema_version": 1,
+                    "request_id": "rust-click-stale-revision",
+                    "caller_label": lease_owners[0],
+                    "project_root": str(self.temp_root),
+                    "cmd": "execute_browser_action",
+                    "target": target_a,
+                    "lease_token": tokens[0],
+                    "action": "click",
+                    "element": {
+                        "css": "#dom-click",
+                        "page_context_revision": "stale-revision",
+                    },
+                }
+            )
+            self._log(
+                "click_rejection_responses",
+                {
+                    "missing_element": {
+                        "ok": missing_element.get("ok"),
+                        "code": missing_element.get("code"),
+                        "operation": missing_element.get("operation"),
+                        "target": missing_element.get("target"),
+                        "error": missing_element.get("error"),
+                    },
+                    "wrong_lease": {
+                        "ok": wrong_lease.get("ok"),
+                        "code": wrong_lease.get("code"),
+                        "operation": wrong_lease.get("operation"),
+                        "error": wrong_lease.get("error"),
+                    },
+                    "wrong_profile": {
+                        "ok": wrong_profile.get("ok"),
+                        "code": wrong_profile.get("code"),
+                        "operation": wrong_profile.get("operation"),
+                        "error": wrong_profile.get("error"),
+                    },
+                    "stale_revision": {
+                        "ok": stale_revision.get("ok"),
+                        "code": stale_revision.get("code"),
+                        "operation": stale_revision.get("operation"),
+                        "error": stale_revision.get("error"),
+                    },
+                },
+            )
+            self.assertFalse(missing_element.get("ok"), missing_element)
+            self.assertEqual(missing_element.get("code"), "element_not_found")
+            self.assertEqual(missing_element.get("operation"), "execute_browser_action")
+            self.assertEqual(missing_element.get("target"), target_a)
+            self.assertEqual(wrong_lease.get("code"), "invalid_browser_lease")
+            self.assertEqual(wrong_profile.get("code"), "browser_target_not_found")
+            self.assertEqual(stale_revision.get("code"), "stale_browser_target")
+            self._log(
+                "click_rejection_boundaries_verified",
+                {
+                    "missing_element": missing_element.get("code"),
+                    "wrong_lease": wrong_lease.get("code"),
+                    "wrong_profile": wrong_profile.get("code"),
+                    "stale_revision": stale_revision.get("code"),
+                    "dispatch_retries": 0,
+                },
+            )
+
+            self._set_stage("execute CSS click and pointer-click through Rust")
+            actions = await asyncio.gather(
+                self._control(
+                    {
+                        "schema_version": 1,
+                        "request_id": "rust-click-profile-a",
+                        "caller_label": lease_owners[0],
+                        "project_root": str(self.temp_root),
+                        "cmd": "execute_browser_action",
+                        "target": target_a,
+                        "lease_token": tokens[0],
+                        "action": "click",
+                        "element": {
+                            "css": "#dom-click",
+                            "page_context_revision": revision_a,
+                        },
+                    }
+                ),
+                self._control(
+                    {
+                        "schema_version": 1,
+                        "request_id": "rust-pointer-click-profile-b",
+                        "caller_label": lease_owners[1],
+                        "project_root": str(self.temp_root),
+                        "cmd": "execute_browser_action",
+                        "target": target_b,
+                        "lease_token": tokens[1],
+                        "action": "pointer_click",
+                        "element": {
+                            "css": "#pointer-click",
+                            "page_context_revision": revision_b,
+                        },
+                    }
+                ),
+            )
+            for result, request_id, target, action in zip(
+                actions,
+                ["rust-click-profile-a", "rust-pointer-click-profile-b"],
+                [target_a, target_b],
+                ["click", "pointer_click"],
+                strict=True,
+            ):
+                self.assertTrue(result.get("ok"), result)
+                self.assertEqual(result.get("request_id"), request_id)
+                self.assertEqual(result.get("operation"), "execute_browser_action")
+                self.assertEqual(result.get("extension_instance_id"), target["extension_instance_id"])
+                self.assertEqual(result.get("target"), target)
+                self.assertEqual(result.get("action_outcome", {}).get("action"), action)
+            self.assertTrue(actions[1]["action_outcome"]["pointer"]["hit_verified"])
+            self._log(
+                "action_responses_verified",
+                {
+                    "responses": [
+                        {
+                            "request_id": result.get("request_id"),
+                            "operation": result.get("operation"),
+                            "extension_instance_id": result.get("extension_instance_id"),
+                            "target": result.get("target"),
+                            "action": result.get("action_outcome", {}).get("action"),
+                            "pointer_hit_verified": result.get("action_outcome", {})
+                            .get("pointer", {})
+                            .get("hit_verified", False),
+                        }
+                        for result in actions
+                    ]
+                },
+            )
+
+            page_a = self.contexts["profile-a"].pages[0]
+            page_b = self.contexts["profile-b"].pages[0]
+            await asyncio.gather(
+                page_a.wait_for_function(
+                    "() => document.querySelector('#dom-click-count').textContent === '1'"
+                ),
+                page_b.wait_for_function(
+                    "() => document.querySelector('#pointer-click-count').textContent === '1' && document.querySelector('#pointerdown-count').textContent === '1'"
+                ),
+            )
+            observed = {
+                "profile-a": {
+                    "dom_click": await page_a.locator("#dom-click-count").text_content(),
+                    "pointer_click": await page_a.locator("#pointer-click-count").text_content(),
+                    "pointerdown": await page_a.locator("#pointerdown-count").text_content(),
+                },
+                "profile-b": {
+                    "dom_click": await page_b.locator("#dom-click-count").text_content(),
+                    "pointer_click": await page_b.locator("#pointer-click-count").text_content(),
+                    "pointerdown": await page_b.locator("#pointerdown-count").text_content(),
+                },
+            }
+            self._log("dom_side_effects", observed)
+            self.assertEqual(
+                observed,
+                {
+                    "profile-a": {"dom_click": "1", "pointer_click": "0", "pointerdown": "0"},
+                    "profile-b": {"dom_click": "0", "pointer_click": "1", "pointerdown": "1"},
+                },
+            )
+            self._log(
+                "click_pointer_acceptance_verified",
+                {
+                    "profiles": [target_a["extension_instance_id"], target_b["extension_instance_id"]],
+                    "click_count": 1,
+                    "pointer_click_count": 1,
+                    "pointerdown_count": 1,
+                    "playwright_mutations": 0,
                 },
             )
         finally:
