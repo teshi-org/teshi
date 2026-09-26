@@ -1949,7 +1949,10 @@ fn error_status(code: BrokerErrorCode) -> StatusCode {
             StatusCode::FORBIDDEN
         }
         BrokerErrorCode::BrowserResourceLimit => StatusCode::SERVICE_UNAVAILABLE,
-        BrokerErrorCode::BrowserOperationTimeout => StatusCode::GATEWAY_TIMEOUT,
+        BrokerErrorCode::BrowserOperationTimeout | BrokerErrorCode::BrowserWaitTimeout => {
+            StatusCode::GATEWAY_TIMEOUT
+        }
+        BrokerErrorCode::BrowserExecutionUnknown => StatusCode::CONFLICT,
         BrokerErrorCode::BrowserUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         BrokerErrorCode::IncompatibleBrowserSession => StatusCode::UPGRADE_REQUIRED,
         _ => StatusCode::BAD_REQUEST,

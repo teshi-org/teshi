@@ -4,6 +4,7 @@
 //! daemon entry points host it; protocol records here are the server-side wire
 //! boundary shared with the extension and existing typed Rust client.
 
+pub(crate) mod coordinator;
 pub mod credential;
 pub mod protocol;
 pub mod server;

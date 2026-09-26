@@ -206,6 +206,8 @@ pub enum BrowserAgentErrorCode {
     BrowserJavascriptException,
     /// The browser rejected an operation for a component-specific reason.
     BrowserOperationFailed,
+    /// A side-effecting action may have run, but its transport result is unknown.
+    BrowserExecutionUnknown,
 }
 
 impl BrowserAgentErrorCode {
@@ -234,6 +236,7 @@ impl BrowserAgentErrorCode {
             Self::BrowserResultTooLarge => "browser_result_too_large",
             Self::BrowserJavascriptException => "browser_javascript_exception",
             Self::BrowserOperationFailed => "browser_operation_failed",
+            Self::BrowserExecutionUnknown => "browser_execution_unknown",
         }
     }
 }
@@ -1464,6 +1467,7 @@ fn parse_error_code(value: &str) -> Option<BrowserAgentErrorCode> {
         "browser_result_too_large" => BrowserAgentErrorCode::BrowserResultTooLarge,
         "browser_javascript_exception" => BrowserAgentErrorCode::BrowserJavascriptException,
         "browser_operation_failed" => BrowserAgentErrorCode::BrowserOperationFailed,
+        "browser_execution_unknown" => BrowserAgentErrorCode::BrowserExecutionUnknown,
         _ => return None,
     })
 }

@@ -5,7 +5,7 @@
 //! pending-request transitions are serialized without holding locks over socket
 //! or filesystem I/O.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
@@ -13,6 +13,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+use crate::coordinator::{ActionMetadata, BrowserActionCoordinator};
 use crate::protocol::{
     BROWSER_BROKER_PROTOCOL_VERSION, BROWSER_BROKER_SCHEMA_VERSION, BrokerError, BrokerErrorCode,
     BrowserTarget, ExecuteLocatorActionRequest, ExecuteLocatorCandidate,
@@ -74,6 +75,11 @@ pub struct BrokerState {
     /// completing a newly reused request ID.
     retired_requests: HashMap<String, Instant>,
     quarantined_responses: Vec<Value>,
+    /// Action metadata is separate from `PendingRequest` so the 4.1 pending
+    /// DTO remains compatible with callers that construct it in tests/tools.
+    action_metadata: HashMap<String, ActionMetadata>,
+    /// Requests that reached a transport dispatch boundary and may have run.
+    dispatched_actions: HashSet<String>,
 }
 
 impl BrokerState {
@@ -277,6 +283,7 @@ impl BrokerState {
             }
         }
         if !requires_lease(&operation) {
+            self.mark_action_dispatched(&request_id);
             return;
         }
         let validation = lease_token
@@ -303,6 +310,8 @@ impl BrokerState {
                 self.retire_request(&request_id, Instant::now());
                 let _ = pending.reply.send(Err(error));
             }
+        } else {
+            self.mark_action_dispatched(&request_id);
         }
     }
 
@@ -376,6 +385,7 @@ impl BrokerState {
                 "browser response was already completed",
             ));
         };
+        let action_metadata = self.action_metadata.get(&request_id).cloned();
         self.retire_request(&request_id, Instant::now());
         let mut value = serde_json::to_value(&response).unwrap_or_else(|_| json!({}));
         if let Value::Object(object) = &mut value {
@@ -419,7 +429,23 @@ impl BrokerState {
                 session.clear_element_references(Some(&pending.target));
             }
         }
-        let _ = pending.reply.send(Ok(value));
+        let result = action_metadata.as_ref().map_or(Ok(()), |metadata| {
+            BrowserActionCoordinator::finalize_response(
+                &mut value,
+                &response,
+                &request_id,
+                &pending.target,
+                metadata,
+            )
+        });
+        match result {
+            Ok(()) => {
+                let _ = pending.reply.send(Ok(value));
+            }
+            Err(error) => {
+                let _ = pending.reply.send(Err(error));
+            }
+        }
         json!({"ok": true, "request_id": request_id})
     }
 
@@ -750,6 +776,14 @@ impl BrokerState {
                 "no pending browser request matches cancel_request_id",
             ));
         }
+        let cancellation = self.terminal_pending_error(
+            &cancelled_request_id,
+            pending,
+            BrokerError::new(
+                BrokerErrorCode::BrowserOperationCancelled,
+                "browser operation was explicitly cancelled; any late response is ignored",
+            ),
+        );
 
         let pending = self
             .pending
@@ -760,10 +794,6 @@ impl BrokerState {
             session.remove_queued_command(&cancelled_request_id);
         }
         let operation = pending.operation.clone();
-        let cancellation = BrokerError::new(
-            BrokerErrorCode::BrowserOperationCancelled,
-            "browser operation was explicitly cancelled; any late response is ignored",
-        );
         let _ = pending.reply.send(Err(cancellation));
         Ok(json!({
             "cancelled": true,
@@ -787,7 +817,7 @@ impl BrokerState {
                 return;
             }
         };
-        let mut resolved_locator = None;
+        let mut action_plan = None;
         let result = self
             .sessions
             .resolve_target(request.target.as_ref(), now)
@@ -857,13 +887,19 @@ impl BrokerState {
                             "browser session was not found",
                         )
                     })?;
-                    resolved_locator = Some(resolve_execute_locator(
+                    let locator = resolve_execute_locator(
                         &request,
                         &target,
                         session,
                         &project,
                         &caller,
                         now,
+                    )?;
+                    action_plan = Some(BrowserActionCoordinator::plan(
+                        &request,
+                        &target,
+                        &instance_id,
+                        &locator,
                     )?);
                 }
                 Ok((instance_id, target))
@@ -876,17 +912,15 @@ impl BrokerState {
                 return;
             }
         };
-        let command = match build_extension_command(
-            &request,
-            &target,
-            &instance_id,
-            resolved_locator.as_ref(),
-        ) {
-            Ok(command) => command,
-            Err(error) => {
-                let _ = reply.send(Err(error));
-                return;
-            }
+        let command = match action_plan.as_ref() {
+            Some(plan) => plan.command.clone(),
+            None => match build_extension_command(&request, &target, &instance_id, None) {
+                Ok(command) => command,
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+            },
         };
         let timeout = request
             .timeout_ms
@@ -906,15 +940,19 @@ impl BrokerState {
                 project_root: project.clone(),
                 caller_label: caller.clone(),
                 lease_token: request.lease_token.clone(),
-                snapshot_id: resolved_locator
+                snapshot_id: action_plan
                     .as_ref()
-                    .and_then(|locator| locator.snapshot_id.clone()),
+                    .and_then(|plan| plan.metadata.locator.snapshot_id.clone()),
                 stream_generation,
                 fallback_generation: None,
                 deadline: now + timeout,
                 reply,
             },
         );
+        if let Some(plan) = action_plan {
+            self.action_metadata
+                .insert(request.request_id.clone(), plan.metadata);
+        }
         if let Err(error) = runtime
             .send_extension_command_for_generation(&instance_id, stream_generation, command.clone())
             .await
@@ -961,6 +999,8 @@ impl BrokerState {
                     }
                 }
             }
+        } else if self.action_metadata.contains_key(&request.request_id) {
+            self.dispatched_actions.insert(request.request_id.clone());
         }
     }
 
@@ -1047,14 +1087,19 @@ impl BrokerState {
             .collect::<Vec<_>>();
         for request_id in expired {
             if let Some(pending) = self.pending.remove(&request_id) {
+                let terminal = self.terminal_pending_error(
+                    &request_id,
+                    &pending,
+                    BrokerError::new(
+                        BrokerErrorCode::BrowserOperationTimeout,
+                        "browser operation expired before a response arrived",
+                    ),
+                );
                 self.retire_request(&request_id, now);
                 if let Some(session) = self.sessions.get_mut(&pending.extension_instance_id) {
                     session.remove_queued_command(&request_id);
                 }
-                let _ = pending.reply.send(Err(BrokerError::new(
-                    BrokerErrorCode::BrowserOperationTimeout,
-                    "browser operation expired before a response arrived",
-                )));
+                let _ = pending.reply.send(Err(terminal));
             }
         }
         let heartbeat_ttl = self.sessions.heartbeat_ttl();
@@ -1070,19 +1115,53 @@ impl BrokerState {
             .collect::<Vec<_>>();
         for request_id in disconnected {
             if let Some(pending) = self.pending.remove(&request_id) {
+                let terminal = self.terminal_pending_error(
+                    &request_id,
+                    &pending,
+                    BrokerError::new(
+                        BrokerErrorCode::BrowserSessionDisconnected,
+                        "browser extension session disconnected while the operation was pending",
+                    ),
+                );
                 self.retire_request(&request_id, now);
                 if let Some(session) = self.sessions.get_mut(&pending.extension_instance_id) {
                     session.remove_queued_command(&request_id);
                 }
-                let _ = pending.reply.send(Err(BrokerError::new(
-                    BrokerErrorCode::BrowserSessionDisconnected,
-                    "browser extension session disconnected while the operation was pending",
-                )));
+                let _ = pending.reply.send(Err(terminal));
             }
         }
     }
 
+    fn mark_action_dispatched(&mut self, request_id: &str) {
+        if self.action_metadata.contains_key(request_id) {
+            self.dispatched_actions.insert(request_id.to_owned());
+        }
+    }
+
+    fn terminal_pending_error(
+        &self,
+        request_id: &str,
+        pending: &PendingRequest,
+        terminal: BrokerError,
+    ) -> BrokerError {
+        let Some(metadata) = self.action_metadata.get(request_id) else {
+            return terminal;
+        };
+        if !metadata.may_have_side_effect || !self.dispatched_actions.contains(request_id) {
+            return terminal;
+        }
+        BrowserActionCoordinator::unknown_execution_error(
+            request_id,
+            &pending.target,
+            &pending.extension_instance_id,
+            &terminal,
+            metadata,
+        )
+    }
+
     fn retire_request(&mut self, request_id: &str, now: Instant) {
+        self.action_metadata.remove(request_id);
+        self.dispatched_actions.remove(request_id);
         self.retired_requests.insert(request_id.to_owned(), now);
         while self.retired_requests.len() > MAX_RETIRED_REQUESTS {
             let oldest = self
@@ -1106,15 +1185,12 @@ impl BrokerState {
             .collect::<Vec<_>>();
         for request_id in request_ids {
             if let Some(pending) = self.pending.remove(&request_id) {
+                let terminal = self.terminal_pending_error(&request_id, &pending, error.clone());
                 self.retire_request(&request_id, Instant::now());
                 if let Some(session) = self.sessions.get_mut(extension_instance_id) {
                     session.remove_queued_command(&request_id);
                 }
-                let _ = pending.reply.send(Err(BrokerError {
-                    code: error.code,
-                    message: error.message.clone(),
-                    recovery: error.recovery.clone(),
-                }));
+                let _ = pending.reply.send(Err(terminal));
             }
         }
     }
@@ -1139,6 +1215,16 @@ fn build_extension_command(
     extension_instance_id: &str,
     resolved_locator: Option<&ExecuteLocatorCommand>,
 ) -> Result<Value, BrokerError> {
+    if request.operation == "execute_browser_action"
+        && let Some(locator) = resolved_locator
+    {
+        return BrowserActionCoordinator::build_command(
+            request,
+            target,
+            extension_instance_id,
+            locator,
+        );
+    }
     let mut object = request
         .arguments
         .clone()
@@ -1842,6 +1928,21 @@ mod tests {
             "element": element
         }))
         .unwrap()
+    }
+
+    fn dispatched_action_metadata() -> ActionMetadata {
+        ActionMetadata {
+            action: "click".into(),
+            locator: ExecuteLocatorCommand {
+                selector: Some("#save".into()),
+                candidate: None,
+                locator_context: None,
+                action: "click".into(),
+                page_context_revision: "revision-1".into(),
+                snapshot_id: None,
+            },
+            may_have_side_effect: true,
+        }
     }
 
     #[test]
@@ -2910,6 +3011,121 @@ mod tests {
                 .element_reference_count(),
             0
         );
+    }
+
+    #[test]
+    fn dispatched_side_effect_timeout_reports_unknown_execution_outcome() {
+        let now = Instant::now();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        let (reply, receiver) = oneshot::channel();
+        state.pending.insert(
+            "action-timeout".into(),
+            PendingRequest {
+                operation: "execute_browser_action".into(),
+                extension_instance_id: "profile-a".into(),
+                target: target(),
+                project_root: "C:/project-a".into(),
+                caller_label: "caller-a".into(),
+                lease_token: Some("lease-secret".into()),
+                snapshot_id: None,
+                stream_generation: Some(7),
+                fallback_generation: None,
+                deadline: now - Duration::from_secs(1),
+                reply,
+            },
+        );
+        state
+            .action_metadata
+            .insert("action-timeout".into(), dispatched_action_metadata());
+        state.dispatched_actions.insert("action-timeout".into());
+
+        state.expire(now);
+
+        let error = receiver.blocking_recv().unwrap().unwrap_err();
+        assert_eq!(error.code, BrokerErrorCode::BrowserExecutionUnknown);
+        assert_eq!(error.recovery["outcome"], "unknown");
+        assert_eq!(error.recovery["cause"], "browser_operation_timeout");
+        assert_eq!(error.recovery["retry"], "do_not_retry_automatically");
+        assert!(!state.pending.contains_key("action-timeout"));
+        assert!(state.retired_requests.contains_key("action-timeout"));
+    }
+
+    #[tokio::test]
+    async fn dispatched_action_cancel_is_unknown_and_late_reuse_is_quarantined() {
+        let mut config = crate::server::BrokerServerConfig::with_trusted_extension_origins(vec![
+            "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        ]);
+        config.discovery_addr = "127.0.0.1:0".parse().unwrap();
+        let runtime = BrokerRuntime::start(config).await.unwrap();
+        let now = Instant::now();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        let (reply, receiver) = oneshot::channel();
+        state.pending.insert(
+            "action-cancel".into(),
+            PendingRequest {
+                operation: "execute_browser_action".into(),
+                extension_instance_id: "profile-a".into(),
+                target: target(),
+                project_root: "C:/project-a".into(),
+                caller_label: "caller-a".into(),
+                lease_token: Some("lease-secret".into()),
+                snapshot_id: None,
+                stream_generation: Some(7),
+                fallback_generation: None,
+                deadline: now + Duration::from_secs(30),
+                reply,
+            },
+        );
+        state
+            .action_metadata
+            .insert("action-cancel".into(), dispatched_action_metadata());
+        state.dispatched_actions.insert("action-cancel".into());
+
+        let (cancel_reply, cancel_receiver) = oneshot::channel();
+        let cancel: OperationRequest = serde_json::from_value(json!({
+            "request_id": "cancel-action-control",
+            "caller_label": "caller-a",
+            "project_root": "C:/project-a",
+            "cmd": "cancel_browser_request",
+            "cancel_request_id": "action-cancel"
+        }))
+        .unwrap();
+        state.handle_operation(cancel, cancel_reply, &runtime).await;
+
+        assert_eq!(cancel_receiver.await.unwrap().unwrap()["cancelled"], true);
+        let error = receiver.await.unwrap().unwrap_err();
+        assert_eq!(error.code, BrokerErrorCode::BrowserExecutionUnknown);
+        assert_eq!(error.recovery["cause"], "browser_operation_cancelled");
+        assert_eq!(error.recovery["retry"], "do_not_retry_automatically");
+        assert_eq!(
+            state.handle_extension_response(
+                "profile-a",
+                Some(7),
+                extension_response("action-cancel", "execute_locator", target()),
+            )["code"],
+            BrokerErrorCode::MismatchedBrowserResponse.as_str()
+        );
+        assert_eq!(
+            state.quarantined_responses.last().unwrap()["reason"],
+            "late_response"
+        );
+
+        let (reuse_reply, reuse_receiver) = oneshot::channel();
+        let reuse: OperationRequest = serde_json::from_value(json!({
+            "request_id": "action-cancel",
+            "caller_label": "caller-a",
+            "project_root": "C:/project-a",
+            "cmd": "execute_browser_action"
+        }))
+        .unwrap();
+        state.handle_operation(reuse, reuse_reply, &runtime).await;
+        assert_eq!(
+            reuse_receiver.await.unwrap().unwrap_err().code,
+            BrokerErrorCode::DuplicateBrowserMutation
+        );
+        runtime.shutdown().await;
     }
 
     #[tokio::test]
