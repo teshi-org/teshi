@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import platform
+import queue
 import re
 import shutil
 import subprocess
@@ -64,6 +65,8 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
         self.broker: subprocess.Popen[str] | None = None
         self.broker_stderr: list[str] = []
         self.broker_stderr_thread: threading.Thread | None = None
+        self.broker_stdout_lines: queue.Queue[str] = queue.Queue()
+        self.broker_stdout_thread: threading.Thread | None = None
         self.project_root = REPO_ROOT
         self.extension_path = EXTENSION
         self.workers: list[Worker] = []
@@ -194,6 +197,21 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
         for line in stream:  # type: ignore[union-attr]
             self.broker_stderr.append(str(line).rstrip())
 
+    def _drain_broker_stdout(self, stream: object) -> None:
+        for line in stream:  # type: ignore[union-attr]
+            self.broker_stdout_lines.put(str(line))
+
+    async def _wait_broker_stdout_line(self, timeout: float = 15) -> str:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                return self.broker_stdout_lines.get_nowait()
+            except queue.Empty:
+                if self.broker is not None and self.broker.poll() is not None:
+                    break
+                await asyncio.sleep(0.05)
+        return ""
+
     async def _start_isolated_broker(self) -> None:
         args = [
             sys.executable,
@@ -226,9 +244,13 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
             daemon=True,
         )
         self.broker_stderr_thread.start()
-        ready_line = await asyncio.wait_for(
-            asyncio.to_thread(self.broker.stdout.readline), timeout=15
+        self.broker_stdout_thread = threading.Thread(
+            target=self._drain_broker_stdout,
+            args=(self.broker.stdout,),
+            daemon=True,
         )
+        self.broker_stdout_thread.start()
+        ready_line = await self._wait_broker_stdout_line()
         if not ready_line.strip().isdigit():
             self._log(
                 "broker_start_failed",
@@ -398,20 +420,27 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
             "profile_dirs": [str(context) for context in getattr(self, "contexts", [])],
         })
         for context in reversed(getattr(self, "contexts", [])):
-            await context.close()
+            try:
+                await asyncio.wait_for(context.close(), timeout=10)
+            except Exception as error:  # noqa: BLE001
+                self._log("context_close_error", {"error": str(error)})
         self._log("browser_contexts_closed", {
             "test_pid": os.getpid(),
             "browser_processes": self._test_profile_processes(),
         })
         if getattr(self, "playwright", None) is not None:
-            await self.playwright.stop()
+            try:
+                await asyncio.wait_for(self.playwright.stop(), timeout=10)
+            except Exception as error:  # noqa: BLE001
+                self._log("playwright_stop_error", {"error": str(error)})
         if getattr(self, "http", None) is not None:
-            self.http.shutdown()
+            try:
+                await asyncio.wait_for(asyncio.to_thread(self.http.shutdown), timeout=5)
+            except asyncio.TimeoutError:
+                self._log("http_shutdown_timeout", {})
             self.http.server_close()
         if getattr(self, "http_thread", None) is not None:
             self.http_thread.join(timeout=2)
-        if getattr(self, "temp", None) is not None:
-            self.temp.cleanup()
         broker = self.broker
         self.broker = None
         if broker is not None:
@@ -424,6 +453,8 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.to_thread(broker.wait, 5)
             if self.broker_stderr_thread is not None:
                 self.broker_stderr_thread.join(timeout=2)
+            if self.broker_stdout_thread is not None:
+                self.broker_stdout_thread.join(timeout=2)
             if broker.stdout is not None:
                 broker.stdout.close()
             if broker.stderr is not None:
@@ -436,6 +467,8 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
                     "stderr": self.broker_stderr[-40:],
                 },
             )
+        if getattr(self, "temp", None) is not None:
+            self.temp.cleanup()
         if getattr(self, "broker_temp", None) is not None:
             self.broker_temp.cleanup()
         if hasattr(self, "previous_existing_endpoint_mode"):

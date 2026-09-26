@@ -14,7 +14,7 @@ from pathlib import Path
 RESOURCES = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RESOURCES))
 
-from browser_agent_broker import BrokerError  # noqa: E402
+from browser_agent_broker import MAX_COMMAND_QUEUE, BrokerError  # noqa: E402
 from browser_service import (  # noqa: E402
     MAX_BROWSER_ARTIFACT_BYTES,
     MAX_BROWSER_WS_MESSAGE_BYTES,
@@ -662,6 +662,60 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
             self.profile_heartbeat("profile-a")
         )
         self.assertIsNone(heartbeat_result["cmd"])
+
+    async def test_ambiguous_direct_send_is_not_retried_by_heartbeat(self) -> None:
+        await self.register("profile-a")
+        lease = await self.acquire("profile-a")
+
+        async def ambiguous_direct(instance_id: str, command: dict) -> bool:
+            asyncio.create_task(
+                self.respond_to_snapshot(instance_id, command, "Save Ambiguous")
+            )
+            raise RuntimeError("transport failed after the write may have completed")
+
+        self.bridge._direct_command_callback = ambiguous_direct
+        result = await self.bridge.forward_command(
+            {
+                "cmd": "get_page_snapshot",
+                "request_id": "ambiguous-direct",
+                "target": target("profile-a"),
+                "lease_token": lease,
+            }
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["request_id"], "ambiguous-direct")
+        heartbeat_result = await self.bridge.handle_heartbeat(
+            self.profile_heartbeat("profile-a")
+        )
+        self.assertIsNone(heartbeat_result["cmd"])
+
+    async def test_full_fallback_queue_fails_without_overflowing_the_queue(self) -> None:
+        await self.register("profile-a")
+        lease = await self.acquire("profile-a")
+        record = self.bridge.broker.sessions["profile-a"]
+
+        async def unavailable_direct(_instance_id: str, _command: dict) -> bool:
+            record.command_queue.extend(
+                {"request_id": f"queue-filler-{index}"}
+                for index in range(MAX_COMMAND_QUEUE)
+            )
+            return False
+
+        self.bridge._direct_command_callback = unavailable_direct
+        result = await self.bridge.forward_command(
+            {
+                "cmd": "get_page_snapshot",
+                "request_id": "fallback-queue-full",
+                "target": target("profile-a"),
+                "lease_token": lease,
+            }
+        )
+        self.assertEqual(result["code"], "browser_session_busy")
+        self.assertEqual(len(record.command_queue), MAX_COMMAND_QUEUE)
+        self.assertNotIn(
+            "fallback-queue-full",
+            [command.get("request_id") for command in record.command_queue],
+        )
 
     async def test_structured_candidate_is_reverified_and_forwarded_without_css_loss(self) -> None:
         await self.register("profile-a")

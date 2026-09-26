@@ -50,6 +50,10 @@ struct PendingRequest {
     caller_label: String,
     lease_token: Option<String>,
     stream_generation: Option<u64>,
+    /// When a direct command falls back to HTTP heartbeat, retain the stream
+    /// generation that was allowed to consume it. HTTP responses intentionally
+    /// carry no stream generation, so this is separate from the response check.
+    fallback_generation: Option<u64>,
     deadline: Instant,
     reply: oneshot::Sender<Result<Value, BrokerError>>,
 }
@@ -225,20 +229,47 @@ impl BrokerState {
             response["cmd"] = Value::Null;
             return;
         };
-        let Some((operation, instance_id, project_root, caller_label, lease_token)) =
-            self.pending.get(&request_id).map(|pending| {
-                (
-                    pending.operation.clone(),
-                    pending.extension_instance_id.clone(),
-                    pending.project_root.clone(),
-                    pending.caller_label.clone(),
-                    pending.lease_token.clone(),
-                )
-            })
+        let Some((
+            operation,
+            instance_id,
+            project_root,
+            caller_label,
+            lease_token,
+            fallback_generation,
+        )) = self.pending.get(&request_id).map(|pending| {
+            (
+                pending.operation.clone(),
+                pending.extension_instance_id.clone(),
+                pending.project_root.clone(),
+                pending.caller_label.clone(),
+                pending.lease_token.clone(),
+                pending.fallback_generation,
+            )
+        })
         else {
             response["cmd"] = Value::Null;
             return;
         };
+        if let Some(expected_generation) = fallback_generation {
+            let current_generation = self
+                .sessions
+                .get(&instance_id)
+                .and_then(|session| session.current_stream_generation());
+            if current_generation != Some(expected_generation) {
+                response["cmd"] = Value::Null;
+                if let Some(pending) = self.pending.remove(&request_id) {
+                    self.retire_request(&request_id, Instant::now());
+                    if let Some(session) = self.sessions.get_mut(&instance_id) {
+                        session.remove_queued_command(&request_id);
+                    }
+                    let _ = pending.reply.send(Err(BrokerError::new(
+                        BrokerErrorCode::BrowserSessionDisconnected,
+                        "browser extension stream generation changed before heartbeat fallback dispatch",
+                    )));
+                }
+                return;
+            }
+        }
         if !requires_lease(&operation) {
             return;
         }
@@ -843,15 +874,29 @@ impl BrokerState {
                 caller_label: caller.clone(),
                 lease_token: request.lease_token.clone(),
                 stream_generation,
+                fallback_generation: None,
                 deadline: now + timeout,
                 reply,
             },
         );
-        if runtime
-            .send_extension_command(&instance_id, command.clone())
+        if let Err(error) = runtime
+            .send_extension_command_for_generation(&instance_id, stream_generation, command.clone())
             .await
-            .is_err()
         {
+            // A replaced stream must never receive a command belonging to the
+            // previous generation. A disconnected sender is safe to fall back
+            // to heartbeat because try_send did not enqueue the command; only
+            // an explicit generation mismatch means a newer stream is already
+            // taking ownership of this session.
+            if stream_generation.is_some()
+                && error.code == BrokerErrorCode::IncompatibleBrowserSession
+            {
+                if let Some(pending) = self.pending.remove(&request.request_id) {
+                    self.retire_request(&request.request_id, Instant::now());
+                    let _ = pending.reply.send(Err(error));
+                }
+                return;
+            }
             let queue_result = self
                 .sessions
                 .get_mut(&instance_id)
@@ -870,6 +915,7 @@ impl BrokerState {
                     // the failed direct WebSocket generation.
                     if let Some(pending) = self.pending.get_mut(&request.request_id) {
                         pending.stream_generation = None;
+                        pending.fallback_generation = stream_generation;
                     }
                 }
                 Err(error) => {
@@ -1456,6 +1502,7 @@ mod tests {
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
                 stream_generation: None,
+                fallback_generation: None,
                 deadline: now - Duration::from_secs(1),
                 reply,
             },
@@ -1509,6 +1556,7 @@ mod tests {
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
                 stream_generation: None,
+                fallback_generation: None,
                 deadline: now + Duration::from_secs(30),
                 reply,
             },
@@ -1590,6 +1638,7 @@ mod tests {
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
                 stream_generation: None,
+                fallback_generation: None,
                 deadline: now + Duration::from_secs(30),
                 reply,
             },
@@ -1665,6 +1714,7 @@ mod tests {
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
                 stream_generation: Some(7),
+                fallback_generation: None,
                 deadline: now + Duration::from_secs(30),
                 reply,
             },
@@ -1741,6 +1791,7 @@ mod tests {
                     caller_label: format!("agent-{instance_id}"),
                     lease_token: Some(format!("lease-{instance_id}")),
                     stream_generation: None,
+                    fallback_generation: None,
                     deadline: now + Duration::from_secs(30),
                     reply,
                 },
@@ -1812,6 +1863,7 @@ mod tests {
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
                 stream_generation: None,
+                fallback_generation: None,
                 deadline: now + Duration::from_secs(30),
                 reply,
             },
@@ -1899,6 +1951,7 @@ mod tests {
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
                 stream_generation: None,
+                fallback_generation: None,
                 deadline: now + Duration::from_secs(30),
                 reply,
             },
@@ -1963,6 +2016,7 @@ mod tests {
                 caller_label: "caller-a".into(),
                 lease_token: Some("lease-secret".into()),
                 stream_generation: None,
+                fallback_generation: None,
                 deadline: now + Duration::from_secs(30),
                 reply: existing_reply,
             },
@@ -2115,5 +2169,62 @@ mod tests {
                 .element_reference_count(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_fallback_rejects_a_replaced_stream_generation() {
+        let mut config = crate::server::BrokerServerConfig::with_trusted_extension_origins(vec![
+            "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        ]);
+        config.discovery_addr = "127.0.0.1:0".parse().unwrap();
+        let runtime = BrokerRuntime::start(config).await.unwrap();
+        let now = Instant::now();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        state.sessions.attach_stream("profile-a", 7, now).unwrap();
+        state
+            .sessions
+            .get_mut("profile-a")
+            .unwrap()
+            .queue_command(json!({"request_id": "fallback-generation"}))
+            .unwrap();
+        let (reply, receiver) = oneshot::channel();
+        state.pending.insert(
+            "fallback-generation".into(),
+            PendingRequest {
+                operation: "navigate".into(),
+                extension_instance_id: "profile-a".into(),
+                target: target(),
+                project_root: "C:/project-a".into(),
+                caller_label: "caller-a".into(),
+                lease_token: Some("lease-secret".into()),
+                stream_generation: None,
+                fallback_generation: Some(7),
+                deadline: now + Duration::from_secs(30),
+                reply,
+            },
+        );
+        state
+            .sessions
+            .attach_stream("profile-a", 8, now + Duration::from_millis(1))
+            .unwrap();
+
+        let mut response = json!({"cmd": {"request_id": "fallback-generation"}});
+        state.validate_heartbeat_command(&mut response, &runtime);
+        assert!(response["cmd"].is_null());
+        assert_eq!(
+            receiver.await.unwrap().unwrap_err().code,
+            BrokerErrorCode::BrowserSessionDisconnected
+        );
+        assert!(!state.pending.contains_key("fallback-generation"));
+        assert_eq!(
+            state
+                .sessions
+                .get("profile-a")
+                .unwrap()
+                .queued_command_count(),
+            0
+        );
+        runtime.shutdown().await;
     }
 }

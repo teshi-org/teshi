@@ -107,6 +107,19 @@ fn get_discovery(port: u16, origin: Option<&str>) -> (u16, Value) {
     (status, payload)
 }
 
+fn post_discovery(port: u16, origin: &str) -> (u16, Value) {
+    let response = reqwest::blocking::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/bridge"))
+        .header("Content-Type", "application/json")
+        .header("Origin", origin)
+        .json(&serde_json::json!({}))
+        .send()
+        .unwrap();
+    let status = response.status().as_u16();
+    let body = response.json().unwrap_or(Value::Null);
+    (status, body)
+}
+
 fn post_json(port: u16, path: &str, token: &str, origin: &str, payload: &Value) -> (u16, Value) {
     let response = reqwest::blocking::Client::new()
         .post(format!("http://127.0.0.1:{port}{path}?token={token}"))
@@ -184,7 +197,16 @@ fn internal_cli_process_serves_authenticated_rust_transport_and_state_without_py
     assert!(!local.ws_url.contains("token="));
     assert!(!local.extension_frame_ws_url.contains("token="));
 
-    let (status, extension) = get_discovery(port, Some(TRUSTED_ORIGIN));
+    let (status, trusted_get) = get_discovery(port, Some(TRUSTED_ORIGIN));
+    assert_eq!(status, 200);
+    let trusted_get: DiscoveryResponse = serde_json::from_value(trusted_get).unwrap();
+    assert!(
+        !trusted_get
+            .extension_frame_ws_url
+            .contains(&format!("token={}", credential.token()))
+    );
+
+    let (status, extension) = post_discovery(port, TRUSTED_ORIGIN);
     assert_eq!(status, 200);
     let extension: DiscoveryResponse = serde_json::from_value(extension).unwrap();
     assert!(
@@ -193,7 +215,7 @@ fn internal_cli_process_serves_authenticated_rust_transport_and_state_without_py
             .contains(&format!("token={}", credential.token()))
     );
 
-    let (status, second_extension) = get_discovery(port, Some(SECOND_TRUSTED_ORIGIN));
+    let (status, second_extension) = post_discovery(port, SECOND_TRUSTED_ORIGIN);
     assert_eq!(status, 200);
     let second_extension: DiscoveryResponse = serde_json::from_value(second_extension).unwrap();
     assert!(

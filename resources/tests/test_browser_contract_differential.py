@@ -502,19 +502,123 @@ async def python_oracle(fixture: dict[str, object]) -> dict[str, object]:
     }
 
 
+def assert_independent_expected_state(
+    testcase: unittest.TestCase,
+    result: dict[str, object],
+    fixture: dict[str, object],
+) -> None:
+    """Check the protocol oracle against fixture semantics, not its peer."""
+    stateful = fixture["stateful"]
+    assert isinstance(stateful, dict)
+
+    race = stateful["profile_response_race"]
+    assert isinstance(race, dict)
+    requests = race["requests"]
+    assert isinstance(requests, list)
+    expected_completed = sorted(
+        [
+            {
+                "request_id": item["request_id"],
+                "extension_instance_id": item["extension_instance_id"],
+                "url": item["result_url"],
+            }
+            for item in requests
+        ],
+        key=lambda item: item["request_id"],
+    )
+    race_result = result["profile_response_race"]
+    assert isinstance(race_result, dict)
+    testcase.assertEqual(race_result["completed"], expected_completed)
+    testcase.assertEqual(
+        race_result["queued_commands"],
+        {item["extension_instance_id"]: 0 for item in requests},
+    )
+    testcase.assertEqual(race_result["session_count"], len(requests))
+
+    ambiguous = stateful["ambiguous_implicit_target"]
+    assert isinstance(ambiguous, dict)
+    ambiguous_result = result["ambiguous_implicit_target"]
+    assert isinstance(ambiguous_result, dict)
+    testcase.assertEqual(ambiguous_result["error"], ambiguous["expected_error"])
+    testcase.assertEqual(
+        ambiguous_result["queued_commands"], ambiguous["expected_dispatched_commands"]
+    )
+    testcase.assertEqual(ambiguous_result["session_count"], len(ambiguous["targets"]))
+
+    lease_scope = stateful["lease_scope_isolation"]
+    assert isinstance(lease_scope, dict)
+    lease_result = result["lease_scope_isolation"]
+    assert isinstance(lease_result, dict)
+    testcase.assertEqual(
+        lease_result["errors"],
+        [
+            {"name": mismatch["name"], "error": lease_scope["expected_error"]}
+            for mismatch in lease_scope["mismatches"]
+        ],
+    )
+    testcase.assertEqual(
+        lease_result["queued_commands"], lease_scope["expected_dispatched_commands"]
+    )
+    testcase.assertEqual(lease_result["session_count"], 2)
+
+    cancel = stateful["cancel_response_race"]
+    assert isinstance(cancel, dict)
+    cancel_result = result["cancel_response_race"]
+    assert isinstance(cancel_result, dict)
+    testcase.assertEqual(
+        cancel_result,
+        {
+            "response_first": {
+                "operation": "ok",
+                "cancel": cancel["cancel_after_response_error"],
+            },
+            "cancel_first": {
+                "operation": cancel["cancel_error"],
+                "cancel": "cancelled",
+                "late_response": cancel["late_response_error"],
+            },
+        },
+    )
+
+    timeout = stateful["timeout_late_response"]
+    assert isinstance(timeout, dict)
+    timeout_result = result["timeout_late_response"]
+    assert isinstance(timeout_result, dict)
+    testcase.assertEqual(timeout_result["timeout"], timeout["timeout_error"])
+    testcase.assertEqual(
+        timeout_result["late_response"], timeout["late_response_error"]
+    )
+    testcase.assertEqual(timeout_result["queued_commands"], 0)
+
+    generation = stateful["generation_reconnect"]
+    assert isinstance(generation, dict)
+    generation_result = result["generation_reconnect"]
+    assert isinstance(generation_result, dict)
+    testcase.assertEqual(generation_result["disconnect"], generation["disconnect_error"])
+    testcase.assertEqual(
+        generation_result["old_generation_response"],
+        generation["old_generation_response_error"],
+    )
+    testcase.assertEqual(
+        generation_result["reused_request"], generation["reused_request_error"]
+    )
+    testcase.assertTrue(generation_result["reconnected"])
+    testcase.assertEqual(generation_result["session_count"], 1)
+
+    fairness = stateful["queue_fairness"]
+    assert isinstance(fairness, dict)
+    fairness_result = result["queue_fairness"]
+    assert isinstance(fairness_result, dict)
+    testcase.assertEqual(fairness_result["blocked_error"], fairness["blocked_error"])
+    testcase.assertTrue(fairness_result["healthy_dispatched"])
+    testcase.assertTrue(fairness_result["healthy_queue_empty"])
+
+
 class BrowserContractDifferentialTests(unittest.TestCase):
     def test_python_and_rust_state_oracles_match_shared_fixture(self) -> None:
         fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
         python_result = asyncio.run(python_oracle(fixture))
-        scenario = fixture["stateful"]
-        self.assertEqual(
-            python_result["ambiguous_implicit_target"]["error"],
-            scenario["ambiguous_implicit_target"]["expected_error"],
-        )
-        self.assertEqual(
-            python_result["ambiguous_implicit_target"]["queued_commands"],
-            scenario["ambiguous_implicit_target"]["expected_dispatched_commands"],
-        )
+        assert_independent_expected_state(self, python_result, fixture)
 
         child_env = os.environ.copy()
         child_env["CARGO_TERM_COLOR"] = "never"
@@ -551,6 +655,7 @@ class BrowserContractDifferentialTests(unittest.TestCase):
         ]
         self.assertTrue(rust_lines, completed.stderr)
         rust_result = json.loads(rust_lines[-1])
+        assert_independent_expected_state(self, rust_result, fixture)
         self.assertEqual(rust_result, python_result)
 
 

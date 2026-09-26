@@ -2214,19 +2214,22 @@ class BrowserSessionBroker:
 
     def restore_queued_command(
         self, extension_instance_id: str, command: dict[str, Any]
-    ) -> None:
+    ) -> bool:
         """Restore a direct-send failure to bounded heartbeat fallback once."""
         request_id = _clean_text(command.get("request_id"))
         pending = self.pending.get(request_id)
         record = self.sessions.get(extension_instance_id)
         if pending is None or record is None:
-            return
+            return False
         if any(
             queued.get("request_id") == request_id
             for queued in record.command_queue
         ):
-            return
+            return True
+        if len(record.command_queue) >= MAX_COMMAND_QUEUE:
+            return False
         record.command_queue.insert(0, command)
+        return True
 
     def cancel_request(self, request_id: str, error: BrokerError) -> None:
         """Fail and remove one pending request and its queued command."""

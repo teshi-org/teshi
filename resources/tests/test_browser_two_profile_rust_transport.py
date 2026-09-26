@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import platform
+import queue
 import re
 import shutil
 import socket
@@ -73,9 +75,12 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
         shutil.copytree(EXTENSION, self.extension_copy)
         self.contexts: dict[str, BrowserContext] = {}
         self.workers: dict[str, Worker] = {}
+        self._pending_worker_evaluations: set[asyncio.Task] = set()
         self.broker: subprocess.Popen[str] | None = None
         self.broker_stderr: list[str] = []
         self.broker_stderr_thread: threading.Thread | None = None
+        self.broker_stdout_lines: queue.Queue[str] = queue.Queue()
+        self.broker_stdout_thread: threading.Thread | None = None
         self.http = ThreadingHTTPServer(("127.0.0.1", 0), RustTransportPage)
         self.http_thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.http_thread.start()
@@ -170,6 +175,7 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(context.close(), timeout=10)
             except Exception as error:  # noqa: BLE001
                 self._log("context_close_error", {"profile": name, "error": str(error)})
+        await self._drain_worker_evaluations()
         await self._stop_broker()
         if hasattr(self, "playwright"):
             try:
@@ -177,7 +183,10 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             except Exception as error:  # noqa: BLE001
                 self._log("playwright_stop_error", {"error": str(error)})
         if hasattr(self, "http"):
-            self.http.shutdown()
+            try:
+                await asyncio.wait_for(asyncio.to_thread(self.http.shutdown), timeout=5)
+            except asyncio.TimeoutError:
+                self._log("http_shutdown_timeout", {})
             self.http.server_close()
             self.http_thread.join(timeout=3)
         self._log(
@@ -188,6 +197,40 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.temp.cleanup()
+
+    async def _drain_worker_evaluations(self) -> None:
+        """Consume Playwright callbacks left behind by bounded worker probes."""
+        pending = list(self._pending_worker_evaluations)
+        for task in pending:
+            if not task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=3)
+                except Exception:  # noqa: BLE001 - cleanup must continue
+                    task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+            self._pending_worker_evaluations.discard(task)
+
+    def _consume_worker_evaluation(self, task: asyncio.Task) -> None:
+        self._pending_worker_evaluations.discard(task)
+        with contextlib.suppress(BaseException):
+            task.result()
+
+    async def _evaluate_worker(
+        self, worker: Worker, expression: str, *, timeout: float
+    ) -> object:
+        """Bound a worker RPC without abandoning its underlying Playwright Future."""
+        task = asyncio.create_task(worker.evaluate(expression))
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending_worker_evaluations.add(task)
+            task.add_done_callback(self._consume_worker_evaluation)
+            raise
+        except BaseException:
+            with contextlib.suppress(BaseException):
+                await task
+            raise
 
     async def _start_broker(self) -> None:
         state_dir = self.temp_root / "rust-user-state"
@@ -217,9 +260,13 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             daemon=True,
         )
         self.broker_stderr_thread.start()
-        ready_line = await asyncio.wait_for(
-            asyncio.to_thread(self.broker.stdout.readline), timeout=15
+        self.broker_stdout_thread = threading.Thread(
+            target=self._drain_broker_stdout,
+            args=(self.broker.stdout,),
+            daemon=True,
         )
+        self.broker_stdout_thread.start()
+        ready_line = await self._wait_broker_stdout_line()
         if not ready_line.startswith("BROWSER_BROKER_READY "):
             raise AssertionError(f"Rust Broker did not announce readiness: {ready_line!r}")
         self.ready_endpoint = json.loads(
@@ -240,7 +287,7 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ready_endpoint["protocol_version"], 1)
         self.assertEqual(self.ready_endpoint["schema_version"], 1)
         trusted = await asyncio.to_thread(
-            self._http_discovery, self.extension_origin
+            self._http_discovery, self.extension_origin, "POST"
         )
         self.assertEqual(trusted["status"], 200)
         self.trusted_discovery_status = trusted["status"]
@@ -263,6 +310,8 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.to_thread(broker.wait, 5)
         if self.broker_stderr_thread is not None:
             self.broker_stderr_thread.join(timeout=2)
+        if self.broker_stdout_thread is not None:
+            self.broker_stdout_thread.join(timeout=2)
         if broker.stdout is not None:
             broker.stdout.close()
         if broker.stderr is not None:
@@ -276,6 +325,21 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
         for line in stream:  # type: ignore[union-attr]
             self.broker_stderr.append(self._redact(str(line).rstrip()))
             del self.broker_stderr[:-80]
+
+    def _drain_broker_stdout(self, stream: object) -> None:
+        for line in stream:  # type: ignore[union-attr]
+            self.broker_stdout_lines.put(str(line))
+
+    async def _wait_broker_stdout_line(self, timeout: float = 15) -> str:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                return self.broker_stdout_lines.get_nowait()
+            except queue.Empty:
+                if self.broker is not None and self.broker.poll() is not None:
+                    break
+                await asyncio.sleep(0.05)
+        return ""
 
     async def _launch_context(self, name: str, *, keep: bool = True) -> BrowserContext:
         profile_dir = self.temp_root / name
@@ -315,15 +379,50 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                 f"Chrome extension service worker did not start: {error}"
             ) from error
 
+    async def _refresh_worker(self, name: str) -> Worker:
+        """Use the current worker after a persistent Profile restart."""
+        context = self.contexts[name]
+        for worker in reversed(context.service_workers):
+            try:
+                await self._evaluate_worker(worker, "true", timeout=3)
+            except Exception:
+                continue
+            self.workers[name] = worker
+            self._log("service_worker_selected", {"profile": name, "url": worker.url})
+            return worker
+        try:
+            worker = await context.wait_for_event("serviceworker", timeout=15_000)
+            await self._evaluate_worker(worker, "true", timeout=3)
+        except Exception as error:  # noqa: BLE001
+            self._log(
+                "service_worker_unavailable",
+                {
+                    "profile": name,
+                    "error": str(error),
+                    "worker_urls": [worker.url for worker in context.service_workers],
+                    "page_urls": [page.url for page in context.pages],
+                },
+            )
+            raise AssertionError(
+                f"Profile {name} did not expose a live extension service worker: {error}"
+            ) from error
+        self.workers[name] = worker
+        self._log("service_worker_selected", {"profile": name, "url": worker.url})
+        return worker
+
     async def _wait_stream(self, name: str) -> None:
         worker = self.workers[name]
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             try:
-                connected = await worker.evaluate(
+                connected = await self._evaluate_worker(
+                    worker,
                     "typeof streamWs !== 'undefined' && "
-                    "streamWs !== null && streamWs.readyState === WebSocket.OPEN"
+                    "streamWs !== null && streamWs.readyState === WebSocket.OPEN",
+                    timeout=2,
                 )
+            except asyncio.TimeoutError:
+                connected = False
             except Exception:
                 connected = False
             if connected:
@@ -331,11 +430,13 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                 return
             await asyncio.sleep(0.25)
         try:
-            diagnostics = await worker.evaluate(
+            diagnostics = await self._evaluate_worker(
+                worker,
                 "({bridge: lastBridgeStatus, projectNeutral: cachedBrokerProjectNeutral, "
                 "projectRoot: cachedProjectRoot, frameWs: Boolean(extensionFrameWsUrl), "
                 "streamState: streamWs ? streamWs.readyState : null, "
-                "screencastActive, streamSessionTabId})"
+                "screencastActive, streamSessionTabId})",
+                timeout=2,
             )
         except Exception as error:  # noqa: BLE001
             diagnostics = {"worker_error": str(error)}
@@ -348,34 +449,59 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
     async def _force_stream(self, name: str) -> None:
         worker = self.workers[name]
         script = """async () => {
-            let probe;
-            try {
-                const response = await fetch(DISCOVERY_URL, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: "{}",
-                    cache: "no-store",
-                });
-                const body = await response.text();
-                const info = body ? JSON.parse(body) : {};
-                probe = {
-                    status: response.status,
-                    ok: response.ok,
-                    type: response.type,
-                    bodyLength: body.length,
-                    keys: Object.keys(info).sort(),
-                    brokerFeatures: info.broker_features || [],
-                    hasTokenizedWs: String(info.ws_url || "").includes("token="),
-                    hasTokenizedFrameWs: String(info.extension_frame_ws_url || "").includes("token="),
-                };
-            } catch (error) {
-                probe = {error: String(error)};
-            }
-            const discovery = await refreshBridgeCache();
-            await heartbeatOnce({forceStream: true});
+            const step = async (name, callback, timeout = 7000) => {
+                let timer;
+                try {
+                    const result = await Promise.race([
+                        Promise.resolve().then(callback).then(value => ({ok: true, value})),
+                        new Promise(resolve => {
+                            timer = setTimeout(() => resolve({ok: false, timeout: name}), timeout);
+                        }),
+                    ]);
+                    return {name, ...result};
+                } catch (error) {
+                    return {name, ok: false, error: String(error)};
+                } finally {
+                    if (timer) clearTimeout(timer);
+                }
+            };
+            const probe = await step("discovery_probe", async () => {
+                const controller = new AbortController();
+                const abortTimer = setTimeout(() => controller.abort(), 5000);
+                try {
+                    const response = await fetch(DISCOVERY_URL, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: "{}",
+                        cache: "no-store",
+                        signal: controller.signal,
+                    });
+                    const body = await response.text();
+                    const info = body ? JSON.parse(body) : {};
+                    return {
+                        status: response.status,
+                        ok: response.ok,
+                        type: response.type,
+                        bodyLength: body.length,
+                        keys: Object.keys(info).sort(),
+                        brokerFeatures: info.broker_features || [],
+                        hasTokenizedWs: String(info.ws_url || "").includes("token="),
+                        hasTokenizedFrameWs: String(info.extension_frame_ws_url || "").includes("token="),
+                    };
+                } finally {
+                    clearTimeout(abortTimer);
+                }
+            });
+            const discovery = await step("refresh_bridge_cache", refreshBridgeCache);
+            const heartbeat = await step(
+                "heartbeat_once",
+                () => heartbeatOnce({forceStream: true}),
+                10000,
+            );
             return {
                 probe,
                 discovery,
+                heartbeat,
                 bridge: lastBridgeStatus,
                 projectNeutral: cachedBrokerProjectNeutral,
                 frameWs: Boolean(extensionFrameWsUrl),
@@ -384,15 +510,14 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             };
         }"""
         try:
-            result = await asyncio.wait_for(worker.evaluate(script), timeout=20)
+            result = await self._evaluate_worker(worker, script, timeout=20)
         except asyncio.TimeoutError as error:
             try:
-                diagnostics = await asyncio.wait_for(
-                    worker.evaluate(
-                        "({bridge: lastBridgeStatus, projectNeutral: cachedBrokerProjectNeutral, "
-                        "projectRoot: cachedProjectRoot, frameWs: Boolean(extensionFrameWsUrl), "
-                        "streamState: streamWs ? streamWs.readyState : null, screencastActive})"
-                    ),
+                diagnostics = await self._evaluate_worker(
+                    worker,
+                    "({bridge: lastBridgeStatus, projectNeutral: cachedBrokerProjectNeutral, "
+                    "projectRoot: cachedProjectRoot, frameWs: Boolean(extensionFrameWsUrl), "
+                    "streamState: streamWs ? streamWs.readyState : null, screencastActive})",
                     timeout=2,
                 )
             except Exception as diagnostic_error:  # noqa: BLE001
@@ -469,6 +594,11 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
         public = await asyncio.to_thread(self._http_discovery, None)
         self.assertEqual(public["status"], 200)
         self.assertNotIn("token", json.dumps(public["payload"]))
+        trusted_get = await asyncio.to_thread(
+            self._http_discovery, self.extension_origin
+        )
+        self.assertEqual(trusted_get["status"], 200)
+        self.assertNotIn("token", json.dumps(trusted_get["payload"]))
         trusted = self.trusted_discovery
         self.assertIn("token=", trusted["ws_url"])
         self.assertEqual(trusted["broker_features"], ["transport.v1"])
@@ -481,6 +611,7 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             "discovery_verified",
             {
                 "public_status": public["status"],
+                "trusted_get_status": trusted_get["status"],
                 "trusted_status": self.trusted_discovery_status,
                 "untrusted_status": untrusted["status"],
                 "broker_features": trusted["broker_features"],
@@ -542,6 +673,19 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
 
         self._set_stage("disconnect Profile A and keep Profile B ready")
         context_a = self.contexts.pop("profile-a")
+        worker_a = self.workers["profile-a"]
+        try:
+            await self._evaluate_worker(
+                worker_a,
+                """async () => {
+                    await stopStreamSession();
+                    closeStreamWebSocket();
+                    return {streamState: streamWs ? streamWs.readyState : null};
+                }""",
+                timeout=5,
+            )
+        except Exception as error:  # noqa: BLE001
+            self._log("profile_stream_stop_before_close_error", {"error": str(error)})
         await asyncio.wait_for(context_a.close(), timeout=10)
         self.workers.pop("profile-a", None)
         remaining = await self._wait_sessions(1, expected_count=1)
@@ -567,6 +711,7 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             ),
             timeout=20,
         )
+        await self._refresh_worker("profile-a")
         await self._force_stream("profile-a")
         await self._wait_stream("profile-a")
         reconnected = await self._wait_sessions(2, expected_count=2)
@@ -680,9 +825,15 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             )
         path.write_text(text, encoding="utf-8")
 
-    def _http_discovery(self, origin: str | None) -> dict:
+    def _http_discovery(self, origin: str | None, method: str = "GET") -> dict:
         url = f"http://127.0.0.1:{self.discovery_port}/v1/bridge"
-        request = Request(url)
+        request = Request(
+            url,
+            data=b"{}" if method == "POST" else None,
+            method=method,
+        )
+        if method == "POST":
+            request.add_header("Content-Type", "application/json")
         if origin is not None:
             request.add_header("Origin", origin)
         try:

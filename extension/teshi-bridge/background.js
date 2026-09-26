@@ -114,6 +114,8 @@ let cachedBrokerProjectNeutral = false;
 let cachedBrokerToken = "";
 let extensionFrameWsUrl = "";
 let heartbeatRunning = false;
+/** @type {Promise<void> | null} */
+let heartbeatOncePromise = null;
 let pendingStreamRestart = false;
 let tabEventTimer = null;
 let commandExecution = Promise.resolve();
@@ -2834,7 +2836,7 @@ async function ensureStreamForActiveTab() {
   await startStreamSession({ tabId: tab.id });
 }
 
-async function heartbeatOnce(options = {}) {
+async function performHeartbeatOnce(options = {}) {
   const projectRoot = await ensureProjectRoot();
   if (!brokerConnectionReady()) {
     setBadge(false);
@@ -2936,6 +2938,24 @@ async function heartbeatOnce(options = {}) {
     await startStreamSession({ force: true });
   } else {
     await ensureStreamForActiveTab();
+  }
+}
+
+async function heartbeatOnce(options = {}) {
+  if (heartbeatOncePromise) {
+    if (options.forceStream) {
+      pendingStreamRestart = true;
+    }
+    return heartbeatOncePromise;
+  }
+  const current = performHeartbeatOnce(options);
+  heartbeatOncePromise = current;
+  try {
+    return await current;
+  } finally {
+    if (heartbeatOncePromise === current) {
+      heartbeatOncePromise = null;
+    }
   }
 }
 

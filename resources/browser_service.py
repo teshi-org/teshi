@@ -21,7 +21,7 @@ import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any
 
 from browser_agent_broker import (
@@ -3249,19 +3249,28 @@ class ChromeBridge:
                 record.extension_instance_id, request_id
             )
             if direct_command is not None:
-                sent = False
+                delivery: bool | None = False
                 try:
-                    sent = bool(
-                        await self._direct_command_callback(
-                            record.extension_instance_id, direct_command
-                        )
-                    )
-                except Exception:  # noqa: BLE001
-                    sent = False
-                if not sent:
-                    self.broker.restore_queued_command(
+                    delivery = await self._direct_command_callback(
                         record.extension_instance_id, direct_command
                     )
+                except Exception:  # noqa: BLE001
+                    # A send exception is delivery-ambiguous: the peer may
+                    # already have received the command. Never retry it via
+                    # heartbeat, because that could duplicate a mutation.
+                    delivery = None
+                if delivery is False:
+                    restored = self.broker.restore_queued_command(
+                        record.extension_instance_id, direct_command
+                    )
+                    if not restored:
+                        error = BrokerError(
+                            "browser_session_busy",
+                            "heartbeat fallback queue is full; command was not dispatched",
+                            {"extension_instance_id": record.extension_instance_id},
+                        )
+                        self.broker.cancel_request(request_id, error)
+                        raise error
         try:
             result = await asyncio.wait_for(future, timeout=timeout)
             return result
@@ -4035,6 +4044,25 @@ def _http_response(
     return header + body
 
 
+def credential_free_discovery(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the public discovery projection without credentials or paths."""
+    public = dict(payload)
+    public.pop("project_root", None)
+    public.pop("endpoint", None)
+    for field in ("ws_url", "extension_frame_ws_url"):
+        value = public.get(field)
+        if not isinstance(value, str):
+            continue
+        parsed = urlparse(value)
+        query = [
+            (key, item)
+            for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+            if key != "token"
+        ]
+        public[field] = urlunparse(parsed._replace(query=urlencode(query)))
+    return public
+
+
 async def _read_http_request(
     reader: asyncio.StreamReader,
 ) -> tuple[str, dict[str, str], bytes]:
@@ -4107,7 +4135,9 @@ async def run_http_discovery(
                 status = 200 if extension_origin else 403
                 writer.write(_http_response(status, b"", cors_origin=extension_origin))
             elif method == "GET" and path == "/v1/bridge":
-                payload = json.dumps(bridge.bridge_info()).encode("utf-8")
+                payload = json.dumps(
+                    credential_free_discovery(bridge.bridge_info())
+                ).encode("utf-8")
                 writer.write(_http_response(200, payload, cors_origin=extension_origin))
             elif method == "POST" and path == "/v1/bridge/heartbeat":
                 data = json.loads(body.decode("utf-8") or "{}")
@@ -4249,7 +4279,7 @@ async def run_chrome(
 
     async def send_direct_command(
         extension_instance_id: str, command: dict[str, Any]
-    ) -> bool:
+    ) -> bool | None:
         websocket = extension_streams.get(extension_instance_id)
         if websocket is None:
             return False
@@ -4260,7 +4290,9 @@ async def run_chrome(
             return True
         except Exception:  # noqa: BLE001
             extension_streams.pop(extension_instance_id, None)
-            return False
+            # The write may have completed before the transport reported an
+            # error. Returning None prevents a duplicate heartbeat dispatch.
+            return None
 
     bridge = ChromeBridge(
         project_root,

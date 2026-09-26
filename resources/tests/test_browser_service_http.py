@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import socket
 import sys
 import tempfile
 import threading
 import unittest
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,11 +21,14 @@ sys.path.insert(0, str(RESOURCES))
 
 from browser_service import (  # noqa: E402
     BrowserSessionBroker,
+    ChromeBridge,
     _bind_websocket_listener,
     _read_http_request,
+    credential_free_discovery,
     embedded_browser_headless,
     handle_embedded_command,
     paths_equal,
+    run_http_discovery,
     write_cdp_endpoint_file,
 )
 
@@ -47,6 +54,95 @@ class FakeEmbeddedSession:
 
 
 class BrowserServiceHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_python_discovery_get_is_public_but_post_keeps_extension_compatibility(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="teshi-discovery-http-") as root:
+            project_root = Path(root)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = int(probe.getsockname()[1])
+            bridge = ChromeBridge(
+                project_root,
+                "ws://127.0.0.1:20254/?token=secret-token",
+                port,
+                "ws://127.0.0.1:20254/extension/frames?token=secret-token",
+            )
+            server_task = asyncio.create_task(
+                run_http_discovery(bridge, "127.0.0.1", port, "command-token")
+            )
+
+            def request(method: str, origin: str | None = None) -> tuple[int, dict]:
+                request = Request(
+                    f"http://127.0.0.1:{port}/v1/bridge",
+                    data=b"{}" if method == "POST" else None,
+                    method=method,
+                )
+                if method == "POST":
+                    request.add_header("Content-Type", "application/json")
+                if origin is not None:
+                    request.add_header("Origin", origin)
+                try:
+                    with urlopen(request, timeout=2) as response:
+                        return response.status, json.loads(response.read())
+                except HTTPError as error:
+                    return error.code, {}
+
+            async def wait_for_request(method: str, origin: str | None = None) -> tuple[int, dict]:
+                deadline = asyncio.get_running_loop().time() + 5
+                while True:
+                    try:
+                        return await asyncio.to_thread(request, method, origin)
+                    except URLError:
+                        if asyncio.get_running_loop().time() >= deadline:
+                            raise
+                        await asyncio.sleep(0.05)
+
+            try:
+                public_status, public = await wait_for_request("GET")
+                self.assertEqual(public_status, 200)
+                self.assertNotIn("token=", json.dumps(public))
+                self.assertNotIn("project_root", public)
+
+                extension_origin = "chrome-extension://" + ("a" * 32)
+                trusted_status, trusted = await wait_for_request(
+                    "POST", extension_origin
+                )
+                self.assertEqual(trusted_status, 200)
+                self.assertIn("token=secret-token", trusted["ws_url"])
+                self.assertEqual(trusted["project_root"], str(project_root))
+
+                missing_status, _ = await wait_for_request("POST")
+                self.assertEqual(missing_status, 403)
+                hostile_status, hostile = await wait_for_request(
+                    "POST", "https://ordinary.example.test"
+                )
+                self.assertEqual(hostile_status, 403)
+                self.assertEqual(hostile, {})
+            finally:
+                server_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(server_task, timeout=5)
+
+    def test_public_discovery_projection_removes_bearer_query_parameters(self) -> None:
+        public = credential_free_discovery(
+            {
+                "ws_url": "ws://127.0.0.1:20254/?token=secret&channel=control",
+                "extension_frame_ws_url": (
+                    "ws://127.0.0.1:20254/extension/frames?token=secret"
+                ),
+                "project_root": r"D:\private\project",
+                "bridge": "python",
+            }
+        )
+        self.assertEqual(
+            public["ws_url"], "ws://127.0.0.1:20254/?channel=control"
+        )
+        self.assertEqual(
+            public["extension_frame_ws_url"],
+            "ws://127.0.0.1:20254/extension/frames",
+        )
+        self.assertNotIn("project_root", public)
+        self.assertEqual(public["bridge"], "python")
+
     def test_embedded_browser_defaults_to_headless_and_can_be_opted_into_headed(self) -> None:
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TESHI_EMBEDDED_HEADLESS", None)

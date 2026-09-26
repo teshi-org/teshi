@@ -397,19 +397,37 @@ impl BrokerRuntime {
         extension_instance_id: &str,
         command: Value,
     ) -> Result<(), BrokerError> {
-        let sender = self
-            .state
-            .streams
-            .read()
+        self.send_extension_command_for_generation(extension_instance_id, None, command)
             .await
-            .get(extension_instance_id)
-            .map(|(_, sender)| sender.clone())
-            .ok_or_else(|| {
-                BrokerError::new(
-                    BrokerErrorCode::BrowserSessionDisconnected,
-                    "extension preview/control stream is disconnected",
-                )
-            })?;
+    }
+
+    /// Send a command only to the stream generation captured by the pending
+    /// request. A reconnect can replace the stream registry entry before the
+    /// state owner consumes its `ExtensionConnected` event; accepting the new
+    /// sender here would dispatch a command after the old request was failed.
+    pub async fn send_extension_command_for_generation(
+        &self,
+        extension_instance_id: &str,
+        expected_generation: Option<u64>,
+        command: Value,
+    ) -> Result<(), BrokerError> {
+        // Keep the registry read lock through the non-blocking try_send. This
+        // makes the generation check and enqueue one critical section with
+        // respect to a reconnect replacing the registry entry; otherwise a
+        // cloned old sender could still receive a command after the check.
+        let streams = self.state.streams.read().await;
+        let Some((actual_generation, sender)) = streams.get(extension_instance_id) else {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserSessionDisconnected,
+                "extension preview/control stream is disconnected",
+            ));
+        };
+        if expected_generation.is_some_and(|expected| expected != *actual_generation) {
+            return Err(BrokerError::new(
+                BrokerErrorCode::IncompatibleBrowserSession,
+                "extension preview/control stream generation changed before dispatch",
+            ));
+        }
         let payload = json!({"type":"direct_command", "command":command});
         let text = json_to_bounded_text(&payload, MAX_CONTROL_MESSAGE_BYTES)?;
         let budget = reserve_event_bytes(&self.state, text.len())?;
@@ -649,29 +667,45 @@ async fn discovery(
         ));
     }
     let origin = header_text(&headers, ORIGIN);
-    // GET remains a public, project-neutral discovery probe. The extension
-    // uses POST, which must carry the browser-supplied exact Origin before a
-    // credential-bearing discovery response is returned. This avoids treating
-    // a self-reported extension ID in a normal request header as proof.
+    // GET is always a public, project-neutral, credential-free discovery probe.
+    // Only the extension's JSON POST, with the browser-supplied exact Origin,
+    // can receive the credential-bearing compatibility URLs. This avoids
+    // treating a self-reported extension ID in a normal request header as proof.
     if method == Method::POST && origin.is_none() {
         return error_response(BrokerError::new(
             BrokerErrorCode::BrokerOriginDenied,
             "credential-bearing discovery requires a browser Origin",
         ));
     }
-    let include_token = match origin.as_deref() {
-        None => false,
-        Some(value) if is_trusted_extension_origin(&state, value) => true,
-        Some(_) => {
-            return cors_error(
-                &headers,
-                &state,
-                BrokerError::new(
-                    BrokerErrorCode::BrokerOriginDenied,
-                    "discovery is unavailable to this browser origin",
-                ),
-            );
+    let include_token = if method == Method::POST {
+        match origin.as_deref() {
+            Some(value) if is_trusted_extension_origin(&state, value) => true,
+            Some(_) => {
+                return cors_error(
+                    &headers,
+                    &state,
+                    BrokerError::new(
+                        BrokerErrorCode::BrokerOriginDenied,
+                        "discovery is unavailable to this browser origin",
+                    ),
+                );
+            }
+            None => false,
         }
+    } else if origin
+        .as_deref()
+        .is_some_and(|value| !is_trusted_extension_origin(&state, value))
+    {
+        return cors_error(
+            &headers,
+            &state,
+            BrokerError::new(
+                BrokerErrorCode::BrokerOriginDenied,
+                "discovery is unavailable to this browser origin",
+            ),
+        );
+    } else {
+        false
     };
     let payload = build_discovery_response(&state, include_token);
     let mut response = Json(payload).into_response();
@@ -2289,13 +2323,43 @@ mod tests {
             trusted_origin.as_str()
         );
         let extension: Value = extension.json().await.unwrap();
-        assert!(extension["ws_url"].as_str().unwrap().contains("token="));
+        assert!(!extension["ws_url"].as_str().unwrap().contains("token="));
         assert!(
             extension["extension_frame_ws_url"]
                 .as_str()
                 .unwrap()
+                .contains("/extension/frames")
+        );
+        assert!(
+            !extension["extension_frame_ws_url"]
+                .as_str()
+                .unwrap()
                 .contains("token=")
         );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn generation_bound_direct_send_never_enqueues_on_a_replacement_stream() {
+        let runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let (sender, mut receiver) = mpsc::channel(EXTENSION_OUTBOUND_QUEUE_CAPACITY);
+        runtime
+            .state
+            .streams
+            .write()
+            .await
+            .insert("profile-a".into(), (2, sender));
+
+        let error = runtime
+            .send_extension_command_for_generation(
+                "profile-a",
+                Some(1),
+                serde_json::json!({"request_id": "old-generation"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, BrokerErrorCode::IncompatibleBrowserSession);
+        assert!(receiver.try_recv().is_err());
         runtime.shutdown().await;
     }
 
