@@ -6,6 +6,8 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -20,6 +22,7 @@ from browser_service import (  # noqa: E402
     embedded_browser_headless,
     handle_embedded_command,
     paths_equal,
+    write_cdp_endpoint_file,
 )
 
 
@@ -71,6 +74,59 @@ class BrowserServiceHttpTests(unittest.IsolatedAsyncioTestCase):
         extended = r"\\?\D:\Dev\Rust\teshi\dev"
 
         self.assertTrue(paths_equal(extended, plain))
+
+    def test_cdp_endpoint_file_is_never_observed_partially(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="teshi-endpoint-test-") as root:
+            project_root = Path(root)
+            write_cdp_endpoint_file(
+                project_root,
+                mode="chrome",
+                ws_url="ws://127.0.0.1:20001/browser",
+                page_url="http://127.0.0.1:20001/",
+                discovery_port=17373,
+            )
+            endpoint_path = project_root / ".teshi" / "cdp-endpoint.json"
+            errors: list[str] = []
+            done = threading.Event()
+
+            def writer() -> None:
+                try:
+                    for index in range(64):
+                        write_cdp_endpoint_file(
+                            project_root,
+                            mode="chrome",
+                            ws_url=f"ws://127.0.0.1:{20001 + index}/browser",
+                            page_url=f"http://127.0.0.1:{20001 + index}/",
+                            discovery_port=17373,
+                        )
+                except Exception as error:  # pragma: no cover - assertion below
+                    errors.append(f"writer: {error}")
+                finally:
+                    done.set()
+
+            def reader() -> None:
+                while not done.is_set():
+                    try:
+                        value = json.loads(endpoint_path.read_text(encoding="utf-8"))
+                        if not isinstance(value, dict) or not value.get("ws_url"):
+                            errors.append("reader: incomplete endpoint payload")
+                    except PermissionError:
+                        # Windows may briefly deny a new open while the old
+                        # endpoint handle is being atomically replaced.
+                        continue
+                    except (OSError, json.JSONDecodeError) as error:
+                        errors.append(f"reader: {error}")
+
+            writer_thread = threading.Thread(target=writer)
+            reader_thread = threading.Thread(target=reader)
+            reader_thread.start()
+            writer_thread.start()
+            writer_thread.join(timeout=10)
+            done.set()
+            reader_thread.join(timeout=10)
+            self.assertFalse(writer_thread.is_alive())
+            self.assertFalse(reader_thread.is_alive())
+            self.assertEqual(errors, [])
 
     async def test_content_length_body_waits_for_all_tcp_chunks(self) -> None:
         payload = json.dumps({"snapshot": "x" * 200_000}).encode("utf-8")

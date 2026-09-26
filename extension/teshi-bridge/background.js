@@ -99,6 +99,7 @@ const debuggerSessions = new Map();
 /** @type {Map<number, Promise<{roles: Set<string>, domains: Set<string>}>>} */
 const debuggerAttachmentPromises = new Map();
 let cachedProjectRoot = "";
+let cachedBrokerProjectNeutral = false;
 let cachedBrokerToken = "";
 let extensionFrameWsUrl = "";
 let heartbeatRunning = false;
@@ -358,6 +359,40 @@ function cacheBrokerToken(info) {
   return Boolean(cachedBrokerToken);
 }
 
+function brokerConnectionReady() {
+  return Boolean(cachedProjectRoot || cachedBrokerProjectNeutral);
+}
+
+function clearBrokerCache() {
+  cachedProjectRoot = "";
+  cachedBrokerProjectNeutral = false;
+  cachedBrokerToken = "";
+  extensionFrameWsUrl = "";
+}
+
+function applyBridgeDiscovery(info) {
+  if (info?.mode !== "chrome") {
+    clearBrokerCache();
+    return false;
+  }
+  const projectNeutral = Array.isArray(info.broker_features)
+    && info.broker_features.includes("transport.v1");
+  const projectRoot = typeof info.project_root === "string"
+    ? info.project_root.trim()
+    : "";
+  // Python Broker remains project-bound. Rust transport discovery is deliberately
+  // project-neutral, so it may omit project_root without weakening auth or Origin
+  // checks. No other discovery shape is accepted.
+  if ((!projectNeutral && !projectRoot) || !cacheBrokerToken(info)) {
+    clearBrokerCache();
+    return false;
+  }
+  cachedProjectRoot = projectNeutral ? "" : projectRoot;
+  cachedBrokerProjectNeutral = projectNeutral;
+  extensionFrameWsUrl = String(info.extension_frame_ws_url || "");
+  return true;
+}
+
 async function refreshExtensionFrameWsUrl() {
   try {
     const res = await fetch(DISCOVERY_URL);
@@ -365,9 +400,7 @@ async function refreshExtensionFrameWsUrl() {
       return false;
     }
     const info = await res.json();
-    if (info.extension_frame_ws_url) {
-      cacheBrokerToken(info);
-      extensionFrameWsUrl = String(info.extension_frame_ws_url);
+    if (applyBridgeDiscovery(info) && info.extension_frame_ws_url) {
       return true;
     }
   } catch {
@@ -391,7 +424,7 @@ function streamSocketNeeded() {
 }
 
 async function connectStreamWebSocket() {
-  if (!extensionFrameWsUrl || !cachedProjectRoot) {
+  if (!extensionFrameWsUrl || !brokerConnectionReady()) {
     return false;
   }
   if (streamWs?.readyState === WebSocket.OPEN) {
@@ -410,15 +443,14 @@ async function connectStreamWebSocket() {
       streamWs = ws;
       streamWsReconnectDelay = STREAM_WS_RECONNECT_BASE_MS;
       const identity = await getExtensionIdentity();
-      ws.send(
-        JSON.stringify({
-          type: "stream_hello",
-          project_root: cachedProjectRoot,
-          extension_instance_id: identity.extension_instance_id,
-          protocol_version: PROTOCOL_VERSION,
-          extension_version: chrome.runtime.getManifest().version,
-        }),
-      );
+      const hello = {
+        type: "stream_hello",
+        extension_instance_id: identity.extension_instance_id,
+        protocol_version: PROTOCOL_VERSION,
+        extension_version: chrome.runtime.getManifest().version,
+        ...(cachedProjectRoot ? { project_root: cachedProjectRoot } : {}),
+      };
+      ws.send(JSON.stringify(hello));
       for (const state of networkDeliveryStates.values()) {
         state.sent_through_seq = state.acked_seq;
         state.termination_sent = false;
@@ -462,7 +494,7 @@ async function connectStreamWebSocket() {
         settled = true;
         resolve(false);
       }
-      if (streamSocketNeeded() && cachedProjectRoot) {
+      if (streamSocketNeeded() && brokerConnectionReady()) {
         setTimeout(() => {
           void connectStreamWebSocket();
         }, streamWsReconnectDelay);
@@ -1144,7 +1176,7 @@ async function stopStreamSession() {
 
 async function startStreamSession(options = {}) {
   ensureScreencastDebuggerListener();
-  if (!cachedProjectRoot) {
+  if (!brokerConnectionReady()) {
     return;
   }
   let tabId = options.tabId;
@@ -1208,7 +1240,7 @@ async function pauseScreencast() {
 }
 
 async function resumeScreencast() {
-  if (!cachedProjectRoot || streamPaused) {
+  if (!brokerConnectionReady() || streamPaused) {
     return;
   }
   const tabId = streamSessionTabId ?? (await getActiveTab())?.id;
@@ -2761,17 +2793,7 @@ async function refreshBridgeCache() {
       return false;
     }
     const info = await res.json();
-    if (info.mode === "chrome" && info.project_root) {
-      cachedProjectRoot = info.project_root;
-      if (!cacheBrokerToken(info)) {
-        cachedProjectRoot = "";
-        return false;
-      }
-      if (info.extension_frame_ws_url) {
-        extensionFrameWsUrl = String(info.extension_frame_ws_url);
-      }
-      return true;
-    }
+    return applyBridgeDiscovery(info);
   } catch {
     // Bridge offline.
   }
@@ -2779,15 +2801,15 @@ async function refreshBridgeCache() {
 }
 
 async function ensureProjectRoot() {
-  if (cachedProjectRoot) {
+  if (brokerConnectionReady()) {
     return cachedProjectRoot;
   }
   await refreshBridgeCache();
-  return cachedProjectRoot;
+  return brokerConnectionReady() ? cachedProjectRoot : "";
 }
 
 async function ensureStreamForActiveTab() {
-  if (!cachedProjectRoot || streamPaused) {
+  if (!brokerConnectionReady() || streamPaused) {
     return;
   }
   const tab = await getActiveTab();
@@ -2803,7 +2825,7 @@ async function ensureStreamForActiveTab() {
 
 async function heartbeatOnce(options = {}) {
   const projectRoot = await ensureProjectRoot();
-  if (!projectRoot) {
+  if (!brokerConnectionReady()) {
     setBadge(false);
     lastBridgeStatus = {
       connected: false,
@@ -2817,28 +2839,32 @@ async function heartbeatOnce(options = {}) {
   const identity = await getExtensionIdentity();
   const optionalPermissions = await optionalPermissionStatus();
 
+  const heartbeat = {
+    schema_version: 1,
+    protocol_version: PROTOCOL_VERSION,
+    extension_version: chrome.runtime.getManifest().version,
+    extension_instance_id: identity.extension_instance_id,
+    profile_label: identity.profile_label,
+    browser: browserMetadata(),
+    features: phasedFeatures(optionalPermissions),
+    supported_actions: SUPPORTED_ACTIONS,
+    supported_operations: SUPPORTED_OPERATIONS,
+    optional_permissions: optionalPermissions,
+    url: tab?.url ?? "",
+    title: tab?.title ?? "",
+    active_window_id: tab?.windowId ?? null,
+    active_tab_id: windowTabs.active_tab_id,
+    tabs: windowTabs.tabs,
+    windows,
+    frame_error: "",
+  };
+  if (projectRoot) {
+    heartbeat.project_root = projectRoot;
+  }
+
   let res;
   try {
-    res = await bridgePost(HEARTBEAT_URL, {
-      schema_version: 1,
-      protocol_version: PROTOCOL_VERSION,
-      extension_version: chrome.runtime.getManifest().version,
-      extension_instance_id: identity.extension_instance_id,
-      profile_label: identity.profile_label,
-      browser: browserMetadata(),
-      features: phasedFeatures(optionalPermissions),
-      supported_actions: SUPPORTED_ACTIONS,
-      supported_operations: SUPPORTED_OPERATIONS,
-      optional_permissions: optionalPermissions,
-      project_root: projectRoot,
-      url: tab?.url ?? "",
-      title: tab?.title ?? "",
-      active_window_id: tab?.windowId ?? null,
-      active_tab_id: windowTabs.active_tab_id,
-      tabs: windowTabs.tabs,
-      windows,
-      frame_error: "",
-    });
+    res = await bridgePost(HEARTBEAT_URL, heartbeat);
   } catch {
     setBadge(false);
     lastBridgeStatus = {
@@ -2849,7 +2875,7 @@ async function heartbeatOnce(options = {}) {
   }
   if (!res.ok) {
     setBadge(false);
-    cachedProjectRoot = "";
+    clearBrokerCache();
     lastBridgeStatus = {
       connected: false,
       error: `Broker heartbeat failed with HTTP ${res.status}.`,
@@ -2869,7 +2895,7 @@ async function heartbeatOnce(options = {}) {
   }
   if (!data.ok) {
     setBadge(false);
-    cachedProjectRoot = "";
+    clearBrokerCache();
     lastBridgeStatus = {
       connected: false,
       error: data.error || "Broker rejected the extension heartbeat.",
@@ -2979,9 +3005,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type === "connect_now") {
-    cachedProjectRoot = "";
-    cachedBrokerToken = "";
-    extensionFrameWsUrl = "";
+    clearBrokerCache();
     closeStreamWebSocket();
     void (async () => {
       heartbeatRunning = false;
@@ -3064,6 +3088,9 @@ if (globalThis.__TESHI_BRIDGE_TEST__) {
     stopNetworkCapture,
     streamSocketNeeded,
     connectStreamWebSocket,
+    refreshBridgeCache,
+    refreshExtensionFrameWsUrl,
+    brokerConnectionReady,
     debuggerSessions,
     networkCapturesByTab,
     networkDeliveryStates,
@@ -3073,7 +3100,16 @@ if (globalThis.__TESHI_BRIDGE_TEST__) {
     },
     setBridgeContextForTest(projectRoot, wsUrl) {
       cachedProjectRoot = projectRoot;
+      cachedBrokerProjectNeutral = false;
       extensionFrameWsUrl = wsUrl;
+    },
+    getBridgeContextForTest() {
+      return {
+        projectRoot: cachedProjectRoot,
+        projectNeutral: cachedBrokerProjectNeutral,
+        tokenCached: Boolean(cachedBrokerToken),
+        extensionFrameWsUrl,
+      };
     },
   };
 }

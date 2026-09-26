@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
-use teshi_engine::{ChromeBrokerEndpoint, send_sidecar_command_with_timeout};
+use teshi_engine::{ChromeBrokerEndpoint, send_sidecar_command_with_timeout, write_atomic};
+
+const ENDPOINT_READ_ATTEMPTS: usize = 20;
+const ENDPOINT_READ_RETRY_DELAY: Duration = Duration::from_millis(5);
 
 /// Parsed `.teshi/cdp-endpoint.json` payload used by browser CLI commands.
 #[derive(Debug, Clone)]
@@ -52,9 +55,33 @@ pub fn resolve_browser_project_root(start: &Path) -> Result<PathBuf> {
 /// Reads and parses the CDP endpoint file under `project_root`.
 pub fn read_cdp_endpoint(project_root: &Path) -> Result<CdpEndpoint> {
     let endpoint_path = project_root.join(".teshi").join("cdp-endpoint.json");
-    let text = fs::read_to_string(&endpoint_path)
-        .with_context(|| format!("read {}", endpoint_path.display()))?;
-    let payload: Value = serde_json::from_str(&text).context("parse cdp-endpoint.json")?;
+    let mut payload = None;
+    let mut last_error = None;
+    for attempt in 0..ENDPOINT_READ_ATTEMPTS {
+        match fs::read_to_string(&endpoint_path) {
+            Ok(text) => match serde_json::from_str::<Value>(&text) {
+                Ok(value) => {
+                    payload = Some(value);
+                    break;
+                }
+                Err(error) => {
+                    last_error = Some(anyhow!(error).context("parse cdp-endpoint.json"));
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                last_error =
+                    Some(anyhow!(error).context(format!("read {}", endpoint_path.display())));
+            }
+            Err(error) => {
+                return Err(anyhow!(error).context(format!("read {}", endpoint_path.display())));
+            }
+        }
+        if attempt + 1 < ENDPOINT_READ_ATTEMPTS {
+            std::thread::sleep(ENDPOINT_READ_RETRY_DELAY);
+        }
+    }
+    let payload = payload
+        .ok_or_else(|| last_error.unwrap_or_else(|| anyhow!("read cdp-endpoint.json failed")))?;
     let mode = payload
         .get("mode")
         .and_then(|v| v.as_str())
@@ -116,8 +143,7 @@ pub fn write_chrome_broker_endpoint(
         "project_root": project_root,
         "broker_project_root": endpoint.project_root,
     });
-    let text = serde_json::to_string_pretty(&payload).context("serialize cdp-endpoint")?;
-    fs::write(&path, text).with_context(|| format!("write {}", path.display()))
+    write_atomic(&path, &payload).with_context(|| format!("write {}", path.display()))
 }
 
 /// Result of a sidecar health probe suitable for JSON CLI output.
@@ -296,8 +322,7 @@ pub fn write_cdp_endpoint_from_rust(
         "extension_connected": false,
         "viewport": {"width": 1920, "height": 1080},
     });
-    let text = serde_json::to_string_pretty(&payload).context("serialize cdp-endpoint")?;
-    std::fs::write(&path, text).with_context(|| format!("write {}", path.display()))?;
+    write_atomic(&path, &payload).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 

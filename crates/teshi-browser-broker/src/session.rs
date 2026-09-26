@@ -372,6 +372,7 @@ impl BrowserSessionRecord {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn resolve_element_reference(
         &mut self,
         target: &BrowserTarget,
@@ -561,15 +562,15 @@ impl BrowserSessionRecord {
         {
             return Ok(());
         }
-        if self.frames.len() >= MAX_TARGET_FRAME_RECORDS && !self.frames.contains_key(&target) {
-            if let Some(oldest) = self
+        if self.frames.len() >= MAX_TARGET_FRAME_RECORDS
+            && !self.frames.contains_key(&target)
+            && let Some(oldest) = self
                 .frames
                 .iter()
                 .min_by_key(|(_, frame)| frame.captured_at)
                 .map(|(target, _)| target.clone())
-            {
-                self.frames.remove(&oldest);
-            }
+        {
+            self.frames.remove(&oldest);
         }
         self.frames.insert(
             target.clone(),
@@ -981,6 +982,7 @@ impl SessionRegistry {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn resolve_element_reference(
         &mut self,
         target: &BrowserTarget,
@@ -1059,12 +1061,8 @@ mod tests {
 
     fn heartbeat(instance_id: Option<&str>, url: &str) -> ExtensionHeartbeat {
         ExtensionHeartbeat {
-            schema_version: instance_id
-                .map(|_| Some(BROWSER_BROKER_SCHEMA_VERSION))
-                .flatten(),
-            protocol_version: instance_id
-                .map(|_| Some(BROWSER_BROKER_PROTOCOL_VERSION))
-                .flatten(),
+            schema_version: instance_id.map(|_| BROWSER_BROKER_SCHEMA_VERSION),
+            protocol_version: instance_id.map(|_| BROWSER_BROKER_PROTOCOL_VERSION),
             extension_instance_id: instance_id.map(str::to_owned),
             profile_label: instance_id.unwrap_or("legacy").into(),
             extension_version: "test".into(),

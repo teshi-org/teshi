@@ -123,13 +123,13 @@ impl BrokerState {
                 reply,
                 ..
             } => {
-                if payload.get("type").and_then(Value::as_str) == Some("frame_error") {
-                    if let (Some(instance_id), Some(error)) = (
+                if payload.get("type").and_then(Value::as_str) == Some("frame_error")
+                    && let (Some(instance_id), Some(error)) = (
                         extension_instance_id.as_deref(),
                         payload.get("error").and_then(Value::as_str),
-                    ) {
-                        self.sessions.mark_frame_error(instance_id, error);
-                    }
+                    )
+                {
+                    self.sessions.mark_frame_error(instance_id, error);
                 }
                 let _ = reply.send(json!({
                     "ok": true,
@@ -377,10 +377,10 @@ impl BrokerState {
                         Instant::now(),
                     );
                 }
-            } else if matches!(pending.operation.as_str(), "navigate" | "close_tab") {
-                if let Some(session) = self.sessions.get_mut(&pending.extension_instance_id) {
-                    session.clear_element_references(Some(&pending.target));
-                }
+            } else if matches!(pending.operation.as_str(), "navigate" | "close_tab")
+                && let Some(session) = self.sessions.get_mut(&pending.extension_instance_id)
+            {
+                session.clear_element_references(Some(&pending.target));
             }
         }
         let _ = pending.reply.send(Ok(value));
@@ -494,16 +494,16 @@ impl BrokerState {
             else {
                 continue;
             };
-            if let Some(lease) = self.active_lease(instance_id, runtime) {
-                if let Value::Object(object) = session {
-                    object.insert(
-                        "lease".into(),
-                        json!({
-                            "owner_label": lease.owner_label.clone(),
-                            "expires_at_ms": lease.expires_at_ms,
-                        }),
-                    );
-                }
+            if let Some(lease) = self.active_lease(instance_id, runtime)
+                && let Value::Object(object) = session
+            {
+                object.insert(
+                    "lease".into(),
+                    json!({
+                        "owner_label": lease.owner_label.clone(),
+                        "expires_at_ms": lease.expires_at_ms,
+                    }),
+                );
             }
         }
         Ok(json!({"sessions": sessions}))

@@ -302,8 +302,7 @@ fn internal_cli_process_serves_authenticated_rust_transport_and_state_without_py
                 "project_root": "C:/integration-project",
                 "cmd": "list_browser_sessions"
             })
-            .to_string()
-            .into(),
+            .to_string(),
         ))
         .unwrap();
     let Message::Text(response) = client_socket.read().unwrap() else {

@@ -24,7 +24,7 @@ function listenerRegistry() {
   };
 }
 
-function loadBackground() {
+function loadBackground(fetchImpl = async () => ({ ok: false })) {
   const debuggerEvents = listenerRegistry();
   const debuggerDetaches = listenerRegistry();
   const tabActivations = listenerRegistry();
@@ -150,7 +150,7 @@ function loadBackground() {
     AbortController,
     WebSocket: FakeWebSocket,
     atob,
-    fetch: async () => ({ ok: false }),
+    fetch: fetchImpl,
     setInterval: () => 1,
     clearInterval() {},
     setTimeout: () => 1,
@@ -169,6 +169,107 @@ function loadBackground() {
     tabRemovals,
   };
 }
+
+function discoveryResponse(overrides = {}) {
+  const info = {
+    mode: "chrome",
+    ws_url: "ws://127.0.0.1:23000/?token=fixture-token",
+    extension_frame_ws_url: "ws://127.0.0.1:23000/extension/frames?token=fixture-token",
+    broker_features: ["transport.v1"],
+    ...overrides,
+  };
+  return {
+    ok: true,
+    status: 200,
+    async json() {
+      return info;
+    },
+  };
+}
+
+test("project-neutral Rust discovery connects without exposing a project root", async () => {
+  const { hooks } = loadBackground(async (url) => {
+    if (new URL(String(url)).pathname.endsWith("/v1/bridge")) {
+      return discoveryResponse();
+    }
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { ok: true, compatible: true, required_protocol_version: 1 };
+      },
+    };
+  });
+
+  assert.equal(await hooks.refreshBridgeCache(), true);
+  const context = hooks.getBridgeContextForTest();
+  assert.equal(context.projectRoot, "");
+  assert.equal(context.projectNeutral, true);
+  assert.equal(context.tokenCached, true);
+  assert.equal(
+    context.extensionFrameWsUrl,
+    "ws://127.0.0.1:23000/extension/frames?token=fixture-token",
+  );
+  assert.equal(hooks.brokerConnectionReady(), true);
+});
+
+test("Python discovery still requires and preserves its project root", async () => {
+  const { hooks } = loadBackground(async (url) => {
+    if (new URL(String(url)).pathname.endsWith("/v1/bridge")) {
+      return discoveryResponse({
+        broker_features: ["p0.control"],
+        project_root: "D:/python-project",
+      });
+    }
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { ok: true, compatible: true, required_protocol_version: 1 };
+      },
+    };
+  });
+
+  assert.equal(await hooks.refreshBridgeCache(), true);
+  assert.equal(hooks.getBridgeContextForTest().projectRoot, "D:/python-project");
+  assert.equal(hooks.getBridgeContextForTest().projectNeutral, false);
+  assert.equal(hooks.brokerConnectionReady(), true);
+});
+
+test("invalid discovery clears the previous broker generation cache", async () => {
+  let invalid = false;
+  const { hooks } = loadBackground(async () =>
+    invalid ? discoveryResponse({ mode: "embedded" }) : discoveryResponse(),
+  );
+
+  assert.equal(await hooks.refreshBridgeCache(), true);
+  invalid = true;
+  assert.equal(await hooks.refreshBridgeCache(), false);
+  const context = hooks.getBridgeContextForTest();
+  assert.equal(context.projectRoot, "");
+  assert.equal(context.projectNeutral, false);
+  assert.equal(context.tokenCached, false);
+  assert.equal(context.extensionFrameWsUrl, "");
+  assert.equal(hooks.brokerConnectionReady(), false);
+});
+
+test("discovery without a frame URL cannot retain the previous stream address", async () => {
+  let missingFrameUrl = false;
+  const { hooks } = loadBackground(async () =>
+    missingFrameUrl
+      ? discoveryResponse({ extension_frame_ws_url: undefined })
+      : discoveryResponse(),
+  );
+
+  assert.equal(await hooks.refreshExtensionFrameWsUrl(), true);
+  missingFrameUrl = true;
+  assert.equal(await hooks.refreshExtensionFrameWsUrl(), false);
+  const context = hooks.getBridgeContextForTest();
+  assert.equal(context.projectNeutral, true);
+  assert.equal(context.tokenCached, true);
+  assert.equal(context.extensionFrameWsUrl, "");
+  assert.equal(hooks.brokerConnectionReady(), true);
+});
 
 function captureState(overrides = {}) {
   return {

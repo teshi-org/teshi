@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tokio::sync::{RwLock, Semaphore, broadcast, mpsc, oneshot, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{interval, timeout};
 use tower::ServiceBuilder;
 use tower::limit::ConcurrencyLimitLayer;
@@ -56,9 +56,14 @@ const MAX_EVENT_QUEUE_CAPACITY: usize = 1024;
 const MAX_PUBLICATION_QUEUE_CAPACITY: usize = 64;
 const MAX_BROKER_FEATURES: usize = 64;
 const EXTENSION_OUTBOUND_QUEUE_CAPACITY: usize = 16;
+const MAX_CLIENT_IN_FLIGHT_OPERATIONS: usize = 64;
 struct BrokerOutgoingMessage {
     message: Message,
     _budget: tokio::sync::OwnedSemaphorePermit,
+}
+struct ClientOutgoingMessage {
+    message: Message,
+    _budget: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 type ExtensionStreamSender = mpsc::Sender<BrokerOutgoingMessage>;
 type StreamRegistry = Arc<RwLock<HashMap<String, (u64, ExtensionStreamSender)>>>;
@@ -408,18 +413,20 @@ impl BrokerRuntime {
         let payload = json!({"type":"direct_command", "command":command});
         let text = json_to_bounded_text(&payload, MAX_CONTROL_MESSAGE_BYTES)?;
         let budget = reserve_event_bytes(&self.state, text.len())?;
-        sender
-            .send(BrokerOutgoingMessage {
-                message: Message::Text(text.into()),
-                _budget: budget,
-            })
-            .await
-            .map_err(|_| {
-                BrokerError::new(
-                    BrokerErrorCode::BrowserSessionDisconnected,
-                    "extension preview/control stream closed before dispatch",
-                )
-            })
+        match sender.try_send(BrokerOutgoingMessage {
+            message: Message::Text(text.into()),
+            _budget: budget,
+        }) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "extension preview/control stream queue is full; command remains on heartbeat fallback",
+            )),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(BrokerError::new(
+                BrokerErrorCode::BrowserSessionDisconnected,
+                "extension preview/control stream closed before dispatch",
+            )),
+        }
     }
 
     /// Endpoint written to the per-project compatibility pointer. It contains no
@@ -1118,6 +1125,10 @@ async fn client_socket(
 ) {
     let mut subscription: Option<String> = None;
     let mut publications = state.publications.subscribe();
+    let (outgoing_tx, mut outgoing_rx) =
+        mpsc::channel::<ClientOutgoingMessage>(MAX_CLIENT_IN_FLIGHT_OPERATIONS);
+    let in_flight = Arc::new(Semaphore::new(MAX_CLIENT_IN_FLIGHT_OPERATIONS));
+    let mut operation_tasks = JoinSet::new();
     loop {
         tokio::select! {
             incoming = socket.next() => {
@@ -1184,9 +1195,20 @@ async fn client_socket(
                         let _ = socket.send(Message::Text(operation_error_value(&request, error).to_string().into())).await;
                         continue;
                     }
+                    let operation_permit = match Arc::clone(&in_flight).try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            let _ = socket.send(Message::Text(operation_error_value(&request, BrokerError::new(
+                                BrokerErrorCode::BrowserResourceLimit,
+                                "client WebSocket has too many in-flight operations",
+                            )).to_string().into())).await;
+                            continue;
+                        }
+                    };
                     let _budget = match reserve_event_bytes(&state, text.len()) {
                         Ok(budget) => budget,
                         Err(error) => {
+                            drop(operation_permit);
                             let _ = socket.send(Message::Text(operation_error_value(&request, error).to_string().into())).await;
                             continue;
                         }
@@ -1194,23 +1216,43 @@ async fn client_socket(
                     let request_timeout = request.timeout_ms.map(Duration::from_millis).unwrap_or(state.response_timeout).min(state.response_timeout);
                     let (reply, receiver) = oneshot::channel();
                     if state.events.try_send(BrokerEvent::Operation { request: request.clone(), reply, _budget }).is_err() {
+                        drop(operation_permit);
                         let _ = socket.send(Message::Text(operation_error_value(&request, BrokerError::new(
                             BrokerErrorCode::BrowserResourceLimit,
                             "broker event queue is full; operation was not dispatched",
                         )).to_string().into())).await;
                         continue;
                     }
-                    let result = match timeout(request_timeout, receiver).await {
-                        Ok(Ok(Ok(value))) => value,
-                        Ok(Ok(Err(error))) => operation_error_value(&request, error),
-                        _ => operation_error_value(&request, BrokerError::new(
-                            BrokerErrorCode::BrowserOperationTimeout,
-                            "broker operation did not complete before its deadline",
-                        )),
-                    };
-                    let (text, _response_budget) =
-                        operation_response_text(&state, &request, &result);
-                    if socket.send(Message::Text(text.into())).await.is_err() { break; }
+                    let operation_state = state.clone();
+                    let operation_outgoing = outgoing_tx.clone();
+                    operation_tasks.spawn(async move {
+                        let _in_flight = operation_permit;
+                        let result = match timeout(request_timeout, receiver).await {
+                            Ok(Ok(Ok(value))) => value,
+                            Ok(Ok(Err(error))) => operation_error_value(&request, error),
+                            _ => operation_error_value(&request, BrokerError::new(
+                                BrokerErrorCode::BrowserOperationTimeout,
+                                "broker operation did not complete before its deadline",
+                            )),
+                        };
+                        let (text, response_budget) =
+                            operation_response_text(&operation_state, &request, &result);
+                        let _ = operation_outgoing
+                            .send(ClientOutgoingMessage {
+                                message: Message::Text(text.into()),
+                                _budget: response_budget,
+                            })
+                            .await;
+                    });
+                }
+            }
+            outgoing = outgoing_rx.recv() => {
+                let Some(outgoing) = outgoing else { break };
+                if socket.send(outgoing.message).await.is_err() { break; }
+            }
+            completed = operation_tasks.join_next(), if !operation_tasks.is_empty() => {
+                if completed.is_none() {
+                    break;
                 }
             }
             publication = publications.recv(), if subscription.is_some() => {
@@ -1224,6 +1266,8 @@ async fn client_socket(
             }
         }
     }
+    operation_tasks.abort_all();
+    while operation_tasks.join_next().await.is_some() {}
 }
 
 async fn extension_socket(
@@ -2502,6 +2546,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_client_websocket_can_receive_cancel_while_operation_is_pending() {
+        let mut runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let (mut socket, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+        socket
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "request_id": "pending-1",
+                    "cmd": "get_page_snapshot",
+                    "target": {"extension_instance_id": "profile-a", "window_id": 2, "tab_id": 3}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let BrokerEvent::Operation {
+            request: pending_request,
+            reply: pending_reply,
+            ..
+        } = runtime.next_event().await.unwrap()
+        else {
+            panic!("expected the pending browser operation")
+        };
+
+        socket
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "request_id": "cancel-1",
+                    "caller_label": "caller-a",
+                    "project_root": "C:/project-a",
+                    "cmd": "cancel_browser_request",
+                    "cancel_request_id": pending_request.request_id.clone()
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let BrokerEvent::Operation {
+            request: cancel_request,
+            reply: cancel_reply,
+            ..
+        } = tokio::time::timeout(Duration::from_millis(250), runtime.next_event())
+            .await
+            .expect("same WebSocket stopped reading the cancellation")
+            .unwrap()
+        else {
+            panic!("expected the cancellation operation")
+        };
+        assert_eq!(cancel_request.operation, "cancel_browser_request");
+
+        cancel_reply
+            .send(Ok(serde_json::json!({
+                "type": "response",
+                "request_id": "cancel-1",
+                "operation": "cancel_browser_request",
+                "ok": true,
+                "cancelled": true,
+                "cancel_request_id": "pending-1"
+            })))
+            .unwrap();
+        pending_reply
+            .send(Err(BrokerError::new(
+                BrokerErrorCode::BrowserOperationCancelled,
+                "browser operation was explicitly cancelled",
+            )))
+            .unwrap();
+
+        let first = read_json(&mut socket).await;
+        let second = read_json(&mut socket).await;
+        let responses = [first, second];
+        let cancelled = responses
+            .iter()
+            .find(|response| response["request_id"] == "cancel-1")
+            .unwrap();
+        let pending = responses
+            .iter()
+            .find(|response| response["request_id"] == "pending-1")
+            .unwrap();
+        assert_eq!(cancelled["cancelled"], true);
+        assert_eq!(pending["code"], "browser_operation_cancelled");
+        socket.close(None).await.unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn direct_response_budget_exhaustion_returns_resource_error() {
         let mut runtime = BrokerRuntime::start(test_config()).await.unwrap();
         let (mut socket, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
@@ -2610,6 +2742,51 @@ mod tests {
         assert!(reply.send(Ok(serde_json::json!({"ok": true}))).is_err());
         assert_eq!(request.request_id, "deadline-1");
         socket.close(None).await.unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn full_profile_outbound_queue_returns_without_blocking_state_transport() {
+        let runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let (sender, _receiver) = mpsc::channel(EXTENSION_OUTBOUND_QUEUE_CAPACITY);
+        let (other_sender, mut other_receiver) = mpsc::channel(EXTENSION_OUTBOUND_QUEUE_CAPACITY);
+        runtime.state.streams.write().await.extend([
+            ("profile-a".into(), (1, sender)),
+            ("profile-b".into(), (1, other_sender)),
+        ]);
+
+        for index in 0..EXTENSION_OUTBOUND_QUEUE_CAPACITY {
+            runtime
+                .send_extension_command(
+                    "profile-a",
+                    serde_json::json!({"request_id": format!("queued-{index}"), "cmd": "get_page_snapshot"}),
+                )
+                .await
+                .unwrap();
+        }
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            runtime.send_extension_command(
+                "profile-a",
+                serde_json::json!({"request_id": "overflow", "cmd": "get_page_snapshot"}),
+            ),
+        )
+        .await
+        .expect("a full Profile queue blocked the broker event loop")
+        .unwrap_err();
+        assert_eq!(result.code, BrokerErrorCode::BrowserResourceLimit);
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            runtime.send_extension_command(
+                "profile-b",
+                serde_json::json!({"request_id": "profile-b-command", "cmd": "heartbeat"}),
+            ),
+        )
+        .await
+        .expect("Profile B command was blocked by Profile A")
+        .unwrap();
+        assert!(other_receiver.try_recv().is_ok());
         runtime.shutdown().await;
     }
 

@@ -145,7 +145,7 @@ test("capture activity and unacknowledged events keep socket reconnect enabled",
   assert.match(background, /function streamSocketNeeded/);
   assert.match(background, /networkCapturesByTab\.size > 0/);
   assert.match(background, /state\.queue\.length > 0/);
-  assert.match(background, /if \(streamSocketNeeded\(\) && cachedProjectRoot\)/);
+  assert.match(background, /if \(streamSocketNeeded\(\) && brokerConnectionReady\(\)\)/);
   assert.match(background, /state\.sent_through_seq = state\.acked_seq/);
 });
 

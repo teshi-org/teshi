@@ -14,6 +14,7 @@ import re
 import secrets
 import socket
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -602,10 +603,42 @@ def write_cdp_endpoint_file(
             payload["broker_start_id"] = broker_start_id
     if extension_frame_ws_url:
         payload["extension_frame_ws_url"] = extension_frame_ws_url
-    (teshi_dir / "cdp-endpoint.json").write_text(
-        json.dumps(payload, indent=2),
-        encoding="utf-8",
-    )
+    endpoint_path = teshi_dir / "cdp-endpoint.json"
+    temporary_path: str | None = None
+    try:
+        # CLI commands read this file concurrently with heartbeat/response
+        # handlers.  Replacing a complete same-directory file prevents a
+        # reader from observing the empty/truncated state of write_text().
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=teshi_dir,
+            prefix=".cdp-endpoint-",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary_path = stream.name
+            json.dump(payload, stream, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        for attempt in range(50):
+            try:
+                os.replace(temporary_path, endpoint_path)
+                break
+            except PermissionError:
+                if attempt == 49:
+                    raise
+                # Windows readers may briefly hold the previous endpoint open
+                # without sharing delete. Keep the old complete file visible
+                # and retry the atomic replacement instead of truncating it.
+                time.sleep(0.005)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            try:
+                Path(temporary_path).unlink()
+            except OSError:
+                pass
 
 
 def parse_tsh1_frame(data: bytes) -> tuple[dict[str, Any], bytes] | None:
