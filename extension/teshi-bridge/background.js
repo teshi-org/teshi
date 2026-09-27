@@ -113,6 +113,7 @@ const debuggerAttachmentPromises = new Map();
 let cachedProjectRoot = "";
 let cachedBrokerProjectNeutral = false;
 let cachedBrokerToken = "";
+let cachedBrokerStartId = "";
 let extensionFrameWsUrl = "";
 let heartbeatRunning = false;
 /** @type {Promise<void> | null} */
@@ -139,9 +140,8 @@ let streamSessionTabId = null;
 let streamSeq = 0;
 let lastScreencastPublishAt = 0;
 let screencastListenerRegistered = false;
-/** Tab IDs with broker-owned bounded console capture enabled. */
-const consoleCaptureTabIds = new Set();
-/** @type {Map<number, object>} Active capture state keyed by tab ID. */
+/** @type {Map<number, {capture_id: string, window_id: number}>} Active capture state keyed by tab ID. */
+const consoleCaptureTabIds = new Map();
 const networkCapturesByTab = new Map();
 /** @type {Map<string, object>} Active or unacknowledged capture delivery state. */
 const networkDeliveryStates = new Map();
@@ -413,6 +413,21 @@ function applyBridgeDiscovery(info) {
     clearBrokerCache();
     return false;
   }
+  const nextBrokerStartId = String(info.broker_start_id || "").trim();
+  if (cachedBrokerStartId && nextBrokerStartId && cachedBrokerStartId !== nextBrokerStartId) {
+    for (const [tabId, capture] of consoleCaptureTabIds.entries()) {
+      consoleCaptureTabIds.delete(tabId);
+      void reportConsoleTermination(
+        capture,
+        { window_id: capture.window_id, tab_id: tabId },
+        "broker_restart",
+      );
+      void releaseDebuggerRole(tabId, "console");
+    }
+  }
+  if (nextBrokerStartId) {
+    cachedBrokerStartId = nextBrokerStartId;
+  }
   cachedProjectRoot = projectNeutral ? "" : projectRoot;
   cachedBrokerProjectNeutral = projectNeutral;
   extensionFrameWsUrl = String(info.extension_frame_ws_url || "");
@@ -440,6 +455,9 @@ function streamSocketNeeded() {
     return true;
   }
   if (networkCapturesByTab.size > 0) {
+    return true;
+  }
+  if (consoleCaptureTabIds.size > 0) {
     return true;
   }
   return Array.from(networkDeliveryStates.values()).some(
@@ -528,7 +546,11 @@ async function connectStreamWebSocket() {
               return;
             }
             const reply = await handleCmd(ack.command);
-            if (isCurrentStreamWebSocket(ws, connectionEpoch) && ws.readyState === WebSocket.OPEN) {
+            if (
+              !ack.command.suppress_response
+              && isCurrentStreamWebSocket(ws, connectionEpoch)
+              && ws.readyState === WebSocket.OPEN
+            ) {
               ws.send(JSON.stringify(reply));
             }
           })();
@@ -546,6 +568,7 @@ async function connectStreamWebSocket() {
       }
       streamWs = null;
       lastStreamGeneration = null;
+      terminateConsoleCaptures("stream_disconnected");
       settle(false);
       if (streamSocketNeeded() && brokerConnectionReady()) {
         const reconnectDelay = streamWsReconnectDelay;
@@ -686,7 +709,8 @@ function remoteObjectText(value) {
 
 async function publishConsoleEvent(tabId, method, params) {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (!tab || !consoleCaptureTabIds.has(tabId)) return;
+  const capture = consoleCaptureTabIds.get(tabId);
+  if (!tab || !capture) return;
   const identity = await getExtensionIdentity();
   const entry = method === "Log.entryAdded" ? (params?.entry || {}) : null;
   const stackFrame = params?.stackTrace?.callFrames?.[0];
@@ -716,6 +740,8 @@ async function publishConsoleEvent(tabId, method, params) {
         window_id: tab.windowId,
         tab_id: tabId,
       },
+      capture_id: capture.capture_id,
+      stream_generation: lastStreamGeneration,
       event,
     });
   } catch {
@@ -723,19 +749,94 @@ async function publishConsoleEvent(tabId, method, params) {
   }
 }
 
-async function startConsoleCapture(target = null) {
+async function startConsoleCapture(target = null, captureId = null) {
+  const normalizedCaptureId = String(captureId || "").trim();
+  if (!normalizedCaptureId) {
+    throw new Error("console capture_id is required");
+  }
   ensureScreencastDebuggerListener();
   const tab = await resolveCommandTab(target);
   await acquireDebuggerRole(tab, "console", ["Runtime", "Log"]);
-  consoleCaptureTabIds.add(tab.id);
-  return { ok: true, active: true, tab_id: tab.id };
+  consoleCaptureTabIds.set(tab.id, {
+    capture_id: normalizedCaptureId,
+    window_id: tab.windowId,
+  });
+  if (streamSocketNeeded() && brokerConnectionReady()) {
+    void connectStreamWebSocket();
+  }
+  return {
+    ok: true,
+    active: true,
+    tab_id: tab.id,
+    capture_id: normalizedCaptureId,
+    stream_generation: lastStreamGeneration,
+  };
 }
 
-async function stopConsoleCapture(target = null) {
+async function stopConsoleCapture(target = null, captureId = null) {
   const tab = await resolveCommandTab(target);
+  const current = consoleCaptureTabIds.get(tab.id);
+  const normalizedCaptureId = String(captureId || "").trim();
+  if (current && current.capture_id !== normalizedCaptureId) {
+    return {
+      ok: false,
+      active: true,
+      tab_id: tab.id,
+      capture_id: current.capture_id,
+      code: "console_capture_id_mismatch",
+      error: "console capture_id does not match the active target capture",
+    };
+  }
   consoleCaptureTabIds.delete(tab.id);
   await releaseDebuggerRole(tab.id, "console");
-  return { ok: true, active: false, tab_id: tab.id };
+  return {
+    ok: true,
+    active: false,
+    tab_id: tab.id,
+    capture_id: current?.capture_id || normalizedCaptureId || null,
+  };
+}
+
+async function reportConsoleTermination(capture, target, reason, detail = "") {
+  if (!capture || !target) return;
+  const identity = await getExtensionIdentity();
+  const safeTarget = {
+    ...target,
+    extension_instance_id: target.extension_instance_id || identity.extension_instance_id,
+    window_id: target.window_id || capture.window_id,
+    tab_id: target.tab_id || 0,
+  };
+  const payload = {
+    type: "console_capture_terminated",
+    extension_instance_id: identity.extension_instance_id,
+    target: safeTarget,
+    capture_id: capture.capture_id,
+    stream_generation: lastStreamGeneration,
+    reason,
+    detail: String(detail || "").slice(0, 256),
+  };
+  try {
+    await bridgePost(RESPONSE_URL, payload);
+  } catch {
+    // The Rust broker will also expire the capture when the Profile heartbeat
+    // becomes stale; termination reporting is best effort during teardown.
+  }
+}
+
+function terminateConsoleCaptures(reason, detail = "") {
+  for (const [tabId, capture] of consoleCaptureTabIds.entries()) {
+    if (consoleCaptureTabIds.get(tabId) !== capture) {
+      continue;
+    }
+    consoleCaptureTabIds.delete(tabId);
+    void reportConsoleTermination(
+      capture,
+      { window_id: capture.window_id, tab_id: tabId },
+      reason,
+      detail,
+    );
+    void releaseDebuggerRole(tabId, "console");
+  }
 }
 
 function normalizeAllowedHostnames(values) {
@@ -2943,9 +3044,11 @@ async function executeCmd(msg) {
         target,
       );
     } else if (cmd === "start_console_capture") {
-      body = await startConsoleCapture(target);
+      body = await startConsoleCapture(target, msg.capture_id);
     } else if (cmd === "stop_console_capture") {
-      body = await stopConsoleCapture(target);
+      body = await stopConsoleCapture(target, msg.capture_id);
+    } else if (cmd === "__teshi_stop_console_capture") {
+      body = await stopConsoleCapture(target, msg.capture_id);
     } else if (cmd === "start_network_capture") {
       body = await startNetworkCapture(
         target,
@@ -3160,10 +3263,12 @@ async function performHeartbeatOnce(options = {}) {
 
   if (data.cmd) {
     const reply = await handleCmd(data.cmd);
-    try {
-      await bridgePost(RESPONSE_URL, reply);
-    } catch {
-      // Best-effort.
+    if (!data.cmd.suppress_response) {
+      try {
+        await bridgePost(RESPONSE_URL, reply);
+      } catch {
+        // Best-effort.
+      }
     }
   }
   if (data.stream_restart || data.force_capture || options.forceStream) {
@@ -3303,7 +3408,15 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  const consoleCapture = consoleCaptureTabIds.get(tabId);
   consoleCaptureTabIds.delete(tabId);
+  if (consoleCapture) {
+    void reportConsoleTermination(
+      consoleCapture,
+      { window_id: consoleCapture.window_id, tab_id: tabId },
+      "target_closed",
+    );
+  }
   const networkState = networkCapturesByTab.get(tabId);
   if (networkState) {
     networkCapturesByTab.delete(tabId);
@@ -3316,12 +3429,21 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 chrome.debugger.onDetach.addListener((source, reason) => {
+  const consoleCapture = consoleCaptureTabIds.get(source.tabId);
+  consoleCaptureTabIds.delete(source.tabId);
+  if (consoleCapture) {
+    void reportConsoleTermination(
+      consoleCapture,
+      { window_id: consoleCapture.window_id, tab_id: source.tabId },
+      "debugger_detached",
+      reason,
+    );
+  }
   const session = debuggerSessions.get(source.tabId);
   if (!session) {
     return;
   }
   debuggerSessions.delete(source.tabId);
-  consoleCaptureTabIds.delete(source.tabId);
   const networkState = networkCapturesByTab.get(source.tabId);
   if (networkState) {
     networkCapturesByTab.delete(source.tabId);

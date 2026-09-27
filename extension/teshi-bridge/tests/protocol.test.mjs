@@ -107,9 +107,18 @@ test("console capture uses target-scoped CDP events and bounded broker transport
   assert.match(background, /Runtime\.consoleAPICalled/);
   assert.match(background, /Log\.entryAdded/);
   assert.match(background, /type: "console_event"/);
+  assert.match(background, /capture_id: capture\.capture_id/);
+  assert.match(background, /stream_generation: lastStreamGeneration/);
+  assert.match(background, /type: "console_capture_terminated"/);
+  assert.match(background, /"target_closed"/);
+  assert.match(background, /"broker_restart"/);
+  assert.match(background, /console_capture_id_mismatch/);
   assert.match(background, /consoleCaptureTabIds\.has\(source\.tabId\)/);
   assert.match(background, /cmd === "start_console_capture"/);
   assert.match(background, /cmd === "stop_console_capture"/);
+  assert.match(background, /cmd === "__teshi_stop_console_capture"/);
+  assert.match(background, /terminateConsoleCaptures\("stream_disconnected"/);
+  assert.match(background, /suppress_response/);
 });
 
 test("network capture uses filtered acknowledged WebSocket batches", () => {

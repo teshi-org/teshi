@@ -5,15 +5,17 @@
 //! binds a response to the request context, validates the actual payload, and
 //! publishes a broker-generated artifact without replacing an existing file.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use url::Url;
 use uuid::Uuid;
 
 use crate::protocol::{BrokerError, BrokerErrorCode, BrowserTarget, ExtensionResponse};
@@ -35,27 +37,94 @@ pub const MAX_ARTIFACT_FILENAME_BYTES: usize = 240;
 
 const MANAGED_ARTIFACT_COMPONENTS: [&str; 3] = [".teshi", "artifacts", "browser"];
 
-/// Configuration shape reserved for the later Console capture stage.
-///
-/// Defining the DTO here keeps the single evidence ownership boundary without
-/// advertising or implementing the 5.3 capture capability in this stage.
+/// Default Console retention age, matching the Python broker during migration.
+pub const DEFAULT_CONSOLE_MAX_AGE_MS: u64 = 300_000;
+/// Default Console entry bound, matching the Python broker during migration.
+pub const DEFAULT_CONSOLE_MAX_ENTRIES: usize = 500;
+/// Default Console byte bound, matching the Python broker during migration.
+pub const DEFAULT_CONSOLE_MAX_BYTES: usize = 1_048_576;
+pub const MAX_CONSOLE_MAX_AGE_MS: u64 = 3_600_000;
+pub const MAX_CONSOLE_MAX_ENTRIES: usize = 5_000;
+pub const MAX_CONSOLE_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// A single event is bounded independently of the aggregate capture budget.
+pub const MAX_CONSOLE_EVENT_BYTES: usize = 64 * 1024;
+pub const MAX_CONSOLE_EVENT_TEXT_BYTES: usize = 16 * 1024;
+pub const MAX_CONSOLE_EVENT_SOURCE_BYTES: usize = 120;
+pub const MAX_CONSOLE_EVENT_URL_BYTES: usize = 4 * 1024;
+pub const MAX_CONSOLE_CAPTURE_DIAGNOSTICS: usize = 64;
+pub const MAX_ACTIVE_CONSOLE_CAPTURES: usize = 128;
+
+const KNOWN_CONSOLE_LEVELS: [&str; 5] = ["debug", "log", "info", "warn", "error"];
+const MAX_CONSOLE_LEVEL_FILTERS: usize = KNOWN_CONSOLE_LEVELS.len();
+const MAX_CONSOLE_LEVEL_BYTES: usize = 32;
+const MAX_CONSOLE_RAW_TEXT_BYTES: usize = MAX_CONSOLE_EVENT_TEXT_BYTES * 8;
+const MAX_CONSOLE_RAW_URL_BYTES: usize = MAX_CONSOLE_EVENT_URL_BYTES * 2;
+const DEFAULT_SENSITIVE_CONSOLE_FIELDS: [&str; 12] = [
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "proxy-authorization",
+    "x-api-key",
+    "api-key",
+    "token",
+    "access-token",
+    "refresh-token",
+    "password",
+    "passwd",
+    "secret",
+];
+const REDACTION_MARKER: &str = "[REDACTED]";
+
+/// Bounded target-scoped Console retention configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsoleCaptureConfig {
-    #[serde(default = "default_capture_age_ms")]
+    #[serde(default = "default_console_capture_age_ms")]
     pub max_age_ms: u64,
-    #[serde(default = "default_capture_entries")]
+    #[serde(default = "default_console_capture_entries")]
     pub max_entries: usize,
-    #[serde(default = "default_capture_bytes")]
+    #[serde(default = "default_console_capture_bytes")]
     pub max_bytes: usize,
 }
 
 impl Default for ConsoleCaptureConfig {
     fn default() -> Self {
         Self {
-            max_age_ms: default_capture_age_ms(),
-            max_entries: default_capture_entries(),
-            max_bytes: default_capture_bytes(),
+            max_age_ms: default_console_capture_age_ms(),
+            max_entries: default_console_capture_entries(),
+            max_bytes: default_console_capture_bytes(),
         }
+    }
+}
+
+impl ConsoleCaptureConfig {
+    fn from_values(
+        max_age_ms: Option<&Value>,
+        max_entries: Option<&Value>,
+        max_bytes: Option<&Value>,
+    ) -> Result<Self, BrokerError> {
+        Ok(Self {
+            max_age_ms: bounded_u64(
+                max_age_ms,
+                DEFAULT_CONSOLE_MAX_AGE_MS,
+                1_000,
+                MAX_CONSOLE_MAX_AGE_MS,
+                "max_age_ms",
+            )?,
+            max_entries: bounded_usize(
+                max_entries,
+                DEFAULT_CONSOLE_MAX_ENTRIES,
+                1,
+                MAX_CONSOLE_MAX_ENTRIES,
+                "max_entries",
+            )?,
+            max_bytes: bounded_usize(
+                max_bytes,
+                DEFAULT_CONSOLE_MAX_BYTES,
+                1_024,
+                MAX_CONSOLE_MAX_BYTES,
+                "max_bytes",
+            )?,
+        })
     }
 }
 
@@ -64,34 +133,46 @@ impl Default for ConsoleCaptureConfig {
 /// The network store and acknowledgement protocol remain outside 5.2.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkCaptureConfig {
-    #[serde(default = "default_capture_age_ms")]
+    #[serde(default = "default_network_capture_age_ms")]
     pub max_age_ms: u64,
-    #[serde(default = "default_capture_entries")]
+    #[serde(default = "default_network_capture_entries")]
     pub max_entries: usize,
-    #[serde(default = "default_capture_bytes")]
+    #[serde(default = "default_network_capture_bytes")]
     pub max_bytes: usize,
 }
 
 impl Default for NetworkCaptureConfig {
     fn default() -> Self {
         Self {
-            max_age_ms: default_capture_age_ms(),
-            max_entries: default_capture_entries(),
-            max_bytes: default_capture_bytes(),
+            max_age_ms: default_network_capture_age_ms(),
+            max_entries: default_network_capture_entries(),
+            max_bytes: default_network_capture_bytes(),
         }
     }
 }
 
-const fn default_capture_age_ms() -> u64 {
+const fn default_network_capture_age_ms() -> u64 {
     300_000
 }
 
-const fn default_capture_entries() -> usize {
+const fn default_network_capture_entries() -> usize {
     1_000
 }
 
-const fn default_capture_bytes() -> usize {
+const fn default_network_capture_bytes() -> usize {
     8 * 1024 * 1024
+}
+
+const fn default_console_capture_age_ms() -> u64 {
+    DEFAULT_CONSOLE_MAX_AGE_MS
+}
+
+const fn default_console_capture_entries() -> usize {
+    DEFAULT_CONSOLE_MAX_ENTRIES
+}
+
+const fn default_console_capture_bytes() -> usize {
+    DEFAULT_CONSOLE_MAX_BYTES
 }
 
 /// Actual dimensions parsed from the image payload, never copied from JSON
@@ -179,17 +260,564 @@ struct ManagedRecord {
     content_digest: [u8; 32],
 }
 
+/// Handle returned to the broker state owner for one pending Console start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsoleCaptureHandle {
+    pub capture_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct ConsoleEventRecord {
+    value: Value,
+    received_at: Instant,
+    byte_size: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ConsoleCaptureRecord {
+    capture_id: String,
+    target: BrowserTarget,
+    project_root: String,
+    caller_label: String,
+    broker_start_id: String,
+    stream_generation: Option<u64>,
+    config: ConsoleCaptureConfig,
+    levels: BTreeSet<String>,
+    sensitive_fields: BTreeSet<String>,
+    events: VecDeque<ConsoleEventRecord>,
+    retained_bytes: usize,
+    evicted_age: u64,
+    evicted_entries: u64,
+    evicted_bytes: u64,
+    rejected_events: u64,
+    filtered_events: u64,
+    truncated_events: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PendingConsoleCapture {
+    request_id: String,
+    capture_id: String,
+    target: BrowserTarget,
+    project_root: String,
+    caller_label: String,
+    broker_start_id: String,
+    stream_generation: Option<u64>,
+    config: ConsoleCaptureConfig,
+    levels: BTreeSet<String>,
+    sensitive_fields: BTreeSet<String>,
+}
+
 /// Single-owner evidence state.  `BrokerState` owns one instance and calls it
 /// synchronously from the same event loop that owns requests and leases.
 #[derive(Debug, Default)]
 pub struct EvidenceStore {
     prepared: HashMap<String, PreparedRecord>,
     managed: HashMap<PathBuf, ManagedRecord>,
+    console_captures: HashMap<BrowserTarget, ConsoleCaptureRecord>,
+    pending_console_captures: HashMap<String, PendingConsoleCapture>,
+    terminated_console_captures: VecDeque<Value>,
 }
 
 impl EvidenceStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Validate and reserve a Console capture without replacing the currently
+    /// active capture.  The replacement happens only after the extension has
+    /// acknowledged the same capture ID, which makes start failure atomic.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_console_capture(
+        &mut self,
+        request_id: &str,
+        broker_start_id: &str,
+        project_root: &str,
+        caller_label: &str,
+        target: &BrowserTarget,
+        stream_generation: Option<u64>,
+        levels: Option<&Value>,
+        max_age_ms: Option<&Value>,
+        max_entries: Option<&Value>,
+        max_bytes: Option<&Value>,
+        sensitive_fields: Option<&Value>,
+    ) -> Result<ConsoleCaptureHandle, BrokerError> {
+        validate_console_scope(
+            request_id,
+            broker_start_id,
+            project_root,
+            caller_label,
+            target,
+        )?;
+        if self.pending_console_captures.contains_key(request_id) {
+            return Err(BrokerError::new(
+                BrokerErrorCode::DuplicateBrowserMutation,
+                "console capture request_id is already reserved",
+            ));
+        }
+        if self.pending_console_captures.len() >= MAX_PREPARED_ARTIFACTS {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "broker has too many pending console captures",
+            ));
+        }
+        if !self.console_captures.contains_key(target)
+            && self
+                .console_captures
+                .len()
+                .saturating_add(self.pending_console_captures.len())
+                >= MAX_ACTIVE_CONSOLE_CAPTURES
+        {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "broker has too many active console captures",
+            ));
+        }
+        let config = ConsoleCaptureConfig::from_values(max_age_ms, max_entries, max_bytes)?;
+        let levels = normalize_console_levels(levels)?;
+        let sensitive_fields = normalize_sensitive_fields(sensitive_fields)?;
+        let capture_id = format!("console_{}", Uuid::new_v4().simple());
+        self.pending_console_captures.insert(
+            request_id.to_owned(),
+            PendingConsoleCapture {
+                request_id: request_id.to_owned(),
+                capture_id: capture_id.clone(),
+                target: target.clone(),
+                project_root: project_root.to_owned(),
+                caller_label: caller_label.to_owned(),
+                broker_start_id: broker_start_id.to_owned(),
+                stream_generation,
+                config,
+                levels,
+                sensitive_fields,
+            },
+        );
+        Ok(ConsoleCaptureHandle { capture_id })
+    }
+
+    /// Commit a prepared Console start after the extension echoed the capture
+    /// ID.  A v1 extension that does not echo the additive field fails closed,
+    /// because accepting ID-less events would allow an old capture to bleed
+    /// into a replacement capture.
+    pub fn commit_console_capture(
+        &mut self,
+        request_id: &str,
+        broker_start_id: &str,
+        project_root: &str,
+        caller_label: &str,
+        target: &BrowserTarget,
+        response: &ExtensionResponse,
+    ) -> Result<Value, BrokerError> {
+        let Some(pending) = self.pending_console_captures.remove(request_id) else {
+            return Err(BrokerError::new(
+                BrokerErrorCode::MismatchedBrowserResponse,
+                "console capture response has no prepared request",
+            ));
+        };
+        if pending.request_id != request_id
+            || pending.broker_start_id != broker_start_id
+            || pending.project_root != project_root
+            || pending.caller_label != caller_label
+            || pending.target != *target
+            || !response.ok
+        {
+            return Err(BrokerError::new(
+                BrokerErrorCode::MismatchedBrowserResponse,
+                "console capture response does not match its prepared request",
+            ));
+        }
+        let returned_capture_id = response
+            .result
+            .get("capture_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if returned_capture_id != Some(pending.capture_id.as_str()) {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserCapabilityUnavailable,
+                "extension must echo capture_id for target-scoped console capture",
+            ));
+        }
+        if response.result.get("active").and_then(Value::as_bool) == Some(false) {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserOperationFailed,
+                "extension did not activate console capture",
+            ));
+        }
+        let record = ConsoleCaptureRecord {
+            capture_id: pending.capture_id,
+            target: pending.target,
+            project_root: pending.project_root,
+            caller_label: pending.caller_label,
+            broker_start_id: pending.broker_start_id,
+            stream_generation: pending.stream_generation,
+            config: pending.config,
+            levels: pending.levels,
+            sensitive_fields: pending.sensitive_fields,
+            events: VecDeque::new(),
+            retained_bytes: 0,
+            evicted_age: 0,
+            evicted_entries: 0,
+            evicted_bytes: 0,
+            rejected_events: 0,
+            filtered_events: 0,
+            truncated_events: 0,
+        };
+        if let Some(previous) = self.console_captures.remove(target) {
+            self.record_console_termination(&previous, "capture_replaced", None);
+        }
+        let summary = console_capture_summary(&record, true, None);
+        self.console_captures.insert(target.clone(), record);
+        Ok(summary)
+    }
+
+    pub fn abort_console_capture(&mut self, request_id: &str) {
+        self.pending_console_captures.remove(request_id);
+    }
+
+    pub fn console_capture_id(&self, target: &BrowserTarget) -> Option<String> {
+        self.console_captures
+            .get(target)
+            .map(|capture| capture.capture_id.clone())
+    }
+
+    pub fn console_capture_scope_matches(
+        &self,
+        target: &BrowserTarget,
+        broker_start_id: &str,
+        project_root: &str,
+        caller_label: &str,
+    ) -> bool {
+        self.console_captures.get(target).is_some_and(|capture| {
+            capture.broker_start_id == broker_start_id
+                && capture.project_root == project_root
+                && capture.caller_label == caller_label
+        })
+    }
+
+    /// Move active captures to the current extension stream generation. Events
+    /// carrying the previous generation remain rejectable after reconnect.
+    pub fn update_console_stream_generation(
+        &mut self,
+        extension_instance_id: &str,
+        generation: u64,
+    ) {
+        for capture in self.console_captures.values_mut() {
+            if capture.target.extension_instance_id == extension_instance_id {
+                capture.stream_generation = Some(generation);
+            }
+        }
+        for capture in self.pending_console_captures.values_mut() {
+            if capture.target.extension_instance_id == extension_instance_id {
+                capture.stream_generation = Some(generation);
+            }
+        }
+    }
+
+    /// Retain a sanitized Console event only when its complete target,
+    /// capture ID, and current extension stream generation all match.
+    pub fn record_console_event(
+        &mut self,
+        extension_instance_id: &str,
+        target: &BrowserTarget,
+        capture_id: Option<&str>,
+        stream_generation: Option<u64>,
+        raw_event: Option<&Value>,
+    ) -> bool {
+        if target.extension_instance_id != extension_instance_id {
+            return false;
+        }
+        let Some(capture) = self.console_captures.get_mut(target) else {
+            return false;
+        };
+        if capture.capture_id != capture_id.unwrap_or_default()
+            || capture.stream_generation != stream_generation
+        {
+            capture.rejected_events = capture.rejected_events.saturating_add(1);
+            return false;
+        }
+        let Some((mut value, mut truncated)) =
+            sanitize_console_event(raw_event, &capture.sensitive_fields)
+        else {
+            capture.rejected_events = capture.rejected_events.saturating_add(1);
+            return false;
+        };
+        let level = value.get("level").and_then(Value::as_str).unwrap_or("log");
+        if !capture.levels.contains(level) {
+            capture.filtered_events = capture.filtered_events.saturating_add(1);
+            return false;
+        }
+        let (byte_size, fit_truncated) = fit_console_event(
+            &mut value,
+            capture.config.max_bytes.min(MAX_CONSOLE_EVENT_BYTES),
+        );
+        truncated |= fit_truncated;
+        if byte_size == 0 {
+            capture.rejected_events = capture.rejected_events.saturating_add(1);
+            return false;
+        }
+        if truncated {
+            capture.truncated_events = capture.truncated_events.saturating_add(1);
+        }
+        let now = Instant::now();
+        evict_console_events(capture, now);
+        capture.events.push_back(ConsoleEventRecord {
+            value,
+            received_at: now,
+            byte_size,
+        });
+        capture.retained_bytes = capture.retained_bytes.saturating_add(byte_size);
+        evict_console_events(capture, now);
+        true
+    }
+
+    pub fn list_console_events(
+        &mut self,
+        target: &BrowserTarget,
+        levels: Option<&Value>,
+        max_age_ms: Option<&Value>,
+        max_entries: Option<&Value>,
+        max_bytes: Option<&Value>,
+    ) -> Result<Value, BrokerError> {
+        let capture = self.console_captures.get_mut(target).ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "console capture is not active for the selected target",
+            )
+        })?;
+        let now = Instant::now();
+        evict_console_events(capture, now);
+        let selected_levels = levels
+            .map(|value| normalize_console_levels(Some(value)))
+            .transpose()?
+            .unwrap_or_else(|| capture.levels.clone());
+        if !selected_levels.is_subset(&capture.levels) {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "console list level filter cannot widen the active capture",
+            ));
+        }
+        let age_limit = bounded_u64(
+            max_age_ms,
+            capture.config.max_age_ms,
+            0,
+            capture.config.max_age_ms,
+            "max_age_ms",
+        )?;
+        let entry_limit = bounded_usize(
+            max_entries,
+            capture.config.max_entries,
+            1,
+            capture.config.max_entries,
+            "max_entries",
+        )?;
+        let byte_limit = bounded_usize(
+            max_bytes,
+            capture.config.max_bytes,
+            1,
+            capture.config.max_bytes,
+            "max_bytes",
+        )?;
+        let mut selected = Vec::new();
+        let mut selected_bytes = 0usize;
+        for event in capture.events.iter().rev() {
+            if now.saturating_duration_since(event.received_at).as_millis() > u128::from(age_limit)
+                || !event
+                    .value
+                    .get("level")
+                    .and_then(Value::as_str)
+                    .is_some_and(|level| selected_levels.contains(level))
+            {
+                continue;
+            }
+            if selected.len() >= entry_limit
+                || selected_bytes.saturating_add(event.byte_size) > byte_limit
+            {
+                break;
+            }
+            selected.push(event.value.clone());
+            selected_bytes = selected_bytes.saturating_add(event.byte_size);
+        }
+        selected.reverse();
+        let mut summary = console_capture_summary(capture, true, None);
+        if let Value::Object(object) = &mut summary {
+            object.insert("events".into(), Value::Array(selected));
+            object.insert(
+                "returned_entries".into(),
+                Value::from(
+                    object
+                        .get("events")
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len),
+                ),
+            );
+            object.insert("returned_bytes".into(), Value::from(selected_bytes));
+        }
+        Ok(summary)
+    }
+
+    pub fn clear_console_capture(&mut self, target: &BrowserTarget) -> Result<Value, BrokerError> {
+        let capture = self.console_captures.get_mut(target).ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "console capture is not active for the selected target",
+            )
+        })?;
+        evict_console_events(capture, Instant::now());
+        let removed_entries = capture.events.len();
+        let removed_bytes = capture.retained_bytes;
+        capture.events.clear();
+        capture.retained_bytes = 0;
+        let mut summary = console_capture_summary(capture, true, None);
+        if let Value::Object(object) = &mut summary {
+            object.insert("removed_entries".into(), Value::from(removed_entries));
+            object.insert("removed_bytes".into(), Value::from(removed_bytes));
+        }
+        Ok(summary)
+    }
+
+    pub fn stop_console_capture(
+        &mut self,
+        target: &BrowserTarget,
+        reason: &str,
+        detail: Option<&str>,
+    ) -> Value {
+        let Some(capture) = self.console_captures.remove(target) else {
+            return json!({
+                "target": target,
+                "active": false,
+                "capture_id": Value::Null,
+                "removed_entries": 0,
+                "removed_bytes": 0,
+                "termination": {"reason": "already_stopped"},
+            });
+        };
+        let removed_entries = capture.events.len();
+        let removed_bytes = capture.retained_bytes;
+        let termination = self.record_console_termination(&capture, reason, detail);
+        json!({
+            "target": capture.target,
+            "active": false,
+            "capture_id": capture.capture_id,
+            "removed_entries": removed_entries,
+            "removed_bytes": removed_bytes,
+            "diagnostics": console_diagnostics(&capture),
+            "termination": termination,
+        })
+    }
+
+    pub fn terminate_console_target(
+        &mut self,
+        target: &BrowserTarget,
+        reason: &str,
+        detail: Option<&str>,
+    ) -> bool {
+        let Some(capture) = self.console_captures.remove(target) else {
+            return false;
+        };
+        self.record_console_termination(&capture, reason, detail);
+        true
+    }
+
+    pub fn terminate_console_session(
+        &mut self,
+        extension_instance_id: &str,
+        reason: &str,
+        detail: Option<&str>,
+    ) -> usize {
+        let targets = self
+            .console_captures
+            .keys()
+            .filter(|target| target.extension_instance_id == extension_instance_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let count = targets.len();
+        for target in targets {
+            self.terminate_console_target(&target, reason, detail);
+        }
+        count
+    }
+
+    pub fn console_capture_instance_ids(&self) -> Vec<String> {
+        self.console_captures
+            .keys()
+            .map(|target| target.extension_instance_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub fn console_capture_handles_for_session(
+        &self,
+        extension_instance_id: &str,
+    ) -> Vec<(BrowserTarget, String)> {
+        self.console_captures
+            .values()
+            .filter(|capture| capture.target.extension_instance_id == extension_instance_id)
+            .map(|capture| (capture.target.clone(), capture.capture_id.clone()))
+            .collect()
+    }
+
+    pub fn latest_console_termination(&self) -> Option<Value> {
+        self.terminated_console_captures.back().cloned()
+    }
+
+    fn record_console_termination(
+        &mut self,
+        capture: &ConsoleCaptureRecord,
+        reason: &str,
+        detail: Option<&str>,
+    ) -> Value {
+        let termination = termination_value_with_fields(reason, detail, &capture.sensitive_fields);
+        let mut summary = console_capture_summary(capture, false, Some(termination.clone()));
+        if let Value::Object(object) = &mut summary {
+            object.insert("retained_entries".into(), Value::from(0));
+            object.insert("retained_bytes".into(), Value::from(0));
+        }
+        self.terminated_console_captures.push_back(summary);
+        while self.terminated_console_captures.len() > MAX_CONSOLE_CAPTURE_DIAGNOSTICS {
+            self.terminated_console_captures.pop_front();
+        }
+        termination
+    }
+
+    pub fn record_console_termination_event(
+        &mut self,
+        extension_instance_id: &str,
+        target: &BrowserTarget,
+        capture_id: Option<&str>,
+        stream_generation: Option<u64>,
+        reason: &str,
+        detail: Option<&str>,
+    ) -> bool {
+        if target.extension_instance_id != extension_instance_id {
+            return false;
+        }
+        let Some(capture) = self.console_captures.get(target) else {
+            return false;
+        };
+        // A teardown notification can arrive over the authenticated HTTP
+        // path after the extension WebSocket has already closed, so it may
+        // legitimately carry no transport generation.  The capture ID and
+        // complete target remain mandatory; ordinary Console events below
+        // continue to require an exact generation.
+        if capture.capture_id != capture_id.unwrap_or_default()
+            || stream_generation
+                .is_some_and(|generation| capture.stream_generation != Some(generation))
+        {
+            return false;
+        }
+        self.terminate_console_target(target, reason, detail)
+    }
+
+    #[cfg(test)]
+    fn active_console_capture_count(&self) -> usize {
+        self.console_captures.len()
+    }
+
+    #[cfg(test)]
+    fn terminated_console_capture_count(&self) -> usize {
+        self.terminated_console_captures.len()
     }
 
     /// Reserve a broker-generated artifact name after the request's target and
@@ -532,6 +1160,585 @@ impl EvidenceStore {
     fn managed_count(&self) -> usize {
         self.managed.len()
     }
+}
+
+fn validate_console_scope(
+    request_id: &str,
+    broker_start_id: &str,
+    project_root: &str,
+    caller_label: &str,
+    target: &BrowserTarget,
+) -> Result<(), BrokerError> {
+    if request_id.trim().is_empty() || request_id.len() > 256 {
+        return Err(BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            "console capture request_id must contain 1 to 256 bytes",
+        ));
+    }
+    if broker_start_id.trim().is_empty() || broker_start_id.len() > 256 {
+        return Err(BrokerError::new(
+            BrokerErrorCode::MismatchedBrowserResponse,
+            "console capture broker generation is invalid",
+        ));
+    }
+    if project_root.trim().is_empty() || project_root.len() > 4096 {
+        return Err(BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            "console capture project scope is invalid",
+        ));
+    }
+    if caller_label.trim().is_empty() || caller_label.len() > 120 {
+        return Err(BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            "console capture caller scope is invalid",
+        ));
+    }
+    if target.extension_instance_id.trim().is_empty()
+        || target.extension_instance_id.len() > 128
+        || target.window_id <= 0
+        || target.tab_id <= 0
+    {
+        return Err(BrokerError::new(
+            BrokerErrorCode::MismatchedBrowserResponse,
+            "console capture target is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn bounded_u64(
+    value: Option<&Value>,
+    default: u64,
+    minimum: u64,
+    maximum: u64,
+    field_name: &str,
+) -> Result<u64, BrokerError> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    let parsed = value.as_u64().ok_or_else(|| {
+        BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            format!("{field_name} must be an integer between {minimum} and {maximum}"),
+        )
+    })?;
+    if parsed < minimum || parsed > maximum {
+        return Err(BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            format!("{field_name} must be between {minimum} and {maximum}"),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn bounded_usize(
+    value: Option<&Value>,
+    default: usize,
+    minimum: usize,
+    maximum: usize,
+    field_name: &str,
+) -> Result<usize, BrokerError> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    let parsed = value.as_u64().and_then(|value| usize::try_from(value).ok());
+    let Some(parsed) = parsed else {
+        return Err(BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            format!("{field_name} must be an integer between {minimum} and {maximum}"),
+        ));
+    };
+    if parsed < minimum || parsed > maximum {
+        return Err(BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            format!("{field_name} must be between {minimum} and {maximum}"),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn normalize_console_levels(value: Option<&Value>) -> Result<BTreeSet<String>, BrokerError> {
+    let Some(value) = value else {
+        return Ok(KNOWN_CONSOLE_LEVELS
+            .iter()
+            .map(|level| (*level).into())
+            .collect());
+    };
+    let Some(values) = value.as_array() else {
+        return Err(BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            "levels must be an array",
+        ));
+    };
+    if values.len() > MAX_CONSOLE_LEVEL_FILTERS {
+        return Err(BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            "levels must contain at most five entries",
+        ));
+    }
+    let levels = values
+        .iter()
+        .map(|item| {
+            let value = value_text(Some(item));
+            if value.len() > MAX_CONSOLE_LEVEL_BYTES {
+                return Err(BrokerError::new(
+                    BrokerErrorCode::InvalidBrowserOperation,
+                    "console level value is too long",
+                ));
+            }
+            Ok(value.to_ascii_lowercase())
+        })
+        .collect::<Result<BTreeSet<_>, BrokerError>>()?;
+    let unknown = levels
+        .iter()
+        .filter(|level| !KNOWN_CONSOLE_LEVELS.contains(&level.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        let mut error = BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            "unsupported console level filter",
+        );
+        error.recovery.insert(
+            "unsupported_levels".into(),
+            Value::Array(unknown.into_iter().map(Value::String).collect()),
+        );
+        error.recovery.insert(
+            "supported_levels".into(),
+            Value::Array(
+                KNOWN_CONSOLE_LEVELS
+                    .iter()
+                    .map(|level| Value::String((*level).into()))
+                    .collect(),
+            ),
+        );
+        return Err(error);
+    }
+    if levels.is_empty() {
+        return Err(BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            "levels must not be empty",
+        ));
+    }
+    Ok(levels)
+}
+
+fn normalize_sensitive_fields(value: Option<&Value>) -> Result<BTreeSet<String>, BrokerError> {
+    let mut fields = DEFAULT_SENSITIVE_CONSOLE_FIELDS
+        .iter()
+        .map(|field| (*field).into())
+        .collect::<BTreeSet<String>>();
+    let Some(value) = value else {
+        return Ok(fields);
+    };
+    let Some(values) = value.as_array() else {
+        return Err(BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            "sensitive_fields must be an array",
+        ));
+    };
+    for item in values.iter().take(128) {
+        let field = value_text(Some(item)).trim().to_ascii_lowercase();
+        if !field.is_empty() {
+            fields.insert(truncate_utf8(&field, 128));
+        }
+    }
+    Ok(fields)
+}
+
+fn value_text(value: Option<&Value>) -> String {
+    match value {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(value)) => value.clone(),
+        Some(value) => value.to_string(),
+    }
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
+fn is_sensitive_field(name: &str, fields: &BTreeSet<String>) -> bool {
+    let normalized = name.to_ascii_lowercase().replace('_', "-");
+    fields.contains(&normalized)
+        || ["token", "password", "passwd", "secret"]
+            .iter()
+            .any(|marker| normalized.contains(marker))
+}
+
+fn redact_field_values(value: &str, fields: &BTreeSet<String>) -> String {
+    let mut output = value.to_owned();
+    for field in fields {
+        if !is_sensitive_field(field, fields) {
+            continue;
+        }
+        let needle = field.to_ascii_lowercase();
+        if needle.is_empty() {
+            continue;
+        }
+        let mut search_from = 0usize;
+        loop {
+            let lower = output.to_ascii_lowercase();
+            let Some(relative) = lower[search_from..].find(&needle) else {
+                break;
+            };
+            let start = search_from + relative;
+            let before_ok = start == 0 || !lower.as_bytes()[start - 1].is_ascii_alphanumeric();
+            let field_end = start + needle.len();
+            if !before_ok {
+                search_from = field_end;
+                continue;
+            }
+            let mut value_start = field_end;
+            while value_start < output.len()
+                && matches!(output.as_bytes()[value_start], b'"' | b'\'' | b' ' | b'\t')
+            {
+                value_start += 1;
+            }
+            if value_start >= output.len() || !matches!(output.as_bytes()[value_start], b':' | b'=')
+            {
+                search_from = field_end;
+                continue;
+            }
+            value_start += 1;
+            while value_start < output.len()
+                && matches!(output.as_bytes()[value_start], b' ' | b'\t')
+            {
+                value_start += 1;
+            }
+            let quote = output
+                .as_bytes()
+                .get(value_start)
+                .copied()
+                .filter(|byte| matches!(byte, b'"' | b'\''));
+            if quote.is_some() {
+                value_start += 1;
+            }
+            let mut value_end = value_start;
+            while value_end < output.len() {
+                let byte = output.as_bytes()[value_end];
+                if quote == Some(byte) {
+                    break;
+                }
+                if quote.is_none() && matches!(byte, b',' | b';' | b'\n' | b'\r' | b'}' | b']') {
+                    break;
+                }
+                if byte == b'\\'
+                    && quote.is_some()
+                    && output
+                        .as_bytes()
+                        .get(value_end + 1)
+                        .is_some_and(|next| *next == quote.unwrap())
+                {
+                    value_end = value_end.saturating_add(2);
+                    continue;
+                }
+                value_end += 1;
+            }
+            if value_end > value_start {
+                output.replace_range(value_start..value_end, REDACTION_MARKER);
+                search_from = value_start + REDACTION_MARKER.len();
+            } else {
+                search_from = field_end;
+            }
+        }
+    }
+    output
+}
+
+fn redact_console_url(value: &str, fields: &BTreeSet<String>) -> String {
+    let Ok(mut url) = Url::parse(value) else {
+        return REDACTION_MARKER.to_owned();
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return REDACTION_MARKER.to_owned();
+    }
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    redact_field_values(url.as_ref(), fields)
+}
+
+fn redact_urls_in_text(value: &str, fields: &BTreeSet<String>) -> String {
+    let mut output = redact_field_values(value, fields);
+    let mut search_from = 0usize;
+    loop {
+        let lower = output.to_ascii_lowercase();
+        let remaining = &lower[search_from..];
+        let http = remaining.find("http://");
+        let https = remaining.find("https://");
+        let Some(start) = (match (http, https) {
+            (Some(left), Some(right)) => Some(search_from + left.min(right)),
+            (Some(index), None) | (None, Some(index)) => Some(search_from + index),
+            (None, None) => None,
+        }) else {
+            return output;
+        };
+        let mut end = start;
+        while end < output.len()
+            && !matches!(
+                output.as_bytes()[end],
+                b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b',' | b';' | b')' | b']' | b'}'
+            )
+        {
+            end += 1;
+        }
+        let raw_url = output[start..end].to_owned();
+        let safe_url = redact_console_url(&raw_url, fields);
+        if safe_url == raw_url {
+            search_from = end;
+        } else {
+            output.replace_range(start..end, &safe_url);
+            search_from = start.saturating_add(safe_url.len());
+        }
+    }
+}
+
+fn sanitize_console_event(
+    raw: Option<&Value>,
+    sensitive_fields: &BTreeSet<String>,
+) -> Option<(Value, bool)> {
+    let object = raw?.as_object()?;
+    let mut truncated = false;
+    let raw_level = value_text(object.get("level"));
+    let bounded_level = truncate_utf8(&raw_level, MAX_CONSOLE_LEVEL_BYTES);
+    let mut level = bounded_level.to_ascii_lowercase();
+    if level == "warning" {
+        level = "warn".into();
+    }
+    if !KNOWN_CONSOLE_LEVELS.contains(&level.as_str()) {
+        level = "log".into();
+    }
+    let now_ms = unix_ms();
+    let timestamp_ms = object
+        .get("timestamp_ms")
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .map(|value| value as u64)
+        .filter(|value| *value <= now_ms.saturating_add(86_400_000))
+        .unwrap_or(now_ms);
+    let raw_text = value_text(object.get("text"));
+    let bounded_raw_text = truncate_utf8(&raw_text, MAX_CONSOLE_RAW_TEXT_BYTES);
+    truncated |= bounded_raw_text.len() < raw_text.len();
+    let redacted_text = redact_urls_in_text(&bounded_raw_text, sensitive_fields);
+    let text = truncate_utf8(&redacted_text, MAX_CONSOLE_EVENT_TEXT_BYTES);
+    truncated |= text.len() < redacted_text.len();
+
+    let raw_source = value_text(object.get("source"));
+    let bounded_raw_source = truncate_utf8(&raw_source, MAX_CONSOLE_EVENT_SOURCE_BYTES * 2);
+    truncated |= bounded_raw_source.len() < raw_source.len();
+    let redacted_source = redact_urls_in_text(&bounded_raw_source, sensitive_fields);
+    let source = truncate_utf8(&redacted_source, MAX_CONSOLE_EVENT_SOURCE_BYTES);
+    truncated |= source.len() < redacted_source.len();
+
+    let raw_url = value_text(object.get("url"));
+    let bounded_raw_url = truncate_utf8(&raw_url, MAX_CONSOLE_RAW_URL_BYTES);
+    truncated |= bounded_raw_url.len() < raw_url.len();
+    let redacted_url = if bounded_raw_url.is_empty() {
+        String::new()
+    } else {
+        redact_console_url(&bounded_raw_url, sensitive_fields)
+    };
+    let url = truncate_utf8(&redacted_url, MAX_CONSOLE_EVENT_URL_BYTES);
+    truncated |= url.len() < redacted_url.len();
+
+    let mut event = Map::from_iter([
+        ("timestamp_ms".into(), Value::from(timestamp_ms)),
+        ("level".into(), Value::String(level)),
+        ("text".into(), Value::String(text)),
+    ]);
+    if !source.is_empty() {
+        event.insert("source".into(), Value::String(source));
+    }
+    if !url.is_empty() {
+        event.insert("url".into(), Value::String(url));
+    }
+    if let Some(line_number) = object
+        .get("line_number")
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+    {
+        event.insert("line_number".into(), Value::from(line_number));
+    }
+    if truncated {
+        event.insert("truncated".into(), Value::Bool(true));
+    }
+    Some((Value::Object(event), truncated))
+}
+
+fn fit_console_event(value: &mut Value, max_bytes: usize) -> (usize, bool) {
+    let mut truncated = value
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    loop {
+        let encoded_len = serde_json::to_vec(value).map_or(0, |encoded| encoded.len());
+        if encoded_len <= max_bytes {
+            return (encoded_len, truncated);
+        }
+        truncated = true;
+        let Some(object) = value.as_object_mut() else {
+            return (0, true);
+        };
+        object.insert("truncated".into(), Value::Bool(true));
+        let overflow = encoded_len.saturating_sub(max_bytes).saturating_add(8);
+        let mut changed = false;
+        for field in ["text", "url", "source"] {
+            let Some(current) = object.get(field).and_then(Value::as_str).map(str::to_owned) else {
+                continue;
+            };
+            if current.is_empty() {
+                continue;
+            }
+            let target = current.len().saturating_sub(overflow);
+            object.insert(field.into(), Value::String(truncate_utf8(&current, target)));
+            changed = true;
+            break;
+        }
+        if !changed {
+            for field in ["line_number", "url", "source"] {
+                if object.remove(field).is_some() {
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        if !changed {
+            return (0, true);
+        }
+    }
+}
+
+fn evict_console_events(capture: &mut ConsoleCaptureRecord, now: Instant) {
+    while let Some(front) = capture.events.front() {
+        let reason = if now.saturating_duration_since(front.received_at).as_millis()
+            > u128::from(capture.config.max_age_ms)
+        {
+            Some("age")
+        } else if capture.events.len() > capture.config.max_entries {
+            Some("entries")
+        } else if capture.retained_bytes > capture.config.max_bytes {
+            Some("bytes")
+        } else {
+            None
+        };
+        let Some(reason) = reason else {
+            break;
+        };
+        let removed = capture
+            .events
+            .pop_front()
+            .expect("console event exists while evicting");
+        capture.retained_bytes = capture.retained_bytes.saturating_sub(removed.byte_size);
+        match reason {
+            "age" => capture.evicted_age = capture.evicted_age.saturating_add(1),
+            "entries" => capture.evicted_entries = capture.evicted_entries.saturating_add(1),
+            "bytes" => {
+                capture.evicted_bytes = capture
+                    .evicted_bytes
+                    .saturating_add(removed.byte_size as u64);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn console_diagnostics(capture: &ConsoleCaptureRecord) -> Value {
+    json!({
+        "evicted_age": capture.evicted_age,
+        "evicted_entries": capture.evicted_entries,
+        "evicted_bytes": capture.evicted_bytes,
+        "rejected_events": capture.rejected_events,
+        "filtered_events": capture.filtered_events,
+        "truncated_events": capture.truncated_events,
+    })
+}
+
+fn console_capture_summary(
+    capture: &ConsoleCaptureRecord,
+    active: bool,
+    termination: Option<Value>,
+) -> Value {
+    json!({
+        "target": capture.target,
+        "capture_id": capture.capture_id,
+        "active": active,
+        "levels": capture.levels,
+        "retention": {
+            "max_age_ms": capture.config.max_age_ms,
+            "max_entries": capture.config.max_entries,
+            "max_bytes": capture.config.max_bytes,
+            "max_event_bytes": MAX_CONSOLE_EVENT_BYTES.min(capture.config.max_bytes),
+        },
+        "retained_entries": capture.events.len(),
+        "retained_bytes": capture.retained_bytes,
+        "diagnostics": console_diagnostics(capture),
+        "termination": termination,
+    })
+}
+
+fn normalize_console_termination_reason(reason: &str) -> &'static str {
+    match reason {
+        "explicit_stop" => "explicit_stop",
+        "capture_replaced" => "capture_replaced",
+        "target_closed" => "target_closed",
+        "debugger_detached" => "debugger_detached",
+        "session_disconnected" => "session_disconnected",
+        "lease_expired" => "lease_expired",
+        "lease_released" => "lease_released",
+        "already_stopped" => "already_stopped",
+        "navigation" => "navigation",
+        "broker_restart" => "broker_restart",
+        "stream_disconnected" => "stream_disconnected",
+        "extension_reported" => "extension_reported",
+        _ => "extension_reported",
+    }
+}
+
+#[cfg(test)]
+fn termination_value(reason: &str, detail: Option<&str>) -> Value {
+    termination_value_with_fields(reason, detail, &default_sensitive_fields())
+}
+
+fn termination_value_with_fields(
+    reason: &str,
+    detail: Option<&str>,
+    sensitive_fields: &BTreeSet<String>,
+) -> Value {
+    let safe_detail = detail
+        .map(|value| {
+            let bounded = truncate_utf8(value, MAX_CONSOLE_EVENT_URL_BYTES);
+            redact_urls_in_text(&bounded, sensitive_fields)
+        })
+        .map(|value| truncate_utf8(&value, 256));
+    json!({
+        "reason": normalize_console_termination_reason(reason),
+        "detail": safe_detail,
+        "at_ms": unix_ms(),
+    })
+}
+
+#[cfg(test)]
+fn default_sensitive_fields() -> BTreeSet<String> {
+    DEFAULT_SENSITIVE_CONSOLE_FIELDS
+        .iter()
+        .map(|field| (*field).into())
+        .collect()
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
 }
 
 fn artifact_error(message: &str) -> BrokerError {
@@ -1019,8 +2226,10 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::Path;
+    use std::time::Duration;
 
     use super::*;
+    use serde_json::json;
 
     const BROKER_GENERATION: &str = "broker-generation-a";
     const CALLER: &str = "caller-a";
@@ -1085,6 +2294,78 @@ mod tests {
             error: None,
             result,
         }
+    }
+
+    fn console_target(profile: &str, window_id: i64, tab_id: i64) -> BrowserTarget {
+        BrowserTarget {
+            extension_instance_id: profile.into(),
+            window_id,
+            tab_id,
+        }
+    }
+
+    fn console_response(
+        request_id: &str,
+        target: &BrowserTarget,
+        capture_id: &str,
+        active: bool,
+    ) -> ExtensionResponse {
+        ExtensionResponse {
+            message_type: "response".into(),
+            schema_version: Some(1),
+            protocol_version: Some(1),
+            request_id: request_id.into(),
+            operation: "start_console_capture".into(),
+            extension_instance_id: Some(target.extension_instance_id.clone()),
+            target: Some(target.clone()),
+            ok: true,
+            code: None,
+            error: None,
+            result: BTreeMap::from([
+                ("active".into(), Value::Bool(active)),
+                ("capture_id".into(), Value::String(capture_id.into())),
+            ]),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_console(
+        store: &mut EvidenceStore,
+        request_id: &str,
+        target: &BrowserTarget,
+        generation: Option<u64>,
+        levels: Option<Value>,
+        max_age_ms: Option<Value>,
+        max_entries: Option<Value>,
+        max_bytes: Option<Value>,
+    ) -> String {
+        let handle = store
+            .prepare_console_capture(
+                request_id,
+                BROKER_GENERATION,
+                "project-a",
+                CALLER,
+                target,
+                generation,
+                levels.as_ref(),
+                max_age_ms.as_ref(),
+                max_entries.as_ref(),
+                max_bytes.as_ref(),
+                None,
+            )
+            .unwrap();
+        let capture_id = handle.capture_id.clone();
+        store
+            .commit_console_capture(
+                request_id,
+                BROKER_GENERATION,
+                "project-a",
+                CALLER,
+                target,
+                &console_response(request_id, target, &capture_id, true),
+            )
+            .unwrap();
+        capture_id
     }
 
     fn prepare(
@@ -1595,5 +2876,360 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, BrokerErrorCode::StaleBrowserTarget);
         assert!(!project.path().join(".teshi").exists());
+    }
+
+    #[test]
+    fn console_config_scope_and_capture_generation_are_fail_closed() {
+        let target_a = console_target("profile-a", 7, 42);
+        let target_b = console_target("profile-b", 8, 52);
+        let mut store = EvidenceStore::new();
+        let invalid_level = store
+            .prepare_console_capture(
+                "invalid-level",
+                BROKER_GENERATION,
+                "project-a",
+                CALLER,
+                &target_a,
+                Some(7),
+                Some(&json!(["trace"])),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(invalid_level.code, BrokerErrorCode::InvalidBrowserOperation);
+        for (request_id, field, value) in [
+            (
+                "age-too-large",
+                "max_age_ms",
+                json!(MAX_CONSOLE_MAX_AGE_MS + 1),
+            ),
+            (
+                "entries-too-large",
+                "max_entries",
+                json!(MAX_CONSOLE_MAX_ENTRIES + 1),
+            ),
+            (
+                "bytes-too-large",
+                "max_bytes",
+                json!(MAX_CONSOLE_MAX_BYTES + 1),
+            ),
+        ] {
+            let error = store
+                .prepare_console_capture(
+                    request_id,
+                    BROKER_GENERATION,
+                    "project-a",
+                    CALLER,
+                    &target_a,
+                    Some(7),
+                    None,
+                    (field == "max_age_ms").then_some(&value),
+                    (field == "max_entries").then_some(&value),
+                    (field == "max_bytes").then_some(&value),
+                    None,
+                )
+                .unwrap_err();
+            assert_eq!(error.code, BrokerErrorCode::InvalidBrowserOperation);
+        }
+
+        let capture_a = start_console(
+            &mut store,
+            "capture-a",
+            &target_a,
+            Some(7),
+            Some(json!(["error"])),
+            None,
+            None,
+            None,
+        );
+        assert!(store.console_capture_scope_matches(
+            &target_a,
+            BROKER_GENERATION,
+            "project-a",
+            CALLER
+        ));
+        assert!(!store.console_capture_scope_matches(
+            &target_a,
+            BROKER_GENERATION,
+            "project-b",
+            CALLER
+        ));
+        assert!(!store.record_console_event(
+            "profile-b",
+            &target_b,
+            Some(&capture_a),
+            Some(7),
+            Some(&json!({"level": "error", "text": "cross-profile"})),
+        ));
+        assert!(!store.record_console_event(
+            "profile-a",
+            &target_a,
+            Some(&capture_a),
+            Some(6),
+            Some(&json!({"level": "error", "text": "old-generation"})),
+        ));
+        assert!(store.record_console_event(
+            "profile-a",
+            &target_a,
+            Some(&capture_a),
+            Some(7),
+            Some(&json!({"level": "error", "text": "kept"})),
+        ));
+        assert_eq!(
+            store
+                .list_console_events(&target_a, Some(&json!(["info"])), None, None, None)
+                .unwrap_err()
+                .code,
+            BrokerErrorCode::InvalidBrowserOperation
+        );
+
+        let capture_b = start_console(
+            &mut store,
+            "capture-b",
+            &target_a,
+            Some(8),
+            Some(json!(["error"])),
+            None,
+            None,
+            None,
+        );
+        assert_ne!(capture_a, capture_b);
+        assert_eq!(store.terminated_console_capture_count(), 1);
+        assert!(!store.record_console_event(
+            "profile-a",
+            &target_a,
+            Some(&capture_a),
+            Some(7),
+            Some(&json!({"level": "error", "text": "late-old-capture"})),
+        ));
+        assert!(store.record_console_event(
+            "profile-a",
+            &target_a,
+            Some(&capture_b),
+            Some(8),
+            Some(&json!({"level": "error", "text": "new-capture"})),
+        ));
+    }
+
+    #[test]
+    fn console_events_are_redacted_truncated_filtered_and_bounded() {
+        let target = target();
+        let mut store = EvidenceStore::new();
+        let capture_id = start_console(
+            &mut store,
+            "bounded",
+            &target,
+            Some(11),
+            Some(json!(["error"])),
+            Some(json!(1_000)),
+            Some(json!(2)),
+            Some(json!(1_024)),
+        );
+        let sensitive = json!({
+            "timestamp_ms": i64::MAX,
+            "level": "error",
+            "text": format!(
+                "token: \"page-secret\" Authorization: Bearer real-secret url=https://user:pass@example.test/path?token=abc#frag {}",
+                "x".repeat(MAX_CONSOLE_EVENT_TEXT_BYTES + 100)
+            ),
+            "source": "sensitive-source",
+            "url": "https://user:pass@example.test/path?token=abc#frag",
+            "line_number": 7,
+        });
+        assert!(store.record_console_event(
+            "profile-a",
+            &target,
+            Some(&capture_id),
+            Some(11),
+            Some(&sensitive),
+        ));
+        let redacted = store
+            .list_console_events(&target, None, None, None, None)
+            .unwrap();
+        let redacted_event = &redacted["events"][0];
+        assert!(!redacted_event.to_string().contains("page-secret"));
+        assert!(!redacted_event.to_string().contains("real-secret"));
+        assert!(!redacted_event.to_string().contains("token=abc"));
+        assert!(!redacted_event.to_string().contains("user:pass"));
+        assert!(!store.record_console_event(
+            "profile-a",
+            &target,
+            Some(&capture_id),
+            Some(11),
+            Some(&json!({"level": "info", "text": "filtered"})),
+        ));
+        for index in 0..3 {
+            assert!(store.record_console_event(
+                "profile-a",
+                &target,
+                Some(&capture_id),
+                Some(11),
+                Some(&json!({
+                    "timestamp_ms": -1,
+                    "level": "error",
+                    "text": format!(
+                        "event-{index}-{}",
+                        "y".repeat(if index == 0 { 2_000 } else { 700 })
+                    ),
+                })),
+            ));
+        }
+        let listed = store
+            .list_console_events(&target, None, None, None, None)
+            .unwrap();
+        assert!(listed["retained_entries"].as_u64().unwrap() <= 2);
+        assert!(listed["retained_bytes"].as_u64().unwrap() <= 1_024);
+        assert!(listed["diagnostics"]["evicted_bytes"].as_u64().unwrap() > 0);
+        assert!(listed["diagnostics"]["truncated_events"].as_u64().unwrap() > 0);
+        assert!(listed["events"].as_array().unwrap().iter().all(|event| {
+            let encoded = serde_json::to_vec(event).unwrap();
+            encoded.len() <= MAX_CONSOLE_EVENT_BYTES.min(1_024)
+                && event["timestamp_ms"].as_u64().unwrap() <= unix_ms()
+                && !event.to_string().contains("page-secret")
+                && !event.to_string().contains("real-secret")
+                && !event.to_string().contains("token=abc")
+                && !event.to_string().contains("user:pass")
+        }));
+
+        let count_target = console_target("profile-count", 9, 98);
+        let count_capture = start_console(
+            &mut store,
+            "count",
+            &count_target,
+            Some(13),
+            None,
+            None,
+            Some(json!(2)),
+            Some(json!(MAX_CONSOLE_MAX_BYTES)),
+        );
+        for index in 0..3 {
+            assert!(store.record_console_event(
+                "profile-count",
+                &count_target,
+                Some(&count_capture),
+                Some(13),
+                Some(&json!({"level": "log", "text": format!("count-{index}")})),
+            ));
+        }
+        let count_list = store
+            .list_console_events(&count_target, None, None, None, None)
+            .unwrap();
+        assert_eq!(count_list["retained_entries"], 2);
+        assert!(
+            count_list["diagnostics"]["evicted_entries"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+
+        let age_capture = start_console(
+            &mut store,
+            "age",
+            &console_target("profile-age", 9, 99),
+            Some(12),
+            None,
+            Some(json!(1_000)),
+            None,
+            None,
+        );
+        let age_target = console_target("profile-age", 9, 99);
+        assert!(store.record_console_event(
+            "profile-age",
+            &age_target,
+            Some(&age_capture),
+            Some(12),
+            Some(&json!({"level": "log", "text": "old"})),
+        ));
+        store
+            .console_captures
+            .get_mut(&age_target)
+            .unwrap()
+            .events
+            .front_mut()
+            .unwrap()
+            .received_at = Instant::now() - Duration::from_secs(2);
+        let age_list = store
+            .list_console_events(&age_target, None, None, None, None)
+            .unwrap();
+        assert_eq!(age_list["retained_entries"], 0);
+        assert!(age_list["diagnostics"]["evicted_age"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn console_termination_diagnostics_are_structured_bounded_and_redacted() {
+        let target = target();
+        let mut store = EvidenceStore::new();
+        let capture_id = start_console(
+            &mut store,
+            "termination",
+            &target,
+            Some(21),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(store.record_console_termination_event(
+            "profile-a",
+            &target,
+            Some(&capture_id),
+            Some(21),
+            "debugger_detached",
+            Some("token=secret https://example.test/?password=hidden"),
+        ));
+        assert_eq!(store.active_console_capture_count(), 0);
+        assert_eq!(store.terminated_console_capture_count(), 1);
+
+        let reconnect_target = console_target("profile-reconnect", 9, 97);
+        let reconnect_capture = start_console(
+            &mut store,
+            "reconnect",
+            &reconnect_target,
+            Some(22),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(store.record_console_termination_event(
+            "profile-reconnect",
+            &reconnect_target,
+            Some(&reconnect_capture),
+            None,
+            "stream_disconnected",
+            Some("transport closed"),
+        ));
+
+        for reason in [
+            "explicit_stop",
+            "capture_replaced",
+            "target_closed",
+            "debugger_detached",
+            "session_disconnected",
+            "lease_expired",
+            "lease_released",
+            "already_stopped",
+            "navigation",
+            "broker_restart",
+            "stream_disconnected",
+            "extension_reported",
+        ] {
+            assert_eq!(
+                normalize_console_termination_reason(reason),
+                if reason == "extension_reported" {
+                    "extension_reported"
+                } else {
+                    reason
+                }
+            );
+        }
+        let safe = termination_value(
+            "debugger_detached",
+            Some(&format!("{} token=secret", "z".repeat(10_000))),
+        );
+        assert!(safe["detail"].as_str().unwrap().len() <= 256);
+        assert!(!safe.to_string().contains("token=secret"));
     }
 }

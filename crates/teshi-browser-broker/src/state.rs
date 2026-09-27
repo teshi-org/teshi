@@ -68,6 +68,7 @@ struct PendingRequest {
     /// generation that was allowed to consume it. HTTP responses intentionally
     /// carry no stream generation, so this is separate from the response check.
     fallback_generation: Option<u64>,
+    console_capture_id: Option<String>,
     deadline: Instant,
     reply: oneshot::Sender<Result<Value, BrokerError>>,
 }
@@ -104,10 +105,19 @@ impl BrokerState {
         match event {
             BrokerEvent::Heartbeat { payload, reply, .. } => {
                 let now = Instant::now();
-                let result = self
+                let result = match self
                     .sessions
-                    .register_heartbeat(payload, now)
-                    .map(|instance_id| self.sessions.heartbeat_response(&instance_id, now));
+                    .register_heartbeat_with_target_closures(payload, now)
+                {
+                    Ok((instance_id, closed_targets)) => {
+                        for target in closed_targets {
+                            self.evidence
+                                .terminate_console_target(&target, "target_closed", None);
+                        }
+                        Ok(self.sessions.heartbeat_response(&instance_id, now))
+                    }
+                    Err(error) => Err(error),
+                };
                 let mut response = result.unwrap_or_else(error_value);
                 self.validate_heartbeat_command(&mut response, runtime);
                 let _ = reply.send(response);
@@ -159,6 +169,7 @@ impl BrokerState {
             BrokerEvent::ExtensionHttpMessage {
                 path,
                 extension_instance_id,
+                generation,
                 payload,
                 reply,
                 ..
@@ -171,11 +182,24 @@ impl BrokerState {
                 {
                     self.sessions.mark_frame_error(instance_id, error);
                 }
-                let _ = reply.send(json!({
-                    "ok": true,
-                    "path": path,
-                    "extension_instance_id": extension_instance_id,
-                }));
+                let response = match payload.get("type").and_then(Value::as_str) {
+                    Some("console_event") => self.handle_console_event_message(
+                        extension_instance_id.as_deref(),
+                        generation,
+                        &payload,
+                    ),
+                    Some("console_capture_terminated") => self.handle_console_termination_message(
+                        extension_instance_id.as_deref(),
+                        generation,
+                        &payload,
+                    ),
+                    _ => json!({
+                        "ok": true,
+                        "path": path,
+                        "extension_instance_id": extension_instance_id,
+                    }),
+                };
+                let _ = reply.send(response);
             }
             BrokerEvent::NetworkBatch { batch, reply, .. } => {
                 let _ = reply.send(self.handle_network_batch(batch));
@@ -271,6 +295,8 @@ impl BrokerState {
             );
         }
         if result.is_ok() {
+            self.evidence
+                .update_console_stream_generation(&extension_instance_id, generation);
             // A reconnect or stream replacement invalidates all old preview
             // subscriptions. UI clients must explicitly re-select the target.
             self.sessions.unsubscribe_instance(&extension_instance_id);
@@ -290,10 +316,33 @@ impl BrokerState {
     }
 
     fn validate_heartbeat_command(&mut self, response: &mut Value, runtime: &BrokerRuntime) {
-        let Some(request_id) = response
-            .get("cmd")
-            .filter(|value| !value.is_null())
-            .and_then(|command| command.get("request_id"))
+        let Some(command) = response.get("cmd").filter(|value| !value.is_null()) else {
+            response["cmd"] = Value::Null;
+            return;
+        };
+        if command.get("cmd").and_then(Value::as_str) == Some("__teshi_stop_console_capture") {
+            let target_matches = command
+                .get("target")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<BrowserTarget>(value).ok())
+                .is_some_and(|target| {
+                    target.extension_instance_id
+                        == response
+                            .get("extension_instance_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                });
+            let capture_id_present = command
+                .get("capture_id")
+                .and_then(Value::as_str)
+                .is_some_and(|capture_id| !capture_id.trim().is_empty());
+            if !target_matches || !capture_id_present {
+                response["cmd"] = Value::Null;
+            }
+            return;
+        }
+        let Some(request_id) = command
+            .get("request_id")
             .and_then(Value::as_str)
             .map(str::to_owned)
         else {
@@ -381,6 +430,11 @@ impl BrokerState {
             .sessions
             .detach_stream(extension_instance_id, generation)
         {
+            self.evidence.terminate_console_session(
+                extension_instance_id,
+                "stream_disconnected",
+                None,
+            );
             self.sessions.unsubscribe_instance(extension_instance_id);
             self.fail_pending_for_session(
                 extension_instance_id,
@@ -390,6 +444,82 @@ impl BrokerState {
                 ),
             );
         }
+    }
+
+    fn handle_console_event_message(
+        &mut self,
+        extension_instance_id: Option<&str>,
+        transport_generation: Option<u64>,
+        payload: &Value,
+    ) -> Value {
+        let Some(instance_id) = extension_instance_id else {
+            return json!({"ok": false, "accepted": false});
+        };
+        let Some(target) = payload
+            .get("target")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<BrowserTarget>(value).ok())
+        else {
+            return json!({"ok": false, "accepted": false});
+        };
+        let Some(stream_generation) = extension_event_generation(payload, transport_generation)
+        else {
+            return json!({"ok": false, "accepted": false});
+        };
+        let accepted = self.evidence.record_console_event(
+            instance_id,
+            &target,
+            payload.get("capture_id").and_then(Value::as_str),
+            stream_generation,
+            payload.get("event"),
+        );
+        json!({
+            "ok": true,
+            "schema_version": BROWSER_BROKER_SCHEMA_VERSION,
+            "accepted": accepted,
+        })
+    }
+
+    fn handle_console_termination_message(
+        &mut self,
+        extension_instance_id: Option<&str>,
+        transport_generation: Option<u64>,
+        payload: &Value,
+    ) -> Value {
+        let Some(instance_id) = extension_instance_id else {
+            return json!({"ok": false, "accepted": false});
+        };
+        let Some(target) = payload
+            .get("target")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<BrowserTarget>(value).ok())
+        else {
+            return json!({"ok": false, "accepted": false});
+        };
+        let Some(stream_generation) = extension_event_generation(payload, transport_generation)
+        else {
+            return json!({"ok": false, "accepted": false});
+        };
+        let accepted = self.evidence.record_console_termination_event(
+            instance_id,
+            &target,
+            payload.get("capture_id").and_then(Value::as_str),
+            stream_generation,
+            payload
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("extension_reported"),
+            payload.get("detail").and_then(Value::as_str),
+        );
+        let termination = accepted
+            .then(|| self.evidence.latest_console_termination())
+            .flatten();
+        json!({
+            "ok": true,
+            "schema_version": BROWSER_BROKER_SCHEMA_VERSION,
+            "accepted": accepted,
+            "termination": termination,
+        })
     }
 
     #[allow(dead_code)]
@@ -440,7 +570,9 @@ impl BrokerState {
             .target
             .as_ref()
             .is_some_and(|target| target == &pending.target);
-        let generation_matches = if is_evidence_operation(&pending.operation) {
+        let generation_matches = if is_evidence_operation(&pending.operation)
+            || is_console_operation(&pending.operation)
+        {
             match (
                 pending.stream_generation,
                 pending.fallback_generation,
@@ -453,16 +585,31 @@ impl BrokerState {
                         .and_then(|session| session.current_stream_generation())
                         == Some(expected)
                 }
+                (None, None, None) => true,
                 _ => false,
             }
         } else {
             pending.stream_generation == generation
         };
         let operation_matches = response.operation == extension_operation_for(&pending.operation);
-        if !instance_matches || !target_matches || !generation_matches || !operation_matches {
+        let capture_id_matches = !response.ok
+            || pending
+                .console_capture_id
+                .as_deref()
+                .is_none_or(|expected| {
+                    response.result.get("capture_id").and_then(Value::as_str) == Some(expected)
+                });
+        if !instance_matches
+            || !target_matches
+            || !generation_matches
+            || !operation_matches
+            || !capture_id_matches
+        {
             self.quarantine(
                 &response,
-                if generation_matches {
+                if !capture_id_matches {
+                    "console_capture_id_mismatch"
+                } else if generation_matches {
                     "target_or_operation_mismatch"
                 } else {
                     "stream_generation_mismatch"
@@ -482,6 +629,78 @@ impl BrokerState {
         };
         let action_metadata = self.action_metadata.get(&request_id).cloned();
         self.retire_request(&request_id, Instant::now());
+
+        let console_capture = if pending.operation == "start_console_capture" {
+            if !response.ok {
+                self.evidence.abort_console_capture(&request_id);
+                None
+            } else {
+                let Some(broker_start_id) = broker_start_id else {
+                    self.evidence.abort_console_capture(&request_id);
+                    let error = BrokerError::new(
+                        BrokerErrorCode::MismatchedBrowserResponse,
+                        "console capture response has no broker generation",
+                    );
+                    let _ = pending.reply.send(Err(error.clone()));
+                    return error_value(error);
+                };
+                let result = self.evidence.commit_console_capture(
+                    &request_id,
+                    broker_start_id,
+                    &pending.project_root,
+                    &pending.caller_label,
+                    &pending.target,
+                    &response,
+                );
+                match result {
+                    Ok(summary) => Some(summary),
+                    Err(error) => {
+                        if let Some(expected_capture_id) = pending.console_capture_id.as_deref() {
+                            let cleanup_capture_id = response
+                                .result
+                                .get("capture_id")
+                                .and_then(Value::as_str)
+                                .filter(|capture_id| !capture_id.trim().is_empty())
+                                .unwrap_or(expected_capture_id);
+                            self.queue_console_stop_command(
+                                &pending.extension_instance_id,
+                                &pending.target,
+                                cleanup_capture_id,
+                            );
+                        }
+                        let _ = pending.reply.send(Err(error.clone()));
+                        return error_value(error);
+                    }
+                }
+            }
+        } else {
+            None
+        };
+        let stopped_console_capture = if pending.operation == "stop_console_capture" && response.ok
+        {
+            if let Some(_expected_capture_id) = pending.console_capture_id.as_deref()
+                && let Some(broker_start_id) = broker_start_id
+                && !self.evidence.console_capture_scope_matches(
+                    &pending.target,
+                    broker_start_id,
+                    &pending.project_root,
+                    &pending.caller_label,
+                )
+            {
+                let error = BrokerError::new(
+                    BrokerErrorCode::InvalidBrowserLease,
+                    "console capture scope changed before stop",
+                );
+                let _ = pending.reply.send(Err(error.clone()));
+                return error_value(error);
+            }
+            Some(
+                self.evidence
+                    .stop_console_capture(&pending.target, "explicit_stop", None),
+            )
+        } else {
+            None
+        };
 
         let artifact = if is_evidence_operation(&pending.operation) {
             if !response.ok {
@@ -585,6 +804,12 @@ impl BrokerState {
                     }
                     _ => {}
                 }
+            }
+            if let Some(capture) = console_capture {
+                object.insert("capture".into(), capture);
+            }
+            if let Some(capture) = stopped_console_capture {
+                object.insert("capture".into(), capture);
             }
         }
         if response.ok {
@@ -775,6 +1000,40 @@ impl BrokerState {
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.evidence.cleanup_managed(&project, &caller, &paths)
+    }
+
+    fn local_console_operation(
+        &mut self,
+        operation: &str,
+        target: &BrowserTarget,
+        broker_start_id: &str,
+        project: &str,
+        caller: &str,
+        arguments: &BTreeMap<String, Value>,
+    ) -> Result<Value, BrokerError> {
+        if !self
+            .evidence
+            .console_capture_scope_matches(target, broker_start_id, project, caller)
+        {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserLease,
+                "console capture scope does not match this project and caller",
+            ));
+        }
+        match operation {
+            "list_console_events" => self.evidence.list_console_events(
+                target,
+                arguments.get("levels"),
+                arguments.get("max_age_ms"),
+                arguments.get("max_entries"),
+                arguments.get("max_bytes"),
+            ),
+            "clear_console_capture" => self.evidence.clear_console_capture(target),
+            _ => Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "unsupported local console operation",
+            )),
+        }
     }
 
     fn list_sessions_response(&mut self, runtime: &BrokerRuntime) -> Result<Value, BrokerError> {
@@ -983,6 +1242,9 @@ impl BrokerState {
         let caller = required_caller_context(request)?;
         let generation = runtime.endpoint_record().broker_start_id;
         self.validate_lease(&instance_id, &token, &project, &caller, &generation)?;
+        self.queue_console_cleanup(&instance_id);
+        self.evidence
+            .terminate_console_session(&instance_id, "lease_released", None);
         self.leases.remove(&instance_id);
         self.sessions.clear_element_references(&instance_id);
         Ok(json!({"extension_instance_id": instance_id, "released": true}))
@@ -1144,16 +1406,23 @@ impl BrokerState {
                 return;
             }
         };
-        let command = match action_plan.as_ref() {
-            Some(plan) => plan.command.clone(),
-            None => match build_extension_command(&request, &target, &instance_id, None) {
-                Ok(command) => command,
-                Err(error) => {
-                    let _ = reply.send(Err(error));
-                    return;
-                }
-            },
-        };
+        let broker_start_id = runtime.endpoint_record().broker_start_id;
+        if matches!(
+            request.operation.as_str(),
+            "list_console_events" | "clear_console_capture"
+        ) {
+            let result = self.local_console_operation(
+                &request.operation,
+                &target,
+                &broker_start_id,
+                &project,
+                &caller,
+                &request.arguments,
+            );
+            self.retire_request(&request.request_id, Instant::now());
+            let _ = reply.send(result.map(|payload| operation_success(&request, payload)));
+            return;
+        }
         let timeout = request
             .timeout_ms
             .map(Duration::from_millis)
@@ -1163,6 +1432,57 @@ impl BrokerState {
             .sessions
             .get(&instance_id)
             .and_then(|session| session.current_stream_generation());
+        let prepared_console = if request.operation == "start_console_capture" {
+            match self.evidence.prepare_console_capture(
+                &request.request_id,
+                &broker_start_id,
+                &project,
+                &caller,
+                &target,
+                stream_generation,
+                request.arguments.get("levels"),
+                request.arguments.get("max_age_ms"),
+                request.arguments.get("max_entries"),
+                request.arguments.get("max_bytes"),
+                request.arguments.get("sensitive_fields"),
+            ) {
+                Ok(handle) => Some(handle),
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let console_capture_id = if request.operation == "start_console_capture" {
+            prepared_console
+                .as_ref()
+                .map(|handle| handle.capture_id.clone())
+        } else if request.operation == "stop_console_capture" {
+            self.evidence.console_capture_id(&target)
+        } else {
+            None
+        };
+        let command = match action_plan.as_ref() {
+            Some(plan) => plan.command.clone(),
+            None => match build_extension_command_with_capture_id(
+                &request,
+                &target,
+                &instance_id,
+                None,
+                console_capture_id.as_deref(),
+            ) {
+                Ok(command) => command,
+                Err(error) => {
+                    if prepared_console.is_some() {
+                        self.evidence.abort_console_capture(&request.request_id);
+                    }
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+            },
+        };
         if is_evidence_operation(&request.operation) {
             let expected_revision = request
                 .arguments
@@ -1198,6 +1518,7 @@ impl BrokerState {
                     .and_then(|plan| plan.metadata.locator.snapshot_id.clone()),
                 stream_generation,
                 fallback_generation: None,
+                console_capture_id,
                 deadline: now + timeout,
                 reply,
             },
@@ -1270,6 +1591,9 @@ impl BrokerState {
             .is_some_and(|lease| lease.expires_at <= Instant::now())
         {
             self.leases.remove(extension_instance_id);
+            self.queue_console_cleanup(extension_instance_id);
+            self.evidence
+                .terminate_console_session(extension_instance_id, "lease_expired", None);
             self.sessions
                 .clear_element_references(extension_instance_id);
         }
@@ -1293,6 +1617,9 @@ impl BrokerState {
             .is_some_and(|lease| lease.expires_at <= Instant::now())
         {
             self.leases.remove(extension_instance_id);
+            self.queue_console_cleanup(extension_instance_id);
+            self.evidence
+                .terminate_console_session(extension_instance_id, "lease_expired", None);
             self.sessions
                 .clear_element_references(extension_instance_id);
             return Err(BrokerError::new(
@@ -1321,6 +1648,17 @@ impl BrokerState {
 
     fn expire(&mut self, now: Instant) {
         self.sessions.expire_stale(now);
+        let heartbeat_ttl = self.sessions.heartbeat_ttl();
+        for instance_id in self.evidence.console_capture_instance_ids() {
+            let alive = self
+                .sessions
+                .get(&instance_id)
+                .is_some_and(|session| session.alive_at(now, heartbeat_ttl));
+            if !alive {
+                self.evidence
+                    .terminate_console_session(&instance_id, "session_disconnected", None);
+            }
+        }
         self.retired_requests.retain(|_, retired_at| {
             now.saturating_duration_since(*retired_at) <= RETIRED_REQUEST_TTL
         });
@@ -1332,6 +1670,9 @@ impl BrokerState {
             .collect::<Vec<_>>();
         for instance_id in expired_leases {
             self.leases.remove(&instance_id);
+            self.queue_console_cleanup(&instance_id);
+            self.evidence
+                .terminate_console_session(&instance_id, "lease_expired", None);
             self.sessions.clear_element_references(&instance_id);
         }
         let expired = self
@@ -1457,6 +1798,40 @@ impl BrokerState {
         if is_evidence_operation(operation) {
             self.evidence.abort_request(request_id);
         }
+        if operation == "start_console_capture" {
+            self.evidence.abort_console_capture(request_id);
+        }
+    }
+
+    fn queue_console_cleanup(&mut self, extension_instance_id: &str) {
+        let captures = self
+            .evidence
+            .console_capture_handles_for_session(extension_instance_id);
+        for (target, capture_id) in captures {
+            self.queue_console_stop_command(extension_instance_id, &target, &capture_id);
+        }
+    }
+
+    fn queue_console_stop_command(
+        &mut self,
+        extension_instance_id: &str,
+        target: &BrowserTarget,
+        capture_id: &str,
+    ) {
+        let Some(session) = self.sessions.get_mut(extension_instance_id) else {
+            return;
+        };
+        let command = json!({
+            "type": "cmd",
+            "cmd": "__teshi_stop_console_capture",
+            "schema_version": BROWSER_BROKER_SCHEMA_VERSION,
+            "protocol_version": BROWSER_BROKER_PROTOCOL_VERSION,
+            "request_id": format!("console_cleanup_{}", Uuid::new_v4().simple()),
+            "target": target,
+            "capture_id": capture_id,
+            "suppress_response": true,
+        });
+        let _ = session.queue_command(command);
     }
 
     fn quarantine(&mut self, response: &ExtensionResponse, reason: &str) {
@@ -1567,6 +1942,29 @@ fn build_extension_command(
         object.remove("element");
     }
     Ok(Value::Object(object))
+}
+
+/// Build the existing extension command envelope and inject only the
+/// broker-owned Console capture ID.  A caller-supplied `capture_id` is never
+/// trusted for start/stop correlation.
+fn build_extension_command_with_capture_id(
+    request: &OperationRequest,
+    target: &BrowserTarget,
+    extension_instance_id: &str,
+    resolved_locator: Option<&ExecuteLocatorCommand>,
+    capture_id: Option<&str>,
+) -> Result<Value, BrokerError> {
+    let mut command =
+        build_extension_command(request, target, extension_instance_id, resolved_locator)?;
+    if is_console_operation(&request.operation)
+        && let Value::Object(object) = &mut command
+    {
+        object.remove("capture_id");
+        if let Some(capture_id) = capture_id {
+            object.insert("capture_id".into(), Value::String(capture_id.to_owned()));
+        }
+    }
+    Ok(command)
 }
 
 fn build_unvalidated_execute_locator(
@@ -1974,6 +2372,28 @@ fn unix_ms() -> u64 {
         .unwrap_or_default()
 }
 
+/// Resolve the generation attached by the extension to a console event.  A
+/// WebSocket transport supplies the authoritative generation out of band;
+/// the payload may repeat it for HTTP/diagnostic delivery, but never override
+/// a conflicting transport value.  `Some(None)` is intentional for a legacy
+/// heartbeat-only stream that has not yet attached a generation.
+fn extension_event_generation(
+    payload: &Value,
+    transport_generation: Option<u64>,
+) -> Option<Option<u64>> {
+    match payload.get("stream_generation") {
+        None | Some(Value::Null) => Some(transport_generation),
+        Some(value) => {
+            let supplied = value.as_u64()?;
+            if transport_generation.is_some_and(|current| current != supplied) {
+                None
+            } else {
+                Some(Some(supplied))
+            }
+        }
+    }
+}
+
 fn constant_time_equal(left: &str, right: &str) -> bool {
     left.as_bytes().ct_eq(right.as_bytes()).into()
 }
@@ -2078,6 +2498,16 @@ fn is_evidence_operation(operation: &str) -> bool {
     matches!(
         operation,
         "capture_browser_evidence" | "capture_browser_screenshot" | "generate_browser_pdf"
+    )
+}
+
+fn is_console_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "start_console_capture"
+            | "list_console_events"
+            | "clear_console_capture"
+            | "stop_console_capture"
     )
 }
 
@@ -2652,6 +3082,7 @@ mod tests {
                 snapshot_id: None,
                 stream_generation: Some(7),
                 fallback_generation: None,
+                console_capture_id: None,
                 deadline: now + Duration::from_secs(30),
                 reply,
             },
@@ -2749,6 +3180,7 @@ mod tests {
                 snapshot_id: None,
                 stream_generation: Some(7),
                 fallback_generation: None,
+                console_capture_id: None,
                 deadline: now + Duration::from_secs(30),
                 reply,
             },
@@ -2831,6 +3263,7 @@ mod tests {
                 snapshot_id: None,
                 stream_generation: None,
                 fallback_generation: None,
+                console_capture_id: None,
                 deadline: now - Duration::from_secs(1),
                 reply,
             },
@@ -2886,6 +3319,7 @@ mod tests {
                 snapshot_id: None,
                 stream_generation: None,
                 fallback_generation: None,
+                console_capture_id: None,
                 deadline: now + Duration::from_secs(30),
                 reply,
             },
@@ -2969,6 +3403,7 @@ mod tests {
                 snapshot_id: None,
                 stream_generation: None,
                 fallback_generation: None,
+                console_capture_id: None,
                 deadline: now + Duration::from_secs(30),
                 reply,
             },
@@ -3046,6 +3481,7 @@ mod tests {
                 snapshot_id: None,
                 stream_generation: Some(7),
                 fallback_generation: None,
+                console_capture_id: None,
                 deadline: now + Duration::from_secs(30),
                 reply,
             },
@@ -3124,6 +3560,7 @@ mod tests {
                     snapshot_id: None,
                     stream_generation: None,
                     fallback_generation: None,
+                    console_capture_id: None,
                     deadline: now + Duration::from_secs(30),
                     reply,
                 },
@@ -3197,6 +3634,7 @@ mod tests {
                 snapshot_id: None,
                 stream_generation: None,
                 fallback_generation: None,
+                console_capture_id: None,
                 deadline: now + Duration::from_secs(30),
                 reply,
             },
@@ -3286,6 +3724,7 @@ mod tests {
                 snapshot_id: None,
                 stream_generation: None,
                 fallback_generation: None,
+                console_capture_id: None,
                 deadline: now + Duration::from_secs(30),
                 reply,
             },
@@ -3352,6 +3791,7 @@ mod tests {
                 snapshot_id: None,
                 stream_generation: None,
                 fallback_generation: None,
+                console_capture_id: None,
                 deadline: now + Duration::from_secs(30),
                 reply: existing_reply,
             },
@@ -3593,6 +4033,7 @@ mod tests {
                 snapshot_id: None,
                 stream_generation: Some(7),
                 fallback_generation: None,
+                console_capture_id: None,
                 deadline: now - Duration::from_secs(1),
                 reply,
             },
@@ -3636,6 +4077,7 @@ mod tests {
                 snapshot_id: None,
                 stream_generation: Some(7),
                 fallback_generation: None,
+                console_capture_id: None,
                 deadline: now + Duration::from_secs(30),
                 reply,
             },
@@ -3720,6 +4162,7 @@ mod tests {
                 snapshot_id: None,
                 stream_generation: None,
                 fallback_generation: Some(7),
+                console_capture_id: None,
                 deadline: now + Duration::from_secs(30),
                 reply,
             },
@@ -3746,5 +4189,426 @@ mod tests {
             0
         );
         runtime.shutdown().await;
+    }
+
+    #[test]
+    fn local_console_list_and_clear_are_scope_bound_and_clear_keeps_capture_active() {
+        let target = target();
+        let mut state = BrokerState::new();
+        let handle = state
+            .evidence
+            .prepare_console_capture(
+                "local-console",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                Some(7),
+                Some(&json!(["error"])),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let capture_id = handle.capture_id;
+        let mut response =
+            extension_response("local-console", "start_console_capture", target.clone());
+        response.ok = true;
+        response.result.insert("active".into(), Value::Bool(true));
+        response
+            .result
+            .insert("capture_id".into(), Value::String(capture_id.clone()));
+        state
+            .evidence
+            .commit_console_capture(
+                "local-console",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                &response,
+            )
+            .unwrap();
+        assert!(state.evidence.record_console_event(
+            "profile-a",
+            &target,
+            Some(&capture_id),
+            Some(7),
+            Some(&json!({"level": "error", "text": "kept"})),
+        ));
+        let listed = state
+            .local_console_operation(
+                "list_console_events",
+                &target,
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(listed["returned_entries"], 1);
+        assert_eq!(
+            state
+                .local_console_operation(
+                    "list_console_events",
+                    &target,
+                    "broker-generation-a",
+                    "C:/project-b",
+                    "caller-a",
+                    &BTreeMap::new(),
+                )
+                .unwrap_err()
+                .code,
+            BrokerErrorCode::InvalidBrowserLease
+        );
+        let cleared = state
+            .local_console_operation(
+                "clear_console_capture",
+                &target,
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(cleared["removed_entries"], 1);
+        assert!(state.evidence.console_capture_id(&target).is_some());
+    }
+
+    #[test]
+    fn failed_console_start_response_rolls_back_the_prepared_capture() {
+        let now = Instant::now();
+        let target = target();
+        let mut state = BrokerState::new();
+        let handle = state
+            .evidence
+            .prepare_console_capture(
+                "failed-console",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                Some(7),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let capture_id = handle.capture_id;
+        let (reply, receiver) = oneshot::channel();
+        state.pending.insert(
+            "failed-console".into(),
+            PendingRequest {
+                operation: "start_console_capture".into(),
+                extension_instance_id: "profile-a".into(),
+                target: target.clone(),
+                project_root: "C:/project-a".into(),
+                caller_label: "caller-a".into(),
+                lease_token: Some("lease-secret".into()),
+                snapshot_id: None,
+                stream_generation: Some(7),
+                fallback_generation: None,
+                console_capture_id: Some(capture_id),
+                deadline: now + Duration::from_secs(30),
+                reply,
+            },
+        );
+        let mut failed =
+            extension_response("failed-console", "start_console_capture", target.clone());
+        failed.ok = false;
+        failed.code = Some("browser_debugger_conflict".into());
+        failed.error = Some("console debugger role is unavailable".into());
+        let ack = state.handle_extension_response_with_broker_generation(
+            "profile-a",
+            Some(7),
+            Some("broker-generation-a"),
+            failed,
+        );
+        assert_eq!(ack["ok"], true);
+        assert!(!state.pending.contains_key("failed-console"));
+        assert!(state.evidence.console_capture_id(&target).is_none());
+        assert_eq!(receiver.blocking_recv().unwrap().unwrap()["ok"], false);
+    }
+
+    #[tokio::test]
+    async fn console_commands_and_responses_require_broker_capture_id_target_and_generation() {
+        let request: OperationRequest = serde_json::from_value(json!({
+            "request_id": "console-command",
+            "caller_label": "caller-a",
+            "project_root": "C:/project-a",
+            "cmd": "start_console_capture",
+            "capture_id": "caller-controlled"
+        }))
+        .unwrap();
+        let command = build_extension_command_with_capture_id(
+            &request,
+            &target(),
+            "profile-a",
+            None,
+            Some("console_broker_id"),
+        )
+        .unwrap();
+        assert_eq!(command["capture_id"], "console_broker_id");
+
+        let now = Instant::now();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        state.sessions.attach_stream("profile-a", 7, now).unwrap();
+        let handle = state
+            .evidence
+            .prepare_console_capture(
+                "console-start",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target(),
+                Some(7),
+                Some(&json!(["error"])),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let capture_id = handle.capture_id;
+        let (reply, receiver) = oneshot::channel();
+        state.pending.insert(
+            "console-start".into(),
+            PendingRequest {
+                operation: "start_console_capture".into(),
+                extension_instance_id: "profile-a".into(),
+                target: target(),
+                project_root: "C:/project-a".into(),
+                caller_label: "caller-a".into(),
+                lease_token: Some("lease-secret".into()),
+                snapshot_id: None,
+                stream_generation: Some(7),
+                fallback_generation: None,
+                console_capture_id: Some(capture_id.clone()),
+                deadline: now + Duration::from_secs(30),
+                reply,
+            },
+        );
+        let mut wrong_id = extension_response("console-start", "start_console_capture", target());
+        wrong_id.result.insert("active".into(), Value::Bool(true));
+        wrong_id
+            .result
+            .insert("capture_id".into(), Value::String("wrong-capture".into()));
+        assert_eq!(
+            state.handle_extension_response_with_broker_generation(
+                "profile-a",
+                Some(7),
+                Some("broker-generation-a"),
+                wrong_id,
+            )["code"],
+            BrokerErrorCode::MismatchedBrowserResponse.as_str()
+        );
+        assert!(state.pending.contains_key("console-start"));
+
+        let mut old_generation =
+            extension_response("console-start", "start_console_capture", target());
+        old_generation
+            .result
+            .insert("active".into(), Value::Bool(true));
+        old_generation
+            .result
+            .insert("capture_id".into(), Value::String(capture_id.clone()));
+        assert_eq!(
+            state.handle_extension_response_with_broker_generation(
+                "profile-a",
+                Some(6),
+                Some("broker-generation-a"),
+                old_generation,
+            )["code"],
+            BrokerErrorCode::MismatchedBrowserResponse.as_str()
+        );
+        assert!(state.pending.contains_key("console-start"));
+
+        let mut matching = extension_response("console-start", "start_console_capture", target());
+        matching.result.insert("active".into(), Value::Bool(true));
+        matching
+            .result
+            .insert("capture_id".into(), Value::String(capture_id.clone()));
+        assert_eq!(
+            state.handle_extension_response_with_broker_generation(
+                "profile-a",
+                Some(7),
+                Some("broker-generation-a"),
+                matching,
+            )["ok"],
+            true
+        );
+        let started = receiver.await.unwrap().unwrap();
+        assert_eq!(started["capture"]["capture_id"], capture_id);
+
+        let (stop_reply, stop_receiver) = oneshot::channel();
+        state.pending.insert(
+            "console-stop".into(),
+            PendingRequest {
+                operation: "stop_console_capture".into(),
+                extension_instance_id: "profile-a".into(),
+                target: target(),
+                project_root: "C:/project-a".into(),
+                caller_label: "caller-a".into(),
+                lease_token: Some("lease-secret".into()),
+                snapshot_id: None,
+                stream_generation: Some(7),
+                fallback_generation: None,
+                console_capture_id: Some(capture_id.clone()),
+                deadline: now + Duration::from_secs(30),
+                reply: stop_reply,
+            },
+        );
+        let mut stopped = extension_response("console-stop", "stop_console_capture", target());
+        stopped
+            .result
+            .insert("capture_id".into(), Value::String(capture_id));
+        assert_eq!(
+            state.handle_extension_response_with_broker_generation(
+                "profile-a",
+                Some(7),
+                Some("broker-generation-a"),
+                stopped,
+            )["ok"],
+            true
+        );
+        let stopped = stop_receiver.await.unwrap().unwrap();
+        assert_eq!(stopped["capture"]["termination"]["reason"], "explicit_stop");
+        assert!(state.evidence.console_capture_id(&target()).is_none());
+    }
+
+    #[test]
+    fn console_stream_disconnect_terminates_only_that_profile_capture() {
+        let now = Instant::now();
+        let target_a = target();
+        let target_b = target_for("profile-b", 8, 52);
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        state.sessions.attach_stream("profile-a", 7, now).unwrap();
+
+        for (request_id, target, instance_id) in [
+            ("disconnect-a", target_a.clone(), "profile-a"),
+            ("disconnect-b", target_b.clone(), "profile-b"),
+        ] {
+            let handle = state
+                .evidence
+                .prepare_console_capture(
+                    request_id,
+                    "broker-generation-a",
+                    "C:/project-a",
+                    "caller-a",
+                    &target,
+                    Some(7),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            let capture_id = handle.capture_id;
+            let mut response =
+                extension_response(request_id, "start_console_capture", target.clone());
+            response.result.insert("active".into(), Value::Bool(true));
+            response
+                .result
+                .insert("capture_id".into(), Value::String(capture_id));
+            state
+                .evidence
+                .commit_console_capture(
+                    request_id,
+                    "broker-generation-a",
+                    "C:/project-a",
+                    "caller-a",
+                    &target,
+                    &response,
+                )
+                .unwrap();
+            assert_eq!(target.extension_instance_id, instance_id);
+        }
+
+        state.handle_extension_disconnected("profile-a", 7);
+
+        assert!(state.evidence.console_capture_id(&target_a).is_none());
+        assert!(state.evidence.console_capture_id(&target_b).is_some());
+        assert_eq!(
+            state.evidence.latest_console_termination().unwrap()["termination"]["reason"],
+            "stream_disconnected"
+        );
+    }
+
+    #[test]
+    fn lease_expiry_queues_extension_console_cleanup_before_dropping_capture() {
+        let now = Instant::now();
+        let target = target();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        state.sessions.attach_stream("profile-a", 7, now).unwrap();
+        state.leases.insert(
+            "profile-a".into(),
+            LeaseRecord {
+                token: "lease-secret".into(),
+                owner_label: "owner-a".into(),
+                project_root: "C:/project-a".into(),
+                caller_label: "caller-a".into(),
+                broker_start_id: "broker-generation-a".into(),
+                acquired_at_ms: 1,
+                expires_at_ms: 2,
+                expires_at: now - Duration::from_secs(1),
+            },
+        );
+        let handle = state
+            .evidence
+            .prepare_console_capture(
+                "lease-expiry-console",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                Some(7),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let capture_id = handle.capture_id;
+        let mut response = extension_response(
+            "lease-expiry-console",
+            "start_console_capture",
+            target.clone(),
+        );
+        response.result.insert("active".into(), Value::Bool(true));
+        response
+            .result
+            .insert("capture_id".into(), Value::String(capture_id.clone()));
+        state
+            .evidence
+            .commit_console_capture(
+                "lease-expiry-console",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                &response,
+            )
+            .unwrap();
+
+        state.expire(now);
+
+        assert!(state.evidence.console_capture_id(&target).is_none());
+        let cleanup = state
+            .sessions
+            .get_mut("profile-a")
+            .unwrap()
+            .pop_command()
+            .unwrap();
+        assert_eq!(cleanup["cmd"], "__teshi_stop_console_capture");
+        assert_eq!(cleanup["capture_id"], capture_id);
+        assert_eq!(cleanup["suppress_response"], true);
     }
 }

@@ -211,6 +211,11 @@ pub enum BrokerEvent {
     ExtensionHttpMessage {
         path: String,
         extension_instance_id: Option<String>,
+        /// WebSocket messages carry the stream generation that was current
+        /// when the transport accepted them. HTTP diagnostic messages may
+        /// repeat the extension's payload generation; teardown messages can
+        /// omit it after the WebSocket has already closed.
+        generation: Option<u64>,
         payload: Value,
         reply: oneshot::Sender<Value>,
         _budget: tokio::sync::OwnedSemaphorePermit,
@@ -986,7 +991,10 @@ async fn extension_response(
         )
         .await;
     }
-    if matches!(kind, "frame_error" | "console_event") {
+    if matches!(
+        kind,
+        "frame_error" | "console_event" | "console_capture_terminated"
+    ) {
         let extension_instance_id = value
             .get("extension_instance_id")
             .and_then(Value::as_str)
@@ -995,6 +1003,7 @@ async fn extension_response(
         let event = BrokerEvent::ExtensionHttpMessage {
             path: uri.path().to_owned(),
             extension_instance_id,
+            generation: None,
             payload: value,
             reply,
             _budget,
@@ -1054,6 +1063,7 @@ async fn extension_http_message(
             .get("extension_instance_id")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        generation: None,
         payload: value,
         reply,
         _budget,
@@ -1830,7 +1840,7 @@ async fn handle_extension_text(
                 false
             }
         }
-        "frame_error" | "console_event" => {
+        "frame_error" | "console_event" | "console_capture_terminated" => {
             let error = value
                 .get("error")
                 .and_then(Value::as_str)
@@ -1850,6 +1860,7 @@ async fn handle_extension_text(
                     .try_send(BrokerEvent::ExtensionHttpMessage {
                         path: "/v1/bridge/response".into(),
                         extension_instance_id: Some(instance_id.to_owned()),
+                        generation: Some(generation),
                         payload: value,
                         reply,
                         _budget,

@@ -551,7 +551,11 @@ impl BrowserSessionRecord {
         Ok(())
     }
 
-    fn update_from_heartbeat(&mut self, heartbeat: ExtensionHeartbeat, now: Instant) {
+    fn update_from_heartbeat(
+        &mut self,
+        heartbeat: ExtensionHeartbeat,
+        now: Instant,
+    ) -> Vec<BrowserTarget> {
         let previous_tabs = self.iter_tabs();
         let windows = normalize_windows(&heartbeat);
         if !self.profile_label_managed {
@@ -580,12 +584,14 @@ impl BrowserSessionRecord {
         if !heartbeat.frame_error.trim().is_empty() {
             self.last_frame_error = heartbeat.frame_error.chars().take(1000).collect();
         }
-        self.clear_changed_target_state(&previous_tabs);
+        let closed_targets = self.clear_changed_target_state(&previous_tabs);
         self.last_heartbeat = now;
         self.disconnected_since = None;
+        closed_targets
     }
 
-    fn clear_changed_target_state(&mut self, previous_tabs: &[ExtensionTab]) {
+    fn clear_changed_target_state(&mut self, previous_tabs: &[ExtensionTab]) -> Vec<BrowserTarget> {
+        let mut closed_targets = Vec::new();
         for previous in previous_tabs {
             let target = BrowserTarget {
                 extension_instance_id: self.extension_instance_id.clone(),
@@ -596,9 +602,11 @@ impl BrowserSessionRecord {
                 .iter_tabs()
                 .into_iter()
                 .find(|tab| tab.window_id == previous.window_id && tab.id == previous.id);
-            if current.is_none_or(|tab| {
+            let target_closed = current.is_none();
+            let target_navigated = current.as_ref().is_some_and(|tab| {
                 previous.url != tab.url && (!previous.url.is_empty() || !tab.url.is_empty())
-            }) {
+            });
+            if target_closed || target_navigated {
                 if let Some(frame) = self.frames.remove(&target) {
                     self.retained_frame_bytes =
                         self.retained_frame_bytes.saturating_sub(frame.jpeg.len());
@@ -607,7 +615,11 @@ impl BrowserSessionRecord {
                     .retain(|_, subscribed| subscribed != &target);
                 self.clear_element_references(Some(&target));
             }
+            if target_closed {
+                closed_targets.push(target);
+            }
         }
+        closed_targets
     }
 
     fn mark_disconnected(&mut self, now: Instant) {
@@ -916,6 +928,15 @@ impl SessionRegistry {
         heartbeat: ExtensionHeartbeat,
         now: Instant,
     ) -> Result<String, BrokerError> {
+        self.register_heartbeat_with_target_closures(heartbeat, now)
+            .map(|(instance_id, _)| instance_id)
+    }
+
+    pub fn register_heartbeat_with_target_closures(
+        &mut self,
+        heartbeat: ExtensionHeartbeat,
+        now: Instant,
+    ) -> Result<(String, Vec<BrowserTarget>), BrokerError> {
         self.expire_stale(now);
         let instance_id = heartbeat
             .extension_instance_id
@@ -932,8 +953,8 @@ impl SessionRegistry {
             .sessions
             .entry(instance_id.clone())
             .or_insert_with(|| BrowserSessionRecord::new(instance_id.clone(), now));
-        record.update_from_heartbeat(heartbeat, now);
-        Ok(instance_id)
+        let closed_targets = record.update_from_heartbeat(heartbeat, now);
+        Ok((instance_id, closed_targets))
     }
 
     pub fn heartbeat_response(&mut self, extension_instance_id: &str, now: Instant) -> Value {
@@ -1585,6 +1606,26 @@ mod tests {
         let session = registry.get("profile-a").unwrap();
         assert!(session.latest_frame(&target).is_none());
         assert!(!session.is_subscribed(&target));
+    }
+
+    #[test]
+    fn heartbeat_target_removal_reports_only_the_closed_complete_target() {
+        let start = Instant::now();
+        let mut registry = SessionRegistry::default();
+        registry
+            .register_heartbeat(heartbeat(Some("profile-a"), "https://before.test"), start)
+            .unwrap();
+
+        let mut closed = heartbeat(Some("profile-a"), "");
+        closed.windows[0].tabs.clear();
+        closed.active_window_id = None;
+        closed.active_tab_id = None;
+        let (instance_id, closed_targets) = registry
+            .register_heartbeat_with_target_closures(closed, start + Duration::from_secs(1))
+            .unwrap();
+
+        assert_eq!(instance_id, "profile-a");
+        assert_eq!(closed_targets, vec![target("profile-a")]);
     }
 
     #[test]
