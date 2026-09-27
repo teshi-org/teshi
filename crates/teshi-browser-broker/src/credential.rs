@@ -629,7 +629,7 @@ mod tests {
         .unwrap();
         store.write(&credential).unwrap();
         assert_eq!(
-            fs::metadata(&temp.path().join("private-state"))
+            fs::metadata(temp.path().join("private-state"))
                 .unwrap()
                 .permissions()
                 .mode()
