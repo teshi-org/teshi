@@ -254,6 +254,11 @@ pub enum BrokerEvent {
     Unsubscribe {
         owner_id: String,
     },
+    SubscriptionActive {
+        owner_id: String,
+        target: BrowserTarget,
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 /// A target-scoped update to a CLI/desktop/daemon browser subscriber.
@@ -1428,7 +1433,25 @@ async fn client_socket(
                         if publication.owner_ids.iter().any(|subscriber| subscriber == &owner_id)
                             && subscription.as_ref() == Some(&publication.target) =>
                     {
-                        if socket.send(Message::Binary(publication.frame)).await.is_err() { break; }
+                        let (reply, receiver) = oneshot::channel();
+                        if state
+                            .events
+                            .try_send(BrokerEvent::SubscriptionActive {
+                                owner_id: owner_id.clone(),
+                                target: publication.target.clone(),
+                                reply,
+                            })
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        let active = matches!(
+                            timeout(state.response_timeout, receiver).await,
+                            Ok(Ok(true))
+                        );
+                        if active && socket.send(Message::Binary(publication.frame)).await.is_err() {
+                            break;
+                        }
                     }
                     Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -2407,6 +2430,14 @@ mod tests {
         read_json(socket).await
     }
 
+    async fn handle_next_state_event(runtime: &mut BrokerRuntime, state: &mut BrokerState) {
+        let event = timeout(Duration::from_secs(1), runtime.next_event())
+            .await
+            .unwrap()
+            .unwrap();
+        state.handle(event, runtime).await;
+    }
+
     #[test]
     fn extension_origin_is_exact_and_uses_chrome_id_alphabet() {
         assert!(valid_extension_origin(&format!(
@@ -2572,12 +2603,22 @@ mod tests {
             )
             .await;
 
-        let received = timeout(Duration::from_secs(1), client_a_42.next())
-            .await
-            .unwrap()
-            .unwrap()
+        let mut navigated = test_heartbeat("profile-a", &[42, 43]);
+        navigated.windows[0].tabs[0].url = "https://profile-a-navigated.test".into();
+        navigated.url = navigated.windows[0].tabs[0].url.clone();
+        state
+            .sessions
+            .register_heartbeat(navigated, now + Duration::from_secs(1))
             .unwrap();
-        assert_eq!(received, WsMessage::Binary(Bytes::from(packet)));
+        handle_next_state_event(&mut runtime, &mut state).await;
+
+        assert!(
+            timeout(Duration::from_millis(100), client_a_42.next())
+                .await
+                .is_err()
+        );
+        assert!(!state.sessions.has_subscriber(&target_a_42));
+
         assert!(
             timeout(Duration::from_millis(100), client_a_43.next())
                 .await
@@ -2588,15 +2629,6 @@ mod tests {
                 .await
                 .is_err()
         );
-
-        let mut navigated = test_heartbeat("profile-a", &[42, 43]);
-        navigated.windows[0].tabs[0].url = "https://profile-a-navigated.test".into();
-        navigated.url = navigated.windows[0].tabs[0].url.clone();
-        state
-            .sessions
-            .register_heartbeat(navigated, now + Duration::from_secs(1))
-            .unwrap();
-        assert!(!state.sessions.has_subscriber(&target_a_42));
 
         let ack = subscribe_client(
             &mut client_a_43,
@@ -2609,7 +2641,7 @@ mod tests {
         assert_eq!(ack["ok"], true);
         assert_eq!(ack["target"], serde_json::to_value(&target_a_42).unwrap());
 
-        let navigated_packet = test_tsh1("profile-a", 7, 42, 2, &test_jpeg(3, 2));
+        let navigated_packet = test_tsh1("profile-a", 7, 42, 1, &test_jpeg(3, 2));
         let (metadata, jpeg, frame) =
             parse_tsh1_frame(Bytes::from(navigated_packet.clone())).unwrap();
         let frame_budget = Arc::new(Semaphore::new(frame.len().max(1)))
@@ -2628,6 +2660,7 @@ mod tests {
                 &runtime,
             )
             .await;
+        handle_next_state_event(&mut runtime, &mut state).await;
         assert!(
             timeout(Duration::from_millis(100), client_a_42.next())
                 .await

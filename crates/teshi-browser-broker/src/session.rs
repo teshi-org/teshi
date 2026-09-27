@@ -26,6 +26,8 @@ pub const DISCONNECTED_RETENTION: Duration = Duration::from_secs(60);
 pub const MAX_SESSION_COMMAND_QUEUE: usize = 256;
 /// Bound retained latest frames/subscriptions for one Profile.
 pub const MAX_TARGET_FRAME_RECORDS: usize = 64;
+/// Bound the total JPEG bytes retained for one Profile's latest frames.
+pub const MAX_RETAINED_PREVIEW_BYTES: usize = 64 * 1024 * 1024;
 /// Keep snapshot-local element aliases only for a bounded amount of time.
 pub const ELEMENT_REFERENCE_TTL: Duration = Duration::from_secs(120);
 /// Bound snapshot-local element aliases retained by one Profile.
@@ -103,6 +105,7 @@ pub struct BrowserSessionRecord {
     stream_generation: Option<u64>,
     command_queue: VecDeque<Value>,
     frames: HashMap<BrowserTarget, PreviewFrameRecord>,
+    retained_frame_bytes: usize,
     /// Browser UI subscriptions keyed by their owning client connection.
     /// Keeping the owner here prevents one client disconnecting or changing
     /// targets from removing another client's subscription.
@@ -137,6 +140,7 @@ impl BrowserSessionRecord {
             stream_generation: None,
             command_queue: VecDeque::new(),
             frames: HashMap::new(),
+            retained_frame_bytes: 0,
             subscriptions: BTreeMap::new(),
             element_references: HashMap::new(),
             page_context_revisions: HashMap::new(),
@@ -318,6 +322,12 @@ impl BrowserSessionRecord {
         self.subscriptions.values().any(|current| current == target)
     }
 
+    pub fn is_owner_subscribed(&self, owner_id: &str, target: &BrowserTarget) -> bool {
+        self.subscriptions
+            .get(owner_id)
+            .is_some_and(|current| current == target)
+    }
+
     pub fn subscriber_owner_ids(&self, target: &BrowserTarget) -> Vec<String> {
         self.subscriptions
             .iter()
@@ -332,6 +342,10 @@ impl BrowserSessionRecord {
 
     pub fn latest_frame(&self, target: &BrowserTarget) -> Option<&PreviewFrameRecord> {
         self.frames.get(target)
+    }
+
+    pub fn retained_frame_bytes(&self) -> usize {
+        self.retained_frame_bytes
     }
 
     pub fn element_reference_count(&self) -> usize {
@@ -585,7 +599,10 @@ impl BrowserSessionRecord {
             if current.is_none_or(|tab| {
                 previous.url != tab.url && (!previous.url.is_empty() || !tab.url.is_empty())
             }) {
-                self.frames.remove(&target);
+                if let Some(frame) = self.frames.remove(&target) {
+                    self.retained_frame_bytes =
+                        self.retained_frame_bytes.saturating_sub(frame.jpeg.len());
+                }
                 self.subscriptions
                     .retain(|_, subscribed| subscribed != &target);
                 self.clear_element_references(Some(&target));
@@ -599,7 +616,7 @@ impl BrowserSessionRecord {
         }
         self.stream_generation = None;
         self.command_queue.clear();
-        self.frames.clear();
+        self.clear_preview_frames();
         self.subscriptions.clear();
         self.element_references.clear();
         self.page_context_revisions.clear();
@@ -617,16 +634,26 @@ impl BrowserSessionRecord {
             ));
         }
         let previous = self.stream_generation.replace(generation);
+        if previous.is_some() {
+            self.clear_preview_frames();
+        }
         Ok(previous)
     }
 
     fn detach_stream(&mut self, generation: u64) -> bool {
         if self.stream_generation == Some(generation) {
             self.stream_generation = None;
+            self.clear_preview_frames();
             true
         } else {
             false
         }
+    }
+
+    fn clear_preview_frames(&mut self) {
+        self.frames.clear();
+        self.retained_frame_bytes = 0;
+        self.last_frame_at = None;
     }
 
     fn update_frame(
@@ -645,15 +672,43 @@ impl BrowserSessionRecord {
         {
             return Ok(false);
         }
-        if self.frames.len() >= MAX_TARGET_FRAME_RECORDS
-            && !self.frames.contains_key(&target)
-            && let Some(oldest) = self
+        if jpeg.len() > MAX_RETAINED_PREVIEW_BYTES {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "preview frame exceeds the retained byte budget",
+            ));
+        }
+
+        let target_exists = self.frames.contains_key(&target);
+        let previous_bytes = self
+            .frames
+            .get(&target)
+            .map(|previous| previous.jpeg.len())
+            .unwrap_or_default();
+        let mut other_frame_bytes = self.retained_frame_bytes.saturating_sub(previous_bytes);
+        while other_frame_bytes.saturating_add(jpeg.len()) > MAX_RETAINED_PREVIEW_BYTES
+            || (!target_exists && self.frames.len() >= MAX_TARGET_FRAME_RECORDS)
+        {
+            let Some(oldest) = self
                 .frames
                 .iter()
+                .filter(|(candidate, _)| *candidate != &target)
                 .min_by_key(|(_, frame)| frame.captured_at)
-                .map(|(target, _)| target.clone())
-        {
-            self.frames.remove(&oldest);
+                .map(|(candidate, _)| candidate.clone())
+            else {
+                return Err(BrokerError::new(
+                    BrokerErrorCode::BrowserResourceLimit,
+                    "retained preview frame byte budget is full",
+                ));
+            };
+            let removed = self
+                .frames
+                .remove(&oldest)
+                .expect("oldest preview frame was selected from the frame map");
+            other_frame_bytes = other_frame_bytes.saturating_sub(removed.jpeg.len());
+        }
+        if target_exists {
+            self.frames.remove(&target);
         }
         self.frames.insert(
             target.clone(),
@@ -665,6 +720,7 @@ impl BrowserSessionRecord {
                 captured_at: now,
             },
         );
+        self.retained_frame_bytes = other_frame_bytes.saturating_add(jpeg.len());
         self.last_frame_at = Some(now);
         self.last_frame_error.clear();
         Ok(true)
@@ -1167,6 +1223,12 @@ impl SessionRegistry {
             .unwrap_or_default()
     }
 
+    pub fn owner_is_subscribed(&self, owner_id: &str, target: &BrowserTarget) -> bool {
+        self.sessions
+            .get(&target.extension_instance_id)
+            .is_some_and(|record| record.is_owner_subscribed(owner_id, target))
+    }
+
     /// Expire heartbeat liveness and remove records past the diagnostic window.
     /// Returns identities that were removed so pending state can fail them.
     pub fn expire_stale(&mut self, now: Instant) -> Vec<String> {
@@ -1557,6 +1619,101 @@ mod tests {
             .unwrap();
         assert_eq!(frame.seq, 2);
         assert_eq!(frame.url, "https://new.test");
+    }
+
+    #[test]
+    fn reconnect_resets_preview_sequence_and_retained_bytes() {
+        let start = Instant::now();
+        let mut registry = SessionRegistry::default();
+        registry
+            .register_heartbeat(heartbeat(Some("profile-a"), "https://test"), start)
+            .unwrap();
+        registry.attach_stream("profile-a", 1, start).unwrap();
+        let target = target("profile-a");
+        registry
+            .update_frame(
+                target.clone(),
+                10,
+                "https://before-reconnect.test".into(),
+                vec![1, 2, 3],
+                start,
+            )
+            .unwrap();
+        assert_eq!(registry.get("profile-a").unwrap().retained_frame_bytes(), 3);
+
+        assert!(registry.detach_stream("profile-a", 1));
+        assert!(
+            registry
+                .get("profile-a")
+                .unwrap()
+                .latest_frame(&target)
+                .is_none()
+        );
+        registry
+            .attach_stream("profile-a", 2, start + Duration::from_secs(1))
+            .unwrap();
+        registry
+            .update_frame(
+                target.clone(),
+                1,
+                "https://after-reconnect.test".into(),
+                vec![4, 5],
+                start + Duration::from_secs(1),
+            )
+            .unwrap();
+        let frame = registry
+            .get("profile-a")
+            .unwrap()
+            .latest_frame(&target)
+            .unwrap();
+        assert_eq!(frame.seq, 1);
+        assert_eq!(registry.get("profile-a").unwrap().retained_frame_bytes(), 2);
+    }
+
+    #[test]
+    fn retained_preview_bytes_are_bounded_and_oldest_targets_are_evicted() {
+        let start = Instant::now();
+        let mut registry = SessionRegistry::default();
+        let mut profile = heartbeat(Some("profile-a"), "https://first.test");
+        profile.windows[0].tabs.push(ExtensionTab {
+            id: 43,
+            window_id: 7,
+            title: "Second tab".into(),
+            url: "https://second.test".into(),
+            active: false,
+            favicon_url: String::new(),
+            debuggable: true,
+        });
+        registry.register_heartbeat(profile, start).unwrap();
+        let first = target("profile-a");
+        let second = BrowserTarget {
+            extension_instance_id: "profile-a".into(),
+            window_id: 7,
+            tab_id: 43,
+        };
+        registry
+            .update_frame(
+                first.clone(),
+                1,
+                "https://first.test".into(),
+                vec![1; MAX_RETAINED_PREVIEW_BYTES],
+                start,
+            )
+            .unwrap();
+        registry
+            .update_frame(
+                second.clone(),
+                1,
+                "https://second.test".into(),
+                vec![2, 3],
+                start + Duration::from_secs(1),
+            )
+            .unwrap();
+
+        let session = registry.get("profile-a").unwrap();
+        assert!(session.latest_frame(&first).is_none());
+        assert_eq!(session.latest_frame(&second).unwrap().seq, 1);
+        assert_eq!(session.retained_frame_bytes(), 2);
     }
 
     #[test]

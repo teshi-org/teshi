@@ -128,6 +128,13 @@ impl BrokerState {
             BrokerEvent::Unsubscribe { owner_id } => {
                 self.sessions.unsubscribe_owner(&owner_id);
             }
+            BrokerEvent::SubscriptionActive {
+                owner_id,
+                target,
+                reply,
+            } => {
+                let _ = reply.send(self.sessions.owner_is_subscribed(&owner_id, &target));
+            }
             BrokerEvent::ExtensionResponse {
                 extension_instance_id,
                 generation,
@@ -180,14 +187,21 @@ impl BrokerState {
                     jpeg.to_vec(),
                     Instant::now(),
                 );
-                if matches!(accepted, Ok(true)) {
-                    let owner_ids = self.sessions.subscriber_owner_ids(&target);
-                    if !owner_ids.is_empty() {
-                        let _ = runtime.publish(crate::server::BrokerPublication {
-                            target,
-                            frame,
-                            owner_ids: Arc::from(owner_ids.into_boxed_slice()),
-                        });
+                match accepted {
+                    Ok(true) => {
+                        let owner_ids = self.sessions.subscriber_owner_ids(&target);
+                        if !owner_ids.is_empty() {
+                            let _ = runtime.publish(crate::server::BrokerPublication {
+                                target,
+                                frame,
+                                owner_ids: Arc::from(owner_ids.into_boxed_slice()),
+                            });
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.sessions
+                            .mark_frame_error(&target.extension_instance_id, &error.message);
                     }
                 }
             }
