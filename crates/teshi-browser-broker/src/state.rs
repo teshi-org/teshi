@@ -15,7 +15,7 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::coordinator::{ActionMetadata, BrowserActionCoordinator};
-use crate::evidence::EvidenceStore;
+use crate::evidence::{EvidenceStore, NetworkBodyAccess};
 use crate::protocol::{
     BROWSER_BROKER_PROTOCOL_VERSION, BROWSER_BROKER_SCHEMA_VERSION, BrokerError, BrokerErrorCode,
     BrowserTarget, ExecuteLocatorActionRequest, ExecuteLocatorCandidate,
@@ -91,6 +91,10 @@ pub struct BrokerState {
     dispatched_actions: HashSet<String>,
     /// Single owner for prepared and published screenshot/PDF artifacts.
     evidence: EvidenceStore,
+    /// Explicit response-body grants are short-lived request state. They are
+    /// removed with the pending request so a body cannot be fetched after a
+    /// timeout, cancellation, lease transition, or capture cleanup.
+    network_body_access: HashMap<String, NetworkBodyAccess>,
 }
 
 impl BrokerState {
@@ -113,6 +117,7 @@ impl BrokerState {
                         for target in closed_targets {
                             self.evidence
                                 .terminate_console_target(&target, "target_closed", None);
+                            self.revoke_network_body_access_for_target(&target);
                             self.evidence
                                 .terminate_network_target(&target, "target_closed", None);
                         }
@@ -646,6 +651,7 @@ impl BrokerState {
             ));
         };
         let action_metadata = self.action_metadata.get(&request_id).cloned();
+        let network_body_access = self.network_body_access.get(&request_id).cloned();
         self.retire_request(&request_id, Instant::now());
 
         let console_capture = if pending.operation == "start_console_capture" {
@@ -747,7 +753,10 @@ impl BrokerState {
                     &pending.target,
                     &response,
                 ) {
-                    Ok(summary) => Some(summary),
+                    Ok(summary) => {
+                        self.revoke_network_body_access_for_target(&pending.target);
+                        Some(summary)
+                    }
                     Err(error) => {
                         if let Some(expected_capture_id) = pending.console_capture_id.as_deref() {
                             let cleanup_capture_id = response
@@ -875,6 +884,55 @@ impl BrokerState {
             }
             None => None,
         };
+        if response.ok
+            && matches!(
+                pending.operation.as_str(),
+                "clear_network_capture" | "stop_network_capture"
+            )
+            && network_transition.is_some()
+        {
+            self.revoke_network_body_access_for_target(&pending.target);
+        }
+
+        let network_body = if pending.operation == "get_network_request_detail" && response.ok {
+            let Some(access) = network_body_access.as_ref() else {
+                let error = BrokerError::new(
+                    BrokerErrorCode::MismatchedBrowserResponse,
+                    "network response-body response has no access grant",
+                );
+                let _ = pending.reply.send(Err(error.clone()));
+                return error_value(error);
+            };
+            let Some(broker_start_id) = broker_start_id else {
+                let error = BrokerError::new(
+                    BrokerErrorCode::MismatchedBrowserResponse,
+                    "network response-body response has no broker generation",
+                );
+                let _ = pending.reply.send(Err(error.clone()));
+                return error_value(error);
+            };
+            match self.evidence.bound_network_body(
+                &pending.target,
+                broker_start_id,
+                &pending.project_root,
+                &pending.caller_label,
+                access,
+                response.result.get("body"),
+                response
+                    .result
+                    .get("base64_encoded")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            ) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    let _ = pending.reply.send(Err(error.clone()));
+                    return error_value(error);
+                }
+            }
+        } else {
+            None
+        };
 
         let artifact = if is_evidence_operation(&pending.operation) {
             if !response.ok {
@@ -990,6 +1048,16 @@ impl BrokerState {
             }
             if let Some(capture) = network_transition {
                 object.insert("capture".into(), capture);
+            }
+            if let Some(Value::Object(body)) = network_body {
+                object.remove("body");
+                object.remove("base64_encoded");
+                object.remove("truncated");
+                object.remove("original_size");
+                object.remove("returned_size");
+                for (key, value) in body {
+                    object.insert(key, value);
+                }
             }
         }
         if response.ok {
@@ -1489,8 +1557,7 @@ impl BrokerState {
         self.queue_network_cleanup(&instance_id);
         self.evidence
             .terminate_console_session(&instance_id, "lease_released", None);
-        self.evidence
-            .terminate_network_session(&instance_id, "lease_released", None);
+        self.terminate_network_session(&instance_id, "lease_released", None);
         self.leases.remove(&instance_id);
         self.sessions.clear_element_references(&instance_id);
         Ok(json!({"extension_instance_id": instance_id, "released": true}))
@@ -1669,10 +1736,15 @@ impl BrokerState {
             let _ = reply.send(result.map(|payload| operation_success(&request, payload)));
             return;
         }
-        if matches!(
-            request.operation.as_str(),
-            "list_network_requests" | "get_network_request_detail"
-        ) {
+        let include_network_body = request.operation == "get_network_request_detail"
+            && request
+                .arguments
+                .get("include_body")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        if request.operation == "list_network_requests"
+            || (request.operation == "get_network_request_detail" && !include_network_body)
+        {
             let result = self.local_network_operation(
                 &request.operation,
                 &target,
@@ -1685,6 +1757,34 @@ impl BrokerState {
             let _ = reply.send(result.map(|payload| operation_success(&request, payload)));
             return;
         }
+        let network_body_access = if include_network_body {
+            let request_id = match request.arguments.get("network_request_id") {
+                Some(request_id) => request_id,
+                None => {
+                    let _ = reply.send(Err(BrokerError::new(
+                        BrokerErrorCode::InvalidBrowserOperation,
+                        "network_request_id is required",
+                    )));
+                    return;
+                }
+            };
+            match self.evidence.prepare_network_body_access(
+                &target,
+                &broker_start_id,
+                &project,
+                &caller,
+                request_id,
+                request.arguments.get("max_body_bytes"),
+            ) {
+                Ok(access) => Some(access),
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let timeout = request
             .timeout_ms
             .map(Duration::from_millis)
@@ -1822,6 +1922,10 @@ impl BrokerState {
                 reply,
             },
         );
+        if let Some(access) = network_body_access {
+            self.network_body_access
+                .insert(request.request_id.clone(), access);
+        }
         if let Some(plan) = action_plan {
             self.action_metadata
                 .insert(request.request_id.clone(), plan.metadata);
@@ -1894,8 +1998,7 @@ impl BrokerState {
             self.queue_network_cleanup(extension_instance_id);
             self.evidence
                 .terminate_console_session(extension_instance_id, "lease_expired", None);
-            self.evidence
-                .terminate_network_session(extension_instance_id, "lease_expired", None);
+            self.terminate_network_session(extension_instance_id, "lease_expired", None);
             self.sessions
                 .clear_element_references(extension_instance_id);
         }
@@ -1923,8 +2026,7 @@ impl BrokerState {
             self.queue_network_cleanup(extension_instance_id);
             self.evidence
                 .terminate_console_session(extension_instance_id, "lease_expired", None);
-            self.evidence
-                .terminate_network_session(extension_instance_id, "lease_expired", None);
+            self.terminate_network_session(extension_instance_id, "lease_expired", None);
             self.sessions
                 .clear_element_references(extension_instance_id);
             return Err(BrokerError::new(
@@ -1968,8 +2070,7 @@ impl BrokerState {
             if !alive {
                 self.evidence
                     .terminate_console_session(&instance_id, "session_disconnected", None);
-                self.evidence
-                    .terminate_network_session(&instance_id, "session_disconnected", None);
+                self.terminate_network_session(&instance_id, "session_disconnected", None);
             }
         }
         self.retired_requests.retain(|_, retired_at| {
@@ -1987,8 +2088,7 @@ impl BrokerState {
             self.queue_network_cleanup(&instance_id);
             self.evidence
                 .terminate_console_session(&instance_id, "lease_expired", None);
-            self.evidence
-                .terminate_network_session(&instance_id, "lease_expired", None);
+            self.terminate_network_session(&instance_id, "lease_expired", None);
             self.sessions.clear_element_references(&instance_id);
         }
         let expired = self
@@ -2046,6 +2146,49 @@ impl BrokerState {
         }
     }
 
+    fn revoke_network_body_access_for_target(&mut self, target: &BrowserTarget) {
+        let request_ids = self
+            .network_body_access
+            .keys()
+            .filter(|request_id| {
+                self.pending
+                    .get(*request_id)
+                    .is_some_and(|pending| &pending.target == target)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for request_id in request_ids {
+            self.network_body_access.remove(&request_id);
+        }
+    }
+
+    fn revoke_network_body_access_for_instance(&mut self, extension_instance_id: &str) {
+        let request_ids = self
+            .network_body_access
+            .keys()
+            .filter(|request_id| {
+                self.pending
+                    .get(*request_id)
+                    .is_some_and(|pending| pending.extension_instance_id == extension_instance_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for request_id in request_ids {
+            self.network_body_access.remove(&request_id);
+        }
+    }
+
+    fn terminate_network_session(
+        &mut self,
+        extension_instance_id: &str,
+        reason: &str,
+        detail: Option<&str>,
+    ) -> usize {
+        self.revoke_network_body_access_for_instance(extension_instance_id);
+        self.evidence
+            .terminate_network_session(extension_instance_id, reason, detail)
+    }
+
     fn mark_action_dispatched(&mut self, request_id: &str) {
         if self.action_metadata.contains_key(request_id) {
             self.dispatched_actions.insert(request_id.to_owned());
@@ -2076,6 +2219,7 @@ impl BrokerState {
     fn retire_request(&mut self, request_id: &str, now: Instant) {
         self.action_metadata.remove(request_id);
         self.dispatched_actions.remove(request_id);
+        self.network_body_access.remove(request_id);
         self.retired_requests.insert(request_id.to_owned(), now);
         while self.retired_requests.len() > MAX_RETIRED_REQUESTS {
             let oldest = self
@@ -2233,7 +2377,10 @@ fn build_extension_command(
         .into_iter()
         .collect::<Map<String, Value>>();
     object.insert("type".into(), Value::String("cmd".into()));
-    object.insert("cmd".into(), Value::String(request.operation.clone()));
+    object.insert(
+        "cmd".into(),
+        Value::String(extension_operation_for(&request.operation).into()),
+    );
     object.insert(
         "schema_version".into(),
         Value::from(BROWSER_BROKER_SCHEMA_VERSION),
@@ -2582,10 +2729,10 @@ fn snapshot_locator_context(value: &Value) -> Result<Option<LocatorContext>, Bro
 }
 
 fn extension_operation_for(operation: &str) -> &str {
-    if operation == "execute_browser_action" {
-        "execute_locator"
-    } else {
-        operation
+    match operation {
+        "execute_browser_action" => "execute_locator",
+        "get_network_request_detail" => "get_network_response_body",
+        _ => operation,
     }
 }
 
@@ -4598,12 +4745,12 @@ mod tests {
                 &target,
                 Some(7),
                 Some(&json!(["EXAMPLE.test."])),
-                Some(&json!(false)),
+                Some(&json!(true)),
+                Some(&json!(1024)),
                 None,
                 None,
                 None,
-                None,
-                None,
+                Some(&json!(1024)),
                 None,
             )
             .unwrap();
@@ -4653,6 +4800,11 @@ mod tests {
                     "request_id": "first",
                     "url": "https://example.test/api?token=private&safe=visible",
                     "method": "POST",
+                    "request_body": {
+                        "encoding": "utf8",
+                        "body": "x".repeat(2048),
+                        "original_size": 2048
+                    },
                     "headers": {
                         "Authorization": "Bearer private",
                         "Accept": "application/json"
@@ -4788,21 +4940,40 @@ mod tests {
         assert!(!detail_text.contains("Bearer private"));
         assert!(!detail_text.contains("private"));
         assert!(detail_text.contains("safe=visible"));
-        assert_eq!(
-            state
-                .evidence
-                .get_network_request_detail(
-                    &target,
-                    "broker-generation-a",
-                    "C:/project-a",
-                    "caller-a",
-                    &json!("first"),
-                    true,
-                )
-                .unwrap_err()
-                .code,
-            BrokerErrorCode::BrowserCapabilityUnavailable
-        );
+        assert_eq!(listed["requests"][0].get("request_body"), None);
+        let retained_body = detail["request"]["request_body"]["body"].as_str().unwrap();
+        assert_eq!(retained_body.len(), 1024);
+        assert_eq!(detail["request"]["request_body"]["captured_size"], 1024);
+        assert_eq!(detail["request"]["request_body"]["truncated"], true);
+
+        let access = state
+            .evidence
+            .prepare_network_body_access(
+                &target,
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &json!("first"),
+                Some(&json!(1024)),
+            )
+            .unwrap();
+        let response_body = state
+            .evidence
+            .bound_network_body(
+                &target,
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &access,
+                Some(&Value::String("y".repeat(2048))),
+                false,
+            )
+            .unwrap();
+        assert_eq!(response_body["body"].as_str().unwrap().len(), 1024);
+        assert_eq!(response_body["returned_size"], 1024);
+        assert_eq!(response_body["original_size"], 2048);
+        assert_eq!(response_body["truncated"], true);
+        assert!(response_body.to_string().contains("safe=visible"));
 
         let duplicate_ack = state.evidence.accept_network_batch("profile-a", 6, &first);
         assert_eq!(duplicate_ack["accepted"], false);
@@ -4840,6 +5011,22 @@ mod tests {
             .unwrap();
         assert_eq!(cleared["sequence_barrier"], 8);
         assert_eq!(cleared["retained_entries"], 0);
+        assert_eq!(
+            state
+                .evidence
+                .bound_network_body(
+                    &target,
+                    "broker-generation-a",
+                    "C:/project-a",
+                    "caller-a",
+                    &access,
+                    Some(&Value::String("should-not-be-read".into())),
+                    false,
+                )
+                .unwrap_err()
+                .code,
+            BrokerErrorCode::BrowserTargetNotFound
+        );
         let stopped = state
             .evidence
             .stop_network_capture(
@@ -5107,12 +5294,33 @@ mod tests {
     }
 
     #[test]
-    fn network_body_capture_is_deferred_until_5_5() {
+    fn network_body_detail_uses_the_extension_response_body_operation() {
+        let request: OperationRequest = serde_json::from_value(json!({
+            "request_id": "network-body",
+            "caller_label": "caller-a",
+            "project_root": "C:/project-a",
+            "cmd": "get_network_request_detail",
+            "network_request_id": "request-1",
+            "include_body": true,
+            "max_body_bytes": 1024
+        }))
+        .unwrap();
+        let command =
+            build_extension_command_with_capture_id(&request, &target(), "profile-a", None, None)
+                .unwrap();
+        assert_eq!(command["cmd"], "get_network_response_body");
+        assert_eq!(command["network_request_id"], "request-1");
+        assert_eq!(command["max_body_bytes"], 1024);
+    }
+
+    #[tokio::test]
+    async fn network_body_response_is_bounded_and_grant_is_retired() {
         let target = target();
-        let mut evidence = EvidenceStore::new();
-        let error = evidence
+        let mut state = BrokerState::new();
+        let handle = state
+            .evidence
             .prepare_network_capture(
-                "network-body",
+                "network-body-capture",
                 "broker-generation-a",
                 "C:/project-a",
                 "caller-a",
@@ -5120,15 +5328,113 @@ mod tests {
                 Some(7),
                 Some(&json!(["example.test"])),
                 Some(&json!(true)),
+                Some(&json!(1024)),
                 None,
                 None,
                 None,
-                None,
-                None,
+                Some(&json!(1024)),
                 None,
             )
-            .unwrap_err();
-        assert_eq!(error.code, BrokerErrorCode::BrowserCapabilityUnavailable);
+            .unwrap();
+        let capture_id = handle.capture_id;
+        let mut started = extension_response(
+            "network-body-capture",
+            "start_network_capture",
+            target.clone(),
+        );
+        started.result.insert("active".into(), Value::Bool(true));
+        started
+            .result
+            .insert("capture_id".into(), Value::String(capture_id.clone()));
+        state
+            .evidence
+            .commit_network_capture(
+                "network-body-capture",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                &started,
+            )
+            .unwrap();
+        let batch = network_batch(
+            target.clone(),
+            &capture_id,
+            json!([{
+                "seq": 1,
+                "event": {
+                    "event_type": "request",
+                    "request_id": "request-1",
+                    "url": "https://example.test/resource"
+                }
+            }]),
+        );
+        assert_eq!(
+            state.evidence.accept_network_batch("profile-a", 7, &batch)["ack_seq"],
+            1
+        );
+        let access = state
+            .evidence
+            .prepare_network_body_access(
+                &target,
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &json!("request-1"),
+                Some(&json!(1024)),
+            )
+            .unwrap();
+        let (reply, receiver) = oneshot::channel();
+        state.pending.insert(
+            "network-body-response".into(),
+            PendingRequest {
+                operation: "get_network_request_detail".into(),
+                extension_instance_id: "profile-a".into(),
+                target: target.clone(),
+                project_root: "C:/project-a".into(),
+                caller_label: "caller-a".into(),
+                lease_token: None,
+                snapshot_id: None,
+                stream_generation: Some(7),
+                fallback_generation: None,
+                console_capture_id: None,
+                deadline: Instant::now() + Duration::from_secs(30),
+                reply,
+            },
+        );
+        state
+            .network_body_access
+            .insert("network-body-response".into(), access);
+        let raw_body = "raw-response-body-".repeat(300);
+        let mut response =
+            extension_response("network-body-response", "get_network_response_body", target);
+        response
+            .result
+            .insert("body".into(), Value::String(raw_body));
+        response
+            .result
+            .insert("base64_encoded".into(), Value::Bool(false));
+        assert_eq!(
+            state.handle_extension_response_with_broker_generation(
+                "profile-a",
+                Some(7),
+                Some("broker-generation-a"),
+                response,
+            )["ok"],
+            true
+        );
+        let completed = receiver.await.unwrap().unwrap();
+        assert_eq!(completed["operation"], "get_network_request_detail");
+        assert_eq!(completed["body"].as_str().unwrap().len(), 1024);
+        assert_eq!(completed["returned_size"], 1024);
+        assert_eq!(completed["truncated"], true);
+        assert!(completed["request"]["request_id"] == "request-1");
+        assert!(
+            !state
+                .network_body_access
+                .contains_key("network-body-response")
+        );
+        assert!(!state.pending.contains_key("network-body-response"));
     }
 
     #[test]

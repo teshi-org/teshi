@@ -424,6 +424,24 @@ function applyBridgeDiscovery(info) {
       );
       void releaseDebuggerRole(tabId, "console");
     }
+    // A broker generation owns the capture barriers and acknowledgements.
+    // Never replay an old generation's Network queue into a fresh broker;
+    // drop the bounded raw-body queue and release its debugger roles instead.
+    for (const [tabId, capture] of networkCapturesByTab.entries()) {
+      networkCapturesByTab.delete(tabId);
+      capture.active = false;
+      capture.queue = [];
+      capture.queue_bytes = 0;
+      capture.matched_request_ids.clear();
+      void releaseDebuggerRole(tabId, "network");
+    }
+    for (const capture of networkDeliveryStates.values()) {
+      capture.active = false;
+      capture.queue = [];
+      capture.queue_bytes = 0;
+      capture.matched_request_ids.clear();
+    }
+    networkDeliveryStates.clear();
   }
   if (nextBrokerStartId) {
     cachedBrokerStartId = nextBrokerStartId;
@@ -3457,6 +3475,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 
 if (globalThis.__TESHI_BRIDGE_TEST__) {
   globalThis.__teshiBridgeTestHooks = {
+    applyBridgeDiscovery,
     acquireDebuggerRole,
     releaseDebuggerRole,
     normalizeAllowedHostnames,

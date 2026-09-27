@@ -299,6 +299,38 @@ test("invalid discovery clears the previous broker generation cache", async () =
   assert.equal(hooks.brokerConnectionReady(), false);
 });
 
+test("broker generation rotation drops old Network queues and captures", () => {
+  const { hooks } = loadBackground();
+  hooks.applyBridgeDiscovery({
+    mode: "chrome",
+    ws_url: "ws://127.0.0.1:23000/?token=old-token",
+    extension_frame_ws_url: "ws://127.0.0.1:23000/extension/frames?token=old-token",
+    broker_features: ["transport.v1"],
+    broker_start_id: "generation-a",
+  });
+  const state = captureState();
+  state.queue.push({
+    seq: 1,
+    event: { event_type: "request", request_id: "secret-body" },
+    bytes: 64,
+  });
+  state.queue_bytes = 64;
+  hooks.networkCapturesByTab.set(11, state);
+  hooks.networkDeliveryStates.set("profile-a:1:11:capture-a", state);
+
+  hooks.applyBridgeDiscovery({
+    mode: "chrome",
+    ws_url: "ws://127.0.0.1:23000/?token=new-token",
+    extension_frame_ws_url: "ws://127.0.0.1:23000/extension/frames?token=new-token",
+    broker_features: ["transport.v1"],
+    broker_start_id: "generation-b",
+  });
+  assert.equal(hooks.networkCapturesByTab.size, 0);
+  assert.equal(hooks.networkDeliveryStates.size, 0);
+  assert.equal(state.queue.length, 0);
+  assert.equal(state.queue_bytes, 0);
+});
+
 test("discovery without a frame URL cannot retain the previous stream address", async () => {
   let missingFrameUrl = false;
   const { hooks } = loadBackground(async () =>

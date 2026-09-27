@@ -182,21 +182,12 @@ impl NetworkCaptureConfig {
         let hostnames = normalize_allowed_hostnames(allowed_hostnames)?;
         let capture_request_bodies = match capture_request_bodies {
             None => false,
-            Some(value) => match value.as_bool() {
-                Some(false) => false,
-                Some(true) => {
-                    return Err(BrokerError::new(
-                        BrokerErrorCode::BrowserCapabilityUnavailable,
-                        "raw Network body capture remains gated for 5.5",
-                    ));
-                }
-                None => {
-                    return Err(BrokerError::new(
-                        BrokerErrorCode::InvalidBrowserOperation,
-                        "capture_request_bodies must be a boolean",
-                    ));
-                }
-            },
+            Some(value) => value.as_bool().ok_or_else(|| {
+                BrokerError::new(
+                    BrokerErrorCode::InvalidBrowserOperation,
+                    "capture_request_bodies must be a boolean",
+                )
+            })?,
         };
         Ok(Self {
             allowed_hostnames: hostnames.into_iter().collect(),
@@ -278,6 +269,18 @@ pub const MAX_NETWORK_REQUEST_ID_BYTES: usize = 256;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkCaptureHandle {
     pub capture_id: String,
+}
+
+/// Explicit, lease-scoped authorization to fetch one bounded response body.
+///
+/// The access record is kept outside the retained Network request metadata so
+/// a body request cannot be reconstructed after the capture is cleared or
+/// terminated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkBodyAccess {
+    pub capture_id: String,
+    pub request_id: String,
+    pub max_body_bytes: usize,
 }
 
 const fn default_console_capture_age_ms() -> u64 {
@@ -1416,7 +1419,7 @@ impl EvidenceStore {
         if include_body {
             return Err(BrokerError::new(
                 BrokerErrorCode::BrowserCapabilityUnavailable,
-                "raw Network body access remains gated for 5.5",
+                "raw Network body access requires an explicit dispatched request",
             ));
         }
         let capture = self.network_captures.get_mut(target).ok_or_else(|| {
@@ -1438,6 +1441,123 @@ impl EvidenceStore {
             "target": capture.target,
             "active": capture.termination_reason.is_none(),
             "request": record.value,
+        }))
+    }
+
+    /// Validate an explicit response-body request before dispatching to the
+    /// extension.  The caller's lease and project scope are checked by the
+    /// broker before reaching this store; this second check keeps the body
+    /// access bound to the still-active capture and retained request.
+    pub fn prepare_network_body_access(
+        &mut self,
+        target: &BrowserTarget,
+        broker_start_id: &str,
+        project_root: &str,
+        caller_label: &str,
+        request_id: &Value,
+        max_body_bytes: Option<&Value>,
+    ) -> Result<NetworkBodyAccess, BrokerError> {
+        self.require_network_scope(target, broker_start_id, project_root, caller_label)?;
+        let capture = self.network_captures.get_mut(target).ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "network capture is not active for the selected target",
+            )
+        })?;
+        evict_network_requests(capture, Instant::now());
+        let normalized = truncate_utf8(&value_text(Some(request_id)), MAX_NETWORK_REQUEST_ID_BYTES);
+        if !capture.requests.contains_key(&normalized) {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserTargetNotFound,
+                "captured network request was not found or has expired",
+            ));
+        }
+        let max_body_bytes = bounded_usize(
+            max_body_bytes,
+            capture.config.max_body_bytes,
+            1,
+            capture.config.max_body_bytes,
+            "max_body_bytes",
+        )?;
+        Ok(NetworkBodyAccess {
+            capture_id: capture.capture_id.clone(),
+            request_id: normalized,
+            max_body_bytes,
+        })
+    }
+
+    /// Bound the response body returned by the extension and combine it with
+    /// the already-retained, metadata-scoped request detail.  The raw body is
+    /// never placed in capture summaries, diagnostics, or the retained event
+    /// store.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bound_network_body(
+        &mut self,
+        target: &BrowserTarget,
+        broker_start_id: &str,
+        project_root: &str,
+        caller_label: &str,
+        access: &NetworkBodyAccess,
+        body: Option<&Value>,
+        base64_encoded: bool,
+    ) -> Result<Value, BrokerError> {
+        self.require_network_scope(target, broker_start_id, project_root, caller_label)?;
+        let capture = self.network_captures.get_mut(target).ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "network capture is not active for the selected target",
+            )
+        })?;
+        evict_network_requests(capture, Instant::now());
+        if capture.capture_id != access.capture_id || capture.termination_reason.is_some() {
+            return Err(BrokerError::new(
+                BrokerErrorCode::MismatchedBrowserResponse,
+                "network response-body access no longer matches the active capture",
+            ));
+        }
+        let Some(record) = capture.requests.get(&access.request_id) else {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserTargetNotFound,
+                "captured network request was not found or has expired",
+            ));
+        };
+        let encoded_body = value_text(body);
+        let (output, original_size, returned_size, truncated) = if base64_encoded {
+            let raw = base64::engine::general_purpose::STANDARD
+                .decode(encoded_body.as_bytes())
+                .map_err(|_| {
+                    BrokerError::new(
+                        BrokerErrorCode::BrowserOperationFailed,
+                        "browser returned an invalid base64 Network body",
+                    )
+                })?;
+            let bounded = &raw[..raw.len().min(access.max_body_bytes)];
+            (
+                base64::engine::general_purpose::STANDARD.encode(bounded),
+                raw.len(),
+                bounded.len(),
+                raw.len() > bounded.len(),
+            )
+        } else {
+            let raw = encoded_body.as_bytes();
+            let output = truncate_utf8(&encoded_body, access.max_body_bytes);
+            (
+                output.clone(),
+                raw.len(),
+                output.len(),
+                raw.len() > output.len(),
+            )
+        };
+        Ok(json!({
+            "capture_id": capture.capture_id,
+            "target": capture.target,
+            "active": capture.termination_reason.is_none(),
+            "request": record.value,
+            "body": output,
+            "base64_encoded": base64_encoded,
+            "truncated": truncated,
+            "original_size": original_size,
+            "returned_size": returned_size,
         }))
     }
 
@@ -2274,6 +2394,89 @@ enum NetworkMergeResult {
     Rejected,
 }
 
+fn bounded_request_body(value: Option<&Value>, limit: usize) -> Value {
+    let Some(value) = value.and_then(Value::as_object) else {
+        return json!({
+            "encoding": "utf8",
+            "body": "",
+            "captured_size": 0,
+            "original_size": Value::Null,
+            "truncated": false,
+            "unavailable_reason": "invalid_request_body",
+        });
+    };
+    let mut encoding = value_text(value.get("encoding")).to_ascii_lowercase();
+    if encoding.is_empty() {
+        encoding = if value
+            .get("base64_encoded")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "base64".into()
+        } else {
+            "utf8".into()
+        };
+    }
+    let body_text = value
+        .get("body")
+        .or_else(|| value.get("data"))
+        .map(|body| value_text(Some(body)))
+        .unwrap_or_default();
+    let mut unavailable_reason = value
+        .get("unavailable_reason")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("unavailable").and_then(Value::as_str))
+        .unwrap_or_default()
+        .to_owned();
+    unavailable_reason = truncate_utf8(&unavailable_reason, 256);
+    let (encoding, output, raw_size, captured_size) = if encoding == "base64" {
+        match base64::engine::general_purpose::STANDARD.decode(body_text.as_bytes()) {
+            Ok(raw) => {
+                let bounded = &raw[..raw.len().min(limit)];
+                (
+                    "base64",
+                    base64::engine::general_purpose::STANDARD.encode(bounded),
+                    raw.len(),
+                    bounded.len(),
+                )
+            }
+            Err(_) => {
+                if unavailable_reason.is_empty() {
+                    unavailable_reason = "invalid_base64".into();
+                }
+                ("base64", String::new(), 0, 0)
+            }
+        }
+    } else {
+        let raw = body_text.as_bytes();
+        let output = truncate_utf8(&body_text, limit);
+        let captured_size = output.len();
+        ("utf8", output, raw.len(), captured_size)
+    };
+    let original_size = value.get("original_size").and_then(|size| {
+        size.as_u64()
+            .map(|size| usize::try_from(size).unwrap_or(usize::MAX))
+            .or_else(|| {
+                size.as_i64()
+                    .map(|size| usize::try_from(size.max(0)).unwrap_or(usize::MAX))
+            })
+    });
+    let truncated = value
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || raw_size > limit
+        || original_size.is_some_and(|size| size > captured_size);
+    json!({
+        "encoding": encoding,
+        "body": output,
+        "captured_size": captured_size,
+        "original_size": original_size,
+        "truncated": truncated,
+        "unavailable_reason": (!unavailable_reason.is_empty()).then_some(unavailable_reason),
+    })
+}
+
 fn network_event_value(event: &crate::protocol::NetworkEvent) -> Value {
     let mut object = event
         .data
@@ -2350,8 +2553,24 @@ fn merge_network_event(capture: &mut NetworkCaptureRecord, raw_event: Value) -> 
             );
         }
         if capture.config.capture_request_bodies && raw.get("request_body").is_some() {
-            // Body retention is deliberately represented only as metadata in
-            // 5.4. Raw body retrieval remains a 5.5 authorization surface.
+            let request_body = raw.get("request_body").map(|request_body| {
+                if request_body.is_object() {
+                    request_body.clone()
+                } else {
+                    json!({
+                        "body": request_body,
+                        "encoding": raw.get("request_body_encoding"),
+                        "base64_encoded": raw.get("request_body_base64_encoded"),
+                        "original_size": raw.get("request_body_original_size"),
+                        "truncated": raw.get("request_body_truncated"),
+                        "unavailable_reason": raw.get("request_body_unavailable_reason"),
+                    })
+                }
+            });
+            value.insert(
+                "request_body".into(),
+                bounded_request_body(request_body.as_ref(), capture.config.max_request_body_bytes),
+            );
             value.insert("has_request_body".into(), Value::Bool(true));
         }
         return store_network_request(
