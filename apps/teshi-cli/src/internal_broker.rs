@@ -30,6 +30,9 @@ pub(crate) struct InternalBrokerOptions {
     /// Enable the migration-only P0 Navigation/Snapshot command surface.
     #[arg(long)]
     enable_p0_control: bool,
+    /// Enable the migration-only P1 screenshot/Console/Network command surface.
+    #[arg(long)]
+    enable_p1_observability: bool,
 }
 
 impl InternalBrokerOptions {
@@ -46,6 +49,13 @@ pub(crate) async fn run(options: InternalBrokerOptions) -> Result<()> {
     config.broker_features = vec!["transport.v1".into()];
     if options.enable_p0_control {
         config.broker_features.push("p0.control".into());
+    }
+    if options.enable_p1_observability {
+        config.broker_features.extend([
+            "p1.observability_artifacts".into(),
+            "p1.filtered_network_capture".into(),
+            "p1.network_batch_transport".into(),
+        ]);
     }
     let runtime = BrokerRuntime::start(config)
         .await
@@ -83,6 +93,7 @@ mod tests {
             "--trusted-extension-origin".into(),
             first_origin.into(),
             "--enable-p0-control".into(),
+            "--enable-p1-observability".into(),
         ])
         .unwrap();
         assert_eq!(
@@ -101,6 +112,7 @@ mod tests {
                 .contains(&second_origin.into())
         );
         assert!(options.enable_p0_control);
+        assert!(options.enable_p1_observability);
 
         assert!(
             InternalBrokerOptions::parse(

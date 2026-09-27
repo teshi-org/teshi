@@ -3020,8 +3020,10 @@ class ChromeBridge:
                     max_bytes=data.get("max_bytes"),
                     sensitive_fields=data.get("sensitive_fields"),
                 )
+                extension_request = dict(data)
+                extension_request["capture_id"] = capture["capture_id"]
                 result = await self._forward_extension_command(
-                    data, authorized=authorized
+                    extension_request, authorized=authorized
                 )
                 if not result.get("ok"):
                     self.broker.stop_console_capture(record, target)
@@ -3051,8 +3053,12 @@ class ChromeBridge:
                     data, legacy_compatibility=False
                 )
                 record, target, _ephemeral = authorized
+                extension_request = dict(data)
+                capture_id = self.broker.console_capture_id(record, target)
+                if capture_id is not None:
+                    extension_request["capture_id"] = capture_id
                 result = await self._forward_extension_command(
-                    data, authorized=authorized
+                    extension_request, authorized=authorized
                 )
                 if not result.get("ok"):
                     return result

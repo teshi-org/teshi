@@ -39,7 +39,7 @@
 - [x] 5.3 Port target-scoped Console filtering, redaction, truncation, age/count/byte eviction, and termination diagnostics.
 - [x] 5.4 Port exact hostname-filtered Network capture, request/response correlation, capture IDs, monotonic sequences, contiguous ack barriers, deduplication, resend, and loss diagnostics.
 - [x] 5.5 Enforce body access grants, bounded memory/backpressure, no raw-body logging, and cleanup on target closure, capture stop, lease expiry, and broker restart.
-- [ ] 5.6 Run real Chrome screenshot, Console, Network, reconnect, large-event, and backpressure scenarios; record memory and latency versus Python.
+- [x] 5.6 Run real Chrome screenshot, Console, Network, reconnect, large-event, and backpressure scenarios; record memory and latency versus Python.
 
 ## 6. Port Privileged Authorization and Security Controls
 

@@ -100,6 +100,28 @@ class RustTransportPage(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_OPTIONS(self) -> None:  # noqa: N802 - stdlib callback name
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_POST(self) -> None:  # noqa: N802 - stdlib callback name
+        try:
+            length = min(int(self.headers.get("Content-Length", "0")), 8 * 1024 * 1024)
+        except ValueError:
+            length = 0
+        if length:
+            self.rfile.read(length)
+        body = ("rust-network-response-" + ("r" * 32_768)).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, _format: str, *_args: object) -> None:
         return
 
@@ -290,6 +312,7 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             "--trusted-extension-origin",
             self.extension_origin,
             "--enable-p0-control",
+            "--enable-p1-observability",
             "--discovery-port",
             str(self.discovery_port),
         ]
@@ -333,7 +356,14 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(
-            self.ready_endpoint["broker_features"], ["transport.v1", "p0.control"]
+            self.ready_endpoint["broker_features"],
+            [
+                "transport.v1",
+                "p0.control",
+                "p1.observability_artifacts",
+                "p1.filtered_network_capture",
+                "p1.network_batch_transport",
+            ],
         )
         self.assertEqual(self.ready_endpoint["protocol_version"], 1)
         self.assertEqual(self.ready_endpoint["schema_version"], 1)
@@ -1012,6 +1042,365 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await self._release_lease(target, owner, token)
 
+    async def test_stage_five_real_evidence_and_bounded_backpressure(self) -> None:
+        self._set_stage("stage 5.6 real screenshot, Console, and Network evidence")
+        sessions = await self._wait_sessions(2, expected_count=2)
+        session_a = self._session_for_path(sessions, "/rust-a")
+        session_b = self._session_for_path(sessions, "/rust-b")
+        target_a = self._target(session_a)
+        target_b = self._target(session_b)
+        owner_a = "rust-stage5-6-profile-a"
+        owner_b = "rust-stage5-6-profile-b"
+        tokens = await asyncio.gather(
+            self._acquire_lease(target_a, owner_a),
+            self._acquire_lease(target_b, owner_b),
+        )
+        leases_valid = True
+        network_active = False
+        metrics: dict[str, object] = {
+            "operations_ms": {},
+            "working_set_bytes": [],
+        }
+
+        def sample_working_set(label: str) -> None:
+            samples = metrics["working_set_bytes"]
+            assert isinstance(samples, list)
+            samples.append(
+                {
+                    "label": label,
+                    "bytes": self._working_set_bytes(
+                        self.broker.pid if self.broker is not None else None
+                    ),
+                }
+            )
+
+        async def control(label: str, payload: dict, *, timeout: float = 20) -> dict:
+            started = time.perf_counter()
+            result = await self._control(payload, timeout=timeout)
+            elapsed = round((time.perf_counter() - started) * 1000, 1)
+            operations = metrics["operations_ms"]
+            assert isinstance(operations, dict)
+            operations[label] = elapsed
+            sample_working_set(label)
+            return result
+
+        try:
+            sample_working_set("before-evidence")
+            screenshot_a, screenshot_b = await asyncio.gather(
+                control(
+                    "screenshot_png_profile_a",
+                    {
+                        "schema_version": 1,
+                        "request_id": "rust-stage5-6-screenshot-a",
+                        "caller_label": owner_a,
+                        "project_root": str(self.temp_root),
+                        "cmd": "capture_browser_screenshot",
+                        "target": target_a,
+                        "lease_token": tokens[0],
+                        "format": "png",
+                        "full_page": False,
+                    },
+                ),
+                control(
+                    "screenshot_jpeg_profile_b",
+                    {
+                        "schema_version": 1,
+                        "request_id": "rust-stage5-6-screenshot-b",
+                        "caller_label": owner_b,
+                        "project_root": str(self.temp_root),
+                        "cmd": "capture_browser_screenshot",
+                        "target": target_b,
+                        "lease_token": tokens[1],
+                        "format": "jpeg",
+                        "quality": 75,
+                        "full_page": True,
+                    },
+                ),
+            )
+            self.assertTrue(screenshot_a.get("ok"), screenshot_a)
+            self.assertTrue(screenshot_b.get("ok"), screenshot_b)
+            artifact_root = self.temp_root / ".teshi" / "artifacts" / "browser"
+            screenshot_paths = [
+                artifact_root / screenshot_a["artifact"]["path"],
+                artifact_root / screenshot_b["artifact"]["path"],
+            ]
+            self.assertEqual(screenshot_paths[0].read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+            self.assertEqual(screenshot_paths[1].read_bytes()[:2], b"\xff\xd8")
+            self.assertTrue(all(path.stat().st_size > 0 for path in screenshot_paths))
+            if self.artifact_dir is not None:
+                shutil.copyfile(
+                    screenshot_paths[0], self.artifact_dir / "rust-stage5-6-profile-a.png"
+                )
+                shutil.copyfile(
+                    screenshot_paths[1], self.artifact_dir / "rust-stage5-6-profile-b.jpg"
+                )
+
+            console_start = await control(
+                "console_start_profile_a",
+                {
+                    "schema_version": 1,
+                    "request_id": "rust-stage5-6-console-start",
+                    "caller_label": owner_a,
+                    "project_root": str(self.temp_root),
+                    "cmd": "start_console_capture",
+                    "target": target_a,
+                    "lease_token": tokens[0],
+                    "levels": ["info", "error"],
+                    "max_entries": 8,
+                    "max_bytes": 4096,
+                    "max_age_ms": 60_000,
+                    "sensitive_fields": ["token"],
+                },
+            )
+            self.assertTrue(console_start.get("ok"), console_start)
+            await self.contexts["profile-a"].pages[0].evaluate(
+                """() => {
+                    console.info('stage5 token=rust-console-secret');
+                    console.error('stage5-large-' + 'x'.repeat(70000));
+                }"""
+            )
+            console_list: dict = {}
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                console_list = await control(
+                    "console_list_profile_a",
+                    {
+                        "schema_version": 1,
+                        "request_id": f"rust-stage5-6-console-list-{uuid.uuid4().hex}",
+                        "caller_label": owner_a,
+                        "project_root": str(self.temp_root),
+                        "cmd": "list_console_events",
+                        "target": target_a,
+                        "lease_token": tokens[0],
+                    },
+                )
+                if console_list.get("events"):
+                    break
+                await asyncio.sleep(0.25)
+            self.assertTrue(console_list.get("events"), console_list)
+            console_text = json.dumps(console_list, ensure_ascii=False)
+            self.assertNotIn("rust-console-secret", console_text)
+            self.assertLessEqual(console_list.get("retained_bytes", 0), 4096)
+            self.assertLessEqual(console_list.get("retained_entries", 0), 8)
+            diagnostics = console_list.get("diagnostics", {})
+            self.assertGreaterEqual(diagnostics.get("truncated_events", 0), 1)
+            console_stop = await control(
+                "console_stop_profile_a",
+                {
+                    "schema_version": 1,
+                    "request_id": "rust-stage5-6-console-stop",
+                    "caller_label": owner_a,
+                    "project_root": str(self.temp_root),
+                    "cmd": "stop_console_capture",
+                    "target": target_a,
+                    "lease_token": tokens[0],
+                },
+            )
+            self.assertTrue(console_stop.get("ok"), console_stop)
+
+            network_start = await control(
+                "network_start_profile_b",
+                {
+                    "schema_version": 1,
+                    "request_id": "rust-stage5-6-network-start",
+                    "caller_label": owner_b,
+                    "project_root": str(self.temp_root),
+                    "cmd": "start_network_capture",
+                    "target": target_b,
+                    "lease_token": tokens[1],
+                    "allowed_hostnames": ["127.0.0.1"],
+                    "capture_request_bodies": True,
+                    "max_request_body_bytes": 64,
+                    "max_body_bytes": 1024,
+                    "max_entries": 256,
+                    "max_bytes": 256 * 1024,
+                    "sensitive_fields": ["token"],
+                },
+            )
+            self.assertTrue(network_start.get("ok"), network_start)
+            network_active = True
+            network_port = self.http.server_address[1]
+            await self.contexts["profile-b"].pages[0].evaluate(
+                """async ({port}) => {
+                    const response = await fetch(
+                        `http://127.0.0.1:${port}/network-match?token=rust-network-secret`,
+                        {
+                            method: 'POST',
+                            headers: {'Content-Type': 'text/plain'},
+                            body: 'request-body-' + 'q'.repeat(4096),
+                        },
+                    );
+                    await response.text();
+                    await fetch(`http://localhost:${port}/network-filtered`).catch(() => null);
+                }""",
+                {"port": network_port},
+            )
+            network_list: dict = {}
+            matching_request: dict | None = None
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                network_list = await control(
+                    "network_list_profile_b",
+                    {
+                        "schema_version": 1,
+                        "request_id": f"rust-stage5-6-network-list-{uuid.uuid4().hex}",
+                        "caller_label": owner_b,
+                        "project_root": str(self.temp_root),
+                        "cmd": "list_network_requests",
+                        "target": target_b,
+                        "lease_token": tokens[1],
+                    },
+                )
+                requests = network_list.get("requests", [])
+                matching_request = next(
+                    (
+                        item
+                        for item in requests
+                        if "/network-match" in str(item.get("url", ""))
+                    ),
+                    None,
+                )
+                if matching_request is not None:
+                    break
+                await asyncio.sleep(0.25)
+            self.assertIsNotNone(matching_request, network_list)
+            assert matching_request is not None
+            self.assertNotIn("request_body", matching_request)
+            self.assertNotIn("rust-network-secret", json.dumps(network_list))
+            self.assertTrue(
+                all("network-filtered" not in str(item.get("url", "")) for item in network_list["requests"])
+            )
+            detail = await control(
+                "network_detail_profile_b",
+                {
+                    "schema_version": 1,
+                    "request_id": "rust-stage5-6-network-detail",
+                    "caller_label": owner_b,
+                    "project_root": str(self.temp_root),
+                    "cmd": "get_network_request_detail",
+                    "target": target_b,
+                    "lease_token": tokens[1],
+                    "network_request_id": matching_request["request_id"],
+                    "include_body": True,
+                    "max_body_bytes": 1024,
+                },
+            )
+            self.assertTrue(detail.get("ok"), detail)
+            request_body = detail["request"].get("request_body", {})
+            self.assertLessEqual(request_body.get("captured_size", 0), 64)
+            self.assertLessEqual(detail.get("returned_size", 0), 1024)
+            self.assertTrue(detail.get("truncated"))
+            self.assertNotIn("rust-network-secret", json.dumps(detail))
+
+            self._set_stage("stage 5.6 broker-offline Network burst and queue bounds")
+            old_port = self.discovery_port
+            await self._stop_broker()
+            leases_valid = False
+            await self._wait_port_closed(old_port)
+            burst_count = 500
+            await self.contexts["profile-b"].pages[0].evaluate(
+                """async ({port, count}) => {
+                    await Promise.all(
+                        Array.from({length: count}, (_, index) =>
+                            fetch(`http://127.0.0.1:${port}/network-burst-${index}`, {
+                                method: 'POST',
+                                headers: {'Content-Type': 'text/plain'},
+                                body: 'burst-' + 'b'.repeat(256),
+                            }).then((response) => response.text()).catch(() => ''),
+                        ),
+                    );
+                }""",
+                {"port": network_port, "count": burst_count},
+            )
+            queue_state: list[dict] = []
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    observed = await self._evaluate_worker(
+                        self.workers["profile-b"],
+                        "Array.from(networkDeliveryStates.values()).map(state => ({queue_length: state.queue.length, queue_bytes: state.queue_bytes, dropped_events: state.dropped_events_total, dropped_bytes: state.dropped_bytes_total, active: state.active}))",
+                        timeout=3,
+                    )
+                    queue_state = observed if isinstance(observed, list) else []
+                except Exception:
+                    queue_state = []
+                if queue_state and (
+                    queue_state[0].get("dropped_events", 0) > 0
+                    or queue_state[0].get("queue_length", 0) >= 1_000
+                ):
+                    break
+                await asyncio.sleep(0.25)
+            self.assertTrue(queue_state, queue_state)
+            queue = queue_state[0]
+            self.assertLessEqual(queue["queue_length"], 1_000)
+            self.assertLessEqual(queue["queue_bytes"], 5 * 1024 * 1024)
+            self.assertGreater(queue["dropped_events"], 0, queue_state)
+            metrics["backpressure"] = {
+                "burst_requests": burst_count,
+                "queue": queue,
+            }
+            sample_working_set("broker-offline-after-burst")
+
+            self.discovery_port = old_port
+            await self._start_broker()
+            await asyncio.gather(
+                self._force_stream("profile-a"),
+                self._force_stream("profile-b"),
+            )
+            recovered = await self._wait_sessions(2, expected_count=2)
+            recovered_a = self._session_for_path(recovered, "/rust-a")
+            recovered_b = self._session_for_path(recovered, "/rust-b")
+            self.assertIsInstance(recovered_a["stream_generation"], int)
+            self.assertIsInstance(recovered_b["stream_generation"], int)
+            self.assertGreaterEqual(recovered_a["stream_generation"], 1)
+            self.assertGreaterEqual(recovered_b["stream_generation"], 1)
+            recovered_worker_state: dict = {}
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    observed = await self._evaluate_worker(
+                        self.workers["profile-b"],
+                        "({captures: networkCapturesByTab.size, deliveries: networkDeliveryStates.size, generation: lastStreamGeneration})",
+                        timeout=3,
+                    )
+                    recovered_worker_state = observed if isinstance(observed, dict) else {}
+                except Exception:
+                    recovered_worker_state = {}
+                if (
+                    recovered_worker_state.get("captures") == 0
+                    and recovered_worker_state.get("deliveries") == 0
+                ):
+                    break
+                await asyncio.sleep(0.25)
+            self.assertEqual(recovered_worker_state.get("captures"), 0, recovered_worker_state)
+            self.assertEqual(recovered_worker_state.get("deliveries"), 0, recovered_worker_state)
+            self.assertGreaterEqual(recovered_worker_state.get("generation", 0), 1)
+            metrics["reconnect_generations"] = {
+                "profile-a": recovered_a["stream_generation"],
+                "profile-b": recovered_b["stream_generation"],
+                "extension_cleanup": recovered_worker_state,
+            }
+            self._log("stage5_6_real_evidence", metrics)
+        finally:
+            if network_active and leases_valid and self.broker is not None:
+                with contextlib.suppress(Exception):
+                    await self._control(
+                        {
+                            "schema_version": 1,
+                            "request_id": "rust-stage5-6-network-stop-cleanup",
+                            "caller_label": owner_b,
+                            "project_root": str(self.temp_root),
+                            "cmd": "stop_network_capture",
+                            "target": target_b,
+                            "lease_token": tokens[1],
+                        }
+                    )
+            if leases_valid:
+                await asyncio.gather(
+                    self._release_lease(target_a, owner_a, tokens[0]),
+                    self._release_lease(target_b, owner_b, tokens[1]),
+                )
+
     async def test_two_profiles_stay_isolated_across_rust_transport_restart(self) -> None:
         self._set_stage("verify discovery origin and feature boundary")
         public = await asyncio.to_thread(self._http_discovery, None)
@@ -1025,7 +1414,14 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
         trusted = self.trusted_discovery
         self.assertIn("token=", trusted["ws_url"])
         self.assertEqual(
-            trusted["broker_features"], ["transport.v1", "p0.control"]
+            trusted["broker_features"],
+            [
+                "transport.v1",
+                "p0.control",
+                "p1.observability_artifacts",
+                "p1.filtered_network_capture",
+                "p1.network_batch_transport",
+            ],
         )
         untrusted = await asyncio.to_thread(
             self._http_discovery,
@@ -2004,6 +2400,30 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
         except (OSError, subprocess.TimeoutExpired) as error:
             return f"unavailable: {error}"
         return (result.stdout or result.stderr).strip()
+
+    @staticmethod
+    def _working_set_bytes(pid: int | None) -> int | None:
+        if pid is None or pid <= 0:
+            return None
+        if os.name != "nt":
+            return None
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                f"(Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue).WorkingSet64",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        try:
+            value = int(result.stdout.strip())
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
 
     @staticmethod
     def _redact(value: str) -> str:

@@ -280,6 +280,7 @@ class ConsoleCaptureState:
     """Target-scoped console capture state owned by one extension session."""
 
     target: dict[str, Any]
+    capture_id: str
     levels: set[str]
     max_age_ms: int
     max_entries: int
@@ -1413,6 +1414,7 @@ class BrowserSessionBroker:
         normalized_levels = _normalize_console_levels(levels)
         state = ConsoleCaptureState(
             target=dict(target),
+            capture_id=f"console_{secrets.token_urlsafe(24)}",
             levels=normalized_levels,
             max_age_ms=_bounded_int(
                 max_age_ms,
@@ -1439,6 +1441,14 @@ class BrowserSessionBroker:
         )
         record.console_captures[_reference_target_prefix(target)] = state
         return _console_capture_summary(state)
+
+    def console_capture_id(
+        self, record: SessionRecord, target: dict[str, Any]
+    ) -> str | None:
+        state = record.console_captures.get(_reference_target_prefix(target))
+        if state is None or not _targets_equal(state.target, target):
+            return None
+        return state.capture_id
 
     def record_console_event(
         self,
@@ -1572,6 +1582,7 @@ class BrowserSessionBroker:
         return {
             "target": dict(target),
             "active": False,
+            "capture_id": state.capture_id,
             "removed_entries": len(state.events),
             "removed_bytes": state.byte_size,
         }
@@ -3053,6 +3064,7 @@ def _console_capture_summary(state: ConsoleCaptureState) -> dict[str, Any]:
     return {
         "target": dict(state.target),
         "active": True,
+        "capture_id": state.capture_id,
         "levels": sorted(state.levels),
         "retention": {
             "max_age_ms": state.max_age_ms,
