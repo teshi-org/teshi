@@ -15,6 +15,7 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::coordinator::{ActionMetadata, BrowserActionCoordinator};
+use crate::evidence::EvidenceStore;
 use crate::protocol::{
     BROWSER_BROKER_PROTOCOL_VERSION, BROWSER_BROKER_SCHEMA_VERSION, BrokerError, BrokerErrorCode,
     BrowserTarget, ExecuteLocatorActionRequest, ExecuteLocatorCandidate,
@@ -87,6 +88,8 @@ pub struct BrokerState {
     action_metadata: HashMap<String, ActionMetadata>,
     /// Requests that reached a transport dispatch boundary and may have run.
     dispatched_actions: HashSet<String>,
+    /// Single owner for prepared and published screenshot/PDF artifacts.
+    evidence: EvidenceStore,
 }
 
 impl BrokerState {
@@ -142,8 +145,13 @@ impl BrokerState {
                 reply,
                 ..
             } => {
-                let response_value =
-                    self.handle_extension_response(&extension_instance_id, generation, response);
+                let broker_start_id = runtime.endpoint_record().broker_start_id;
+                let response_value = self.handle_extension_response_with_broker_generation(
+                    &extension_instance_id,
+                    generation,
+                    Some(&broker_start_id),
+                    response,
+                );
                 if let Some(reply) = reply {
                     let _ = reply.send(response_value);
                 }
@@ -321,6 +329,7 @@ impl BrokerState {
             if current_generation != Some(expected_generation) {
                 response["cmd"] = Value::Null;
                 if let Some(pending) = self.pending.remove(&request_id) {
+                    self.abort_evidence(&request_id, &pending.operation);
                     self.retire_request(&request_id, Instant::now());
                     if let Some(session) = self.sessions.get_mut(&instance_id) {
                         session.remove_queued_command(&request_id);
@@ -358,6 +367,7 @@ impl BrokerState {
         if let Err(error) = validation {
             response["cmd"] = Value::Null;
             if let Some(pending) = self.pending.remove(&request_id) {
+                self.abort_evidence(&request_id, &pending.operation);
                 self.retire_request(&request_id, Instant::now());
                 let _ = pending.reply.send(Err(error));
             }
@@ -382,10 +392,26 @@ impl BrokerState {
         }
     }
 
+    #[allow(dead_code)]
     fn handle_extension_response(
         &mut self,
         event_instance_id: &str,
         generation: Option<u64>,
+        response: ExtensionResponse,
+    ) -> Value {
+        self.handle_extension_response_with_broker_generation(
+            event_instance_id,
+            generation,
+            None,
+            response,
+        )
+    }
+
+    fn handle_extension_response_with_broker_generation(
+        &mut self,
+        event_instance_id: &str,
+        generation: Option<u64>,
+        broker_start_id: Option<&str>,
         response: ExtensionResponse,
     ) -> Value {
         if let Err(error) = response.validate() {
@@ -414,7 +440,24 @@ impl BrokerState {
             .target
             .as_ref()
             .is_some_and(|target| target == &pending.target);
-        let generation_matches = pending.stream_generation == generation;
+        let generation_matches = if is_evidence_operation(&pending.operation) {
+            match (
+                pending.stream_generation,
+                pending.fallback_generation,
+                generation,
+            ) {
+                (Some(expected), _, Some(actual)) => expected == actual,
+                (None, Some(expected), None) => {
+                    self.sessions
+                        .get(&pending.extension_instance_id)
+                        .and_then(|session| session.current_stream_generation())
+                        == Some(expected)
+                }
+                _ => false,
+            }
+        } else {
+            pending.stream_generation == generation
+        };
         let operation_matches = response.operation == extension_operation_for(&pending.operation);
         if !instance_matches || !target_matches || !generation_matches || !operation_matches {
             self.quarantine(
@@ -439,6 +482,64 @@ impl BrokerState {
         };
         let action_metadata = self.action_metadata.get(&request_id).cloned();
         self.retire_request(&request_id, Instant::now());
+
+        let artifact = if is_evidence_operation(&pending.operation) {
+            if !response.ok {
+                self.evidence.abort_request(&request_id);
+                None
+            } else {
+                let Some(broker_start_id) = broker_start_id else {
+                    self.evidence.abort_request(&request_id);
+                    let error = BrokerError::new(
+                        BrokerErrorCode::MismatchedBrowserResponse,
+                        "browser evidence response has no broker generation",
+                    );
+                    let _ = pending.reply.send(Err(error.clone()));
+                    return error_value(error);
+                };
+                let lease_result = pending
+                    .lease_token
+                    .as_deref()
+                    .ok_or_else(|| {
+                        BrokerError::new(
+                            BrokerErrorCode::InvalidBrowserLease,
+                            "browser evidence response has no lease token",
+                        )
+                    })
+                    .and_then(|token| {
+                        self.validate_lease(
+                            &pending.extension_instance_id,
+                            token,
+                            &pending.project_root,
+                            &pending.caller_label,
+                            broker_start_id,
+                        )
+                        .map(|_| ())
+                    });
+                if let Err(error) = lease_result {
+                    self.evidence.abort_request(&request_id);
+                    let _ = pending.reply.send(Err(error.clone()));
+                    return error_value(error);
+                }
+                match self.evidence.commit_response(
+                    &request_id,
+                    broker_start_id,
+                    &pending.operation,
+                    &pending.project_root,
+                    &pending.caller_label,
+                    &pending.target,
+                    &response,
+                ) {
+                    Ok(artifact) => Some(artifact),
+                    Err(error) => {
+                        let _ = pending.reply.send(Err(error.clone()));
+                        return error_value(error);
+                    }
+                }
+            }
+        } else {
+            None
+        };
         let mut value = serde_json::to_value(&response).unwrap_or_else(|_| json!({}));
         if let Value::Object(object) = &mut value {
             object.insert("type".into(), Value::String("response".into()));
@@ -461,6 +562,29 @@ impl BrokerState {
             );
             if let Some(snapshot_id) = &pending.snapshot_id {
                 object.insert("snapshot_id".into(), Value::String(snapshot_id.clone()));
+            }
+            if let Some(artifact) = &artifact {
+                object.insert("artifact".into(), serde_json::to_value(artifact).unwrap());
+                match pending.operation.as_str() {
+                    "capture_browser_evidence" => {
+                        object.remove("screenshot");
+                        object.insert(
+                            "evidence".into(),
+                            json!({
+                                "request_id": artifact.request_id,
+                                "target": artifact.target,
+                                "media_type": artifact.media_type,
+                                "reference": artifact.path,
+                                "page_context_revision": artifact.page_context_revision,
+                                "artifact": artifact,
+                            }),
+                        );
+                    }
+                    "generate_browser_pdf" => {
+                        object.remove("artifact_data");
+                    }
+                    _ => {}
+                }
             }
         }
         if response.ok {
@@ -612,6 +736,7 @@ impl BrokerState {
             "renew_browser_lease" => Some(self.renew_lease_response(&request, runtime)),
             "release_browser_lease" => Some(self.release_lease_response(&request, runtime)),
             "cancel_browser_request" => Some(self.cancel_request_response(&request)),
+            "cleanup_browser_artifacts" => Some(self.cleanup_browser_artifacts_response(&request)),
             _ => None,
         };
         if let Some(result) = immediate {
@@ -621,6 +746,35 @@ impl BrokerState {
             return;
         }
         self.forward_operation(request, reply, runtime).await;
+    }
+
+    fn cleanup_browser_artifacts_response(
+        &mut self,
+        request: &OperationRequest,
+    ) -> Result<Value, BrokerError> {
+        let project = required_project_context(request)?;
+        let caller = required_caller_context(request)?;
+        let paths = request
+            .arguments
+            .get("paths")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                BrokerError::new(
+                    BrokerErrorCode::InvalidBrowserOperation,
+                    "paths is required for browser artifact cleanup",
+                )
+            })?
+            .iter()
+            .map(|value| {
+                value.as_str().map(str::to_owned).ok_or_else(|| {
+                    BrokerError::new(
+                        BrokerErrorCode::InvalidBrowserOperation,
+                        "browser artifact cleanup paths must be strings",
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.evidence.cleanup_managed(&project, &caller, &paths)
     }
 
     fn list_sessions_response(&mut self, runtime: &BrokerRuntime) -> Result<Value, BrokerError> {
@@ -866,6 +1020,7 @@ impl BrokerState {
             .pending
             .remove(&cancelled_request_id)
             .expect("pending request was checked immediately above");
+        self.abort_evidence(&cancelled_request_id, &pending.operation);
         self.retire_request(&cancelled_request_id, Instant::now());
         if let Some(session) = self.sessions.get_mut(&pending.extension_instance_id) {
             session.remove_queued_command(&cancelled_request_id);
@@ -1008,6 +1163,27 @@ impl BrokerState {
             .sessions
             .get(&instance_id)
             .and_then(|session| session.current_stream_generation());
+        if is_evidence_operation(&request.operation) {
+            let expected_revision = request
+                .arguments
+                .get("page_context_revision")
+                .and_then(Value::as_str);
+            let requested_format = request.arguments.get("format").and_then(Value::as_str);
+            let broker_start_id = runtime.endpoint_record().broker_start_id;
+            if let Err(error) = self.evidence.prepare_request(
+                &request.operation,
+                &request.request_id,
+                &broker_start_id,
+                &project,
+                &caller,
+                &target,
+                expected_revision,
+                requested_format,
+            ) {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        }
         self.pending.insert(
             request.request_id.clone(),
             PendingRequest {
@@ -1043,6 +1219,7 @@ impl BrokerState {
                 && error.code == BrokerErrorCode::IncompatibleBrowserSession
             {
                 if let Some(pending) = self.pending.remove(&request.request_id) {
+                    self.abort_evidence(&request.request_id, &pending.operation);
                     self.retire_request(&request.request_id, Instant::now());
                     let _ = pending.reply.send(Err(error));
                 }
@@ -1071,6 +1248,7 @@ impl BrokerState {
                 }
                 Err(error) => {
                     if let Some(pending) = self.pending.remove(&request.request_id) {
+                        self.abort_evidence(&request.request_id, &pending.operation);
                         self.retire_request(&request.request_id, Instant::now());
                         let _ = pending.reply.send(Err(error));
                     }
@@ -1164,6 +1342,7 @@ impl BrokerState {
             .collect::<Vec<_>>();
         for request_id in expired {
             if let Some(pending) = self.pending.remove(&request_id) {
+                self.abort_evidence(&request_id, &pending.operation);
                 let terminal = self.terminal_pending_error(
                     &request_id,
                     &pending,
@@ -1192,6 +1371,7 @@ impl BrokerState {
             .collect::<Vec<_>>();
         for request_id in disconnected {
             if let Some(pending) = self.pending.remove(&request_id) {
+                self.abort_evidence(&request_id, &pending.operation);
                 let terminal = self.terminal_pending_error(
                     &request_id,
                     &pending,
@@ -1262,6 +1442,7 @@ impl BrokerState {
             .collect::<Vec<_>>();
         for request_id in request_ids {
             if let Some(pending) = self.pending.remove(&request_id) {
+                self.abort_evidence(&request_id, &pending.operation);
                 let terminal = self.terminal_pending_error(&request_id, &pending, error.clone());
                 self.retire_request(&request_id, Instant::now());
                 if let Some(session) = self.sessions.get_mut(extension_instance_id) {
@@ -1269,6 +1450,12 @@ impl BrokerState {
                 }
                 let _ = pending.reply.send(Err(terminal));
             }
+        }
+    }
+
+    fn abort_evidence(&mut self, request_id: &str, operation: &str) {
+        if is_evidence_operation(operation) {
+            self.evidence.abort_request(request_id);
         }
     }
 
@@ -1817,7 +2004,6 @@ fn requires_lease(operation: &str) -> bool {
             | "get_network_request_detail"
             | "clear_network_capture"
             | "stop_network_capture"
-            | "cleanup_browser_artifacts"
             | "execute_privileged_javascript"
             | "execute_privileged_cdp"
             | "list_browser_cookies"
@@ -1832,7 +2018,8 @@ fn required_features_for_operation(request: &OperationRequest) -> Vec<String> {
         "get_page_snapshot" | "navigate" | "execute_browser_action" => {
             required.push("p0.control".into());
         }
-        "capture_browser_screenshot"
+        "capture_browser_evidence"
+        | "capture_browser_screenshot"
         | "generate_browser_pdf"
         | "start_console_capture"
         | "list_console_events"
@@ -1867,7 +2054,8 @@ fn required_features_for_operation(request: &OperationRequest) -> Vec<String> {
 fn requires_extension_operation_advertisement(operation: &str) -> bool {
     matches!(
         operation,
-        "capture_browser_screenshot"
+        "capture_browser_evidence"
+            | "capture_browser_screenshot"
             | "generate_browser_pdf"
             | "start_console_capture"
             | "list_console_events"
@@ -1883,6 +2071,13 @@ fn requires_extension_operation_advertisement(operation: &str) -> bool {
             | "list_browser_cookies"
             | "access_browser_content_setting"
             | "list_browser_extensions"
+    )
+}
+
+fn is_evidence_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "capture_browser_evidence" | "capture_browser_screenshot" | "generate_browser_pdf"
     )
 }
 
@@ -1911,8 +2106,11 @@ fn is_mutating_operation(operation: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::protocol::{ExtensionHeartbeat, ExtensionTab, ExtensionWindow, FeatureAvailability};
+    use base64::Engine as _;
 
     fn heartbeat() -> ExtensionHeartbeat {
         ExtensionHeartbeat {
@@ -1986,6 +2184,47 @@ mod tests {
             code: None,
             error: None,
             result: BTreeMap::new(),
+        }
+    }
+
+    fn evidence_png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes
+    }
+
+    fn evidence_response(
+        request_id: &str,
+        target: BrowserTarget,
+        payload: &[u8],
+    ) -> ExtensionResponse {
+        let mut result = BTreeMap::new();
+        result.insert("format".into(), Value::String("png".into()));
+        result.insert(
+            "page_context_revision".into(),
+            Value::String("revision-1".into()),
+        );
+        result.insert(
+            "artifact_data".into(),
+            Value::String(base64::engine::general_purpose::STANDARD.encode(payload)),
+        );
+        ExtensionResponse {
+            message_type: "response".into(),
+            schema_version: Some(BROWSER_BROKER_SCHEMA_VERSION),
+            protocol_version: Some(BROWSER_BROKER_PROTOCOL_VERSION),
+            request_id: request_id.into(),
+            operation: "capture_browser_screenshot".into(),
+            extension_instance_id: Some(target.extension_instance_id.clone()),
+            target: Some(target),
+            ok: true,
+            code: None,
+            error: None,
+            result,
         }
     }
 
@@ -2455,6 +2694,107 @@ mod tests {
         assert_eq!(completed["cmd"], "execute_locator");
         assert_eq!(completed["extension_instance_id"], "profile-a");
         assert_eq!(completed["target"], json!(target()));
+    }
+
+    #[tokio::test]
+    async fn screenshot_response_is_bound_to_lease_generation_and_managed_bytes() {
+        let mut config = crate::server::BrokerServerConfig::with_trusted_extension_origins(vec![
+            "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        ]);
+        config.discovery_addr = "127.0.0.1:0".parse().unwrap();
+        let runtime = BrokerRuntime::start(config).await.unwrap();
+        let broker_start_id = runtime.endpoint_record().broker_start_id;
+        let project = tempfile::tempdir().unwrap();
+        let project_root = project.path().to_string_lossy().into_owned();
+        let now = Instant::now();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        state.sessions.attach_stream("profile-a", 7, now).unwrap();
+        state.leases.insert(
+            "profile-a".into(),
+            LeaseRecord {
+                token: "lease-secret".into(),
+                owner_label: "owner-a".into(),
+                project_root: project_root.clone(),
+                caller_label: "caller-a".into(),
+                broker_start_id: broker_start_id.clone(),
+                acquired_at_ms: 1,
+                expires_at_ms: u64::MAX,
+                expires_at: now + Duration::from_secs(60),
+            },
+        );
+        state
+            .evidence
+            .prepare_request(
+                "capture_browser_screenshot",
+                "evidence-state-1",
+                &broker_start_id,
+                &project_root,
+                "caller-a",
+                &target(),
+                Some("revision-1"),
+                Some("png"),
+            )
+            .unwrap();
+        let (reply, receiver) = oneshot::channel();
+        state.pending.insert(
+            "evidence-state-1".into(),
+            PendingRequest {
+                operation: "capture_browser_screenshot".into(),
+                extension_instance_id: "profile-a".into(),
+                target: target(),
+                project_root: project_root.clone(),
+                caller_label: "caller-a".into(),
+                lease_token: Some("lease-secret".into()),
+                snapshot_id: None,
+                stream_generation: Some(7),
+                fallback_generation: None,
+                deadline: now + Duration::from_secs(30),
+                reply,
+            },
+        );
+
+        let payload = evidence_png(2, 3);
+        let response = evidence_response("evidence-state-1", target(), &payload);
+        assert_eq!(
+            state.handle_extension_response_with_broker_generation(
+                "profile-a",
+                Some(7),
+                Some(&broker_start_id),
+                response.clone(),
+            )["ok"],
+            true
+        );
+        let completed = receiver.await.unwrap().unwrap();
+        assert_eq!(completed["artifact"]["size"], payload.len());
+        assert_eq!(completed["artifact"]["dimensions"]["pixels"], 6);
+        assert!(completed.get("artifact_data").is_some());
+        let relative = completed["artifact"]["path"].as_str().unwrap();
+        assert!(!relative.contains(['/', '\\']));
+        assert_eq!(
+            fs::read(
+                project
+                    .path()
+                    .join(".teshi")
+                    .join("artifacts")
+                    .join("browser")
+                    .join(relative)
+            )
+            .unwrap(),
+            payload
+        );
+
+        let duplicate = state.handle_extension_response_with_broker_generation(
+            "profile-a",
+            Some(7),
+            Some(&broker_start_id),
+            response,
+        );
+        assert_eq!(
+            duplicate["code"],
+            BrokerErrorCode::MismatchedBrowserResponse.as_str()
+        );
+        runtime.shutdown().await;
     }
 
     #[test]

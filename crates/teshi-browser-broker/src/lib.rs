@@ -6,12 +6,14 @@
 
 pub(crate) mod coordinator;
 pub mod credential;
+pub mod evidence;
 pub mod protocol;
 pub mod server;
 pub mod session;
 pub mod state;
 
 pub use credential::{PrivateBrokerCredential, PrivateCredentialStore};
+pub use evidence::{ConsoleCaptureConfig, EvidenceStore, NetworkCaptureConfig, PreparedArtifact};
 pub use protocol::{
     BROWSER_BROKER_IDENTITY_CHALLENGE_PATH, BROWSER_BROKER_PROTOCOL_VERSION,
     BROWSER_BROKER_SCHEMA_VERSION, BrokerErrorCode, BrokerIdentityChallenge, BrokerIdentityProof,

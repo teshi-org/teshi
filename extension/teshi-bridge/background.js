@@ -74,6 +74,7 @@ const SUPPORTED_ACTIONS = Object.freeze([
   "upload",
 ]);
 const SUPPORTED_OPERATIONS = Object.freeze([
+  "capture_browser_evidence",
   "capture_browser_screenshot",
   "generate_browser_pdf",
   "start_console_capture",
