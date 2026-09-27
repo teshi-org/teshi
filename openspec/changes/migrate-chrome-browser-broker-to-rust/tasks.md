@@ -37,7 +37,7 @@
 - [x] 5.1 Preserve TSH1 metadata and route bounded binary preview frames only to subscribers of the complete matching target.
 - [x] 5.2 Port screenshot/PDF evidence coordination and managed artifact path validation, byte/dimension/pixel bounds, atomic writes, and safe cleanup.
 - [x] 5.3 Port target-scoped Console filtering, redaction, truncation, age/count/byte eviction, and termination diagnostics.
-- [ ] 5.4 Port exact hostname-filtered Network capture, request/response correlation, capture IDs, monotonic sequences, contiguous ack barriers, deduplication, resend, and loss diagnostics.
+- [x] 5.4 Port exact hostname-filtered Network capture, request/response correlation, capture IDs, monotonic sequences, contiguous ack barriers, deduplication, resend, and loss diagnostics.
 - [ ] 5.5 Enforce body access grants, bounded memory/backpressure, no raw-body logging, and cleanup on target closure, capture stop, lease expiry, and broker restart.
 - [ ] 5.6 Run real Chrome screenshot, Console, Network, reconnect, large-event, and backpressure scenarios; record memory and latency versus Python.
 

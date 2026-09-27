@@ -232,6 +232,10 @@ pub enum BrokerEvent {
     },
     NetworkBatch {
         batch: NetworkBatch,
+        /// The authenticated WebSocket generation that accepted this batch.
+        /// This is transport authority and is intentionally not supplied by
+        /// the extension payload.
+        generation: u64,
         reply: oneshot::Sender<Value>,
         _budget: tokio::sync::OwnedSemaphorePermit,
     },
@@ -1792,11 +1796,14 @@ async fn handle_extension_text(
                 .is_ok()
         }
         "network_batch" => {
+            if text.len() > crate::protocol::MAX_NETWORK_BATCH_BYTES {
+                return false;
+            }
             let batch: NetworkBatch = match serde_json::from_value(value) {
                 Ok(batch) => batch,
                 Err(_) => return false,
             };
-            if batch.validate().is_err() || batch.extension_instance_id != instance_id {
+            if batch.extension_instance_id != instance_id {
                 return false;
             }
             let (reply, receiver) = oneshot::channel();
@@ -1804,6 +1811,7 @@ async fn handle_extension_text(
                 .events
                 .try_send(BrokerEvent::NetworkBatch {
                     batch,
+                    generation,
                     reply,
                     _budget,
                 })
@@ -2309,7 +2317,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::protocol::{BrokerIdentityProof, ExtensionHeartbeat, ExtensionTab, ExtensionWindow};
+    use crate::protocol::{
+        BrokerIdentityProof, ExtensionHeartbeat, ExtensionTab, ExtensionWindow, FeatureAvailability,
+    };
     use crate::state::BrokerState;
     use futures_util::SinkExt;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -3280,6 +3290,215 @@ mod tests {
         assert_eq!(disconnected_generation, next_generation);
         drop(socket);
         drop(reconnected);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn extension_stream_network_batch_is_acknowledged_by_state_machine() {
+        let mut config = test_config();
+        config.broker_features = vec![
+            "p0.control".into(),
+            "p1.observability_artifacts".into(),
+            "p1.filtered_network_capture".into(),
+            "p1.network_batch_transport".into(),
+        ];
+        let mut runtime = BrokerRuntime::start(config).await.unwrap();
+        let target = BrowserTarget {
+            extension_instance_id: "profile-a".into(),
+            window_id: 7,
+            tab_id: 42,
+        };
+        let mut heartbeat = test_heartbeat("profile-a", &[42]);
+        heartbeat.project_root = Some("C:/project-a".into());
+        heartbeat.features = [
+            "p0.control",
+            "p1.observability_artifacts",
+            "p1.filtered_network_capture",
+            "p1.network_batch_transport",
+        ]
+        .into_iter()
+        .map(|feature| FeatureAvailability {
+            feature: feature.into(),
+            available: true,
+            reason: None,
+        })
+        .collect();
+        heartbeat.supported_operations = vec![
+            "start_network_capture".into(),
+            "list_network_requests".into(),
+        ];
+        let mut state = BrokerState::new();
+        state
+            .sessions
+            .register_heartbeat(heartbeat, std::time::Instant::now())
+            .unwrap();
+
+        let mut extension_request = request_extension_ws_url(&runtime)
+            .into_client_request()
+            .unwrap();
+        extension_request.headers_mut().insert(
+            WS_ORIGIN,
+            WsHeaderValue::from_str(&format!("chrome-extension://{EXTENSION_ID}")).unwrap(),
+        );
+        let (mut extension, _) = connect_async(extension_request).await.unwrap();
+        extension
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "type": "stream_hello",
+                    "protocol_version": 1,
+                    "extension_instance_id": "profile-a",
+                    "project_root": "C:/project-a",
+                    "extension_version": "0.7.10"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let connected = runtime.next_event().await.unwrap();
+        state.handle(connected, &runtime).await;
+        assert_eq!(read_json(&mut extension).await["type"], "stream_hello_ack");
+
+        let (mut client, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+        client
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "request_id": "lease-1",
+                    "caller_label": "caller-a",
+                    "project_root": "C:/project-a",
+                    "cmd": "acquire_browser_lease",
+                    "extension_instance_id": "profile-a",
+                    "owner_label": "network-state-test",
+                    "ttl_secs": 60
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let lease_event = runtime.next_event().await.unwrap();
+        state.handle(lease_event, &runtime).await;
+        let lease_response = read_json(&mut client).await;
+        let lease_token = lease_response["lease_token"].as_str().unwrap().to_owned();
+
+        client
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "request_id": "network-start-1",
+                    "caller_label": "caller-a",
+                    "project_root": "C:/project-a",
+                    "cmd": "start_network_capture",
+                    "target": target,
+                    "lease_token": lease_token.clone(),
+                    "allowed_hostnames": ["example.test"]
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let start_event = runtime.next_event().await.unwrap();
+        state.handle(start_event, &runtime).await;
+        let start_command = read_json(&mut extension).await;
+        let capture_id = start_command["command"]["capture_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            start_command["command"]["target"],
+            serde_json::json!(target)
+        );
+
+        extension
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "type": "response",
+                    "schema_version": 1,
+                    "protocol_version": 1,
+                    "request_id": "network-start-1",
+                    "cmd": "start_network_capture",
+                    "extension_instance_id": "profile-a",
+                    "target": target,
+                    "ok": true,
+                    "active": true,
+                    "capture_id": capture_id
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let response_event = runtime.next_event().await.unwrap();
+        state.handle(response_event, &runtime).await;
+        let start_response = read_json(&mut client).await;
+        assert_eq!(start_response["ok"], true);
+        assert_eq!(start_response["capture"]["capture_id"], capture_id);
+
+        extension
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "type": "network_batch",
+                    "extension_instance_id": "profile-a",
+                    "capture_id": capture_id,
+                    "target": target,
+                    "events": [{
+                        "seq": 1,
+                        "event": {
+                            "event_type": "request",
+                            "request_id": "network-1",
+                            "url": "https://example.test/path",
+                            "method": "GET",
+                            "headers": {"Authorization": "Bearer secret"}
+                        }
+                    }],
+                    "first_seq": 1,
+                    "last_seq": 1
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let batch_event = runtime.next_event().await.unwrap();
+        state.handle(batch_event, &runtime).await;
+        let ack = read_json(&mut extension).await;
+        assert_eq!(ack["type"], "network_ack");
+        assert_eq!(ack["capture_id"], capture_id);
+        assert_eq!(ack["target"], serde_json::json!(target));
+        assert_eq!(ack["ack_seq"], 1);
+        assert_eq!(ack["acknowledged_sequence"], 1);
+        assert_eq!(ack["accepted"], true);
+
+        client
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "request_id": "network-list-1",
+                    "caller_label": "caller-a",
+                    "project_root": "C:/project-a",
+                    "cmd": "list_network_requests",
+                    "target": target,
+                    "lease_token": lease_token
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let list_event = runtime.next_event().await.unwrap();
+        state.handle(list_event, &runtime).await;
+        let list_response = read_json(&mut client).await;
+        assert_eq!(list_response["requests"].as_array().unwrap().len(), 1);
+        assert!(
+            !list_response["requests"]
+                .to_string()
+                .contains("Bearer secret")
+        );
+
+        client.close(None).await.unwrap();
+        extension.close(None).await.unwrap();
         runtime.shutdown().await;
     }
 

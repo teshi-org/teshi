@@ -18,7 +18,10 @@ use sha2::{Digest, Sha256};
 use url::Url;
 use uuid::Uuid;
 
-use crate::protocol::{BrokerError, BrokerErrorCode, BrowserTarget, ExtensionResponse};
+use crate::protocol::{
+    BrokerError, BrokerErrorCode, BrowserTarget, ExtensionResponse, MAX_NETWORK_PENDING_EVENTS,
+    NetworkBatch,
+};
 
 /// Maximum decoded bytes retained or written for one browser artifact.
 pub const MAX_ARTIFACT_BYTES: usize = 50 * 1024 * 1024;
@@ -128,26 +131,113 @@ impl ConsoleCaptureConfig {
     }
 }
 
-/// Configuration shape reserved for the later Network capture stage.
-///
-/// The network store and acknowledgement protocol remain outside 5.2.
+/// Bounded target-scoped Network capture configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkCaptureConfig {
+    #[serde(default)]
+    pub allowed_hostnames: Vec<String>,
+    #[serde(default)]
+    pub capture_request_bodies: bool,
+    #[serde(default = "default_network_request_body_bytes")]
+    pub max_request_body_bytes: usize,
     #[serde(default = "default_network_capture_age_ms")]
     pub max_age_ms: u64,
     #[serde(default = "default_network_capture_entries")]
     pub max_entries: usize,
     #[serde(default = "default_network_capture_bytes")]
     pub max_bytes: usize,
+    #[serde(default = "default_network_body_bytes")]
+    pub max_body_bytes: usize,
+    #[serde(default)]
+    pub sensitive_fields: BTreeSet<String>,
 }
 
 impl Default for NetworkCaptureConfig {
     fn default() -> Self {
         Self {
+            allowed_hostnames: Vec::new(),
+            capture_request_bodies: false,
+            max_request_body_bytes: default_network_request_body_bytes(),
             max_age_ms: default_network_capture_age_ms(),
             max_entries: default_network_capture_entries(),
             max_bytes: default_network_capture_bytes(),
+            max_body_bytes: default_network_body_bytes(),
+            sensitive_fields: default_sensitive_fields(),
         }
+    }
+}
+
+impl NetworkCaptureConfig {
+    #[allow(clippy::too_many_arguments)]
+    fn from_values(
+        allowed_hostnames: Option<&Value>,
+        capture_request_bodies: Option<&Value>,
+        max_request_body_bytes: Option<&Value>,
+        max_age_ms: Option<&Value>,
+        max_entries: Option<&Value>,
+        max_bytes: Option<&Value>,
+        max_body_bytes: Option<&Value>,
+        sensitive_fields: Option<&Value>,
+    ) -> Result<Self, BrokerError> {
+        let hostnames = normalize_allowed_hostnames(allowed_hostnames)?;
+        let capture_request_bodies = match capture_request_bodies {
+            None => false,
+            Some(value) => match value.as_bool() {
+                Some(false) => false,
+                Some(true) => {
+                    return Err(BrokerError::new(
+                        BrokerErrorCode::BrowserCapabilityUnavailable,
+                        "raw Network body capture remains gated for 5.5",
+                    ));
+                }
+                None => {
+                    return Err(BrokerError::new(
+                        BrokerErrorCode::InvalidBrowserOperation,
+                        "capture_request_bodies must be a boolean",
+                    ));
+                }
+            },
+        };
+        Ok(Self {
+            allowed_hostnames: hostnames.into_iter().collect(),
+            capture_request_bodies,
+            max_request_body_bytes: bounded_usize(
+                max_request_body_bytes,
+                default_network_request_body_bytes(),
+                1,
+                MAX_NETWORK_BODY_BYTES,
+                "max_request_body_bytes",
+            )?,
+            max_age_ms: bounded_u64(
+                max_age_ms,
+                default_network_capture_age_ms(),
+                1_000,
+                MAX_NETWORK_CAPTURE_AGE_MS,
+                "max_age_ms",
+            )?,
+            max_entries: bounded_usize(
+                max_entries,
+                default_network_capture_entries(),
+                1,
+                MAX_NETWORK_CAPTURE_ENTRIES,
+                "max_entries",
+            )?,
+            max_bytes: bounded_usize(
+                max_bytes,
+                default_network_capture_bytes(),
+                2_048,
+                MAX_NETWORK_CAPTURE_BYTES,
+                "max_bytes",
+            )?,
+            max_body_bytes: bounded_usize(
+                max_body_bytes,
+                default_network_body_bytes(),
+                1_024,
+                MAX_NETWORK_BODY_BYTES,
+                "max_body_bytes",
+            )?,
+            sensitive_fields: normalize_sensitive_fields(sensitive_fields)?,
+        })
     }
 }
 
@@ -160,7 +250,34 @@ const fn default_network_capture_entries() -> usize {
 }
 
 const fn default_network_capture_bytes() -> usize {
-    8 * 1024 * 1024
+    2 * 1024 * 1024
+}
+
+const fn default_network_request_body_bytes() -> usize {
+    256 * 1024
+}
+
+const fn default_network_body_bytes() -> usize {
+    256 * 1024
+}
+
+pub const MAX_NETWORK_CAPTURE_AGE_MS: u64 = 3_600_000;
+pub const MAX_NETWORK_CAPTURE_ENTRIES: usize = 10_000;
+pub const MAX_NETWORK_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_NETWORK_BODY_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_NETWORK_EVENT_BYTES: usize = 256 * 1024;
+pub const MAX_NETWORK_PENDING_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_NETWORK_DIAGNOSTICS: usize = 64;
+pub const MAX_NETWORK_BARRIER_RECORDS: usize = 64;
+pub const MAX_NETWORK_GAP_DIAGNOSTICS: usize = 32;
+pub const MAX_NETWORK_HOSTNAMES: usize = 64;
+pub const MAX_NETWORK_HOSTNAME_BYTES: usize = 253;
+pub const MAX_NETWORK_REQUEST_ID_BYTES: usize = 256;
+
+/// Handle returned after the broker has reserved a Network capture ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkCaptureHandle {
+    pub capture_id: String,
 }
 
 const fn default_console_capture_age_ms() -> u64 {
@@ -308,6 +425,70 @@ struct PendingConsoleCapture {
     sensitive_fields: BTreeSet<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkRequestPhase {
+    Requested,
+    ResponseReceived,
+    Finished,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct NetworkRequestRecord {
+    value: Value,
+    received_at: Instant,
+    byte_size: usize,
+    phase: NetworkRequestPhase,
+}
+
+#[derive(Debug, Clone)]
+struct PendingNetworkCapture {
+    request_id: String,
+    capture_id: String,
+    target: BrowserTarget,
+    project_root: String,
+    caller_label: String,
+    broker_start_id: String,
+    stream_generation: Option<u64>,
+    config: NetworkCaptureConfig,
+}
+
+#[derive(Debug, Clone)]
+struct NetworkCaptureRecord {
+    capture_id: String,
+    target: BrowserTarget,
+    project_root: String,
+    caller_label: String,
+    broker_start_id: String,
+    stream_generation: Option<u64>,
+    config: NetworkCaptureConfig,
+    requests: HashMap<String, NetworkRequestRecord>,
+    request_order: VecDeque<String>,
+    retained_bytes: usize,
+    acknowledged_sequence: u64,
+    highest_seen_sequence: u64,
+    pending_events: HashMap<u64, Value>,
+    pending_bytes: usize,
+    clear_sequence: u64,
+    dropped_events: u64,
+    dropped_batches: u64,
+    dropped_bytes: u64,
+    rejected_events: u64,
+    filtered_events: u64,
+    duplicate_events: u64,
+    gap_events: u64,
+    loss_diagnostics: VecDeque<Value>,
+    termination_reason: Option<String>,
+    terminated_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct NetworkBarrier {
+    target: BrowserTarget,
+    capture_id: String,
+    acknowledged_sequence: u64,
+}
+
 /// Single-owner evidence state.  `BrokerState` owns one instance and calls it
 /// synchronously from the same event loop that owns requests and leases.
 #[derive(Debug, Default)]
@@ -317,6 +498,10 @@ pub struct EvidenceStore {
     console_captures: HashMap<BrowserTarget, ConsoleCaptureRecord>,
     pending_console_captures: HashMap<String, PendingConsoleCapture>,
     terminated_console_captures: VecDeque<Value>,
+    network_captures: HashMap<BrowserTarget, NetworkCaptureRecord>,
+    pending_network_captures: HashMap<String, PendingNetworkCapture>,
+    network_barriers: HashMap<String, NetworkBarrier>,
+    terminated_network_captures: VecDeque<Value>,
 }
 
 impl EvidenceStore {
@@ -756,6 +941,738 @@ impl EvidenceStore {
             .filter(|capture| capture.target.extension_instance_id == extension_instance_id)
             .map(|capture| (capture.target.clone(), capture.capture_id.clone()))
             .collect()
+    }
+
+    /// Reserve a broker-owned Network capture ID.  The active capture is not
+    /// replaced until the extension confirms the same ID, so a failed start
+    /// cannot tear down a working capture.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_network_capture(
+        &mut self,
+        request_id: &str,
+        broker_start_id: &str,
+        project_root: &str,
+        caller_label: &str,
+        target: &BrowserTarget,
+        stream_generation: Option<u64>,
+        allowed_hostnames: Option<&Value>,
+        capture_request_bodies: Option<&Value>,
+        max_request_body_bytes: Option<&Value>,
+        max_age_ms: Option<&Value>,
+        max_entries: Option<&Value>,
+        max_bytes: Option<&Value>,
+        max_body_bytes: Option<&Value>,
+        sensitive_fields: Option<&Value>,
+    ) -> Result<NetworkCaptureHandle, BrokerError> {
+        validate_network_scope(
+            request_id,
+            broker_start_id,
+            project_root,
+            caller_label,
+            target,
+        )?;
+        if self.pending_network_captures.contains_key(request_id) {
+            return Err(BrokerError::new(
+                BrokerErrorCode::DuplicateBrowserMutation,
+                "network capture request_id is already reserved",
+            ));
+        }
+        if self.pending_network_captures.len() >= MAX_PREPARED_ARTIFACTS {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "broker has too many pending network captures",
+            ));
+        }
+        if !self.network_captures.contains_key(target)
+            && self
+                .network_captures
+                .len()
+                .saturating_add(self.pending_network_captures.len())
+                >= MAX_ACTIVE_CONSOLE_CAPTURES
+        {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "broker has too many active network captures",
+            ));
+        }
+        let config = NetworkCaptureConfig::from_values(
+            allowed_hostnames,
+            capture_request_bodies,
+            max_request_body_bytes,
+            max_age_ms,
+            max_entries,
+            max_bytes,
+            max_body_bytes,
+            sensitive_fields,
+        )?;
+        let capture_id = format!("network_{}", Uuid::new_v4().simple());
+        self.pending_network_captures.insert(
+            request_id.to_owned(),
+            PendingNetworkCapture {
+                request_id: request_id.to_owned(),
+                capture_id: capture_id.clone(),
+                target: target.clone(),
+                project_root: project_root.to_owned(),
+                caller_label: caller_label.to_owned(),
+                broker_start_id: broker_start_id.to_owned(),
+                stream_generation,
+                config,
+            },
+        );
+        Ok(NetworkCaptureHandle { capture_id })
+    }
+
+    /// Commit a prepared Network capture only after the extension echoes the
+    /// broker-owned capture ID and confirms activation.
+    pub fn commit_network_capture(
+        &mut self,
+        request_id: &str,
+        broker_start_id: &str,
+        project_root: &str,
+        caller_label: &str,
+        target: &BrowserTarget,
+        response: &ExtensionResponse,
+    ) -> Result<Value, BrokerError> {
+        let Some(pending) = self.pending_network_captures.remove(request_id) else {
+            return Err(BrokerError::new(
+                BrokerErrorCode::MismatchedBrowserResponse,
+                "network capture response has no prepared request",
+            ));
+        };
+        if pending.request_id != request_id
+            || pending.broker_start_id != broker_start_id
+            || pending.project_root != project_root
+            || pending.caller_label != caller_label
+            || pending.target != *target
+            || !response.ok
+        {
+            return Err(BrokerError::new(
+                BrokerErrorCode::MismatchedBrowserResponse,
+                "network capture response does not match its prepared request",
+            ));
+        }
+        let returned_capture_id = response
+            .result
+            .get("capture_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if returned_capture_id != Some(pending.capture_id.as_str()) {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserCapabilityUnavailable,
+                "extension must echo capture_id for target-scoped network capture",
+            ));
+        }
+        if response.result.get("active").and_then(Value::as_bool) == Some(false) {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserOperationFailed,
+                "extension did not activate network capture",
+            ));
+        }
+        let record = NetworkCaptureRecord {
+            capture_id: pending.capture_id,
+            target: pending.target,
+            project_root: pending.project_root,
+            caller_label: pending.caller_label,
+            broker_start_id: pending.broker_start_id,
+            stream_generation: pending.stream_generation,
+            config: pending.config,
+            requests: HashMap::new(),
+            request_order: VecDeque::new(),
+            retained_bytes: 0,
+            acknowledged_sequence: 0,
+            highest_seen_sequence: 0,
+            pending_events: HashMap::new(),
+            pending_bytes: 0,
+            clear_sequence: 0,
+            dropped_events: 0,
+            dropped_batches: 0,
+            dropped_bytes: 0,
+            rejected_events: 0,
+            filtered_events: 0,
+            duplicate_events: 0,
+            gap_events: 0,
+            loss_diagnostics: VecDeque::new(),
+            termination_reason: None,
+            terminated_at_ms: None,
+        };
+        if let Some(previous) = self.network_captures.remove(target) {
+            // A replacement confirms a new capture identity, but it does not
+            // establish that unacknowledged old events were processed. Keep
+            // the old cumulative ACK as the late-retransmit barrier.
+            let barrier = previous.acknowledged_sequence;
+            self.insert_network_barrier(&previous, barrier);
+            self.record_network_termination(&previous, "capture_replaced", barrier, None);
+        }
+        let summary = network_capture_summary(&record, true, None);
+        self.network_captures.insert(target.clone(), record);
+        Ok(summary)
+    }
+
+    pub fn abort_network_capture(&mut self, request_id: &str) {
+        self.pending_network_captures.remove(request_id);
+    }
+
+    pub fn network_capture_id(&self, target: &BrowserTarget) -> Option<String> {
+        self.network_captures
+            .get(target)
+            .map(|capture| capture.capture_id.clone())
+    }
+
+    pub fn network_capture_scope_matches(
+        &self,
+        target: &BrowserTarget,
+        capture_id: Option<&str>,
+        broker_start_id: &str,
+        project_root: &str,
+        caller_label: &str,
+    ) -> bool {
+        self.network_captures.get(target).is_some_and(|capture| {
+            capture.capture_id == capture_id.unwrap_or_default()
+                && capture.broker_start_id == broker_start_id
+                && capture.project_root == project_root
+                && capture.caller_label == caller_label
+        })
+    }
+
+    /// Move active captures to the current extension stream generation after
+    /// reconnect.  A batch from the previous stream remains rejectable.
+    pub fn update_network_stream_generation(
+        &mut self,
+        extension_instance_id: &str,
+        generation: u64,
+    ) {
+        for capture in self.network_captures.values_mut() {
+            if capture.target.extension_instance_id == extension_instance_id {
+                capture.stream_generation = Some(generation);
+            }
+        }
+        for capture in self.pending_network_captures.values_mut() {
+            if capture.target.extension_instance_id == extension_instance_id {
+                capture.stream_generation = Some(generation);
+            }
+        }
+    }
+
+    /// Accept one transport-authenticated batch and return the extension ACK.
+    /// Only contiguous sequences that have reached a deterministic outcome
+    /// advance the acknowledgement barrier.
+    pub fn accept_network_batch(
+        &mut self,
+        extension_instance_id: &str,
+        generation: u64,
+        batch: &NetworkBatch,
+    ) -> Value {
+        let target = &batch.target;
+        let capture_id = batch.capture_id.as_str();
+        if target.extension_instance_id != extension_instance_id {
+            return network_ack(capture_id, target, 0, false, Some("target_mismatch"));
+        }
+        if self
+            .network_captures
+            .get(target)
+            .is_some_and(|capture| capture.capture_id != capture_id)
+        {
+            if let Some(barrier) = self
+                .network_barriers
+                .get(&network_capture_identity(target, capture_id))
+            {
+                return network_ack(
+                    capture_id,
+                    target,
+                    barrier.acknowledged_sequence,
+                    true,
+                    None,
+                );
+            }
+            return network_ack(capture_id, target, 0, false, Some("capture_mismatch"));
+        }
+        let Some(capture) = self.network_captures.get_mut(target) else {
+            if let Some(barrier) = self
+                .network_barriers
+                .get(&network_capture_identity(target, capture_id))
+            {
+                return network_ack(
+                    capture_id,
+                    target,
+                    barrier.acknowledged_sequence,
+                    true,
+                    None,
+                );
+            }
+            return network_ack(capture_id, target, 0, false, Some("capture_mismatch"));
+        };
+        if capture.capture_id != capture_id {
+            return network_ack(
+                capture_id,
+                target,
+                capture.acknowledged_sequence,
+                false,
+                Some("capture_mismatch"),
+            );
+        }
+        if capture.stream_generation != Some(generation) {
+            return network_ack(
+                capture_id,
+                target,
+                capture.acknowledged_sequence,
+                false,
+                Some("stream_generation_mismatch"),
+            );
+        }
+
+        capture.dropped_events = capture
+            .dropped_events
+            .max(batch.dropped_events.max(batch.dropped_events_total));
+        capture.dropped_bytes = capture
+            .dropped_bytes
+            .max(batch.dropped_bytes.max(batch.dropped_bytes_total));
+        if let Some(diagnostics) = batch.diagnostics.as_ref().and_then(Value::as_object)
+            && let Some(value) = diagnostics.get("dropped_batches").and_then(Value::as_u64)
+        {
+            capture.dropped_batches = capture.dropped_batches.max(value);
+        }
+
+        let already_terminated = capture.termination_reason.is_some();
+        for event in &batch.events {
+            capture.highest_seen_sequence = capture.highest_seen_sequence.max(event.seq);
+            if event.seq <= capture.acknowledged_sequence
+                || event.seq <= capture.clear_sequence
+                || capture.pending_events.contains_key(&event.seq)
+            {
+                capture.duplicate_events = capture.duplicate_events.saturating_add(1);
+                continue;
+            }
+            if already_terminated {
+                capture.rejected_events = capture.rejected_events.saturating_add(1);
+                continue;
+            }
+            if event.seq
+                > capture
+                    .acknowledged_sequence
+                    .saturating_add(MAX_NETWORK_PENDING_EVENTS as u64)
+            {
+                capture.rejected_events = capture.rejected_events.saturating_add(1);
+                continue;
+            }
+            let event_value = network_event_value(event);
+            let event_bytes =
+                serde_json::to_vec(&event_value).map_or(usize::MAX, |bytes| bytes.len());
+            if event_bytes > MAX_NETWORK_EVENT_BYTES
+                || capture.pending_bytes.saturating_add(event_bytes) > MAX_NETWORK_PENDING_BYTES
+            {
+                capture.rejected_events = capture.rejected_events.saturating_add(1);
+                continue;
+            }
+            capture.pending_bytes = capture.pending_bytes.saturating_add(event_bytes);
+            capture.pending_events.insert(event.seq, event_value);
+        }
+
+        while let Some(event) = capture
+            .pending_events
+            .remove(&capture.acknowledged_sequence.saturating_add(1))
+        {
+            let event_bytes = serde_json::to_vec(&event).map_or(0, |bytes| bytes.len());
+            capture.pending_bytes = capture.pending_bytes.saturating_sub(event_bytes);
+            capture.acknowledged_sequence = capture.acknowledged_sequence.saturating_add(1);
+            match merge_network_event(capture, event) {
+                NetworkMergeResult::Accepted => {}
+                NetworkMergeResult::Filtered => {
+                    capture.filtered_events = capture.filtered_events.saturating_add(1)
+                }
+                NetworkMergeResult::Rejected => {
+                    capture.rejected_events = capture.rejected_events.saturating_add(1)
+                }
+            }
+        }
+        if let Some(&next) = capture.pending_events.keys().min()
+            && next > capture.acknowledged_sequence.saturating_add(1)
+        {
+            record_network_gap(
+                capture,
+                capture.acknowledged_sequence.saturating_add(1),
+                next - 1,
+            );
+        }
+
+        if !already_terminated && let Some(reason) = batch.termination_reason.as_deref() {
+            let barrier = batch
+                .final_sequence
+                .or(batch.last_seq)
+                .unwrap_or(capture.acknowledged_sequence);
+            advance_network_barrier(capture, barrier, "termination");
+            capture.termination_reason = Some(truncate_utf8(reason, 256));
+            capture.terminated_at_ms = Some(unix_ms());
+            let summary = network_capture_summary(
+                capture,
+                false,
+                Some(json!({
+                    "reason": capture.termination_reason,
+                    "detail": batch.termination_detail.as_deref().map(|detail| truncate_utf8(detail, 256)),
+                    "at_ms": capture.terminated_at_ms,
+                })),
+            );
+            self.terminated_network_captures.push_back(summary);
+            while self.terminated_network_captures.len() > MAX_NETWORK_DIAGNOSTICS {
+                self.terminated_network_captures.pop_front();
+            }
+        }
+
+        network_ack(
+            capture_id,
+            target,
+            capture.acknowledged_sequence,
+            true,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn list_network_requests(
+        &mut self,
+        target: &BrowserTarget,
+        broker_start_id: &str,
+        project_root: &str,
+        caller_label: &str,
+        max_age_ms: Option<&Value>,
+        max_entries: Option<&Value>,
+        max_bytes: Option<&Value>,
+    ) -> Result<Value, BrokerError> {
+        self.require_network_scope(target, broker_start_id, project_root, caller_label)?;
+        let capture = self.network_captures.get_mut(target).ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "network capture is not active for the selected target",
+            )
+        })?;
+        evict_network_requests(capture, Instant::now());
+        let age_limit = bounded_u64(
+            max_age_ms,
+            capture.config.max_age_ms,
+            0,
+            capture.config.max_age_ms,
+            "max_age_ms",
+        )?;
+        let entry_limit = bounded_usize(
+            max_entries,
+            capture.config.max_entries,
+            1,
+            capture.config.max_entries,
+            "max_entries",
+        )?;
+        let byte_limit = bounded_usize(
+            max_bytes,
+            capture.config.max_bytes,
+            1,
+            capture.config.max_bytes,
+            "max_bytes",
+        )?;
+        let now = Instant::now();
+        let mut selected = Vec::new();
+        let mut selected_bytes = 0usize;
+        for request_id in capture.request_order.iter().rev() {
+            let Some(record) = capture.requests.get(request_id) else {
+                continue;
+            };
+            if now
+                .saturating_duration_since(record.received_at)
+                .as_millis()
+                > u128::from(age_limit)
+            {
+                continue;
+            }
+            if selected.len() >= entry_limit
+                || selected_bytes.saturating_add(record.byte_size) > byte_limit
+            {
+                break;
+            }
+            selected.push(network_request_summary(&record.value));
+            selected_bytes = selected_bytes.saturating_add(record.byte_size);
+        }
+        selected.reverse();
+        let mut summary =
+            network_capture_summary(capture, capture.termination_reason.is_none(), None);
+        if let Value::Object(object) = &mut summary {
+            object.insert("requests".into(), Value::Array(selected));
+            object.insert(
+                "returned_entries".into(),
+                Value::from(object["requests"].as_array().map_or(0, Vec::len)),
+            );
+            object.insert("returned_bytes".into(), Value::from(selected_bytes));
+        }
+        Ok(summary)
+    }
+
+    pub fn get_network_request_detail(
+        &mut self,
+        target: &BrowserTarget,
+        broker_start_id: &str,
+        project_root: &str,
+        caller_label: &str,
+        request_id: &Value,
+        include_body: bool,
+    ) -> Result<Value, BrokerError> {
+        self.require_network_scope(target, broker_start_id, project_root, caller_label)?;
+        if include_body {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserCapabilityUnavailable,
+                "raw Network body access remains gated for 5.5",
+            ));
+        }
+        let capture = self.network_captures.get_mut(target).ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "network capture is not active for the selected target",
+            )
+        })?;
+        evict_network_requests(capture, Instant::now());
+        let normalized = truncate_utf8(&value_text(Some(request_id)), MAX_NETWORK_REQUEST_ID_BYTES);
+        let Some(record) = capture.requests.get(&normalized) else {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserTargetNotFound,
+                "captured network request was not found or has expired",
+            ));
+        };
+        Ok(json!({
+            "capture_id": capture.capture_id,
+            "target": capture.target,
+            "active": capture.termination_reason.is_none(),
+            "request": record.value,
+        }))
+    }
+
+    pub fn clear_network_capture(
+        &mut self,
+        target: &BrowserTarget,
+        capture_id: &str,
+        broker_start_id: &str,
+        project_root: &str,
+        caller_label: &str,
+        sequence_barrier: u64,
+    ) -> Result<Value, BrokerError> {
+        self.require_network_scope(target, broker_start_id, project_root, caller_label)?;
+        let capture = self.network_captures.get_mut(target).ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "network capture is not active for the selected target",
+            )
+        })?;
+        if capture.capture_id != capture_id || capture.termination_reason.is_some() {
+            return Err(BrokerError::new(
+                BrokerErrorCode::MismatchedBrowserResponse,
+                "network clear response does not match the active capture",
+            ));
+        }
+        let removed_entries = capture.requests.len();
+        let removed_bytes = capture.retained_bytes;
+        capture.requests.clear();
+        capture.request_order.clear();
+        capture.retained_bytes = 0;
+        advance_network_barrier(capture, sequence_barrier, "clear");
+        let mut summary = network_capture_summary(capture, true, None);
+        if let Value::Object(object) = &mut summary {
+            object.insert("removed_entries".into(), Value::from(removed_entries));
+            object.insert("removed_bytes".into(), Value::from(removed_bytes));
+            object.insert("sequence_barrier".into(), Value::from(sequence_barrier));
+        }
+        Ok(summary)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn stop_network_capture(
+        &mut self,
+        target: &BrowserTarget,
+        capture_id: &str,
+        broker_start_id: &str,
+        project_root: &str,
+        caller_label: &str,
+        sequence_barrier: u64,
+        termination_reason: &str,
+    ) -> Result<Value, BrokerError> {
+        self.require_network_scope(target, broker_start_id, project_root, caller_label)?;
+        let Some(mut capture) = self.network_captures.remove(target) else {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "network capture is not active for the selected target",
+            ));
+        };
+        if capture.capture_id != capture_id {
+            self.network_captures.insert(target.clone(), capture);
+            return Err(BrokerError::new(
+                BrokerErrorCode::MismatchedBrowserResponse,
+                "network stop response does not match the active capture",
+            ));
+        }
+        let removed_entries = capture.requests.len();
+        let removed_bytes = capture.retained_bytes;
+        advance_network_barrier(&mut capture, sequence_barrier, "stop");
+        capture.termination_reason = Some(truncate_utf8(termination_reason, 256));
+        capture.terminated_at_ms = Some(unix_ms());
+        let barrier = NetworkBarrier {
+            target: capture.target.clone(),
+            capture_id: capture.capture_id.clone(),
+            acknowledged_sequence: capture.acknowledged_sequence,
+        };
+        self.network_barriers.insert(
+            network_capture_identity(&barrier.target, &barrier.capture_id),
+            barrier,
+        );
+        self.trim_network_barriers();
+        let summary = network_capture_summary(
+            &capture,
+            false,
+            Some(json!({
+                "reason": capture.termination_reason,
+                "at_ms": capture.terminated_at_ms,
+            })),
+        );
+        self.terminated_network_captures.push_back(summary.clone());
+        while self.terminated_network_captures.len() > MAX_NETWORK_DIAGNOSTICS {
+            self.terminated_network_captures.pop_front();
+        }
+        let mut response = summary;
+        if let Value::Object(object) = &mut response {
+            object.insert("removed_entries".into(), Value::from(removed_entries));
+            object.insert("removed_bytes".into(), Value::from(removed_bytes));
+        }
+        Ok(response)
+    }
+
+    pub fn terminate_network_target(
+        &mut self,
+        target: &BrowserTarget,
+        reason: &str,
+        detail: Option<&str>,
+    ) -> bool {
+        let Some(mut capture) = self.network_captures.remove(target) else {
+            return false;
+        };
+        let barrier = capture.acknowledged_sequence;
+        advance_network_barrier(&mut capture, barrier, "termination");
+        self.insert_network_barrier(&capture, barrier);
+        self.record_network_termination(&capture, reason, barrier, detail);
+        true
+    }
+
+    pub fn terminate_network_session(
+        &mut self,
+        extension_instance_id: &str,
+        reason: &str,
+        detail: Option<&str>,
+    ) -> usize {
+        let targets = self
+            .network_captures
+            .keys()
+            .filter(|target| target.extension_instance_id == extension_instance_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let count = targets.len();
+        for target in targets {
+            self.terminate_network_target(&target, reason, detail);
+        }
+        count
+    }
+
+    pub fn network_capture_instance_ids(&self) -> Vec<String> {
+        self.network_captures
+            .keys()
+            .map(|target| target.extension_instance_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub fn network_capture_handles_for_session(
+        &self,
+        extension_instance_id: &str,
+    ) -> Vec<(BrowserTarget, String)> {
+        self.network_captures
+            .values()
+            .filter(|capture| capture.target.extension_instance_id == extension_instance_id)
+            .map(|capture| (capture.target.clone(), capture.capture_id.clone()))
+            .collect()
+    }
+
+    pub fn latest_network_termination(&self) -> Option<Value> {
+        self.terminated_network_captures.back().cloned()
+    }
+
+    fn require_network_scope(
+        &self,
+        target: &BrowserTarget,
+        broker_start_id: &str,
+        project_root: &str,
+        caller_label: &str,
+    ) -> Result<(), BrokerError> {
+        let Some(capture) = self.network_captures.get(target) else {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "network capture is not active for the selected target",
+            ));
+        };
+        if capture.broker_start_id != broker_start_id
+            || capture.project_root != project_root
+            || capture.caller_label != caller_label
+        {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserLease,
+                "network capture scope does not match this project and caller",
+            ));
+        }
+        Ok(())
+    }
+
+    fn insert_network_barrier(
+        &mut self,
+        capture: &NetworkCaptureRecord,
+        acknowledged_sequence: u64,
+    ) {
+        let barrier = NetworkBarrier {
+            target: capture.target.clone(),
+            capture_id: capture.capture_id.clone(),
+            acknowledged_sequence,
+        };
+        self.network_barriers.insert(
+            network_capture_identity(&barrier.target, &barrier.capture_id),
+            barrier,
+        );
+        self.trim_network_barriers();
+    }
+
+    fn trim_network_barriers(&mut self) {
+        while self.network_barriers.len() > MAX_NETWORK_BARRIER_RECORDS {
+            let Some(oldest) = self.network_barriers.keys().next().cloned() else {
+                break;
+            };
+            self.network_barriers.remove(&oldest);
+        }
+    }
+
+    fn record_network_termination(
+        &mut self,
+        capture: &NetworkCaptureRecord,
+        reason: &str,
+        barrier: u64,
+        detail: Option<&str>,
+    ) {
+        let mut summary = network_capture_summary(
+            capture,
+            false,
+            Some(json!({
+                "reason": truncate_utf8(reason, 256),
+                "detail": detail.map(|value| truncate_utf8(&redact_urls_in_text(value, &capture.config.sensitive_fields), 256)),
+                "barrier": barrier,
+                "at_ms": unix_ms(),
+            })),
+        );
+        if let Value::Object(object) = &mut summary {
+            object.insert("retained_entries".into(), Value::from(0));
+            object.insert("retained_bytes".into(), Value::from(0));
+        }
+        self.terminated_network_captures.push_back(summary);
+        while self.terminated_network_captures.len() > MAX_NETWORK_DIAGNOSTICS {
+            self.terminated_network_captures.pop_front();
+        }
     }
 
     pub fn latest_console_termination(&self) -> Option<Value> {
@@ -1204,6 +2121,653 @@ fn validate_console_scope(
         ));
     }
     Ok(())
+}
+
+fn validate_network_scope(
+    request_id: &str,
+    broker_start_id: &str,
+    project_root: &str,
+    caller_label: &str,
+    target: &BrowserTarget,
+) -> Result<(), BrokerError> {
+    if request_id.trim().is_empty() || request_id.len() > 256 {
+        return Err(BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            "network capture request_id must contain 1 to 256 bytes",
+        ));
+    }
+    if broker_start_id.trim().is_empty() || broker_start_id.len() > 256 {
+        return Err(BrokerError::new(
+            BrokerErrorCode::MismatchedBrowserResponse,
+            "network capture broker generation is invalid",
+        ));
+    }
+    if project_root.trim().is_empty() || project_root.len() > 4096 {
+        return Err(BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            "network capture project scope is invalid",
+        ));
+    }
+    if caller_label.trim().is_empty() || caller_label.len() > 120 {
+        return Err(BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            "network capture caller scope is invalid",
+        ));
+    }
+    if target.extension_instance_id.trim().is_empty()
+        || target.extension_instance_id.len() > 128
+        || target.window_id <= 0
+        || target.tab_id <= 0
+    {
+        return Err(BrokerError::new(
+            BrokerErrorCode::MismatchedBrowserResponse,
+            "network capture target is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_allowed_hostnames(value: Option<&Value>) -> Result<BTreeSet<String>, BrokerError> {
+    let Some(value) = value else {
+        return Err(BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            "start_network_capture requires at least one exact hostname",
+        ));
+    };
+    let values = if let Some(value) = value.as_array() {
+        value.clone()
+    } else if value.is_string() {
+        vec![value.clone()]
+    } else {
+        return Err(BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            "allowed_hostnames must be an array of exact hostnames",
+        ));
+    };
+    if values.len() > MAX_NETWORK_HOSTNAMES {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrowserResourceLimit,
+            "allowed_hostnames exceeds the capture limit",
+        ));
+    }
+    let mut normalized = BTreeSet::new();
+    for value in values {
+        let Some(raw_value) = value.as_str() else {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "allowed_hostnames must contain strings",
+            ));
+        };
+        let raw = raw_value.trim().to_ascii_lowercase();
+        if raw.is_empty()
+            || raw.len() > MAX_NETWORK_HOSTNAME_BYTES
+            || raw.chars().any(char::is_whitespace)
+            || ["://", "/", "\\", "@", "*", "?", "#"]
+                .iter()
+                .any(|marker| raw.contains(marker))
+        {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "allowed_hostnames must contain exact hostnames without URL components or wildcards",
+            ));
+        }
+        let parsed = Url::parse(&format!("http://{raw}")).map_err(|_| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "allowed_hostnames contains an invalid hostname",
+            )
+        })?;
+        if parsed.port().is_some()
+            || parsed.username() != ""
+            || parsed.password().is_some()
+            || parsed.path() != "/"
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "allowed_hostnames must contain exact hostnames without URL components",
+            ));
+        }
+        let hostname = parsed
+            .domain()
+            .or_else(|| parsed.host_str())
+            .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
+            .filter(|host| !host.is_empty())
+            .ok_or_else(|| {
+                BrokerError::new(
+                    BrokerErrorCode::InvalidBrowserOperation,
+                    "allowed_hostnames contains an invalid hostname",
+                )
+            })?;
+        if hostname.len() > MAX_NETWORK_HOSTNAME_BYTES
+            || hostname.split('.').any(|label| {
+                label.is_empty()
+                    || label.len() > 63
+                    || label.starts_with('-')
+                    || label.ends_with('-')
+                    || !label
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+        {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "allowed_hostnames contains an invalid exact hostname",
+            ));
+        }
+        normalized.insert(hostname);
+    }
+    if normalized.is_empty() {
+        return Err(BrokerError::new(
+            BrokerErrorCode::InvalidBrowserOperation,
+            "start_network_capture requires at least one exact hostname",
+        ));
+    }
+    Ok(normalized)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkMergeResult {
+    Accepted,
+    Filtered,
+    Rejected,
+}
+
+fn network_event_value(event: &crate::protocol::NetworkEvent) -> Value {
+    let mut object = event
+        .data
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<Map<String, Value>>();
+    if let Some(Value::Object(nested)) = object.remove("event") {
+        Value::Object(nested)
+    } else {
+        Value::Object(object)
+    }
+}
+
+fn merge_network_event(capture: &mut NetworkCaptureRecord, raw_event: Value) -> NetworkMergeResult {
+    let Some(raw) = raw_event.as_object() else {
+        return NetworkMergeResult::Rejected;
+    };
+    evict_network_requests(capture, Instant::now());
+    let request_id = truncate_utf8(
+        &value_text(raw.get("request_id")),
+        MAX_NETWORK_REQUEST_ID_BYTES,
+    );
+    let event_type = value_text(raw.get("event_type")).to_ascii_lowercase();
+    if request_id.is_empty()
+        || !matches!(
+            event_type.as_str(),
+            "request" | "response" | "finished" | "failed"
+        )
+    {
+        return NetworkMergeResult::Rejected;
+    }
+    let previous = capture.requests.get(&request_id).cloned();
+    if event_type == "request" {
+        let raw_url = truncate_utf8(&value_text(raw.get("url")), 8_192);
+        if !url_matches_allowed_hostname(&raw_url, &capture.config.allowed_hostnames) {
+            return NetworkMergeResult::Filtered;
+        }
+        if previous.as_ref().is_some_and(|record| {
+            matches!(
+                record.phase,
+                NetworkRequestPhase::Finished | NetworkRequestPhase::Failed
+            )
+        }) {
+            return NetworkMergeResult::Rejected;
+        }
+        let mut value = Map::new();
+        value.insert("request_id".into(), Value::String(request_id.clone()));
+        value.insert(
+            "timestamp_ms".into(),
+            Value::from(network_timestamp(raw.get("timestamp_ms"))),
+        );
+        value.insert(
+            "url".into(),
+            Value::String(redact_network_url(
+                &raw_url,
+                &capture.config.sensitive_fields,
+            )),
+        );
+        value.insert(
+            "method".into(),
+            Value::String(truncate_utf8(&value_text(raw.get("method")), 32)),
+        );
+        value.insert(
+            "resource_type".into(),
+            Value::String(truncate_utf8(&value_text(raw.get("resource_type")), 64)),
+        );
+        if raw.get("headers").is_some() || raw.get("request_headers").is_some() {
+            value.insert(
+                "request_headers".into(),
+                redact_network_mapping(
+                    raw.get("headers").or_else(|| raw.get("request_headers")),
+                    &capture.config.sensitive_fields,
+                ),
+            );
+        }
+        if capture.config.capture_request_bodies && raw.get("request_body").is_some() {
+            // Body retention is deliberately represented only as metadata in
+            // 5.4. Raw body retrieval remains a 5.5 authorization surface.
+            value.insert("has_request_body".into(), Value::Bool(true));
+        }
+        return store_network_request(
+            capture,
+            request_id,
+            Value::Object(value),
+            NetworkRequestPhase::Requested,
+        );
+    }
+
+    let Some(previous) = previous else {
+        return NetworkMergeResult::Rejected;
+    };
+    if matches!(
+        previous.phase,
+        NetworkRequestPhase::Finished | NetworkRequestPhase::Failed
+    ) {
+        return NetworkMergeResult::Rejected;
+    }
+    let mut value = previous.value;
+    let Some(object) = value.as_object_mut() else {
+        return NetworkMergeResult::Rejected;
+    };
+    match event_type.as_str() {
+        "response" => {
+            object.insert(
+                "status".into(),
+                Value::from(raw.get("status").and_then(Value::as_i64).unwrap_or(0)),
+            );
+            object.insert(
+                "status_text".into(),
+                Value::String(truncate_utf8(&value_text(raw.get("status_text")), 256)),
+            );
+            object.insert(
+                "mime_type".into(),
+                Value::String(truncate_utf8(&value_text(raw.get("mime_type")), 256)),
+            );
+            object.insert(
+                "protocol".into(),
+                Value::String(truncate_utf8(&value_text(raw.get("protocol")), 64)),
+            );
+            object.insert(
+                "from_cache".into(),
+                Value::Bool(
+                    raw.get("from_cache")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                ),
+            );
+            if raw.get("headers").is_some() || raw.get("response_headers").is_some() {
+                object.insert(
+                    "response_headers".into(),
+                    redact_network_mapping(
+                        raw.get("headers").or_else(|| raw.get("response_headers")),
+                        &capture.config.sensitive_fields,
+                    ),
+                );
+            }
+            store_network_request(
+                capture,
+                request_id,
+                Value::Object(object.clone()),
+                NetworkRequestPhase::ResponseReceived,
+            )
+        }
+        "finished" => {
+            object.insert("finished".into(), Value::Bool(true));
+            object.insert(
+                "encoded_data_length".into(),
+                Value::from(
+                    raw.get("encoded_data_length")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0)
+                        .max(0),
+                ),
+            );
+            store_network_request(
+                capture,
+                request_id,
+                Value::Object(object.clone()),
+                NetworkRequestPhase::Finished,
+            )
+        }
+        "failed" => {
+            object.insert("finished".into(), Value::Bool(true));
+            object.insert("failed".into(), Value::Bool(true));
+            object.insert(
+                "error_text".into(),
+                Value::String(truncate_utf8(
+                    &redact_urls_in_text(
+                        &value_text(raw.get("error_text")),
+                        &capture.config.sensitive_fields,
+                    ),
+                    1_024,
+                )),
+            );
+            object.insert(
+                "canceled".into(),
+                Value::Bool(
+                    raw.get("canceled")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                ),
+            );
+            store_network_request(
+                capture,
+                request_id,
+                Value::Object(object.clone()),
+                NetworkRequestPhase::Failed,
+            )
+        }
+        _ => NetworkMergeResult::Rejected,
+    }
+}
+
+fn store_network_request(
+    capture: &mut NetworkCaptureRecord,
+    request_id: String,
+    value: Value,
+    phase: NetworkRequestPhase,
+) -> NetworkMergeResult {
+    let Ok(encoded) = serde_json::to_vec(&value) else {
+        return NetworkMergeResult::Rejected;
+    };
+    let byte_size = encoded.len();
+    if byte_size > capture.config.max_bytes.min(MAX_NETWORK_EVENT_BYTES) {
+        return NetworkMergeResult::Rejected;
+    }
+    if let Some(previous) = capture.requests.remove(&request_id) {
+        capture.retained_bytes = capture.retained_bytes.saturating_sub(previous.byte_size);
+        capture.request_order.retain(|key| key != &request_id);
+    }
+    capture.request_order.push_back(request_id.clone());
+    capture.requests.insert(
+        request_id,
+        NetworkRequestRecord {
+            value,
+            received_at: Instant::now(),
+            byte_size,
+            phase,
+        },
+    );
+    capture.retained_bytes = capture.retained_bytes.saturating_add(byte_size);
+    evict_network_requests(capture, Instant::now());
+    NetworkMergeResult::Accepted
+}
+
+fn evict_network_requests(capture: &mut NetworkCaptureRecord, now: Instant) {
+    while let Some(request_id) = capture.request_order.front().cloned() {
+        let Some(record) = capture.requests.get(&request_id) else {
+            capture.request_order.pop_front();
+            continue;
+        };
+        if now
+            .saturating_duration_since(record.received_at)
+            .as_millis()
+            <= u128::from(capture.config.max_age_ms)
+            && capture.requests.len() <= capture.config.max_entries
+            && capture.retained_bytes <= capture.config.max_bytes
+        {
+            break;
+        }
+        capture.request_order.pop_front();
+        if let Some(removed) = capture.requests.remove(&request_id) {
+            capture.retained_bytes = capture.retained_bytes.saturating_sub(removed.byte_size);
+        }
+    }
+}
+
+fn network_timestamp(value: Option<&Value>) -> u64 {
+    let now = unix_ms();
+    value
+        .and_then(Value::as_u64)
+        .filter(|timestamp| *timestamp <= now.saturating_add(86_400_000))
+        .unwrap_or(now)
+}
+
+fn url_matches_allowed_hostname(value: &str, allowed_hostnames: &[String]) -> bool {
+    let Ok(parsed) = Url::parse(value) else {
+        return false;
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(hostname) = parsed
+        .domain()
+        .or_else(|| parsed.host_str())
+        .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
+    else {
+        return false;
+    };
+    allowed_hostnames.iter().any(|allowed| allowed == &hostname)
+}
+
+fn redact_network_url(value: &str, fields: &BTreeSet<String>) -> String {
+    let Ok(mut parsed) = Url::parse(value) else {
+        return REDACTION_MARKER.to_owned();
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return REDACTION_MARKER.to_owned();
+    }
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    let query = parsed.query().map(|_| {
+        parsed
+            .query_pairs()
+            .map(|(name, value)| {
+                let name = name.into_owned();
+                (
+                    name.clone(),
+                    if is_sensitive_field(&name, fields) {
+                        REDACTION_MARKER.to_owned()
+                    } else {
+                        value.into_owned()
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    parsed.set_fragment(None);
+    if let Some(pairs) = query {
+        let mut serializer = parsed.query_pairs_mut();
+        serializer.clear();
+        for (name, value) in pairs {
+            serializer.append_pair(&name, &value);
+        }
+    }
+    parsed.into()
+}
+
+fn redact_network_mapping(value: Option<&Value>, fields: &BTreeSet<String>) -> Value {
+    redact_network_value(value.unwrap_or(&Value::Null), fields, 0)
+}
+
+fn redact_network_value(value: &Value, fields: &BTreeSet<String>, depth: usize) -> Value {
+    if depth > 4 {
+        return Value::String("[TRUNCATED]".into());
+    }
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .take(256)
+                .map(|(key, value)| {
+                    (
+                        truncate_utf8(key, 256),
+                        if is_sensitive_field(key, fields) {
+                            Value::String(REDACTION_MARKER.into())
+                        } else {
+                            redact_network_value(value, fields, depth + 1)
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .take(128)
+                .map(|value| redact_network_value(value, fields, depth + 1))
+                .collect(),
+        ),
+        Value::String(value) => {
+            Value::String(truncate_utf8(&redact_urls_in_text(value, fields), 4_096))
+        }
+        _ => value.clone(),
+    }
+}
+
+fn network_request_summary(value: &Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return json!({});
+    };
+    let fields = [
+        "request_id",
+        "timestamp_ms",
+        "url",
+        "method",
+        "resource_type",
+        "status",
+        "status_text",
+        "mime_type",
+        "protocol",
+        "from_cache",
+        "finished",
+        "failed",
+        "error_text",
+        "canceled",
+        "encoded_data_length",
+        "has_request_body",
+    ];
+    Value::Object(
+        fields
+            .iter()
+            .filter_map(|field| {
+                object
+                    .get(*field)
+                    .cloned()
+                    .map(|value| ((*field).into(), value))
+            })
+            .collect(),
+    )
+}
+
+fn network_capture_identity(target: &BrowserTarget, capture_id: &str) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        target.extension_instance_id, target.window_id, target.tab_id, capture_id
+    )
+}
+
+fn network_ack(
+    capture_id: &str,
+    target: &BrowserTarget,
+    acknowledged_sequence: u64,
+    accepted: bool,
+    reason: Option<&str>,
+) -> Value {
+    let mut value = json!({
+        "type": "network_ack",
+        "capture_id": capture_id,
+        "target": target,
+        "ack_seq": acknowledged_sequence,
+        "acknowledged_sequence": acknowledged_sequence,
+        "accepted": accepted,
+    });
+    if let Some(reason) = reason {
+        value["reason"] = Value::String(reason.into());
+    }
+    value
+}
+
+fn record_network_gap(capture: &mut NetworkCaptureRecord, from: u64, to: u64) {
+    if from > to {
+        return;
+    }
+    capture.gap_events = capture.gap_events.saturating_add(1);
+    capture.loss_diagnostics.push_back(json!({
+        "kind": "sequence_gap",
+        "from": from,
+        "to": to,
+        "at_ms": unix_ms(),
+    }));
+    while capture.loss_diagnostics.len() > MAX_NETWORK_GAP_DIAGNOSTICS {
+        capture.loss_diagnostics.pop_front();
+    }
+}
+
+fn advance_network_barrier(capture: &mut NetworkCaptureRecord, barrier: u64, source: &str) {
+    let barrier = barrier.max(capture.acknowledged_sequence);
+    if barrier > capture.acknowledged_sequence.saturating_add(1) {
+        record_network_gap(capture, capture.acknowledged_sequence + 1, barrier - 1);
+    }
+    capture
+        .pending_events
+        .retain(|sequence, _| *sequence > barrier);
+    if source == "termination" {
+        capture.rejected_events = capture
+            .rejected_events
+            .saturating_add(capture.pending_events.len() as u64);
+        capture.pending_events.clear();
+    }
+    capture.pending_bytes = capture
+        .pending_events
+        .values()
+        .map(|event| serde_json::to_vec(event).map_or(0, |bytes| bytes.len()))
+        .sum();
+    capture.acknowledged_sequence = barrier;
+    capture.highest_seen_sequence = capture.highest_seen_sequence.max(barrier);
+    if matches!(source, "clear" | "stop" | "termination") {
+        capture.clear_sequence = capture.clear_sequence.max(barrier);
+    }
+}
+
+fn network_capture_summary(
+    capture: &NetworkCaptureRecord,
+    active: bool,
+    termination: Option<Value>,
+) -> Value {
+    json!({
+        "target": capture.target,
+        "capture_id": capture.capture_id,
+        "active": active,
+        "allowed_hostnames": capture.config.allowed_hostnames,
+        "capture_request_bodies": capture.config.capture_request_bodies,
+        "retention": {
+            "max_age_ms": capture.config.max_age_ms,
+            "max_entries": capture.config.max_entries,
+            "max_bytes": capture.config.max_bytes,
+            "max_body_bytes": capture.config.max_body_bytes,
+            "max_request_body_bytes": capture.config.max_request_body_bytes,
+        },
+        "retained_entries": capture.requests.len(),
+        "retained_bytes": capture.retained_bytes,
+        "delivery": {
+            "acknowledged_sequence": capture.acknowledged_sequence,
+            "highest_seen_sequence": capture.highest_seen_sequence,
+            "clear_sequence": capture.clear_sequence,
+            "pending_sequences": capture.pending_events.len(),
+            "pending_bytes": capture.pending_bytes,
+            "dropped_events": capture.dropped_events,
+            "dropped_batches": capture.dropped_batches,
+            "dropped_bytes": capture.dropped_bytes,
+            "rejected_events": capture.rejected_events,
+            "filtered_events": capture.filtered_events,
+            "duplicate_events": capture.duplicate_events,
+            "gap_events": capture.gap_events,
+            "loss_diagnostics": capture.loss_diagnostics,
+        },
+        "termination": termination.or_else(|| {
+            capture.termination_reason.as_ref().map(|reason| json!({
+                "reason": reason,
+                "at_ms": capture.terminated_at_ms,
+            }))
+        }),
+    })
 }
 
 fn bounded_u64(
@@ -1726,7 +3290,6 @@ fn termination_value_with_fields(
     })
 }
 
-#[cfg(test)]
 fn default_sensitive_fields() -> BTreeSet<String> {
     DEFAULT_SENSITIVE_CONSOLE_FIELDS
         .iter()

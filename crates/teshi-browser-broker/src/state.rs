@@ -113,6 +113,8 @@ impl BrokerState {
                         for target in closed_targets {
                             self.evidence
                                 .terminate_console_target(&target, "target_closed", None);
+                            self.evidence
+                                .terminate_network_target(&target, "target_closed", None);
                         }
                         Ok(self.sessions.heartbeat_response(&instance_id, now))
                     }
@@ -201,8 +203,13 @@ impl BrokerState {
                 };
                 let _ = reply.send(response);
             }
-            BrokerEvent::NetworkBatch { batch, reply, .. } => {
-                let _ = reply.send(self.handle_network_batch(batch));
+            BrokerEvent::NetworkBatch {
+                batch,
+                generation,
+                reply,
+                ..
+            } => {
+                let _ = reply.send(self.handle_network_batch(batch, generation));
             }
             BrokerEvent::PreviewFrame {
                 target,
@@ -297,6 +304,8 @@ impl BrokerState {
         if result.is_ok() {
             self.evidence
                 .update_console_stream_generation(&extension_instance_id, generation);
+            self.evidence
+                .update_network_stream_generation(&extension_instance_id, generation);
             // A reconnect or stream replacement invalidates all old preview
             // subscriptions. UI clients must explicitly re-select the target.
             self.sessions.unsubscribe_instance(&extension_instance_id);
@@ -435,6 +444,10 @@ impl BrokerState {
                 "stream_disconnected",
                 None,
             );
+            // Keep Network capture state across a transient stream loss. The
+            // extension retains its bounded retry queue and will resend the
+            // same capture's unacknowledged events after reconnect; the new
+            // stream generation is bound when it attaches.
             self.sessions.unsubscribe_instance(extension_instance_id);
             self.fail_pending_for_session(
                 extension_instance_id,
@@ -572,6 +585,7 @@ impl BrokerState {
             .is_some_and(|target| target == &pending.target);
         let generation_matches = if is_evidence_operation(&pending.operation)
             || is_console_operation(&pending.operation)
+            || is_network_operation(&pending.operation)
         {
             match (
                 pending.stream_generation,
@@ -608,7 +622,11 @@ impl BrokerState {
             self.quarantine(
                 &response,
                 if !capture_id_matches {
-                    "console_capture_id_mismatch"
+                    if is_network_operation(&pending.operation) {
+                        "network_capture_id_mismatch"
+                    } else {
+                        "console_capture_id_mismatch"
+                    }
                 } else if generation_matches {
                     "target_or_operation_mismatch"
                 } else {
@@ -676,6 +694,82 @@ impl BrokerState {
         } else {
             None
         };
+        let network_capture = if pending.operation == "start_network_capture" {
+            if !response.ok {
+                self.evidence.abort_network_capture(&request_id);
+                None
+            } else {
+                let Some(broker_start_id) = broker_start_id else {
+                    self.evidence.abort_network_capture(&request_id);
+                    let error = BrokerError::new(
+                        BrokerErrorCode::MismatchedBrowserResponse,
+                        "network capture response has no broker generation",
+                    );
+                    let _ = pending.reply.send(Err(error.clone()));
+                    return error_value(error);
+                };
+                let lease_result = pending
+                    .lease_token
+                    .as_deref()
+                    .ok_or_else(|| {
+                        BrokerError::new(
+                            BrokerErrorCode::InvalidBrowserLease,
+                            "network capture response has no lease token",
+                        )
+                    })
+                    .and_then(|token| {
+                        self.validate_lease(
+                            &pending.extension_instance_id,
+                            token,
+                            &pending.project_root,
+                            &pending.caller_label,
+                            broker_start_id,
+                        )
+                        .map(|_| ())
+                    });
+                if let Err(error) = lease_result {
+                    self.evidence.abort_network_capture(&request_id);
+                    if let Some(capture_id) = pending.console_capture_id.as_deref() {
+                        self.queue_network_stop_command(
+                            &pending.extension_instance_id,
+                            &pending.target,
+                            capture_id,
+                        );
+                    }
+                    let _ = pending.reply.send(Err(error.clone()));
+                    return error_value(error);
+                }
+                match self.evidence.commit_network_capture(
+                    &request_id,
+                    broker_start_id,
+                    &pending.project_root,
+                    &pending.caller_label,
+                    &pending.target,
+                    &response,
+                ) {
+                    Ok(summary) => Some(summary),
+                    Err(error) => {
+                        if let Some(expected_capture_id) = pending.console_capture_id.as_deref() {
+                            let cleanup_capture_id = response
+                                .result
+                                .get("capture_id")
+                                .and_then(Value::as_str)
+                                .filter(|capture_id| !capture_id.trim().is_empty())
+                                .unwrap_or(expected_capture_id);
+                            self.queue_network_stop_command(
+                                &pending.extension_instance_id,
+                                &pending.target,
+                                cleanup_capture_id,
+                            );
+                        }
+                        let _ = pending.reply.send(Err(error.clone()));
+                        return error_value(error);
+                    }
+                }
+            }
+        } else {
+            None
+        };
         let stopped_console_capture = if pending.operation == "stop_console_capture" && response.ok
         {
             if let Some(_expected_capture_id) = pending.console_capture_id.as_deref()
@@ -700,6 +794,86 @@ impl BrokerState {
             )
         } else {
             None
+        };
+        let network_transition = if response.ok
+            && matches!(
+                pending.operation.as_str(),
+                "clear_network_capture" | "stop_network_capture"
+            ) {
+            let Some(broker_start_id) = broker_start_id else {
+                let error = BrokerError::new(
+                    BrokerErrorCode::MismatchedBrowserResponse,
+                    "network capture response has no broker generation",
+                );
+                let _ = pending.reply.send(Err(error.clone()));
+                return error_value(error);
+            };
+            let Some(capture_id) = pending.console_capture_id.as_deref() else {
+                let error = BrokerError::new(
+                    BrokerErrorCode::MismatchedBrowserResponse,
+                    "network capture response has no capture_id",
+                );
+                let _ = pending.reply.send(Err(error.clone()));
+                return error_value(error);
+            };
+            let Some(sequence_barrier) = network_response_barrier(&response.result) else {
+                let error = BrokerError::new(
+                    BrokerErrorCode::MismatchedBrowserResponse,
+                    "network capture response has no explicit sequence barrier",
+                );
+                let _ = pending.reply.send(Err(error.clone()));
+                return error_value(error);
+            };
+            if !self.evidence.network_capture_scope_matches(
+                &pending.target,
+                Some(capture_id),
+                broker_start_id,
+                &pending.project_root,
+                &pending.caller_label,
+            ) {
+                let error = BrokerError::new(
+                    BrokerErrorCode::InvalidBrowserLease,
+                    "network capture scope changed before barrier commit",
+                );
+                let _ = pending.reply.send(Err(error.clone()));
+                return error_value(error);
+            }
+            if pending.operation == "clear_network_capture" {
+                Some(self.evidence.clear_network_capture(
+                    &pending.target,
+                    capture_id,
+                    broker_start_id,
+                    &pending.project_root,
+                    &pending.caller_label,
+                    sequence_barrier,
+                ))
+            } else {
+                Some(
+                    self.evidence.stop_network_capture(
+                        &pending.target,
+                        capture_id,
+                        broker_start_id,
+                        &pending.project_root,
+                        &pending.caller_label,
+                        sequence_barrier,
+                        response
+                            .result
+                            .get("termination_reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("explicit_stop"),
+                    ),
+                )
+            }
+        } else {
+            None
+        };
+        let network_transition = match network_transition {
+            Some(Ok(value)) => Some(value),
+            Some(Err(error)) => {
+                let _ = pending.reply.send(Err(error.clone()));
+                return error_value(error);
+            }
+            None => None,
         };
 
         let artifact = if is_evidence_operation(&pending.operation) {
@@ -811,6 +985,12 @@ impl BrokerState {
             if let Some(capture) = stopped_console_capture {
                 object.insert("capture".into(), capture);
             }
+            if let Some(capture) = network_capture {
+                object.insert("capture".into(), capture);
+            }
+            if let Some(capture) = network_transition {
+                object.insert("capture".into(), capture);
+            }
         }
         if response.ok {
             if pending.operation == "get_page_snapshot" {
@@ -850,21 +1030,42 @@ impl BrokerState {
         json!({"ok": true, "request_id": request_id})
     }
 
-    fn handle_network_batch(&mut self, batch: NetworkBatch) -> Value {
+    fn handle_network_batch(&mut self, batch: NetworkBatch, generation: u64) -> Value {
+        let target = batch.target.clone();
+        let capture_id = batch.capture_id.clone();
         if let Err(error) = batch.validate() {
-            return error_value(error);
+            let reason = match error.code {
+                BrokerErrorCode::BrowserResourceLimit => "batch_too_large",
+                BrokerErrorCode::MismatchedBrowserResponse => "target_mismatch",
+                _ => "invalid_events",
+            };
+            return json!({
+                "type": "network_ack",
+                "capture_id": capture_id,
+                "target": target,
+                "ack_seq": 0,
+                "acknowledged_sequence": 0,
+                "accepted": false,
+                "reason": reason,
+            });
         }
-        let ack_seq = batch
-            .last_seq
-            .or_else(|| batch.events.last().map(|event| event.seq))
-            .unwrap_or_default();
-        json!({
-            "ok": true,
-            "type": "network_ack",
-            "extension_instance_id": batch.extension_instance_id,
-            "capture_id": batch.capture_id,
-            "ack_seq": ack_seq,
-        })
+        let current_generation = self
+            .sessions
+            .get(&batch.extension_instance_id)
+            .and_then(|session| session.current_stream_generation());
+        if current_generation != Some(generation) {
+            return json!({
+                "type": "network_ack",
+                "capture_id": capture_id,
+                "target": target,
+                "ack_seq": 0,
+                "acknowledged_sequence": 0,
+                "accepted": false,
+                "reason": "stream_generation_mismatch",
+            });
+        }
+        self.evidence
+            .accept_network_batch(&batch.extension_instance_id, generation, &batch)
     }
 
     fn handle_subscription(
@@ -1032,6 +1233,48 @@ impl BrokerState {
             _ => Err(BrokerError::new(
                 BrokerErrorCode::InvalidBrowserOperation,
                 "unsupported local console operation",
+            )),
+        }
+    }
+
+    fn local_network_operation(
+        &mut self,
+        operation: &str,
+        target: &BrowserTarget,
+        broker_start_id: &str,
+        project: &str,
+        caller: &str,
+        arguments: &BTreeMap<String, Value>,
+    ) -> Result<Value, BrokerError> {
+        match operation {
+            "list_network_requests" => self.evidence.list_network_requests(
+                target,
+                broker_start_id,
+                project,
+                caller,
+                arguments.get("max_age_ms"),
+                arguments.get("max_entries"),
+                arguments.get("max_bytes"),
+            ),
+            "get_network_request_detail" => self.evidence.get_network_request_detail(
+                target,
+                broker_start_id,
+                project,
+                caller,
+                arguments.get("network_request_id").ok_or_else(|| {
+                    BrokerError::new(
+                        BrokerErrorCode::InvalidBrowserOperation,
+                        "network_request_id is required",
+                    )
+                })?,
+                arguments
+                    .get("include_body")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            ),
+            _ => Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "unsupported local network operation",
             )),
         }
     }
@@ -1243,8 +1486,11 @@ impl BrokerState {
         let generation = runtime.endpoint_record().broker_start_id;
         self.validate_lease(&instance_id, &token, &project, &caller, &generation)?;
         self.queue_console_cleanup(&instance_id);
+        self.queue_network_cleanup(&instance_id);
         self.evidence
             .terminate_console_session(&instance_id, "lease_released", None);
+        self.evidence
+            .terminate_network_session(&instance_id, "lease_released", None);
         self.leases.remove(&instance_id);
         self.sessions.clear_element_references(&instance_id);
         Ok(json!({"extension_instance_id": instance_id, "released": true}))
@@ -1423,6 +1669,22 @@ impl BrokerState {
             let _ = reply.send(result.map(|payload| operation_success(&request, payload)));
             return;
         }
+        if matches!(
+            request.operation.as_str(),
+            "list_network_requests" | "get_network_request_detail"
+        ) {
+            let result = self.local_network_operation(
+                &request.operation,
+                &target,
+                &broker_start_id,
+                &project,
+                &caller,
+                &request.arguments,
+            );
+            self.retire_request(&request.request_id, Instant::now());
+            let _ = reply.send(result.map(|payload| operation_success(&request, payload)));
+            return;
+        }
         let timeout = request
             .timeout_ms
             .map(Duration::from_millis)
@@ -1455,12 +1717,46 @@ impl BrokerState {
         } else {
             None
         };
-        let console_capture_id = if request.operation == "start_console_capture" {
+        let prepared_network = if request.operation == "start_network_capture" {
+            match self.evidence.prepare_network_capture(
+                &request.request_id,
+                &broker_start_id,
+                &project,
+                &caller,
+                &target,
+                stream_generation,
+                request.arguments.get("allowed_hostnames"),
+                request.arguments.get("capture_request_bodies"),
+                request.arguments.get("max_request_body_bytes"),
+                request.arguments.get("max_age_ms"),
+                request.arguments.get("max_entries"),
+                request.arguments.get("max_bytes"),
+                request.arguments.get("max_body_bytes"),
+                request.arguments.get("sensitive_fields"),
+            ) {
+                Ok(handle) => Some(handle),
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let capture_id = if request.operation == "start_console_capture" {
             prepared_console
                 .as_ref()
                 .map(|handle| handle.capture_id.clone())
         } else if request.operation == "stop_console_capture" {
             self.evidence.console_capture_id(&target)
+        } else if request.operation == "start_network_capture" {
+            prepared_network
+                .as_ref()
+                .map(|handle| handle.capture_id.clone())
+        } else if request.operation == "stop_network_capture"
+            || request.operation == "clear_network_capture"
+        {
+            self.evidence.network_capture_id(&target)
         } else {
             None
         };
@@ -1471,12 +1767,15 @@ impl BrokerState {
                 &target,
                 &instance_id,
                 None,
-                console_capture_id.as_deref(),
+                capture_id.as_deref(),
             ) {
                 Ok(command) => command,
                 Err(error) => {
                     if prepared_console.is_some() {
                         self.evidence.abort_console_capture(&request.request_id);
+                    }
+                    if prepared_network.is_some() {
+                        self.evidence.abort_network_capture(&request.request_id);
                     }
                     let _ = reply.send(Err(error));
                     return;
@@ -1518,7 +1817,7 @@ impl BrokerState {
                     .and_then(|plan| plan.metadata.locator.snapshot_id.clone()),
                 stream_generation,
                 fallback_generation: None,
-                console_capture_id,
+                console_capture_id: capture_id,
                 deadline: now + timeout,
                 reply,
             },
@@ -1592,8 +1891,11 @@ impl BrokerState {
         {
             self.leases.remove(extension_instance_id);
             self.queue_console_cleanup(extension_instance_id);
+            self.queue_network_cleanup(extension_instance_id);
             self.evidence
                 .terminate_console_session(extension_instance_id, "lease_expired", None);
+            self.evidence
+                .terminate_network_session(extension_instance_id, "lease_expired", None);
             self.sessions
                 .clear_element_references(extension_instance_id);
         }
@@ -1618,8 +1920,11 @@ impl BrokerState {
         {
             self.leases.remove(extension_instance_id);
             self.queue_console_cleanup(extension_instance_id);
+            self.queue_network_cleanup(extension_instance_id);
             self.evidence
                 .terminate_console_session(extension_instance_id, "lease_expired", None);
+            self.evidence
+                .terminate_network_session(extension_instance_id, "lease_expired", None);
             self.sessions
                 .clear_element_references(extension_instance_id);
             return Err(BrokerError::new(
@@ -1649,7 +1954,13 @@ impl BrokerState {
     fn expire(&mut self, now: Instant) {
         self.sessions.expire_stale(now);
         let heartbeat_ttl = self.sessions.heartbeat_ttl();
-        for instance_id in self.evidence.console_capture_instance_ids() {
+        let mut capture_instances = self
+            .evidence
+            .console_capture_instance_ids()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        capture_instances.extend(self.evidence.network_capture_instance_ids());
+        for instance_id in capture_instances {
             let alive = self
                 .sessions
                 .get(&instance_id)
@@ -1657,6 +1968,8 @@ impl BrokerState {
             if !alive {
                 self.evidence
                     .terminate_console_session(&instance_id, "session_disconnected", None);
+                self.evidence
+                    .terminate_network_session(&instance_id, "session_disconnected", None);
             }
         }
         self.retired_requests.retain(|_, retired_at| {
@@ -1671,8 +1984,11 @@ impl BrokerState {
         for instance_id in expired_leases {
             self.leases.remove(&instance_id);
             self.queue_console_cleanup(&instance_id);
+            self.queue_network_cleanup(&instance_id);
             self.evidence
                 .terminate_console_session(&instance_id, "lease_expired", None);
+            self.evidence
+                .terminate_network_session(&instance_id, "lease_expired", None);
             self.sessions.clear_element_references(&instance_id);
         }
         let expired = self
@@ -1801,6 +2117,9 @@ impl BrokerState {
         if operation == "start_console_capture" {
             self.evidence.abort_console_capture(request_id);
         }
+        if operation == "start_network_capture" {
+            self.evidence.abort_network_capture(request_id);
+        }
     }
 
     fn queue_console_cleanup(&mut self, extension_instance_id: &str) {
@@ -1832,6 +2151,50 @@ impl BrokerState {
             "suppress_response": true,
         });
         let _ = session.queue_command(command);
+    }
+
+    fn queue_network_stop_command(
+        &mut self,
+        extension_instance_id: &str,
+        target: &BrowserTarget,
+        capture_id: &str,
+    ) {
+        let Some(session) = self.sessions.get_mut(extension_instance_id) else {
+            return;
+        };
+        let command = json!({
+            "type": "cmd",
+            "cmd": "stop_network_capture",
+            "schema_version": BROWSER_BROKER_SCHEMA_VERSION,
+            "protocol_version": BROWSER_BROKER_PROTOCOL_VERSION,
+            "request_id": format!("network_cleanup_{}", Uuid::new_v4().simple()),
+            "target": target,
+            "capture_id": capture_id,
+            "suppress_response": true,
+        });
+        let _ = session.queue_command(command);
+    }
+
+    fn queue_network_cleanup(&mut self, extension_instance_id: &str) {
+        let captures = self
+            .evidence
+            .network_capture_handles_for_session(extension_instance_id);
+        let Some(session) = self.sessions.get_mut(extension_instance_id) else {
+            return;
+        };
+        for (target, capture_id) in captures {
+            let command = json!({
+                "type": "cmd",
+                "cmd": "stop_network_capture",
+                "schema_version": BROWSER_BROKER_SCHEMA_VERSION,
+                "protocol_version": BROWSER_BROKER_PROTOCOL_VERSION,
+                "request_id": format!("network_cleanup_{}", Uuid::new_v4().simple()),
+                "target": target,
+                "capture_id": capture_id,
+                "suppress_response": true,
+            });
+            let _ = session.queue_command(command);
+        }
     }
 
     fn quarantine(&mut self, response: &ExtensionResponse, reason: &str) {
@@ -1945,8 +2308,8 @@ fn build_extension_command(
 }
 
 /// Build the existing extension command envelope and inject only the
-/// broker-owned Console capture ID.  A caller-supplied `capture_id` is never
-/// trusted for start/stop correlation.
+/// broker-owned capture ID for Console/Network lifecycle commands.  A
+/// caller-supplied `capture_id` is never trusted for start/stop correlation.
 fn build_extension_command_with_capture_id(
     request: &OperationRequest,
     target: &BrowserTarget,
@@ -1956,7 +2319,7 @@ fn build_extension_command_with_capture_id(
 ) -> Result<Value, BrokerError> {
     let mut command =
         build_extension_command(request, target, extension_instance_id, resolved_locator)?;
-    if is_console_operation(&request.operation)
+    if (is_console_operation(&request.operation) || is_network_operation(&request.operation))
         && let Value::Object(object) = &mut command
     {
         object.remove("capture_id");
@@ -2511,6 +2874,23 @@ fn is_console_operation(operation: &str) -> bool {
     )
 }
 
+fn is_network_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "start_network_capture"
+            | "list_network_requests"
+            | "get_network_request_detail"
+            | "clear_network_capture"
+            | "stop_network_capture"
+    )
+}
+
+fn network_response_barrier(result: &BTreeMap<String, Value>) -> Option<u64> {
+    ["sequence_barrier", "final_sequence", "last_seq"]
+        .iter()
+        .find_map(|field| result.get(*field).and_then(Value::as_u64))
+}
+
 fn is_mutating_operation(operation: &str) -> bool {
     matches!(
         operation,
@@ -2539,7 +2919,9 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::protocol::{ExtensionHeartbeat, ExtensionTab, ExtensionWindow, FeatureAvailability};
+    use crate::protocol::{
+        ExtensionHeartbeat, ExtensionTab, ExtensionWindow, FeatureAvailability, NetworkBatch,
+    };
     use base64::Engine as _;
 
     fn heartbeat() -> ExtensionHeartbeat {
@@ -2656,6 +3038,17 @@ mod tests {
             error: None,
             result,
         }
+    }
+
+    fn network_batch(target: BrowserTarget, capture_id: &str, events: Value) -> NetworkBatch {
+        serde_json::from_value(json!({
+            "type": "network_batch",
+            "extension_instance_id": target.extension_instance_id,
+            "capture_id": capture_id,
+            "target": target,
+            "events": events,
+        }))
+        .unwrap()
     }
 
     fn execute_request(action: &str, selector: &str, revision: &str) -> OperationRequest {
@@ -4187,6 +4580,917 @@ mod tests {
                 .unwrap()
                 .queued_command_count(),
             0
+        );
+        runtime.shutdown().await;
+    }
+
+    #[test]
+    fn network_store_only_acks_contiguous_processed_events_and_preserves_scope() {
+        let target = target();
+        let mut state = BrokerState::new();
+        let handle = state
+            .evidence
+            .prepare_network_capture(
+                "network-start",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                Some(7),
+                Some(&json!(["EXAMPLE.test."])),
+                Some(&json!(false)),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let capture_id = handle.capture_id;
+        let mut started =
+            extension_response("network-start", "start_network_capture", target.clone());
+        started.result.insert("active".into(), Value::Bool(true));
+        started
+            .result
+            .insert("capture_id".into(), Value::String(capture_id.clone()));
+        state
+            .evidence
+            .commit_network_capture(
+                "network-start",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                &started,
+            )
+            .unwrap();
+
+        let gap = network_batch(
+            target.clone(),
+            &capture_id,
+            json!([{
+                "seq": 2,
+                "event": {
+                    "event_type": "request",
+                    "request_id": "second",
+                    "url": "https://example.test/second"
+                }
+            }]),
+        );
+        let gap_ack = state.evidence.accept_network_batch("profile-a", 7, &gap);
+        assert_eq!(gap_ack["ack_seq"], 0);
+        assert_eq!(gap_ack["acknowledged_sequence"], 0);
+        assert_eq!(gap_ack["accepted"], true);
+
+        let first = network_batch(
+            target.clone(),
+            &capture_id,
+            json!([{
+                "seq": 1,
+                "event": {
+                    "event_type": "request",
+                    "request_id": "first",
+                    "url": "https://example.test/api?token=private&safe=visible",
+                    "method": "POST",
+                    "headers": {
+                        "Authorization": "Bearer private",
+                        "Accept": "application/json"
+                    }
+                }
+            }]),
+        );
+        let first_ack = state.evidence.accept_network_batch("profile-a", 7, &first);
+        assert_eq!(first_ack["ack_seq"], 2);
+
+        let response = network_batch(
+            target.clone(),
+            &capture_id,
+            json!([
+                {
+                    "seq": 3,
+                    "event": {
+                        "event_type": "response",
+                        "request_id": "first",
+                        "status": 200,
+                        "headers": {"Set-Cookie": "private", "Content-Type": "application/json"}
+                    }
+                },
+                {
+                    "seq": 4,
+                    "event": {
+                        "event_type": "finished",
+                        "request_id": "first",
+                        "encoded_data_length": 12
+                    }
+                },
+                {
+                    "seq": 5,
+                    "event": {
+                        "event_type": "response",
+                        "request_id": "orphan",
+                        "status": 500
+                    }
+                },
+                {
+                    "seq": 6,
+                    "event": {
+                        "event_type": "request",
+                        "request_id": "suffix",
+                        "url": "https://evil.example.test/"
+                    }
+                }
+            ]),
+        );
+        let response_ack = state
+            .evidence
+            .accept_network_batch("profile-a", 7, &response);
+        assert_eq!(response_ack["ack_seq"], 6);
+        let far_ahead = network_batch(
+            target.clone(),
+            &capture_id,
+            json!([{
+                "seq": 6 + crate::protocol::MAX_NETWORK_PENDING_EVENTS as u64 + 1,
+                "event": {
+                    "event_type": "request",
+                    "request_id": "far-ahead",
+                    "url": "https://example.test/far-ahead"
+                }
+            }]),
+        );
+        let far_ahead_ack = state
+            .evidence
+            .accept_network_batch("profile-a", 7, &far_ahead);
+        assert_eq!(far_ahead_ack["ack_seq"], 6);
+        assert_eq!(far_ahead_ack["accepted"], true);
+        let listed = state
+            .evidence
+            .list_network_requests(
+                &target,
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(listed["requests"].as_array().unwrap().len(), 2);
+        assert_eq!(listed["delivery"]["filtered_events"], 1);
+        assert!(listed["delivery"]["rejected_events"].as_u64().unwrap() >= 2);
+        assert!(listed["requests"].to_string().contains("safe=visible"));
+        assert!(!listed["requests"].to_string().contains("request_headers"));
+        assert_eq!(
+            state
+                .evidence
+                .list_network_requests(
+                    &target,
+                    "broker-generation-a",
+                    "C:/other-project",
+                    "caller-a",
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap_err()
+                .code,
+            BrokerErrorCode::InvalidBrowserLease
+        );
+        assert_eq!(
+            state
+                .evidence
+                .list_network_requests(
+                    &target,
+                    "broker-generation-a",
+                    "C:/project-a",
+                    "caller-b",
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap_err()
+                .code,
+            BrokerErrorCode::InvalidBrowserLease
+        );
+
+        let detail = state
+            .evidence
+            .get_network_request_detail(
+                &target,
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &json!("first"),
+                false,
+            )
+            .unwrap();
+        let detail_text = detail.to_string();
+        assert!(!detail_text.contains("Bearer private"));
+        assert!(!detail_text.contains("private"));
+        assert!(detail_text.contains("safe=visible"));
+        assert_eq!(
+            state
+                .evidence
+                .get_network_request_detail(
+                    &target,
+                    "broker-generation-a",
+                    "C:/project-a",
+                    "caller-a",
+                    &json!("first"),
+                    true,
+                )
+                .unwrap_err()
+                .code,
+            BrokerErrorCode::BrowserCapabilityUnavailable
+        );
+
+        let duplicate_ack = state.evidence.accept_network_batch("profile-a", 6, &first);
+        assert_eq!(duplicate_ack["accepted"], false);
+        assert_eq!(duplicate_ack["reason"], "stream_generation_mismatch");
+        let duplicate_ack = state.evidence.accept_network_batch("profile-a", 7, &first);
+        assert_eq!(duplicate_ack["ack_seq"], 6);
+        assert!(
+            state
+                .evidence
+                .list_network_requests(
+                    &target,
+                    "broker-generation-a",
+                    "C:/project-a",
+                    "caller-a",
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()["delivery"]["duplicate_events"]
+                .as_u64()
+                .unwrap()
+                >= 1
+        );
+
+        let cleared = state
+            .evidence
+            .clear_network_capture(
+                &target,
+                &capture_id,
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                8,
+            )
+            .unwrap();
+        assert_eq!(cleared["sequence_barrier"], 8);
+        assert_eq!(cleared["retained_entries"], 0);
+        let stopped = state
+            .evidence
+            .stop_network_capture(
+                &target,
+                &capture_id,
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                8,
+                "explicit_stop",
+            )
+            .unwrap();
+        assert_eq!(stopped["active"], false);
+        let late = state.evidence.accept_network_batch("profile-a", 7, &first);
+        assert_eq!(late["accepted"], true);
+        assert_eq!(late["ack_seq"], 8);
+    }
+
+    #[test]
+    fn network_capture_replacement_keeps_old_unacknowledged_events_out_of_new_capture() {
+        let target = target();
+        let mut state = BrokerState::new();
+        let old_handle = state
+            .evidence
+            .prepare_network_capture(
+                "network-old",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                Some(7),
+                Some(&json!(["example.test"])),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let old_capture_id = old_handle.capture_id;
+        let mut old_start =
+            extension_response("network-old", "start_network_capture", target.clone());
+        old_start.result.insert("active".into(), Value::Bool(true));
+        old_start
+            .result
+            .insert("capture_id".into(), Value::String(old_capture_id.clone()));
+        state
+            .evidence
+            .commit_network_capture(
+                "network-old",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                &old_start,
+            )
+            .unwrap();
+
+        let old_gap = network_batch(
+            target.clone(),
+            &old_capture_id,
+            json!([{
+                "seq": 2,
+                "event": {
+                    "event_type": "request",
+                    "request_id": "old-unacknowledged",
+                    "url": "https://example.test/old"
+                }
+            }]),
+        );
+        assert_eq!(
+            state
+                .evidence
+                .accept_network_batch("profile-a", 7, &old_gap)["ack_seq"],
+            0
+        );
+
+        let new_handle = state
+            .evidence
+            .prepare_network_capture(
+                "network-new",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                Some(7),
+                Some(&json!(["example.test"])),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let new_capture_id = new_handle.capture_id;
+        let mut new_start =
+            extension_response("network-new", "start_network_capture", target.clone());
+        new_start.result.insert("active".into(), Value::Bool(true));
+        new_start
+            .result
+            .insert("capture_id".into(), Value::String(new_capture_id.clone()));
+        state
+            .evidence
+            .commit_network_capture(
+                "network-new",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                &new_start,
+            )
+            .unwrap();
+
+        let late_old = state
+            .evidence
+            .accept_network_batch("profile-a", 7, &old_gap);
+        assert_eq!(late_old["accepted"], true);
+        assert_eq!(late_old["ack_seq"], 0);
+        let fresh = network_batch(
+            target.clone(),
+            &new_capture_id,
+            json!([{
+                "seq": 1,
+                "event": {
+                    "event_type": "request",
+                    "request_id": "new-request",
+                    "url": "https://example.test/new"
+                }
+            }]),
+        );
+        assert_eq!(
+            state.evidence.accept_network_batch("profile-a", 7, &fresh)["ack_seq"],
+            1
+        );
+        let listed = state
+            .evidence
+            .list_network_requests(
+                &target,
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(listed["requests"].as_array().unwrap().len(), 1);
+        assert!(listed["requests"].to_string().contains("new-request"));
+        assert!(
+            !listed["requests"]
+                .to_string()
+                .contains("old-unacknowledged")
+        );
+    }
+
+    #[test]
+    fn network_termination_barrier_rejects_events_after_final_sequence() {
+        let now = Instant::now();
+        let target = target();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        state.sessions.attach_stream("profile-a", 7, now).unwrap();
+        let handle = state
+            .evidence
+            .prepare_network_capture(
+                "network-terminal",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                Some(7),
+                Some(&json!(["example.test"])),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let capture_id = handle.capture_id;
+        let mut started =
+            extension_response("network-terminal", "start_network_capture", target.clone());
+        started.result.insert("active".into(), Value::Bool(true));
+        started
+            .result
+            .insert("capture_id".into(), Value::String(capture_id.clone()));
+        state
+            .evidence
+            .commit_network_capture(
+                "network-terminal",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                &started,
+            )
+            .unwrap();
+
+        let terminal = NetworkBatch {
+            message_type: "network_batch".into(),
+            extension_instance_id: "profile-a".into(),
+            capture_id: capture_id.clone(),
+            target: target.clone(),
+            events: vec![
+                serde_json::from_value(json!({
+                    "seq": 1,
+                    "event": {
+                        "event_type": "request",
+                        "request_id": "terminal-request",
+                        "url": "https://example.test/terminal"
+                    }
+                }))
+                .unwrap(),
+            ],
+            first_seq: Some(1),
+            last_seq: Some(1),
+            dropped_events: 0,
+            dropped_bytes: 0,
+            dropped_events_total: 0,
+            dropped_bytes_total: 0,
+            termination_reason: Some("debugger_detached".into()),
+            termination_detail: None,
+            final_sequence: Some(3),
+            diagnostics: None,
+        };
+        let terminal_ack = state.handle_network_batch(terminal, 7);
+        assert_eq!(terminal_ack["ack_seq"], 3);
+
+        let late = network_batch(
+            target.clone(),
+            &capture_id,
+            json!([{
+                "seq": 4,
+                "event": {
+                    "event_type": "request",
+                    "request_id": "after-terminal",
+                    "url": "https://example.test/after-terminal"
+                }
+            }]),
+        );
+        let late_ack = state.handle_network_batch(late, 7);
+        assert_eq!(late_ack["ack_seq"], 3);
+        let listed = state
+            .evidence
+            .list_network_requests(
+                &target,
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(listed["active"], false);
+        assert!(listed["requests"].to_string().contains("terminal-request"));
+        assert!(!listed["requests"].to_string().contains("after-terminal"));
+        assert!(listed["delivery"]["rejected_events"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn network_body_capture_is_deferred_until_5_5() {
+        let target = target();
+        let mut evidence = EvidenceStore::new();
+        let error = evidence
+            .prepare_network_capture(
+                "network-body",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                Some(7),
+                Some(&json!(["example.test"])),
+                Some(&json!(true)),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, BrokerErrorCode::BrowserCapabilityUnavailable);
+    }
+
+    #[test]
+    fn network_sequence_matches_shared_python_fixture_boundaries() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../resources/browser_contract_fixtures.json"
+        ))
+        .unwrap();
+        let scenario = &fixture["migration_contracts"]["network_sequence"];
+        let accepted_sequences = scenario["accepted_sequences"].as_array().unwrap();
+        let first_sequence = accepted_sequences[0].as_u64().unwrap();
+        let second_sequence = accepted_sequences[1].as_u64().unwrap();
+        let target = target();
+        let mut state = BrokerState::new();
+        let handle = state
+            .evidence
+            .prepare_network_capture(
+                "network-fixture",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                Some(7),
+                Some(&json!(["api.example.test"])),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let capture_id = handle.capture_id;
+        let mut started =
+            extension_response("network-fixture", "start_network_capture", target.clone());
+        started.result.insert("active".into(), Value::Bool(true));
+        started
+            .result
+            .insert("capture_id".into(), Value::String(capture_id.clone()));
+        state
+            .evidence
+            .commit_network_capture(
+                "network-fixture",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                &started,
+            )
+            .unwrap();
+
+        let mut payload = network_batch(
+            target.clone(),
+            &capture_id,
+            json!([
+                {
+                    "seq": first_sequence,
+                    "event": {
+                        "event_type": "request",
+                        "request_id": "suffix",
+                        "url": "https://evilapi.example.test/"
+                    }
+                },
+                {
+                    "seq": second_sequence,
+                    "event": {
+                        "event_type": "request",
+                        "request_id": "matching",
+                        "url": "https://api.example.test/"
+                    }
+                }
+            ]),
+        );
+        payload.dropped_events = 3;
+        assert_eq!(
+            state
+                .evidence
+                .accept_network_batch("profile-a", 7, &payload)["ack_seq"],
+            scenario["duplicate_ack_sequence"]
+        );
+        assert_eq!(
+            state
+                .evidence
+                .accept_network_batch("profile-a", 7, &payload)["ack_seq"],
+            scenario["duplicate_ack_sequence"]
+        );
+        let listed = state
+            .evidence
+            .list_network_requests(
+                &target,
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(listed["requests"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["delivery"]["dropped_events"], 3);
+        assert_eq!(listed["delivery"]["duplicate_events"], 2);
+
+        let clear_barrier = scenario["clear_barrier_sequence"].as_u64().unwrap();
+        state
+            .evidence
+            .clear_network_capture(
+                &target,
+                &capture_id,
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                clear_barrier,
+            )
+            .unwrap();
+        let late = network_batch(
+            target.clone(),
+            &capture_id,
+            json!([{
+                "seq": second_sequence + 1,
+                "event": {
+                    "event_type": "request",
+                    "request_id": "late",
+                    "url": "https://api.example.test/late"
+                }
+            }]),
+        );
+        assert_eq!(
+            state.evidence.accept_network_batch("profile-a", 7, &late)["ack_seq"],
+            clear_barrier
+        );
+        assert!(
+            state
+                .evidence
+                .list_network_requests(
+                    &target,
+                    "broker-generation-a",
+                    "C:/project-a",
+                    "caller-a",
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()["requests"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut terminal = network_batch(target.clone(), &capture_id, json!([]));
+        terminal.termination_reason = Some("debugger_detached".into());
+        terminal.final_sequence = Some(clear_barrier + 1);
+        assert_eq!(
+            state
+                .evidence
+                .accept_network_batch("profile-a", 7, &terminal)["ack_seq"],
+            clear_barrier + 1
+        );
+        assert_eq!(
+            state
+                .evidence
+                .stop_network_capture(
+                    &target,
+                    &capture_id,
+                    "broker-generation-a",
+                    "C:/project-a",
+                    "caller-a",
+                    clear_barrier + 1,
+                    "explicit_stop",
+                )
+                .unwrap()["active"],
+            false
+        );
+        assert_eq!(
+            state
+                .evidence
+                .accept_network_batch("profile-a", 7, &payload)["ack_seq"],
+            clear_barrier + 1
+        );
+    }
+
+    #[test]
+    fn network_state_rejects_old_generation_without_mutating_new_capture() {
+        let now = Instant::now();
+        let target = target();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        state.sessions.attach_stream("profile-a", 7, now).unwrap();
+        let handle = state
+            .evidence
+            .prepare_network_capture(
+                "network-generation",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                Some(7),
+                Some(&json!(["example.test"])),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let capture_id = handle.capture_id;
+        let mut started = extension_response(
+            "network-generation",
+            "start_network_capture",
+            target.clone(),
+        );
+        started.result.insert("active".into(), Value::Bool(true));
+        started
+            .result
+            .insert("capture_id".into(), Value::String(capture_id.clone()));
+        state
+            .evidence
+            .commit_network_capture(
+                "network-generation",
+                "broker-generation-a",
+                "C:/project-a",
+                "caller-a",
+                &target,
+                &started,
+            )
+            .unwrap();
+        let batch = network_batch(
+            target.clone(),
+            &capture_id,
+            json!([{
+                "seq": 1,
+                "event": {
+                    "event_type": "request",
+                    "request_id": "request-1",
+                    "url": "https://example.test/"
+                }
+            }]),
+        );
+        let old = state.handle_network_batch(batch.clone(), 6);
+        assert_eq!(old["accepted"], false);
+        assert_eq!(old["reason"], "stream_generation_mismatch");
+        let gap = network_batch(
+            target.clone(),
+            &capture_id,
+            json!([{
+                "seq": 2,
+                "event": {
+                    "event_type": "request",
+                    "request_id": "request-2",
+                    "url": "https://example.test/two"
+                }
+            }]),
+        );
+        let gap_ack = state.handle_network_batch(gap, 7);
+        assert_eq!(gap_ack["ack_seq"], 0);
+
+        state.handle_extension_disconnected("profile-a", 7);
+        assert_eq!(
+            state.evidence.network_capture_id(&target),
+            Some(capture_id.clone())
+        );
+        state
+            .sessions
+            .attach_stream("profile-a", 8, Instant::now())
+            .unwrap();
+        state
+            .evidence
+            .update_network_stream_generation("profile-a", 8);
+        let current = state.handle_network_batch(batch, 8);
+        assert_eq!(current["ack_seq"], 2);
+    }
+
+    #[tokio::test]
+    async fn expired_lease_cannot_commit_a_pending_network_start() {
+        let now = Instant::now();
+        let target = target();
+        let mut config = crate::server::BrokerServerConfig::with_trusted_extension_origins(vec![
+            "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        ]);
+        config.discovery_addr = "127.0.0.1:0".parse().unwrap();
+        let runtime = BrokerRuntime::start(config).await.unwrap();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        state.sessions.attach_stream("profile-a", 7, now).unwrap();
+        let broker_start_id = runtime.endpoint_record().broker_start_id.clone();
+        let handle = state
+            .evidence
+            .prepare_network_capture(
+                "network-expired",
+                &broker_start_id,
+                "C:/project-a",
+                "caller-a",
+                &target,
+                Some(7),
+                Some(&json!(["example.test"])),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let capture_id = handle.capture_id;
+        let (reply, receiver) = oneshot::channel();
+        state.leases.insert(
+            "profile-a".into(),
+            LeaseRecord {
+                token: "lease-expired".into(),
+                owner_label: "caller-a".into(),
+                project_root: "C:/project-a".into(),
+                caller_label: "caller-a".into(),
+                broker_start_id: broker_start_id.clone(),
+                acquired_at_ms: 1,
+                expires_at_ms: 2,
+                expires_at: now - Duration::from_secs(1),
+            },
+        );
+        state.pending.insert(
+            "network-expired".into(),
+            PendingRequest {
+                operation: "start_network_capture".into(),
+                extension_instance_id: "profile-a".into(),
+                target: target.clone(),
+                project_root: "C:/project-a".into(),
+                caller_label: "caller-a".into(),
+                lease_token: Some("lease-expired".into()),
+                snapshot_id: None,
+                stream_generation: Some(7),
+                fallback_generation: None,
+                console_capture_id: Some(capture_id.clone()),
+                deadline: now + Duration::from_secs(30),
+                reply,
+            },
+        );
+        let mut response =
+            extension_response("network-expired", "start_network_capture", target.clone());
+        response.result.insert("active".into(), Value::Bool(true));
+        response
+            .result
+            .insert("capture_id".into(), Value::String(capture_id));
+        let _ = state.handle_extension_response_with_broker_generation(
+            "profile-a",
+            Some(7),
+            Some(&broker_start_id),
+            response,
+        );
+        assert_eq!(
+            receiver.await.unwrap().unwrap_err().code,
+            BrokerErrorCode::ExpiredBrowserLease
+        );
+        assert!(state.evidence.network_capture_id(&target).is_none());
+        assert_eq!(
+            state
+                .sessions
+                .get("profile-a")
+                .unwrap()
+                .queued_command_count(),
+            1
         );
         runtime.shutdown().await;
     }

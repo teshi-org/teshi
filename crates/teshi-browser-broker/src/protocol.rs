@@ -29,6 +29,10 @@ pub const MAX_TRUSTED_EXTENSION_ORIGINS: usize = 16;
 pub const BROWSER_BROKER_IDENTITY_CHALLENGE_PATH: &str = "/v1/bridge/identity";
 /// Maximum in-flight network events retained in one extension batch.
 pub const MAX_NETWORK_EVENTS_PER_BATCH: usize = 100;
+/// Maximum serialized Network batch accepted by the broker state owner.
+pub const MAX_NETWORK_BATCH_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum number of out-of-order Network sequence numbers retained per capture.
+pub const MAX_NETWORK_PENDING_EVENTS: usize = 2_000;
 
 /// A complete target identity. Window and tab IDs are only unique inside one Profile.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1527,6 +1531,18 @@ impl NetworkBatch {
                 "network batch target does not match its extension instance",
             ));
         }
+        if self.capture_id.trim().is_empty() || self.capture_id.len() > 256 {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "network batch capture_id is invalid",
+            ));
+        }
+        if self.target.window_id <= 0 || self.target.tab_id <= 0 {
+            return Err(BrokerError::new(
+                BrokerErrorCode::MismatchedBrowserResponse,
+                "network batch target is invalid",
+            ));
+        }
         if self
             .events
             .windows(2)
@@ -1535,6 +1551,28 @@ impl NetworkBatch {
             return Err(BrokerError::new(
                 BrokerErrorCode::InvalidBrowserOperation,
                 "network event sequence must be strictly increasing",
+            ));
+        }
+        if self.events.iter().any(|event| event.seq == 0) {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "network event sequence must be positive",
+            ));
+        }
+        if let Some(first_seq) = self.first_seq
+            && self.events.first().map(|event| event.seq) != Some(first_seq)
+        {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "network batch first_seq does not match its events",
+            ));
+        }
+        if let Some(last_seq) = self.last_seq
+            && self.events.last().map(|event| event.seq) != Some(last_seq)
+        {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "network batch last_seq does not match its events",
             ));
         }
         Ok(())
