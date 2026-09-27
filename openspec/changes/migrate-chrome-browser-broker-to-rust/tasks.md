@@ -29,8 +29,8 @@
 - [x] 4.1 Port snapshot normalization, candidate generation/ranking, structured intent scoring, and verification-result integration with typed Rust models.
 - [x] 4.2 Preserve role/name, label, placeholder, test ID, stable attribute, CSS fallback, iframe, and Shadow DOM semantics; compare fixture rankings with Python.
 - [x] 4.3 Route actions, waits, locator re-verification, page revision checks, and structured assertions through one command coordinator.
-- [ ] 4.4 Add negative tests for ambiguous, missing, stale, hidden, disabled, timed-out, navigation-changed, and assertion-failed operations; verify none report success or silently retry.
-- [ ] 4.5 Replay existing browser Features and step bindings against the Rust broker and compare successful side effects and stable failure codes.
+- [x] 4.4 Add negative tests for ambiguous, missing, stale, hidden, disabled, timed-out, navigation-changed, and assertion-failed operations; verify none report success or silently retry.
+- [x] 4.5 Replay existing browser Features and step bindings against the Rust broker and compare successful side effects and stable failure codes.
 
 ## 5. Port Screenshot, Console, Network, and Artifact Handling
 

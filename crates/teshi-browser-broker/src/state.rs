@@ -32,7 +32,13 @@ const MAX_PENDING_REQUESTS: usize = 128;
 const MAX_QUARANTINED_RESPONSES: usize = 32;
 const MAX_RETIRED_REQUESTS: usize = MAX_PENDING_REQUESTS * 8;
 const RETIRED_REQUEST_TTL: Duration = Duration::from_secs(600);
-const RUST_P0_EXECUTABLE_ACTIONS: [&str; 2] = ["click", "pointer_click"];
+const RUST_P0_EXECUTABLE_ACTIONS: [&str; 5] = [
+    "click",
+    "pointer_click",
+    "assert_visible",
+    "assert_not_exists",
+    "assert_text",
+];
 
 #[derive(Debug)]
 struct LeaseRecord {
@@ -1313,7 +1319,7 @@ fn build_unvalidated_execute_locator(
     if !RUST_P0_EXECUTABLE_ACTIONS.contains(&action.as_str()) {
         return Err(BrokerError::new(
             BrokerErrorCode::BrowserCapabilityUnavailable,
-            "Rust p0.control currently supports only click and pointer_click",
+            "Rust p0.control supports click, pointer_click, and locator assertions",
         ));
     }
     let page_context_revision = dto.page_context_revision()?;
@@ -1354,7 +1360,7 @@ fn resolve_execute_locator(
     if !RUST_P0_EXECUTABLE_ACTIONS.contains(&action.as_str()) {
         return Err(BrokerError::new(
             BrokerErrorCode::BrowserCapabilityUnavailable,
-            "Rust p0.control currently supports only click and pointer_click",
+            "Rust p0.control supports click, pointer_click, and locator assertions",
         ));
     }
     if !session

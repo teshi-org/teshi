@@ -1177,6 +1177,19 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
         return Err(anyhow!("no confirmed bindings found for {feature}"));
     }
 
+    let capture_replay_screenshots = replay_screenshots_supported(project_root, args)?;
+    if !args.dry_run && !capture_replay_screenshots {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "event": "replay_screenshots_skipped",
+                "reason": "broker_capability_unavailable",
+                "required_feature": "p1.observability_artifacts",
+                "message": "Rust P0 replay continues without stage-5 screenshot capture"
+            }))?
+        );
+    }
+
     let mut screenshot_entries: Vec<ReplayScreenshotEntry> = Vec::new();
     let screenshot_dir = project_root
         .join(".teshi")
@@ -1267,6 +1280,14 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                 .map(serde_json::from_value)
                 .transpose()
                 .context("binding structured_candidate is invalid")?;
+            let page_context_revision = match step.primary.page_context_revision.clone() {
+                Some(revision) => Some(PageContextRevision(revision)),
+                None => Some(current_page_context_revision(
+                    project_root,
+                    &target,
+                    &lease_token,
+                )?),
+            };
             let element = BrowserElementInput {
                 reference: step.primary.element_reference.clone(),
                 candidate,
@@ -1274,11 +1295,7 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                     && step.primary.structured_candidate.is_none())
                 .then(|| step.primary.value.clone()),
                 snapshot_id: None,
-                page_context_revision: step
-                    .primary
-                    .page_context_revision
-                    .clone()
-                    .map(PageContextRevision),
+                page_context_revision,
             };
             execute_typed_operation_value(
                 project_root,
@@ -1290,11 +1307,14 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                     value: step.primary.value_arg.clone(),
                     files: vec![],
                     wait: None,
-                    timeout_ms: 5_000,
+                    // Feature pages may finish their WASM/UI update after
+                    // navigation reports load-complete. Keep replay bounded,
+                    // without relying on stage-5 screenshots as a delay.
+                    timeout_ms: 15_000,
                     focus: false,
                     monitor: false,
                 },
-                command_timeout_for_ms(5_000),
+                command_timeout_for_ms(15_000),
             )?
         } else {
             let timeout_ms = 5_000;
@@ -1313,7 +1333,7 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
             )?
         };
         // Capture screenshot after each step (before ensure_ok so we capture even on failure).
-        if !args.dry_run {
+        if !args.dry_run && capture_replay_screenshots {
             match capture_replay_step_screenshot(
                 project_root,
                 &feature,
@@ -1368,6 +1388,26 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn replay_screenshots_supported(project_root: &Path, args: &BrowserReplayArgs) -> Result<bool> {
+    if args.dry_run || args.target.session.is_none() {
+        return Ok(true);
+    }
+    let endpoint = read_cdp_endpoint(project_root)?;
+    let rust_transport = endpoint.mode == "chrome"
+        && endpoint.bridge == "rust"
+        && endpoint
+            .broker_features
+            .iter()
+            .any(|feature| feature == "transport.v1");
+    if !rust_transport {
+        return Ok(true);
+    }
+    Ok(endpoint
+        .broker_features
+        .iter()
+        .any(|feature| feature == "p1.observability_artifacts"))
 }
 
 /// Starts the embedded Playwright sidecar and blocks until interrupted (for CI/scripts).
@@ -1555,6 +1595,34 @@ fn required_target(args: &BrowserTargetArgs) -> Result<(BrowserTarget, String)> 
         },
         lease_token.to_string(),
     ))
+}
+
+fn current_page_context_revision(
+    project_root: &Path,
+    target: &BrowserTarget,
+    lease_token: &str,
+) -> Result<PageContextRevision> {
+    let snapshot = || {
+        execute_typed_operation_value(
+            project_root,
+            BrowserOperation::GetPageSnapshot {
+                target: target.clone(),
+                lease_token: lease_token.to_owned(),
+            },
+            Duration::from_secs(15),
+        )
+    };
+    // The first snapshot after navigation can race extension stream resumption.
+    // Take a second bounded observation before the locator action; this is not an
+    // action retry and therefore cannot duplicate a side effect.
+    let _ = snapshot()?;
+    let snapshot = snapshot()?;
+    let revision = snapshot
+        .get("page_context_revision")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .context("browser snapshot did not return page_context_revision")?;
+    Ok(PageContextRevision(revision.to_owned()))
 }
 
 fn apply_targeting(
@@ -1895,5 +1963,57 @@ mod tests {
             }]
         });
         assert!(validate_filtered_network_capture_capabilities(&discovery, "profile-a").is_ok());
+    }
+
+    #[test]
+    fn rust_p0_replay_skips_stage_five_screenshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_dir = temp.path().join(".teshi");
+        fs::create_dir_all(&endpoint_dir).unwrap();
+        fs::write(
+            endpoint_dir.join("cdp-endpoint.json"),
+            r#"{"mode":"chrome","bridge":"rust","ws_url":"ws://127.0.0.1:1","broker_features":["transport.v1","p0.control"]}"#,
+        )
+        .unwrap();
+        let args = BrowserReplayArgs {
+            feature: Some("features/example.feature".into()),
+            until_line: None,
+            dry_run: false,
+            non_interactive: true,
+            yes: true,
+            target: BrowserTargetArgs {
+                session: Some("profile-a".into()),
+                window: Some(1),
+                tab: Some(2),
+                lease_token: Some("lease".into()),
+            },
+        };
+        assert!(!replay_screenshots_supported(temp.path(), &args).unwrap());
+    }
+
+    #[test]
+    fn python_or_p1_replay_keeps_screenshot_capture_enabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_dir = temp.path().join(".teshi");
+        fs::create_dir_all(&endpoint_dir).unwrap();
+        fs::write(
+            endpoint_dir.join("cdp-endpoint.json"),
+            r#"{"mode":"chrome","bridge":"python","ws_url":"ws://127.0.0.1:1","broker_features":["p0.control"]}"#,
+        )
+        .unwrap();
+        let args = BrowserReplayArgs {
+            feature: Some("features/example.feature".into()),
+            until_line: None,
+            dry_run: false,
+            non_interactive: true,
+            yes: true,
+            target: BrowserTargetArgs {
+                session: Some("profile-a".into()),
+                window: Some(1),
+                tab: Some(2),
+                lease_token: Some("lease".into()),
+            },
+        };
+        assert!(replay_screenshots_supported(temp.path(), &args).unwrap());
     }
 }

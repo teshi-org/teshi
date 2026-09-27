@@ -21,11 +21,13 @@ pub struct CdpEndpoint {
     /// Absolute path to the endpoint JSON file.
     pub endpoint_path: PathBuf,
     pub mode: String,
+    pub bridge: String,
     pub ws_url: String,
     pub page_url: Option<String>,
     pub broker_pid: Option<u32>,
     pub broker_start_id: Option<String>,
     pub protocol_version: Option<u16>,
+    pub broker_features: Vec<String>,
 }
 
 /// Locates a project root by walking upward from `start` until `.teshi/cdp-endpoint.json` exists.
@@ -87,6 +89,11 @@ pub fn read_cdp_endpoint(project_root: &Path) -> Result<CdpEndpoint> {
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
         .to_string();
+    let bridge = payload
+        .get("bridge")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown")
+        .to_string();
     let ws_url = payload
         .get("ws_url")
         .and_then(|v| v.as_str())
@@ -108,15 +115,27 @@ pub fn read_cdp_endpoint(project_root: &Path) -> Result<CdpEndpoint> {
         .get("protocol_version")
         .and_then(|value| value.as_u64())
         .and_then(|value| u16::try_from(value).ok());
+    let broker_features = payload
+        .get("broker_features")
+        .and_then(|value| value.as_array())
+        .map(|features| {
+            features
+                .iter()
+                .filter_map(|feature| feature.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(CdpEndpoint {
         project_root: project_root.to_path_buf(),
         endpoint_path,
         mode,
+        bridge,
         ws_url,
         page_url,
         broker_pid,
         broker_start_id,
         protocol_version,
+        broker_features,
     })
 }
 
@@ -138,6 +157,7 @@ pub fn write_chrome_broker_endpoint(
         "bridge": "python",
         "broker_pid": endpoint.broker_pid,
         "broker_start_id": endpoint.broker_start_id,
+        "broker_features": endpoint.broker_features,
         "discovery_url": endpoint.discovery_url,
         "extension_frame_ws_url": endpoint.extension_frame_ws_url,
         "project_root": project_root,

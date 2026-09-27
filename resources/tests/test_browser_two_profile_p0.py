@@ -44,9 +44,15 @@ class AcceptancePage(BaseHTTPRequestHandler):
         body = f"""<!doctype html><meta charset=utf-8>
         <title>Profile {profile}</title>
         <button id=action onclick="document.querySelector('#status').textContent='clicked-{profile}'">Run {profile}</button>
+        <button id=hidden-action style="display:none" onclick="document.querySelector('#negative-click-count').textContent=String(Number(document.querySelector('#negative-click-count').textContent)+1)">Hidden {profile}</button>
+        <button id=disabled-action disabled onclick="document.querySelector('#negative-click-count').textContent=String(Number(document.querySelector('#negative-click-count').textContent)+1)">Disabled {profile}</button>
+        <button id=timeout-action onclick="document.querySelector('#timeout-click-count').textContent=String(Number(document.querySelector('#timeout-click-count').textContent)+1)">Timeout {profile}</button>
+        <div id=assert-target>Expected {profile}</div>
         <input id=upload type=file onchange="document.querySelector('#upload-status').textContent='uploaded-' + this.files[0].name">
         <div id=status>idle-{profile}</div>
-        <div id=upload-status>upload-idle</div>""".encode()
+        <div id=upload-status>upload-idle</div>
+        <div id=negative-click-count>0</div>
+        <div id=timeout-click-count>0</div>""".encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -517,6 +523,47 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
         except json.JSONDecodeError as error:
             self.fail(f"CLI returned invalid JSON during {self.stage}: {error}")
 
+    async def cli_failure(
+        self, *args: str, expected_code: str, timeout: float = 30
+    ) -> dict:
+        redacted_args = self._redacted_args(args)
+        self._log("cli_failure_start", {"args": redacted_args, "timeout_seconds": timeout})
+
+        def invoke() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [str(TESHI_CLI), "browser", *args],
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+
+        result = await asyncio.to_thread(invoke)
+        self._log(
+            "cli_failure_end",
+            {
+                "args": redacted_args,
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            },
+        )
+        self.assertNotEqual(
+            result.returncode,
+            0,
+            f"CLI unexpectedly succeeded during {self.stage}: {' '.join(redacted_args)}",
+        )
+        raw = result.stdout.strip() or result.stderr.strip()
+        start = raw.find("{")
+        end = raw.rfind("}")
+        self.assertGreaterEqual(start, 0, raw)
+        self.assertGreater(end, start, raw)
+        payload = json.loads(raw[start : end + 1])
+        self.assertFalse(payload.get("ok"), payload)
+        self.assertEqual(payload.get("code"), expected_code, payload)
+        return payload
+
     @staticmethod
     def _redacted_args(args: tuple[str, ...]) -> list[str]:
         redacted = []
@@ -698,6 +745,81 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
             observed = sorted([await page.locator("#status").text_content() for page in pages])
             self._log("dom_side_effects", {"status_values": observed})
             self.assertEqual(observed, ["clicked-a", "clicked-b"])
+
+            self._set_stage("verify Python locator failure outcomes and no retry")
+            hidden = await self.cli_failure(
+                "execute",
+                "--selector",
+                "#hidden-action",
+                "--page-revision",
+                snapshots[0]["page_context_revision"],
+                "--action",
+                "click",
+                *self.target_args(targets[0], tokens[0]),
+                expected_code="browser_operation_failed",
+                timeout=20,
+            )
+            disabled = await self.cli_failure(
+                "execute",
+                "--selector",
+                "#disabled-action",
+                "--page-revision",
+                snapshots[0]["page_context_revision"],
+                "--action",
+                "click",
+                *self.target_args(targets[0], tokens[0]),
+                expected_code="browser_operation_failed",
+            )
+            assertion = await self.cli_failure(
+                "execute",
+                "--selector",
+                "#assert-target",
+                "--page-revision",
+                snapshots[0]["page_context_revision"],
+                "--action",
+                "assert_text",
+                "--value-arg",
+                "Unexpected text",
+                *self.target_args(targets[0], tokens[0]),
+                expected_code="browser_operation_failed",
+            )
+            timed_out = await self.cli_failure(
+                "execute",
+                "--selector",
+                "#timeout-action",
+                "--page-revision",
+                snapshots[0]["page_context_revision"],
+                "--action",
+                "click",
+                "--wait-text",
+                "this text never appears in the fixture",
+                *self.target_args(targets[0], tokens[0]),
+                expected_code="browser_wait_timeout",
+                timeout=20,
+            )
+            self.assertTrue(hidden["ok"] is False)
+            self.assertTrue(disabled["ok"] is False)
+            self.assertTrue(timed_out["recovery"]["action_executed"])
+            self.assertIn("do not retry", timed_out["recovery"]["retry"])
+            negative_counts = await asyncio.gather(
+                *(page.locator("#negative-click-count").text_content() for page in pages)
+            )
+            timeout_counts = await asyncio.gather(
+                *(page.locator("#timeout-click-count").text_content() for page in pages)
+            )
+            self.assertEqual(sorted(negative_counts), ["0", "0"])
+            self.assertEqual(sorted(timeout_counts), ["0", "1"])
+            self._log(
+                "locator_failure_outcomes",
+                {
+                    "hidden": hidden["code"],
+                    "disabled": disabled["code"],
+                    "assertion": assertion["code"],
+                    "timed_out": timed_out["code"],
+                    "timeout_action_counts": sorted(timeout_counts),
+                    "dispatch_retries": 0,
+                },
+            )
 
             self._set_stage("open, observe, and close independent tabs")
             opened = await asyncio.gather(

@@ -176,6 +176,8 @@ pub enum BrowserAgentErrorCode {
     StaleBrowserTarget,
     /// A snapshot-local element reference is expired or belongs to another context.
     StaleElementReference,
+    /// The resolved locator matched no live element in the selected target.
+    ElementNotFound,
     /// A response does not match its pending request or target.
     MismatchedBrowserResponse,
     /// The supplied lease has expired.
@@ -221,6 +223,7 @@ impl BrowserAgentErrorCode {
             Self::BrowserSessionBusy => "browser_session_busy",
             Self::StaleBrowserTarget => "stale_browser_target",
             Self::StaleElementReference => "stale_element_reference",
+            Self::ElementNotFound => "element_not_found",
             Self::MismatchedBrowserResponse => "mismatched_browser_response",
             Self::ExpiredBrowserLease => "expired_browser_lease",
             Self::InvalidBrowserLease => "invalid_browser_lease",
@@ -1450,6 +1453,7 @@ fn parse_error_code(value: &str) -> Option<BrowserAgentErrorCode> {
         "browser_session_busy" => BrowserAgentErrorCode::BrowserSessionBusy,
         "stale_browser_target" | "stale_page_context" => BrowserAgentErrorCode::StaleBrowserTarget,
         "stale_element_reference" => BrowserAgentErrorCode::StaleElementReference,
+        "element_not_found" => BrowserAgentErrorCode::ElementNotFound,
         "mismatched_browser_response" => BrowserAgentErrorCode::MismatchedBrowserResponse,
         "expired_browser_lease" => BrowserAgentErrorCode::ExpiredBrowserLease,
         "invalid_browser_lease" => BrowserAgentErrorCode::InvalidBrowserLease,
@@ -1942,6 +1946,7 @@ mod tests {
         );
         for code in [
             BrowserAgentErrorCode::StaleElementReference,
+            BrowserAgentErrorCode::ElementNotFound,
             BrowserAgentErrorCode::UnsupportedBrowserAction,
             BrowserAgentErrorCode::BrowserCapabilityUnavailable,
             BrowserAgentErrorCode::BrowserCapabilityDenied,

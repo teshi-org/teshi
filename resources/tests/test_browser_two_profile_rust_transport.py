@@ -82,11 +82,17 @@ class RustTransportPage(BaseHTTPRequestHandler):
                 f"<button id=\"role-click\" aria-label=\"Role click\" onclick=\"document.querySelector('#role-click-count').textContent=String(Number(document.querySelector('#role-click-count').textContent)+1)\">Role click {profile}</button>"
                 f"<button data-testid=\"ambiguous-click\">Ambiguous one {profile}</button>"
                 f"<button data-testid=\"ambiguous-click\">Ambiguous two {profile}</button>"
+                f"<button id=\"hidden-action\" style=\"display:none\" onclick=\"document.querySelector('#negative-click-count').textContent=String(Number(document.querySelector('#negative-click-count').textContent)+1)\">Hidden action {profile}</button>"
+                f"<button id=\"disabled-action\" disabled onclick=\"document.querySelector('#negative-click-count').textContent=String(Number(document.querySelector('#negative-click-count').textContent)+1)\">Disabled action {profile}</button>"
+                f"<button id=\"timeout-action\" onclick=\"document.querySelector('#timeout-click-count').textContent=String(Number(document.querySelector('#timeout-click-count').textContent)+1)\">Timeout action {profile}</button>"
+                f"<div id=\"assert-target\">Expected {profile}</div>"
                 f"<div id=\"dom-click-count\">0</div>"
                 f"<div id=\"pointer-click-count\">0</div>"
                 f"<div id=\"pointerdown-count\">0</div></main>"
                 f"<div id=\"test-id-click-count\">0</div>"
                 f"<div id=\"role-click-count\">0</div>"
+                f"<div id=\"negative-click-count\">0</div>"
+                f"<div id=\"timeout-click-count\">0</div>"
             ).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
@@ -1307,6 +1313,78 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                     },
                 }
             )
+            hidden_element = await self._control(
+                {
+                    "schema_version": 1,
+                    "request_id": "rust-hidden-element",
+                    "caller_label": lease_owners[0],
+                    "project_root": str(self.temp_root),
+                    "cmd": "execute_browser_action",
+                    "target": target_a,
+                    "lease_token": tokens[0],
+                    "action": "click",
+                    "element": {
+                        "css": "#hidden-action",
+                        "page_context_revision": revision_a,
+                    },
+                },
+                timeout=10,
+            )
+            disabled_element = await self._control(
+                {
+                    "schema_version": 1,
+                    "request_id": "rust-disabled-element",
+                    "caller_label": lease_owners[0],
+                    "project_root": str(self.temp_root),
+                    "cmd": "execute_browser_action",
+                    "target": target_a,
+                    "lease_token": tokens[0],
+                    "action": "click",
+                    "element": {
+                        "css": "#disabled-action",
+                        "page_context_revision": revision_a,
+                    },
+                }
+            )
+            assertion_failed = await self._control(
+                {
+                    "schema_version": 1,
+                    "request_id": "rust-assertion-failed",
+                    "caller_label": lease_owners[0],
+                    "project_root": str(self.temp_root),
+                    "cmd": "execute_browser_action",
+                    "target": target_a,
+                    "lease_token": tokens[0],
+                    "action": "assert_text",
+                    "value": "this text never appears in the fixture",
+                    "element": {
+                        "css": "#assert-target",
+                        "page_context_revision": revision_a,
+                    },
+                },
+                timeout=10,
+            )
+            timed_out = await self._control(
+                {
+                    "schema_version": 1,
+                    "request_id": "rust-action-wait-timeout",
+                    "caller_label": lease_owners[0],
+                    "project_root": str(self.temp_root),
+                    "cmd": "execute_browser_action",
+                    "target": target_a,
+                    "lease_token": tokens[0],
+                    "action": "click",
+                    "wait": {
+                        "kind": "visible_text",
+                        "text": "this text never appears in the fixture",
+                    },
+                    "element": {
+                        "css": "#timeout-action",
+                        "page_context_revision": revision_a,
+                    },
+                },
+                timeout=10,
+            )
             cross_profile_reference = await self._control(
                 {
                     "schema_version": 1,
@@ -1359,6 +1437,30 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                         or ambiguous_locator.get("action_outcome", {}).get("match_count"),
                         "error": ambiguous_locator.get("error"),
                     },
+                    "hidden_element": {
+                        "ok": hidden_element.get("ok"),
+                        "code": hidden_element.get("code"),
+                        "extension_code": hidden_element.get("extension_code"),
+                        "error": hidden_element.get("error"),
+                    },
+                    "disabled_element": {
+                        "ok": disabled_element.get("ok"),
+                        "code": disabled_element.get("code"),
+                        "extension_code": disabled_element.get("extension_code"),
+                        "error": disabled_element.get("error"),
+                    },
+                    "assertion_failed": {
+                        "ok": assertion_failed.get("ok"),
+                        "code": assertion_failed.get("code"),
+                        "extension_code": assertion_failed.get("extension_code"),
+                        "error": assertion_failed.get("error"),
+                    },
+                    "timed_out": {
+                        "ok": timed_out.get("ok"),
+                        "code": timed_out.get("code"),
+                        "action_executed": timed_out.get("recovery", {}).get("action_executed"),
+                        "retry": timed_out.get("recovery", {}).get("retry"),
+                    },
                     "cross_profile_reference": {
                         "ok": cross_profile_reference.get("ok"),
                         "code": cross_profile_reference.get("code"),
@@ -1378,6 +1480,22 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                 ambiguous_locator.get("action_outcome", {}).get("match_count"),
                 2,
             )
+            self.assertFalse(hidden_element.get("ok"), hidden_element)
+            self.assertEqual(hidden_element.get("code"), "browser_operation_failed")
+            self.assertEqual(hidden_element.get("extension_code"), "not_visible")
+            self.assertFalse(disabled_element.get("ok"), disabled_element)
+            self.assertEqual(disabled_element.get("code"), "browser_operation_failed")
+            self.assertEqual(disabled_element.get("extension_code"), "element_disabled")
+            self.assertFalse(assertion_failed.get("ok"), assertion_failed)
+            self.assertEqual(assertion_failed.get("code"), "browser_operation_failed")
+            self.assertEqual(assertion_failed.get("extension_code"), "assert_text_failed")
+            self.assertFalse(timed_out.get("ok"), timed_out)
+            self.assertEqual(timed_out.get("code"), "browser_wait_timeout")
+            self.assertTrue(timed_out.get("recovery", {}).get("action_executed"), timed_out)
+            self.assertIn("do not retry", timed_out.get("recovery", {}).get("retry", ""))
+            page_a = self.contexts["profile-a"].pages[0]
+            self.assertEqual(await page_a.locator("#negative-click-count").text_content(), "0")
+            self.assertEqual(await page_a.locator("#timeout-click-count").text_content(), "1")
             self.assertEqual(cross_profile_reference.get("code"), "stale_element_reference")
             self._log(
                 "click_rejection_boundaries_verified",
@@ -1387,8 +1505,13 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                     "wrong_profile": wrong_profile.get("code"),
                     "stale_revision": stale_revision.get("code"),
                     "ambiguous_locator": ambiguous_locator.get("code"),
+                    "hidden_element": hidden_element.get("extension_code"),
+                    "disabled_element": disabled_element.get("extension_code"),
+                    "assertion_failed": assertion_failed.get("extension_code"),
+                    "timed_out": timed_out.get("code"),
                     "cross_profile_reference": cross_profile_reference.get("code"),
                     "dispatch_retries": 0,
+                    "timeout_action_count": "1",
                 },
             )
 

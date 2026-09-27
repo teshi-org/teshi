@@ -1969,14 +1969,33 @@ fn error_value(error: BrokerError) -> Value {
 }
 
 fn operation_error_value(request: &OperationRequest, error: BrokerError) -> Value {
-    json!({
+    let mut response = json!({
         "ok": false,
         "request_id": request.request_id,
         "operation": request.operation,
         "code": error.code.as_str(),
         "error": error.message,
         "recovery": error.recovery,
-    })
+    });
+    if let Some(object) = response.as_object_mut() {
+        for key in [
+            "target",
+            "action",
+            "page_context_revision",
+            "extension_code",
+            "action_outcome",
+            "wait_outcome",
+        ] {
+            if let Some(value) = object
+                .get("recovery")
+                .and_then(Value::as_object)
+                .and_then(|recovery| recovery.get(key))
+            {
+                object.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+    response
 }
 
 fn operation_response_text(
@@ -2151,6 +2170,52 @@ mod tests {
         assert_eq!(parsed.extension_instance_id, "profile-a");
         assert_eq!(parsed.seq, 1);
         assert_eq!(&bytes[..], &jpeg);
+    }
+
+    #[test]
+    fn action_error_projection_keeps_non_secret_locator_context_at_top_level() {
+        let request: OperationRequest = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "request_id": "action-1",
+            "caller_label": "caller-a",
+            "project_root": "C:/project-a",
+            "cmd": "execute_browser_action",
+            "target": {
+                "extension_instance_id": "profile-a",
+                "window_id": 7,
+                "tab_id": 42
+            },
+            "lease_token": "lease-private",
+            "action": "click",
+            "element": {
+                "css": "#missing",
+                "page_context_revision": "revision-1"
+            }
+        }))
+        .unwrap();
+        let mut error = BrokerError::new(BrokerErrorCode::ElementNotFound, "element not found");
+        error.recovery.insert(
+            "target".into(),
+            serde_json::json!({
+                "extension_instance_id": "profile-a",
+                "window_id": 7,
+                "tab_id": 42
+            }),
+        );
+        error
+            .recovery
+            .insert("action".into(), Value::String("click".into()));
+        error.recovery.insert(
+            "action_outcome".into(),
+            serde_json::json!({"ok": false, "match_count": 0}),
+        );
+        let response = operation_error_value(&request, error);
+        assert_eq!(response["code"], "element_not_found");
+        assert_eq!(response["target"]["extension_instance_id"], "profile-a");
+        assert_eq!(response["action"], "click");
+        assert_eq!(response["action_outcome"]["match_count"], 0);
+        assert_eq!(response["recovery"]["target"]["tab_id"], 42);
+        assert!(!response.to_string().contains("lease-private"));
     }
 
     #[test]

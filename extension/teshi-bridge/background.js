@@ -2059,6 +2059,9 @@ async function executeLocator({ selector, candidate = null, locatorContext = nul
       if (!visible(el)) {
         return { ok: false, error: "element not visible before timeout", code: "not_visible" };
       }
+      if (el.disabled || el.getAttribute?.("aria-disabled") === "true") {
+        return { ok: false, error: "element is disabled", code: "element_disabled" };
+      }
       el.scrollIntoView({ block: "center", inline: "center" });
       if (action === "upload") {
         return { ok: true, upload_ready: true };
@@ -2085,10 +2088,13 @@ async function executeLocator({ selector, candidate = null, locatorContext = nul
       } else if (action === "assert_visible") {
         return { ok: true };
       } else if (action === "assert_text") {
-        const text = (el.innerText || el.textContent || el.value || "").trim();
-        if (!text.includes(value)) {
-          return { ok: false, error: "text assertion failed", code: "assert_text_failed", actual: text };
+        let text = "";
+        while (Date.now() < deadline) {
+          text = (el.innerText || el.textContent || el.value || "").trim();
+          if (text.includes(value)) return { ok: true };
+          await sleep(100);
         }
+        return { ok: false, error: "text assertion failed", code: "assert_text_failed", actual: text };
       } else if (action === "select") {
         el.value = value;
         el.dispatchEvent(new Event("input", { bubbles: true }));

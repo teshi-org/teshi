@@ -4003,7 +4003,7 @@ class ChromeBridge:
             command,
             authorized=(record, target, ephemeral),
         )
-        return {
+        response = {
             **result,
             "request_id": request_id,
             "operation": "execute_browser_action",
@@ -4012,6 +4012,21 @@ class ChromeBridge:
             or revision,
             "snapshot_id": snapshot_id or None,
         }
+        wait_outcome = response.get("wait_outcome")
+        if response.get("ok") and isinstance(wait_outcome, dict) and not wait_outcome.get("ok"):
+            response.update(
+                {
+                    "ok": False,
+                    "code": wait_outcome.get("code") or "browser_wait_timeout",
+                    "error": wait_outcome.get("error")
+                    or "post-action wait condition timed out",
+                    "recovery": {
+                        "action_executed": True,
+                        "retry": "do not retry the action automatically; reconcile the page state first",
+                    },
+                }
+            )
+        return response
 
     async def _emit_event(self, event: dict[str, Any]) -> None:
         if self._event_callback is not None:

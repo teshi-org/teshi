@@ -1545,6 +1545,10 @@ class ChromeBridgeAgentFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         actions = [item for item in delivered if item["cmd"] == "execute_locator"]
         self.assertEqual(len(actions), 1)
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["code"], "browser_wait_timeout")
+        self.assertTrue(result["recovery"]["action_executed"])
+        self.assertIn("do not retry", result["recovery"]["retry"])
         self.assertTrue(actions[0]["monitor"])
         self.assertTrue(result["action_outcome"]["ok"])
         self.assertEqual(result["wait_outcome"]["code"], "browser_wait_timeout")

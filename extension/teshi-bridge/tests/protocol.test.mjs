@@ -193,10 +193,22 @@ test("execute_locator keeps DOM click and pointer click semantics distinct", () 
     /async function executeLocator\([\s\S]*?\n}\n\nasync function waitForBrowserCondition/,
   )?.[0];
   assert.ok(executeLocator, "executeLocator implementation missing");
+  assert.match(executeLocator, /code: "element_disabled"/);
   assert.match(executeLocator, /else if \(action === "click"\) \{\s*el\.click\(\);/);
   assert.match(executeLocator, /else if \(action === "pointer_click"\) \{/);
   assert.match(executeLocator, /Input\.dispatchMouseEvent.*type: "mousePressed"/);
   assert.match(executeLocator, /Input\.dispatchMouseEvent.*type: "mouseReleased"/);
+});
+
+test("assert_text observes asynchronous UI updates without replaying an action", () => {
+  const executeLocator = background.match(
+    /async function executeLocator\([\s\S]*?\n}\n\nasync function waitForBrowserCondition/,
+  )?.[0];
+  assert.ok(executeLocator, "executeLocator implementation missing");
+  assert.match(executeLocator, /let text = "";/);
+  assert.match(executeLocator, /while \(Date\.now\(\) < deadline\)/);
+  assert.match(executeLocator, /await sleep\(100\);/);
+  assert.match(executeLocator, /code: "assert_text_failed"/);
 });
 
 test("locator verification preserves frame and shadow scope and fails closed", () => {

@@ -250,7 +250,7 @@ pub fn send_sidecar_command(
     send_sidecar_command_with_timeout(ws_url, command, std::time::Duration::from_secs(10))
 }
 
-/// Sends a one-shot command and waits up to `timeout` for a typed `response` message.
+/// Sends a one-shot command and waits up to `timeout` for its terminal response.
 pub fn send_sidecar_command_with_timeout(
     ws_url: &str,
     command: serde_json::Value,
@@ -258,6 +258,9 @@ pub fn send_sidecar_command_with_timeout(
 ) -> Result<serde_json::Value, String> {
     use tungstenite::{connect, Message};
 
+    let expected_request_id = command
+        .get("request_id")
+        .and_then(serde_json::Value::as_str);
     let (mut socket, _) = connect(ws_url).map_err(|e| e.to_string())?;
     socket
         .send(Message::Text(command.to_string()))
@@ -269,7 +272,7 @@ pub fn send_sidecar_command_with_timeout(
         if let Message::Text(text) = message {
             let payload: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| e.to_string())?;
-            if payload.get("type") == Some(&serde_json::Value::String("response".into())) {
+            if is_terminal_sidecar_response(&payload, expected_request_id) {
                 return Ok(payload);
             }
         }
@@ -278,6 +281,24 @@ pub fn send_sidecar_command_with_timeout(
     Err(format!(
         "browser sidecar did not respond within {secs}s (CLI timeout; check extension heartbeat if using Connect Chrome)"
     ))
+}
+
+fn is_terminal_sidecar_response(
+    payload: &serde_json::Value,
+    expected_request_id: Option<&str>,
+) -> bool {
+    let request_matches = expected_request_id.is_none_or(|expected| {
+        payload
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(expected)
+    });
+    if payload.get("type").and_then(serde_json::Value::as_str) == Some("response") {
+        return request_matches;
+    }
+    payload.get("ok").and_then(serde_json::Value::as_bool) == Some(false)
+        && expected_request_id.is_some()
+        && request_matches
 }
 
 use crate::venv::{
@@ -1967,6 +1988,27 @@ mod tests {
             "ws://127.0.0.1:43123/extension/frames?token=bad&token=duplicate"
         )
         .is_err());
+    }
+
+    #[test]
+    fn sidecar_accepts_correlated_operation_error_without_response_type() {
+        let payload = serde_json::json!({
+            "ok": false,
+            "request_id": "request-1",
+            "code": "stale_browser_target"
+        });
+        assert!(is_terminal_sidecar_response(&payload, Some("request-1")));
+    }
+
+    #[test]
+    fn sidecar_ignores_unrelated_operation_errors() {
+        let payload = serde_json::json!({
+            "ok": false,
+            "request_id": "request-2",
+            "code": "stale_browser_target"
+        });
+        assert!(!is_terminal_sidecar_response(&payload, Some("request-1")));
+        assert!(!is_terminal_sidecar_response(&payload, None));
     }
 
     #[test]

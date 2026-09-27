@@ -223,6 +223,7 @@ impl BrowserActionCoordinator {
             let code = match extension_code {
                 "stale_page_context" => BrokerErrorCode::StaleBrowserTarget,
                 "stale_element_reference" => BrokerErrorCode::StaleElementReference,
+                "element_not_found" => BrokerErrorCode::ElementNotFound,
                 "browser_wait_timeout" => BrokerErrorCode::BrowserWaitTimeout,
                 "invalid_selector" | "missing_value" => BrokerErrorCode::InvalidBrowserOperation,
                 "unsupported_action" => BrokerErrorCode::BrowserCapabilityUnavailable,
@@ -332,6 +333,10 @@ fn action_error(
             .recovery
             .insert("wait_outcome".into(), wait_outcome.clone());
     }
+    error.recovery.insert(
+        "retry".into(),
+        Value::String("do_not_retry_automatically".into()),
+    );
     error
 }
 
@@ -649,5 +654,68 @@ mod tests {
             error.recovery["retry"],
             "do not retry the action automatically; reconcile the page state first"
         );
+    }
+
+    #[test]
+    fn locator_failures_remain_terminal_failures_with_stable_context() {
+        let target = target();
+        let metadata = ActionMetadata {
+            action: "click".into(),
+            locator: css_locator(),
+            may_have_side_effect: true,
+        };
+        let cases = [
+            (
+                "stale_element_reference",
+                BrokerErrorCode::StaleElementReference,
+            ),
+            ("element_not_found", BrokerErrorCode::ElementNotFound),
+            ("not_visible", BrokerErrorCode::BrowserOperationFailed),
+            ("element_disabled", BrokerErrorCode::BrowserOperationFailed),
+            ("browser_wait_timeout", BrokerErrorCode::BrowserWaitTimeout),
+            ("stale_page_context", BrokerErrorCode::StaleBrowserTarget),
+            (
+                "assert_text_failed",
+                BrokerErrorCode::BrowserOperationFailed,
+            ),
+            (
+                "assert_not_exists_failed",
+                BrokerErrorCode::BrowserOperationFailed,
+            ),
+        ];
+
+        for (extension_code, expected_code) in cases {
+            let response = ExtensionResponse {
+                message_type: "response".into(),
+                schema_version: Some(BROWSER_BROKER_SCHEMA_VERSION),
+                protocol_version: Some(BROWSER_BROKER_PROTOCOL_VERSION),
+                request_id: "action-failure".into(),
+                operation: "execute_locator".into(),
+                extension_instance_id: Some("profile-a".into()),
+                target: Some(target.clone()),
+                ok: false,
+                code: Some(extension_code.into()),
+                error: Some("fixture failure".into()),
+                result: BTreeMap::from([(
+                    "action_outcome".into(),
+                    json!({"ok": false, "match_count": if extension_code == "stale_element_reference" { 2 } else { 0 }}),
+                )]),
+            };
+            let mut value = serde_json::to_value(&response).unwrap();
+            let error = BrowserActionCoordinator::finalize_response(
+                &mut value,
+                &response,
+                "action-failure",
+                &target,
+                &metadata,
+            )
+            .unwrap_err();
+
+            assert_eq!(error.code, expected_code, "extension code {extension_code}");
+            assert_eq!(value["ok"], false);
+            assert_eq!(value["outcome"], "failed");
+            assert_eq!(error.recovery["extension_code"], extension_code);
+            assert_eq!(error.recovery["retry"], "do_not_retry_automatically");
+        }
     }
 }
