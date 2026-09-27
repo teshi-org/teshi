@@ -294,7 +294,10 @@ fn is_terminal_sidecar_response(
             == Some(expected)
     });
     if payload.get("type").and_then(serde_json::Value::as_str) == Some("response") {
-        return request_matches;
+        // Existing WinApp/embedded sidecars may omit request_id on typed
+        // responses; preserve that response contract while still rejecting a
+        // typed packet carrying a different explicit request ID.
+        return payload.get("request_id").is_none() || request_matches;
     }
     payload.get("ok").and_then(serde_json::Value::as_bool) == Some(false)
         && expected_request_id.is_some()
@@ -1996,6 +1999,16 @@ mod tests {
             "ok": false,
             "request_id": "request-1",
             "code": "stale_browser_target"
+        });
+        assert!(is_terminal_sidecar_response(&payload, Some("request-1")));
+    }
+
+    #[test]
+    fn sidecar_accepts_legacy_typed_response_without_request_id() {
+        let payload = serde_json::json!({
+            "type": "response",
+            "ok": false,
+            "code": "browser_operation_failed"
         });
         assert!(is_terminal_sidecar_response(&payload, Some("request-1")));
     }
