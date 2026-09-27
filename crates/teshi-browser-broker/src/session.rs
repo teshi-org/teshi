@@ -672,7 +672,8 @@ impl BrowserSessionRecord {
         {
             return Ok(false);
         }
-        if jpeg.len() > MAX_RETAINED_PREVIEW_BYTES {
+        let incoming_frame_bytes = jpeg.len();
+        if incoming_frame_bytes > MAX_RETAINED_PREVIEW_BYTES {
             return Err(BrokerError::new(
                 BrokerErrorCode::BrowserResourceLimit,
                 "preview frame exceeds the retained byte budget",
@@ -686,7 +687,7 @@ impl BrowserSessionRecord {
             .map(|previous| previous.jpeg.len())
             .unwrap_or_default();
         let mut other_frame_bytes = self.retained_frame_bytes.saturating_sub(previous_bytes);
-        while other_frame_bytes.saturating_add(jpeg.len()) > MAX_RETAINED_PREVIEW_BYTES
+        while other_frame_bytes.saturating_add(incoming_frame_bytes) > MAX_RETAINED_PREVIEW_BYTES
             || (!target_exists && self.frames.len() >= MAX_TARGET_FRAME_RECORDS)
         {
             let Some(oldest) = self
@@ -720,7 +721,7 @@ impl BrowserSessionRecord {
                 captured_at: now,
             },
         );
-        self.retained_frame_bytes = other_frame_bytes.saturating_add(jpeg.len());
+        self.retained_frame_bytes = other_frame_bytes.saturating_add(incoming_frame_bytes);
         self.last_frame_at = Some(now);
         self.last_frame_error.clear();
         Ok(true)
