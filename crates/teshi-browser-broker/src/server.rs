@@ -45,6 +45,10 @@ use crate::protocol::{
 const EXTENSION_FRAME_WS_PATH: &str = "/extension/frames";
 const TSH1_MAGIC: &[u8; 4] = b"TSH1";
 const MAX_PREVIEW_META_BYTES: usize = 65_536;
+const MAX_PREVIEW_JPEG_BYTES: usize = 50 * 1024 * 1024;
+const MAX_PREVIEW_WIDTH: u16 = 1_920;
+const MAX_PREVIEW_HEIGHT: u16 = 1_080;
+const MAX_PREVIEW_PIXELS: u32 = (MAX_PREVIEW_WIDTH as u32) * (MAX_PREVIEW_HEIGHT as u32);
 const MAX_EVENT_RESPONSE_WAIT: Duration = Duration::from_secs(30);
 const WS_WRITE_BUFFER_BYTES: usize = 64 * 1024;
 const WS_MAX_WRITE_BUFFER_BYTES: usize = MAX_WEBSOCKET_MESSAGE_BYTES;
@@ -231,6 +235,9 @@ pub enum BrokerEvent {
         seq: u64,
         url: String,
         jpeg: Bytes,
+        /// The validated TSH1 envelope, retained for zero-reencoding
+        /// publication to browser UI clients.
+        frame: Bytes,
         _budget: tokio::sync::OwnedSemaphorePermit,
     },
     FrameError {
@@ -238,17 +245,27 @@ pub enum BrokerEvent {
         error: String,
     },
     Subscribe {
+        owner_id: String,
         extension_instance_id: String,
+        target: Option<BrowserTarget>,
         request_id: String,
         reply: oneshot::Sender<Result<Value, BrokerError>>,
+    },
+    Unsubscribe {
+        owner_id: String,
     },
 }
 
 /// A target-scoped update to a CLI/desktop/daemon browser subscriber.
 #[derive(Debug, Clone)]
 pub struct BrokerPublication {
-    pub extension_instance_id: String,
-    pub payload: Value,
+    pub target: BrowserTarget,
+    pub frame: Bytes,
+    /// Owners that still hold this target subscription when the state owner
+    /// accepted the frame. The transport uses this set in addition to its
+    /// local target filter so navigation and disconnect cleanup cannot leave
+    /// a stale socket subscribed by accident.
+    pub owner_ids: Arc<[String]>,
 }
 
 #[derive(Clone)]
@@ -378,7 +395,24 @@ impl BrokerRuntime {
 
     /// Publish one already-authorized target event to browser UI clients.
     pub fn publish(&self, publication: BrokerPublication) -> Result<(), BrokerError> {
-        json_to_bounded_text(&publication.payload, MAX_CONTROL_MESSAGE_BYTES)?;
+        if publication.frame.is_empty() || publication.frame.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "preview publication exceeds the binary frame limit",
+            ));
+        }
+        let (metadata, _, _) = parse_tsh1_frame(publication.frame.clone())?;
+        let frame_target = BrowserTarget {
+            extension_instance_id: metadata.extension_instance_id,
+            window_id: metadata.window_id,
+            tab_id: metadata.tab_id,
+        };
+        if frame_target != publication.target {
+            return Err(BrokerError::new(
+                BrokerErrorCode::MismatchedBrowserResponse,
+                "preview publication target does not match its TSH1 metadata",
+            ));
+        }
         self.state
             .publications
             .send(publication)
@@ -1220,7 +1254,8 @@ async fn client_socket(
     state: ServerState,
     _permit: tokio::sync::OwnedSemaphorePermit,
 ) {
-    let mut subscription: Option<String> = None;
+    let owner_id = Uuid::new_v4().simple().to_string();
+    let mut subscription: Option<BrowserTarget> = None;
     let mut publications = state.publications.subscribe();
     let (outgoing_tx, mut outgoing_rx) =
         mpsc::channel::<ClientOutgoingMessage>(MAX_CLIENT_IN_FLIGHT_OPERATIONS);
@@ -1255,8 +1290,27 @@ async fn client_socket(
                         )).to_string().into())).await;
                         continue;
                     }
+                    let target = match value.get("target") {
+                        Some(raw_target) => match serde_json::from_value::<BrowserTarget>(raw_target.clone()) {
+                            Ok(target) => Some(target),
+                            Err(_) => {
+                                let _ = socket.send(Message::Text(error_value(BrokerError::new(
+                                    BrokerErrorCode::InvalidBrowserOperation,
+                                    "subscription target does not match the complete browser target shape",
+                                )).to_string().into())).await;
+                                continue;
+                            }
+                        },
+                        None => None,
+                    };
                     let (reply, receiver) = oneshot::channel();
-                    if state.events.try_send(BrokerEvent::Subscribe { extension_instance_id: extension_instance_id.clone(), request_id, reply }).is_err() {
+                    if state.events.try_send(BrokerEvent::Subscribe {
+                        owner_id: owner_id.clone(),
+                        extension_instance_id: extension_instance_id.clone(),
+                        target,
+                        request_id,
+                        reply,
+                    }).is_err() {
                         let _ = socket.send(Message::Text(error_value(BrokerError::new(
                             BrokerErrorCode::BrowserResourceLimit,
                             "broker event queue is full; subscription was not accepted",
@@ -1264,7 +1318,23 @@ async fn client_socket(
                         continue;
                     }
                     match timeout(state.response_timeout, receiver).await {
-                        Ok(Ok(Ok(_))) => subscription = Some(extension_instance_id),
+                        Ok(Ok(Ok(response))) => {
+                            let Some(target) = response
+                                .get("target")
+                                .cloned()
+                                .and_then(|value| serde_json::from_value::<BrowserTarget>(value).ok())
+                            else {
+                                let _ = socket.send(Message::Text(error_value(BrokerError::new(
+                                    BrokerErrorCode::BrokerProtocolError,
+                                    "broker returned an invalid subscription target",
+                                )).to_string().into())).await;
+                                continue;
+                            };
+                            if socket.send(Message::Text(response.to_string().into())).await.is_err() {
+                                break;
+                            }
+                            subscription = Some(target);
+                        }
                         Ok(Ok(Err(error))) => {
                             let _ = socket.send(Message::Text(error_value(error).to_string().into())).await;
                             continue;
@@ -1354,8 +1424,11 @@ async fn client_socket(
             }
             publication = publications.recv(), if subscription.is_some() => {
                 match publication {
-                    Ok(publication) if Some(publication.extension_instance_id.as_str()) == subscription.as_deref() => {
-                        if socket.send(Message::Text(publication.payload.to_string().into())).await.is_err() { break; }
+                    Ok(publication)
+                        if publication.owner_ids.iter().any(|subscriber| subscriber == &owner_id)
+                            && subscription.as_ref() == Some(&publication.target) =>
+                    {
+                        if socket.send(Message::Binary(publication.frame)).await.is_err() { break; }
                     }
                     Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -1363,6 +1436,11 @@ async fn client_socket(
             }
         }
     }
+    let _ = timeout(
+        state.response_timeout,
+        state.events.send(BrokerEvent::Unsubscribe { owner_id }),
+    )
+    .await;
     operation_tasks.abort_all();
     while operation_tasks.join_next().await.is_some() {}
 }
@@ -1516,16 +1594,22 @@ async fn extension_socket(
                         }
                     }
                     Message::Binary(packet) => {
+                        let raw_frame = packet.clone();
                         let frame_budget = match reserve_event_bytes(&state, packet.len()) {
                             Ok(budget) => budget,
-                            Err(_) => {
+                            Err(error) => {
+                                let _ = socket.send(Message::Text(error_value(error).to_string().into())).await;
                                 let _ = socket.send(Message::Close(None)).await;
                                 break;
                             }
                         };
                         match parse_tsh1_frame(packet) {
-                            Ok((metadata, jpeg)) => {
+                            Ok((metadata, jpeg, frame)) => {
                                 if metadata.extension_instance_id != extension_instance_id {
+                                    let _ = socket.send(Message::Text(error_value(BrokerError::new(
+                                        BrokerErrorCode::MismatchedBrowserResponse,
+                                        "preview frame extension instance does not match the authenticated stream",
+                                    )).to_string().into())).await;
                                     let _ = socket.send(Message::Close(None)).await;
                                     break;
                                 }
@@ -1534,13 +1618,19 @@ async fn extension_socket(
                                     window_id: metadata.window_id,
                                     tab_id: metadata.tab_id,
                                 };
-                                let event = BrokerEvent::PreviewFrame { target, seq: metadata.seq, url: metadata.url, jpeg, _budget: frame_budget };
+                                debug_assert_eq!(&frame[..], &raw_frame[..]);
+                                let event = BrokerEvent::PreviewFrame { target, seq: metadata.seq, url: metadata.url, jpeg, frame, _budget: frame_budget };
                                 if state.events.try_send(event).is_err() {
+                                    let _ = socket.send(Message::Text(error_value(BrokerError::new(
+                                        BrokerErrorCode::BrowserResourceLimit,
+                                        "broker event queue is full; preview frame was not accepted",
+                                    )).to_string().into())).await;
                                     let _ = socket.send(Message::Close(None)).await;
                                     break;
                                 }
                             }
-                            Err(_) => {
+                            Err(error) => {
+                                let _ = socket.send(Message::Text(error_value(error).to_string().into())).await;
                                 let _ = socket.send(Message::Close(None)).await;
                                 break;
                             }
@@ -2020,7 +2110,96 @@ fn error_response(error: BrokerError) -> Response {
     (status, Json(error_value(error))).into_response()
 }
 
-fn parse_tsh1_frame(packet: Bytes) -> Result<(PreviewFrameMetadata, Bytes), BrokerError> {
+fn jpeg_dimensions(jpeg: &[u8]) -> Result<(u16, u16), BrokerError> {
+    let mut cursor = 2;
+    while cursor < jpeg.len() {
+        if jpeg[cursor] != 0xff {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "preview JPEG marker is malformed",
+            ));
+        }
+        while cursor < jpeg.len() && jpeg[cursor] == 0xff {
+            cursor += 1;
+        }
+        let marker = *jpeg.get(cursor).ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "preview JPEG marker is truncated",
+            )
+        })?;
+        cursor += 1;
+        if marker == 0xda || marker == 0xd9 {
+            break;
+        }
+        if marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+        let length_end = cursor.checked_add(2).ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "preview JPEG segment length overflowed",
+            )
+        })?;
+        let length_bytes = jpeg.get(cursor..length_end).ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "preview JPEG segment length is truncated",
+            )
+        })?;
+        let segment_len = u16::from_be_bytes([length_bytes[0], length_bytes[1]]) as usize;
+        if segment_len < 2 {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "preview JPEG segment length is invalid",
+            ));
+        }
+        let segment_end = cursor.checked_add(segment_len).ok_or_else(|| {
+            BrokerError::new(
+                BrokerErrorCode::BrowserResourceLimit,
+                "preview JPEG segment length overflowed",
+            )
+        })?;
+        if segment_end > jpeg.len() {
+            return Err(BrokerError::new(
+                BrokerErrorCode::BrokerProtocolError,
+                "preview JPEG segment is truncated",
+            ));
+        }
+        if matches!(
+            marker,
+            0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf
+        ) {
+            if segment_len < 7 {
+                return Err(BrokerError::new(
+                    BrokerErrorCode::BrokerProtocolError,
+                    "preview JPEG dimensions are truncated",
+                ));
+            }
+            let height = u16::from_be_bytes([jpeg[cursor + 3], jpeg[cursor + 4]]);
+            let width = u16::from_be_bytes([jpeg[cursor + 5], jpeg[cursor + 6]]);
+            if width == 0
+                || height == 0
+                || width > MAX_PREVIEW_WIDTH
+                || height > MAX_PREVIEW_HEIGHT
+                || u32::from(width) * u32::from(height) > MAX_PREVIEW_PIXELS
+            {
+                return Err(BrokerError::new(
+                    BrokerErrorCode::BrowserResourceLimit,
+                    "preview JPEG dimensions exceed the configured bound",
+                ));
+            }
+            return Ok((width, height));
+        }
+        cursor = segment_end;
+    }
+    Err(BrokerError::new(
+        BrokerErrorCode::BrokerProtocolError,
+        "preview JPEG does not contain a supported dimension marker",
+    ))
+}
+
+fn parse_tsh1_frame(packet: Bytes) -> Result<(PreviewFrameMetadata, Bytes, Bytes), BrokerError> {
     if packet.len() < 8 || &packet[..4] != TSH1_MAGIC {
         return Err(BrokerError::new(
             BrokerErrorCode::BrokerProtocolError,
@@ -2066,7 +2245,7 @@ fn parse_tsh1_frame(packet: Bytes) -> Result<(PreviewFrameMetadata, Bytes), Brok
         ));
     }
     let jpeg = packet.slice(metadata_end..);
-    if jpeg.len() > 50 * 1024 * 1024
+    if jpeg.len() > MAX_PREVIEW_JPEG_BYTES
         || jpeg.len() < 4
         || jpeg[..2] != [0xff, 0xd8]
         || jpeg[jpeg.len() - 2..] != [0xff, 0xd9]
@@ -2076,7 +2255,8 @@ fn parse_tsh1_frame(packet: Bytes) -> Result<(PreviewFrameMetadata, Bytes), Brok
             "preview JPEG is empty, malformed, or exceeds the frame limit",
         ));
     }
-    Ok((metadata, jpeg))
+    jpeg_dimensions(&jpeg)?;
+    Ok((metadata, jpeg, packet))
 }
 
 /// Generate a URL-safe bearer value with 244 CSPRNG bits without logging or
@@ -2092,8 +2272,11 @@ pub fn generate_broker_token() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
-    use crate::protocol::BrokerIdentityProof;
+    use crate::protocol::{BrokerIdentityProof, ExtensionHeartbeat, ExtensionTab, ExtensionWindow};
+    use crate::state::BrokerState;
     use futures_util::SinkExt;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tokio_tungstenite::tungstenite::http::HeaderValue as WsHeaderValue;
@@ -2101,6 +2284,9 @@ mod tests {
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
     const EXTENSION_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    type TestSocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
 
     fn test_config() -> BrokerServerConfig {
         let mut config = BrokerServerConfig::new(format!("chrome-extension://{EXTENSION_ID}"));
@@ -2124,13 +2310,101 @@ mod tests {
         )
     }
 
-    async fn read_json(
-        socket: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    ) -> Value {
+    fn test_jpeg(width: u16, height: u16) -> Vec<u8> {
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08];
+        jpeg.extend_from_slice(&height.to_be_bytes());
+        jpeg.extend_from_slice(&width.to_be_bytes());
+        jpeg.extend_from_slice(&[0x01, 0x01, 0x11, 0x00, 0xff, 0xd9]);
+        jpeg
+    }
+
+    fn test_tsh1(instance_id: &str, window_id: i64, tab_id: i64, seq: u64, jpeg: &[u8]) -> Vec<u8> {
+        let metadata = serde_json::to_vec(&PreviewFrameMetadata {
+            extension_instance_id: instance_id.into(),
+            window_id,
+            tab_id,
+            url: "https://example.test/".into(),
+            seq,
+        })
+        .unwrap();
+        let mut packet = Vec::with_capacity(8 + metadata.len() + jpeg.len());
+        packet.extend_from_slice(TSH1_MAGIC);
+        packet.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
+        packet.extend_from_slice(&metadata);
+        packet.extend_from_slice(jpeg);
+        packet
+    }
+
+    fn test_heartbeat(instance_id: &str, tab_ids: &[i64]) -> ExtensionHeartbeat {
+        let tabs = tab_ids
+            .iter()
+            .map(|tab_id| ExtensionTab {
+                id: *tab_id,
+                window_id: 7,
+                title: format!("Tab {tab_id}"),
+                url: format!("https://{instance_id}-{tab_id}.test"),
+                active: Some(tab_id) == tab_ids.first(),
+                favicon_url: String::new(),
+                debuggable: true,
+            })
+            .collect::<Vec<_>>();
+        ExtensionHeartbeat {
+            schema_version: Some(BROWSER_BROKER_SCHEMA_VERSION),
+            protocol_version: Some(BROWSER_BROKER_PROTOCOL_VERSION),
+            extension_instance_id: Some(instance_id.into()),
+            profile_label: instance_id.into(),
+            extension_version: "test".into(),
+            features: Vec::new(),
+            supported_actions: Vec::new(),
+            supported_operations: Vec::new(),
+            optional_permissions: BTreeMap::new(),
+            browser: BTreeMap::new(),
+            project_root: None,
+            url: tabs.first().map(|tab| tab.url.clone()).unwrap_or_default(),
+            title: tabs
+                .first()
+                .map(|tab| tab.title.clone())
+                .unwrap_or_default(),
+            active_window_id: Some(7),
+            active_tab_id: tab_ids.first().copied(),
+            tabs: Vec::new(),
+            windows: vec![ExtensionWindow {
+                id: 7,
+                focused: true,
+                tabs,
+            }],
+            frame_error: String::new(),
+        }
+    }
+
+    async fn read_json(socket: &mut TestSocket) -> Value {
         let message = socket.next().await.unwrap().unwrap();
         serde_json::from_str(message.into_text().unwrap().as_str()).unwrap()
+    }
+
+    async fn subscribe_client(
+        socket: &mut TestSocket,
+        runtime: &mut BrokerRuntime,
+        state: &mut BrokerState,
+        target: &BrowserTarget,
+        request_id: &str,
+    ) -> Value {
+        socket
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "cmd": "subscribe_browser_session",
+                    "request_id": request_id,
+                    "extension_instance_id": target.extension_instance_id,
+                    "target": target,
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let event = runtime.next_event().await.unwrap();
+        state.handle(event, runtime).await;
+        read_json(socket).await
     }
 
     #[test]
@@ -2152,24 +2426,237 @@ mod tests {
 
     #[test]
     fn tsh1_parser_preserves_frame_bytes_without_reencoding() {
-        let metadata = serde_json::to_vec(&PreviewFrameMetadata {
+        let jpeg = test_jpeg(3, 2);
+        let packet = test_tsh1("profile-a", 7, 42, 1, &jpeg);
+        let original = packet.clone();
+        let (parsed, bytes, frame) = parse_tsh1_frame(Bytes::from(packet)).unwrap();
+        assert_eq!(parsed.extension_instance_id, "profile-a");
+        assert_eq!(parsed.seq, 1);
+        assert_eq!(&bytes[..], &jpeg[..]);
+        assert_eq!(&frame[..], &original[..]);
+    }
+
+    #[test]
+    fn tsh1_parser_rejects_malformed_oversized_and_dimension_limited_frames() {
+        let malformed = parse_tsh1_frame(Bytes::from_static(b"not-tsh1")).unwrap_err();
+        assert_eq!(malformed.code, BrokerErrorCode::BrokerProtocolError);
+
+        let mut oversized_jpeg = vec![0xff, 0xd8];
+        oversized_jpeg.resize(MAX_PREVIEW_JPEG_BYTES + 1, 0);
+        let oversized = parse_tsh1_frame(Bytes::from(test_tsh1(
+            "profile-a",
+            7,
+            42,
+            1,
+            &oversized_jpeg,
+        )))
+        .unwrap_err();
+        assert_eq!(oversized.code, BrokerErrorCode::BrowserResourceLimit);
+
+        let too_wide = parse_tsh1_frame(Bytes::from(test_tsh1(
+            "profile-a",
+            7,
+            42,
+            1,
+            &test_jpeg(MAX_PREVIEW_WIDTH + 1, 1),
+        )))
+        .unwrap_err();
+        assert_eq!(too_wide.code, BrokerErrorCode::BrowserResourceLimit);
+
+        let pixel_bound_edge = parse_tsh1_frame(Bytes::from(test_tsh1(
+            "profile-a",
+            7,
+            42,
+            1,
+            &test_jpeg(MAX_PREVIEW_WIDTH, MAX_PREVIEW_HEIGHT),
+        )))
+        .unwrap();
+        assert_eq!(pixel_bound_edge.0.tab_id, 42);
+    }
+
+    #[tokio::test]
+    async fn binary_publication_preserves_tsh1_and_validates_complete_target() {
+        let runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let mut publications = runtime.subscribe_publications();
+        let target = BrowserTarget {
             extension_instance_id: "profile-a".into(),
             window_id: 7,
             tab_id: 42,
-            url: "https://example.test/".into(),
-            seq: 1,
-        })
-        .unwrap();
-        let jpeg = [0xff, 0xd8, 0xff, 0xd9];
-        let mut packet = Vec::new();
-        packet.extend_from_slice(TSH1_MAGIC);
-        packet.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
-        packet.extend_from_slice(&metadata);
-        packet.extend_from_slice(&jpeg);
-        let (parsed, bytes) = parse_tsh1_frame(Bytes::from(packet)).unwrap();
-        assert_eq!(parsed.extension_instance_id, "profile-a");
-        assert_eq!(parsed.seq, 1);
-        assert_eq!(&bytes[..], &jpeg);
+        };
+        let packet = test_tsh1("profile-a", 7, 42, 1, &test_jpeg(3, 2));
+        runtime
+            .publish(BrokerPublication {
+                target: target.clone(),
+                frame: Bytes::from(packet.clone()),
+                owner_ids: Arc::from(Vec::<String>::new().into_boxed_slice()),
+            })
+            .unwrap();
+        let publication = publications.recv().await.unwrap();
+        assert_eq!(publication.target, target);
+        assert_eq!(&publication.frame[..], &packet[..]);
+
+        let mismatch = runtime
+            .publish(BrokerPublication {
+                target: BrowserTarget {
+                    extension_instance_id: "profile-b".into(),
+                    window_id: 7,
+                    tab_id: 42,
+                },
+                frame: Bytes::from(packet),
+                owner_ids: Arc::from(Vec::<String>::new().into_boxed_slice()),
+            })
+            .unwrap_err();
+        assert_eq!(mismatch.code, BrokerErrorCode::MismatchedBrowserResponse);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn client_preview_subscriptions_require_the_complete_matching_target() {
+        let mut runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let mut state = BrokerState::new();
+        let now = std::time::Instant::now();
+        state
+            .sessions
+            .register_heartbeat(test_heartbeat("profile-a", &[42, 43]), now)
+            .unwrap();
+        state
+            .sessions
+            .register_heartbeat(test_heartbeat("profile-b", &[42]), now)
+            .unwrap();
+
+        let target_a_42 = BrowserTarget {
+            extension_instance_id: "profile-a".into(),
+            window_id: 7,
+            tab_id: 42,
+        };
+        let target_a_43 = BrowserTarget {
+            extension_instance_id: "profile-a".into(),
+            window_id: 7,
+            tab_id: 43,
+        };
+        let target_b_42 = BrowserTarget {
+            extension_instance_id: "profile-b".into(),
+            window_id: 7,
+            tab_id: 42,
+        };
+        let (mut client_a_42, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+        let (mut client_a_43, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+        let (mut client_b_42, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+
+        for (client, target, request_id) in [
+            (&mut client_a_42, &target_a_42, "subscribe-a-42"),
+            (&mut client_a_43, &target_a_43, "subscribe-a-43"),
+            (&mut client_b_42, &target_b_42, "subscribe-b-42"),
+        ] {
+            let ack = subscribe_client(client, &mut runtime, &mut state, target, request_id).await;
+            assert_eq!(ack["ok"], true);
+            assert_eq!(ack["target"], serde_json::to_value(target).unwrap());
+        }
+
+        let packet = test_tsh1("profile-a", 7, 42, 1, &test_jpeg(3, 2));
+        let (metadata, jpeg, frame) = parse_tsh1_frame(Bytes::from(packet.clone())).unwrap();
+        let frame_budget = Arc::new(Semaphore::new(frame.len().max(1)))
+            .try_acquire_owned()
+            .unwrap();
+        state
+            .handle(
+                BrokerEvent::PreviewFrame {
+                    target: target_a_42.clone(),
+                    seq: metadata.seq,
+                    url: metadata.url,
+                    jpeg,
+                    frame,
+                    _budget: frame_budget,
+                },
+                &runtime,
+            )
+            .await;
+
+        let received = timeout(Duration::from_secs(1), client_a_42.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, WsMessage::Binary(Bytes::from(packet)));
+        assert!(
+            timeout(Duration::from_millis(100), client_a_43.next())
+                .await
+                .is_err()
+        );
+        assert!(
+            timeout(Duration::from_millis(100), client_b_42.next())
+                .await
+                .is_err()
+        );
+
+        let mut navigated = test_heartbeat("profile-a", &[42, 43]);
+        navigated.windows[0].tabs[0].url = "https://profile-a-navigated.test".into();
+        navigated.url = navigated.windows[0].tabs[0].url.clone();
+        state
+            .sessions
+            .register_heartbeat(navigated, now + Duration::from_secs(1))
+            .unwrap();
+        assert!(!state.sessions.has_subscriber(&target_a_42));
+
+        let ack = subscribe_client(
+            &mut client_a_43,
+            &mut runtime,
+            &mut state,
+            &target_a_42,
+            "subscribe-a-42-after-navigation",
+        )
+        .await;
+        assert_eq!(ack["ok"], true);
+        assert_eq!(ack["target"], serde_json::to_value(&target_a_42).unwrap());
+
+        let navigated_packet = test_tsh1("profile-a", 7, 42, 2, &test_jpeg(3, 2));
+        let (metadata, jpeg, frame) =
+            parse_tsh1_frame(Bytes::from(navigated_packet.clone())).unwrap();
+        let frame_budget = Arc::new(Semaphore::new(frame.len().max(1)))
+            .try_acquire_owned()
+            .unwrap();
+        state
+            .handle(
+                BrokerEvent::PreviewFrame {
+                    target: target_a_42.clone(),
+                    seq: metadata.seq,
+                    url: metadata.url,
+                    jpeg,
+                    frame,
+                    _budget: frame_budget,
+                },
+                &runtime,
+            )
+            .await;
+        assert!(
+            timeout(Duration::from_millis(100), client_a_42.next())
+                .await
+                .is_err()
+        );
+        let received_after_navigation = timeout(Duration::from_secs(1), client_a_43.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            received_after_navigation,
+            WsMessage::Binary(Bytes::from(navigated_packet))
+        );
+
+        client_a_42.close(None).await.unwrap();
+        let disconnect = timeout(Duration::from_secs(1), runtime.next_event())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(disconnect, BrokerEvent::Unsubscribe { .. }));
+        state.handle(disconnect, &runtime).await;
+        assert!(state.sessions.has_subscriber(&target_a_42));
+        assert!(!state.sessions.has_subscriber(&target_a_43));
+        assert!(state.sessions.has_subscriber(&target_b_42));
+
+        client_a_43.close(None).await.unwrap();
+        client_b_42.close(None).await.unwrap();
+        runtime.shutdown().await;
     }
 
     #[test]

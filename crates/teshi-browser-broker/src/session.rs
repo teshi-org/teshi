@@ -4,7 +4,7 @@
 //! the profile-scoped identity and liveness rules that must remain independent
 //! of whichever Teshi surface started the user broker.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -103,7 +103,10 @@ pub struct BrowserSessionRecord {
     stream_generation: Option<u64>,
     command_queue: VecDeque<Value>,
     frames: HashMap<BrowserTarget, PreviewFrameRecord>,
-    subscriptions: BTreeSet<BrowserTarget>,
+    /// Browser UI subscriptions keyed by their owning client connection.
+    /// Keeping the owner here prevents one client disconnecting or changing
+    /// targets from removing another client's subscription.
+    subscriptions: BTreeMap<String, BrowserTarget>,
     element_references: HashMap<String, ElementReferenceRecord>,
     page_context_revisions: HashMap<BrowserTarget, String>,
     page_snapshot_ids: HashMap<BrowserTarget, String>,
@@ -134,7 +137,7 @@ impl BrowserSessionRecord {
             stream_generation: None,
             command_queue: VecDeque::new(),
             frames: HashMap::new(),
-            subscriptions: BTreeSet::new(),
+            subscriptions: BTreeMap::new(),
             element_references: HashMap::new(),
             page_context_revisions: HashMap::new(),
             page_snapshot_ids: HashMap::new(),
@@ -284,18 +287,47 @@ impl BrowserSessionRecord {
         Ok(())
     }
 
-    pub fn subscribe_target(&mut self, target: BrowserTarget) -> Result<(), BrokerError> {
+    pub fn subscribe_target_for_owner(
+        &mut self,
+        owner_id: String,
+        target: BrowserTarget,
+    ) -> Result<(), BrokerError> {
         self.require_target(&target)?;
-        self.subscriptions.insert(target);
+        self.subscriptions.insert(owner_id, target);
         Ok(())
     }
 
-    pub fn unsubscribe_target(&mut self, target: &BrowserTarget) {
-        self.subscriptions.remove(target);
+    pub fn unsubscribe_owner(&mut self, owner_id: &str) -> bool {
+        self.subscriptions.remove(owner_id).is_some()
+    }
+
+    pub fn unsubscribe_owner_target(&mut self, owner_id: &str, target: &BrowserTarget) -> bool {
+        if self
+            .subscriptions
+            .get(owner_id)
+            .is_some_and(|current| current == target)
+        {
+            self.subscriptions.remove(owner_id);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn is_subscribed(&self, target: &BrowserTarget) -> bool {
-        self.subscriptions.contains(target)
+        self.subscriptions.values().any(|current| current == target)
+    }
+
+    pub fn subscriber_owner_ids(&self, target: &BrowserTarget) -> Vec<String> {
+        self.subscriptions
+            .iter()
+            .filter(|(_, subscribed)| *subscribed == target)
+            .map(|(owner_id, _)| owner_id.clone())
+            .collect()
+    }
+
+    pub fn subscription_count(&self) -> usize {
+        self.subscriptions.len()
     }
 
     pub fn latest_frame(&self, target: &BrowserTarget) -> Option<&PreviewFrameRecord> {
@@ -551,10 +583,11 @@ impl BrowserSessionRecord {
                 .into_iter()
                 .find(|tab| tab.window_id == previous.window_id && tab.id == previous.id);
             if current.is_none_or(|tab| {
-                !previous.url.is_empty() && !tab.url.is_empty() && previous.url != tab.url
+                previous.url != tab.url && (!previous.url.is_empty() || !tab.url.is_empty())
             }) {
                 self.frames.remove(&target);
-                self.subscriptions.remove(&target);
+                self.subscriptions
+                    .retain(|_, subscribed| subscribed != &target);
                 self.clear_element_references(Some(&target));
             }
         }
@@ -603,14 +636,14 @@ impl BrowserSessionRecord {
         url: String,
         jpeg: Vec<u8>,
         now: Instant,
-    ) -> Result<(), BrokerError> {
+    ) -> Result<bool, BrokerError> {
         self.require_target(&target)?;
         if self
             .frames
             .get(&target)
             .is_some_and(|previous| seq <= previous.seq)
         {
-            return Ok(());
+            return Ok(false);
         }
         if self.frames.len() >= MAX_TARGET_FRAME_RECORDS
             && !self.frames.contains_key(&target)
@@ -634,7 +667,7 @@ impl BrowserSessionRecord {
         );
         self.last_frame_at = Some(now);
         self.last_frame_error.clear();
-        Ok(())
+        Ok(true)
     }
 
     pub fn public_contract(&self, now: Instant, heartbeat_ttl: Duration) -> Value {
@@ -1069,18 +1102,69 @@ impl SessionRegistry {
         url: String,
         jpeg: Vec<u8>,
         now: Instant,
-    ) -> Result<(), BrokerError> {
+    ) -> Result<bool, BrokerError> {
         let record = self.require_live(&target.extension_instance_id, now)?;
         record.update_frame(target, seq, url, jpeg, now)
     }
 
+    pub fn subscribe_target_for_owner(
+        &mut self,
+        owner_id: String,
+        target: BrowserTarget,
+        now: Instant,
+    ) -> Result<(), BrokerError> {
+        self.require_live(&target.extension_instance_id, now)?;
+        self.unsubscribe_owner(&owner_id);
+        let record = self
+            .sessions
+            .get_mut(&target.extension_instance_id)
+            .expect("require_live returned a live session");
+        record.subscribe_target_for_owner(owner_id, target)
+    }
+
+    /// Compatibility helper for in-crate state probes that predate explicit
+    /// client ownership. Production transport paths always provide an owner.
     pub fn subscribe_target(
         &mut self,
         target: BrowserTarget,
         now: Instant,
     ) -> Result<(), BrokerError> {
-        let record = self.require_live(&target.extension_instance_id, now)?;
-        record.subscribe_target(target)
+        let owner_id = format!(
+            "legacy:{}:{}:{}",
+            target.extension_instance_id, target.window_id, target.tab_id
+        );
+        self.subscribe_target_for_owner(owner_id, target, now)
+            .map(|_| ())
+    }
+
+    pub fn unsubscribe_owner(&mut self, owner_id: &str) -> bool {
+        self.sessions
+            .values_mut()
+            .any(|record| record.unsubscribe_owner(owner_id))
+    }
+
+    pub fn unsubscribe_instance(&mut self, extension_instance_id: &str) -> usize {
+        self.sessions
+            .get_mut(extension_instance_id)
+            .map(|record| {
+                let count = record.subscription_count();
+                record.subscriptions.clear();
+                count
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn has_subscriber(&self, target: &BrowserTarget) -> bool {
+        self.sessions
+            .get(&target.extension_instance_id)
+            .is_some_and(|record| record.is_subscribed(target))
+    }
+
+    pub fn subscriber_owner_ids(&self, target: &BrowserTarget) -> Vec<String> {
+        self.sessions
+            .get(&target.extension_instance_id)
+            .map(|record| record.subscriber_owner_ids(target))
+            .unwrap_or_default()
     }
 
     /// Expire heartbeat liveness and remove records past the diagnostic window.
@@ -1409,6 +1493,38 @@ mod tests {
     }
 
     #[test]
+    fn navigation_to_an_empty_url_clears_target_state() {
+        let start = Instant::now();
+        let mut registry = SessionRegistry::default();
+        registry
+            .register_heartbeat(heartbeat(Some("profile-a"), "https://before.test"), start)
+            .unwrap();
+        let target = target("profile-a");
+        registry
+            .subscribe_target_for_owner("owner-a".into(), target.clone(), start)
+            .unwrap();
+        registry
+            .update_frame(
+                target.clone(),
+                1,
+                "https://before.test".into(),
+                vec![0xff, 0xd8, 0xff, 0xd9],
+                start,
+            )
+            .unwrap();
+
+        let mut navigated = heartbeat(Some("profile-a"), "");
+        navigated.windows[0].tabs[0].url.clear();
+        registry
+            .register_heartbeat(navigated, start + Duration::from_secs(1))
+            .unwrap();
+
+        let session = registry.get("profile-a").unwrap();
+        assert!(session.latest_frame(&target).is_none());
+        assert!(!session.is_subscribed(&target));
+    }
+
+    #[test]
     fn preview_frames_keep_the_newest_sequence_for_each_target() {
         let start = Instant::now();
         let mut registry = SessionRegistry::default();
@@ -1441,6 +1557,58 @@ mod tests {
             .unwrap();
         assert_eq!(frame.seq, 2);
         assert_eq!(frame.url, "https://new.test");
+    }
+
+    #[test]
+    fn subscriptions_are_owner_and_complete_target_scoped() {
+        let start = Instant::now();
+        let mut registry = SessionRegistry::default();
+        let mut profile_a = heartbeat(Some("profile-a"), "https://a.test");
+        profile_a.windows[0].tabs.push(ExtensionTab {
+            id: 43,
+            window_id: 7,
+            title: "Second tab".into(),
+            url: "https://second-a.test".into(),
+            active: false,
+            favicon_url: String::new(),
+            debuggable: true,
+        });
+        registry.register_heartbeat(profile_a, start).unwrap();
+        registry
+            .register_heartbeat(heartbeat(Some("profile-b"), "https://b.test"), start)
+            .unwrap();
+
+        let profile_a_tab_42 = target("profile-a");
+        let profile_a_tab_43 = BrowserTarget {
+            extension_instance_id: "profile-a".into(),
+            window_id: 7,
+            tab_id: 43,
+        };
+        let profile_b_tab_42 = target("profile-b");
+        registry
+            .subscribe_target_for_owner("owner-a".into(), profile_a_tab_42.clone(), start)
+            .unwrap();
+        registry
+            .subscribe_target_for_owner("owner-b".into(), profile_a_tab_43.clone(), start)
+            .unwrap();
+        registry
+            .subscribe_target_for_owner("owner-c".into(), profile_b_tab_42.clone(), start)
+            .unwrap();
+
+        assert!(registry.has_subscriber(&profile_a_tab_42));
+        assert!(registry.has_subscriber(&profile_a_tab_43));
+        assert!(registry.has_subscriber(&profile_b_tab_42));
+        assert_eq!(registry.get("profile-a").unwrap().subscription_count(), 2);
+        assert_eq!(registry.get("profile-b").unwrap().subscription_count(), 1);
+
+        assert!(registry.unsubscribe_owner("owner-b"));
+        assert!(registry.has_subscriber(&profile_a_tab_42));
+        assert!(!registry.has_subscriber(&profile_a_tab_43));
+        assert!(registry.has_subscriber(&profile_b_tab_42));
+
+        assert_eq!(registry.unsubscribe_instance("profile-a"), 1);
+        assert!(!registry.has_subscriber(&profile_a_tab_42));
+        assert!(registry.has_subscriber(&profile_b_tab_42));
     }
 
     #[test]

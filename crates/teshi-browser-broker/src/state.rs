@@ -6,6 +6,7 @@
 //! or filesystem I/O.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
@@ -124,6 +125,9 @@ impl BrokerState {
                 extension_instance_id,
                 generation,
             } => self.handle_extension_disconnected(&extension_instance_id, generation),
+            BrokerEvent::Unsubscribe { owner_id } => {
+                self.sessions.unsubscribe_owner(&owner_id);
+            }
             BrokerEvent::ExtensionResponse {
                 extension_instance_id,
                 generation,
@@ -166,11 +170,26 @@ impl BrokerState {
                 seq,
                 url,
                 jpeg,
+                frame,
                 ..
             } => {
-                let _ = self
-                    .sessions
-                    .update_frame(target, seq, url, jpeg.to_vec(), Instant::now());
+                let accepted = self.sessions.update_frame(
+                    target.clone(),
+                    seq,
+                    url,
+                    jpeg.to_vec(),
+                    Instant::now(),
+                );
+                if matches!(accepted, Ok(true)) {
+                    let owner_ids = self.sessions.subscriber_owner_ids(&target);
+                    if !owner_ids.is_empty() {
+                        let _ = runtime.publish(crate::server::BrokerPublication {
+                            target,
+                            frame,
+                            owner_ids: Arc::from(owner_ids.into_boxed_slice()),
+                        });
+                    }
+                }
             }
             BrokerEvent::FrameError {
                 extension_instance_id,
@@ -179,11 +198,18 @@ impl BrokerState {
                 .sessions
                 .mark_frame_error(&extension_instance_id, &error),
             BrokerEvent::Subscribe {
+                owner_id,
                 extension_instance_id,
+                target,
                 request_id,
                 reply,
             } => {
-                let response = self.handle_subscription(&extension_instance_id, &request_id);
+                let response = self.handle_subscription(
+                    &owner_id,
+                    &extension_instance_id,
+                    target.as_ref(),
+                    &request_id,
+                );
                 let _ = reply.send(response);
             }
         }
@@ -221,6 +247,11 @@ impl BrokerState {
                     "browser extension stream was replaced while the operation was pending",
                 ),
             );
+        }
+        if result.is_ok() {
+            // A reconnect or stream replacement invalidates all old preview
+            // subscriptions. UI clients must explicitly re-select the target.
+            self.sessions.unsubscribe_instance(&extension_instance_id);
         }
         match result {
             Ok(previous_generation) => json!({
@@ -326,6 +357,7 @@ impl BrokerState {
             .sessions
             .detach_stream(extension_instance_id, generation)
         {
+            self.sessions.unsubscribe_instance(extension_instance_id);
             self.fail_pending_for_session(
                 extension_instance_id,
                 BrokerError::new(
@@ -474,21 +506,46 @@ impl BrokerState {
 
     fn handle_subscription(
         &mut self,
+        owner_id: &str,
         extension_instance_id: &str,
+        requested_target: Option<&BrowserTarget>,
         request_id: &str,
     ) -> Result<Value, BrokerError> {
         let now = Instant::now();
-        let target = self
-            .sessions
-            .require_live(extension_instance_id, now)?
-            .current_active_target()
-            .ok_or_else(|| {
-                BrokerError::new(
-                    BrokerErrorCode::BrowserTargetNotFound,
-                    "browser session has no active debuggable target",
-                )
-            })?;
-        self.sessions.subscribe_target(target.clone(), now)?;
+        if requested_target
+            .is_some_and(|target| target.extension_instance_id != extension_instance_id)
+        {
+            return Err(BrokerError::new(
+                BrokerErrorCode::MismatchedBrowserResponse,
+                "subscription target does not match extension_instance_id",
+            ));
+        }
+        let target = if let Some(target) = requested_target {
+            self.sessions.resolve_target(Some(target), now).and_then(
+                |(resolved_instance_id, target, _)| {
+                    if resolved_instance_id != extension_instance_id {
+                        Err(BrokerError::new(
+                            BrokerErrorCode::MismatchedBrowserResponse,
+                            "subscription target does not match extension_instance_id",
+                        ))
+                    } else {
+                        Ok(target)
+                    }
+                },
+            )?
+        } else {
+            self.sessions
+                .require_live(extension_instance_id, now)?
+                .current_active_target()
+                .ok_or_else(|| {
+                    BrokerError::new(
+                        BrokerErrorCode::BrowserTargetNotFound,
+                        "browser session has no active debuggable target",
+                    )
+                })?
+        };
+        self.sessions
+            .subscribe_target_for_owner(owner_id.to_owned(), target.clone(), now)?;
         Ok(json!({
             "type": "response",
             "schema_version": BROWSER_BROKER_SCHEMA_VERSION,
