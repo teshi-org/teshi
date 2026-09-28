@@ -55,6 +55,8 @@ impl BrowserMode {
 
 /// Fixed HTTP discovery port for chrome mode (`GET /v1/bridge`).
 pub const CHROME_DISCOVERY_PORT: u16 = 17373;
+const CHROME_BROKER_IMPLEMENTATION_ENV: &str = "TESHI_BROWSER_BROKER_IMPLEMENTATION";
+const CHROME_BROKER_EXTENSION_ORIGINS_ENV: &str = "TESHI_BROWSER_BROKER_EXTENSION_ORIGINS";
 const MAX_DISCOVERY_HEADER_BYTES: usize = 16 * 1024;
 const MAX_DISCOVERY_BODY_BYTES: usize = 64 * 1024;
 const MAX_DISCOVERY_RESPONSE_BYTES: usize = MAX_DISCOVERY_HEADER_BYTES + MAX_DISCOVERY_BODY_BYTES;
@@ -261,7 +263,11 @@ pub fn send_sidecar_command_with_timeout(
     let expected_request_id = command
         .get("request_id")
         .and_then(serde_json::Value::as_str);
-    let (mut socket, _) = connect(ws_url).map_err(|e| e.to_string())?;
+    let authenticated_url = authenticated_sidecar_ws_url(ws_url)?;
+    let (mut socket, _) = connect(&authenticated_url).map_err(|error| {
+        let detail = error.to_string();
+        detail.replace(&authenticated_url, ws_url)
+    })?;
     socket
         .send(Message::Text(command.to_string()))
         .map_err(|e| e.to_string())?;
@@ -281,6 +287,69 @@ pub fn send_sidecar_command_with_timeout(
     Err(format!(
         "browser sidecar did not respond within {secs}s (CLI timeout; check extension heartbeat if using Connect Chrome)"
     ))
+}
+
+/// Adds the private generation-bound credential only when a URL identifies the
+/// Rust user broker. Embedded, WinApp, and legacy Python URLs remain unchanged.
+/// The public endpoint file never contains the resulting query parameter. The
+/// returned URL is for an in-process native connection only and must never be
+/// serialized, logged, or sent to a browser/UI client.
+pub fn authenticated_sidecar_ws_url(ws_url: &str) -> Result<String, String> {
+    let parsed = url::Url::parse(ws_url).map_err(|error| error.to_string())?;
+    if parsed.query_pairs().any(|(name, _)| name == "token") {
+        return Ok(ws_url.to_owned());
+    }
+
+    let endpoint_path = match chrome_broker_endpoint_path() {
+        Ok(path) => path,
+        Err(_) => return Ok(ws_url.to_owned()),
+    };
+    let endpoint_text = match std::fs::read_to_string(endpoint_path) {
+        Ok(text) => text,
+        Err(_) => return Ok(ws_url.to_owned()),
+    };
+    let endpoint: ChromeBrokerEndpoint = match serde_json::from_str(&endpoint_text) {
+        Ok(endpoint) => endpoint,
+        Err(_) => return Ok(ws_url.to_owned()),
+    };
+    if endpoint.ws_url != ws_url
+        || !endpoint
+            .broker_features
+            .iter()
+            .any(|feature| feature == "transport.v1")
+    {
+        return Ok(ws_url.to_owned());
+    }
+
+    let state_dir = chrome_broker_state_dir().map_err(|error| error.message)?;
+    let credential_store = PrivateCredentialStore::new(&state_dir);
+    let public_record = EndpointRecord {
+        schema_version: endpoint.schema_version,
+        protocol_version: endpoint.protocol_version,
+        mode: endpoint.mode.clone(),
+        ws_url: endpoint.ws_url.clone(),
+        discovery_url: endpoint.discovery_url.clone(),
+        extension_frame_ws_url: endpoint.extension_frame_ws_url.clone(),
+        broker_pid: endpoint.broker_pid,
+        broker_start_id: endpoint.broker_start_id.clone(),
+        broker_features: endpoint.broker_features.clone(),
+        bridge: "rust".into(),
+    };
+    let credential = credential_store
+        .read_for_endpoint(&public_record)
+        .map_err(|error| {
+            format!(
+                "Rust Chrome broker credential is unavailable: {}",
+                error.message
+            )
+        })?;
+    verify_rust_broker_identity(&endpoint, &credential, &public_record)
+        .map_err(|error| error.message)?;
+    let mut authenticated = parsed;
+    authenticated
+        .query_pairs_mut()
+        .append_pair("token", credential.token());
+    Ok(authenticated.to_string())
 }
 
 fn is_terminal_sidecar_response(
@@ -1008,17 +1077,18 @@ fn discover_compatible_chrome_broker() -> Result<Option<ChromeBrokerEndpoint>, B
     validate_chrome_broker_compatibility(endpoint).map(Some)
 }
 
-fn discover_rust_transport_broker_at(
+fn discover_rust_broker_at(
     port: u16,
     state_dir: &Path,
     trusted_extension_origins: &[String],
+    require_full_chrome_features: bool,
 ) -> Result<Option<ChromeBrokerEndpoint>, BrowserError> {
     if !port_is_open(port) {
         return Ok(None);
     }
     let endpoint = fetch_chrome_broker_endpoint(port).map_err(|error| BrowserError {
         message: format!(
-            "Port {port} is occupied by a listener that is not a verifiable Rust Chrome transport broker: {}",
+            "Port {port} is occupied by a listener that is not a verifiable Rust Chrome broker: {}",
             error.message
         ),
         hint: Some("The listener was left untouched.".into()),
@@ -1029,6 +1099,27 @@ fn discover_rust_transport_broker_at(
         return Err(BrowserError {
             message: "The Rust Chrome transport broker protocol is incompatible.".into(),
             hint: Some("The existing listener was left untouched.".into()),
+        });
+    }
+    if require_full_chrome_features
+        && [
+            "transport.v1",
+            "p0.control",
+            "p1.observability_artifacts",
+            "p1.filtered_network_capture",
+            "p1.network_batch_transport",
+        ]
+        .iter()
+        .any(|required| {
+            !endpoint
+                .broker_features
+                .iter()
+                .any(|feature| feature == required)
+        })
+    {
+        return Err(BrowserError {
+            message: "The Rust Chrome broker does not advertise the required control and observability features.".into(),
+            hint: Some("The existing listener was left untouched; stop it explicitly before retrying.".into()),
         });
     }
     let credential_store = PrivateCredentialStore::new(state_dir);
@@ -1100,16 +1191,21 @@ fn open_private_broker_diagnostic_log(path: &Path) -> Result<std::fs::File, Brow
     Ok(file)
 }
 
-/// Start or reuse the internal Rust transport process without changing the
-/// production Chrome runtime selector. The caller must supply exact paired
-/// extension origins; no wildcard or arbitrary-ID fallback is provided.
+/// Start or reuse an internal Rust broker process.
+///
+/// The caller must supply exact paired extension origins; no wildcard or
+/// arbitrary-ID fallback is provided. Feature flags are explicit so the
+/// transport-only migration probe cannot accidentally advertise the full
+/// Chrome control surface.
 #[doc(hidden)]
-fn ensure_rust_transport_broker_at(
+fn ensure_rust_broker_at(
     state_dir: &Path,
     teshi_executable: &Path,
     trusted_extension_origins: &[String],
     discovery_port: u16,
     readiness_timeout: Duration,
+    enable_p0_control: bool,
+    enable_p1_observability: bool,
 ) -> Result<ChromeBrokerEndpoint, BrowserError> {
     if discovery_port == 0
         || trusted_extension_origins.is_empty()
@@ -1169,7 +1265,12 @@ fn ensure_rust_transport_broker_at(
                     )),
                 });
             }
-            discover_rust_transport_broker_at(discovery_port, &state_dir, trusted_extension_origins)
+            discover_rust_broker_at(
+                discovery_port,
+                &state_dir,
+                trusted_extension_origins,
+                enable_p0_control && enable_p1_observability,
+            )
         }
     };
     let mut start = {
@@ -1191,6 +1292,12 @@ fn ensure_rust_transport_broker_at(
                 .stderr(Stdio::from(stderr));
             for origin in trusted_extension_origins {
                 command.arg("--trusted-extension-origin").arg(origin);
+            }
+            if enable_p0_control {
+                command.arg("--enable-p0-control");
+            }
+            if enable_p1_observability {
+                command.arg("--enable-p1-observability");
             }
             #[cfg(windows)]
             {
@@ -1228,6 +1335,47 @@ fn valid_chrome_extension_origin(origin: &str) -> bool {
     id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
 }
 
+fn parse_configured_chrome_extension_origins(raw: &str) -> Result<Vec<String>, BrowserError> {
+    let mut origins: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .map(str::to_owned)
+        .collect();
+    origins.sort();
+    if origins.is_empty()
+        || origins.len() > MAX_TRUSTED_EXTENSION_ORIGINS
+        || origins
+            .iter()
+            .any(|origin| !valid_chrome_extension_origin(origin))
+        || origins.windows(2).any(|pair| pair[0] == pair[1])
+    {
+        return Err(BrowserError {
+            message: format!(
+                "{CHROME_BROKER_EXTENSION_ORIGINS_ENV} must contain 1-{MAX_TRUSTED_EXTENSION_ORIGINS} unique exact chrome-extension:// origins."
+            ),
+            hint: Some(
+                "Copy the extension ID shown by teshi-bridge and pair it explicitly; wildcards are not supported."
+                    .into(),
+            ),
+        });
+    }
+    Ok(origins)
+}
+
+fn configured_chrome_extension_origins() -> Result<Vec<String>, BrowserError> {
+    let raw = std::env::var(CHROME_BROKER_EXTENSION_ORIGINS_ENV).map_err(|_| BrowserError {
+        message: format!(
+            "Rust Chrome broker requires explicit extension pairing via {CHROME_BROKER_EXTENSION_ORIGINS_ENV}."
+        ),
+        hint: Some(
+            "Set a comma-separated list of exact chrome-extension://<32-character-id> origins for this development/test run."
+                .into(),
+        ),
+    })?;
+    parse_configured_chrome_extension_origins(&raw)
+}
+
 fn resolve_teshi_cli_executable(current_executable: &Path) -> Result<PathBuf, BrowserError> {
     let is_teshi = current_executable
         .file_stem()
@@ -1251,9 +1399,8 @@ fn resolve_teshi_cli_executable(current_executable: &Path) -> Result<PathBuf, Br
 
 /// Starts or reuses the transport-only Rust broker for the current OS user.
 ///
-/// This is an internal migration bootstrap, not the production Chrome runtime
-/// selector: the current implementation intentionally advertises no `p0.control`
-/// feature, so normal Chrome automation continues to use the existing backend.
+/// This remains an internal migration probe. It intentionally advertises no
+/// `p0.control` feature, so it cannot be selected as a Chrome executor.
 #[doc(hidden)]
 pub fn ensure_user_rust_transport_broker_transport_only(
     trusted_extension_origins: &[String],
@@ -1263,12 +1410,14 @@ pub fn ensure_user_rust_transport_broker_transport_only(
         hint: None,
     })?;
     let teshi_executable = resolve_teshi_cli_executable(&current_executable)?;
-    ensure_rust_transport_broker_at(
+    ensure_rust_broker_at(
         &chrome_broker_state_dir()?,
         &teshi_executable,
         trusted_extension_origins,
         CHROME_DISCOVERY_PORT,
         Duration::from_secs(10),
+        false,
+        false,
     )
 }
 
@@ -1332,8 +1481,8 @@ where
     })
 }
 
-/// Starts or reuses the per-user Chrome broker under an inter-process startup lock.
-pub fn ensure_user_chrome_broker(
+/// Starts or reuses the legacy Python Chrome broker under an inter-process startup lock.
+fn ensure_user_python_chrome_broker(
     project_root: &Path,
     browser_service_script: &Path,
 ) -> Result<ChromeBrokerEndpoint, BrowserError> {
@@ -1419,6 +1568,58 @@ pub fn ensure_user_chrome_broker(
     )?;
     persist_user_broker_endpoint(&endpoint)?;
     Ok(endpoint)
+}
+
+/// Starts or reuses the full Rust Chrome broker for an explicitly paired
+/// development/test session. Native clients still obtain their bearer
+/// credential from the private state record; it is never placed in the
+/// public endpoint returned by this function.
+#[doc(hidden)]
+pub fn ensure_user_rust_chrome_broker(
+    trusted_extension_origins: &[String],
+) -> Result<ChromeBrokerEndpoint, BrowserError> {
+    let current_executable = std::env::current_exe().map_err(|error| BrowserError {
+        message: format!("cannot locate the Teshi application executable: {error}"),
+        hint: None,
+    })?;
+    let teshi_executable = resolve_teshi_cli_executable(&current_executable)?;
+    ensure_rust_broker_at(
+        &chrome_broker_state_dir()?,
+        &teshi_executable,
+        trusted_extension_origins,
+        CHROME_DISCOVERY_PORT,
+        Duration::from_secs(10),
+        true,
+        true,
+    )
+}
+
+/// Starts or reuses the selected per-user Chrome broker under the shared
+/// inter-process startup lock.
+///
+/// Rust selection is explicit through
+/// `TESHI_BROWSER_BROKER_IMPLEMENTATION=rust` and requires exact paired
+/// origins in `TESHI_BROWSER_BROKER_EXTENSION_ORIGINS`. A failed Rust start is
+/// returned to the caller; it is never silently retried with Python. The
+/// legacy Python path remains the default until the later migration acceptance
+/// gates authorize changing the production selector.
+pub fn ensure_user_chrome_broker(
+    project_root: &Path,
+    browser_service_script: &Path,
+) -> Result<ChromeBrokerEndpoint, BrowserError> {
+    match std::env::var(CHROME_BROKER_IMPLEMENTATION_ENV).as_deref() {
+        Ok("rust") => {
+            let origins = configured_chrome_extension_origins()?;
+            ensure_user_rust_chrome_broker(&origins)
+        }
+        Ok("python") | Err(_) => ensure_user_python_chrome_broker(project_root, browser_service_script),
+        Ok(other) => Err(BrowserError {
+            message: format!(
+                "unsupported {CHROME_BROKER_IMPLEMENTATION_ENV} value {other:?}; expected rust or python"
+            ),
+            hint: Some("Choose one implementation explicitly; Teshi does not auto-fallback.".into()),
+        }),
+    }
 }
 
 /// Starts the browser sidecar for the open project in the given mode.
@@ -1968,6 +2169,19 @@ mod tests {
     }
 
     #[test]
+    fn configured_chrome_origins_are_exact_sorted_and_bounded() {
+        let first = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let second = "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        assert_eq!(
+            parse_configured_chrome_extension_origins(&format!(" {second}, {first} ")).unwrap(),
+            vec![first, second]
+        );
+        assert!(parse_configured_chrome_extension_origins("https://example.test").is_err());
+        assert!(parse_configured_chrome_extension_origins(&format!("{first},{first}")).is_err());
+        assert!(parse_configured_chrome_extension_origins("*").is_err());
+    }
+
+    #[test]
     fn discovery_websocket_urls_must_remain_local_and_correlated() {
         let local = "ws://127.0.0.1:43123/";
         let frames = "ws://127.0.0.1:43123/extension/frames";
@@ -2380,6 +2594,12 @@ mod tests {
     fn authenticated_sidecar_url_keeps_port_discoverable() {
         let address = ws_url_to_addr("ws://127.0.0.1:43123/?token=tk_secret").unwrap();
         assert_eq!(address.port(), 43123);
+    }
+
+    #[test]
+    fn already_authenticated_sidecar_url_is_not_rewritten() {
+        let url = "ws://127.0.0.1:43123/?token=tk_secret";
+        assert_eq!(authenticated_sidecar_ws_url(url).unwrap(), url);
     }
 
     #[test]

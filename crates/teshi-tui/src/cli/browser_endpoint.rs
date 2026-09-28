@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
-use teshi_engine::{ChromeBrokerEndpoint, send_sidecar_command_with_timeout, write_atomic};
+use teshi_engine::{
+    ChromeBrokerEndpoint, default_browser_service_script, ensure_user_chrome_broker,
+    send_sidecar_command_with_timeout, write_atomic,
+};
 
 const ENDPOINT_READ_ATTEMPTS: usize = 20;
 const ENDPOINT_READ_RETRY_DELAY: Duration = Duration::from_millis(5);
@@ -148,13 +151,22 @@ pub fn write_chrome_broker_endpoint(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
+    let bridge = if endpoint
+        .broker_features
+        .iter()
+        .any(|feature| feature == "transport.v1")
+    {
+        "rust"
+    } else {
+        "python"
+    };
     let payload = json!({
         "schema_version": endpoint.schema_version,
         "protocol_version": endpoint.protocol_version,
         "mode": endpoint.mode,
         "ws_url": endpoint.ws_url,
         "page_url": "about:blank",
-        "bridge": "python",
+        "bridge": bridge,
         "broker_pid": endpoint.broker_pid,
         "broker_start_id": endpoint.broker_start_id,
         "broker_features": endpoint.broker_features,
@@ -354,7 +366,7 @@ pub fn auto_reconnect_enabled() -> bool {
     )
 }
 
-/// Ensures the sidecar responds; attempts embedded reconnect once when doctor fails.
+/// Ensures the sidecar responds; attempts one mode-preserving reconnect when doctor fails.
 pub fn ensure_sidecar_healthy(project_root: &Path) -> Result<CdpEndpoint> {
     if doctor_endpoint(project_root).is_ok_and(|r| r.ok) {
         return read_cdp_endpoint(project_root);
@@ -367,6 +379,25 @@ pub fn ensure_sidecar_healthy(project_root: &Path) -> Result<CdpEndpoint> {
     let endpoint = read_cdp_endpoint(project_root).ok();
     if endpoint.as_ref().is_some_and(|e| e.mode == "embedded") {
         reconnect_embedded(project_root, None, 45)?;
+        if doctor_endpoint(project_root).is_ok_and(|r| r.ok) {
+            return read_cdp_endpoint(project_root);
+        }
+    }
+    if endpoint
+        .as_ref()
+        .is_some_and(|e| e.mode == "chrome" && e.bridge == "rust")
+    {
+        if std::env::var("TESHI_BROWSER_BROKER_IMPLEMENTATION").as_deref() != Ok("rust") {
+            return Err(anyhow!(
+                "Rust Chrome endpoint requires TESHI_BROWSER_BROKER_IMPLEMENTATION=rust for reconnect; Teshi will not fall back to Python"
+            ));
+        }
+        let broker = ensure_user_chrome_broker(project_root, &default_browser_service_script())
+            .map_err(|error| match error.hint {
+                Some(hint) => anyhow!("{} ({hint})", error.message),
+                None => anyhow!(error.message),
+            })?;
+        write_chrome_broker_endpoint(project_root, &broker)?;
         if doctor_endpoint(project_root).is_ok_and(|r| r.ok) {
             return read_cdp_endpoint(project_root);
         }
@@ -423,5 +454,18 @@ mod tests {
         let desktop = read_cdp_endpoint(second.path()).unwrap();
         assert_eq!(cli.broker_start_id, desktop.broker_start_id);
         assert_eq!(cli.ws_url, desktop.ws_url);
+        assert_eq!(cli.bridge, "python");
+    }
+
+    #[test]
+    fn rust_transport_endpoint_is_marked_without_persisting_a_credential() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut endpoint = broker_endpoint();
+        endpoint.broker_features.insert(0, "transport.v1".into());
+        write_chrome_broker_endpoint(temp.path(), &endpoint).unwrap();
+        let current = read_cdp_endpoint(temp.path()).unwrap();
+        assert_eq!(current.bridge, "rust");
+        let text = fs::read_to_string(current.endpoint_path).unwrap();
+        assert!(!text.contains("token"));
     }
 }

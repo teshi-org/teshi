@@ -29,17 +29,18 @@ use teshi_web_protocol::{
 
 use crate::session::{Role, SessionStore};
 use teshi_engine::{
-    check_project_switch_allowed, confirm_locator, default_api_service_script, delete_profile,
-    dispatch_cases, get_active_step, get_pending_locator, get_profile_public, get_project_root,
-    get_recent_projects, highlight_locator, list_dir, list_profiles, list_runnable_scenarios,
-    load_llm_config_public, load_project_settings, open_project, reject_locator, render_feature,
-    resize_terminal, save_profile, save_stored_llm_config, send_api_command, set_active_id,
-    spawn_terminal, start_browser_sidecar_with_options, step_binding_statuses,
-    stop_browser_sidecar, sync_active_step, teardown_runtime, unbind_step, validate_feature_scope,
-    write_terminal, ActiveStep, ApiStyle, BrowserError, BrowserMode, BrowserStartResult,
-    DeepSeekThinking, DirEntry, DispatchCase, LlmConfigPublic, LlmConfigWrite, ModelProfile,
-    ModelProfileList, ModelProfilePublic, PendingLocator, ProjectSettings, RuntimeEvent,
-    StepBinding, StepBindingStatus, TeshiEngine, PROVIDER_OPENAI,
+    authenticated_sidecar_ws_url, check_project_switch_allowed, confirm_locator,
+    default_api_service_script, delete_profile, dispatch_cases, get_active_step,
+    get_pending_locator, get_profile_public, get_project_root, get_recent_projects,
+    highlight_locator, list_dir, list_profiles, list_runnable_scenarios, load_llm_config_public,
+    load_project_settings, open_project, reject_locator, render_feature, resize_terminal,
+    save_profile, save_stored_llm_config, send_api_command, set_active_id, spawn_terminal,
+    start_browser_sidecar_with_options, step_binding_statuses, stop_browser_sidecar,
+    sync_active_step, teardown_runtime, unbind_step, validate_feature_scope, write_terminal,
+    ActiveStep, ApiStyle, BrowserError, BrowserMode, BrowserStartResult, DeepSeekThinking,
+    DirEntry, DispatchCase, LlmConfigPublic, LlmConfigWrite, ModelProfile, ModelProfileList,
+    ModelProfilePublic, PendingLocator, ProjectSettings, RuntimeEvent, StepBinding,
+    StepBindingStatus, TeshiEngine, PROVIDER_OPENAI,
 };
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
@@ -1851,7 +1852,20 @@ async fn handle_browser_stream_socket(
     active_ws.fetch_add(1, Ordering::Relaxed);
     let _guard = WsGuard(active_ws);
 
-    let mut upstream = match tokio_tungstenite::connect_async(&ws_url).await {
+    let authenticated_ws_url = match authenticated_sidecar_ws_url(&ws_url) {
+        Ok(url) => url,
+        Err(_error) => {
+            let payload = json!({
+                "type": "frame_error",
+                "error": "authenticate with preview sidecar failed",
+            });
+            let _ = downstream
+                .send(Message::Text(payload.to_string().into()))
+                .await;
+            return;
+        }
+    };
+    let mut upstream = match tokio_tungstenite::connect_async(&authenticated_ws_url).await {
         Ok((socket, _)) => socket,
         Err(_error) => {
             let payload = json!({
