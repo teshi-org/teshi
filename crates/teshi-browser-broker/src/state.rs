@@ -14,7 +14,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use crate::authorization::{self, AuthorizationState, Capability};
+use crate::authorization::{self, AuthorizationState, Capability, PrivilegedRequest};
 use crate::coordinator::{ActionMetadata, BrowserActionCoordinator};
 use crate::evidence::{EvidenceStore, NetworkBodyAccess};
 use crate::protocol::{
@@ -35,12 +35,13 @@ const MAX_PENDING_REQUESTS: usize = 128;
 const MAX_QUARANTINED_RESPONSES: usize = 32;
 const MAX_RETIRED_REQUESTS: usize = MAX_PENDING_REQUESTS * 8;
 const RETIRED_REQUEST_TTL: Duration = Duration::from_secs(600);
-const RUST_P0_EXECUTABLE_ACTIONS: [&str; 5] = [
+const RUST_P0_EXECUTABLE_ACTIONS: [&str; 6] = [
     "click",
     "pointer_click",
     "assert_visible",
     "assert_not_exists",
     "assert_text",
+    "upload",
 ];
 
 #[derive(Debug)]
@@ -96,6 +97,9 @@ pub struct BrokerState {
     /// removed with the pending request so a body cannot be fetched after a
     /// timeout, cancellation, lease transition, or capture cleanup.
     network_body_access: HashMap<String, NetworkBodyAccess>,
+    /// Operation-specific P2 result limits retained independently of the
+    /// compatibility PendingRequest shape.
+    privileged_requests: HashMap<String, PrivilegedRequest>,
     /// Memory-only short-lived authorization for privileged browser surfaces.
     authorization: AuthorizationState,
 }
@@ -565,6 +569,7 @@ impl BrokerState {
         broker_start_id: Option<&str>,
         response: ExtensionResponse,
     ) -> Value {
+        let mut response = response;
         if let Err(error) = response.validate() {
             self.quarantine(&response, "invalid_response");
             return error_value(error);
@@ -655,6 +660,7 @@ impl BrokerState {
         };
         let action_metadata = self.action_metadata.get(&request_id).cloned();
         let network_body_access = self.network_body_access.get(&request_id).cloned();
+        let privileged_request = self.privileged_requests.get(&request_id).cloned();
         self.retire_request(&request_id, Instant::now());
 
         let console_capture = if pending.operation == "start_console_capture" {
@@ -994,6 +1000,40 @@ impl BrokerState {
         } else {
             None
         };
+        if let Some(privileged_request) = privileged_request.as_ref() {
+            if response.ok
+                && let Err(error) = authorization::sanitize_privileged_response(
+                    &pending.operation,
+                    &mut response.result,
+                    privileged_request,
+                )
+            {
+                self.authorization.append_privileged_audit(
+                    privileged_request.audit_capability(),
+                    &pending.project_root,
+                    &pending.caller_label,
+                    serde_json::to_value(&pending.target).unwrap_or(Value::Null),
+                    &request_id,
+                    error.code.as_str(),
+                    privileged_request.audit_arguments(),
+                );
+                let _ = pending.reply.send(Err(error.clone()));
+                return error_value(error);
+            }
+            self.authorization.append_privileged_audit(
+                privileged_request.audit_capability(),
+                &pending.project_root,
+                &pending.caller_label,
+                serde_json::to_value(&pending.target).unwrap_or(Value::Null),
+                &request_id,
+                if response.ok {
+                    "succeeded"
+                } else {
+                    response.code.as_deref().unwrap_or("failed")
+                },
+                privileged_request.audit_arguments(),
+            );
+        }
         let mut value = serde_json::to_value(&response).unwrap_or_else(|_| json!({}));
         if let Value::Object(object) = &mut value {
             object.insert("type".into(), Value::String("response".into()));
@@ -1242,6 +1282,7 @@ impl BrokerState {
                 Some(self.revoke_capability_grant_response(&request))
             }
             "expire_browser_capability_grants" => Some(self.expire_capability_grants_response()),
+            "list_browser_privileged_audit" => Some(self.list_privileged_audit_response(&request)),
             "cancel_browser_request" => Some(self.cancel_request_response(&request)),
             "cleanup_browser_artifacts" => Some(self.cleanup_browser_artifacts_response(&request)),
             _ => None,
@@ -1350,6 +1391,59 @@ impl BrokerState {
         Ok(json!({
             "expired": self.authorization.expire(Instant::now()),
         }))
+    }
+
+    fn list_privileged_audit_response(
+        &self,
+        request: &OperationRequest,
+    ) -> Result<Value, BrokerError> {
+        let project = required_project_context(request)?;
+        let caller = required_caller_context(request)?;
+        let limit = request.arguments.get("limit").and_then(Value::as_u64);
+        Ok(json!({
+            "records": self
+                .authorization
+                .list_privileged_audit(&project, &caller, limit),
+        }))
+    }
+
+    fn record_privileged_audit(
+        &mut self,
+        request: &OperationRequest,
+        project: &str,
+        caller: &str,
+        outcome: &str,
+        arguments: Option<&Value>,
+    ) {
+        let include_cookie_values = request.operation == "list_browser_cookies"
+            && request
+                .arguments
+                .get("include_values")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        let Some(capability) = authorization::audit_capability_for_operation(
+            &request.operation,
+            include_cookie_values,
+        ) else {
+            return;
+        };
+        let audit_arguments = arguments.cloned().unwrap_or_else(|| {
+            authorization::audit_arguments_for_operation(&request.operation, &request.arguments)
+        });
+        let target = request
+            .target
+            .as_ref()
+            .and_then(|target| serde_json::to_value(target).ok())
+            .unwrap_or(Value::Null);
+        self.authorization.append_privileged_audit(
+            capability,
+            project,
+            caller,
+            target,
+            &request.request_id,
+            outcome,
+            &audit_arguments,
+        );
     }
 
     fn local_console_operation(
@@ -1706,6 +1800,8 @@ impl BrokerState {
             }
         };
         let mut action_plan = None;
+        let mut privileged_request = None;
+        let mut upload_files = None;
         let result = self
             .sessions
             .resolve_target(request.target.as_ref(), now)
@@ -1837,7 +1933,19 @@ impl BrokerState {
                         )?;
                     }
                 }
+                if let Some(prepared) = authorization::prepare_privileged_request(
+                    &request.operation,
+                    &request.arguments,
+                    &project,
+                )? {
+                    privileged_request = Some(prepared);
+                }
                 if request.operation == "execute_browser_action" {
+                    upload_files = authorization::validate_upload_files(
+                        &project,
+                        request.arguments.get("action"),
+                        request.arguments.get("files"),
+                    )?;
                     let session = self.sessions.get_mut(&instance_id).ok_or_else(|| {
                         BrokerError::new(
                             BrokerErrorCode::BrowserTargetNotFound,
@@ -1865,6 +1973,13 @@ impl BrokerState {
         let (instance_id, target) = match result {
             Ok(value) => value,
             Err(error) => {
+                self.record_privileged_audit(
+                    &request,
+                    &project,
+                    &caller,
+                    error.code.as_str(),
+                    None,
+                );
                 let _ = reply.send(Err(error));
                 return;
             }
@@ -2032,6 +2147,38 @@ impl BrokerState {
                 }
             },
         };
+        let mut command = command;
+        if let Some(files) = upload_files
+            && let Value::Object(object) = &mut command
+        {
+            object.insert(
+                "files".into(),
+                Value::Array(files.into_iter().map(Value::String).collect()),
+            );
+        }
+        if let Some(privileged) = privileged_request.as_ref()
+            && let Value::Object(object) = &mut command
+        {
+            if let Some(method) = privileged.normalized_method() {
+                object.insert("method".into(), Value::String(method.into()));
+            }
+            if let Some(setting) = privileged.normalized_setting() {
+                object.insert("setting".into(), Value::String(setting.into()));
+            }
+            if let Some(max_entries) = privileged.max_entries() {
+                object.insert("max_entries".into(), Value::from(max_entries));
+            }
+            if matches!(
+                request.operation.as_str(),
+                "execute_privileged_javascript" | "execute_privileged_cdp" | "list_browser_cookies"
+            ) {
+                object.insert(
+                    "max_result_bytes".into(),
+                    Value::from(privileged.max_result_bytes()),
+                );
+            }
+            object.remove("source_kind");
+        }
         if is_evidence_operation(&request.operation) {
             let expected_revision = request
                 .arguments
@@ -2052,6 +2199,10 @@ impl BrokerState {
                 let _ = reply.send(Err(error));
                 return;
             }
+        }
+        if let Some(privileged_request) = privileged_request {
+            self.privileged_requests
+                .insert(request.request_id.clone(), privileged_request);
         }
         self.pending.insert(
             request.request_id.clone(),
@@ -2370,6 +2521,7 @@ impl BrokerState {
         self.action_metadata.remove(request_id);
         self.dispatched_actions.remove(request_id);
         self.network_body_access.remove(request_id);
+        self.privileged_requests.remove(request_id);
         self.retired_requests.insert(request_id.to_owned(), now);
         while self.retired_requests.len() > MAX_RETIRED_REQUESTS {
             let oldest = self
@@ -2561,6 +2713,7 @@ fn build_extension_command(
     object.remove("lease_token");
     object.remove("capability_grant_token");
     object.remove("value_capability_grant_token");
+    object.remove("source_kind");
     if request.operation == "execute_browser_action" {
         let fallback_locator;
         let locator = if let Some(locator) = resolved_locator {
@@ -3429,6 +3582,78 @@ mod tests {
         assert_eq!(command["cmd"], "execute_privileged_javascript");
         assert!(command.get("capability_grant_token").is_none());
         assert!(command.get("value_capability_grant_token").is_none());
+    }
+
+    #[tokio::test]
+    async fn privileged_response_is_redacted_and_recorded_as_metadata_only() {
+        let project = tempfile::tempdir().unwrap();
+        let project_root = project.path().to_string_lossy().into_owned();
+        let now = Instant::now();
+        let mut state = BrokerState::new();
+        state.sessions.register_heartbeat(heartbeat(), now).unwrap();
+        state.sessions.attach_stream("profile-a", 7, now).unwrap();
+        let request_id = "cookies-state-1";
+        let (reply, receiver) = oneshot::channel();
+        state.pending.insert(
+            request_id.into(),
+            PendingRequest {
+                operation: "list_browser_cookies".into(),
+                extension_instance_id: "profile-a".into(),
+                target: target(),
+                project_root: project_root.clone(),
+                caller_label: "caller-a".into(),
+                lease_token: Some("lease-secret".into()),
+                snapshot_id: None,
+                stream_generation: Some(7),
+                fallback_generation: None,
+                console_capture_id: None,
+                deadline: now + Duration::from_secs(30),
+                reply,
+            },
+        );
+        let request: OperationRequest = serde_json::from_value(json!({
+            "request_id": request_id,
+            "caller_label": "caller-a",
+            "project_root": project_root,
+            "cmd": "list_browser_cookies",
+            "target": target(),
+            "lease_token": "lease-secret",
+            "include_values": false,
+            "max_entries": 1
+        }))
+        .unwrap();
+        let prepared = authorization::prepare_privileged_request(
+            &request.operation,
+            &request.arguments,
+            request.project_root.as_deref().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        state
+            .privileged_requests
+            .insert(request_id.into(), prepared);
+        let mut response = extension_response(request_id, "list_browser_cookies", target());
+        response.result.insert(
+            "cookies".into(),
+            json!([
+                {"name": "sid", "value": "secret"},
+                {"name": "other", "value": "hidden"}
+            ]),
+        );
+        assert_eq!(
+            state.handle_extension_response("profile-a", Some(7), response)["ok"],
+            true
+        );
+        let completed = receiver.await.unwrap().unwrap();
+        assert!(completed["cookies"][0].get("value").is_none());
+        assert_eq!(completed["cookies"][0]["value_redacted"], true);
+        let audit = state.authorization.list_privileged_audit(
+            request.project_root.as_deref().unwrap(),
+            "caller-a",
+            None,
+        );
+        assert_eq!(audit.len(), 1);
+        assert!(!serde_json::to_string(&audit).unwrap().contains("secret"));
     }
 
     #[test]

@@ -111,6 +111,8 @@ impl BrowserActionCoordinator {
             })?,
         );
         object.remove("lease_token");
+        object.remove("capability_grant_token");
+        object.remove("value_capability_grant_token");
         object.remove("element");
         object.insert("action".into(), Value::String(locator.action.clone()));
         if let Some(selector) = &locator.selector {
