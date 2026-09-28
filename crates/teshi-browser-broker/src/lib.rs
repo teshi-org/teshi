@@ -4,6 +4,7 @@
 //! daemon entry points host it; protocol records here are the server-side wire
 //! boundary shared with the extension and existing typed Rust client.
 
+pub mod authorization;
 pub(crate) mod coordinator;
 pub mod credential;
 pub mod evidence;
@@ -12,6 +13,9 @@ pub mod server;
 pub mod session;
 pub mod state;
 
+pub use authorization::{
+    AuthorizationState, Capability, ProjectPolicy, canonical_project_root, load_project_policy,
+};
 pub use credential::{PrivateBrokerCredential, PrivateCredentialStore};
 pub use evidence::{ConsoleCaptureConfig, EvidenceStore, NetworkCaptureConfig, PreparedArtifact};
 pub use protocol::{

@@ -14,6 +14,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+use crate::authorization::{self, AuthorizationState, Capability};
 use crate::coordinator::{ActionMetadata, BrowserActionCoordinator};
 use crate::evidence::{EvidenceStore, NetworkBodyAccess};
 use crate::protocol::{
@@ -95,6 +96,8 @@ pub struct BrokerState {
     /// removed with the pending request so a body cannot be fetched after a
     /// timeout, cancellation, lease transition, or capture cleanup.
     network_body_access: HashMap<String, NetworkBodyAccess>,
+    /// Memory-only short-lived authorization for privileged browser surfaces.
+    authorization: AuthorizationState,
 }
 
 impl BrokerState {
@@ -1229,6 +1232,16 @@ impl BrokerState {
             "acquire_browser_lease" => Some(self.acquire_lease_response(&request, runtime)),
             "renew_browser_lease" => Some(self.renew_lease_response(&request, runtime)),
             "release_browser_lease" => Some(self.release_lease_response(&request, runtime)),
+            "create_browser_capability_grant" => {
+                Some(self.create_capability_grant_response(&request, runtime))
+            }
+            "list_browser_capability_grants" => {
+                Some(self.list_capability_grants_response(&request))
+            }
+            "revoke_browser_capability_grant" => {
+                Some(self.revoke_capability_grant_response(&request))
+            }
+            "expire_browser_capability_grants" => Some(self.expire_capability_grants_response()),
             "cancel_browser_request" => Some(self.cancel_request_response(&request)),
             "cleanup_browser_artifacts" => Some(self.cleanup_browser_artifacts_response(&request)),
             _ => None,
@@ -1269,6 +1282,74 @@ impl BrokerState {
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.evidence.cleanup_managed(&project, &caller, &paths)
+    }
+
+    fn create_capability_grant_response(
+        &mut self,
+        request: &OperationRequest,
+        runtime: &BrokerRuntime,
+    ) -> Result<Value, BrokerError> {
+        let now = Instant::now();
+        let (instance_id, _target, _) =
+            self.sessions.resolve_target(request.target.as_ref(), now)?;
+        let project = required_project_context(request)?;
+        let caller = required_caller_context(request)?;
+        let lease_token = request_lease_token(request)?;
+        let generation = runtime.endpoint_record().broker_start_id;
+        self.validate_lease(&instance_id, &lease_token, &project, &caller, &generation)?;
+        let capability = Capability::parse(&argument_string(&request.arguments, "capability")?)?;
+        let grant = self.authorization.issue(
+            capability,
+            &instance_id,
+            &project,
+            &caller,
+            &generation,
+            request.arguments.get("ttl_secs").and_then(Value::as_u64),
+            request
+                .arguments
+                .get("interactive_confirmed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            request
+                .arguments
+                .get("non_interactive")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            request
+                .arguments
+                .get("acknowledged_capability")
+                .and_then(Value::as_str),
+            &authorization::load_project_policy(&project),
+        )?;
+        Ok(json!({"grant": grant}))
+    }
+
+    fn list_capability_grants_response(
+        &mut self,
+        request: &OperationRequest,
+    ) -> Result<Value, BrokerError> {
+        let project = required_project_context(request)?;
+        let extension_instance_id =
+            argument_string_optional(&request.arguments, "extension_instance_id");
+        let grants = self
+            .authorization
+            .list(&project, extension_instance_id.as_deref());
+        Ok(json!({"grants": grants}))
+    }
+
+    fn revoke_capability_grant_response(
+        &mut self,
+        request: &OperationRequest,
+    ) -> Result<Value, BrokerError> {
+        let project = required_project_context(request)?;
+        let grant_id = argument_string(&request.arguments, "grant_id")?;
+        self.authorization.revoke(&grant_id, &project)
+    }
+
+    fn expire_capability_grants_response(&mut self) -> Result<Value, BrokerError> {
+        Ok(json!({
+            "expired": self.authorization.expire(Instant::now()),
+        }))
     }
 
     fn local_console_operation(
@@ -1629,17 +1710,27 @@ impl BrokerState {
             .sessions
             .resolve_target(request.target.as_ref(), now)
             .and_then(|(instance_id, target, _)| {
-                let session = self.sessions.get(&instance_id).ok_or_else(|| {
-                    BrokerError::new(
-                        BrokerErrorCode::BrowserTargetNotFound,
-                        "browser session was not found",
+                let (session_supports_control, session_features, supported_operations,
+                    optional_permissions) = {
+                    let session = self.sessions.get(&instance_id).ok_or_else(|| {
+                        BrokerError::new(
+                            BrokerErrorCode::BrowserTargetNotFound,
+                            "browser session was not found",
+                        )
+                    })?;
+                    (
+                        session.supports_feature("p0.control"),
+                        session.features().to_vec(),
+                        session.supported_operations().to_vec(),
+                        session.optional_permissions().clone(),
                     )
-                })?;
+                };
                 if !runtime
                     .endpoint_record()
                     .broker_features
                     .iter()
                     .any(|feature| feature == "p0.control")
+                    || !session_supports_control
                 {
                     return Err(BrokerError::new(
                         BrokerErrorCode::BrowserCapabilityUnavailable,
@@ -1653,7 +1744,9 @@ impl BrokerState {
                         .broker_features
                         .iter()
                         .any(|feature| feature == &required_feature)
-                        || !session.supports_feature(&required_feature)
+                        || !session_features
+                            .iter()
+                            .any(|feature| feature.feature == required_feature && feature.available)
                     {
                         return Err(BrokerError::new(
                             BrokerErrorCode::BrowserCapabilityUnavailable,
@@ -1664,8 +1757,7 @@ impl BrokerState {
                     }
                 }
                 if requires_extension_operation_advertisement(&request.operation)
-                    && !session
-                        .supported_operations()
+                    && !supported_operations
                         .iter()
                         .any(|operation| operation == &request.operation)
                 {
@@ -1686,6 +1778,64 @@ impl BrokerState {
                         )
                     })?;
                     self.validate_lease(&instance_id, token, &project, &caller, &generation)?;
+                }
+                let include_cookie_values = request.operation == "list_browser_cookies"
+                    && request
+                        .arguments
+                        .get("include_values")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                if let Some(capability) = authorization::capability_for_operation(
+                    &request.operation,
+                    include_cookie_values,
+                ) {
+                    if let Some(permission) = capability.optional_permission() {
+                        authorization::require_optional_permission(
+                            optional_permissions
+                                .get(permission)
+                                .copied()
+                                .unwrap_or(false),
+                            permission,
+                        )?;
+                    }
+                    let token = request
+                        .arguments
+                        .get("capability_grant_token")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            BrokerError::new(
+                                BrokerErrorCode::BrowserCapabilityDenied,
+                                "a valid capability grant is required",
+                            )
+                        })?;
+                    self.authorization.validate(
+                        token,
+                        capability,
+                        &instance_id,
+                        &project,
+                        &caller,
+                        &generation,
+                    )?;
+                    if capability == Capability::Cookies && include_cookie_values {
+                        let value_token = request
+                            .arguments
+                            .get("value_capability_grant_token")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| {
+                                BrokerError::new(
+                                    BrokerErrorCode::BrowserCapabilityDenied,
+                                    "a cookie-values capability grant is required",
+                                )
+                            })?;
+                        self.authorization.validate(
+                            value_token,
+                            Capability::CookieValues,
+                            &instance_id,
+                            &project,
+                            &caller,
+                            &generation,
+                        )?;
+                    }
                 }
                 if request.operation == "execute_browser_action" {
                     let session = self.sessions.get_mut(&instance_id).ok_or_else(|| {
@@ -2409,6 +2559,8 @@ fn build_extension_command(
     );
     object.insert("target".into(), serde_json::to_value(target).unwrap());
     object.remove("lease_token");
+    object.remove("capability_grant_token");
+    object.remove("value_capability_grant_token");
     if request.operation == "execute_browser_action" {
         let fallback_locator;
         let locator = if let Some(locator) = resolved_locator {
@@ -3258,6 +3410,25 @@ mod tests {
         assert_eq!(command["target"], json!(target()));
         assert!(command.get("element").is_none());
         assert!(command.get("lease_token").is_none());
+    }
+
+    #[test]
+    fn privileged_grant_tokens_never_enter_extension_commands() {
+        let request: OperationRequest = serde_json::from_value(json!({
+            "request_id": "privileged-command",
+            "caller_label": "caller-a",
+            "project_root": "C:/project-a",
+            "cmd": "execute_privileged_javascript",
+            "target": target(),
+            "lease_token": "lease-secret",
+            "capability_grant_token": "grant-secret",
+            "expression": "document.title"
+        }))
+        .unwrap();
+        let command = build_extension_command(&request, &target(), "profile-a", None).unwrap();
+        assert_eq!(command["cmd"], "execute_privileged_javascript");
+        assert!(command.get("capability_grant_token").is_none());
+        assert!(command.get("value_capability_grant_token").is_none());
     }
 
     #[test]

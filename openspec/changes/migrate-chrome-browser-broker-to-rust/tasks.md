@@ -43,7 +43,7 @@
 
 ## 6. Port Privileged Authorization and Security Controls
 
-- [ ] 6.1 Port project policy loading, typed capability grants, expiry/revocation, OS-user/broker/project/caller/Profile binding, and optional Chrome permission checks.
+- [x] 6.1 Port project policy loading, typed capability grants, expiry/revocation, OS-user/broker/project/caller/Profile binding, and optional Chrome permission checks.
 - [ ] 6.2 Port raw CDP method allowlists, JavaScript/Cookie/content-setting/extension metadata gates, upload scope, artifact access, and redacted audit records.
 - [ ] 6.3 Add negative integration tests for hostile origins, stale tokens, path traversal/symlink escape, malformed targets, oversized frames, unknown fields/operations, grant revocation, and post-disconnect reuse.
 - [ ] 6.4 Verify the existing extension permissions remain explicit and no protocol-v0 compatibility path bypasses current authorization.
