@@ -15,6 +15,14 @@ const fixtures = JSON.parse(
 
 test("manifest permits persisted profile-local identity and debugger access", () => {
   assert.equal(manifest.manifest_version, 3);
+  assert.deepEqual([...manifest.permissions].sort(), [
+    "activeTab",
+    "alarms",
+    "debugger",
+    "storage",
+    "tabGroups",
+    "tabs",
+  ]);
   assert.ok(manifest.permissions.includes("storage"));
   assert.ok(manifest.permissions.includes("debugger"));
 });

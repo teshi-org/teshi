@@ -1,9 +1,12 @@
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-use teshi_browser_broker::{BrokerEvent, BrokerRuntime, BrokerServerConfig};
+use teshi_browser_broker::protocol::{BrokerError, BrokerErrorCode, OperationRequest};
+use teshi_browser_broker::{BrokerEvent, BrokerRuntime, BrokerServerConfig, BrokerState};
+use tokio::sync::{Semaphore, oneshot};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -47,6 +50,29 @@ async fn read_json(socket: &mut TestSocket) -> Value {
             return serde_json::from_str(text.as_str()).expect("broker response is JSON");
         }
     }
+}
+
+async fn run_operation(
+    state: &mut BrokerState,
+    runtime: &BrokerRuntime,
+    request: OperationRequest,
+) -> Result<Value, BrokerError> {
+    let (reply, receiver) = oneshot::channel();
+    let budget = Arc::new(Semaphore::new(1))
+        .acquire_owned()
+        .await
+        .expect("operation budget");
+    state
+        .handle(
+            BrokerEvent::Operation {
+                request,
+                reply,
+                _budget: budget,
+            },
+            runtime,
+        )
+        .await;
+    receiver.await.expect("operation reply")
 }
 
 #[tokio::test]
@@ -238,5 +264,131 @@ async fn configured_websocket_limit_closes_oversized_extension_messages() {
     {
         panic!("oversized messages must not enqueue a browser operation");
     }
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn protocol_v0_cannot_attach_a_stream_or_bypass_current_authorization() {
+    let mut config = test_config();
+    config.broker_features = vec!["p0.control".into(), "p2.cookies".into()];
+    let mut runtime = BrokerRuntime::start(config)
+        .await
+        .expect("start test broker");
+
+    let mut stream_request = extension_ws_url(&runtime, runtime.credential())
+        .into_client_request()
+        .expect("build extension WebSocket request");
+    stream_request.headers_mut().insert(
+        ORIGIN,
+        HeaderValue::from_str(&format!("chrome-extension://{EXTENSION_ID}"))
+            .expect("valid test Origin header"),
+    );
+    let (mut stream, _) = connect_async(stream_request)
+        .await
+        .expect("connect extension WebSocket");
+    stream
+        .send(Message::Text(
+            json!({
+                "type": "stream_hello",
+                "protocol_version": 0,
+                "extension_instance_id": "legacy-single-session",
+                "extension_version": "legacy"
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send protocol-v0 hello");
+    let rejected = read_json(&mut stream).await;
+    assert_eq!(rejected["code"], "incompatible_browser_session");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), runtime.next_event())
+            .await
+            .is_err(),
+        "protocol-v0 stream hello must not reach the state owner"
+    );
+
+    let mut state = BrokerState::new();
+    let legacy_id = state
+        .sessions
+        .register_heartbeat(
+            serde_json::from_value(json!({
+                "windows": [{
+                    "id": 7,
+                    "focused": true,
+                    "tabs": [{
+                        "id": 42,
+                        "window_id": 7,
+                        "url": "https://legacy.example.test/",
+                        "active": true,
+                        "debuggable": true
+                    }]
+                }],
+                "active_window_id": 7,
+                "active_tab_id": 42,
+                "features": [
+                    {"feature": "p0.control", "available": true},
+                    {"feature": "p2.cookies", "available": true}
+                ],
+                "supported_operations": ["list_browser_cookies"],
+                "optional_permissions": {"cookies": true}
+            }))
+            .expect("legacy heartbeat payload"),
+            Instant::now(),
+        )
+        .expect("register protocol-v0 heartbeat");
+    assert_eq!(legacy_id, "legacy-single-session");
+
+    let target = json!({
+        "extension_instance_id": "legacy-single-session",
+        "window_id": 7,
+        "tab_id": 42
+    });
+    let missing_lease: OperationRequest = serde_json::from_value(json!({
+        "schema_version": 1,
+        "request_id": "legacy-p0-without-lease",
+        "caller_label": "legacy-caller",
+        "project_root": "C:/legacy-project",
+        "cmd": "get_page_snapshot",
+        "target": target
+    }))
+    .expect("legacy P0 request");
+    let error = run_operation(&mut state, &runtime, missing_lease)
+        .await
+        .expect_err("protocol-v0 P0 request bypassed the lease gate");
+    assert_eq!(error.code, BrokerErrorCode::InvalidBrowserLease);
+
+    let acquired: OperationRequest = serde_json::from_value(json!({
+        "schema_version": 1,
+        "request_id": "legacy-lease",
+        "caller_label": "legacy-caller",
+        "project_root": "C:/legacy-project",
+        "cmd": "acquire_browser_lease",
+        "extension_instance_id": "legacy-single-session",
+        "owner_label": "legacy-caller"
+    }))
+    .expect("legacy lease request");
+    let lease = run_operation(&mut state, &runtime, acquired)
+        .await
+        .expect("legacy lease acquisition")["lease_token"]
+        .as_str()
+        .expect("lease token")
+        .to_owned();
+
+    let missing_grant: OperationRequest = serde_json::from_value(json!({
+        "schema_version": 1,
+        "request_id": "legacy-p2-without-grant",
+        "caller_label": "legacy-caller",
+        "project_root": "C:/legacy-project",
+        "cmd": "list_browser_cookies",
+        "target": target,
+        "lease_token": lease
+    }))
+    .expect("legacy P2 request");
+    let error = run_operation(&mut state, &runtime, missing_grant)
+        .await
+        .expect_err("protocol-v0 P2 request bypassed the capability gate");
+    assert_eq!(error.code, BrokerErrorCode::BrowserCapabilityDenied);
+
     runtime.shutdown().await;
 }
