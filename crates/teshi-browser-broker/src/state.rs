@@ -1238,6 +1238,14 @@ impl BrokerState {
         reply: oneshot::Sender<Result<Value, BrokerError>>,
         runtime: &BrokerRuntime,
     ) {
+        // The WebSocket transport validates the envelope before queueing it, but
+        // BrokerEvent is also an internal/public typed boundary used by the
+        // shared entry points. Re-check here so a caller cannot bypass the
+        // operation allowlist or version gate by constructing an event directly.
+        if let Err(error) = request.validate() {
+            let _ = reply.send(Err(error));
+            return;
+        }
         if self.pending.contains_key(&request.request_id)
             || self.retired_requests.contains_key(&request.request_id)
         {

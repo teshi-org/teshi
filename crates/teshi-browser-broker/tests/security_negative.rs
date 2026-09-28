@@ -392,3 +392,36 @@ async fn protocol_v0_cannot_attach_a_stream_or_bypass_current_authorization() {
 
     runtime.shutdown().await;
 }
+
+#[tokio::test]
+async fn state_owner_rechecks_operation_envelope_before_dispatch() {
+    let runtime = BrokerRuntime::start(test_config())
+        .await
+        .expect("start test broker");
+    let mut state = BrokerState::new();
+
+    let unknown: OperationRequest = serde_json::from_value(json!({
+        "schema_version": 1,
+        "request_id": "state-unknown-operation",
+        "cmd": "delete_all_files"
+    }))
+    .expect("unknown operation envelope");
+    let error = run_operation(&mut state, &runtime, unknown)
+        .await
+        .expect_err("state owner accepted an unknown operation");
+    assert_eq!(error.code, BrokerErrorCode::InvalidBrowserOperation);
+
+    let incompatible: OperationRequest = serde_json::from_value(json!({
+        "schema_version": 2,
+        "request_id": "state-incompatible-schema",
+        "cmd": "list_browser_sessions"
+    }))
+    .expect("incompatible operation envelope");
+    let error = run_operation(&mut state, &runtime, incompatible)
+        .await
+        .expect_err("state owner accepted an incompatible schema");
+    assert_eq!(error.code, BrokerErrorCode::IncompatibleBrowserSession);
+
+    assert!(state.sessions.list_public(Instant::now()).is_empty());
+    runtime.shutdown().await;
+}

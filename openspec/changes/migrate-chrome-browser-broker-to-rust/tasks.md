@@ -47,7 +47,7 @@
 - [x] 6.2 Port raw CDP method allowlists, JavaScript/Cookie/content-setting/extension metadata gates, upload scope, artifact access, and redacted audit records.
 - [x] 6.3 Add negative integration tests for hostile origins, stale tokens, path traversal/symlink escape, malformed targets, oversized frames, unknown fields/operations, grant revocation, and post-disconnect reuse.
 - [x] 6.4 Verify the existing extension permissions remain explicit and no protocol-v0 compatibility path bypasses current authorization.
-- [ ] 6.5 Complete security review of discovery, endpoint permissions, logs, request scoping, and actual server-side checks before production routing changes.
+- [x] 6.5 Complete security review of discovery, endpoint permissions, logs, request scoping, and actual server-side checks before production routing changes.
 
 ## 7. Integrate All Teshi Entry Points
 
