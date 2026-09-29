@@ -265,28 +265,71 @@ pub fn send_sidecar_command_with_timeout(
         .and_then(serde_json::Value::as_str);
     let authenticated_url = authenticated_sidecar_ws_url(ws_url)?;
     let (mut socket, _) = connect(&authenticated_url).map_err(|error| {
-        let detail = error.to_string();
-        detail.replace(&authenticated_url, ws_url)
+        sidecar_transport_error(
+            "websocket_handshake_failed",
+            error,
+            &authenticated_url,
+            ws_url,
+        )
     })?;
     socket
         .send(Message::Text(command.to_string()))
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| {
+            sidecar_transport_error(
+                "websocket_closed_before_command",
+                error,
+                &authenticated_url,
+                ws_url,
+            )
+        })?;
 
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
-        let message = socket.read().map_err(|e| e.to_string())?;
-        if let Message::Text(text) = message {
-            let payload: serde_json::Value =
-                serde_json::from_str(&text).map_err(|e| e.to_string())?;
-            if is_terminal_sidecar_response(&payload, expected_request_id) {
-                return Ok(payload);
+        let message = socket.read().map_err(|error| {
+            sidecar_transport_error(
+                "websocket_closed_before_command",
+                error,
+                &authenticated_url,
+                ws_url,
+            )
+        })?;
+        match message {
+            Message::Text(text) => {
+                let payload: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+                    format!("websocket_protocol_error: invalid JSON response: {error}")
+                })?;
+                if is_terminal_sidecar_response(&payload, expected_request_id) {
+                    return Ok(payload);
+                }
             }
+            Message::Close(frame) => {
+                let close_code = frame
+                    .map(|frame| format!("{:?}", frame.code))
+                    .unwrap_or_else(|| "none".into());
+                return Err(format!(
+                    "websocket_closed_before_command: stage=awaiting_response close_code={close_code}"
+                ));
+            }
+            Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
         }
     }
     let secs = timeout.as_secs();
     Err(format!(
         "browser sidecar did not respond within {secs}s (CLI timeout; check extension heartbeat if using Connect Chrome)"
     ))
+}
+
+fn sidecar_transport_error(
+    code: &str,
+    error: impl std::fmt::Display,
+    authenticated_url: &str,
+    public_url: &str,
+) -> String {
+    let detail = error.to_string().replace(authenticated_url, public_url);
+    if detail.contains("token=") {
+        return format!("{code}: broker credential redacted");
+    }
+    format!("{code}: {detail}")
 }
 
 /// Adds the private generation-bound credential only when a URL identifies the
@@ -300,29 +343,83 @@ pub fn authenticated_sidecar_ws_url(ws_url: &str) -> Result<String, String> {
         return Ok(ws_url.to_owned());
     }
 
+    let rust_selected = std::env::var(CHROME_BROKER_IMPLEMENTATION_ENV)
+        .is_ok_and(|value| value.eq_ignore_ascii_case("rust"));
     let endpoint_path = match chrome_broker_endpoint_path() {
         Ok(path) => path,
+        Err(error) if rust_selected => {
+            return Err(format!("broker_endpoint_unavailable: {}", error.message));
+        }
         Err(_) => return Ok(ws_url.to_owned()),
     };
+    let state_dir = match chrome_broker_state_dir() {
+        Ok(path) => path,
+        Err(error) if rust_selected => {
+            return Err(format!(
+                "broker_private_credential_unavailable: {}",
+                error.message
+            ));
+        }
+        Err(_) => return Ok(ws_url.to_owned()),
+    };
+    authenticated_sidecar_ws_url_from_paths(ws_url, rust_selected, &endpoint_path, &state_dir)
+}
+
+fn authenticated_sidecar_ws_url_from_paths(
+    ws_url: &str,
+    rust_selected: bool,
+    endpoint_path: &Path,
+    state_dir: &Path,
+) -> Result<String, String> {
+    let parsed = url::Url::parse(ws_url).map_err(|error| error.to_string())?;
     let endpoint_text = match std::fs::read_to_string(endpoint_path) {
         Ok(text) => text,
+        Err(error) if rust_selected => {
+            return Err(format!(
+                "broker_endpoint_unavailable: cannot read Rust Chrome broker endpoint ({error})"
+            ));
+        }
         Err(_) => return Ok(ws_url.to_owned()),
     };
     let endpoint: ChromeBrokerEndpoint = match serde_json::from_str(&endpoint_text) {
         Ok(endpoint) => endpoint,
+        Err(error) if rust_selected => {
+            return Err(format!(
+                "broker_endpoint_invalid: Rust Chrome broker endpoint is not valid JSON ({error})"
+            ));
+        }
         Err(_) => return Ok(ws_url.to_owned()),
     };
-    if endpoint.ws_url != ws_url
-        || !endpoint
-            .broker_features
-            .iter()
-            .any(|feature| feature == "transport.v1")
+    if endpoint.ws_url != ws_url {
+        if rust_selected {
+            return Err(
+                "broker_endpoint_mismatch: Rust Chrome broker endpoint does not match the active WebSocket"
+                    .into(),
+            );
+        }
+        return Ok(ws_url.to_owned());
+    }
+    if endpoint.mode != "chrome" {
+        if rust_selected {
+            return Err("broker_endpoint_mismatch: Rust broker endpoint is not Chrome mode".into());
+        }
+        return Ok(ws_url.to_owned());
+    }
+    if !endpoint
+        .broker_features
+        .iter()
+        .any(|feature| feature == "transport.v1")
     {
+        if rust_selected {
+            return Err(
+                "broker_transport_incompatible: Rust Chrome broker does not advertise transport.v1"
+                    .into(),
+            );
+        }
         return Ok(ws_url.to_owned());
     }
 
-    let state_dir = chrome_broker_state_dir().map_err(|error| error.message)?;
-    let credential_store = PrivateCredentialStore::new(&state_dir);
+    let credential_store = PrivateCredentialStore::new(state_dir);
     let public_record = EndpointRecord {
         schema_version: endpoint.schema_version,
         protocol_version: endpoint.protocol_version,
@@ -339,12 +436,12 @@ pub fn authenticated_sidecar_ws_url(ws_url: &str) -> Result<String, String> {
         .read_for_endpoint(&public_record)
         .map_err(|error| {
             format!(
-                "Rust Chrome broker credential is unavailable: {}",
+                "broker_private_credential_missing: Rust Chrome broker credential is unavailable: {}",
                 error.message
             )
         })?;
     verify_rust_broker_identity(&endpoint, &credential, &public_record)
-        .map_err(|error| error.message)?;
+        .map_err(|error| format!("broker_identity_mismatch: {}", error.message))?;
     let mut authenticated = parsed;
     authenticated
         .query_pairs_mut()
@@ -2600,6 +2697,93 @@ mod tests {
     fn already_authenticated_sidecar_url_is_not_rewritten() {
         let url = "ws://127.0.0.1:43123/?token=tk_secret";
         assert_eq!(authenticated_sidecar_ws_url(url).unwrap(), url);
+    }
+
+    #[test]
+    fn rust_authentication_fails_closed_for_broken_endpoint_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_path = temp.path().join("endpoint.json");
+        let state_dir = temp.path().join("private-state");
+        let ws_url = "ws://127.0.0.1:23456";
+
+        let missing =
+            authenticated_sidecar_ws_url_from_paths(ws_url, true, &endpoint_path, &state_dir)
+                .unwrap_err();
+        assert!(missing.starts_with("broker_endpoint_unavailable:"));
+
+        std::fs::write(&endpoint_path, b"not-json").unwrap();
+        let malformed =
+            authenticated_sidecar_ws_url_from_paths(ws_url, true, &endpoint_path, &state_dir)
+                .unwrap_err();
+        assert!(malformed.starts_with("broker_endpoint_invalid:"));
+
+        let mut mismatched = endpoint("rust-generation");
+        mismatched.ws_url = "ws://127.0.0.1:23457".into();
+        mismatched.broker_features = vec!["transport.v1".into()];
+        std::fs::write(&endpoint_path, serde_json::to_vec(&mismatched).unwrap()).unwrap();
+        let mismatch =
+            authenticated_sidecar_ws_url_from_paths(ws_url, true, &endpoint_path, &state_dir)
+                .unwrap_err();
+        assert!(mismatch.starts_with("broker_endpoint_mismatch:"));
+
+        mismatched.ws_url = ws_url.into();
+        std::fs::write(&endpoint_path, serde_json::to_vec(&mismatched).unwrap()).unwrap();
+        let missing_credential =
+            authenticated_sidecar_ws_url_from_paths(ws_url, true, &endpoint_path, &state_dir)
+                .unwrap_err();
+        assert!(missing_credential.starts_with("broker_private_credential_missing:"));
+
+        mismatched.broker_features = vec!["p0.control".into()];
+        std::fs::write(&endpoint_path, serde_json::to_vec(&mismatched).unwrap()).unwrap();
+        let incompatible =
+            authenticated_sidecar_ws_url_from_paths(ws_url, true, &endpoint_path, &state_dir)
+                .unwrap_err();
+        assert!(incompatible.starts_with("broker_transport_incompatible:"));
+    }
+
+    #[test]
+    fn legacy_authentication_keeps_unauthenticated_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_path = temp.path().join("endpoint.json");
+        let state_dir = temp.path().join("private-state");
+        let ws_url = "ws://127.0.0.1:23456";
+
+        assert_eq!(
+            authenticated_sidecar_ws_url_from_paths(ws_url, false, &endpoint_path, &state_dir,)
+                .unwrap(),
+            ws_url
+        );
+
+        std::fs::write(&endpoint_path, b"not-json").unwrap();
+        assert_eq!(
+            authenticated_sidecar_ws_url_from_paths(ws_url, false, &endpoint_path, &state_dir,)
+                .unwrap(),
+            ws_url
+        );
+
+        let mut legacy = endpoint("legacy-generation");
+        legacy.ws_url = ws_url.into();
+        std::fs::write(&endpoint_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(
+            authenticated_sidecar_ws_url_from_paths(ws_url, false, &endpoint_path, &state_dir,)
+                .unwrap(),
+            ws_url
+        );
+    }
+
+    #[test]
+    fn sidecar_transport_diagnostics_redact_credentials() {
+        let error = sidecar_transport_error(
+            "websocket_handshake_failed",
+            "failed to connect to ws://127.0.0.1:23456/?token=secret",
+            "ws://127.0.0.1:23456/?token=secret",
+            "ws://127.0.0.1:23456/",
+        );
+        assert_eq!(
+            error,
+            "websocket_handshake_failed: failed to connect to ws://127.0.0.1:23456/"
+        );
+        assert!(!error.contains("secret"));
     }
 
     #[test]
