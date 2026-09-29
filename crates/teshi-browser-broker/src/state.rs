@@ -22,7 +22,7 @@ use crate::protocol::{
     BrowserTarget, ExecuteLocatorActionRequest, ExecuteLocatorCandidate,
     ExecuteLocatorCandidateKind, ExecuteLocatorCommand, ExecuteLocatorInput, ExtensionResponse,
     ExtensionStreamMessage, LocatorCandidateArguments, LocatorContext, LocatorIntent,
-    LocatorSnapshot, NetworkBatch, OperationRequest, SnapshotElement,
+    LocatorSnapshot, LocatorVerificationStatus, NetworkBatch, OperationRequest, SnapshotElement,
 };
 use crate::server::{BrokerEvent, BrokerRuntime};
 use crate::session::{BrowserSessionRecord, SessionRegistry};
@@ -35,9 +35,10 @@ const MAX_PENDING_REQUESTS: usize = 128;
 const MAX_QUARANTINED_RESPONSES: usize = 32;
 const MAX_RETIRED_REQUESTS: usize = MAX_PENDING_REQUESTS * 8;
 const RETIRED_REQUEST_TTL: Duration = Duration::from_secs(600);
-const RUST_P0_EXECUTABLE_ACTIONS: [&str; 6] = [
+const RUST_P0_EXECUTABLE_ACTIONS: [&str; 7] = [
     "click",
     "pointer_click",
+    "fill",
     "assert_visible",
     "assert_not_exists",
     "assert_text",
@@ -75,6 +76,24 @@ struct PendingRequest {
     reply: oneshot::Sender<Result<Value, BrokerError>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocatorWorkflowStage {
+    Snapshot,
+    Verify,
+}
+
+#[derive(Debug, Clone)]
+struct LocatorWorkflow {
+    intent: LocatorIntent,
+    test_id_attributes: Vec<String>,
+    stage: LocatorWorkflowStage,
+    candidates: Vec<ExecuteLocatorCandidate>,
+    element: Option<SnapshotElement>,
+    page_context_revision: Option<String>,
+    url: String,
+    title: String,
+}
+
 /// State owner for one user-scoped broker process.
 #[derive(Debug, Default)]
 pub struct BrokerState {
@@ -102,6 +121,9 @@ pub struct BrokerState {
     privileged_requests: HashMap<String, PrivilegedRequest>,
     /// Memory-only short-lived authorization for privileged browser surfaces.
     authorization: AuthorizationState,
+    /// Two-phase locator acquisition state: snapshot, then live extension
+    /// verification. The public request ID remains stable across both phases.
+    locator_workflows: HashMap<String, LocatorWorkflow>,
 }
 
 impl BrokerState {
@@ -562,6 +584,273 @@ impl BrokerState {
         )
     }
 
+    fn expected_extension_operation(&self, request_id: &str, operation: &str) -> String {
+        if operation == "resolve_playwright_locator"
+            && let Some(workflow) = self.locator_workflows.get(request_id)
+        {
+            return match workflow.stage {
+                LocatorWorkflowStage::Snapshot => "get_page_snapshot",
+                LocatorWorkflowStage::Verify => "verify_playwright_locators",
+            }
+            .into();
+        }
+        extension_operation_for(operation).into()
+    }
+
+    fn handle_locator_workflow_response(
+        &mut self,
+        request_id: &str,
+        response: &ExtensionResponse,
+    ) -> Value {
+        let Some(stage) = self
+            .locator_workflows
+            .get(request_id)
+            .map(|workflow| workflow.stage)
+        else {
+            return error_value(BrokerError::new(
+                BrokerErrorCode::MismatchedBrowserResponse,
+                "locator workflow is missing for the pending browser request",
+            ));
+        };
+        match stage {
+            LocatorWorkflowStage::Snapshot => {
+                self.handle_locator_snapshot_response(request_id, response)
+            }
+            LocatorWorkflowStage::Verify => {
+                self.handle_locator_verification_response(request_id, response)
+            }
+        }
+    }
+
+    fn handle_locator_snapshot_response(
+        &mut self,
+        request_id: &str,
+        response: &ExtensionResponse,
+    ) -> Value {
+        let Some((
+            instance_id,
+            target,
+            project_root,
+            caller_label,
+            stream_generation,
+            fallback_generation,
+        )) = self.pending.get(request_id).map(|pending| {
+            (
+                pending.extension_instance_id.clone(),
+                pending.target.clone(),
+                pending.project_root.clone(),
+                pending.caller_label.clone(),
+                pending.stream_generation,
+                pending.fallback_generation,
+            )
+        })
+        else {
+            return error_value(BrokerError::new(
+                BrokerErrorCode::MismatchedBrowserResponse,
+                "locator snapshot response has no pending request",
+            ));
+        };
+        if !response.ok {
+            return self.complete_pending_error(request_id, extension_response_error(response));
+        }
+        let Some(workflow) = self.locator_workflows.get(request_id).cloned() else {
+            return error_value(BrokerError::new(
+                BrokerErrorCode::MismatchedBrowserResponse,
+                "locator snapshot response has no workflow state",
+            ));
+        };
+        let snapshot_value = Value::Object(response.result.clone().into_iter().collect());
+        let snapshot = match LocatorSnapshot::normalize(&snapshot_value) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return self.complete_pending_error(request_id, error),
+        };
+        let page_context_revision = match snapshot
+            .page_context_revision
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+        {
+            Some(revision) => revision,
+            None => {
+                return self.complete_pending_error(
+                    request_id,
+                    BrokerError::new(
+                        BrokerErrorCode::BrokerProtocolError,
+                        "browser snapshot did not return page_context_revision",
+                    ),
+                );
+            }
+        };
+        let resolution =
+            match snapshot.generate_candidates(&workflow.intent, &workflow.test_id_attributes) {
+                Ok(resolution) => resolution,
+                Err(error) => return self.complete_pending_error(request_id, error),
+            };
+        let mut cached_snapshot = snapshot_value;
+        let cache_result = self
+            .sessions
+            .get_mut(&instance_id)
+            .ok_or_else(|| {
+                BrokerError::new(
+                    BrokerErrorCode::BrowserTargetNotFound,
+                    "browser session was not found while caching the locator snapshot",
+                )
+            })
+            .and_then(|session| {
+                session.cache_snapshot_references(
+                    target.clone(),
+                    &mut cached_snapshot,
+                    request_id,
+                    &project_root,
+                    &caller_label,
+                    Instant::now(),
+                )
+            });
+        if let Err(error) = cache_result {
+            return self.complete_pending_error(request_id, error);
+        }
+        let command = build_locator_verification_command(
+            request_id,
+            &target,
+            &instance_id,
+            &caller_label,
+            &project_root,
+            &page_context_revision,
+            &resolution.candidates,
+        );
+        let queue_result = self
+            .sessions
+            .get_mut(&instance_id)
+            .ok_or_else(|| {
+                BrokerError::new(
+                    BrokerErrorCode::BrowserSessionDisconnected,
+                    "browser session disconnected before locator verification",
+                )
+            })
+            .and_then(|session| session.queue_command(command));
+        if let Err(error) = queue_result {
+            return self.complete_pending_error(request_id, error);
+        }
+        if let Some(workflow) = self.locator_workflows.get_mut(request_id) {
+            workflow.stage = LocatorWorkflowStage::Verify;
+            workflow.candidates = resolution.candidates;
+            workflow.element = Some(resolution.element);
+            workflow.page_context_revision = Some(page_context_revision);
+            workflow.url = snapshot.url;
+            workflow.title = snapshot.title;
+        }
+        if let Some(pending) = self.pending.get_mut(request_id) {
+            pending.stream_generation = None;
+            pending.fallback_generation = fallback_generation.or(stream_generation);
+        }
+        json!({
+            "ok": true,
+            "request_id": request_id,
+            "queued": true,
+            "operation": "verify_playwright_locators",
+        })
+    }
+
+    fn handle_locator_verification_response(
+        &mut self,
+        request_id: &str,
+        response: &ExtensionResponse,
+    ) -> Value {
+        if !response.ok {
+            return self.complete_pending_error(request_id, extension_response_error(response));
+        }
+        let Some(workflow) = self.locator_workflows.get(request_id).cloned() else {
+            return error_value(BrokerError::new(
+                BrokerErrorCode::MismatchedBrowserResponse,
+                "locator verification response has no workflow state",
+            ));
+        };
+        let verification = match response.locator_verification_results() {
+            Ok(verification) => verification,
+            Err(error) => return self.complete_pending_error(request_id, error),
+        };
+        let candidates = crate::protocol::apply_locator_verification_results(
+            &workflow.candidates,
+            &verification,
+        );
+        let recommended = candidates
+            .iter()
+            .find(|candidate| candidate.verification == Some(LocatorVerificationStatus::Verified))
+            .cloned();
+        let Some(page_context_revision) = workflow.page_context_revision else {
+            return self.complete_pending_error(
+                request_id,
+                BrokerError::new(
+                    BrokerErrorCode::BrokerProtocolError,
+                    "locator workflow has no page_context_revision",
+                ),
+            );
+        };
+        let Some(element) = workflow.element else {
+            return self.complete_pending_error(
+                request_id,
+                BrokerError::new(
+                    BrokerErrorCode::BrokerProtocolError,
+                    "locator workflow has no selected element",
+                ),
+            );
+        };
+        let Some((target, extension_instance_id)) = self.pending.get(request_id).map(|pending| {
+            (
+                pending.target.clone(),
+                pending.extension_instance_id.clone(),
+            )
+        }) else {
+            return error_value(BrokerError::new(
+                BrokerErrorCode::MismatchedBrowserResponse,
+                "locator verification response has no pending request",
+            ));
+        };
+        let value = json!({
+            "type": "response",
+            "schema_version": BROWSER_BROKER_SCHEMA_VERSION,
+            "protocol_version": BROWSER_BROKER_PROTOCOL_VERSION,
+            "request_id": request_id,
+            "operation": "resolve_playwright_locator",
+            "ok": true,
+            "extension_instance_id": extension_instance_id,
+            "target": target,
+            "page_context_revision": page_context_revision,
+            "url": workflow.url,
+            "title": workflow.title,
+            "element": element,
+            "recommended": recommended,
+            "candidates": candidates,
+        });
+        self.complete_pending_value(request_id, value)
+    }
+
+    fn complete_pending_error(&mut self, request_id: &str, error: BrokerError) -> Value {
+        let Some(pending) = self.pending.remove(request_id) else {
+            return error_value(error);
+        };
+        self.abort_evidence(request_id, &pending.operation);
+        let terminal = self.terminal_pending_error(request_id, &pending, error);
+        self.retire_request(request_id, Instant::now());
+        if let Some(session) = self.sessions.get_mut(&pending.extension_instance_id) {
+            session.remove_queued_command(request_id);
+        }
+        let value = error_value(terminal.clone());
+        let _ = pending.reply.send(Err(terminal));
+        value
+    }
+
+    fn complete_pending_value(&mut self, request_id: &str, value: Value) -> Value {
+        let Some(pending) = self.pending.remove(request_id) else {
+            return error_value(BrokerError::new(
+                BrokerErrorCode::MismatchedBrowserResponse,
+                "browser response was already completed",
+            ));
+        };
+        self.retire_request(request_id, Instant::now());
+        let _ = pending.reply.send(Ok(value.clone()));
+        value
+    }
+
     fn handle_extension_response_with_broker_generation(
         &mut self,
         event_instance_id: &str,
@@ -618,7 +907,8 @@ impl BrokerState {
         } else {
             pending.stream_generation == generation
         };
-        let operation_matches = response.operation == extension_operation_for(&pending.operation);
+        let expected_operation = self.expected_extension_operation(&request_id, &pending.operation);
+        let operation_matches = response.operation == expected_operation;
         let capture_id_matches = !response.ok
             || pending
                 .console_capture_id
@@ -650,6 +940,10 @@ impl BrokerState {
                 BrokerErrorCode::MismatchedBrowserResponse,
                 "browser response does not match its pending request",
             ));
+        }
+
+        if self.locator_workflows.contains_key(&request_id) {
+            return self.handle_locator_workflow_response(&request_id, &response);
         }
 
         let Some(pending) = self.pending.remove(&request_id) else {
@@ -1800,6 +2094,19 @@ impl BrokerState {
     ) {
         let now = Instant::now();
         let lease_required = requires_lease(&request.operation);
+        let locator_workflow = if request.operation == "resolve_playwright_locator" {
+            Some(locator_workflow_from_request(&request))
+        } else {
+            None
+        };
+        let locator_workflow = match locator_workflow {
+            Some(Ok(workflow)) => Some(workflow),
+            Some(Err(error)) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+            None => None,
+        };
         let (project, caller) = match request_scope(&request, lease_required) {
             Ok(scope) => scope,
             Err(error) => {
@@ -2212,6 +2519,10 @@ impl BrokerState {
             self.privileged_requests
                 .insert(request.request_id.clone(), privileged_request);
         }
+        if let Some(locator_workflow) = locator_workflow {
+            self.locator_workflows
+                .insert(request.request_id.clone(), locator_workflow);
+        }
         self.pending.insert(
             request.request_id.clone(),
             PendingRequest {
@@ -2530,6 +2841,7 @@ impl BrokerState {
         self.dispatched_actions.remove(request_id);
         self.network_body_access.remove(request_id);
         self.privileged_requests.remove(request_id);
+        self.locator_workflows.remove(request_id);
         self.retired_requests.insert(request_id.to_owned(), now);
         while self.retired_requests.len() > MAX_RETIRED_REQUESTS {
             let oldest = self
@@ -2798,7 +3110,7 @@ fn build_unvalidated_execute_locator(
     if !RUST_P0_EXECUTABLE_ACTIONS.contains(&action.as_str()) {
         return Err(BrokerError::new(
             BrokerErrorCode::BrowserCapabilityUnavailable,
-            "Rust p0.control supports click, pointer_click, and locator assertions",
+            "Rust p0.control supports click, pointer_click, fill, and locator assertions",
         ));
     }
     let page_context_revision = dto.page_context_revision()?;
@@ -2839,7 +3151,7 @@ fn resolve_execute_locator(
     if !RUST_P0_EXECUTABLE_ACTIONS.contains(&action.as_str()) {
         return Err(BrokerError::new(
             BrokerErrorCode::BrowserCapabilityUnavailable,
-            "Rust p0.control supports click, pointer_click, and locator assertions",
+            "Rust p0.control supports click, pointer_click, fill, and locator assertions",
         ));
     }
     if !session
@@ -3044,9 +3356,81 @@ fn snapshot_locator_context(value: &Value) -> Result<Option<LocatorContext>, Bro
 fn extension_operation_for(operation: &str) -> &str {
     match operation {
         "execute_browser_action" => "execute_locator",
+        "resolve_playwright_locator" => "get_page_snapshot",
         "get_network_request_detail" => "get_network_response_body",
         _ => operation,
     }
+}
+
+fn locator_workflow_from_request(
+    request: &OperationRequest,
+) -> Result<LocatorWorkflow, BrokerError> {
+    let intent = match request.arguments.get("intent") {
+        None | Some(Value::Null) => LocatorIntent::default(),
+        Some(value) => serde_json::from_value(value.clone()).map_err(|_| {
+            BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "locator intent must be a JSON object",
+            )
+        })?,
+    };
+    let test_id_attributes = match request.arguments.get("test_id_attributes") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(|value| value.trim().to_owned())
+                    .ok_or_else(|| {
+                        BrokerError::new(
+                            BrokerErrorCode::InvalidBrowserOperation,
+                            "locator test_id_attributes must contain only strings",
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => {
+            return Err(BrokerError::new(
+                BrokerErrorCode::InvalidBrowserOperation,
+                "locator test_id_attributes must be an array",
+            ));
+        }
+    };
+    Ok(LocatorWorkflow {
+        intent,
+        test_id_attributes,
+        stage: LocatorWorkflowStage::Snapshot,
+        candidates: Vec::new(),
+        element: None,
+        page_context_revision: None,
+        url: String::new(),
+        title: String::new(),
+    })
+}
+
+fn build_locator_verification_command(
+    request_id: &str,
+    target: &BrowserTarget,
+    extension_instance_id: &str,
+    caller_label: &str,
+    project_root: &str,
+    page_context_revision: &str,
+    candidates: &[ExecuteLocatorCandidate],
+) -> Value {
+    json!({
+        "type": "cmd",
+        "cmd": "verify_playwright_locators",
+        "schema_version": BROWSER_BROKER_SCHEMA_VERSION,
+        "protocol_version": BROWSER_BROKER_PROTOCOL_VERSION,
+        "request_id": request_id,
+        "caller_label": caller_label,
+        "project_root": project_root,
+        "extension_instance_id": extension_instance_id,
+        "target": target,
+        "page_context_revision": page_context_revision,
+        "candidates": candidates,
+    })
 }
 
 fn operation_success(request: &OperationRequest, payload: Value) -> Value {
@@ -3080,6 +3464,22 @@ fn error_value(error: BrokerError) -> Value {
         "error": error.message,
         "recovery": error.recovery,
     })
+}
+
+fn extension_response_error(response: &ExtensionResponse) -> BrokerError {
+    let code = response
+        .code
+        .as_deref()
+        .and_then(|code| serde_json::from_value::<BrokerErrorCode>(Value::String(code.into())).ok())
+        .unwrap_or(BrokerErrorCode::BrowserOperationFailed);
+    let message = response
+        .error
+        .as_deref()
+        .unwrap_or("browser extension operation failed")
+        .chars()
+        .take(4096)
+        .collect::<String>();
+    BrokerError::new(code, message)
 }
 
 fn argument_string(arguments: &BTreeMap<String, Value>, name: &str) -> Result<String, BrokerError> {
@@ -3574,6 +3974,39 @@ mod tests {
     }
 
     #[test]
+    fn locator_resolution_starts_with_snapshot_and_verifies_candidates_afterward() {
+        let request: OperationRequest = serde_json::from_value(json!({
+            "request_id": "locator-1",
+            "caller_label": "caller-a",
+            "project_root": "C:/project-a",
+            "cmd": "resolve_playwright_locator",
+            "target": target(),
+            "lease_token": "lease-secret",
+            "intent": {"role": "textbox", "text": "Name"},
+            "test_id_attributes": ["data-testid"]
+        }))
+        .unwrap();
+        let command = build_extension_command(&request, &target(), "profile-a", None).unwrap();
+        assert_eq!(command["cmd"], "get_page_snapshot");
+        assert!(command.get("lease_token").is_none());
+
+        let verification = build_locator_verification_command(
+            "locator-1",
+            &target(),
+            "profile-a",
+            "caller-a",
+            "C:/project-a",
+            "revision-1",
+            &[],
+        );
+        assert_eq!(verification["cmd"], "verify_playwright_locators");
+        assert_eq!(verification["request_id"], "locator-1");
+        assert_eq!(verification["page_context_revision"], "revision-1");
+        assert_eq!(verification["candidates"], json!([]));
+        assert!(!verification.to_string().contains("lease-secret"));
+    }
+
+    #[test]
     fn privileged_grant_tokens_never_enter_extension_commands() {
         let request: OperationRequest = serde_json::from_value(json!({
             "request_id": "privileged-command",
@@ -3947,7 +4380,14 @@ mod tests {
             BrokerErrorCode::BrowserCapabilityUnavailable
         );
 
-        let unsupported = execute_request("fill", "#save", "revision-1");
+        let mut fill = execute_request("fill", "#save", "revision-1");
+        fill.arguments.insert("value".into(), json!("Ada"));
+        let fill_command = build_extension_command(&fill, &target(), "profile-a", None).unwrap();
+        assert_eq!(fill_command["cmd"], "execute_locator");
+        assert_eq!(fill_command["action"], "fill");
+        assert_eq!(fill_command["value"], "Ada");
+
+        let unsupported = execute_request("select", "#save", "revision-1");
         assert_eq!(
             build_extension_command(&unsupported, &target(), "profile-a", None)
                 .unwrap_err()
