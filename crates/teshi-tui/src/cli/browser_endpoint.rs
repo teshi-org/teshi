@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use teshi_engine::{
-    ChromeBrokerEndpoint, default_browser_service_script, ensure_user_chrome_broker,
-    send_sidecar_command_with_timeout, write_atomic,
+    CHROME_DISCOVERY_PORT, ChromeBrokerEndpoint, default_browser_service_script,
+    ensure_user_chrome_broker, fetch_chrome_broker_endpoint, send_sidecar_command_with_timeout,
+    write_atomic,
 };
 
 const ENDPOINT_READ_ATTEMPTS: usize = 20;
@@ -147,35 +148,8 @@ pub fn write_chrome_broker_endpoint(
     project_root: &Path,
     endpoint: &ChromeBrokerEndpoint,
 ) -> Result<()> {
-    let path = project_root.join(".teshi").join("cdp-endpoint.json");
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let bridge = if endpoint
-        .broker_features
-        .iter()
-        .any(|feature| feature == "transport.v1")
-    {
-        "rust"
-    } else {
-        "python"
-    };
-    let payload = json!({
-        "schema_version": endpoint.schema_version,
-        "protocol_version": endpoint.protocol_version,
-        "mode": endpoint.mode,
-        "ws_url": endpoint.ws_url,
-        "page_url": "about:blank",
-        "bridge": bridge,
-        "broker_pid": endpoint.broker_pid,
-        "broker_start_id": endpoint.broker_start_id,
-        "broker_features": endpoint.broker_features,
-        "discovery_url": endpoint.discovery_url,
-        "extension_frame_ws_url": endpoint.extension_frame_ws_url,
-        "project_root": project_root,
-        "broker_project_root": endpoint.project_root,
-    });
-    write_atomic(&path, &payload).with_context(|| format!("write {}", path.display()))
+    teshi_engine::write_chrome_broker_endpoint(project_root, endpoint)
+        .map_err(|error| anyhow!("{}", error.message))
 }
 
 /// Result of a sidecar health probe suitable for JSON CLI output.
@@ -189,6 +163,7 @@ pub struct DoctorReport {
     pub error: Option<String>,
     pub tcp_reachable: bool,
     pub snapshot_ok: bool,
+    pub broker_generation_match: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub broker_pid: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -200,9 +175,33 @@ pub struct DoctorReport {
 /// Probes TCP reachability and issues a short `get_page_snapshot` over the sidecar WebSocket.
 pub fn doctor_endpoint(project_root: &Path) -> Result<DoctorReport> {
     let endpoint = read_cdp_endpoint(project_root)?;
-    let tcp_reachable = tcp_probe_ws_url(&endpoint.ws_url);
+    let mut broker_generation_match = true;
+    let mut generation_error = None;
+    if endpoint.mode == "chrome" && endpoint.bridge == "rust" {
+        match fetch_chrome_broker_endpoint(CHROME_DISCOVERY_PORT) {
+            Ok(current) => {
+                broker_generation_match = endpoint.ws_url == current.ws_url
+                    && endpoint.broker_pid == Some(current.broker_pid)
+                    && endpoint.broker_start_id.as_deref()
+                        == Some(current.broker_start_id.as_str())
+                    && endpoint.protocol_version == Some(current.protocol_version)
+                    && endpoint.broker_features == current.broker_features;
+                if !broker_generation_match {
+                    generation_error = Some(
+                        "project endpoint points to a stale Rust broker generation; refreshing it"
+                            .to_owned(),
+                    );
+                }
+            }
+            Err(error) => {
+                broker_generation_match = false;
+                generation_error = Some(error.message);
+            }
+        }
+    }
+    let tcp_reachable = broker_generation_match && tcp_probe_ws_url(&endpoint.ws_url);
     let mut snapshot_ok = false;
-    let mut error = None;
+    let mut error = generation_error;
 
     if !tcp_reachable {
         error = Some(format!(
@@ -236,7 +235,7 @@ pub fn doctor_endpoint(project_root: &Path) -> Result<DoctorReport> {
         }
     }
 
-    let ok = tcp_reachable && snapshot_ok;
+    let ok = broker_generation_match && tcp_reachable && snapshot_ok;
     Ok(DoctorReport {
         ok,
         mode: endpoint.mode,
@@ -245,6 +244,7 @@ pub fn doctor_endpoint(project_root: &Path) -> Result<DoctorReport> {
         error,
         tcp_reachable,
         snapshot_ok,
+        broker_generation_match,
         broker_pid: endpoint.broker_pid,
         broker_start_id: endpoint.broker_start_id,
         protocol_version: endpoint.protocol_version,
@@ -332,6 +332,29 @@ pub fn reconnect_embedded(
     Err(anyhow!(
         "timed out waiting for embedded sidecar after reconnect; check Python venv and Playwright"
     ))
+}
+
+/// Refresh a Chrome project pointer from the shared user broker. This path is
+/// generation-aware and never launches a second broker for a stale project.
+pub fn reconnect_chrome_broker(project_root: &Path) -> Result<CdpEndpoint> {
+    let current = read_cdp_endpoint(project_root)?;
+    if current.mode != "chrome" {
+        return Err(anyhow!("project endpoint is not a Chrome broker endpoint"));
+    }
+    if current.bridge == "rust"
+        && std::env::var("TESHI_BROWSER_BROKER_IMPLEMENTATION").as_deref() != Ok("rust")
+    {
+        return Err(anyhow!(
+            "Rust Chrome endpoint requires TESHI_BROWSER_BROKER_IMPLEMENTATION=rust for reconnect; Teshi will not fall back to Python"
+        ));
+    }
+    let broker = ensure_user_chrome_broker(project_root, &default_browser_service_script())
+        .map_err(|error| match error.hint {
+            Some(hint) => anyhow!("{} ({hint})", error.message),
+            None => anyhow!(error.message),
+        })?;
+    write_chrome_broker_endpoint(project_root, &broker)?;
+    read_cdp_endpoint(project_root)
 }
 
 /// Writes `cdp-endpoint.json` from the Rust side with the actual ws_url.
@@ -422,7 +445,6 @@ mod tests {
             broker_pid: 1234,
             broker_start_id: "broker-start-a".into(),
             broker_features: vec!["p0.control".into()],
-            project_root: "initial-project".into(),
         }
     }
 
@@ -455,6 +477,16 @@ mod tests {
         assert_eq!(cli.broker_start_id, desktop.broker_start_id);
         assert_eq!(cli.ws_url, desktop.ws_url);
         assert_eq!(cli.bridge, "python");
+        let first_text = fs::read_to_string(first.path().join(".teshi/cdp-endpoint.json")).unwrap();
+        let second_text =
+            fs::read_to_string(second.path().join(".teshi/cdp-endpoint.json")).unwrap();
+        for text in [first_text, second_text] {
+            let payload: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert!(payload.get("project_root").is_none());
+            assert!(payload.get("broker_project_root").is_none());
+            assert!(payload.get("token").is_none());
+            assert!(payload.get("secret").is_none());
+        }
     }
 
     #[test]
@@ -467,5 +499,36 @@ mod tests {
         assert_eq!(current.bridge, "rust");
         let text = fs::read_to_string(current.endpoint_path).unwrap();
         assert!(!text.contains("token"));
+        assert!(!text.contains("project_root"));
+        assert!(!text.contains("broker_project_root"));
+    }
+
+    #[test]
+    fn two_projects_repair_to_one_current_broker_generation_regardless_of_start_order() {
+        let project_a = tempfile::tempdir().unwrap();
+        let project_b = tempfile::tempdir().unwrap();
+        let first = broker_endpoint();
+        let mut restarted = first.clone();
+        restarted.ws_url = "ws://127.0.0.1:24568".into();
+        restarted.extension_frame_ws_url = "ws://127.0.0.1:24568/extension/frames".into();
+        restarted.broker_pid = 4321;
+        restarted.broker_start_id = "broker-start-b".into();
+        restarted
+            .broker_features
+            .push("p1.observability_artifacts".into());
+
+        // B can attach before A; both pointers still represent the same user
+        // broker generation rather than spawning project-scoped brokers.
+        write_chrome_broker_endpoint(project_b.path(), &first).unwrap();
+        write_chrome_broker_endpoint(project_a.path(), &first).unwrap();
+        write_chrome_broker_endpoint(project_a.path(), &restarted).unwrap();
+        write_chrome_broker_endpoint(project_b.path(), &restarted).unwrap();
+        let a = read_cdp_endpoint(project_a.path()).unwrap();
+        let b = read_cdp_endpoint(project_b.path()).unwrap();
+        assert_eq!(a.ws_url, b.ws_url);
+        assert_eq!(a.broker_pid, b.broker_pid);
+        assert_eq!(a.broker_start_id, b.broker_start_id);
+        assert_eq!(a.protocol_version, b.protocol_version);
+        assert_eq!(a.broker_features, b.broker_features);
     }
 }

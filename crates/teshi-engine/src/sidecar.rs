@@ -231,8 +231,6 @@ pub struct ChromeBrokerEndpoint {
     pub broker_start_id: String,
     #[serde(default)]
     pub broker_features: Vec<String>,
-    #[serde(default)]
-    pub project_root: String,
 }
 
 /// User-facing browser startup failure.
@@ -739,11 +737,74 @@ pub fn fetch_chrome_broker_endpoint(port: u16) -> Result<ChromeBrokerEndpoint, B
                 })
                 .collect::<Result<Vec<_>, _>>()?
         },
-        project_root: payload
-            .get("project_root")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+    })
+}
+
+/// Write the project-local compatibility pointer for a shared Chrome broker.
+/// This file is intentionally limited to public broker identity and contains
+/// neither project identity nor private authentication state.
+pub fn write_chrome_broker_endpoint(
+    project_root: &Path,
+    endpoint: &ChromeBrokerEndpoint,
+) -> Result<(), BrowserError> {
+    for (label, value) in [
+        ("ws_url", endpoint.ws_url.as_str()),
+        ("discovery_url", endpoint.discovery_url.as_str()),
+        (
+            "extension_frame_ws_url",
+            endpoint.extension_frame_ws_url.as_str(),
+        ),
+    ] {
+        let parsed = url::Url::parse(value).map_err(|_| BrowserError {
+            message: format!("public broker endpoint contains an invalid {label}"),
+            hint: None,
+        })?;
+        if parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            return Err(BrowserError {
+                message: format!("public broker endpoint {label} contains private URL state"),
+                hint: Some("Broker credentials remain in the private per-user state file.".into()),
+            });
+        }
+    }
+    let path = project_root.join(".teshi").join("cdp-endpoint.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| BrowserError {
+            message: format!(
+                "cannot create endpoint directory {}: {error}",
+                parent.display()
+            ),
+            hint: None,
+        })?;
+    }
+    let bridge = if endpoint
+        .broker_features
+        .iter()
+        .any(|feature| feature == "transport.v1")
+    {
+        "rust"
+    } else {
+        "python"
+    };
+    let payload = serde_json::json!({
+        "schema_version": endpoint.schema_version,
+        "protocol_version": endpoint.protocol_version,
+        "mode": endpoint.mode,
+        "ws_url": endpoint.ws_url,
+        "page_url": "about:blank",
+        "bridge": bridge,
+        "broker_pid": endpoint.broker_pid,
+        "broker_start_id": endpoint.broker_start_id,
+        "broker_features": endpoint.broker_features,
+        "discovery_url": endpoint.discovery_url,
+        "extension_frame_ws_url": endpoint.extension_frame_ws_url,
+    });
+    crate::fs_util::write_atomic(&path, &payload).map_err(|error| BrowserError {
+        message: format!("cannot write endpoint {}: {error}", path.display()),
+        hint: None,
     })
 }
 
@@ -1290,8 +1351,8 @@ fn open_private_broker_diagnostic_log(path: &Path) -> Result<std::fs::File, Brow
 
 /// Start or reuse an internal Rust broker process.
 ///
-/// The caller must supply exact paired extension origins; no wildcard or
-/// arbitrary-ID fallback is provided. Feature flags are explicit so the
+/// The caller may supply zero or more exact paired extension origins; no
+/// wildcard or arbitrary-ID fallback is provided. Feature flags are explicit so the
 /// transport-only migration probe cannot accidentally advertise the full
 /// Chrome control surface.
 #[doc(hidden)]
@@ -1305,7 +1366,6 @@ fn ensure_rust_broker_at(
     enable_p1_observability: bool,
 ) -> Result<ChromeBrokerEndpoint, BrowserError> {
     if discovery_port == 0
-        || trusted_extension_origins.is_empty()
         || trusted_extension_origins.len() > MAX_TRUSTED_EXTENSION_ORIGINS
         || trusted_extension_origins
             .iter()
@@ -1317,7 +1377,7 @@ fn ensure_rust_broker_at(
             != trusted_extension_origins.len()
     {
         return Err(BrowserError {
-            message: "Rust transport startup requires a fixed port and a bounded set of unique exact Chrome extension origins.".into(),
+            message: "Rust transport startup requires a fixed port and at most the bounded set of unique exact Chrome extension origins.".into(),
             hint: None,
         });
     }
@@ -1440,8 +1500,7 @@ fn parse_configured_chrome_extension_origins(raw: &str) -> Result<Vec<String>, B
         .map(str::to_owned)
         .collect();
     origins.sort();
-    if origins.is_empty()
-        || origins.len() > MAX_TRUSTED_EXTENSION_ORIGINS
+    if origins.len() > MAX_TRUSTED_EXTENSION_ORIGINS
         || origins
             .iter()
             .any(|origin| !valid_chrome_extension_origin(origin))
@@ -1449,7 +1508,7 @@ fn parse_configured_chrome_extension_origins(raw: &str) -> Result<Vec<String>, B
     {
         return Err(BrowserError {
             message: format!(
-                "{CHROME_BROKER_EXTENSION_ORIGINS_ENV} must contain 1-{MAX_TRUSTED_EXTENSION_ORIGINS} unique exact chrome-extension:// origins."
+                "{CHROME_BROKER_EXTENSION_ORIGINS_ENV} must contain 0-{MAX_TRUSTED_EXTENSION_ORIGINS} unique exact chrome-extension:// origins."
             ),
             hint: Some(
                 "Copy the extension ID shown by teshi-bridge and pair it explicitly; wildcards are not supported."
@@ -1461,16 +1520,169 @@ fn parse_configured_chrome_extension_origins(raw: &str) -> Result<Vec<String>, B
 }
 
 fn configured_chrome_extension_origins() -> Result<Vec<String>, BrowserError> {
-    let raw = std::env::var(CHROME_BROKER_EXTENSION_ORIGINS_ENV).map_err(|_| BrowserError {
-        message: format!(
-            "Rust Chrome broker requires explicit extension pairing via {CHROME_BROKER_EXTENSION_ORIGINS_ENV}."
-        ),
-        hint: Some(
-            "Set a comma-separated list of exact chrome-extension://<32-character-id> origins for this development/test run."
-                .into(),
-        ),
+    match std::env::var(CHROME_BROKER_EXTENSION_ORIGINS_ENV) {
+        Ok(raw) => parse_configured_chrome_extension_origins(&raw),
+        Err(_) => Ok(Vec::new()),
+    }
+}
+
+fn effective_chrome_extension_origins() -> Result<Vec<String>, BrowserError> {
+    let state_dir = chrome_broker_state_dir()?;
+    let durable = teshi_browser_broker::PairingStore::new(state_dir)
+        .load()
+        .map_err(|error| BrowserError {
+            message: format!(
+                "cannot load durable Chrome pairing state: {}",
+                error.message
+            ),
+            hint: Some(
+                "The broker failed closed; repair or remove pairing.json explicitly.".into(),
+            ),
+        })?;
+    let configured = configured_chrome_extension_origins()?;
+    let mut origins = configured;
+    origins.extend(durable.into_iter().map(|record| record.origin));
+    origins.sort();
+    origins.dedup();
+    if origins.len() > MAX_TRUSTED_EXTENSION_ORIGINS {
+        return Err(BrowserError {
+            message: format!(
+                "effective Chrome extension pairing exceeds the limit of {MAX_TRUSTED_EXTENSION_ORIGINS} exact origins"
+            ),
+            hint: Some("Remove an origin from durable pairing or the development override.".into()),
+        });
+    }
+    Ok(origins)
+}
+
+/// Return the existing user-scoped pairing store used by the Rust broker.
+pub fn chrome_broker_pairing_store() -> Result<teshi_browser_broker::PairingStore, BrowserError> {
+    Ok(teshi_browser_broker::PairingStore::new(
+        chrome_broker_state_dir()?,
+    ))
+}
+
+/// List durable pairing state through the authenticated local broker admin API.
+/// The bearer credential is read only in this native process and is never put
+/// in a URL or returned to a caller.
+pub fn chrome_broker_pairing_list() -> Result<serde_json::Value, BrowserError> {
+    chrome_broker_pairing_request(reqwest::Method::GET, None)
+}
+
+/// Explicitly approve one exact extension Origin through the trusted Teshi
+/// process. Claims submitted by the extension are never used here.
+pub fn chrome_broker_pairing_approve(
+    origin: &str,
+    display_name: Option<&str>,
+) -> Result<serde_json::Value, BrowserError> {
+    chrome_broker_pairing_request(
+        reqwest::Method::POST,
+        Some(serde_json::json!({
+            "origin": origin,
+            "display_name": display_name,
+        })),
+    )
+}
+
+/// Revoke one exact extension Origin through the live broker so existing
+/// streams and their scoped state are closed immediately.
+pub fn chrome_broker_pairing_remove(origin: &str) -> Result<serde_json::Value, BrowserError> {
+    chrome_broker_pairing_request(
+        reqwest::Method::DELETE,
+        Some(serde_json::json!({"origin": origin})),
+    )
+}
+
+fn chrome_broker_pairing_request(
+    method: reqwest::Method,
+    payload: Option<serde_json::Value>,
+) -> Result<serde_json::Value, BrowserError> {
+    let endpoint = fetch_chrome_broker_endpoint(CHROME_DISCOVERY_PORT)?;
+    if !endpoint
+        .broker_features
+        .iter()
+        .any(|feature| feature == "transport.v1")
+    {
+        return Err(BrowserError {
+            message: "the discovery listener is not the Rust Chrome broker".into(),
+            hint: None,
+        });
+    }
+    let endpoint_path = chrome_broker_endpoint_path()?;
+    let state_dir = endpoint_path.parent().ok_or_else(|| BrowserError {
+        message: "Rust broker endpoint has no private state directory".into(),
+        hint: None,
     })?;
-    parse_configured_chrome_extension_origins(&raw)
+    let public_record = EndpointRecord {
+        schema_version: endpoint.schema_version,
+        protocol_version: endpoint.protocol_version,
+        mode: endpoint.mode.clone(),
+        ws_url: endpoint.ws_url.clone(),
+        discovery_url: endpoint.discovery_url.clone(),
+        extension_frame_ws_url: endpoint.extension_frame_ws_url.clone(),
+        broker_pid: endpoint.broker_pid,
+        broker_start_id: endpoint.broker_start_id.clone(),
+        broker_features: endpoint.broker_features.clone(),
+        bridge: "rust".into(),
+    };
+    let credentials = PrivateCredentialStore::new(state_dir);
+    let credential = credentials
+        .read_for_endpoint(&public_record)
+        .map_err(|error| BrowserError {
+            message: format!(
+                "cannot authenticate broker pairing administration: {}",
+                error.message
+            ),
+            hint: None,
+        })?;
+    verify_rust_broker_identity(&endpoint, &credential, &public_record).map_err(|error| {
+        BrowserError {
+            message: format!(
+                "cannot verify broker pairing administration: {}",
+                error.message
+            ),
+            hint: None,
+        }
+    })?;
+    let url = format!("{}/pairing", endpoint.discovery_url.trim_end_matches('/'));
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|error| BrowserError {
+            message: format!("cannot create broker pairing client: {error}"),
+            hint: None,
+        })?;
+    let mut request = client
+        .request(method, url)
+        .header("X-Teshi-Broker-Token", credential.token());
+    if let Some(payload) = payload {
+        request = request.json(&payload);
+    }
+    let response = request.send().map_err(|error| BrowserError {
+        message: format!("broker pairing request failed: {error}"),
+        hint: None,
+    })?;
+    let status = response.status();
+    let body = response
+        .json::<serde_json::Value>()
+        .map_err(|error| BrowserError {
+            message: format!("broker pairing response was malformed: {error}"),
+            hint: None,
+        })?;
+    if !status.is_success() {
+        return Err(BrowserError {
+            message: body
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("broker pairing request was rejected")
+                .to_owned(),
+            hint: body
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        });
+    }
+    Ok(body)
 }
 
 fn resolve_teshi_cli_executable(current_executable: &Path) -> Result<PathBuf, BrowserError> {
@@ -1667,8 +1879,8 @@ fn ensure_user_python_chrome_broker(
     Ok(endpoint)
 }
 
-/// Starts or reuses the full Rust Chrome broker for an explicitly paired
-/// development/test session. Native clients still obtain their bearer
+/// Starts or reuses the full Rust Chrome broker for the current user's
+/// durable pairing set plus any explicit development/test override. Native clients still obtain their bearer
 /// credential from the private state record; it is never placed in the
 /// public endpoint returned by this function.
 #[doc(hidden)]
@@ -1695,8 +1907,9 @@ pub fn ensure_user_rust_chrome_broker(
 /// inter-process startup lock.
 ///
 /// Rust selection is explicit through
-/// `TESHI_BROWSER_BROKER_IMPLEMENTATION=rust` and requires exact paired
-/// origins in `TESHI_BROWSER_BROKER_EXTENSION_ORIGINS`. A failed Rust start is
+/// `TESHI_BROWSER_BROKER_IMPLEMENTATION=rust`. `TESHI_BROWSER_BROKER_EXTENSION_ORIGINS`
+/// is only a development/test union override; durable pairing is loaded from
+/// the per-user state directory. A failed Rust start is
 /// returned to the caller; it is never silently retried with Python. The
 /// legacy Python path remains the default until the later migration acceptance
 /// gates authorize changing the production selector.
@@ -1706,7 +1919,7 @@ pub fn ensure_user_chrome_broker(
 ) -> Result<ChromeBrokerEndpoint, BrowserError> {
     match std::env::var(CHROME_BROKER_IMPLEMENTATION_ENV).as_deref() {
         Ok("rust") => {
-            let origins = configured_chrome_extension_origins()?;
+            let origins = effective_chrome_extension_origins()?;
             ensure_user_rust_chrome_broker(&origins)
         }
         Ok("python") | Err(_) => ensure_user_python_chrome_broker(project_root, browser_service_script),
@@ -1783,6 +1996,7 @@ pub async fn start_browser_sidecar_with_options(
 
     if mode == BrowserMode::Chrome {
         let endpoint = ensure_user_chrome_broker(&project_root, &rt.browser_service_script)?;
+        write_chrome_broker_endpoint(&project_root, &endpoint)?;
         *rt.sidecar.ws_url.lock().unwrap() = Some(endpoint.ws_url.clone());
         *rt.sidecar.mode.lock().unwrap() = Some(mode);
         *rt.project.browser_active.lock().unwrap() = true;
@@ -2261,7 +2475,6 @@ mod tests {
             broker_pid: 42,
             broker_start_id: start_id.into(),
             broker_features: vec!["p0.control".into()],
-            project_root: "fixture".into(),
         }
     }
 
@@ -2276,6 +2489,15 @@ mod tests {
         assert!(parse_configured_chrome_extension_origins("https://example.test").is_err());
         assert!(parse_configured_chrome_extension_origins(&format!("{first},{first}")).is_err());
         assert!(parse_configured_chrome_extension_origins("*").is_err());
+    }
+
+    #[test]
+    fn public_endpoint_writer_rejects_private_url_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut private_url = endpoint("writer-generation");
+        private_url.ws_url.push_str("?token=private");
+        assert!(write_chrome_broker_endpoint(temp.path(), &private_url).is_err());
+        assert!(!temp.path().join(".teshi/cdp-endpoint.json").exists());
     }
 
     #[test]

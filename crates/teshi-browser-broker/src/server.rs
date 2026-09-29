@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
-use std::time::Duration;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock as StdRwLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::body::Bytes;
@@ -22,6 +23,7 @@ use axum::{Json, Router};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
@@ -33,6 +35,7 @@ use tower::limit::ConcurrencyLimitLayer;
 use uuid::Uuid;
 
 use crate::credential::{PrivateBrokerCredential, PrivateCredentialStore, create_identity_proof};
+use crate::pairing::{PairingStore, TrustedExtensionOrigin, validate_origin};
 use crate::protocol::{
     BROWSER_BROKER_IDENTITY_CHALLENGE_PATH, BROWSER_BROKER_PROTOCOL_VERSION,
     BROWSER_BROKER_SCHEMA_VERSION, BrokerError, BrokerErrorCode, BrokerIdentityChallenge,
@@ -71,6 +74,8 @@ struct ClientOutgoingMessage {
 }
 type ExtensionStreamSender = mpsc::Sender<BrokerOutgoingMessage>;
 type StreamRegistry = Arc<RwLock<HashMap<String, (u64, ExtensionStreamSender)>>>;
+type StreamOrigin = (u64, Arc<str>);
+type StreamOriginRegistry = Arc<RwLock<HashMap<String, StreamOrigin>>>;
 
 /// Settings for one in-process broker server. Production callers use loopback and
 /// port 17373; tests may bind port zero to avoid touching a user's running broker.
@@ -80,6 +85,12 @@ pub struct BrokerServerConfig {
     pub discovery_addr: SocketAddr,
     /// Exact Chrome extension Origins explicitly paired with this OS user.
     pub trusted_extension_origins: Vec<String>,
+    /// Optional durable per-user pairing store. Development/test origins in
+    /// `trusted_extension_origins` are merged at runtime but never persisted.
+    pub pairing_store: Option<PairingStore>,
+    /// Private credential destination used when a live pairing is approved or
+    /// revoked through the local admin API.
+    pub credential_store: Option<PrivateCredentialStore>,
     /// Cryptographically random per-broker bearer secret.
     pub token: String,
     /// Broker start identity used to reject stale endpoint/process metadata.
@@ -115,6 +126,8 @@ impl BrokerServerConfig {
                 crate::protocol::CHROME_DISCOVERY_PORT,
             ),
             trusted_extension_origins,
+            pairing_store: None,
+            credential_store: None,
             token: generate_broker_token(),
             broker_start_id: Uuid::new_v4().simple().to_string(),
             // Features are enabled only by the runtime after their state machine
@@ -129,6 +142,16 @@ impl BrokerServerConfig {
         }
     }
 
+    /// Attach the existing per-user state directory without creating a second
+    /// storage convention. The pairing and generation credential files remain
+    /// siblings beneath this private directory.
+    pub fn with_persistent_state_dir(mut self, state_dir: impl Into<PathBuf>) -> Self {
+        let state_dir = state_dir.into();
+        self.pairing_store = Some(PairingStore::new(&state_dir));
+        self.credential_store = Some(PrivateCredentialStore::new(state_dir));
+        self
+    }
+
     fn validate(&self) -> Result<(), BrokerError> {
         if !self.discovery_addr.ip().is_loopback() {
             return Err(BrokerError::new(
@@ -136,8 +159,7 @@ impl BrokerServerConfig {
                 "Chrome broker listeners must bind to loopback",
             ));
         }
-        if self.trusted_extension_origins.is_empty()
-            || self.trusted_extension_origins.len() > crate::protocol::MAX_TRUSTED_EXTENSION_ORIGINS
+        if self.trusted_extension_origins.len() > crate::protocol::MAX_TRUSTED_EXTENSION_ORIGINS
             || self
                 .trusted_extension_origins
                 .windows(2)
@@ -230,6 +252,11 @@ pub enum BrokerEvent {
         extension_instance_id: String,
         generation: u64,
     },
+    /// Explicit trust removal is stronger than a transient stream disconnect:
+    /// clear all request and capture state for the affected live sessions.
+    ExtensionTrustRevoked {
+        extension_instance_ids: Vec<String>,
+    },
     NetworkBatch {
         batch: NetworkBatch,
         /// The authenticated WebSocket generation that accepted this batch.
@@ -284,7 +311,11 @@ pub struct BrokerPublication {
 
 #[derive(Clone)]
 struct ServerState {
-    trusted_extension_origins: Arc<Vec<Arc<str>>>,
+    trusted_extension_origins: Arc<StdRwLock<Vec<Arc<str>>>>,
+    configured_extension_origins: Arc<Vec<Arc<str>>>,
+    pairing_store: Option<PairingStore>,
+    credential_store: Option<PrivateCredentialStore>,
+    pending_pairings: Arc<tokio::sync::RwLock<Vec<PendingExtensionPairing>>>,
     token: Arc<str>,
     start_id: Arc<str>,
     broker_features: Arc<Vec<String>>,
@@ -297,10 +328,35 @@ struct ServerState {
     websocket_slots: Arc<Semaphore>,
     extension_stream_slots: Arc<Semaphore>,
     streams: StreamRegistry,
+    stream_origins: StreamOriginRegistry,
+    revocations: broadcast::Sender<Arc<str>>,
     publications: broadcast::Sender<BrokerPublication>,
     next_stream_generation: Arc<std::sync::atomic::AtomicU64>,
     max_websocket_message_bytes: usize,
     response_timeout: Duration,
+}
+
+/// Untrusted extension metadata retained only until the user explicitly
+/// approves the authoritative HTTP Origin. Claims never become trust keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingExtensionPairing {
+    pub origin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claimed_extension_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension_instance_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_label: Option<String>,
+    pub first_seen_at_ms: u64,
+    pub last_seen_at_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PairingApprovalRequest {
+    origin: String,
+    #[serde(default)]
+    display_name: Option<String>,
 }
 
 /// Running loopback broker listeners and the event queue used by the state owner.
@@ -316,6 +372,17 @@ impl BrokerRuntime {
     /// signalling, killing, or sending any data to the process that owns it.
     pub async fn start(config: BrokerServerConfig) -> Result<Self, BrokerError> {
         config.validate()?;
+
+        let durable_pairings = config
+            .pairing_store
+            .as_ref()
+            .map(PairingStore::load)
+            .transpose()?
+            .unwrap_or_default();
+        let effective_origins = merge_extension_origins(
+            &config.trusted_extension_origins,
+            durable_pairings.iter().map(|record| record.origin.as_str()),
+        )?;
 
         // Bind fixed discovery first so an unrelated existing listener is reported
         // before any dynamic socket is allocated.
@@ -352,14 +419,25 @@ impl BrokerRuntime {
 
         let (event_tx, event_rx) = mpsc::channel(config.event_queue_capacity);
         let (publication_tx, _) = broadcast::channel(MAX_PUBLICATION_QUEUE_CAPACITY);
+        let (revocation_tx, _) = broadcast::channel(MAX_EXTENSION_STREAMS);
+        let configured_extension_origins = Arc::new(
+            config
+                .trusted_extension_origins
+                .into_iter()
+                .map(Arc::<str>::from)
+                .collect::<Vec<_>>(),
+        );
         let state = ServerState {
-            trusted_extension_origins: Arc::new(
-                config
-                    .trusted_extension_origins
+            trusted_extension_origins: Arc::new(StdRwLock::new(
+                effective_origins
                     .into_iter()
                     .map(Arc::<str>::from)
                     .collect(),
-            ),
+            )),
+            configured_extension_origins,
+            pairing_store: config.pairing_store,
+            credential_store: config.credential_store,
+            pending_pairings: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             token: Arc::from(config.token),
             start_id: Arc::from(config.broker_start_id),
             broker_features: Arc::new(config.broker_features),
@@ -375,6 +453,8 @@ impl BrokerRuntime {
             websocket_slots: Arc::new(Semaphore::new(config.max_websocket_connections)),
             extension_stream_slots: Arc::new(Semaphore::new(config.max_extension_streams)),
             streams: Arc::new(RwLock::new(HashMap::new())),
+            stream_origins: Arc::new(RwLock::new(HashMap::new())),
+            revocations: revocation_tx,
             publications: publication_tx,
             next_stream_generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             max_websocket_message_bytes: config.max_websocket_message_bytes,
@@ -571,14 +651,23 @@ impl BrokerRuntime {
         &self,
         store: &PrivateCredentialStore,
     ) -> Result<(), BrokerError> {
+        let trusted_extension_origins = self
+            .state
+            .trusted_extension_origins
+            .read()
+            .map_err(|_| {
+                BrokerError::new(
+                    BrokerErrorCode::BrowserArtifactFailure,
+                    "broker trust state lock is poisoned",
+                )
+            })?
+            .iter()
+            .map(|origin| origin.to_string())
+            .collect();
         let credential = PrivateBrokerCredential::for_endpoint(
             &self.endpoint_record(),
             self.credential(),
-            self.state
-                .trusted_extension_origins
-                .iter()
-                .map(|origin| origin.to_string())
-                .collect(),
+            trusted_extension_origins,
         )?;
         store.write(&credential)
     }
@@ -630,6 +719,10 @@ fn discovery_router(state: ServerState) -> Router {
         .route(
             "/v1/bridge",
             get(discovery).post(discovery).options(preflight),
+        )
+        .route(
+            "/v1/bridge/pairing",
+            get(pairing_list).post(pairing_add).delete(pairing_remove),
         )
         .route(
             BROWSER_BROKER_IDENTITY_CHALLENGE_PATH,
@@ -707,6 +800,7 @@ async fn discovery(
     State(state): State<ServerState>,
     method: Method,
     headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
     if !host_is_loopback(&headers, state.discovery_addr.port()) {
         return error_response(BrokerError::new(
@@ -725,40 +819,370 @@ async fn discovery(
             "credential-bearing discovery requires a browser Origin",
         ));
     }
-    let include_token = if method == Method::POST {
-        match origin.as_deref() {
-            Some(value) if is_trusted_extension_origin(&state, value) => true,
-            Some(_) => {
-                return cors_error(
-                    &headers,
-                    &state,
-                    BrokerError::new(
-                        BrokerErrorCode::BrokerOriginDenied,
-                        "discovery is unavailable to this browser origin",
-                    ),
-                );
-            }
-            None => false,
+    let include_token = match origin.as_deref() {
+        Some(value) if is_trusted_extension_origin(&state, value) => method == Method::POST,
+        Some(value) if valid_extension_origin(value) => {
+            let pending = remember_pending_pairing(&state, value, &body).await;
+            return pairing_required_response(&headers, value, pending);
         }
-    } else if origin
-        .as_deref()
-        .is_some_and(|value| !is_trusted_extension_origin(&state, value))
-    {
-        return cors_error(
-            &headers,
-            &state,
-            BrokerError::new(
-                BrokerErrorCode::BrokerOriginDenied,
-                "discovery is unavailable to this browser origin",
-            ),
-        );
-    } else {
-        false
+        Some(_) => {
+            return cors_error(
+                &headers,
+                &state,
+                BrokerError::new(
+                    BrokerErrorCode::BrokerOriginDenied,
+                    "discovery is unavailable to this browser origin",
+                ),
+            );
+        }
+        None => false,
     };
     let payload = build_discovery_response(&state, include_token);
     let mut response = Json(payload).into_response();
     add_cors_if_trusted(response.headers_mut(), &headers, &state);
     response
+}
+
+async fn remember_pending_pairing(
+    state: &ServerState,
+    origin: &str,
+    body: &Bytes,
+) -> PendingExtensionPairing {
+    let now = unix_ms();
+    let claims = serde_json::from_slice::<Value>(body)
+        .ok()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    let claimed_extension_id = bounded_claim(&claims, "extension_id", 64).filter(|value| {
+        value.len() == 32 && value.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+    });
+    let extension_instance_id = bounded_claim(&claims, "extension_instance_id", 128);
+    let profile_label = bounded_claim(&claims, "profile_label", 120);
+    let mut pending = state.pending_pairings.write().await;
+    if let Some(existing) = pending.iter_mut().find(|entry| entry.origin == origin) {
+        existing.last_seen_at_ms = now;
+        if claimed_extension_id.is_some() {
+            existing.claimed_extension_id = claimed_extension_id.clone();
+        }
+        if extension_instance_id.is_some() {
+            existing.extension_instance_id = extension_instance_id.clone();
+        }
+        if profile_label.is_some() {
+            existing.profile_label = profile_label.clone();
+        }
+        return existing.clone();
+    }
+    if pending.len() >= crate::protocol::MAX_TRUSTED_EXTENSION_ORIGINS
+        && let Some(oldest) = pending
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, entry)| entry.last_seen_at_ms)
+            .map(|(index, _)| index)
+    {
+        pending.remove(oldest);
+    }
+    let entry = PendingExtensionPairing {
+        origin: origin.to_owned(),
+        claimed_extension_id,
+        extension_instance_id,
+        profile_label,
+        first_seen_at_ms: now,
+        last_seen_at_ms: now,
+    };
+    pending.push(entry.clone());
+    entry
+}
+
+fn bounded_claim(value: &Value, key: &str, max_bytes: usize) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= max_bytes)
+        .filter(|value| !value.chars().any(char::is_control))
+        .map(str::to_owned)
+}
+
+fn pairing_required_response(
+    request_headers: &HeaderMap,
+    origin: &str,
+    pending: PendingExtensionPairing,
+) -> Response {
+    let mut error = BrokerError::new(
+        BrokerErrorCode::BrokerPairingRequired,
+        "this Chrome extension is not paired with the local Teshi broker",
+    );
+    error
+        .recovery
+        .insert("pairing_required".into(), Value::Bool(true));
+    error
+        .recovery
+        .insert("origin".into(), Value::String(origin.to_owned()));
+    error.recovery.insert(
+        "pending".into(),
+        serde_json::to_value(pending).unwrap_or_else(|_| json!({})),
+    );
+    let mut response = error_response(error);
+    add_cors_for_extension_origin(response.headers_mut(), request_headers, origin);
+    response
+}
+
+async fn pairing_list(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    if let Err(error) = authorize_admin(&state, &headers) {
+        return error_response(error);
+    }
+    let trusted = match pairing_records(&state) {
+        Ok(records) => records,
+        Err(error) => return error_response(error),
+    };
+    let pending = state.pending_pairings.read().await.clone();
+    Json(json!({
+        "ok": true,
+        "trusted_origins": trusted,
+        "effective_origins": effective_origin_strings(&state),
+        "pending_pairings": pending,
+    }))
+    .into_response()
+}
+
+async fn pairing_add(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = authorize_admin(&state, &headers) {
+        return error_response(error);
+    }
+    let request = match parse_pairing_approval(&headers, &body) {
+        Ok(request) => request,
+        Err(error) => return error_response(error),
+    };
+    let Some(store) = state.pairing_store.as_ref() else {
+        return error_response(BrokerError::new(
+            BrokerErrorCode::BrowserArtifactFailure,
+            "durable pairing is unavailable because no per-user state store was configured",
+        ));
+    };
+    let before_records = match store.load() {
+        Ok(records) => records,
+        Err(error) => return error_response(error),
+    };
+    if let Err(error) = store.add_exact(&request.origin, request.display_name.as_deref()) {
+        return error_response(error);
+    }
+    let after_records = match store.load() {
+        Ok(records) => records,
+        Err(error) => return error_response(error),
+    };
+    if let Err(error) = apply_trust_update(&state, &after_records) {
+        let _ = store.replace(&before_records);
+        return error_response(error);
+    }
+    state
+        .pending_pairings
+        .write()
+        .await
+        .retain(|entry| entry.origin != request.origin);
+    Json(json!({
+        "ok": true,
+        "changed": before_records.iter().all(|entry| entry.origin != request.origin),
+        "origin": request.origin,
+        "trusted_origins": after_records,
+        "effective_origins": effective_origin_strings(&state),
+    }))
+    .into_response()
+}
+
+async fn pairing_remove(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = authorize_admin(&state, &headers) {
+        return error_response(error);
+    }
+    let request = match parse_pairing_approval(&headers, &body) {
+        Ok(request) => request,
+        Err(error) => return error_response(error),
+    };
+    let Some(store) = state.pairing_store.as_ref() else {
+        return error_response(BrokerError::new(
+            BrokerErrorCode::BrowserArtifactFailure,
+            "durable pairing is unavailable because no per-user state store was configured",
+        ));
+    };
+    let before_records = match store.load() {
+        Ok(records) => records,
+        Err(error) => return error_response(error),
+    };
+    if let Err(error) = store.remove_exact(&request.origin) {
+        return error_response(error);
+    }
+    let after_records = match store.load() {
+        Ok(records) => records,
+        Err(error) => return error_response(error),
+    };
+    if let Err(error) = apply_trust_update(&state, &after_records) {
+        let _ = store.replace(&before_records);
+        return error_response(error);
+    }
+    let affected_instances = stream_instances_for_origin(&state, &request.origin).await;
+    if !affected_instances.is_empty()
+        && state
+            .events
+            .try_send(BrokerEvent::ExtensionTrustRevoked {
+                extension_instance_ids: affected_instances.clone(),
+            })
+            .is_err()
+    {
+        let _ = store.replace(&before_records);
+        let _ = apply_trust_update(&state, &before_records);
+        return error_response(BrokerError::new(
+            BrokerErrorCode::BrowserResourceLimit,
+            "broker event queue is full; live trust revoke was not completed",
+        ));
+    }
+    close_streams_for_instances(&state, &affected_instances).await;
+    state
+        .pending_pairings
+        .write()
+        .await
+        .retain(|entry| entry.origin != request.origin);
+    let _ = state.revocations.send(Arc::from(request.origin.clone()));
+    Json(json!({
+        "ok": true,
+        "changed": before_records.iter().any(|entry| entry.origin == request.origin),
+        "origin": request.origin,
+        "revoked_sessions": affected_instances,
+        "trusted_origins": after_records,
+        "effective_origins": effective_origin_strings(&state),
+    }))
+    .into_response()
+}
+
+fn parse_pairing_approval(
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<PairingApprovalRequest, BrokerError> {
+    if !content_type_is_json(headers) {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerProtocolError,
+            "pairing mutation requires application/json",
+        ));
+    }
+    let request: PairingApprovalRequest = serde_json::from_slice(body).map_err(|_| {
+        BrokerError::new(
+            BrokerErrorCode::BrokerProtocolError,
+            "pairing mutation body is malformed",
+        )
+    })?;
+    validate_origin(request.origin.trim())?;
+    Ok(PairingApprovalRequest {
+        origin: request.origin.trim().to_owned(),
+        display_name: request.display_name,
+    })
+}
+
+fn pairing_records(state: &ServerState) -> Result<Vec<TrustedExtensionOrigin>, BrokerError> {
+    if let Some(store) = state.pairing_store.as_ref() {
+        return store.list();
+    }
+    Ok(effective_origin_strings(state)
+        .into_iter()
+        .map(|origin| TrustedExtensionOrigin {
+            origin,
+            display_name: None,
+            created_at_ms: 0,
+            last_seen_at_ms: 0,
+        })
+        .collect())
+}
+
+fn apply_trust_update(
+    state: &ServerState,
+    durable_records: &[TrustedExtensionOrigin],
+) -> Result<(), BrokerError> {
+    let effective = merge_extension_origins(
+        &state
+            .configured_extension_origins
+            .iter()
+            .map(|origin| origin.to_string())
+            .collect::<Vec<_>>(),
+        durable_records.iter().map(|record| record.origin.as_str()),
+    )?;
+    {
+        let mut trusted = state.trusted_extension_origins.write().map_err(|_| {
+            BrokerError::new(
+                BrokerErrorCode::BrowserArtifactFailure,
+                "broker trust state lock is poisoned",
+            )
+        })?;
+        let previous = trusted.clone();
+        *trusted = effective
+            .iter()
+            .map(|origin| Arc::<str>::from(origin.as_str()))
+            .collect();
+        if let Some(store) = state.credential_store.as_ref() {
+            let credential = PrivateBrokerCredential::for_endpoint(
+                &state_endpoint_record(state),
+                state.token.to_string(),
+                effective,
+            )?;
+            if let Err(error) = store.write(&credential) {
+                *trusted = previous;
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn state_endpoint_record(state: &ServerState) -> EndpointRecord {
+    let discovery = build_discovery_response(state, false);
+    EndpointRecord {
+        schema_version: discovery.schema_version,
+        protocol_version: discovery.protocol_version,
+        mode: discovery.mode,
+        ws_url: discovery.ws_url,
+        discovery_url: discovery.discovery_url,
+        extension_frame_ws_url: discovery.extension_frame_ws_url,
+        broker_pid: discovery.broker_pid,
+        broker_start_id: discovery.broker_start_id,
+        broker_features: discovery.broker_features,
+        bridge: "rust".into(),
+    }
+}
+
+fn effective_origin_strings(state: &ServerState) -> Vec<String> {
+    state
+        .trusted_extension_origins
+        .read()
+        .map(|origins| origins.iter().map(|origin| origin.to_string()).collect())
+        .unwrap_or_default()
+}
+
+async fn stream_instances_for_origin(state: &ServerState, origin: &str) -> Vec<String> {
+    state
+        .stream_origins
+        .read()
+        .await
+        .iter()
+        .filter(|(_, (_, stream_origin))| stream_origin.as_ref() == origin)
+        .map(|(instance_id, _)| instance_id.clone())
+        .collect()
+}
+
+async fn close_streams_for_instances(state: &ServerState, extension_instance_ids: &[String]) {
+    let senders = {
+        let streams = state.streams.read().await;
+        extension_instance_ids
+            .iter()
+            .filter_map(|instance_id| streams.get(instance_id).map(|(_, sender)| sender.clone()))
+            .collect::<Vec<_>>()
+    };
+    for sender in senders {
+        close_replaced_stream(state, sender).await;
+    }
 }
 
 async fn identity_challenge(
@@ -808,7 +1232,7 @@ async fn preflight(State(state): State<ServerState>, headers: HeaderMap) -> Resp
     let Some(origin) = header_text(&headers, ORIGIN) else {
         return StatusCode::FORBIDDEN.into_response();
     };
-    if !is_trusted_extension_origin(&state, &origin) {
+    if !is_trusted_extension_origin(&state, &origin) && !valid_extension_origin(&origin) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let mut response = StatusCode::NO_CONTENT.into_response();
@@ -1240,6 +1664,7 @@ async fn extension_websocket(
     if let Err(error) = authorize_websocket(&state, &headers, &uri, true) {
         return error_response(error);
     }
+    let extension_origin = header_text(&headers, ORIGIN).unwrap_or_default();
     let permit = match Arc::clone(&state.websocket_slots).try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
@@ -1265,7 +1690,15 @@ async fn extension_websocket(
         .max_frame_size(max_size)
         .write_buffer_size(WS_WRITE_BUFFER_BYTES)
         .max_write_buffer_size(WS_MAX_WRITE_BUFFER_BYTES)
-        .on_upgrade(move |socket| extension_socket(socket, state, permit, extension_stream_permit))
+        .on_upgrade(move |socket| {
+            extension_socket(
+                socket,
+                state,
+                permit,
+                extension_stream_permit,
+                extension_origin,
+            )
+        })
 }
 
 async fn client_socket(
@@ -1487,6 +1920,7 @@ async fn extension_socket(
     state: ServerState,
     _permit: tokio::sync::OwnedSemaphorePermit,
     _extension_stream_permit: tokio::sync::OwnedSemaphorePermit,
+    extension_origin: String,
 ) {
     let Some(Ok(Message::Text(first))) = socket.next().await else {
         let _ = socket.send(Message::Close(None)).await;
@@ -1553,6 +1987,7 @@ async fn extension_socket(
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (outgoing, mut outgoing_rx) =
         mpsc::channel::<BrokerOutgoingMessage>(EXTENSION_OUTBOUND_QUEUE_CAPACITY);
+    let mut revocations = state.revocations.subscribe();
     let event_permit = match timeout(state.response_timeout, state.events.reserve()).await {
         Ok(Ok(permit)) => permit,
         _ => {
@@ -1573,6 +2008,10 @@ async fn extension_socket(
     let previous = state.streams.write().await.insert(
         extension_instance_id.clone(),
         (generation, outgoing.clone()),
+    );
+    state.stream_origins.write().await.insert(
+        extension_instance_id.clone(),
+        (generation, Arc::from(extension_origin.clone())),
     );
     if let Some((_, old_sender)) = previous {
         close_replaced_stream(&state, old_sender).await;
@@ -1688,6 +2127,16 @@ async fn extension_socket(
                 }
                 if socket.send(outgoing.message).await.is_err() { break; }
             }
+            revoked = revocations.recv() => {
+                match revoked {
+                    Ok(origin) if origin.as_ref() == extension_origin => {
+                        let _ = socket.send(Message::Close(None)).await;
+                        break;
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
         }
     }
 
@@ -1723,6 +2172,15 @@ async fn unregister_stream(
             false
         }
     };
+    if removed {
+        let mut stream_origins = state.stream_origins.write().await;
+        if stream_origins
+            .get(extension_instance_id)
+            .is_some_and(|(current, _)| *current == generation)
+        {
+            stream_origins.remove(extension_instance_id);
+        }
+    }
     if removed && notify {
         let event = BrokerEvent::ExtensionDisconnected {
             extension_instance_id: extension_instance_id.to_owned(),
@@ -1938,6 +2396,28 @@ fn authorize_http(
     Ok(())
 }
 
+fn authorize_admin(state: &ServerState, headers: &HeaderMap) -> Result<(), BrokerError> {
+    if !host_is_loopback(headers, state.discovery_addr.port()) {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerOriginDenied,
+            "pairing administration requires the loopback discovery listener",
+        ));
+    }
+    if headers.contains_key(ORIGIN) {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerOriginDenied,
+            "pairing administration is restricted to the trusted Teshi process",
+        ));
+    }
+    if !token_matches_header(state, headers) {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerAuthenticationFailed,
+            "broker authentication failed",
+        ));
+    }
+    Ok(())
+}
+
 fn authorize_websocket(
     state: &ServerState,
     headers: &HeaderMap,
@@ -2003,6 +2483,19 @@ fn token_matches(state: &ServerState, headers: &HeaderMap, query: Option<&str>) 
     }
 }
 
+fn token_matches_header(state: &ServerState, headers: &HeaderMap) -> bool {
+    let header_token = headers
+        .get("x-teshi-broker-token")
+        .and_then(|value| value.to_str().ok());
+    let bearer_token = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    header_token
+        .or(bearer_token)
+        .is_some_and(|candidate| constant_time_equal(candidate, &state.token))
+}
+
 fn constant_time_equal(candidate: &str, expected: &str) -> bool {
     if candidate.len() != expected.len() {
         return false;
@@ -2017,11 +2510,31 @@ fn valid_extension_origin(origin: &str) -> bool {
     id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
 }
 
+fn merge_extension_origins<'a>(
+    configured: &[String],
+    durable: impl IntoIterator<Item = &'a str>,
+) -> Result<Vec<String>, BrokerError> {
+    let mut origins = configured.to_vec();
+    origins.extend(durable.into_iter().map(str::to_owned));
+    origins.sort();
+    origins.dedup();
+    if origins.len() > crate::protocol::MAX_TRUSTED_EXTENSION_ORIGINS
+        || origins.iter().any(|origin| !valid_extension_origin(origin))
+    {
+        return Err(BrokerError::new(
+            BrokerErrorCode::BrokerOriginDenied,
+            "effective trusted extension origins exceed the exact bounded allowlist",
+        ));
+    }
+    Ok(origins)
+}
+
 fn is_trusted_extension_origin(state: &ServerState, origin: &str) -> bool {
     state
         .trusted_extension_origins
-        .iter()
-        .any(|trusted| trusted.as_ref() == origin)
+        .read()
+        .map(|trusted| trusted.iter().any(|value| value.as_ref() == origin))
+        .unwrap_or(false)
 }
 
 fn host_is_loopback(headers: &HeaderMap, port: u16) -> bool {
@@ -2059,6 +2572,22 @@ fn add_cors_if_trusted(headers: &mut HeaderMap, request_headers: &HeaderMap, sta
     }
 }
 
+fn add_cors_for_extension_origin(
+    headers: &mut HeaderMap,
+    request_headers: &HeaderMap,
+    origin: &str,
+) {
+    if header_text(request_headers, ORIGIN).as_deref() != Some(origin)
+        || !valid_extension_origin(origin)
+    {
+        return;
+    }
+    if let Ok(origin) = HeaderValue::from_str(origin) {
+        headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        headers.insert(VARY, HeaderValue::from_static("Origin"));
+    }
+}
+
 fn add_cors_if_trusted_to_value(
     value: Value,
     headers: &HeaderMap,
@@ -2069,6 +2598,14 @@ fn add_cors_if_trusted_to_value(
     response
 }
 
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
 fn cors_error(headers: &HeaderMap, state: &ServerState, error: BrokerError) -> Response {
     let mut response = error_response(error);
     add_cors_if_trusted(response.headers_mut(), headers, state);
@@ -2077,9 +2614,9 @@ fn cors_error(headers: &HeaderMap, state: &ServerState, error: BrokerError) -> R
 
 fn error_status(code: BrokerErrorCode) -> StatusCode {
     match code {
-        BrokerErrorCode::BrokerAuthenticationFailed | BrokerErrorCode::BrokerOriginDenied => {
-            StatusCode::FORBIDDEN
-        }
+        BrokerErrorCode::BrokerAuthenticationFailed
+        | BrokerErrorCode::BrokerOriginDenied
+        | BrokerErrorCode::BrokerPairingRequired => StatusCode::FORBIDDEN,
         BrokerErrorCode::BrowserResourceLimit => StatusCode::SERVICE_UNAVAILABLE,
         BrokerErrorCode::BrowserOperationTimeout | BrokerErrorCode::BrowserWaitTimeout => {
             StatusCode::GATEWAY_TIMEOUT
@@ -2945,6 +3482,185 @@ mod tests {
                 .unwrap()
                 .contains("token=")
         );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn pairing_requires_explicit_native_approval_and_persists_without_project_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = BrokerServerConfig::with_trusted_extension_origins(Vec::new())
+            .with_persistent_state_dir(temp.path());
+        config.discovery_addr = "127.0.0.1:0".parse().unwrap();
+        let runtime = BrokerRuntime::start(config).await.unwrap();
+        let private = PrivateCredentialStore::new(temp.path());
+        runtime.persist_private_credential(&private).unwrap();
+        let endpoint = runtime.endpoint_record();
+        let client = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap();
+        let origin = format!("chrome-extension://{EXTENSION_ID}");
+
+        let pending = client
+            .post(&endpoint.discovery_url)
+            .header("Content-Type", "application/json")
+            .header("Origin", &origin)
+            .json(&serde_json::json!({
+                "extension_id": EXTENSION_ID,
+                "profile_label": "QA account",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(pending.status(), StatusCode::FORBIDDEN);
+        let pending_body: Value = pending.json().await.unwrap();
+        assert_eq!(pending_body["code"], "broker_pairing_required");
+        assert_eq!(pending_body["recovery"]["origin"], origin);
+        assert!(pending_body.to_string().find("token").is_none());
+
+        let admin_path = format!("{}/pairing", endpoint.discovery_url);
+        let listed = client
+            .get(&admin_path)
+            .header("X-Teshi-Broker-Token", runtime.credential())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed_body: Value = listed.json().await.unwrap();
+        assert_eq!(listed_body["trusted_origins"].as_array().unwrap().len(), 0);
+        assert_eq!(listed_body["pending_pairings"][0]["origin"], origin);
+
+        let self_approval = client
+            .post(&admin_path)
+            .header("Content-Type", "application/json")
+            .header("Origin", &origin)
+            .header("X-Teshi-Broker-Token", runtime.credential())
+            .json(&serde_json::json!({"origin": origin}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(self_approval.status(), StatusCode::FORBIDDEN);
+
+        let approved = client
+            .post(&admin_path)
+            .header("Content-Type", "application/json")
+            .header("X-Teshi-Broker-Token", runtime.credential())
+            .json(&serde_json::json!({
+                "origin": origin,
+                "display_name": "QA account",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+        let approved_body: Value = approved.json().await.unwrap();
+        assert_eq!(approved_body["changed"], true);
+        assert_eq!(
+            PairingStore::new(temp.path()).load().unwrap()[0].origin,
+            origin
+        );
+        let generation_credential = private.read_for_endpoint(&endpoint).unwrap();
+        assert_eq!(
+            generation_credential.trusted_extension_origins(),
+            std::slice::from_ref(&origin)
+        );
+
+        let discovered = client
+            .post(&endpoint.discovery_url)
+            .header("Content-Type", "application/json")
+            .header("Origin", &origin)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(discovered.status(), StatusCode::OK);
+        let discovered_body: Value = discovered.json().await.unwrap();
+        assert!(
+            discovered_body["extension_frame_ws_url"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("token={}", runtime.credential()))
+        );
+
+        let removed = client
+            .delete(&admin_path)
+            .header("Content-Type", "application/json")
+            .header("X-Teshi-Broker-Token", runtime.credential())
+            .json(&serde_json::json!({"origin": origin}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(removed.status(), StatusCode::OK);
+        assert!(PairingStore::new(temp.path()).load().unwrap().is_empty());
+        let denied = client
+            .post(&endpoint.discovery_url)
+            .header("Content-Type", "application/json")
+            .header("Origin", &origin)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            denied.json::<Value>().await.unwrap()["code"],
+            "broker_pairing_required"
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn removing_pairing_closes_the_live_extension_stream() {
+        let temp = tempfile::tempdir().unwrap();
+        let origin = format!("chrome-extension://{EXTENSION_ID}");
+        let mut config = BrokerServerConfig::with_trusted_extension_origins(vec![origin.clone()])
+            .with_persistent_state_dir(temp.path());
+        config.discovery_addr = "127.0.0.1:0".parse().unwrap();
+        let mut runtime = BrokerRuntime::start(config).await.unwrap();
+        let private = PrivateCredentialStore::new(temp.path());
+        runtime.persist_private_credential(&private).unwrap();
+        let endpoint = runtime.endpoint_record();
+        let mut request = request_extension_ws_url(&runtime)
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert(WS_ORIGIN, WsHeaderValue::from_str(&origin).unwrap());
+        let (mut socket, _) = connect_async(request).await.unwrap();
+        socket
+            .send(WsMessage::Text(
+                serde_json::to_string(&ExtensionStreamMessage::StreamHello {
+                    project_root: None,
+                    extension_instance_id: "pairing-revoke-profile".into(),
+                    protocol_version: BROWSER_BROKER_PROTOCOL_VERSION,
+                    extension_version: "test".into(),
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let mut state = BrokerState::new();
+        handle_next_state_event(&mut runtime, &mut state).await;
+        assert_eq!(read_json(&mut socket).await["ok"], true);
+
+        let client = reqwest::Client::new();
+        let removed = client
+            .delete(format!("{}/pairing", endpoint.discovery_url))
+            .header("Content-Type", "application/json")
+            .header("X-Teshi-Broker-Token", runtime.credential())
+            .json(&serde_json::json!({"origin": origin}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(removed.status(), StatusCode::OK);
+        handle_next_state_event(&mut runtime, &mut state).await;
+        let closed = timeout(Duration::from_secs(1), socket.next())
+            .await
+            .unwrap();
+        assert!(matches!(
+            closed,
+            None | Some(Err(_)) | Some(Ok(WsMessage::Close(_)))
+        ));
         runtime.shutdown().await;
     }
 

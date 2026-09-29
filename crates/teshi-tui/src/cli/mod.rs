@@ -464,6 +464,11 @@ pub enum WaitUntilArg {
 
 #[derive(Debug, Subcommand)]
 pub enum BrowserCommand {
+    /// List, approve, or revoke user-scoped Chrome extension pairing.
+    Pairing {
+        #[command(subcommand)]
+        action: BrowserPairingCommand,
+    },
     /// List registered browser-profile sessions and health
     Sessions,
     /// List windows and tabs for one browser-profile session
@@ -548,6 +553,31 @@ pub enum BrowserCommand {
     },
     /// Explicitly remove managed browser artifact files
     ArtifactCleanup(BrowserArtifactCleanupArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BrowserPairingCommand {
+    /// Show durable trusted origins and live pending pairing requests.
+    List,
+    /// Explicitly approve one exact Origin or its 32-character extension ID.
+    Approve(BrowserPairingApproveArgs),
+    /// Revoke one exact Origin or its 32-character extension ID.
+    Remove(BrowserPairingOriginArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserPairingApproveArgs {
+    /// Exact chrome-extension:// origin, or the extension ID shown by pairing list.
+    pub origin: String,
+    /// Optional display-only label retained with the durable identity.
+    #[arg(long)]
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserPairingOriginArgs {
+    /// Exact chrome-extension:// origin, or the extension ID shown by pairing list.
+    pub origin: String,
 }
 
 #[derive(Debug, Args, Default)]

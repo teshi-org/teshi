@@ -188,7 +188,10 @@ test("extension Discovery uses a browser-originated credential request", () => {
   assert.match(background, /function discoveryRequestOptions/);
   assert.match(background, /method: "POST"/);
   assert.match(background, /"Content-Type": "application\/json"/);
-  assert.match(background, /body: "\{\}"/);
+  assert.match(background, /extension_id: chrome\.runtime\.id/);
+  assert.match(background, /extension_instance_id: identity\.extension_instance_id/);
+  assert.match(background, /profile_label: identity\.profile_label/);
+  assert.match(background, /browser-supplied HTTP Origin header/);
   assert.doesNotMatch(background, /X-Teshi-Extension-Origin/);
 });
 

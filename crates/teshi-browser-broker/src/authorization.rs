@@ -471,6 +471,19 @@ impl AuthorizationState {
         before.saturating_sub(self.grants.len())
     }
 
+    /// Revoke all short-lived capability grants associated with an extension
+    /// instance when its durable Origin trust is removed.
+    pub fn revoke_for_extension_instance(&mut self, extension_instance_id: &str) -> usize {
+        let mut revoked = 0;
+        for grant in self.grants.values_mut() {
+            if grant.extension_instance_id == extension_instance_id && !grant.revoked {
+                grant.revoked = true;
+                revoked += 1;
+            }
+        }
+        revoked
+    }
+
     pub fn validate(
         &mut self,
         token: &str,

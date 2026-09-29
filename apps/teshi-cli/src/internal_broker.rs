@@ -20,7 +20,6 @@ pub(crate) struct InternalBrokerOptions {
     #[arg(
         long = "trusted-extension-origin",
         value_name = "ORIGIN",
-        required = true,
         action = clap::ArgAction::Append
     )]
     trusted_extension_origins: Vec<String>,
@@ -43,7 +42,8 @@ impl InternalBrokerOptions {
 
 pub(crate) async fn run(options: InternalBrokerOptions) -> Result<()> {
     let mut config =
-        BrokerServerConfig::with_trusted_extension_origins(options.trusted_extension_origins);
+        BrokerServerConfig::with_trusted_extension_origins(options.trusted_extension_origins)
+            .with_persistent_state_dir(&options.state_dir);
     config.discovery_addr =
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), options.discovery_port);
     config.broker_features = vec!["transport.v1".into()];
@@ -81,7 +81,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn internal_arguments_require_an_explicit_exact_origin_and_state_directory() {
+    fn internal_arguments_allow_unpaired_startup_and_keep_exact_origin_overrides() {
         let first_origin = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let second_origin = "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let options = InternalBrokerOptions::parse([
@@ -114,11 +114,9 @@ mod tests {
         assert!(options.enable_p0_control);
         assert!(options.enable_p1_observability);
 
-        assert!(
-            InternalBrokerOptions::parse(
-                ["teshi".into(), "--state-dir".into(), "C:/state".into(),]
-            )
-            .is_err()
-        );
+        let unpaired =
+            InternalBrokerOptions::parse(["teshi".into(), "--state-dir".into(), "C:/state".into()])
+                .unwrap();
+        assert!(unpaired.trusted_extension_origins.is_empty());
     }
 }

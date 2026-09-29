@@ -43,6 +43,9 @@ async function refreshStatus() {
       connectBtn.disabled = false;
       if (info.code === "incompatible_browser_session") {
         statusEl.textContent = `Incompatible protocol — broker requires ${info.required_protocol_version}`;
+      } else if (info.code === "broker_pairing_required" || info.pairing_required) {
+        statusEl.textContent = "Waiting for Teshi approval of this extension";
+        detailsEl.textContent += ` · approve ${info.origin || extensionId} with teshi browser pairing approve`;
       } else {
         statusEl.textContent = info.error || "Bridge offline — start Connect Chrome in teshi";
       }

@@ -12,16 +12,17 @@ use teshi_engine::{
     BrowserElementInput, BrowserFeatureId, BrowserMode, BrowserOperation, BrowserOperations,
     BrowserPrivilegedCapability, BrowserScreenshotFormat, BrowserTarget, BrowserWaitCondition,
     LocatorIntent, PageContextRevision, PlaywrightLocatorCandidate, RuntimeConfig, StepBinding,
-    TeshiEngine, default_browser_service_script, default_winapp_service_script,
-    ensure_user_chrome_broker, load_project_settings, open_project, read_active_step,
-    resolve_step_bindings, send_sidecar_command_with_timeout, start_browser_sidecar,
-    stop_browser_sidecar,
+    TeshiEngine, chrome_broker_pairing_approve, chrome_broker_pairing_list,
+    chrome_broker_pairing_remove, chrome_broker_pairing_store, default_browser_service_script,
+    default_winapp_service_script, ensure_user_chrome_broker, fetch_chrome_broker_endpoint,
+    load_project_settings, open_project, read_active_step, resolve_step_bindings,
+    send_sidecar_command_with_timeout, start_browser_sidecar, stop_browser_sidecar,
 };
 
 use super::browser_endpoint::{
     auto_reconnect_enabled, doctor_endpoint, ensure_sidecar_healthy, read_cdp_endpoint,
-    reconnect_embedded, resolve_browser_project_root, write_cdp_endpoint_from_rust,
-    write_chrome_broker_endpoint,
+    reconnect_chrome_broker, reconnect_embedded, resolve_browser_project_root,
+    write_cdp_endpoint_from_rust, write_chrome_broker_endpoint,
 };
 use super::check::preflight_feature;
 use super::locator_verify::{LocatorVerifyRecord, append_locator_verify, verify_record_json};
@@ -35,7 +36,8 @@ use super::{
     BrowserContentSettingArgs, BrowserCookiesArgs, BrowserEvidenceArgs, BrowserExecuteArgs,
     BrowserExtensionsArgs, BrowserGrantCommand, BrowserJavascriptArgs, BrowserLeaseCommand,
     BrowserLocatorArgs, BrowserLocatorVerifyArgs, BrowserNavigateArgs, BrowserNetworkCommand,
-    BrowserNetworkDetailArgs, BrowserNetworkListArgs, BrowserNetworkStartArgs, BrowserPdfArgs,
+    BrowserNetworkDetailArgs, BrowserNetworkListArgs, BrowserNetworkStartArgs,
+    BrowserPairingApproveArgs, BrowserPairingCommand, BrowserPairingOriginArgs, BrowserPdfArgs,
     BrowserProfileLabelCommand, BrowserReconnectArgs, BrowserReplayArgs, BrowserScreenshotArgs,
     BrowserSelectorArgs, BrowserServeEmbeddedArgs, BrowserSnapshotArgs, BrowserTabCommand,
     BrowserTargetArgs, BrowserVerifyArgs,
@@ -43,9 +45,13 @@ use super::{
 
 /// Handles `teshi browser ...` subcommands.
 pub fn handle_browser_command(action: &BrowserCommand) -> Result<()> {
+    if let BrowserCommand::Pairing { action } = action {
+        return pairing(action);
+    }
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let project_root = resolve_browser_project_root(&cwd).unwrap_or(cwd);
     match action {
+        BrowserCommand::Pairing { action } => pairing(action),
         BrowserCommand::Sessions => {
             ensure_cli_chrome_broker(&project_root)?;
             run_typed_operation(
@@ -102,6 +108,94 @@ pub fn handle_browser_command(action: &BrowserCommand) -> Result<()> {
         BrowserCommand::Network { action } => network(&project_root, action),
         BrowserCommand::ArtifactCleanup(args) => artifact_cleanup(&project_root, args),
     }
+}
+
+fn pairing(action: &BrowserPairingCommand) -> Result<()> {
+    match action {
+        BrowserPairingCommand::List => {
+            let value = if rust_broker_is_live() {
+                chrome_broker_pairing_list().map_err(browser_error_to_anyhow)?
+            } else {
+                let store = chrome_broker_pairing_store().map_err(browser_error_to_anyhow)?;
+                json!({
+                    "ok": true,
+                    "trusted_origins": store.list().map_err(|error| anyhow!(error.message))?,
+                    "effective_origins": store
+                        .list()
+                        .map_err(|error| anyhow!(error.message))?
+                        .into_iter()
+                        .map(|record| record.origin)
+                        .collect::<Vec<_>>(),
+                    "pending_pairings": [],
+                    "broker": "offline",
+                })
+            };
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
+        }
+        BrowserPairingCommand::Approve(args) => pairing_approve(args),
+        BrowserPairingCommand::Remove(args) => pairing_remove(args),
+    }
+}
+
+fn pairing_approve(args: &BrowserPairingApproveArgs) -> Result<()> {
+    let origin = normalize_pairing_origin(&args.origin)?;
+    let value = if rust_broker_is_live() {
+        chrome_broker_pairing_approve(&origin, args.display_name.as_deref())
+            .map_err(browser_error_to_anyhow)?
+    } else {
+        let store = chrome_broker_pairing_store().map_err(browser_error_to_anyhow)?;
+        let change = store
+            .add_exact(&origin, args.display_name.as_deref())
+            .map_err(|error| anyhow!(error.message))?;
+        json!({"ok": true, "changed": change.changed, "origin": origin, "broker": "offline"})
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+fn pairing_remove(args: &BrowserPairingOriginArgs) -> Result<()> {
+    let origin = normalize_pairing_origin(&args.origin)?;
+    let value = if rust_broker_is_live() {
+        chrome_broker_pairing_remove(&origin).map_err(browser_error_to_anyhow)?
+    } else {
+        let store = chrome_broker_pairing_store().map_err(browser_error_to_anyhow)?;
+        let change = store
+            .remove_exact(&origin)
+            .map_err(|error| anyhow!(error.message))?;
+        json!({"ok": true, "changed": change.changed, "origin": origin, "broker": "offline"})
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+fn rust_broker_is_live() -> bool {
+    fetch_chrome_broker_endpoint(teshi_engine::CHROME_DISCOVERY_PORT).is_ok_and(|endpoint| {
+        endpoint
+            .broker_features
+            .iter()
+            .any(|feature| feature == "transport.v1")
+    })
+}
+
+fn browser_error_to_anyhow(error: teshi_engine::BrowserError) -> anyhow::Error {
+    match error.hint {
+        Some(hint) => anyhow!("{} ({hint})", error.message),
+        None => anyhow!(error.message),
+    }
+}
+
+fn normalize_pairing_origin(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.starts_with("chrome-extension://") {
+        return Ok(value.to_owned());
+    }
+    if value.len() == 32 && value.bytes().all(|byte| (b'a'..=b'p').contains(&byte)) {
+        return Ok(format!("chrome-extension://{value}"));
+    }
+    Err(anyhow!(
+        "pairing target must be an exact chrome-extension:// origin or a 32-character extension ID"
+    ))
 }
 
 fn grant(project_root: &Path, action: &BrowserGrantCommand) -> Result<()> {
@@ -786,7 +880,15 @@ fn doctor(project_root: &Path) -> Result<()> {
 }
 
 fn reconnect(project_root: &Path, args: &BrowserReconnectArgs) -> Result<()> {
-    let endpoint = reconnect_embedded(project_root, args.navigate.as_deref(), args.wait_secs)?;
+    let before = read_cdp_endpoint(project_root).ok();
+    let endpoint = if before
+        .as_ref()
+        .is_some_and(|endpoint| endpoint.mode == "chrome")
+    {
+        reconnect_chrome_broker(project_root)?
+    } else {
+        reconnect_embedded(project_root, args.navigate.as_deref(), args.wait_secs)?
+    };
     let report = doctor_endpoint(project_root)?;
     println!(
         "{}",

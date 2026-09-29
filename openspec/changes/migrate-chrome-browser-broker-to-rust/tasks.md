@@ -52,7 +52,7 @@
 ## 7. Integrate All Teshi Entry Points
 
 - [ ] 7.1 Switch Chrome startup in `teshi-engine` from Python venv resolution/import checks to the shared Rust broker launcher; keep Embedded and WinApp branches unchanged.
-- [ ] 7.2 Update endpoint creation/health/reconnect so every project points to the same broker generation without exposing project paths or credentials publicly.
+- [x] 7.2 Update endpoint creation/health/reconnect so every project points to the same broker generation without exposing project paths or credentials publicly.
 - [ ] 7.3 Verify CLI, Agent, MCP, Daemon, GPUI Desktop, and daemon-backed GPUI WASM Web requests use the same typed state and broker identity.
 - [ ] 7.4 Test multiple projects, multiple terminals, client exits, daemon restarts, broker crashes, lease ownership, and recovery while preserving other clients' sessions.
 - [ ] 7.5 Run Embedded Playwright and WinApp regression suites to prove their existing runtimes and error guidance remain intact.

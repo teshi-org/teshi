@@ -8,11 +8,17 @@ const RESPONSE_URL = "http://127.0.0.1:17373/v1/bridge/response";
 // A JSON POST makes Chromium perform a CORS request with its browser-supplied
 // extension Origin. Rust only returns a credential on that exact Origin; the
 // public GET probe remains project-neutral and credential-free.
-function discoveryRequestOptions() {
+function discoveryRequestOptions(identity = {}) {
   return {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: "{}",
+    // These are untrusted pairing hints. The broker binds trust only to the
+    // browser-supplied HTTP Origin header, never to this body.
+    body: JSON.stringify({
+      extension_id: chrome.runtime.id || "",
+      extension_instance_id: identity.extension_instance_id || "",
+      profile_label: identity.profile_label || "",
+    }),
     cache: "no-store",
   };
 }
@@ -454,8 +460,19 @@ function applyBridgeDiscovery(info) {
 
 async function refreshExtensionFrameWsUrl() {
   try {
-    const res = await fetch(DISCOVERY_URL, discoveryRequestOptions());
+    const identity = await getExtensionIdentity();
+    const res = await fetch(DISCOVERY_URL, discoveryRequestOptions(identity));
     if (!res.ok) {
+      const failure = await res.json().catch(() => ({}));
+      if (failure.code === "broker_pairing_required") {
+        lastBridgeStatus = {
+          connected: false,
+          code: failure.code,
+          pairing_required: true,
+          origin: failure.recovery?.origin || `chrome-extension://${chrome.runtime.id}`,
+          error: "Waiting for Teshi approval of this Chrome extension.",
+        };
+      }
       return false;
     }
     const info = await res.json();
@@ -3154,8 +3171,27 @@ function setBadge(connected) {
 
 async function refreshBridgeCache() {
   try {
-    const res = await fetch(DISCOVERY_URL, discoveryRequestOptions());
+    const identity = await getExtensionIdentity();
+    const res = await fetch(DISCOVERY_URL, discoveryRequestOptions(identity));
     if (!res.ok) {
+      const failure = await res.json().catch(() => ({}));
+      clearBrokerCache();
+      if (failure.code === "broker_pairing_required") {
+        lastBridgeStatus = {
+          connected: false,
+          code: failure.code,
+          pairing_required: true,
+          origin: failure.recovery?.origin || `chrome-extension://${chrome.runtime.id}`,
+          pending: failure.recovery?.pending || null,
+          error: "Waiting for Teshi approval of this Chrome extension.",
+        };
+      } else {
+        lastBridgeStatus = {
+          connected: false,
+          code: failure.code,
+          error: failure.error || `Broker discovery failed with HTTP ${res.status}.`,
+        };
+      }
       return false;
     }
     const info = await res.json();

@@ -1662,6 +1662,7 @@ pub enum BrokerErrorCode {
     BrowserResourceLimit,
     BrokerAuthenticationFailed,
     BrokerOriginDenied,
+    BrokerPairingRequired,
     BrokerProtocolError,
 }
 
@@ -1694,6 +1695,7 @@ impl BrokerErrorCode {
             Self::BrowserResourceLimit => "browser_resource_limit",
             Self::BrokerAuthenticationFailed => "broker_authentication_failed",
             Self::BrokerOriginDenied => "broker_origin_denied",
+            Self::BrokerPairingRequired => "broker_pairing_required",
             Self::BrokerProtocolError => "broker_protocol_error",
         }
     }

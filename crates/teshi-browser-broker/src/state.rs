@@ -174,6 +174,9 @@ impl BrokerState {
                 extension_instance_id,
                 generation,
             } => self.handle_extension_disconnected(&extension_instance_id, generation),
+            BrokerEvent::ExtensionTrustRevoked {
+                extension_instance_ids,
+            } => self.handle_extension_trust_revoked(&extension_instance_ids),
             BrokerEvent::Unsubscribe { owner_id } => {
                 self.sessions.unsubscribe_owner(&owner_id);
             }
@@ -488,6 +491,30 @@ impl BrokerState {
                 BrokerError::new(
                     BrokerErrorCode::BrowserSessionDisconnected,
                     "browser extension stream disconnected while the operation was pending",
+                ),
+            );
+        }
+    }
+
+    fn handle_extension_trust_revoked(&mut self, extension_instance_ids: &[String]) {
+        for extension_instance_id in extension_instance_ids {
+            self.leases.remove(extension_instance_id);
+            self.queue_console_cleanup(extension_instance_id);
+            self.queue_network_cleanup(extension_instance_id);
+            self.evidence
+                .terminate_console_session(extension_instance_id, "trust_revoked", None);
+            self.terminate_network_session(extension_instance_id, "trust_revoked", None);
+            self.revoke_network_body_access_for_instance(extension_instance_id);
+            self.sessions.unsubscribe_instance(extension_instance_id);
+            self.sessions
+                .clear_element_references(extension_instance_id);
+            self.authorization
+                .revoke_for_extension_instance(extension_instance_id);
+            self.fail_pending_for_session(
+                extension_instance_id,
+                BrokerError::new(
+                    BrokerErrorCode::BrokerOriginDenied,
+                    "browser extension trust was revoked while the operation was pending",
                 ),
             );
         }

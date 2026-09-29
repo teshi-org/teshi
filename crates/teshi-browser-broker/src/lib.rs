@@ -8,6 +8,7 @@ pub mod authorization;
 pub(crate) mod coordinator;
 pub mod credential;
 pub mod evidence;
+pub mod pairing;
 pub mod protocol;
 pub mod server;
 pub mod session;
@@ -18,6 +19,7 @@ pub use authorization::{
 };
 pub use credential::{PrivateBrokerCredential, PrivateCredentialStore};
 pub use evidence::{ConsoleCaptureConfig, EvidenceStore, NetworkCaptureConfig, PreparedArtifact};
+pub use pairing::{PairingChange, PairingStore, TrustedExtensionOrigin};
 pub use protocol::{
     BROWSER_BROKER_IDENTITY_CHALLENGE_PATH, BROWSER_BROKER_PROTOCOL_VERSION,
     BROWSER_BROKER_SCHEMA_VERSION, BrokerErrorCode, BrokerIdentityChallenge, BrokerIdentityProof,

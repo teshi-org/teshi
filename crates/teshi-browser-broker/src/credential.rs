@@ -143,7 +143,9 @@ impl PrivateBrokerCredential {
             || self.broker_pid == 0
             || self.broker_start_id.is_empty()
             || self.broker_start_id.len() > 128
-            || self.trusted_extension_origins.is_empty()
+            // An empty list is the valid pre-pairing state.  The broker may
+            // listen and report pairing_required before any extension is
+            // explicitly approved; it still cannot issue a token to one.
             || self.trusted_extension_origins.len() > MAX_TRUSTED_EXTENSION_ORIGINS
             || self
                 .trusted_extension_origins
@@ -238,7 +240,7 @@ fn identity_authentication_error() -> BrokerError {
     )
 }
 
-fn valid_extension_origin(origin: &str) -> bool {
+pub(crate) fn valid_extension_origin(origin: &str) -> bool {
     let Some(id) = origin.strip_prefix("chrome-extension://") else {
         return false;
     };
@@ -363,7 +365,7 @@ impl PrivateCredentialStore {
     }
 }
 
-fn write_private_temp(path: &Path, bytes: &[u8]) -> Result<(), BrokerError> {
+pub(crate) fn write_private_temp(path: &Path, bytes: &[u8]) -> Result<(), BrokerError> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -392,7 +394,7 @@ fn write_private_temp(path: &Path, bytes: &[u8]) -> Result<(), BrokerError> {
 }
 
 #[cfg(unix)]
-fn create_owner_only_state_dir(path: &Path) -> Result<(), BrokerError> {
+pub(crate) fn create_owner_only_state_dir(path: &Path) -> Result<(), BrokerError> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
     let mut builder = fs::DirBuilder::new();
@@ -412,7 +414,7 @@ fn create_owner_only_state_dir(path: &Path) -> Result<(), BrokerError> {
 }
 
 #[cfg(not(unix))]
-fn create_owner_only_state_dir(path: &Path) -> Result<(), BrokerError> {
+pub(crate) fn create_owner_only_state_dir(path: &Path) -> Result<(), BrokerError> {
     fs::create_dir_all(path).map_err(|error| {
         BrokerError::new(
             BrokerErrorCode::BrowserArtifactFailure,
@@ -422,7 +424,7 @@ fn create_owner_only_state_dir(path: &Path) -> Result<(), BrokerError> {
 }
 
 #[cfg(unix)]
-fn set_owner_only_file_permissions(path: &Path) -> Result<(), BrokerError> {
+pub(crate) fn set_owner_only_file_permissions(path: &Path) -> Result<(), BrokerError> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
         BrokerError::new(
@@ -433,7 +435,7 @@ fn set_owner_only_file_permissions(path: &Path) -> Result<(), BrokerError> {
 }
 
 #[cfg(not(unix))]
-fn set_owner_only_file_permissions(_path: &Path) -> Result<(), BrokerError> {
+pub(crate) fn set_owner_only_file_permissions(_path: &Path) -> Result<(), BrokerError> {
     Ok(())
 }
 

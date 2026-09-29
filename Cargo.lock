@@ -7112,6 +7112,7 @@ dependencies = [
  "teshi-browser-broker",
  "teshi-core",
  "teshi-daemon",
+ "teshi-engine",
  "teshi-tui",
  "teshi-update",
  "tokio",
