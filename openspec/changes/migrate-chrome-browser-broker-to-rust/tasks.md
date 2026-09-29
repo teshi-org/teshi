@@ -56,7 +56,7 @@
 - [ ] 7.3 Verify CLI, Agent, MCP, Daemon, GPUI Desktop, and daemon-backed GPUI WASM Web requests use the same typed state and broker identity.
 - [ ] 7.4 Test multiple projects, multiple terminals, client exits, daemon restarts, broker crashes, lease ownership, and recovery while preserving other clients' sessions.
 - [ ] 7.5 Run Embedded Playwright and WinApp regression suites to prove their existing runtimes and error guidance remain intact.
-- [ ] 7.6 Enable Rust as the test-only Chrome implementation behind an explicit development selector; do not auto-fallback between implementations.
+- [x] 7.6 Enable Rust as the test-only Chrome implementation behind an explicit development selector; do not auto-fallback between implementations.
 
 ## 8. Complete Acceptance, Packaging, and Chrome Python Removal
 
