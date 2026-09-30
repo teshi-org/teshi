@@ -59,16 +59,17 @@ pub use authoring::{
 };
 pub use browser_agent::{
     AccessibleElement, BrowserAction, BrowserAgentError, BrowserAgentErrorCode,
-    BrowserCapabilities, BrowserConsoleLevel, BrowserElementInput, BrowserElementReferenceRecord,
-    BrowserElementState, BrowserEvidenceReference, BrowserFeatureAvailability, BrowserFeatureId,
-    BrowserFeaturePhase, BrowserLease, BrowserLeaseSummary, BrowserMetadata, BrowserOperation,
-    BrowserOperationResponse, BrowserOperations, BrowserPageSnapshot, BrowserPrivilegedCapability,
-    BrowserRequestEnvelope, BrowserScreenshot, BrowserScreenshotFormat, BrowserSession,
-    BrowserSessionHealth, BrowserTab, BrowserTarget, BrowserWaitCondition, BrowserWindow,
-    ExtensionIdentity, LocatorContext, LocatorIntent, LocatorVerificationStatus,
-    PageContextRevision, PlaywrightLocatorCandidate, PlaywrightLocatorKind,
-    PlaywrightLocatorResult, BROWSER_AGENT_SCHEMA_VERSION, BROWSER_BROKER_PROTOCOL_VERSION,
-    DEFAULT_BROWSER_CAPABILITY_GRANT_TTL_SECS, DEFAULT_BROWSER_LEASE_TTL_SECS,
+    BrowserBrokerIdentity, BrowserCapabilities, BrowserConsoleLevel, BrowserElementInput,
+    BrowserElementReferenceRecord, BrowserElementState, BrowserEvidenceReference,
+    BrowserFeatureAvailability, BrowserFeatureId, BrowserFeaturePhase, BrowserLease,
+    BrowserLeaseSummary, BrowserMetadata, BrowserOperation, BrowserOperationResponse,
+    BrowserOperations, BrowserPageSnapshot, BrowserPrivilegedCapability, BrowserRequestEnvelope,
+    BrowserScreenshot, BrowserScreenshotFormat, BrowserSession, BrowserSessionHealth, BrowserTab,
+    BrowserTarget, BrowserWaitCondition, BrowserWindow, ExtensionIdentity, LocatorContext,
+    LocatorIntent, LocatorVerificationStatus, PageContextRevision, PlaywrightLocatorCandidate,
+    PlaywrightLocatorKind, PlaywrightLocatorResult, BROWSER_AGENT_SCHEMA_VERSION,
+    BROWSER_BROKER_PROTOCOL_VERSION, DEFAULT_BROWSER_CAPABILITY_GRANT_TTL_SECS,
+    DEFAULT_BROWSER_LEASE_TTL_SECS,
 };
 pub use daemon::{
     find_project_root, pick_free_port, remove_daemon_manifest, spawn_daemon_background,

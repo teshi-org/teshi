@@ -2667,17 +2667,49 @@ fn operation_error_value(request: &OperationRequest, error: BrokerError) -> Valu
     response
 }
 
+/// Return only the credential-free fields that identify the broker generation.
+///
+/// This is attached to every typed operation response so CLI, Agent, MCP, and
+/// native/daemon adapters can prove that their request was handled by the same
+/// user-scoped broker. The public `ws_url` is intentionally generated from the
+/// token-free endpoint record; the command credential is never included here.
+fn broker_identity_value(state: &ServerState) -> Value {
+    let endpoint = state_endpoint_record(state);
+    json!({
+        "schema_version": endpoint.schema_version,
+        "protocol_version": endpoint.protocol_version,
+        "mode": endpoint.mode,
+        "ws_url": endpoint.ws_url,
+        "discovery_url": endpoint.discovery_url,
+        "broker_pid": endpoint.broker_pid,
+        "broker_start_id": endpoint.broker_start_id,
+        "broker_features": endpoint.broker_features,
+        "broker_scope": "user_session",
+        "bridge": endpoint.bridge,
+    })
+}
+
+fn attach_broker_identity(state: &ServerState, response: &Value) -> Value {
+    let mut response = response.clone();
+    if let Some(object) = response.as_object_mut() {
+        object.insert("broker_identity".into(), broker_identity_value(state));
+    }
+    response
+}
+
 fn operation_response_text(
     state: &ServerState,
     request: &OperationRequest,
     response: &Value,
 ) -> (String, Option<tokio::sync::OwnedSemaphorePermit>) {
-    let mut text = json_to_bounded_text(response, MAX_WEBSOCKET_MESSAGE_BYTES)
+    let response = attach_broker_identity(state, response);
+    let mut text = json_to_bounded_text(&response, MAX_WEBSOCKET_MESSAGE_BYTES)
         .unwrap_or_else(|error| operation_error_value(request, error).to_string());
     match reserve_event_bytes(state, text.len()) {
         Ok(budget) => (text, Some(budget)),
         Err(error) => {
-            text = operation_error_value(request, error).to_string();
+            text =
+                attach_broker_identity(state, &operation_error_value(request, error)).to_string();
             let budget = reserve_event_bytes(state, text.len()).ok();
             (text, budget)
         }

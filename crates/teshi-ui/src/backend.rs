@@ -325,12 +325,40 @@ pub struct BrowserSessionSnapshot {
     /// Age of the last extension heartbeat.
     #[serde(default)]
     pub last_heartbeat_age_ms: u64,
+    /// Monotonic extension stream generation for this session.
+    #[serde(default)]
+    pub stream_generation: Option<u64>,
     /// Current window/tab inventory.
     #[serde(default)]
     pub windows: Vec<BrowserWindowSnapshot>,
     /// Public lease summary when another local actor owns this session.
     #[serde(default)]
     pub lease: Option<BrowserLeaseSnapshot>,
+}
+
+/// Credential-free identity of the user-scoped broker generation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserBrokerIdentitySnapshot {
+    #[serde(default)]
+    pub schema_version: u16,
+    #[serde(default)]
+    pub protocol_version: u16,
+    #[serde(default)]
+    pub mode: String,
+    /// Hosted Web adapters intentionally leave this empty; private coordinates
+    /// never cross the daemon boundary.
+    #[serde(default)]
+    pub ws_url: String,
+    #[serde(default)]
+    pub broker_pid: u32,
+    #[serde(default)]
+    pub broker_start_id: String,
+    #[serde(default)]
+    pub broker_features: Vec<String>,
+    #[serde(default)]
+    pub broker_scope: String,
+    #[serde(default)]
+    pub bridge: String,
 }
 
 impl BrowserSessionSnapshot {
@@ -354,6 +382,9 @@ pub struct BrowserSessionListSnapshot {
     /// Whether legacy implicit targeting would be ambiguous.
     #[serde(default)]
     pub ambiguous_browser_target: bool,
+    /// Public identity shared by all clients of this broker generation.
+    #[serde(default)]
+    pub broker_identity: Option<BrowserBrokerIdentitySnapshot>,
     /// All retained session records, including recently disconnected ones.
     #[serde(default)]
     pub sessions: Vec<BrowserSessionSnapshot>,

@@ -216,7 +216,9 @@ fn call_tool(project_root: &Path, params: &Value, allow_mutations: bool) -> Resu
             ));
         }
     };
-    let client = BrowserOperations::new(endpoint.ws_url, timeout);
+    let client = BrowserOperations::new(endpoint.ws_url, timeout)
+        .with_caller_label("teshi-mcp")
+        .with_project_root(project_root.to_string_lossy());
     match client.execute(&operation) {
         Ok(response) => {
             let payload = response.payload;

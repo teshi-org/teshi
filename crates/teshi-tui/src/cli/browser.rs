@@ -870,6 +870,99 @@ fn execute_typed_operation_value(
     }
 }
 
+/// Execute one legacy compatibility command through the typed Rust broker when
+/// the endpoint belongs to that broker. The implicit target remains deliberately
+/// strict: it is allowed only when exactly one ready session exists, and the
+/// lease is always released before returning to the caller.
+fn execute_implicit_rust_browser_operation(
+    project_root: &Path,
+    timeout: Duration,
+    build: impl FnOnce(BrowserTarget, String) -> BrowserOperation,
+) -> Result<serde_json::Value> {
+    let endpoint = read_cdp_endpoint(project_root)?;
+    if endpoint.bridge != "rust" {
+        return Err(anyhow!(
+            "implicit typed browser targeting requires the Rust broker endpoint"
+        ));
+    }
+    let client = BrowserOperations::new(endpoint.ws_url, timeout)
+        .with_caller_label("teshi-cli")
+        .with_project_root(project_root.to_string_lossy());
+    let sessions = client
+        .execute(&BrowserOperation::ListBrowserSessions)?
+        .payload;
+    let records = sessions
+        .get("sessions")
+        .and_then(serde_json::Value::as_array)
+        .context("browser session discovery returned no sessions array")?;
+    let ready: Vec<_> = records
+        .iter()
+        .filter(|record| record.get("health").and_then(serde_json::Value::as_str) == Some("ready"))
+        .collect();
+    if ready.len() != 1 {
+        anyhow::bail!(
+            "implicit browser targeting requires exactly one ready Profile; found {}",
+            ready.len()
+        );
+    }
+    let record = ready[0];
+    let extension_instance_id = record
+        .pointer("/identity/extension_instance_id")
+        .and_then(serde_json::Value::as_str)
+        .context("browser session missing extension identity")?
+        .to_owned();
+    let (window_id, tab_id) = record
+        .get("windows")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|windows| {
+            windows.iter().find_map(|window| {
+                let window_id = window.get("id")?.as_i64()?;
+                window
+                    .get("tabs")?
+                    .as_array()?
+                    .iter()
+                    .find(|tab| {
+                        tab.get("active").and_then(serde_json::Value::as_bool) == Some(true)
+                    })
+                    .and_then(|tab| Some((window_id, tab.get("id")?.as_i64()?)))
+            })
+        })
+        .context("ready browser session has no active tab")?;
+    let target = BrowserTarget {
+        extension_instance_id: extension_instance_id.clone(),
+        window_id,
+        tab_id,
+    };
+    let lease = client.execute(&BrowserOperation::AcquireBrowserLease {
+        extension_instance_id: extension_instance_id.clone(),
+        owner_label: "teshi-cli-implicit".into(),
+        ttl_secs: 30,
+    })?;
+    let lease_token = lease
+        .payload
+        .get("lease_token")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            lease
+                .payload
+                .pointer("/lease/lease_token")
+                .and_then(serde_json::Value::as_str)
+        })
+        .context("browser lease response missing token")?
+        .to_owned();
+    let result = client.execute(&build(target, lease_token.clone()));
+    let release = client.execute(&BrowserOperation::ReleaseBrowserLease {
+        extension_instance_id,
+        lease_token,
+    });
+    if let Err(error) = release
+        && result.is_ok()
+    {
+        return Err(error.into());
+    }
+    result.map(|response| response.payload).map_err(Into::into)
+}
+
 fn doctor(project_root: &Path) -> Result<()> {
     let report = doctor_endpoint(project_root)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1045,6 +1138,24 @@ fn navigate(project_root: &Path, args: &BrowserNavigateArgs) -> Result<()> {
         );
     }
     let timeout = command_timeout_for_ms(args.timeout_ms);
+    if read_cdp_endpoint(project_root)
+        .ok()
+        .is_some_and(|endpoint| endpoint.bridge == "rust")
+    {
+        let response = execute_implicit_rust_browser_operation(
+            project_root,
+            timeout,
+            |target, lease_token| BrowserOperation::NavigateBrowser {
+                target,
+                lease_token,
+                url: args.url.clone(),
+                timeout_ms: args.timeout_ms,
+                wait: Some(BrowserWaitCondition::LoadComplete),
+                monitor: args.monitor,
+            },
+        )?;
+        return print_json_response(response);
+    }
     let response = navigate_to_url(
         project_root,
         &args.url,
@@ -1070,6 +1181,20 @@ fn snapshot(project_root: &Path, args: &BrowserSnapshotArgs) -> Result<()> {
             },
             timeout,
         );
+    }
+    if read_cdp_endpoint(project_root)
+        .ok()
+        .is_some_and(|endpoint| endpoint.bridge == "rust")
+    {
+        let response = execute_implicit_rust_browser_operation(
+            project_root,
+            timeout,
+            |target, lease_token| BrowserOperation::GetPageSnapshot {
+                target,
+                lease_token,
+            },
+        )?;
+        return print_json_response(response);
     }
     let response = send_browser_command(
         project_root,
@@ -1758,6 +1883,25 @@ fn navigate_to_url(
     health_check: bool,
     target: Option<&BrowserTargetArgs>,
 ) -> Result<serde_json::Value> {
+    let has_explicit_target = target.is_some_and(|value| value.session.is_some());
+    if !has_explicit_target
+        && read_cdp_endpoint(project_root)
+            .ok()
+            .is_some_and(|endpoint| endpoint.bridge == "rust")
+    {
+        return execute_implicit_rust_browser_operation(
+            project_root,
+            sidecar_timeout,
+            |target, lease_token| BrowserOperation::NavigateBrowser {
+                target,
+                lease_token,
+                url: url.to_owned(),
+                timeout_ms,
+                wait: Some(BrowserWaitCondition::LoadComplete),
+                monitor: false,
+            },
+        );
+    }
     let command = json!({
         "cmd": "navigate",
         "request_id": request_id,
@@ -1814,6 +1958,37 @@ fn execute_locator(
     params: ExecuteLocatorParams<'_>,
     sidecar_timeout: Duration,
 ) -> Result<serde_json::Value> {
+    let has_explicit_target = params.target.is_some_and(|value| value.session.is_some());
+    if !has_explicit_target
+        && read_cdp_endpoint(project_root)
+            .ok()
+            .is_some_and(|endpoint| endpoint.bridge == "rust")
+    {
+        let action: BrowserAction = serde_json::from_value(json!(params.action))
+            .with_context(|| format!("unsupported Rust browser action {}", params.action))?;
+        let selector = params.selector.to_owned();
+        let value = params.value.map(str::to_owned);
+        let timeout_ms = params.timeout_ms;
+        return execute_implicit_rust_browser_operation(
+            project_root,
+            sidecar_timeout,
+            move |target, lease_token| BrowserOperation::ExecuteBrowserAction {
+                target,
+                lease_token,
+                action,
+                element: BrowserElementInput {
+                    css: Some(selector),
+                    ..Default::default()
+                },
+                value,
+                files: vec![],
+                wait: None,
+                timeout_ms,
+                focus: false,
+                monitor: false,
+            },
+        );
+    }
     let command = json!({
         "cmd": "execute_locator",
         "request_id": params.request_id,

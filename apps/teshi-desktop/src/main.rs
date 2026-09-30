@@ -2,6 +2,7 @@
 
 mod titlebar;
 
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -13,12 +14,14 @@ use gpui::{
     Styled, Window, WindowBounds, WindowDecorations, WindowOptions, div, px, size,
 };
 use teshi_engine::{
-    ApiStyle, DeepSeekThinking, ModelProfile, ModelProfileList, ModelProfilePublic, PROVIDER_OPENAI,
+    ApiStyle, BrowserOperation, BrowserOperations, DeepSeekThinking, ModelProfile,
+    ModelProfileList, ModelProfilePublic, PROVIDER_OPENAI, default_browser_service_script,
+    ensure_user_chrome_broker, find_project_root, write_chrome_broker_endpoint,
 };
 #[cfg(windows)]
 use teshi_engine::{
-    BrowserMode, RuntimeConfig, TeshiEngine, default_browser_service_script,
-    default_winapp_service_script, open_project, start_browser_sidecar,
+    BrowserMode, RuntimeConfig, TeshiEngine, default_winapp_service_script, open_project,
+    start_browser_sidecar,
 };
 use teshi_ui::{
     ApiRunBackend, ApiRunEventDto, ApiScenarioSnapshot, ApiStyleDto, AppShell,
@@ -383,6 +386,7 @@ impl GherkinEditorBackend for NativePlatformBackend {
 }
 
 /// HTTP client for loopback desktop services; ignores process and system proxies.
+#[cfg(test)]
 fn loopback_http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .no_proxy()
@@ -392,18 +396,30 @@ fn loopback_http_client(timeout: Duration) -> Result<reqwest::blocking::Client, 
 }
 
 impl NativePlatformBackend {
-    fn browser_client() -> Result<reqwest::blocking::Client, String> {
-        loopback_http_client(Duration::from_secs(3))
+    fn browser_project_root() -> Result<PathBuf, String> {
+        find_project_root(None).ok_or_else(|| {
+            "no Teshi project root found; open the desktop shell from a project containing .teshi"
+                .to_string()
+        })
     }
 
-    fn browser_bridge_value(&self) -> Result<serde_json::Value, String> {
-        Self::browser_client()?
-            .get("http://127.0.0.1:17373/v1/bridge")
-            .send()
-            .and_then(reqwest::blocking::Response::error_for_status)
-            .map_err(|error| error.to_string())?
-            .json()
-            .map_err(|error| error.to_string())
+    fn browser_operations(&self) -> Result<BrowserOperations, String> {
+        let project_root = Self::browser_project_root()?;
+        let endpoint = ensure_user_chrome_broker(&project_root, &default_browser_service_script())
+            .map_err(|error| match error.hint {
+                Some(hint) => format!("{} ({hint})", error.message),
+                None => error.message,
+            })?;
+        write_chrome_broker_endpoint(&project_root, &endpoint).map_err(|error| error.message)?;
+        Ok(
+            BrowserOperations::new(endpoint.ws_url, Duration::from_secs(30))
+                .with_caller_label("teshi-desktop")
+                .with_project_root(project_root.to_string_lossy()),
+        )
+    }
+
+    fn browser_operation_error(error: teshi_engine::BrowserAgentError) -> String {
+        error.to_wire_value().to_string()
     }
 }
 
@@ -411,9 +427,13 @@ impl BrowserSessionsBackend for NativePlatformBackend {
     fn start_browser_bridge(&self) -> teshi_ui::backend::BackendFuture<()> {
         let backend = *self;
         Box::pin(async move {
-            backend.browser_bridge_value().map(|_| ()).map_err(|_| {
-                "the native shell does not own a Chrome bridge yet; start it through `teshi web` or the browser CLI, then Refresh".into()
-            })
+            let client = backend
+                .browser_operations()
+                .map_err(|error| format!("connect Chrome broker: {error}"))?;
+            client
+                .execute(&BrowserOperation::ListBrowserSessions)
+                .map(|_| ())
+                .map_err(Self::browser_operation_error)
         })
     }
 
@@ -422,7 +442,12 @@ impl BrowserSessionsBackend for NativePlatformBackend {
     ) -> teshi_ui::backend::BackendFuture<BrowserSessionListSnapshot> {
         let backend = *self;
         Box::pin(async move {
-            serde_json::from_value(backend.browser_bridge_value()?)
+            let response = backend
+                .browser_operations()
+                .map_err(|error| format!("connect Chrome broker: {error}"))?
+                .execute(&BrowserOperation::ListBrowserSessions)
+                .map_err(Self::browser_operation_error)?;
+            serde_json::from_value(response.payload)
                 .map_err(|error| format!("decode browser sessions: {error}"))
         })
     }
@@ -434,45 +459,46 @@ impl BrowserSessionsBackend for NativePlatformBackend {
         let backend = *self;
         let target = target.clone();
         Box::pin(async move {
-            let bridge = backend.browser_bridge_value()?;
-            let project_root = bridge
-                .get("project_root")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "browser bridge did not report its project root".to_string())?;
-            let broker_token = bridge
-                .get("ws_url")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|url| reqwest::Url::parse(url).ok())
-                .and_then(|url| {
-                    url.query_pairs()
-                        .find(|(key, _)| key == "token")
-                        .map(|(_, value)| value.into_owned())
+            let client = backend
+                .browser_operations()
+                .map_err(|error| format!("connect Chrome broker: {error}"))?;
+            let lease = client
+                .execute(&BrowserOperation::AcquireBrowserLease {
+                    extension_instance_id: target.extension_instance_id.clone(),
+                    owner_label: "teshi-desktop-ui".into(),
+                    ttl_secs: 30,
                 })
-                .filter(|token| !token.is_empty())
-                .ok_or_else(|| "browser bridge did not report its command token".to_string())?;
-            let body = serde_json::json!({
-                "project_root": project_root,
-                "extension_instance_id": target.extension_instance_id,
-                "window_id": target.window_id,
-                "tab_id": target.tab_id,
+                .map_err(Self::browser_operation_error)?;
+            let lease_token = lease
+                .payload
+                .get("lease_token")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    lease
+                        .payload
+                        .pointer("/lease/lease_token")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .ok_or_else(|| "browser lease response did not contain a lease token".to_string())?
+                .to_owned();
+            let extension_instance_id = target.extension_instance_id.clone();
+            let browser_target = teshi_engine::BrowserTarget {
+                extension_instance_id: extension_instance_id.clone(),
+                window_id: target.window_id,
+                tab_id: target.tab_id,
+            };
+            let activation = client.execute(&BrowserOperation::ActivateBrowserTab {
+                target: browser_target,
+                lease_token: lease_token.clone(),
+                focus_window: true,
             });
-            let response = Self::browser_client()?
-                .post("http://127.0.0.1:17373/v1/bridge/activate_tab")
-                .header("X-Teshi-Broker-Token", broker_token)
-                .json(&body)
-                .send()
-                .and_then(reqwest::blocking::Response::error_for_status)
-                .map_err(|error| error.to_string())?
-                .json::<serde_json::Value>()
-                .map_err(|error| error.to_string())?;
-            if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
-                Ok(())
-            } else {
-                Err(response
-                    .get("error")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("browser broker rejected tab activation")
-                    .to_string())
+            let release = client.execute(&BrowserOperation::ReleaseBrowserLease {
+                extension_instance_id,
+                lease_token,
+            });
+            match activation {
+                Ok(_) => release.map(|_| ()).map_err(Self::browser_operation_error),
+                Err(error) => Err(Self::browser_operation_error(error)),
             }
         })
     }

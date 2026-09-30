@@ -1777,7 +1777,7 @@ impl App {
     }
 
     /// Try to find a sensible project root directory.
-    fn find_project_dir(&self) -> &Path {
+    pub(crate) fn find_project_dir(&self) -> &Path {
         &self.project.root_dir
     }
 
@@ -9033,6 +9033,172 @@ mod tests {
             requests[2]
                 .get("tools")
                 .is_none_or(serde_json::Value::is_null)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the durable-paired real Chrome Rust broker"]
+    fn native_model_browser_tool_round_trip_uses_the_shared_broker() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for round in 0..2 {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let mut received = Vec::new();
+                let mut buffer = [0u8; 8192];
+                let body_start = loop {
+                    let n = socket.read(&mut buffer).unwrap();
+                    assert!(n > 0);
+                    received.extend_from_slice(&buffer[..n]);
+                    let Some(header_end) = received.windows(4).position(|part| part == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&received[..header_end]);
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|value| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    let body_start = header_end + 4;
+                    if received.len() >= body_start + length {
+                        break (body_start, length);
+                    }
+                };
+                requests.push(
+                    serde_json::from_slice::<serde_json::Value>(
+                        &received[body_start.0..body_start.0 + body_start.1],
+                    )
+                    .unwrap(),
+                );
+                let body = if round == 0 {
+                    serde_json::json!({
+                        "model": "mock",
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": null,
+                                "tool_calls": [{
+                                    "id": "browser-call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "browser_snapshot",
+                                        "arguments": "{}"
+                                    }
+                                }]
+                            }
+                        }]
+                    })
+                } else {
+                    serde_json::json!({
+                        "model": "mock",
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": "finished"
+                            }
+                        }]
+                    })
+                }
+                .to_string();
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+            requests
+        });
+
+        let (mut app, project, _store) = slash_test_app();
+        let source_root = crate::cli::browser_endpoint::resolve_browser_project_root(Path::new(
+            env!("CARGO_MANIFEST_DIR"),
+        ))
+        .unwrap();
+        let endpoint = fs::read(source_root.join(".teshi").join("cdp-endpoint.json")).unwrap();
+        fs::create_dir_all(project.path().join(".teshi")).unwrap();
+        fs::write(
+            project.path().join(".teshi").join("cdp-endpoint.json"),
+            endpoint,
+        )
+        .unwrap();
+        app.agents[0].backend = teshi_agent_runtime::backend::AgentBackendRuntime::new(
+            teshi_agent::backend::AgentBackendKind::Native,
+            1,
+        );
+        app.agents[0]
+            .backend
+            .attach_native_model(crate::llm::LlmConfig {
+                api_key: "test-only".into(),
+                base_url: format!("http://{addr}/v1"),
+                model: "mock".into(),
+                max_tokens: 256,
+                temperature: 0.0,
+                context_window: None,
+                provider: "openai".into(),
+                thinking: teshi_engine::DeepSeekThinking::High,
+                api_style: teshi_engine::ApiStyle::ChatCompletions,
+                stream: false,
+                http_headers: Default::default(),
+                chat_options: Default::default(),
+            })
+            .unwrap();
+        app.agents[0].messages_mut().push(super::AiChatMessage {
+            role: AiRole::User,
+            content: "inspect the current page".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+        });
+        app.agents[0].backend.start().unwrap();
+        let messages = app.build_chat_messages_for_agent(0);
+        app.agents[0]
+            .backend
+            .submit_turn(
+                Some("test".into()),
+                messages,
+                Some(teshi_agent::get_tools(None)),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline
+            && app.agents[0].backend.status() != teshi_agent::backend::AgentBackendStatus::Completed
+        {
+            app.poll_llm_events();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            app.agents[0].backend.status(),
+            teshi_agent::backend::AgentBackendStatus::Completed
+        );
+        let requests = server.join().unwrap();
+        let tool_result = requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .unwrap();
+        assert!(
+            tool_result["content"]
+                .as_str()
+                .unwrap()
+                .contains("broker_start_id")
+        );
+        assert!(
+            tool_result["content"]
+                .as_str()
+                .unwrap()
+                .contains("\"bridge\": \"rust\"")
         );
     }
 

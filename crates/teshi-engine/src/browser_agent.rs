@@ -1231,8 +1231,50 @@ pub struct BrowserOperationResponse {
     pub operation: String,
     /// Correlated request identifier.
     pub request_id: String,
+    /// Public identity of the user-scoped broker generation that handled the request.
+    ///
+    /// The command credential is deliberately absent. Native clients may use the
+    /// public WebSocket coordinate as an identity comparison value, while the
+    /// private credential remains resolved inside the engine transport layer.
+    #[serde(default)]
+    pub broker_identity: Option<BrowserBrokerIdentity>,
     /// Complete operation-specific JSON result.
     pub payload: Value,
+}
+
+/// Stable, credential-free identity shared by every typed browser client.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserBrokerIdentity {
+    /// Version of the public identity contract.
+    #[serde(default)]
+    pub schema_version: u16,
+    /// Chrome extension/broker protocol version.
+    #[serde(default)]
+    pub protocol_version: u16,
+    /// Broker implementation mode, normally `chrome`.
+    #[serde(default)]
+    pub mode: String,
+    /// Public broker WebSocket coordinate without a command token.
+    #[serde(default)]
+    pub ws_url: String,
+    /// Public loopback discovery coordinate.
+    #[serde(default)]
+    pub discovery_url: String,
+    /// Process identifier of this broker generation.
+    #[serde(default)]
+    pub broker_pid: u32,
+    /// Opaque process-start generation identifier.
+    #[serde(default)]
+    pub broker_start_id: String,
+    /// Features registered by this broker generation.
+    #[serde(default)]
+    pub broker_features: Vec<String>,
+    /// Lifetime scope of the broker, not a project identifier.
+    #[serde(default)]
+    pub broker_scope: String,
+    /// Public transport implementation label.
+    #[serde(default)]
+    pub bridge: String,
 }
 
 /// Reusable browser operation client backed by the existing local WebSocket.
@@ -1440,6 +1482,10 @@ fn parse_operation_response(
             .unwrap_or(BROWSER_AGENT_SCHEMA_VERSION),
         operation,
         request_id: actual_request_id.to_string(),
+        broker_identity: response
+            .get("broker_identity")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok()),
         payload: response,
     })
 }
@@ -1844,6 +1890,38 @@ mod tests {
             response.payload["request"]["request_body"]["captured_bytes"],
             18
         );
+    }
+
+    #[test]
+    fn typed_response_parses_public_broker_generation_identity() {
+        let response = parse_operation_response(
+            "list_browser_sessions",
+            "identity-1",
+            json!({
+                "ok": true,
+                "operation": "list_browser_sessions",
+                "request_id": "identity-1",
+                "broker_identity": {
+                    "schema_version": 1,
+                    "protocol_version": 1,
+                    "mode": "chrome",
+                    "ws_url": "ws://127.0.0.1:17373/",
+                    "discovery_url": "http://127.0.0.1:17373/v1/bridge",
+                    "broker_pid": 42,
+                    "broker_start_id": "generation-a",
+                    "broker_features": ["transport.v1"],
+                    "broker_scope": "user_session",
+                    "bridge": "rust"
+                },
+                "sessions": []
+            }),
+        )
+        .unwrap();
+        let identity = response.broker_identity.expect("broker identity");
+        assert_eq!(identity.broker_pid, 42);
+        assert_eq!(identity.broker_start_id, "generation-a");
+        assert_eq!(identity.broker_features, vec!["transport.v1"]);
+        assert_eq!(response.payload["sessions"], json!([]));
     }
 
     #[test]

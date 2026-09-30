@@ -62,6 +62,7 @@ impl BrowserSessionsBackend for E2eBrowserSessionsBackend {
             Ok(BrowserSessionListSnapshot {
                 extension_connected: true,
                 ambiguous_browser_target: true,
+                broker_identity: None,
                 sessions: vec![
                     fixture_browser_session("e2e-profile-a", "E2E Profile A", 1, 101),
                     fixture_browser_session("e2e-profile-b", "E2E Profile B", 2, 201),
@@ -95,6 +96,7 @@ fn fixture_browser_session(
         },
         health: "ready".to_string(),
         last_heartbeat_age_ms: 0,
+        stream_generation: Some(1),
         windows: vec![BrowserWindowSnapshot {
             id: window_id,
             focused: true,

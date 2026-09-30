@@ -7,7 +7,7 @@ use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -37,10 +37,11 @@ use teshi_engine::{
     save_profile, save_stored_llm_config, send_api_command, set_active_id, spawn_terminal,
     start_browser_sidecar_with_options, step_binding_statuses, stop_browser_sidecar,
     sync_active_step, teardown_runtime, unbind_step, validate_feature_scope, write_terminal,
-    ActiveStep, ApiStyle, BrowserError, BrowserMode, BrowserStartResult, DeepSeekThinking,
-    DirEntry, DispatchCase, LlmConfigPublic, LlmConfigWrite, ModelProfile, ModelProfileList,
-    ModelProfilePublic, PendingLocator, ProjectSettings, RuntimeEvent, StepBinding,
-    StepBindingStatus, TeshiEngine, PROVIDER_OPENAI,
+    ActiveStep, ApiStyle, BrowserAgentError, BrowserError, BrowserMode, BrowserOperation,
+    BrowserOperations, BrowserStartResult, BrowserTarget, DeepSeekThinking, DirEntry, DispatchCase,
+    LlmConfigPublic, LlmConfigWrite, ModelProfile, ModelProfileList, ModelProfilePublic,
+    PendingLocator, ProjectSettings, RuntimeEvent, StepBinding, StepBindingStatus, TeshiEngine,
+    PROVIDER_OPENAI,
 };
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
@@ -558,6 +559,8 @@ struct HostedBrowserSessionList {
     #[serde(default)]
     ambiguous_browser_target: bool,
     #[serde(default)]
+    broker_identity: Option<HostedBrowserBrokerIdentity>,
+    #[serde(default)]
     sessions: Vec<HostedBrowserSession>,
 }
 
@@ -572,9 +575,34 @@ struct HostedBrowserSession {
     #[serde(default)]
     last_heartbeat_age_ms: u64,
     #[serde(default)]
+    stream_generation: Option<u64>,
+    #[serde(default)]
     windows: Vec<HostedBrowserWindow>,
     #[serde(default)]
     lease: Option<HostedBrowserLease>,
+}
+
+/// Stable broker-generation metadata allowed across the daemon -> hosted Web
+/// boundary. Private WebSocket coordinates and credentials are intentionally
+/// not represented by this DTO.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct HostedBrowserBrokerIdentity {
+    #[serde(default)]
+    schema_version: u16,
+    #[serde(default)]
+    protocol_version: u16,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    broker_pid: u32,
+    #[serde(default)]
+    broker_start_id: String,
+    #[serde(default)]
+    broker_features: Vec<String>,
+    #[serde(default)]
+    broker_scope: String,
+    #[serde(default)]
+    bridge: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2816,26 +2844,64 @@ struct BrowserStartBody {
     elevated: bool,
 }
 
-const BROWSER_BROKER_DISCOVERY_URL: &str = "http://127.0.0.1:17373/v1/bridge";
-
-fn browser_broker_client() -> Result<reqwest::Client, ApiError> {
-    reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .map_err(|error| ApiError::internal(format!("create browser broker client: {error}")))
-}
-
-fn browser_broker_unavailable(error: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
+fn browser_operation_unavailable(
+    code: &str,
+    error: impl std::fmt::Display,
+    status: StatusCode,
+) -> (StatusCode, Json<Value>) {
     (
-        StatusCode::SERVICE_UNAVAILABLE,
+        status,
         Json(json!({
             "ok": false,
-            "code": "browser_unavailable",
-            "error": format!(
-                "local Chrome bridge is unavailable: {error}; click Connect Chrome and reload teshi-bridge"
-            ),
+            "code": code,
+            "error": error.to_string(),
         })),
+    )
+}
+
+fn browser_operation_error(error: BrowserAgentError) -> (StatusCode, Json<Value>) {
+    let status = match error.code.as_str() {
+        "browser_unavailable" | "browser_session_disconnected" => StatusCode::SERVICE_UNAVAILABLE,
+        "browser_session_busy"
+        | "invalid_browser_lease"
+        | "expired_browser_lease"
+        | "browser_target_not_found"
+        | "stale_browser_target" => StatusCode::CONFLICT,
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    (status, Json(error.to_wire_value()))
+}
+
+async fn daemon_browser_client(
+    state: &DaemonState,
+) -> Result<BrowserOperations, (StatusCode, Json<Value>)> {
+    let project_root = get_project_root(&state.rt).ok_or_else(|| {
+        browser_operation_unavailable(
+            "browser_unavailable",
+            "no project is open in the daemon",
+            StatusCode::CONFLICT,
+        )
+    })?;
+    let started = start_browser_sidecar_with_options(
+        state.rt.clone(),
+        BrowserMode::Chrome,
+        false,
+    )
+    .await
+    .map_err(|error| {
+        browser_operation_unavailable(
+            "browser_unavailable",
+            format!(
+                "local Chrome broker is unavailable: {}; click Connect Chrome and reload teshi-bridge",
+                error.message
+            ),
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+    })?;
+    Ok(
+        BrowserOperations::new(started.ws_url, Duration::from_secs(30))
+            .with_caller_label("teshi-daemon")
+            .with_project_root(project_root),
     )
 }
 
@@ -2843,29 +2909,11 @@ async fn api_browser_sessions(
     State(state): State<DaemonState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     state.touch();
-    let client =
-        browser_broker_client().map_err(|error| browser_broker_unavailable(error.message))?;
-    let response = client
-        .get(BROWSER_BROKER_DISCOVERY_URL)
-        .send()
-        .await
-        .map_err(browser_broker_unavailable)?;
-    if !response.status().is_success() {
-        return Err(browser_broker_unavailable(format!(
-            "broker returned HTTP {}",
-            response.status()
-        )));
-    }
-    response.json::<Value>().await.map(Json).map_err(|error| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({
-                "ok": false,
-                "code": "invalid_browser_response",
-                "error": format!("decode browser broker discovery response: {error}"),
-            })),
-        )
-    })
+    let client = daemon_browser_client(&state).await?;
+    client
+        .execute(&BrowserOperation::ListBrowserSessions)
+        .map(|response| Json(response.payload))
+        .map_err(browser_operation_error)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2880,50 +2928,54 @@ async fn api_browser_activate_tab(
     Json(body): Json<BrowserActivateTabBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     state.touch();
-    let project_root = get_project_root(&state.rt).ok_or_else(|| {
-        (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "ok": false,
-                "code": "browser_unavailable",
-                "error": "no project is open in the daemon",
-            })),
-        )
-    })?;
-    let client =
-        browser_broker_client().map_err(|error| browser_broker_unavailable(error.message))?;
-    let response = client
-        .post(format!("{BROWSER_BROKER_DISCOVERY_URL}/activate_tab"))
-        .json(&json!({
-            "project_root": project_root,
-            "extension_instance_id": body.extension_instance_id,
-            "window_id": body.window_id,
-            "tab_id": body.tab_id,
-        }))
-        .send()
-        .await
-        .map_err(browser_broker_unavailable)?;
-    if !response.status().is_success() {
-        return Err(browser_broker_unavailable(format!(
-            "broker returned HTTP {}",
-            response.status()
-        )));
+    let client = daemon_browser_client(&state).await?;
+    let target = BrowserTarget {
+        extension_instance_id: body.extension_instance_id.clone(),
+        window_id: body.window_id,
+        tab_id: body.tab_id,
+    };
+    let lease = client
+        .execute(&BrowserOperation::AcquireBrowserLease {
+            extension_instance_id: body.extension_instance_id.clone(),
+            owner_label: "teshi-daemon-ui".into(),
+            ttl_secs: 30,
+        })
+        .map_err(browser_operation_error)?;
+    let lease_token = lease
+        .payload
+        .get("lease_token")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            lease
+                .payload
+                .pointer("/lease/lease_token")
+                .and_then(Value::as_str)
+        })
+        .ok_or_else(|| {
+            browser_operation_unavailable(
+                "browser_operation_failed",
+                "browser lease response did not contain a lease token",
+                StatusCode::BAD_GATEWAY,
+            )
+        })?
+        .to_owned();
+    let result = client.execute(&BrowserOperation::ActivateBrowserTab {
+        target,
+        lease_token: lease_token.clone(),
+        focus_window: true,
+    });
+    let release = client.execute(&BrowserOperation::ReleaseBrowserLease {
+        extension_instance_id: body.extension_instance_id,
+        lease_token,
+    });
+    if let Err(error) = release {
+        if result.is_ok() {
+            return Err(browser_operation_error(error));
+        }
     }
-    let payload = response.json::<Value>().await.map_err(|error| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({
-                "ok": false,
-                "code": "invalid_browser_response",
-                "error": format!("decode browser tab activation response: {error}"),
-            })),
-        )
-    })?;
-    if payload.get("ok").and_then(Value::as_bool) == Some(true) {
-        Ok(Json(payload))
-    } else {
-        Err((StatusCode::CONFLICT, Json(payload)))
-    }
+    result
+        .map(|response| Json(response.payload))
+        .map_err(browser_operation_error)
 }
 
 async fn api_browser_start(
@@ -3441,6 +3493,17 @@ mod integration {
             "project_root": "C:/private/project",
             "extension_connected": true,
             "ambiguous_browser_target": false,
+            "broker_identity": {
+                "schema_version": 1,
+                "protocol_version": 1,
+                "mode": "chrome",
+                "ws_url": "ws://127.0.0.1:17373/",
+                "broker_pid": 42,
+                "broker_start_id": "generation-a",
+                "broker_features": ["transport.v1"],
+                "broker_scope": "user_session",
+                "bridge": "rust"
+            },
             "sessions": [{
                 "identity": {
                     "extension_instance_id": "ext-1",
@@ -3451,6 +3514,7 @@ mod integration {
                 "browser": {"name": "Chrome", "version": "1", "platform": "windows"},
                 "health": "ready",
                 "last_heartbeat_age_ms": 4,
+                "stream_generation": 7,
                 "windows": [{"id": 7, "focused": true, "tabs": [{
                     "id": 8,
                     "window_id": 7,
@@ -3469,10 +3533,13 @@ mod integration {
         assert!(!text.contains("extension_frame_ws_url"));
         assert!(!text.contains("project_root"));
         assert!(!text.contains("secret"));
+        assert_eq!(value["broker_identity"]["broker_start_id"], "generation-a");
+        assert_eq!(value["broker_identity"]["broker_pid"], 42);
         assert_eq!(
             value["sessions"][0]["identity"]["extension_instance_id"],
             "ext-1"
         );
+        assert_eq!(value["sessions"][0]["stream_generation"], 7);
         assert_eq!(value["sessions"][0]["windows"][0]["tabs"][0]["id"], 8);
     }
 
