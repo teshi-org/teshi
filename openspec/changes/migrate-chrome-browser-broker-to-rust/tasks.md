@@ -53,8 +53,8 @@
 
 - [ ] 7.1 Switch Chrome startup in `teshi-engine` from Python venv resolution/import checks to the shared Rust broker launcher; keep Embedded and WinApp branches unchanged.
 - [x] 7.2 Update endpoint creation/health/reconnect so every project points to the same broker generation without exposing project paths or credentials publicly.
-- [ ] 7.3 Verify CLI, Agent, MCP, Daemon, GPUI Desktop, and daemon-backed GPUI WASM Web requests use the same typed state and broker identity.
-- [ ] 7.4 Test multiple projects, multiple terminals, client exits, daemon restarts, broker crashes, lease ownership, and recovery while preserving other clients' sessions.
+- [x] 7.3 Verify CLI, Agent, MCP, Daemon, GPUI Desktop, and daemon-backed GPUI WASM Web requests use the same typed state and broker identity.
+- [x] 7.4 Test multiple projects, multiple terminals, client exits, daemon restarts, broker crashes, lease ownership, and recovery while preserving other clients' sessions.
 - [ ] 7.5 Run Embedded Playwright and WinApp regression suites to prove their existing runtimes and error guidance remain intact.
 - [x] 7.6 Enable Rust as the test-only Chrome implementation behind an explicit development selector; do not auto-fallback between implementations.
 
