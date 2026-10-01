@@ -1717,10 +1717,24 @@ async fn client_socket(
         tokio::select! {
             incoming = socket.next() => {
                 let Some(Ok(message)) = incoming else { break };
-                let Message::Text(text) = message else {
-                    if matches!(message, Message::Close(_)) { break; }
-                    if socket.send(Message::Close(None)).await.is_err() { break; }
-                    break;
+                let text = match message {
+                    Message::Text(text) => text,
+                    // Answer RFC 6455 keepalive pings so standard clients with
+                    // periodic pings are not disconnected mid-session.
+                    Message::Ping(payload) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    Message::Pong(_) => continue,
+                    Message::Close(_) => break,
+                    Message::Binary(_) => {
+                        if socket.send(Message::Close(None)).await.is_err() {
+                            break;
+                        }
+                        break;
+                    }
                 };
                 let value: Value = match serde_json::from_str::<Value>(text.as_str()) {
                     Ok(value) if value.is_object() => value,
@@ -4492,6 +4506,45 @@ mod tests {
         assert_eq!(response["code"], "browser_operation_timeout");
         assert!(reply.send(Ok(serde_json::json!({"ok": true}))).is_err());
         assert_eq!(request.request_id, "deadline-1");
+        socket.close(None).await.unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn client_keepalive_pings_are_answered_without_closing_the_control_socket() {
+        let mut runtime = BrokerRuntime::start(test_config()).await.unwrap();
+        let mut state = BrokerState::new();
+        let (mut socket, _) = connect_async(request_ws_url(&runtime)).await.unwrap();
+
+        socket
+            .send(WsMessage::Ping(vec![7, 8, 9].into()))
+            .await
+            .unwrap();
+        let pong = timeout(Duration::from_secs(1), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(pong, WsMessage::Pong(vec![7, 8, 9].into()));
+
+        socket
+            .send(WsMessage::Text(
+                serde_json::json!({
+                    "schema_version": 1,
+                    "request_id": "request-after-ping",
+                    "cmd": "list_browser_sessions",
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let event = runtime.next_event().await.unwrap();
+        state.handle(event, &runtime).await;
+        let response = read_json(&mut socket).await;
+        assert_eq!(response["request_id"], "request-after-ping");
+        assert_eq!(response["ok"], true);
+
         socket.close(None).await.unwrap();
         runtime.shutdown().await;
     }
