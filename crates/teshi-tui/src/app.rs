@@ -9571,6 +9571,167 @@ mod tests {
         result.expect("live browser vision closed loop");
     }
 
+    /// Live opt-in acceptance that the Agent browser tools observe the same
+    /// broker generation and Chrome session as every other Teshi entry point.
+    ///
+    /// The test drives the production Agent loop (`dispatch_user_message` plus
+    /// `poll_llm_events`), so every browser observation is produced by a
+    /// model-requested Agent tool call instead of a direct `BrowserOperations`
+    /// invocation. It prints only non-sensitive identity fields; the broker
+    /// credential and lease tokens never leave the engine client.
+    #[test]
+    fn live_chrome_agent_broker_identity() {
+        if std::env::var("TESHI_RUN_LIVE_CHROME_AGENT_E2E").as_deref() != Ok("1") {
+            println!(
+                "SKIP live_chrome_agent_broker_identity: set TESHI_RUN_LIVE_CHROME_AGENT_E2E=1"
+            );
+            return;
+        }
+        let api_key = std::env::var("DEEPSEEK_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .expect("DEEPSEEK_API_KEY is required for the live Chrome Agent acceptance");
+        let project_root =
+            PathBuf::from(std::env::var("TESHI_ACCEPTANCE_PROJECT").expect(
+                "TESHI_ACCEPTANCE_PROJECT must name a project with .teshi/cdp-endpoint.json",
+            ));
+        assert!(
+            project_root
+                .join(".teshi")
+                .join("cdp-endpoint.json")
+                .is_file(),
+            "acceptance project {} has no .teshi/cdp-endpoint.json",
+            project_root.display()
+        );
+
+        let feature = project_root.join("acceptance.feature");
+        fs::write(
+            &feature,
+            "Feature: Chrome Agent acceptance\n\n  Scenario: observe the acceptance page\n    Given the acceptance page is open\n",
+        )
+        .expect("write acceptance feature");
+        let store = tempdir().expect("create requirement store");
+        teshi_engine::initialize_requirement_store(store.path()).expect("init requirement store");
+        let mut app = App::from_file(
+            &feature,
+            crate::config::load_config().expect("load config"),
+            store.path().to_path_buf(),
+        )
+        .expect("create production App");
+        app.agents[0]
+            .backend
+            .attach_native_model(crate::llm::LlmConfig {
+                api_key,
+                base_url: "https://api.deepseek.com".into(),
+                model: "deepseek-flash".into(),
+                max_tokens: 2048,
+                temperature: 0.0,
+                context_window: None,
+                provider: "deepseek".into(),
+                thinking: teshi_engine::DeepSeekThinking::High,
+                api_style: teshi_engine::ApiStyle::ChatCompletions,
+                stream: true,
+                http_headers: Default::default(),
+                chat_options: Default::default(),
+            })
+            .expect("attach native model");
+        app.dispatch_user_message(
+            "Inspect the browser page that is already open.\n\n\
+             1. Call `browser_snapshot` once.\n\
+             2. Call `browser_assert` with condition_type `url_match` and value `127\\.0\\.0\\.1:8799`.\n\
+             3. Report the observed page title and URL. Do not call any other tool."
+                .into(),
+        )
+        .expect("dispatch user message");
+
+        let deadline = Instant::now() + Duration::from_secs(240);
+        while Instant::now() < deadline {
+            app.poll_llm_events();
+            if app.agents[0].status == AiStatus::Error {
+                panic!("Agent entered error state: {:?}", app.agents[0].messages());
+            }
+            let done = app.agents[0].status == AiStatus::Idle
+                && app.agents[0].messages().iter().any(|message| {
+                    message.role == AiRole::Assistant
+                        && message.tool_calls.is_none()
+                        && !message.content.trim().is_empty()
+                });
+            if done {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(
+            app.agents[0].status,
+            AiStatus::Idle,
+            "Agent did not finish within 240 seconds"
+        );
+
+        let tool_names: Vec<String> = app.agents[0]
+            .messages()
+            .iter()
+            .filter_map(|message| message.tool_calls.as_ref())
+            .flat_map(|calls| calls.iter().map(|call| call.name.clone()))
+            .collect();
+        assert!(
+            tool_names.iter().any(|name| name == "browser_snapshot"),
+            "Agent never called browser_snapshot: {tool_names:?}"
+        );
+
+        let snapshots: Vec<serde_json::Value> = app.agents[0]
+            .messages()
+            .iter()
+            .filter(|message| message.role == AiRole::Tool)
+            .filter_map(|message| serde_json::from_str::<serde_json::Value>(&message.content).ok())
+            .filter(|value| {
+                value.get("operation").and_then(|v| v.as_str()) == Some("get_page_snapshot")
+            })
+            .collect();
+        assert!(
+            !snapshots.is_empty(),
+            "Agent produced no get_page_snapshot tool result: {tool_names:?}"
+        );
+        let snapshot = snapshots.last().expect("snapshot tool result");
+        let identity = snapshot
+            .get("broker_identity")
+            .expect("agent snapshot carried no broker identity");
+        println!(
+            "AGENT_ACCEPTANCE {}",
+            serde_json::json!({
+                "broker_pid": identity.get("broker_pid"),
+                "broker_start_id": identity.get("broker_start_id"),
+                "protocol_version": identity.get("protocol_version"),
+                "extension_instance_id": snapshot.get("extension_instance_id"),
+                "window_id": snapshot.get("window_id"),
+                "tab_id": snapshot.get("tab_id"),
+                "url": snapshot.get("url"),
+                "title": snapshot.get("title"),
+                "page_context_revision": snapshot.get("page_context_revision"),
+            })
+        );
+
+        for (env_name, observed) in [
+            (
+                "TESHI_EXPECT_BROKER_START_ID",
+                identity.get("broker_start_id").and_then(|v| v.as_str()),
+            ),
+            (
+                "TESHI_EXPECT_EXTENSION_INSTANCE_ID",
+                snapshot
+                    .get("extension_instance_id")
+                    .and_then(|v| v.as_str()),
+            ),
+        ] {
+            if let Ok(expected) = std::env::var(env_name) {
+                assert_eq!(
+                    observed,
+                    Some(expected.as_str()),
+                    "{env_name} mismatch between the Agent tool path and the baseline"
+                );
+            }
+        }
+    }
+
     fn start_visual_fixture_server() -> (String, impl FnOnce()) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
         let port = listener
