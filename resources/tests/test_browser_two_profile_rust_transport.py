@@ -76,6 +76,14 @@ class RustTransportPage(BaseHTTPRequestHandler):
                 f"<!doctype html><meta charset=utf-8><title>Rust {profile}</title>"
                 f"<main data-profile=\"{profile}\"><h1>Rust {profile}</h1>"
                 f"<button id=\"snapshot-action\">Snapshot {profile}</button>"
+                "<label for=\"project-value\">Project value</label>"
+                "<input id=\"project-value\" data-testid=\"project-value\" "
+                "oninput=\"document.querySelector('#project-echo').textContent=this.value\">"
+                "<div id=\"project-echo\"></div>"
+                f"<button id=\"project-submit\" onclick=\"console.info('project-submit-{profile}');"
+                f"fetch('/network-{profile}',{{method:'POST',body:document.querySelector('#project-value').value}})"
+                ".then(response=>response.text()).then(()=>document.querySelector('#project-submitted').textContent='1')\">Submit project</button>"
+                "<div id=\"project-submitted\">0</div>"
                 f"<button id=\"dom-click\" onclick=\"document.querySelector('#dom-click-count').textContent=String(Number(document.querySelector('#dom-click-count').textContent)+1)\">DOM click {profile}</button>"
                 f"<button id=\"pointer-click\" onpointerdown=\"document.querySelector('#pointerdown-count').textContent=String(Number(document.querySelector('#pointerdown-count').textContent)+1)\" onclick=\"document.querySelector('#pointer-click-count').textContent=String(Number(document.querySelector('#pointer-click-count').textContent)+1)\">Pointer click {profile}</button>"
                 f"<button id=\"test-id-click\" data-testid=\"test-id-click\" onclick=\"document.querySelector('#test-id-click-count').textContent=String(Number(document.querySelector('#test-id-click-count').textContent)+1)\">Test ID click {profile}</button>"
@@ -304,6 +312,19 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def _start_broker(self) -> None:
         state_dir = self.temp_root / "rust-user-state"
+        self.broker_env = os.environ.copy()
+        self.python_free = os.environ.get("TESHI_RUST_TRANSPORT_PYTHON_FREE") == "1"
+        if self.python_free:
+            # Only the external test driver uses Python/Playwright. The actual
+            # Chrome runtime must start, register, operate, and restart without them.
+            self.broker_env["PATH"] = (
+                str(Path(os.environ["SYSTEMROOT"]) / "System32")
+                if os.name == "nt" else str(self.temp_root / "empty-runtime-path")
+            )
+            for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
+                self.broker_env.pop(key, None)
+            for name in ("python", "python3", "py", "pip", "pip3", "uv", "playwright"):
+                self.assertIsNone(shutil.which(name, path=self.broker_env["PATH"]), name)
         args = [
             str(TESHI_CLI),
             "--browser-broker-internal",
@@ -318,7 +339,8 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.broker = subprocess.Popen(
             args,
-            cwd=REPO_ROOT,
+            cwd=self.temp_root if self.python_free else REPO_ROOT,
+            env=self.broker_env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -353,6 +375,7 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
                 "schema_version": self.ready_endpoint.get("schema_version"),
                 "broker_features": self.ready_endpoint.get("broker_features"),
                 "discovery_port": self.discovery_port,
+                "python_free_child_environment": self.python_free,
             },
         )
         self.assertEqual(
@@ -721,14 +744,16 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             message = message.decode("utf-8")
         return json.loads(message)
 
-    async def _acquire_lease(self, target: dict, owner: str) -> str:
+    async def _acquire_lease(
+        self, target: dict, owner: str, *, project_root: Path | None = None
+    ) -> str:
         request_id = f"rust-lease-{owner}-{uuid.uuid4().hex}"
         response = await self._control(
             {
                 "schema_version": 1,
                 "request_id": request_id,
                 "caller_label": owner,
-                "project_root": str(self.temp_root),
+                "project_root": str(project_root or self.temp_root),
                 "cmd": "acquire_browser_lease",
                 "extension_instance_id": target["extension_instance_id"],
                 "owner_label": owner,
@@ -750,14 +775,16 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
         )
         return token
 
-    async def _release_lease(self, target: dict, owner: str, token: str) -> None:
+    async def _release_lease(
+        self, target: dict, owner: str, token: str, *, project_root: Path | None = None
+    ) -> None:
         request_id = f"rust-release-{owner}-{uuid.uuid4().hex}"
         response = await self._control(
             {
                 "schema_version": 1,
                 "request_id": request_id,
                 "caller_label": owner,
-                "project_root": str(self.temp_root),
+                "project_root": str(project_root or self.temp_root),
                 "cmd": "release_browser_lease",
                 "extension_instance_id": target["extension_instance_id"],
                 "lease_token": token,
@@ -1041,6 +1068,153 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             await self._release_lease(target, owner, token)
+
+    async def test_two_projects_fill_evidence_and_reconnect(self) -> None:
+        """Exercise each project through its own lease and real extension stream."""
+        self._set_stage("stage 8.2 two projects and two Profiles")
+        sessions = await self._wait_sessions(2, expected_count=2)
+        targets = [
+            self._target(self._session_for_path(sessions, f"/rust-{suffix}"))
+            for suffix in ("a", "b")
+        ]
+        projects = [self.temp_root / f"project-{suffix}" for suffix in ("a", "b")]
+        for project in projects:
+            project.mkdir()
+            self.assertFalse((project / ".venv").exists())
+        if self.python_free:
+            embedded = await asyncio.to_thread(
+                subprocess.run,
+                [str(TESHI_CLI), "browser", "serve-embedded", "--project", str(projects[0])],
+                cwd=projects[0], env=self.broker_env, stdin=subprocess.DEVNULL,
+                capture_output=True, text=True, timeout=15,
+            )
+            self.assertNotEqual(embedded.returncode, 0)
+            self.assertIn("Python virtual environment not found or not runnable", embedded.stderr)
+            self.assertIn("pip install -r python/requirements.txt", embedded.stderr)
+            self._log("python_free_embedded_guidance_verified", {
+                "python_on_runtime_path": False, "project_venv_present": False,
+                "embedded_missing_python_guidance": True,
+                "scope": "Rust Chrome runtime; startup mode is recorded by broker readiness events",
+            })
+        owners = ["rust-project-a", "rust-project-b"]
+        values = ["Independent project A", "Independent project B"]
+        tokens = [
+            await self._acquire_lease(target, owner, project_root=project)
+            for target, owner, project in zip(targets, owners, projects)
+        ]
+
+        async def request(index: int, cmd: str, *, expect_ok: bool = True, **fields) -> dict:
+            response = await self._control({
+                "schema_version": 1,
+                "request_id": f"rust-two-projects-{uuid.uuid4().hex}",
+                "caller_label": owners[index],
+                "project_root": str(projects[index]),
+                "cmd": cmd,
+                "target": targets[index],
+                "lease_token": tokens[index],
+                **fields,
+            }, timeout=20)
+            if expect_ok:
+                self.assertTrue(response.get("ok"), response)
+                self.assertEqual(response.get("target"), targets[index])
+            return response
+
+        revisions: list[str] = []
+        for index, suffix in enumerate(("a", "b")):
+            url = f"http://127.0.0.1:{self.http.server_address[1]}/project-{suffix}"
+            await request(index, "navigate", url=url, timeout_ms=15_000)
+            await self._wait_target_url(targets[index], url)
+            snapshot = await request(index, "get_page_snapshot")
+            self.assertEqual(snapshot["url"], url)
+            self.assertTrue(any(e.get("id") == "project-value" for e in snapshot["interactive_elements"]))
+            locator = await request(index, "resolve_playwright_locator", intent={"role": "textbox", "text": "Project value"})
+            self.assertEqual(locator["element"]["id"], "project-value")
+            self.assertTrue(locator.get("recommended"), locator)
+            revisions.append(locator["page_context_revision"])
+
+        # A valid token cannot authorize the same target from another project/caller.
+        for index in range(2):
+            rejected = await request(index, "execute_browser_action", expect_ok=False,
+                project_root=str(projects[1 - index]), action="fill", value="cross-project-write",
+                element={"test_id": "project-value", "page_context_revision": revisions[index]})
+            self.assertFalse(rejected.get("ok"), rejected)
+            self.assertEqual(rejected.get("code"), "invalid_browser_lease")
+            rejected_caller = await request(index, "execute_browser_action", expect_ok=False,
+                caller_label=owners[1 - index], action="fill", value="cross-caller-write",
+                element={"test_id": "project-value", "page_context_revision": revisions[index]})
+            self.assertEqual(rejected_caller.get("code"), "invalid_browser_lease")
+
+        for index in range(2):
+            await request(index, "execute_browser_action", action="fill", value=values[index],
+                element={"test_id": "project-value", "page_context_revision": revisions[index]})
+            await request(index, "execute_browser_action", action="assert_text", value=values[index],
+                element={"css": "#project-echo", "page_context_revision": revisions[index]})
+            page = self.contexts[f"profile-{'ab'[index]}"].pages[0]
+            self.assertEqual(await page.locator("#project-value").input_value(), values[index])
+            if index == 0:
+                self.assertEqual(await self.contexts["profile-b"].pages[0].locator("#project-value").input_value(), "")
+            await request(index, "start_console_capture", levels=["info"], max_entries=32, max_bytes=16_384)
+            await request(index, "start_network_capture", allowed_hostnames=["127.0.0.1"], max_entries=32, max_bytes=65_536)
+            await request(index, "execute_browser_action", action="click",
+                element={"css": "#project-submit", "page_context_revision": revisions[index]})
+            await request(index, "execute_browser_action", action="assert_text", value="1",
+                element={"css": "#project-submitted", "page_context_revision": revisions[index]})
+
+        for index, suffix in enumerate(("a", "b")):
+            deadline = time.monotonic() + 15
+            while True:
+                console = await request(index, "list_console_events")
+                network = await request(index, "list_network_requests")
+                console_text = json.dumps(console)
+                requests = network.get("requests", [])
+                if f"project-submit-project-{suffix}" in console_text and any(
+                    f"/network-project-{suffix}" in item.get("url", "") for item in requests
+                ):
+                    break
+                self.assertLess(time.monotonic(), deadline, {"console": console, "network": network})
+                await asyncio.sleep(0.25)
+            other = "b" if suffix == "a" else "a"
+            self.assertNotIn(f"project-submit-project-{other}", console_text)
+            self.assertFalse(any(f"/network-project-{other}" in item.get("url", "") for item in requests))
+            screenshot = await request(index, "capture_browser_screenshot", format="png", full_page=False)
+            artifact_root = (projects[index] / ".teshi" / "artifacts" / "browser").resolve()
+            artifact = (artifact_root / screenshot["artifact"]["path"]).resolve()
+            self.assertTrue(artifact.is_relative_to(artifact_root))
+            self.assertFalse(artifact.is_relative_to(projects[1 - index].resolve()))
+            self.assertEqual(artifact.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+            if self.artifact_dir is not None:
+                shutil.copyfile(artifact, self.artifact_dir / f"two-projects-{suffix}.png")
+            await request(index, "stop_console_capture")
+            await request(index, "stop_network_capture")
+            self._log("two_project_evidence_verified", {
+                "project_root": str(projects[index]), "target": targets[index],
+                "fill_value": values[index], "console_isolated": True, "network_isolated": True,
+                "artifact_project_scoped": True, "cross_project_rejected": True,
+                "cross_caller_rejected": True, "playwright_mutations": 0,
+            })
+
+        old_generation = self.ready_endpoint["broker_start_id"]
+        await self._stop_broker()
+        await self._wait_port_closed(self.discovery_port)
+        await self._start_broker()
+        self.assertNotEqual(old_generation, self.ready_endpoint["broker_start_id"])
+        await asyncio.gather(self._force_stream("profile-a"), self._force_stream("profile-b"))
+        recovered = await self._wait_sessions(2, expected_count=2)
+        for index, suffix in enumerate(("a", "b")):
+            recovered_target = self._target(self._session_for_path(recovered, f"/project-{suffix}"))
+            self.assertEqual(recovered_target, targets[index])
+            stale = await request(index, "get_page_snapshot", expect_ok=False)
+            self.assertEqual(stale.get("code"), "invalid_browser_lease")
+            tokens[index] = await self._acquire_lease(targets[index], owners[index], project_root=projects[index])
+            snapshot = await request(index, "get_page_snapshot")
+            await request(index, "execute_browser_action", action="assert_text", value=values[index],
+                element={"css": "#project-echo", "page_context_revision": snapshot["page_context_revision"]})
+            await self._release_lease(targets[index], owners[index], tokens[index], project_root=projects[index])
+        self._log("two_project_reconnect_verified", {
+            "projects": [str(project) for project in projects], "targets": targets,
+            "broker_generation_changed": True, "old_leases_rejected": True,
+            "filled_values_preserved": True, "playwright_mutations": 0,
+        })
 
     async def test_stage_five_real_evidence_and_bounded_backpressure(self) -> None:
         self._set_stage("stage 5.6 real screenshot, Console, and Network evidence")

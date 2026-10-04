@@ -9120,10 +9120,14 @@ mod tests {
         });
 
         let (mut app, project, _store) = slash_test_app();
-        let source_root = crate::cli::browser_endpoint::resolve_browser_project_root(Path::new(
-            env!("CARGO_MANIFEST_DIR"),
-        ))
-        .unwrap();
+        let source_root = std::env::var_os("TESHI_ACCEPTANCE_PROJECT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                crate::cli::browser_endpoint::resolve_browser_project_root(Path::new(env!(
+                    "CARGO_MANIFEST_DIR"
+                )))
+                .unwrap()
+            });
         let endpoint = fs::read(source_root.join(".teshi").join("cdp-endpoint.json")).unwrap();
         fs::create_dir_all(project.path().join(".teshi")).unwrap();
         fs::write(
@@ -9591,6 +9595,10 @@ mod tests {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .expect("DEEPSEEK_API_KEY is required for the live Chrome Agent acceptance");
+        assert!(
+            crate::llm::is_configured(),
+            "live Agent dispatch requires TESHI_LLM_API_KEY or a configured model profile"
+        );
         let project_root =
             PathBuf::from(std::env::var("TESHI_ACCEPTANCE_PROJECT").expect(
                 "TESHI_ACCEPTANCE_PROJECT must name a project with .teshi/cdp-endpoint.json",
@@ -9618,6 +9626,10 @@ mod tests {
             store.path().to_path_buf(),
         )
         .expect("create production App");
+        app.agents[0].backend = teshi_agent_runtime::backend::AgentBackendRuntime::new(
+            teshi_agent::backend::AgentBackendKind::Native,
+            1,
+        );
         app.agents[0]
             .backend
             .attach_native_model(crate::llm::LlmConfig {
@@ -9635,22 +9647,33 @@ mod tests {
                 chat_options: Default::default(),
             })
             .expect("attach native model");
-        app.dispatch_user_message(
+        let expected_url_pattern = std::env::var("TESHI_EXPECT_BROWSER_URL_PATTERN")
+            .unwrap_or_else(|_| "127\\.0\\.0\\.1:8799".into());
+        app.dispatch_user_message(format!(
             "Inspect the browser page that is already open.\n\n\
              1. Call `browser_snapshot` once.\n\
-             2. Call `browser_assert` with condition_type `url_match` and value `127\\.0\\.0\\.1:8799`.\n\
+             2. Call `browser_assert` with condition_type `url_match` and value `{expected_url_pattern}`.\n\
              3. Report the observed page title and URL. Do not call any other tool."
-                .into(),
-        )
+        ))
         .expect("dispatch user message");
+        assert_ne!(
+            app.agents[0].status,
+            AiStatus::Idle,
+            "live Agent turn was not submitted: {}",
+            app.status
+        );
 
         let deadline = Instant::now() + Duration::from_secs(240);
         while Instant::now() < deadline {
             app.poll_llm_events();
-            if app.agents[0].status == AiStatus::Error {
+            if app.agents[0].status == AiStatus::Error
+                || app.agents[0].backend.status()
+                    == teshi_agent::backend::AgentBackendStatus::Failed
+            {
                 panic!("Agent entered error state: {:?}", app.agents[0].messages());
             }
-            let done = app.agents[0].status == AiStatus::Idle
+            let done = app.agents[0].backend.status()
+                == teshi_agent::backend::AgentBackendStatus::Completed
                 && app.agents[0].messages().iter().any(|message| {
                     message.role == AiRole::Assistant
                         && message.tool_calls.is_none()
@@ -9662,8 +9685,8 @@ mod tests {
             thread::sleep(Duration::from_millis(100));
         }
         assert_eq!(
-            app.agents[0].status,
-            AiStatus::Idle,
+            app.agents[0].backend.status(),
+            teshi_agent::backend::AgentBackendStatus::Completed,
             "Agent did not finish within 240 seconds"
         );
 

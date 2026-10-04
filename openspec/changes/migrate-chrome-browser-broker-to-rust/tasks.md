@@ -55,14 +55,14 @@
 - [x] 7.2 Update endpoint creation/health/reconnect so every project points to the same broker generation without exposing project paths or credentials publicly.
 - [x] 7.3 Verify CLI, Agent, MCP, Daemon, GPUI Desktop, and daemon-backed GPUI WASM Web requests use the same typed state and broker identity.
 - [x] 7.4 Test multiple projects, multiple terminals, client exits, daemon restarts, broker crashes, lease ownership, and recovery while preserving other clients' sessions.
-- [ ] 7.5 Run Embedded Playwright and WinApp regression suites to prove their existing runtimes and error guidance remain intact.
+- [x] 7.5 Run Embedded Playwright and WinApp regression suites to prove their existing runtimes and error guidance remain intact.
 - [x] 7.6 Enable Rust as the test-only Chrome implementation behind an explicit development selector; do not auto-fallback between implementations.
 
 ## 8. Complete Acceptance, Packaging, and Chrome Python Removal
 
-- [ ] 8.1 Run full shared protocol, Rust workspace, Python Embedded/WinApp, extension Node, CLI/MCP/Daemon/UI, and security suites; resolve every unexplained failure.
-- [ ] 8.2 Run real Chrome end-to-end tests with two Profiles and at least two project roots for connection, navigation, snapshot, locator, click/fill/assert, screenshot, Console, Network, and reconnect.
-- [ ] 8.3 Run Chrome acceptance with Python executables absent from PATH and no project venv; prove Embedded still reports its documented Python requirement and remains functional when configured.
+- [x] 8.1 Run full shared protocol, Rust workspace, Python Embedded/WinApp, extension Node, CLI/MCP/Daemon/UI, and security suites; resolve every unexplained failure.
+- [x] 8.2 Run real Chrome end-to-end tests with two Profiles and at least two project roots for connection, navigation, snapshot, locator, click/fill/assert, screenshot, Console, Network, and reconnect.
+- [x] 8.3 Run Chrome acceptance with Python executables absent from PATH and no project venv; prove Embedded still reports its documented Python requirement and remains functional when configured.
 - [ ] 8.4 Build and inspect Windows MSI/EXE, Linux and macOS archives, nightly artifacts, and browser-testing package contents; retain only Embedded/WinApp Python resources that have live consumers.
 - [ ] 8.5 Measure broker startup, locator acquisition, command execution, screenshot transport, steady/peak memory, and high-volume Network behavior against the recorded Python baseline.
 - [ ] 8.6 Update browser docs, skills, extension upgrade instructions, user errors, endpoint fixture markers, CI/release/nightly contract tests, and supported protocol metadata.
