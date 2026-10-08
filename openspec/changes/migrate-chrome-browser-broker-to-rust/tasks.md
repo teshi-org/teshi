@@ -51,7 +51,13 @@
 
 ## 7. Integrate All Teshi Entry Points
 
-- [ ] 7.1 Switch Chrome startup in `teshi-engine` from Python venv resolution/import checks to the shared Rust broker launcher; keep Embedded and WinApp branches unchanged.
+- [x] 7.1 Switch Chrome startup in `teshi-engine` from Python venv resolution/import checks to the shared Rust broker launcher; keep Embedded and WinApp branches unchanged.
+  - Rust is the lazy default (unset/non-Unicode selector); exact `python` remains an explicit compatibility switch. Neither launcher falls back on failure. Default Rust endpoint authentication and reconnect are covered.
+  - Verified on Windows amd64 on 2026-10-08 using an isolated index export of `cd10776` plus the engine/TUI changes, excluding unrelated working-tree edits. Full browser startup/stop lifecycle code, including Embedded and WinApp branches, is unchanged from HEAD.
+  - Passed `cargo fmt --all --check` and `cargo check --workspace --exclude teshi-web --locked`.
+  - Passed `cargo test -p teshi-engine --locked` (228 tests), `cargo test -p teshi-browser-broker --locked` (128 tests), `cargo test -p teshi-cli --test browser_broker_process --locked` (4 tests), and `cargo test -p teshi-tui --locked` (339 tests including one doctest; one real-Chrome test ignored).
+  - Passed `cargo clippy -p teshi-engine -p teshi-browser-broker -p teshi-cli -p teshi-tui --locked --all-targets --all-features -- -D warnings`.
+  - Evidence is limited to source isolation, unit/contract tests, and Rust broker process tests. Real Chrome/Python-free extension registration, Embedded UI, WinApp UI/UAC, Linux/macOS, full-workspace test/Clippy/doc, and WASM acceptance were not rerun; tasks 8.4/8.6/8.7/8.8 remain open.
 - [x] 7.2 Update endpoint creation/health/reconnect so every project points to the same broker generation without exposing project paths or credentials publicly.
 - [x] 7.3 Verify CLI, Agent, MCP, Daemon, GPUI Desktop, and daemon-backed GPUI WASM Web requests use the same typed state and broker identity.
 - [x] 7.4 Test multiple projects, multiple terminals, client exits, daemon restarts, broker crashes, lease ownership, and recovery while preserving other clients' sessions.

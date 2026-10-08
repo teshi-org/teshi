@@ -341,13 +341,10 @@ pub fn reconnect_chrome_broker(project_root: &Path) -> Result<CdpEndpoint> {
     if current.mode != "chrome" {
         return Err(anyhow!("project endpoint is not a Chrome broker endpoint"));
     }
-    if current.bridge == "rust"
-        && std::env::var("TESHI_BROWSER_BROKER_IMPLEMENTATION").as_deref() != Ok("rust")
-    {
-        return Err(anyhow!(
-            "Rust Chrome endpoint requires TESHI_BROWSER_BROKER_IMPLEMENTATION=rust for reconnect; Teshi will not fall back to Python"
-        ));
-    }
+    validate_chrome_reconnect_selection(
+        &current,
+        std::env::var("TESHI_BROWSER_BROKER_IMPLEMENTATION"),
+    )?;
     let broker = ensure_user_chrome_broker(project_root, &default_browser_service_script())
         .map_err(|error| match error.hint {
             Some(hint) => anyhow!("{} ({hint})", error.message),
@@ -355,6 +352,26 @@ pub fn reconnect_chrome_broker(project_root: &Path) -> Result<CdpEndpoint> {
         })?;
     write_chrome_broker_endpoint(project_root, &broker)?;
     read_cdp_endpoint(project_root)
+}
+
+// A Rust project pointer may use the default launcher, but must never be
+// reconnected through an explicitly selected legacy Python implementation.
+fn validate_chrome_reconnect_selection(
+    endpoint: &CdpEndpoint,
+    selection: Result<String, std::env::VarError>,
+) -> Result<()> {
+    if endpoint.mode != "chrome" || endpoint.bridge != "rust" {
+        return Ok(());
+    }
+    match selection.as_deref() {
+        Ok("rust") | Err(_) => Ok(()),
+        Ok("python") => Err(anyhow!(
+            "Rust Chrome endpoint requires the default Rust launcher for reconnect; unset TESHI_BROWSER_BROKER_IMPLEMENTATION or set it to rust; Teshi will not fall back to Python"
+        )),
+        Ok(other) => Err(anyhow!(
+            "unsupported TESHI_BROWSER_BROKER_IMPLEMENTATION value {other:?}; expected rust or python"
+        )),
+    }
 }
 
 /// Writes `cdp-endpoint.json` from the Rust side with the actual ws_url.
@@ -406,15 +423,14 @@ pub fn ensure_sidecar_healthy(project_root: &Path) -> Result<CdpEndpoint> {
             return read_cdp_endpoint(project_root);
         }
     }
-    if endpoint
+    if let Some(endpoint) = endpoint
         .as_ref()
-        .is_some_and(|e| e.mode == "chrome" && e.bridge == "rust")
+        .filter(|e| e.mode == "chrome" && e.bridge == "rust")
     {
-        if std::env::var("TESHI_BROWSER_BROKER_IMPLEMENTATION").as_deref() != Ok("rust") {
-            return Err(anyhow!(
-                "Rust Chrome endpoint requires TESHI_BROWSER_BROKER_IMPLEMENTATION=rust for reconnect; Teshi will not fall back to Python"
-            ));
-        }
+        validate_chrome_reconnect_selection(
+            endpoint,
+            std::env::var("TESHI_BROWSER_BROKER_IMPLEMENTATION"),
+        )?;
         let broker = ensure_user_chrome_broker(project_root, &default_browser_service_script())
             .map_err(|error| match error.hint {
                 Some(hint) => anyhow!("{} ({hint})", error.message),
@@ -445,6 +461,75 @@ mod tests {
             broker_pid: 1234,
             broker_start_id: "broker-start-a".into(),
             broker_features: vec!["p0.control".into()],
+        }
+    }
+
+    #[test]
+    fn rust_endpoint_reconnect_accepts_default_and_explicit_rust() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut broker = broker_endpoint();
+        broker.broker_features.push("transport.v1".into());
+        write_chrome_broker_endpoint(temp.path(), &broker).unwrap();
+        let endpoint = read_cdp_endpoint(temp.path()).unwrap();
+        assert_eq!(endpoint.bridge, "rust");
+        for selection in [Err(std::env::VarError::NotPresent), Ok("rust".into())] {
+            validate_chrome_reconnect_selection(&endpoint, selection).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+
+            let invalid = std::ffi::OsString::from_wide(&[0xd800]);
+            assert!(invalid.to_str().is_none());
+            validate_chrome_reconnect_selection(
+                &endpoint,
+                Err(std::env::VarError::NotUnicode(invalid)),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn rust_endpoint_reconnect_rejects_python_and_invalid_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut broker = broker_endpoint();
+        broker.broker_features.push("transport.v1".into());
+        write_chrome_broker_endpoint(temp.path(), &broker).unwrap();
+        let endpoint = read_cdp_endpoint(temp.path()).unwrap();
+        let error = validate_chrome_reconnect_selection(&endpoint, Ok("python".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unset TESHI_BROWSER_BROKER_IMPLEMENTATION"));
+        assert!(error.contains("will not fall back to Python"));
+        for selected in ["", "Rust", "PYTHON", " rust", "rust ", "unknown"] {
+            let error = validate_chrome_reconnect_selection(&endpoint, Ok(selected.into()))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("TESHI_BROWSER_BROKER_IMPLEMENTATION"));
+            assert!(error.contains(&format!("{selected:?}")));
+            assert!(error.contains("expected rust or python"));
+        }
+    }
+
+    #[test]
+    fn reconnect_selection_guard_leaves_non_rust_endpoints_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        write_chrome_broker_endpoint(temp.path(), &broker_endpoint()).unwrap();
+        let mut endpoint = read_cdp_endpoint(temp.path()).unwrap();
+        for (mode, bridge) in [
+            ("chrome", "python"),
+            ("embedded", "python"),
+            ("winapp", "rust"),
+        ] {
+            endpoint.mode = mode.into();
+            endpoint.bridge = bridge.into();
+            for selection in [
+                Err(std::env::VarError::NotPresent),
+                Ok("python".into()),
+                Ok("invalid".into()),
+            ] {
+                validate_chrome_reconnect_selection(&endpoint, selection).unwrap();
+            }
         }
     }
 

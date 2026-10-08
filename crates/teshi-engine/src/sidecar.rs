@@ -341,6 +341,9 @@ pub fn authenticated_sidecar_ws_url(ws_url: &str) -> Result<String, String> {
         return Ok(ws_url.to_owned());
     }
 
+    // Explicit selection enables strict endpoint diagnostics for this mode-agnostic
+    // helper. Default Chrome endpoints are still authenticated when matched below;
+    // making strictness the default would also reject Embedded and WinApp URLs.
     let rust_selected = std::env::var(CHROME_BROKER_IMPLEMENTATION_ENV)
         .is_ok_and(|value| value.eq_ignore_ascii_case("rust"));
     let endpoint_path = match chrome_broker_endpoint_path() {
@@ -1906,23 +1909,39 @@ pub fn ensure_user_rust_chrome_broker(
 /// Starts or reuses the selected per-user Chrome broker under the shared
 /// inter-process startup lock.
 ///
-/// Rust selection is explicit through
-/// `TESHI_BROWSER_BROKER_IMPLEMENTATION=rust`. `TESHI_BROWSER_BROKER_EXTENSION_ORIGINS`
-/// is only a development/test union override; durable pairing is loaded from
-/// the per-user state directory. A failed Rust start is
-/// returned to the caller; it is never silently retried with Python. The
-/// legacy Python path remains the default until the later migration acceptance
-/// gates authorize changing the production selector.
+/// Rust is the default when `TESHI_BROWSER_BROKER_IMPLEMENTATION` is unset or
+/// non-Unicode. Exact `rust` and `python` values explicitly select an implementation;
+/// the legacy Python launcher remains available until its separate removal gate.
+/// `TESHI_BROWSER_BROKER_EXTENSION_ORIGINS` is only a development/test union
+/// override; durable pairing is loaded from the per-user state directory.
+///
+/// # Errors
+/// Returns invalid selection, pairing, or launcher errors without retrying with
+/// another implementation.
 pub fn ensure_user_chrome_broker(
     project_root: &Path,
     browser_service_script: &Path,
 ) -> Result<ChromeBrokerEndpoint, BrowserError> {
-    match std::env::var(CHROME_BROKER_IMPLEMENTATION_ENV).as_deref() {
-        Ok("rust") => {
+    ensure_user_chrome_broker_with_launchers(
+        std::env::var(CHROME_BROKER_IMPLEMENTATION_ENV),
+        || {
             let origins = effective_chrome_extension_origins()?;
             ensure_user_rust_chrome_broker(&origins)
-        }
-        Ok("python") | Err(_) => ensure_user_python_chrome_broker(project_root, browser_service_script),
+        },
+        || ensure_user_python_chrome_broker(project_root, browser_service_script),
+    )
+}
+
+// Keep all launcher work lazy: default Chrome startup must never inspect Python,
+// and a failed Rust start must not trigger the legacy launcher's side effects.
+fn ensure_user_chrome_broker_with_launchers(
+    selection: Result<String, std::env::VarError>,
+    rust_launcher: impl FnOnce() -> Result<ChromeBrokerEndpoint, BrowserError>,
+    python_launcher: impl FnOnce() -> Result<ChromeBrokerEndpoint, BrowserError>,
+) -> Result<ChromeBrokerEndpoint, BrowserError> {
+    match selection.as_deref() {
+        Ok("rust") | Err(_) => rust_launcher(),
+        Ok("python") => python_launcher(),
         Ok(other) => Err(BrowserError {
             message: format!(
                 "unsupported {CHROME_BROKER_IMPLEMENTATION_ENV} value {other:?}; expected rust or python"
@@ -2479,6 +2498,135 @@ mod tests {
     }
 
     #[test]
+    fn chrome_selector_defaults_to_rust_without_python() {
+        let starts = AtomicUsize::new(0);
+        let result = ensure_user_chrome_broker_with_launchers(
+            Err(std::env::VarError::NotPresent),
+            || {
+                starts.fetch_add(1, Ordering::SeqCst);
+                Ok(endpoint("default-rust"))
+            },
+            || panic!("default Chrome must not inspect or launch Python"),
+        )
+        .unwrap();
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(result.broker_start_id, "default-rust");
+    }
+
+    #[test]
+    fn chrome_selector_preserves_explicit_implementations() {
+        for selected in ["rust", "python"] {
+            let rust_starts = AtomicUsize::new(0);
+            let python_starts = AtomicUsize::new(0);
+            let result = ensure_user_chrome_broker_with_launchers(
+                Ok(selected.into()),
+                || {
+                    rust_starts.fetch_add(1, Ordering::SeqCst);
+                    Ok(endpoint("rust"))
+                },
+                || {
+                    python_starts.fetch_add(1, Ordering::SeqCst);
+                    Ok(endpoint("python"))
+                },
+            )
+            .unwrap();
+            assert_eq!(result.broker_start_id, selected);
+            assert_eq!(
+                rust_starts.load(Ordering::SeqCst),
+                usize::from(selected == "rust")
+            );
+            assert_eq!(
+                python_starts.load(Ordering::SeqCst),
+                usize::from(selected == "python")
+            );
+        }
+    }
+
+    #[test]
+    fn chrome_selector_rejects_invalid_values_before_launch() {
+        for selected in ["", "Rust", "PYTHON", " rust", "rust ", "unknown"] {
+            let error = ensure_user_chrome_broker_with_launchers(
+                Ok(selected.into()),
+                || panic!("invalid selection must not launch Rust"),
+                || panic!("invalid selection must not launch Python"),
+            )
+            .unwrap_err();
+            assert!(error.message.contains(CHROME_BROKER_IMPLEMENTATION_ENV));
+            assert!(error.message.contains(&format!("{selected:?}")));
+            assert!(error.message.contains("expected rust or python"));
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn chrome_selector_non_unicode_uses_rust_default() {
+        use std::os::windows::ffi::OsStringExt;
+
+        let invalid = std::ffi::OsString::from_wide(&[0xd800]);
+        assert!(invalid.to_str().is_none());
+        let result = ensure_user_chrome_broker_with_launchers(
+            Err(std::env::VarError::NotUnicode(invalid)),
+            || Ok(endpoint("default-rust")),
+            || panic!("non-Unicode selection must use the Rust default"),
+        )
+        .unwrap();
+        assert_eq!(result.broker_start_id, "default-rust");
+    }
+
+    #[test]
+    fn chrome_selector_rust_failure_never_falls_back() {
+        let selections = [Err(std::env::VarError::NotPresent), Ok("rust".into())];
+        #[cfg(windows)]
+        let selections = {
+            use std::os::windows::ffi::OsStringExt;
+
+            let invalid = std::ffi::OsString::from_wide(&[0xd800]);
+            assert!(invalid.to_str().is_none());
+            selections
+                .into_iter()
+                .chain([Err(std::env::VarError::NotUnicode(invalid))])
+        };
+        for selection in selections {
+            let starts = AtomicUsize::new(0);
+            let error = ensure_user_chrome_broker_with_launchers(
+                selection,
+                || {
+                    starts.fetch_add(1, Ordering::SeqCst);
+                    Err(BrowserError {
+                        message: "sentinel Rust startup failure".into(),
+                        hint: Some("sentinel recovery hint".into()),
+                    })
+                },
+                || panic!("Rust failure must not inspect or launch Python"),
+            )
+            .unwrap_err();
+            assert_eq!(starts.load(Ordering::SeqCst), 1);
+            assert_eq!(error.message, "sentinel Rust startup failure");
+            assert_eq!(error.hint.as_deref(), Some("sentinel recovery hint"));
+        }
+    }
+
+    #[test]
+    fn chrome_selector_python_failure_never_falls_back() {
+        let starts = AtomicUsize::new(0);
+        let error = ensure_user_chrome_broker_with_launchers(
+            Ok("python".into()),
+            || panic!("explicit Python failure must not launch Rust"),
+            || {
+                starts.fetch_add(1, Ordering::SeqCst);
+                Err(BrowserError {
+                    message: "sentinel Python startup failure".into(),
+                    hint: Some("sentinel Python recovery hint".into()),
+                })
+            },
+        )
+        .unwrap_err();
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(error.message, "sentinel Python startup failure");
+        assert_eq!(error.hint.as_deref(), Some("sentinel Python recovery hint"));
+    }
+
+    #[test]
     fn configured_chrome_origins_are_exact_sorted_and_bounded() {
         let first = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let second = "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -2919,6 +3067,90 @@ mod tests {
     fn already_authenticated_sidecar_url_is_not_rewritten() {
         let url = "ws://127.0.0.1:43123/?token=tk_secret";
         assert_eq!(authenticated_sidecar_ws_url(url).unwrap(), url);
+    }
+
+    #[test]
+    fn non_chrome_urls_remain_unchanged_with_default_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_path = temp.path().join("endpoint.json");
+        let state_dir = temp.path().join("private-state");
+        let urls = ["ws://127.0.0.1:23457", "ws://127.0.0.1:23458/winapp"];
+
+        for ws_url in urls {
+            assert_eq!(
+                authenticated_sidecar_ws_url_from_paths(ws_url, false, &endpoint_path, &state_dir)
+                    .unwrap(),
+                ws_url
+            );
+        }
+        let mut chrome = endpoint("rust-generation");
+        chrome.broker_features = vec!["transport.v1".into()];
+        std::fs::write(&endpoint_path, serde_json::to_vec(&chrome).unwrap()).unwrap();
+        for ws_url in urls {
+            assert_eq!(
+                authenticated_sidecar_ws_url_from_paths(ws_url, false, &endpoint_path, &state_dir)
+                    .unwrap(),
+                ws_url
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn default_rust_endpoint_authenticates_without_explicit_selection() {
+        let mut config =
+            BrokerServerConfig::new("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        config.discovery_addr = "127.0.0.1:0".parse().unwrap();
+        config.broker_features = vec!["transport.v1".into()];
+        let runtime = BrokerRuntime::start(config).await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().join("private-state");
+        let credentials = PrivateCredentialStore::new(&state_dir);
+        runtime.persist_private_credential(&credentials).unwrap();
+        let public = runtime.endpoint_record();
+        let endpoint_path = temp.path().join("endpoint.json");
+        let public_json = serde_json::to_vec(&public).unwrap();
+        std::fs::write(&endpoint_path, &public_json).unwrap();
+        let expected_token = credentials
+            .read_for_endpoint(&public)
+            .unwrap()
+            .token()
+            .to_owned();
+
+        let (authenticated, missing_credential) = tokio::task::spawn_blocking(move || {
+            let authenticated = authenticated_sidecar_ws_url_from_paths(
+                &public.ws_url,
+                false,
+                &endpoint_path,
+                &state_dir,
+            )
+            .unwrap();
+            let authenticated = url::Url::parse(&authenticated).unwrap();
+            assert_eq!(
+                authenticated
+                    .query_pairs()
+                    .find(|(name, _)| name == "token")
+                    .unwrap()
+                    .1,
+                expected_token
+            );
+            assert_eq!(std::fs::read(&endpoint_path).unwrap(), public_json);
+            assert!(!String::from_utf8(public_json).unwrap().contains("token"));
+
+            std::fs::remove_file(credentials.path()).unwrap();
+            let missing = authenticated_sidecar_ws_url_from_paths(
+                &public.ws_url,
+                false,
+                &endpoint_path,
+                &state_dir,
+            )
+            .unwrap_err();
+            (authenticated, missing)
+        })
+        .await
+        .unwrap();
+        assert_eq!(authenticated.scheme(), "ws");
+        assert!(missing_credential.starts_with("broker_private_credential_missing:"));
+        runtime.shutdown().await;
     }
 
     #[test]
