@@ -37,6 +37,12 @@ pub fn check(
     channel: Option<ReleaseChannel>,
 ) -> Result<CheckResult> {
     let installation = Installation::detect(executable, &current)?;
+    if current.channel == ReleaseChannel::Local && channel.is_none() {
+        return Err(UpdateError::new(
+            ErrorCode::Unsupported,
+            "Local builds do not follow a published update stream; rebuild locally or explicitly select --channel stable or --channel nightly",
+        ));
+    }
     let selected = channel.unwrap_or(match current.channel {
         ReleaseChannel::Dev => ReleaseChannel::Stable,
         other => other,

@@ -117,7 +117,7 @@ pub struct ReleaseManifest {
     pub assets: Vec<ReleaseAsset>,
 }
 
-/// Validates a complete published identity.
+/// Validates a complete published or explicitly local bundle identity.
 ///
 /// # Errors
 /// Rejects development identities, malformed SemVer/SHA/time and missing sequence.
@@ -272,7 +272,11 @@ impl ReleaseManifest {
                     &self.identity.git_sha[..7]
                 )
             }
-            ReleaseChannel::Dev => return Err(invalid("Development release")),
+            ReleaseChannel::Dev | ReleaseChannel::Local => {
+                return Err(invalid(
+                    "Local/development builds cannot be published releases",
+                ));
+            }
         };
         if self.tag != expected {
             return Err(invalid("Release tag and identity disagree"));

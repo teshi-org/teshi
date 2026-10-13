@@ -100,7 +100,7 @@ fn add_dated_release(
             format!("v{}-nightly.20260908.{}", build.semver, &build.git_sha[..7])
         }
         ReleaseChannel::Stable => format!("v{}", build.semver),
-        ReleaseChannel::Dev => format!("v{}-dev", build.semver),
+        ReleaseChannel::Dev | ReleaseChannel::Local => format!("v{}-dev", build.semver),
     };
     let prerelease = build.channel == ReleaseChannel::Nightly;
     let asset = ReleaseAsset {
@@ -883,4 +883,19 @@ fn manifest_rejects_case_alias_and_reserved_inventory_path() {
     assert!(bundle.validate().is_ok());
     bundle.files.push(file(".teshi-update/journal.json"));
     assert!(bundle.validate().is_err());
+}
+
+#[test]
+fn local_identity_cannot_be_published_as_a_release() {
+    let mut local = identity(1, 'a');
+    local.channel = ReleaseChannel::Local;
+    teshi_update::manifest::validate_identity(&local).unwrap();
+    let published = ReleaseManifest {
+        schema: 1,
+        minimum_updater: 1,
+        identity: local,
+        tag: "v0.7.10-local.20261013.1203".into(),
+        assets: vec![],
+    };
+    assert!(published.validate().is_err());
 }

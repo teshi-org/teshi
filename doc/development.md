@@ -27,6 +27,25 @@ bash scripts/build-teshi-web.sh
 
 This requires the nightly toolchain, the `wasm32-unknown-unknown` target, and the `wasm-bindgen` CLI.
 
+## Local source build identity
+
+Use `TESHI_BUILD_CHANNEL=local` for a deliberately identified source build,
+separate from GitHub stable/nightly streams. Set `TESHI_GIT_SHA` to the full
+source commit, `TESHI_BUILD_TIMESTAMP` to a UTC RFC3339 timestamp,
+`TESHI_BUILD_DATE` to its `YYYYMMDD` date, and `TESHI_BUILD_SEQUENCE` to a positive
+local build sequence (for example Unix time). Compile every bundled executable
+with the same values. Record uncommitted source changes separately when building
+a dirty checkout.
+
+Set `TESHI_BUILD_LOCAL_TIMESTAMP` to the same instant in the build machine's
+current timezone, including its RFC3339 offset. The displayed local version
+includes that local minute and offset, for example
+`0.7.10-local.20261013.2003+0800 (26fd0b6)`. The bundle's machine-readable channel is
+`local`; the manifest retains the full timestamp. Local builds do not perform
+automatic release checks. Rebuild locally for another local version, or explicitly
+choose `teshi update --channel stable` / `--channel nightly` to switch streams.
+Local identities are rejected by published release manifests.
+
 ## Testing
 
 ```bash

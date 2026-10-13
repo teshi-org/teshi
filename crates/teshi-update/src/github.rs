@@ -443,7 +443,7 @@ impl<H: Http, C: Clock> GithubSource<H, C> {
         kind: InstallKind,
         explicit: bool,
     ) -> Result<Option<Candidate>> {
-        if channel == ReleaseChannel::Dev {
+        if matches!(channel, ReleaseChannel::Dev | ReleaseChannel::Local) {
             return Err(invalid("Select stable or nightly"));
         }
         let current_version =
@@ -489,7 +489,7 @@ impl<H: Http, C: Clock> GithubSource<H, C> {
         let manifest_limit = match channel {
             ReleaseChannel::Nightly => NIGHTLY_MANIFEST_LIMIT,
             ReleaseChannel::Stable => usize::MAX,
-            ReleaseChannel::Dev => 0,
+            ReleaseChannel::Dev | ReleaseChannel::Local => 0,
         };
         let mut best: Option<Candidate> = None;
         let mut manifests_fetched = 0;
@@ -587,7 +587,7 @@ impl<H: Http, C: Clock> GithubSource<H, C> {
         match channel {
             ReleaseChannel::Stable => self.list_latest_stable(cache, current_version),
             ReleaseChannel::Nightly => self.list_recent_nightlies(cache),
-            ReleaseChannel::Dev => Err(invalid("Select stable or nightly")),
+            ReleaseChannel::Dev | ReleaseChannel::Local => Err(invalid("Select stable or nightly")),
         }
     }
 

@@ -15,7 +15,9 @@ pub enum ReleaseChannel {
     Stable,
     /// Published development snapshots.
     Nightly,
-    /// Local or unidentified builds.
+    /// Explicit local source builds, separate from published release streams.
+    Local,
+    /// Unidentified development builds.
     Dev,
 }
 
@@ -26,9 +28,9 @@ pub struct BuildIdentity {
     pub semver: String,
     /// Explicit release stream.
     pub channel: ReleaseChannel,
-    /// Full source commit, empty for local builds.
+    /// Full source commit, empty for unidentified builds.
     pub git_sha: String,
-    /// UTC RFC3339 build timestamp, empty for local builds.
+    /// UTC RFC3339 build timestamp, empty for unidentified builds.
     pub build_timestamp: String,
     /// Monotonic CI run identity (not a lexically ordered SHA).
     pub build_sequence: u64,
@@ -39,6 +41,7 @@ pub fn build_identity() -> BuildIdentity {
     let channel = match option_env!("TESHI_BUILD_CHANNEL") {
         Some("stable") => ReleaseChannel::Stable,
         Some("nightly") => ReleaseChannel::Nightly,
+        Some("local") => ReleaseChannel::Local,
         _ => ReleaseChannel::Dev,
     };
     let mut identity = BuildIdentity {
@@ -76,6 +79,8 @@ pub struct VersionInfo {
     pub build_date: Option<&'static str>,
     /// Short git object name when CI injected one.
     pub git_sha: Option<&'static str>,
+    /// RFC3339 build timestamp with the build machine's offset for local display.
+    pub build_timestamp: Option<&'static str>,
 }
 
 impl VersionInfo {
@@ -86,6 +91,19 @@ impl VersionInfo {
     /// ignored so a half-set CI environment cannot look like a shipped
     /// nightly.
     pub fn display_string(&self) -> String {
+        if self.channel == Some("local") {
+            if let (Some(timestamp), Some(sha)) = (self.build_timestamp, self.git_sha)
+                && let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(timestamp)
+            {
+                return format!(
+                    "{}-local.{} ({})",
+                    self.semver,
+                    timestamp.format("%Y%m%d.%H%M%z"),
+                    sha.chars().take(7).collect::<String>()
+                );
+            }
+            return format!("{}-local", self.semver);
+        }
         match (self.channel, self.build_date, self.git_sha) {
             (Some(channel), Some(date), Some(sha)) if channel != "stable" => {
                 if let Some(date) = format_yyyymmdd(date) {
@@ -110,6 +128,8 @@ pub fn version_info() -> VersionInfo {
         channel: nonempty_env(option_env!("TESHI_BUILD_CHANNEL")),
         build_date: nonempty_env(option_env!("TESHI_BUILD_DATE")),
         git_sha: nonempty_env(option_env!("TESHI_GIT_SHA")),
+        build_timestamp: nonempty_env(option_env!("TESHI_BUILD_LOCAL_TIMESTAMP"))
+            .or_else(|| nonempty_env(option_env!("TESHI_BUILD_TIMESTAMP"))),
     }
 }
 
@@ -141,6 +161,7 @@ mod tests {
             channel: None,
             build_date: None,
             git_sha: None,
+            build_timestamp: None,
         };
         assert_eq!(info.display_string(), "0.7.10");
     }
@@ -152,6 +173,7 @@ mod tests {
             channel: Some("nightly"),
             build_date: Some("20260907"),
             git_sha: Some("cb4361a"),
+            build_timestamp: None,
         };
         assert_eq!(info.display_string(), "0.7.10-nightly-2026.09.07 (cb4361a)");
     }
@@ -163,6 +185,7 @@ mod tests {
             channel: Some("nightly"),
             build_date: Some("20260907"),
             git_sha: None,
+            build_timestamp: None,
         };
         assert_eq!(info.display_string(), "0.7.10");
     }
@@ -174,9 +197,56 @@ mod tests {
             channel: Some("nightly"),
             build_date: Some("2026-09-07"),
             git_sha: Some("cb4361a"),
+            build_timestamp: None,
         };
         assert_eq!(info.display_string(), "0.7.10");
         assert_eq!(format_yyyymmdd("20260907").as_deref(), Some("2026.09.07"));
+    }
+
+    #[test]
+    fn local_display_preserves_build_timezone_and_minute() {
+        let info = VersionInfo {
+            semver: "0.7.10",
+            channel: Some("local"),
+            build_date: Some("20261013"),
+            git_sha: Some("26fd0b6"),
+            build_timestamp: Some("2026-10-13T20:03:59+08:00"),
+        };
+        assert_eq!(
+            info.display_string(),
+            "0.7.10-local.20261013.2003+0800 (26fd0b6)"
+        );
+        assert_eq!(
+            VersionInfo {
+                build_timestamp: None,
+                ..info
+            }
+            .display_string(),
+            "0.7.10-local"
+        );
+    }
+
+    #[test]
+    fn local_display_preserves_negative_and_utc_offsets() {
+        for (timestamp, expected) in [
+            (
+                "2026-10-13T23:59:30-05:30",
+                "0.7.10-local.20261013.2359-0530 (26fd0b6)",
+            ),
+            (
+                "2026-10-13T12:03:59Z",
+                "0.7.10-local.20261013.1203+0000 (26fd0b6)",
+            ),
+        ] {
+            let info = VersionInfo {
+                semver: "0.7.10",
+                channel: Some("local"),
+                build_date: None,
+                git_sha: Some("26fd0b6"),
+                build_timestamp: Some(timestamp),
+            };
+            assert_eq!(info.display_string(), expected);
+        }
     }
 
     #[test]
