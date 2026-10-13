@@ -70,7 +70,9 @@
 - [x] 8.2 Run real Chrome end-to-end tests with two Profiles and at least two project roots for connection, navigation, snapshot, locator, click/fill/assert, screenshot, Console, Network, and reconnect.
 - [x] 8.3 Run Chrome acceptance with Python executables absent from PATH and no project venv; prove Embedded still reports its documented Python requirement and remains functional when configured.
 - [ ] 8.4 Build and inspect Windows MSI/EXE, Linux and macOS archives, nightly artifacts, and browser-testing package contents; retain only Embedded/WinApp Python resources that have live consumers.
-- [ ] 8.5 Measure broker startup, locator acquisition, command execution, screenshot transport, steady/peak memory, and high-volume Network behavior against the recorded Python baseline.
+  - Local Windows/Linux packaging evidence and remaining platform/removal boundaries: [stage 8.4 handoff](../../../../docs/agent-handoff-84.md). This task remains unchecked.
+- [x] 8.5 Measure broker startup, locator acquisition, command execution, screenshot transport, steady/peak memory, and high-volume Network behavior against the recorded Python baseline.
+  - Windows same-wire measurements, historical baseline limits, and the locator performance gap: [stage 8.5 handoff](../../../../docs/agent-handoff-85.md).
 - [ ] 8.6 Update browser docs, skills, extension upgrade instructions, user errors, endpoint fixture markers, CI/release/nightly contract tests, and supported protocol metadata.
 - [ ] 8.7 After every acceptance gate passes, remove the production Chrome Python selection and dead Chrome-only Python broker code; retain differential fixtures and any Python code still imported by Embedded.
 - [ ] 8.8 Run final release-equivalent validation and publish a stage report with exact commands/results, behavior invariants, failure recovery, performance measurements, and any platform boundary not exercised.

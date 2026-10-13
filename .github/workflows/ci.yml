@@ -72,6 +72,13 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --exclude teshi-web --locked
 
+      - name: Verify package inventory contracts
+        run: |
+          python scripts/test_release_package.py
+          python scripts/test_update_manifest.py
+          python scripts/test-release-workflow-contract.py
+          python scripts/test-nightly-workflow-contract.py
+
       - name: Run clippy with warnings denied
         run: cargo clippy --workspace --exclude teshi-web --locked --all-targets --all-features -- -D warnings
 

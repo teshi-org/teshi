@@ -13,12 +13,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+from package_runtime import copy_runtime, probe_rust_broker
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_SOURCE = REPO_ROOT / "agent-packages" / "teshi-browser-testing"
 EXTENSION_SOURCE = REPO_ROOT / "extension" / "teshi-bridge"
-BROKER_SOURCE = REPO_ROOT / "resources" / "browser_agent_broker.py"
-BROWSER_SERVICE_SOURCE = REPO_ROOT / "resources" / "browser_service.py"
 
 
 def require(condition: bool, message: str) -> None:
@@ -158,9 +158,14 @@ def smoke_test() -> None:
             package_root / "extension" / "teshi-bridge",
         )
         runtime = package_root / "runtime"
-        runtime.mkdir()
-        shutil.copy2(BROKER_SOURCE, runtime / BROKER_SOURCE.name)
-        shutil.copy2(BROWSER_SERVICE_SOURCE, runtime / BROWSER_SERVICE_SOURCE.name)
+        copy_runtime(runtime, ("browser_service.py",))
+        # Run from the shipped folder without checkout PYTHONPATH. This catches
+        # missing imports that loading only the broker oracle cannot detect.
+        service_probe = subprocess.run(
+            [sys.executable, "-E", "-B", str(runtime / "browser_service.py"), "--help"],
+            cwd=isolated, capture_output=True, text=True, timeout=20, check=False,
+        )
+        require(service_probe.returncode == 0, f"staged Embedded imports failed: {service_probe.stderr}")
 
         exe_name = "teshi.exe" if os.name == "nt" else "teshi"
         built_cli = resolve_built_cli()
@@ -173,20 +178,7 @@ def smoke_test() -> None:
             shutil.copy2(built_cli, installed_cli)
             if os.name != "nt":
                 installed_cli.chmod(installed_cli.stat().st_mode | 0o111)
-            shutil.copy2(
-                BROWSER_SERVICE_SOURCE,
-                installed_share / BROWSER_SERVICE_SOURCE.name,
-            )
-            shutil.copy2(BROKER_SOURCE, installed_share / BROKER_SOURCE.name)
-
-        # Give the isolated project a runnable Python environment without copying
-        # the whole checkout-local virtualenv. The runtime resolves the base
-        # interpreter from pyvenv.cfg, while PYTHONPATH supplies its installed deps.
-        source_pyvenv = REPO_ROOT / ".venv" / "pyvenv.cfg"
-        if source_pyvenv.is_file():
-            isolated_venv = isolated / ".venv"
-            isolated_venv.mkdir()
-            shutil.copy2(source_pyvenv, isolated_venv / "pyvenv.cfg")
+            copy_runtime(installed_share, ("browser_service.py",))
 
         previous_cwd = Path.cwd()
         os.chdir(isolated)
@@ -267,32 +259,9 @@ def smoke_test() -> None:
                 "MCP STDIO arguments drifted",
             )
 
-            if installed_cli is not None and source_pyvenv.is_file():
-                cli_env = os.environ.copy()
-                site_packages = REPO_ROOT / ".venv" / (
-                    "Lib/site-packages" if os.name == "nt" else "lib/python3/site-packages"
-                )
-                if site_packages.is_dir():
-                    cli_env["PYTHONPATH"] = str(site_packages)
-                cli_result = subprocess.run(
-                    [str(installed_cli), "browser", "sessions"],
-                    cwd=isolated,
-                    env=cli_env,
-                    capture_output=True,
-                    text=True,
-                    timeout=20,
-                    check=False,
-                )
-                require(
-                    cli_result.returncode == 0,
-                    "installed CLI broker bootstrap failed: "
-                    f"stdout={cli_result.stdout!r} stderr={cli_result.stderr!r}",
-                )
-                require(
-                    (isolated / ".teshi" / "cdp-endpoint.json").is_file(),
-                    "installed CLI did not write project compatibility data",
-                )
-                json.loads(cli_result.stdout)
+            if installed_cli is not None:
+                probe_rust_broker(installed_cli)
+                require(not (isolated / ".venv").exists(), "package probe must not supply a venv")
 
             broker_module = load_staged_broker(runtime / "browser_agent_broker.py")
             broker = broker_module.BrowserSessionBroker()

@@ -62,6 +62,14 @@ def main() -> int:
     require(WINAPP_RUNTIME, 'service_script = "resources/winapp_service.py"', "runtime service manifest path")
     require(RELEASE, "-RuntimeVersion 4", "release WinApp runtime v4 build")
     require(RELEASE, "winapp-runtime-windows-x86_64-v4.zip", "release WinApp runtime v4 archive")
+    require(RELEASE, "scripts/test-release-package.py", "shipped dependency and bundle validation")
+    require(RELEASE, "scripts/package_runtime.py --destination", "browser-agent live import staging")
+    require(RELEASE, '--kind msi --run-cli', "compiled MSI broker probe")
+    require(RELEASE, '--kind exe --run-cli', "compiled EXE broker probe")
+    require(RELEASE, '"--cli-only"', "nightly package inventory mode")
+    nightly_start = RELEASE.index("      - name: Stage payload and build per-user setup.exe")
+    nightly_stage = RELEASE[nightly_start:RELEASE.find("\n      - name:", nightly_start + 1)]
+    require(nightly_stage, "$includeDesktop =", "step-local nightly desktop gate")
     if "winapp-runtime-windows-x86_64-v3" in RELEASE:
         raise SystemExit("release workflow still references the retired WinApp runtime v3 archive")
     if "winapp-runtime-windows-x86_64-v2" in RELEASE:

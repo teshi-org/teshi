@@ -355,6 +355,8 @@ jobs:
           Copy-Item -Path "extension/teshi-bridge/*" -Destination $agentBridgeDir -Recurse -Force
           python scripts/update_manifest.py bundle --root $stagingRoot --identity build-identity.json --target "${{ matrix.target }}" --kind msi
           if ($LASTEXITCODE -ne 0) { throw "MSI bundle manifest generation failed" }
+          python scripts/test-release-package.py --root $stagingRoot --target "${{ matrix.target }}" --kind msi --run-cli
+          if ($LASTEXITCODE -ne 0) { throw "MSI payload validation failed" }
 
           # Generate WiX fragments for web, bridge, and browser-agent files
           $heat = Join-Path $env:WIX "bin/heat.exe"
@@ -396,6 +398,8 @@ jobs:
           Copy-Item -Path "staging/msi-root" -Destination "staging/exe-root" -Recurse -Force
           python scripts/update_manifest.py bundle --root staging/exe-root --identity build-identity.json --target "${{ matrix.target }}" --kind exe
           if ($LASTEXITCODE -ne 0) { throw "EXE bundle manifest generation failed" }
+          python scripts/test-release-package.py --root staging/exe-root --target "${{ matrix.target }}" --kind exe --run-cli
+          if ($LASTEXITCODE -ne 0) { throw "EXE payload validation failed" }
           ./scripts/build-exe-setup.ps1 -StagingRoot "staging/exe-root" -Tag $tag -Version $identity.semver
 
       - name: Stage payload and build per-user setup.exe
@@ -412,6 +416,7 @@ jobs:
           $shareDir  = Join-Path $stagingRoot "share"
           $webDir    = Join-Path $stagingRoot "share/web"
           $includeWeb = '${{ needs.resolve.outputs.run_scope }}' -ne 'windows-installer'
+          $includeDesktop = '${{ needs.resolve.outputs.run_scope }}' -ne 'windows-installer'
           $bridgeDir = Join-Path $stagingRoot "share/teshi-bridge"
           $agentDir  = Join-Path $stagingRoot "share/teshi-browser-testing"
           $agentBridgeDir = Join-Path $agentDir "extension/teshi-bridge"
@@ -448,6 +453,10 @@ jobs:
           if (-not $includeDesktop) { $bundleArgs += "--omit-desktop" }
           python @bundleArgs
           if ($LASTEXITCODE -ne 0) { throw "EXE bundle manifest generation failed" }
+          $inspectionArgs = @("scripts/test-release-package.py", "--root", $stagingRoot, "--target", "${{ matrix.target }}", "--kind", "exe", "--run-cli")
+          if (-not $includeDesktop) { $inspectionArgs += "--cli-only" }
+          python @inspectionArgs
+          if ($LASTEXITCODE -ne 0) { throw "EXE payload validation failed" }
           $identity = Get-Content build-identity.json | ConvertFrom-Json
           $setupArgs = @{ StagingRoot = $stagingRoot; Tag = $tag; Version = $identity.semver }
           if (-not $includeDesktop) { $setupArgs.CliOnly = $true }
@@ -570,6 +579,7 @@ jobs:
             fi
 
             python scripts/update_manifest.py bundle --root "${stage_dir}" --identity "${artifacts_dir}/teshi-${target}/build-identity.json" --target "${target}" --kind portable
+            python scripts/test-release-package.py --root "${stage_dir}" --target "${target}" --kind portable
 
             if [[ "${target}" == *"windows"* ]]; then
               (cd dist && zip -r "teshi-${version}-${target}.zip" "teshi-${version}-${target}")
@@ -585,8 +595,8 @@ jobs:
           cp -a "${repo_dir}/agent-packages/teshi-browser-testing/." "${agent_stage}/"
           cp -a "${repo_dir}/skills/teshi" "${repo_dir}/skills/bdd-feature" "${repo_dir}/skills/winapp-regression" "${agent_stage}/skills/"
           cp -a "${repo_dir}/extension/teshi-bridge/." "${agent_stage}/extension/teshi-bridge/"
-          cp "${repo_dir}/resources/browser_service.py" "${agent_stage}/runtime/browser_service.py"
-          cp "${repo_dir}/resources/browser_agent_broker.py" "${agent_stage}/runtime/browser_agent_broker.py"
+          python scripts/package_runtime.py --destination "${agent_stage}/runtime" --entry-point browser_service.py
+          python scripts/test-release-package.py --root "${agent_stage}" --target x86_64-unknown-linux-gnu --kind agent
           (cd dist && zip -r "teshi-browser-testing-${version}.zip" "teshi-browser-testing-${version}")
 
           cp "${artifacts_dir}/teshi-msi/"*.msi dist/
