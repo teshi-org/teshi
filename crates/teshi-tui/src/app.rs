@@ -8072,7 +8072,9 @@ impl App {
             AgentPanelMode::SelectBackend => {
                 "Select Agent: ↑↓ move · Enter select · Esc close".into()
             }
-            AgentPanelMode::InstalledAcp => "ACP Agents: i browse Registry · Esc close".into(),
+            AgentPanelMode::InstalledAcp => {
+                "ACP Agents: ↑↓ move · Enter select · i Registry · Esc close".into()
+            }
             _ => String::new(),
         };
     }
@@ -8212,6 +8214,16 @@ impl App {
                             .cloned()
                     };
                     self.select_backend(item);
+                }
+                AgentPanelMode::InstalledAcp => {
+                    // Rows start at the first installed agent (no Native row).
+                    if let Some(agent) = self
+                        .installed_acp_agents
+                        .get(self.agent_profile_panel_selection)
+                        .cloned()
+                    {
+                        self.select_backend(Some(agent));
+                    }
                 }
                 AgentPanelMode::Registry if self.acp_install_rx.is_none() => {
                     if let Some(agent) = self
@@ -8633,6 +8645,30 @@ mod tests {
             .collect::<String>();
         assert!(display.contains("Fixture Agent (fixture) [installed]"));
         assert!(display.contains("Reads test files"));
+    }
+
+    #[test]
+    fn installed_acp_panel_enter_selects_agent_backend() {
+        let (mut app, _project, _store) = slash_test_app();
+        let installed = |id: &str| crate::acp_agents::InstalledAgent {
+            id: id.into(),
+            name: id.into(),
+            program: id.into(),
+            args: vec![],
+            env: Default::default(),
+        };
+        app.installed_acp_agents = vec![installed("first"), installed("second")];
+        app.agent_panel_mode = AgentPanelMode::InstalledAcp;
+        app.agent_profile_panel_active = true;
+        // Rows have no "Teshi Native" entry, so one Down lands on the second agent.
+        app.handle_action(Action::AgentPanelDown).unwrap();
+        app.handle_action(Action::AgentPanelSelect).unwrap();
+        assert_eq!(app.agent().selected_acp_id.as_deref(), Some("second"));
+        assert_eq!(
+            app.agent().backend.kind(),
+            teshi_agent::backend::AgentBackendKind::Acp
+        );
+        assert!(!app.agent_profile_panel_active);
     }
 
     #[test]
