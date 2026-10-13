@@ -38,7 +38,6 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("approval", "Switch approval mode (Manual/Auto/Bypass)"),
     ("agent", "Select session Agent (Native or installed ACP)"),
     ("acp", "Manage installed ACP Agents"),
-    ("acp install", "Browse the official ACP Registry"),
     ("agent-profile", "Select Native agent profile"),
     (
         "generate",
@@ -6191,8 +6190,9 @@ impl App {
                         self.execute_slash_command(name)
                     };
                 }
-                // Multiword commands such as `/acp install` are not suggestions;
-                // submit the typed command when the menu has no matching entry.
+                // No suggestion matched the typed text (an argument-bearing or
+                // unknown command such as `/copy 3`); submit it to the same
+                // dispatcher as a submitted command.
                 if let Some(command) = self.agent().input.strip_prefix('/').map(str::to_owned) {
                     self.agent_mut().input.clear();
                     self.agent_mut().input_cursor = 0;
@@ -8317,10 +8317,6 @@ impl App {
         }
         if command == "acp" {
             self.open_agent_backend_panel(AgentPanelMode::InstalledAcp);
-            return Ok(());
-        }
-        if command == "acp install" {
-            self.open_acp_registry();
             return Ok(());
         }
         if let Some(spec) = command.strip_prefix("acp add ") {
