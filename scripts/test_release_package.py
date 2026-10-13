@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import update_manifest
 from package_runtime import copy_runtime
@@ -15,6 +16,9 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("release_package", ROOT / "scripts/test-release-package.py")
 package = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(package)
+smoke_spec = importlib.util.spec_from_file_location("browser_package_smoke", ROOT / "scripts/test-browser-agent-package.py")
+smoke = importlib.util.module_from_spec(smoke_spec)
+smoke_spec.loader.exec_module(smoke)
 
 
 def stage(root, target, kind, cli_only=False):
@@ -45,6 +49,30 @@ def stage(root, target, kind, cli_only=False):
 
 
 class PackageInventoryTests(unittest.TestCase):
+    def test_native_smoke_never_selects_a_foreign_artifact(self):
+        cases = [("linux", "teshi-x86_64-pc-windows-msvc", "teshi.exe"),
+                 ("win32", "teshi-x86_64-unknown-linux-gnu", "teshi"),
+                 ("darwin", "teshi-x86_64-pc-windows-msvc", "teshi.exe")]
+        for platform, foreign_target, name in cases:
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                binary = root / "artifacts" / foreign_target / name
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(b"foreign fixture")
+                with patch.object(smoke, "REPO_ROOT", root), patch.dict(smoke.os.environ, {"TESHI_CLI": ""}):
+                    self.assertIsNone(smoke.resolve_built_cli(platform))
+
+    def test_native_smoke_selects_the_matching_artifact(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            native = root / "artifacts/teshi-x86_64-unknown-linux-gnu/teshi"
+            foreign = root / "artifacts/teshi-x86_64-pc-windows-msvc/teshi.exe"
+            for binary in (native, foreign):
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(b"layout fixture")
+            with patch.object(smoke, "REPO_ROOT", root), patch.dict(smoke.os.environ, {"TESHI_CLI": ""}):
+                self.assertEqual(smoke.resolve_built_cli("linux"), native)
+
     def test_all_channel_layouts(self):
         cases = [(target, "portable", False) for target in update_manifest.TARGETS]
         cases += [(update_manifest.TARGETS[0], "msi", False),

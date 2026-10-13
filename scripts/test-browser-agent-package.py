@@ -72,9 +72,16 @@ def load_staged_broker(path: Path):
     return module
 
 
-def resolve_built_cli() -> Path | None:
+def resolve_built_cli(platform: str = sys.platform) -> Path | None:
     """Return a packaged teshi binary when one exists locally or in CI artifacts."""
-    exe_name = "teshi.exe" if os.name == "nt" else "teshi"
+    native_targets = {
+        "win32": ("teshi.exe", "x86_64-pc-windows-msvc"),
+        "linux": ("teshi", "x86_64-unknown-linux-gnu"),
+        "darwin": ("teshi", "aarch64-apple-darwin"),
+    }
+    if platform not in native_targets:
+        return None
+    exe_name, target = native_targets[platform]
     env_cli = os.environ.get("TESHI_CLI", "").strip()
     candidates = []
     if env_cli:
@@ -83,8 +90,10 @@ def resolve_built_cli() -> Path | None:
         [
             REPO_ROOT / "target" / "debug" / exe_name,
             REPO_ROOT / "target" / "release" / exe_name,
-            REPO_ROOT / "artifacts" / "teshi-x86_64-unknown-linux-gnu" / "teshi",
-            REPO_ROOT / "artifacts" / "teshi-x86_64-pc-windows-msvc" / "teshi.exe",
+            # Publication can download only Windows artifacts on Ubuntu.
+            # Run native smoke there only when a native binary is available;
+            # the Windows build job already probes its packaged broker.
+            REPO_ROOT / "artifacts" / f"teshi-{target}" / exe_name,
         ]
     )
     for path in candidates:
