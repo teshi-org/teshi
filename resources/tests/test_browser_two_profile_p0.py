@@ -221,7 +221,7 @@ class BrowserTwoProfileP0Tests(unittest.IsolatedAsyncioTestCase):
     async def _start_isolated_broker(self) -> None:
         args = [
             sys.executable,
-            str(REPO_ROOT / "resources" / "browser_service.py"),
+            str(REPO_ROOT / "resources" / "tests" / "chrome_broker_oracle.py"),
             "--host",
             "127.0.0.1",
             "--port",

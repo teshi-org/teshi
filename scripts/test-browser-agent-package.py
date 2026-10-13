@@ -166,6 +166,14 @@ def smoke_test() -> None:
             cwd=isolated, capture_output=True, text=True, timeout=20, check=False,
         )
         require(service_probe.returncode == 0, f"staged Embedded imports failed: {service_probe.stderr}")
+        retired_chrome_probe = subprocess.run(
+            [sys.executable, "-E", "-B", str(runtime / "browser_service.py"),
+             "--port", "0", "--mode", "chrome"],
+            cwd=isolated, capture_output=True, text=True, timeout=20, check=False,
+        )
+        require(retired_chrome_probe.returncode == 2
+                and "invalid choice" in retired_chrome_probe.stderr,
+                "staged Python service still accepts Chrome startup")
 
         exe_name = "teshi.exe" if os.name == "nt" else "teshi"
         built_cli = resolve_built_cli()
@@ -220,6 +228,14 @@ def smoke_test() -> None:
             require(compatibility["package_version"] == version, "compatibility version drift")
             require(extension["version"] == version, "extension/CLI version drift")
             require(compatibility["broker_protocol"] == 1, "broker protocol drift")
+            runtime_contract = compatibility["chrome_runtime"]
+            require(runtime_contract["default_implementation"] == "rust", "Chrome default runtime drift")
+            require(runtime_contract["endpoint_bridge"] == "rust", "Chrome endpoint marker drift")
+            require(runtime_contract["python_required"] is False, "Chrome Python dependency drift")
+            require(runtime_contract["automatic_fallback"] is False, "Chrome fallback policy drift")
+            require(runtime_contract.get("rejected_legacy_selector") == "TESHI_BROWSER_BROKER_IMPLEMENTATION=python"
+                    and "legacy_implementation_selector" not in runtime_contract,
+                    "retired Chrome selector compatibility drift")
             require(compatibility["browser_agent_schema"] == 1, "agent schema drift")
             require(compatibility["phases"]["p0.control"]["cli"], "P0 CLI missing")
             require(compatibility["phases"]["p0.control"]["extension"], "P0 extension missing")

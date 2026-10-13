@@ -20,7 +20,7 @@ Toolbar and store icons are PNGs under `icons/`. After updating brand icons, reg
 
 1. In **Google Chrome** (or another Chromium browser), open the tabs you need on an **http(s)** page. Use one dedicated browser profile per concurrent agent.
 2. In teshi-desktop, open your project and click **Connect Chrome** in the Browser panel.
-3. Open the extension popup, set an optional profile label such as `agent-a`, then click **Connect to teshi**. The popup reports the persisted instance ID, extension/protocol versions, and actionable disconnected/incompatible/debugger/stale status.
+3. Open the extension popup, run `teshi browser pairing approve <extension-id>` with the displayed ID, set an optional profile label such as `agent-a`, then click **Connect to teshi**. The popup reports the persisted instance ID, extension/protocol versions, and actionable disconnected/incompatible/debugger/stale status.
 4. `teshi browser sessions` starts or reuses the per-user broker on `127.0.0.1:17373`; Desktop attaches to that same process. The extension sends metadata heartbeats and opens a session-authenticated WebSocket for screencast frames, low-latency correlated commands, and acknowledged network-capture batches. Heartbeat delivery is the bounded command fallback.
 5. When connected, explicitly select the profile and tab in the Browser panel. The panel never projects tabs or frames from several profiles into one implicit selection.
 6. For browser inspection and actions, use the packaged **playwright-locator** skill under `share/teshi-browser-testing/skills/`. For Gherkin binding and replay, use the **teshi** skill's binding workflow, including CLI step selection.
@@ -32,9 +32,20 @@ Unpacked Chrome extensions do not have a stable ID across every install path, so
 paired origins of the form `chrome-extension://<32-character-a-p-id>`; it never
 wildcards an extension ID or self-authorizes an extension that asks for discovery.
 The popup displays the full Chrome extension ID so it can be paired without
-guessing. The Rust migration bootstrap currently receives this explicit pairing
-through repeated `--trusted-extension-origin` arguments; a durable user-facing
-pairing editor is required before production Chrome routing changes.
+guessing. Chrome startup defaults to the shared Rust broker and requires no
+Python installation or project venv. Pair the displayed ID explicitly:
+
+```bash
+teshi browser pairing list
+teshi browser pairing approve <extension-id>
+```
+
+Pairing persists per OS user, with at most 16 exact origins. Approval also updates
+a running Rust broker. Use `teshi browser pairing remove <old-extension-id>` only
+after verifying the replacement; removal revokes the origin and closes its live
+extension streams. The former `TESHI_BROWSER_BROKER_IMPLEMENTATION=python`
+switch is rejected; unset it or set it to `rust`. Teshi never falls back on a
+Rust startup failure. Embedded Playwright and WinApp still use Python.
 
 When moving an unpacked installation or changing distribution channels:
 
@@ -47,7 +58,7 @@ Moving a folder may create a new Chrome ID and therefore requires re-pairing; no
 wildcard or automatic migration grant is supported. The old ID remains unchanged
 until the explicit removal step.
 
-After changing extension files, click **Reload** on `chrome://extensions` for teshi-bridge, then **Disconnect / Connect Chrome** in teshi-desktop so `browser_service.py` restarts if needed.
+After changing extension files, click **Reload** on `chrome://extensions` for teshi-bridge, then click **Connect to teshi** in the popup and refresh the Browser panel. Desktop detach does not stop the shared Rust broker.
 
 If the preview is idle or stalled:
 

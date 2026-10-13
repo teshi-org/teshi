@@ -953,6 +953,7 @@ pub fn chrome_broker_endpoint_path() -> Result<PathBuf, BrowserError> {
     Ok(chrome_broker_state_dir()?.join("endpoint.json"))
 }
 
+#[cfg(test)]
 fn validate_chrome_broker_compatibility(
     endpoint: ChromeBrokerEndpoint,
 ) -> Result<ChromeBrokerEndpoint, BrowserError> {
@@ -1209,33 +1210,6 @@ fn verify_rust_broker_identity(
             message: "Rust Chrome broker did not prove possession of its private credential".into(),
             hint: Some("The listener was left untouched.".into()),
         })
-}
-
-fn discover_compatible_chrome_broker() -> Result<Option<ChromeBrokerEndpoint>, BrowserError> {
-    if !port_is_open(CHROME_DISCOVERY_PORT) {
-        return Ok(None);
-    }
-    let endpoint = fetch_chrome_broker_endpoint(CHROME_DISCOVERY_PORT).map_err(|error| {
-        BrowserError {
-            message: format!(
-                "Port {CHROME_DISCOVERY_PORT} is occupied by a service that is not a compatible Teshi Chrome broker: {}",
-                error.message
-            ),
-            hint: Some(
-                "The listener was not terminated. Stop it explicitly or configure the matching Teshi version."
-                    .into(),
-            ),
-        }
-    })?;
-    if endpoint
-        .broker_features
-        .iter()
-        .any(|feature| feature == "transport.v1")
-    {
-        let credential_store = PrivateCredentialStore::new(chrome_broker_state_dir()?);
-        validate_rust_transport_broker(&endpoint, &credential_store, None)?;
-    }
-    validate_chrome_broker_compatibility(endpoint).map(Some)
 }
 
 fn discover_rust_broker_at(
@@ -1793,95 +1767,6 @@ where
     })
 }
 
-/// Starts or reuses the legacy Python Chrome broker under an inter-process startup lock.
-fn ensure_user_python_chrome_broker(
-    project_root: &Path,
-    browser_service_script: &Path,
-) -> Result<ChromeBrokerEndpoint, BrowserError> {
-    let state_dir = chrome_broker_state_dir()?;
-    let start = || {
-        let venv = resolve_project_venv(project_root).ok_or_else(|| BrowserError {
-            message: "Python virtual environment not found or not runnable.".into(),
-            hint: Some("Create .venv and install websockets from python/requirements.txt.".into()),
-        })?;
-        let check = build_import_check_command(&venv)
-            .args(["-c", "import websockets"])
-            .output()
-            .map_err(|error| BrowserError {
-                message: format!("Failed to run Python: {error}"),
-                hint: Some(format!(
-                    "{} -m pip install websockets",
-                    venv.python_exe.display()
-                )),
-            })?;
-        if !check.status.success() {
-            return Err(BrowserError {
-                message: import_check_failed_message(&check, "websockets"),
-                hint: Some(format!(
-                    "{} -m pip install websockets",
-                    venv.python_exe.display()
-                )),
-            });
-        }
-        if !browser_service_script.is_file() {
-            return Err(BrowserError {
-                message: format!(
-                    "browser_service.py not found at {}",
-                    browser_service_script.display()
-                ),
-                hint: Some("Reinstall Teshi so its bundled share resources are present.".into()),
-            });
-        }
-
-        let stderr_path = state_dir.join("broker.stderr.log");
-        let stderr = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&stderr_path)
-            .map_err(|error| BrowserError {
-                message: format!("Failed to open broker diagnostic log: {error}"),
-                hint: None,
-            })?;
-        let mut cmd = python_sidecar_command(&venv);
-        cmd.arg(browser_service_script).args([
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "0",
-            "--mode",
-            "chrome",
-            "--user-session",
-            "--project-root",
-            &project_root.to_string_lossy(),
-            "--discovery-port",
-            &CHROME_DISCOVERY_PORT.to_string(),
-        ]);
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr));
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const DETACHED_PROCESS: u32 = 0x00000008;
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-        }
-        cmd.spawn().map_err(|error| BrowserError {
-            message: format!("Failed to start the user-session Chrome broker: {error}"),
-            hint: Some(format!("Inspect {}", stderr_path.display())),
-        })?;
-        Ok(())
-    };
-    let endpoint = coordinate_broker_start(
-        &state_dir,
-        Duration::from_secs(10),
-        discover_compatible_chrome_broker,
-        start,
-    )?;
-    persist_user_broker_endpoint(&endpoint)?;
-    Ok(endpoint)
-}
-
 /// Starts or reuses the full Rust Chrome broker for the current user's
 /// durable pairing set plus any explicit development/test override. Native clients still obtain their bearer
 /// credential from the private state record; it is never placed in the
@@ -1910,8 +1795,8 @@ pub fn ensure_user_rust_chrome_broker(
 /// inter-process startup lock.
 ///
 /// Rust is the default when `TESHI_BROWSER_BROKER_IMPLEMENTATION` is unset or
-/// non-Unicode. Exact `rust` and `python` values explicitly select an implementation;
-/// the legacy Python launcher remains available until its separate removal gate.
+/// non-Unicode. Exact `rust` is accepted for compatibility; `python` and other
+/// selector values are rejected before startup. Chrome never invokes Python.
 /// `TESHI_BROWSER_BROKER_EXTENSION_ORIGINS` is only a development/test union
 /// override; durable pairing is loaded from the per-user state directory.
 ///
@@ -1919,34 +1804,28 @@ pub fn ensure_user_rust_chrome_broker(
 /// Returns invalid selection, pairing, or launcher errors without retrying with
 /// another implementation.
 pub fn ensure_user_chrome_broker(
-    project_root: &Path,
-    browser_service_script: &Path,
+    _project_root: &Path,
+    _browser_service_script: &Path,
 ) -> Result<ChromeBrokerEndpoint, BrowserError> {
-    ensure_user_chrome_broker_with_launchers(
-        std::env::var(CHROME_BROKER_IMPLEMENTATION_ENV),
-        || {
-            let origins = effective_chrome_extension_origins()?;
-            ensure_user_rust_chrome_broker(&origins)
-        },
-        || ensure_user_python_chrome_broker(project_root, browser_service_script),
-    )
+    ensure_user_chrome_broker_with_launcher(std::env::var(CHROME_BROKER_IMPLEMENTATION_ENV), || {
+        let origins = effective_chrome_extension_origins()?;
+        ensure_user_rust_chrome_broker(&origins)
+    })
 }
 
 // Keep all launcher work lazy: default Chrome startup must never inspect Python,
-// and a failed Rust start must not trigger the legacy launcher's side effects.
-fn ensure_user_chrome_broker_with_launchers(
+// and invalid selectors must fail before launcher side effects.
+fn ensure_user_chrome_broker_with_launcher(
     selection: Result<String, std::env::VarError>,
     rust_launcher: impl FnOnce() -> Result<ChromeBrokerEndpoint, BrowserError>,
-    python_launcher: impl FnOnce() -> Result<ChromeBrokerEndpoint, BrowserError>,
 ) -> Result<ChromeBrokerEndpoint, BrowserError> {
     match selection.as_deref() {
         Ok("rust") | Err(_) => rust_launcher(),
-        Ok("python") => python_launcher(),
         Ok(other) => Err(BrowserError {
             message: format!(
-                "unsupported {CHROME_BROKER_IMPLEMENTATION_ENV} value {other:?}; expected rust or python"
+                "unsupported {CHROME_BROKER_IMPLEMENTATION_ENV} value {other:?}; expected rust; Python Chrome support has been removed"
             ),
-            hint: Some("Choose one implementation explicitly; Teshi does not auto-fallback.".into()),
+            hint: Some("Unset TESHI_BROWSER_BROKER_IMPLEMENTATION or set it to rust. Embedded and WinApp still use their Python runtimes.".into()),
         }),
     }
 }
@@ -2498,132 +2377,51 @@ mod tests {
     }
 
     #[test]
-    fn chrome_selector_defaults_to_rust_without_python() {
-        let starts = AtomicUsize::new(0);
-        let result = ensure_user_chrome_broker_with_launchers(
-            Err(std::env::VarError::NotPresent),
-            || {
-                starts.fetch_add(1, Ordering::SeqCst);
-                Ok(endpoint("default-rust"))
-            },
-            || panic!("default Chrome must not inspect or launch Python"),
-        )
-        .unwrap();
-        assert_eq!(starts.load(Ordering::SeqCst), 1);
-        assert_eq!(result.broker_start_id, "default-rust");
-    }
-
-    #[test]
-    fn chrome_selector_preserves_explicit_implementations() {
-        for selected in ["rust", "python"] {
-            let rust_starts = AtomicUsize::new(0);
-            let python_starts = AtomicUsize::new(0);
-            let result = ensure_user_chrome_broker_with_launchers(
-                Ok(selected.into()),
-                || {
-                    rust_starts.fetch_add(1, Ordering::SeqCst);
-                    Ok(endpoint("rust"))
-                },
-                || {
-                    python_starts.fetch_add(1, Ordering::SeqCst);
-                    Ok(endpoint("python"))
-                },
-            )
-            .unwrap();
-            assert_eq!(result.broker_start_id, selected);
-            assert_eq!(
-                rust_starts.load(Ordering::SeqCst),
-                usize::from(selected == "rust")
-            );
-            assert_eq!(
-                python_starts.load(Ordering::SeqCst),
-                usize::from(selected == "python")
-            );
+    fn chrome_selector_accepts_only_rust_and_default() {
+        for selection in [Err(std::env::VarError::NotPresent), Ok("rust".into())] {
+            let result =
+                ensure_user_chrome_broker_with_launcher(selection, || Ok(endpoint("rust")))
+                    .unwrap();
+            assert_eq!(result.broker_start_id, "rust");
         }
     }
 
     #[test]
-    fn chrome_selector_rejects_invalid_values_before_launch() {
-        for selected in ["", "Rust", "PYTHON", " rust", "rust ", "unknown"] {
-            let error = ensure_user_chrome_broker_with_launchers(
-                Ok(selected.into()),
-                || panic!("invalid selection must not launch Rust"),
-                || panic!("invalid selection must not launch Python"),
-            )
+    fn chrome_selector_rejects_python_and_invalid_values_before_launch() {
+        for selected in ["python", "", "Rust", "PYTHON", " rust", "rust ", "unknown"] {
+            let error = ensure_user_chrome_broker_with_launcher(Ok(selected.into()), || {
+                panic!("invalid selection must not launch a broker")
+            })
             .unwrap_err();
-            assert!(error.message.contains(CHROME_BROKER_IMPLEMENTATION_ENV));
-            assert!(error.message.contains(&format!("{selected:?}")));
-            assert!(error.message.contains("expected rust or python"));
+            assert!(error
+                .message
+                .contains("Python Chrome support has been removed"));
         }
+    }
+
+    #[test]
+    fn chrome_selector_preserves_rust_startup_failure() {
+        let error =
+            ensure_user_chrome_broker_with_launcher(Err(std::env::VarError::NotPresent), || {
+                Err(BrowserError {
+                    message: "sentinel Rust startup failure".into(),
+                    hint: None,
+                })
+            })
+            .unwrap_err();
+        assert_eq!(error.message, "sentinel Rust startup failure");
     }
 
     #[test]
     #[cfg(windows)]
     fn chrome_selector_non_unicode_uses_rust_default() {
         use std::os::windows::ffi::OsStringExt;
-
-        let invalid = std::ffi::OsString::from_wide(&[0xd800]);
-        assert!(invalid.to_str().is_none());
-        let result = ensure_user_chrome_broker_with_launchers(
-            Err(std::env::VarError::NotUnicode(invalid)),
-            || Ok(endpoint("default-rust")),
-            || panic!("non-Unicode selection must use the Rust default"),
-        )
-        .unwrap();
-        assert_eq!(result.broker_start_id, "default-rust");
-    }
-
-    #[test]
-    fn chrome_selector_rust_failure_never_falls_back() {
-        let selections = [Err(std::env::VarError::NotPresent), Ok("rust".into())];
-        #[cfg(windows)]
-        let selections = {
-            use std::os::windows::ffi::OsStringExt;
-
-            let invalid = std::ffi::OsString::from_wide(&[0xd800]);
-            assert!(invalid.to_str().is_none());
-            selections
-                .into_iter()
-                .chain([Err(std::env::VarError::NotUnicode(invalid))])
-        };
-        for selection in selections {
-            let starts = AtomicUsize::new(0);
-            let error = ensure_user_chrome_broker_with_launchers(
-                selection,
-                || {
-                    starts.fetch_add(1, Ordering::SeqCst);
-                    Err(BrowserError {
-                        message: "sentinel Rust startup failure".into(),
-                        hint: Some("sentinel recovery hint".into()),
-                    })
-                },
-                || panic!("Rust failure must not inspect or launch Python"),
-            )
-            .unwrap_err();
-            assert_eq!(starts.load(Ordering::SeqCst), 1);
-            assert_eq!(error.message, "sentinel Rust startup failure");
-            assert_eq!(error.hint.as_deref(), Some("sentinel recovery hint"));
-        }
-    }
-
-    #[test]
-    fn chrome_selector_python_failure_never_falls_back() {
-        let starts = AtomicUsize::new(0);
-        let error = ensure_user_chrome_broker_with_launchers(
-            Ok("python".into()),
-            || panic!("explicit Python failure must not launch Rust"),
-            || {
-                starts.fetch_add(1, Ordering::SeqCst);
-                Err(BrowserError {
-                    message: "sentinel Python startup failure".into(),
-                    hint: Some("sentinel Python recovery hint".into()),
-                })
-            },
-        )
-        .unwrap_err();
-        assert_eq!(starts.load(Ordering::SeqCst), 1);
-        assert_eq!(error.message, "sentinel Python startup failure");
-        assert_eq!(error.hint.as_deref(), Some("sentinel Python recovery hint"));
+        let selection = Err(std::env::VarError::NotUnicode(
+            std::ffi::OsString::from_wide(&[0xd800]),
+        ));
+        let result =
+            ensure_user_chrome_broker_with_launcher(selection, || Ok(endpoint("rust"))).unwrap();
+        assert_eq!(result.broker_start_id, "rust");
     }
 
     #[test]

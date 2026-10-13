@@ -193,6 +193,20 @@
     }
   },
   "migration_contracts": {
+    "rust_cdp_endpoint": {
+      "mode": "chrome",
+      "ws_url": "ws://127.0.0.1:20254",
+      "bridge": "rust",
+      "schema_version": 1,
+      "protocol_version": 1,
+      "broker_pid": 1234,
+      "broker_start_id": "fixture-rust-generation",
+      "broker_features": [
+        "transport.v1",
+        "p0.control"
+      ],
+      "discovery_url": "http://127.0.0.1:17373/v1/bridge"
+    },
     "discovery": {
       "url": "http://127.0.0.1:17373/v1/bridge",
       "protocol_version": 1,

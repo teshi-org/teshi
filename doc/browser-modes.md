@@ -6,9 +6,9 @@ teshi-desktop supports two browser backends for BDD locator recording. Both writ
 
 ```text
 ┌─────────────────┐     POST /heartbeat (~1.5s)          ┌──────────────────────┐
-│  teshi-bridge   │ ──────────────────────────────────► │  Python bridge       │
+│  teshi-bridge   │ ──────────────────────────────────► │  Rust broker         │
 │  Chrome ext     │ ◄────────────────────────────────── │  127.0.0.1:17373     │
-│  (active tab)   │     JSON { cmd? }                     │  browser_service.py  │
+│  (active tab)   │     JSON { cmd? }                     │  teshi internal CLI  │
 │                 │     WS frames + commands + net batches│                      │
 └─────────────────┘                                       └──────────┬───────────┘
         │ CDP debugger (screencast + locator cmds)                     │ WebSocket
@@ -19,11 +19,11 @@ teshi-desktop supports two browser backends for BDD locator recording. Both writ
 └─────────────────┘                                       └──────────────────────┘
 ```
 
-- **Extension control plane**: HTTP `POST /v1/bridge/heartbeat` (~1.5 s) for `project_root`, tabs, and queued `cmd` objects. Small replies go to `POST /v1/bridge/response`. Every POST carries the random broker-start token discovered from `ws_url`; unauthenticated requests and browser-page CORS access are rejected.
+- **Extension control plane**: HTTP `POST /v1/bridge/heartbeat` (~1.5 s) for Profile identity, tabs, and queued `cmd` objects; legacy `project_root` metadata does not own the Profile. Small replies go to `POST /v1/bridge/response`. Authenticated mutations carry the generation-bound token obtained through origin-authorized POST discovery; public GET discovery never returns that credential. Unauthenticated mutations and browser-page CORS access are rejected.
 - **Extension WebSocket data plane**: `extension_frame_ws_url` from `GET /v1/bridge` (same host/port as agent `ws_url`, path `/extension/frames`) authenticates one extension Profile. It carries binary **TSH1** screencast packets, direct commands/responses, and acknowledged `network_batch` JSON. Network batches use a capture ID plus monotonic sequence numbers and remain in a bounded extension queue until the broker returns a matching contiguous `network_ack`.
 - **Preview capture**: CDP `Page.startScreencast` only (JPEG quality **70**, fit inside **1920×1080**, no upscaling). Frames are sent when the page repaints (scroll, animation, etc.); a static page keeps the last frame and the panel may show **Preview idle**. Locator commands pause screencast briefly, then resume. If screencast cannot start, the extension reports `frame_error` (no HTTP capture fallback). Large JSON frames on `/v1/bridge/response` are deprecated.
 - **Agent ↔ bridge**: token-authenticated WebSocket (`ws_url` in `.teshi/cdp-endpoint.json`); ordinary web-page origins are rejected.
-- **Desktop**: starts/stops the Python process; polls discovery; `POST /v1/bridge/activate_tab` to switch Chrome tabs.
+- **Desktop**: starts or reuses the detached per-user Rust broker; polls discovery; `POST /v1/bridge/activate_tab` switches Chrome tabs. Detaching Desktop leaves other clients and their sessions running.
 
 Chrome may show **“Chrome is being controlled by automated test software”** while screencast runs (debugger attached). This is expected for CDP-based live preview. Keep the active tab on **http(s)**.
 
@@ -51,10 +51,25 @@ The extension manifest deliberately has no `key`: an unpacked checkout, MSI copy
 and browser-testing package can receive different Chrome IDs. The popup displays
 the complete ID. Rust transport pairing is exact and per-user (`chrome-extension://`
 plus 32 lower-case letters `a`–`p`); ordinary pages, unknown IDs, and wildcard
-origins are rejected. The migration-only hidden broker command takes paired IDs as
-repeated `--trusted-extension-origin` values. A durable pairing editor is a
-precondition for production Chrome cutover, so the current production selector
-remains the Python broker.
+origins are rejected. Pairing is stored per OS user and supports at most 16 exact
+origins. Use the public CLI with the ID shown in the popup:
+
+```bash
+teshi browser pairing list
+teshi browser pairing approve <extension-id>
+teshi browser pairing remove <old-extension-id>
+```
+
+Approval persists the exact origin; a running Rust broker applies approval
+immediately. Removal revokes that origin and closes its live extension streams;
+unrelated paired Profiles remain connected. Never approve an ID inferred
+from a package path.
+
+Chrome startup defaults to Rust and does not check Python, pip, uv, Playwright,
+or a project venv. `TESHI_BROWSER_BROKER_IMPLEMENTATION=python` is rejected
+with migration guidance; unset the variable or set it to `rust`.
+There is no automatic fallback; invalid selector values fail with guidance.
+Embedded Playwright and WinApp keep their separate Python runtimes.
 
 To upgrade an unpacked installation, add/pair the new exact ID first, connect it,
 and verify the existing `chrome.storage.local` profile identity and reconnecting
@@ -73,7 +88,7 @@ Privileged P2 access adds two independent gates: a short-lived Teshi grant bound
 1. Start the dedicated recording Chrome profile manually.
 2. Install the unpacked extension from `C:\Program Files\teshi\share\teshi-bridge` (or `extension/teshi-bridge` in repo for development; see [extension README](../extension/teshi-bridge/README.md)).
 3. Open the app under test in Chrome and select the target **tab**.
-4. Run `teshi browser sessions` or click **Connect Chrome**. Both attach to the same per-user broker; the CLI starts it when absent.
+4. Copy the extension ID from its popup and run `teshi browser pairing approve <extension-id>`. Run `teshi browser sessions` or click **Connect Chrome**. Both attach to the same per-user broker; the CLI starts it when absent.
 5. Wait until the live stream appears (extension connected; check the status dot tooltip if needed).
 6. Select a Gherkin step and run the **playwright-locator** skill in the agent terminal.
 

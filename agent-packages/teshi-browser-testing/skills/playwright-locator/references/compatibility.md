@@ -30,6 +30,24 @@ Create a dedicated Chromium profile for each concurrent agent. Install the exten
 
 Run `teshi browser sessions`, select by explicit opaque instance ID, then run `teshi browser tabs --session <id>`. Each agent must acquire a lease only for its selected profile. Never use a profile label or numeric tab ID as a global routing key.
 
+## Rust Chrome runtime
+
+Chrome uses Rust by default with protocol 1 and endpoint marker `bridge: rust`.
+It requires no Python executable, venv, pip, uv, or Playwright. Embedded and
+WinApp retain their separate Python requirements. The former migration switch
+`TESHI_BROWSER_BROKER_IMPLEMENTATION=python` is rejected; unset it or use `rust`;
+startup and reconnect never automatically fall back to it.
+
+Use `teshi browser pairing list` to inspect pairing and pending requests. The
+user explicitly approves the exact ID displayed in the extension popup with
+`teshi browser pairing approve <extension-id>`. Approval persists per user and
+updates the live broker. A moved unpacked folder may require a new pairing;
+verify the intended Profile before `teshi browser pairing remove <old-id>`.
+Removing a pairing closes its streams without disconnecting unrelated Profiles.
+Public GET discovery omits the credential; only paired extension origins receive
+credentials through POST discovery. Project endpoint files are compatibility
+pointers, while native credentials stay in private per-user runtime state.
+
 ## Recover common failures
 
 | Code/health | Recovery |

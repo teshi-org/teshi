@@ -19,18 +19,16 @@ from unittest.mock import patch
 RESOURCES = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RESOURCES))
 
-from browser_service import (  # noqa: E402
+from chrome_broker_oracle import (  # noqa: E402
     BrowserSessionBroker,
     ChromeBridge,
     _bind_websocket_listener,
     _read_http_request,
     credential_free_discovery,
-    embedded_browser_headless,
-    handle_embedded_command,
-    paths_equal,
     run_http_discovery,
-    write_cdp_endpoint_file,
 )
+
+from browser_service import embedded_browser_headless, handle_embedded_command, paths_equal, write_cdp_endpoint_file
 
 
 class FakeEmbeddedSession:

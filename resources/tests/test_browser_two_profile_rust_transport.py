@@ -1524,6 +1524,12 @@ class BrowserTwoProfileRustTransportTests(unittest.IsolatedAsyncioTestCase):
             recovered = await self._wait_sessions(2, expected_count=2)
             recovered_a = self._session_for_path(recovered, "/rust-a")
             recovered_b = self._session_for_path(recovered, "/rust-b")
+            # Heartbeat readiness can precede the authenticated stream hello.
+            # Observe both streams without redispatching any browser action.
+            recovered_a, recovered_b = await asyncio.gather(
+                self._wait_session_stream_generation(target_a["extension_instance_id"]),
+                self._wait_session_stream_generation(target_b["extension_instance_id"]),
+            )
             self.assertIsInstance(recovered_a["stream_generation"], int)
             self.assertIsInstance(recovered_b["stream_generation"], int)
             self.assertGreaterEqual(recovered_a["stream_generation"], 1)

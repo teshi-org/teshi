@@ -78,6 +78,7 @@ jobs:
           python scripts/test_update_manifest.py
           python scripts/test-release-workflow-contract.py
           python scripts/test-nightly-workflow-contract.py
+          python scripts/test-browser-agent-package.py
 
       - name: Run clippy with warnings denied
         run: cargo clippy --workspace --exclude teshi-web --locked --all-targets --all-features -- -D warnings

@@ -11,6 +11,7 @@ RELEASE = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="u
 NIGHTLY = (ROOT / ".github" / "workflows" / "nightly.yml").read_text(encoding="utf-8")
 WINAPP_RUNTIME = (ROOT / "scripts" / "build-winapp-runtime.ps1").read_text(encoding="utf-8")
 WINAPP_SERVICE = (ROOT / "resources" / "winapp_service.py").read_text(encoding="utf-8")
+CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
 
 def require(text: str, needle: str, label: str) -> None:
@@ -19,6 +20,7 @@ def require(text: str, needle: str, label: str) -> None:
 
 
 def main() -> int:
+    require(CI, "python scripts/test-browser-agent-package.py", "CI staged Rust broker and Embedded import smoke")
     require(NIGHTLY, "run_scope: windows-installer", "nightly installer scope")
     desktop_block_start = RELEASE.index("      - name: Build native desktop")
     desktop_block = RELEASE[desktop_block_start : RELEASE.find("\n      - name:", desktop_block_start + 1)]

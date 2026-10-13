@@ -11,6 +11,15 @@ For Gherkin step selection, binding proposals, confirmation, and replay, use the
 
 `teshi browser sessions` starts or reuses the per-user loopback broker even when Desktop is closed. A live incompatible broker is never terminated implicitly.
 
+Chrome uses the shared Rust broker by default, without Python or a project venv.
+If the extension is unpaired, report its setup state. The user can inspect
+`teshi browser pairing list` and explicitly approve the exact ID shown in the
+extension popup with `teshi browser pairing approve <extension-id>`. Do not infer
+or approve an extension identity without the user's explicit pairing request.
+Moving an unpacked extension may change its ID; verify the replacement Profile
+before removing the old pairing. Embedded Playwright and WinApp retain their
+Python requirements. There is no automatic broker fallback.
+
 ## Preflight
 
 1. Run `teshi --version`. Require the CLI range in [references/compatibility.md](references/compatibility.md).

@@ -128,7 +128,7 @@ class RuntimeFixture(BrowserTwoProfileRustTransportTests):
                 python_env = os.environ.copy()
                 python_env["PYTHONPATH"] = os.pathsep.join(sys.path)
                 self.broker = subprocess.Popen([
-                    sys._base_executable, "-B", str(REPO_ROOT / "resources/browser_service.py"),
+                    sys._base_executable, "-B", str(REPO_ROOT / "resources/tests/chrome_broker_oracle.py"),
                     "--host", "127.0.0.1", "--port", "0", "--mode", "chrome",
                     "--discovery-port", str(self.discovery_port),
                     "--project-root", str(self.temp_root),
@@ -361,7 +361,7 @@ async def run(args: argparse.Namespace) -> None:
                         "playwright": importlib.metadata.version("playwright"),
                         "benchmark_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                         "extension_background_sha256": hashlib.sha256((REPO_ROOT / "extension/teshi-bridge/background.js").read_bytes()).hexdigest(),
-                        "python_service_sha256": hashlib.sha256((REPO_ROOT / "resources/browser_service.py").read_bytes()).hexdigest(),
+                        "python_service_sha256": hashlib.sha256((REPO_ROOT / "resources/tests/chrome_broker_oracle.py").read_bytes()).hexdigest(),
                         "cli": str(TESHI_CLI), "cli_sha256": hashlib.sha256(TESHI_CLI.read_bytes()).hexdigest(),
                         "cli_version": subprocess.check_output([str(TESHI_CLI), "--version"], text=True).strip(),
                         "source_head": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()},

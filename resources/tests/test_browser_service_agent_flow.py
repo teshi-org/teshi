@@ -18,10 +18,6 @@ from browser_agent_broker import MAX_COMMAND_QUEUE, BrokerError  # noqa: E402
 from browser_service import (  # noqa: E402
     MAX_BROWSER_ARTIFACT_BYTES,
     MAX_BROWSER_WS_MESSAGE_BYTES,
-    ChromeBridge,
-    _http_response,
-    authenticated_http_post,
-    authenticated_websocket_path,
     cleanup_managed_browser_artifacts,
     load_browser_privileged_policy,
     managed_browser_artifact_path,
@@ -29,6 +25,8 @@ from browser_service import (  # noqa: E402
     validate_raw_cdp_method,
     validate_browser_upload_files,
 )
+
+from chrome_broker_oracle import ChromeBridge, _http_response, authenticated_http_post, authenticated_websocket_path
 
 from test_browser_agent_broker import heartbeat, target  # noqa: E402
 

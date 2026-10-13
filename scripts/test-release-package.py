@@ -8,6 +8,7 @@ This deliberately does not bootstrap the user-wide broker or change pairing.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 from pathlib import Path
@@ -63,6 +64,11 @@ def inspect(root: Path, target: str, kind: str, cli_only: bool = False,
         ("browser_service.py", "api_service.py", "winapp_service.py") if windows
         else ("browser_service.py", "api_service.py")
     )
+    embedded_tree = ast.parse((share / "browser_service.py").read_text(encoding="utf-8"))
+    require(not any(isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name in {"ChromeBridge", "_LegacyChromeBridge", "run_chrome", "run_http_discovery"}
+                    for node in embedded_tree.body),
+            "Production package contains the retired Python Chrome transport")
     dependencies = runtime_resources(entries)
     expected_python = {source.name for source in dependencies}
     actual_python = {path.name for path in share.glob("*.py")}
@@ -82,6 +88,14 @@ def inspect(root: Path, target: str, kind: str, cli_only: bool = False,
     version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"]
     require(plugin["version"] == version, "Plugin/workspace version mismatch")
     require(compatibility["broker_protocol"] == 1, "Broker protocol mismatch")
+    runtime = compatibility.get("chrome_runtime", {})
+    require(runtime.get("default_implementation") == "rust"
+            and runtime.get("endpoint_bridge") == "rust"
+            and runtime.get("python_required") is False
+            and runtime.get("automatic_fallback") is False
+            and runtime.get("rejected_legacy_selector") == "TESHI_BROWSER_BROKER_IMPLEMENTATION=python"
+            and "legacy_implementation_selector" not in runtime,
+            "Chrome runtime compatibility mismatch")
     require("key" not in extension, "Packaging must preserve the unpacked extension identity contract")
     for relative in (".mcp.json", "skills/playwright-locator/SKILL.md", "skills/teshi/SKILL.md",
                      "skills/bdd-feature/SKILL.md", "skills/winapp-regression/SKILL.md"):
@@ -95,6 +109,7 @@ def inspect(root: Path, target: str, kind: str, cli_only: bool = False,
     inventory = list(root.rglob("*"))
     forbidden = {".git", ".venv", "venv", "__pycache__", ".teshi", ".teshi-update"}
     for path in inventory:
+        require(path.name != "chrome_broker_oracle.py", "Test-only Chrome oracle in package")
         require(not path.is_symlink() and not (hasattr(path, "is_junction") and path.is_junction()),
                 f"Linked package entry: {path.relative_to(root)}")
         relative = path.relative_to(root)

@@ -1,7 +1,8 @@
 """Resolve shipped Python resources from their live local imports.
 
-The browser entry point still imports the migration oracle. It must remain in
-packages until that import and the production Python Chrome path are retired.
+Embedded imports the shared session/lease/locator implementation from
+browser_agent_broker.py. The Chrome transport oracle lives under resources/tests
+and is excluded from shipped runtime resources.
 """
 
 from __future__ import annotations

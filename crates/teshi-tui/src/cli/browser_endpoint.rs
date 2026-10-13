@@ -369,7 +369,7 @@ fn validate_chrome_reconnect_selection(
             "Rust Chrome endpoint requires the default Rust launcher for reconnect; unset TESHI_BROWSER_BROKER_IMPLEMENTATION or set it to rust; Teshi will not fall back to Python"
         )),
         Ok(other) => Err(anyhow!(
-            "unsupported TESHI_BROWSER_BROKER_IMPLEMENTATION value {other:?}; expected rust or python"
+            "unsupported TESHI_BROWSER_BROKER_IMPLEMENTATION value {other:?}; expected rust; Python Chrome support has been removed"
         )),
     }
 }
@@ -507,7 +507,7 @@ mod tests {
                 .to_string();
             assert!(error.contains("TESHI_BROWSER_BROKER_IMPLEMENTATION"));
             assert!(error.contains(&format!("{selected:?}")));
-            assert!(error.contains("expected rust or python"));
+            assert!(error.contains("expected rust; Python Chrome support has been removed"));
         }
     }
 
@@ -571,6 +571,37 @@ mod tests {
             assert!(payload.get("broker_project_root").is_none());
             assert!(payload.get("token").is_none());
             assert!(payload.get("secret").is_none());
+        }
+    }
+
+    #[test]
+    fn shared_endpoint_fixtures_preserve_legacy_and_rust_markers() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../resources/browser_contract_fixtures.json"
+        ))
+        .unwrap();
+        for (record, bridge) in [
+            (&fixture["legacy"]["cdp_endpoint"], "python"),
+            (&fixture["migration_contracts"]["rust_cdp_endpoint"], "rust"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            fs::create_dir_all(temp.path().join(".teshi")).unwrap();
+            fs::write(
+                temp.path().join(".teshi/cdp-endpoint.json"),
+                serde_json::to_vec(record).unwrap(),
+            )
+            .unwrap();
+            let endpoint = read_cdp_endpoint(temp.path()).unwrap();
+            assert_eq!(endpoint.bridge, bridge);
+            assert_eq!(endpoint.mode, "chrome");
+            assert_eq!(endpoint.ws_url, "ws://127.0.0.1:20254");
+            if bridge == "rust" {
+                assert_eq!(
+                    endpoint.broker_start_id.as_deref(),
+                    Some("fixture-rust-generation")
+                );
+                assert!(record.get("token").is_none());
+            }
         }
     }
 

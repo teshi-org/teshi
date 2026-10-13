@@ -1,6 +1,7 @@
 """Negative artifact inventory tests; headers below are layout fixtures only."""
 
 import importlib.util
+import json
 from pathlib import Path
 import shutil
 import tempfile
@@ -56,6 +57,26 @@ class PackageInventoryTests(unittest.TestCase):
                 result = package.inspect(root, target, kind, cli_only)
                 self.assertIn("update_participant.py", result["python_resources"])
                 self.assertFalse(result["compiled_identity_verified"])
+
+    def test_stale_chrome_runtime_metadata_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            stage(root, update_manifest.TARGETS[1], "portable")
+            metadata = root / "share/teshi-browser-testing/compatibility.json"
+            value = json.loads(metadata.read_text(encoding="utf-8"))
+            value["chrome_runtime"]["default_implementation"] = "python"
+            metadata.write_text(json.dumps(value), encoding="utf-8")
+            update_manifest.bundle(root, {}, update_manifest.TARGETS[1], "portable")
+            with self.assertRaisesRegex(ValueError, "Chrome runtime compatibility mismatch"):
+                package.inspect(root, update_manifest.TARGETS[1], "portable")
+
+    def test_chrome_oracle_is_not_shipped(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            stage(root, update_manifest.TARGETS[1], "portable")
+            (root / "share/chrome_broker_oracle.py").write_text("pass", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Runtime resource mismatch"):
+                package.inspect(root, update_manifest.TARGETS[1], "portable")
 
     def test_missing_live_import_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
