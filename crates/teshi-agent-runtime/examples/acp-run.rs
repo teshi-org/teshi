@@ -154,6 +154,20 @@ fn pump_turn(backend: &mut AgentBackendRuntime, started: Instant, deadline: Inst
                     AgentBackendEvent::ExternalToolActivity { title, status } => {
                         println!("  [{ms}ms] tool  : {title} ({status:?})");
                     }
+                    AgentBackendEvent::PermissionRequest {
+                        request_id,
+                        options,
+                    } => {
+                        let labels: Vec<_> = options
+                            .iter()
+                            .map(|option| option.display_label().to_string())
+                            .collect();
+                        println!("  [{ms}ms] PERM  : {labels:?} (auto-allow first)");
+                        backend.respond_permission(
+                            request_id,
+                            options.first().map(|option| option.id.clone()),
+                        );
+                    }
                     AgentBackendEvent::ToolActivity { tool_calls, .. } => {
                         let names: Vec<_> = tool_calls.iter().map(|c| c.name.clone()).collect();
                         println!("  [{ms}ms] tools : {names:?}");

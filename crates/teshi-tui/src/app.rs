@@ -69,6 +69,14 @@ pub enum AiStatus {
     Error,
 }
 
+/// A pending ACP `session/request_permission` prompt for one agent.
+#[derive(Debug, Clone)]
+pub struct AcpPermissionPrompt {
+    pub request_id: u64,
+    pub options: Vec<teshi_agent::backend::PermissionChoice>,
+    pub selected: usize,
+}
+
 /// A single independent agent conversation with its own state and LLM connection.
 #[derive(Debug)]
 pub struct AgentThread {
@@ -92,6 +100,8 @@ pub struct AgentThread {
     pub profile_id: Option<String>,
     /// Current conversation's ACP selection; never persisted.
     pub selected_acp_id: Option<String>,
+    /// Permission prompt from the external ACP agent, if one is pending.
+    pub pending_acp_permission: Option<AcpPermissionPrompt>,
     /// Latest on-demand browser visual observation. Older image bytes are not
     /// retained in the active model projection, while their text messages
     /// remain in the durable chat history.
@@ -132,6 +142,7 @@ impl AgentThread {
             last_input_tokens: None,
             profile_id: None,
             selected_acp_id: None,
+            pending_acp_permission: None,
             latest_visual_observation: None,
             last_finish_reason: None,
         }
@@ -1656,6 +1667,46 @@ impl App {
         agent.backend.cancel();
         agent.status = AiStatus::Idle;
         agent.tool_status = None;
+        agent.pending_acp_permission = None;
+    }
+
+    /// Whether the selected agent has a pending ACP permission prompt. The
+    /// keymap intercepts navigation keys while this is true.
+    pub fn has_acp_permission_prompt(&self) -> bool {
+        self.agent().pending_acp_permission.is_some()
+    }
+
+    /// Move the ACP permission prompt selection by `delta` (clamped).
+    pub fn move_acp_permission_selection(&mut self, delta: isize) {
+        let Some(prompt) = self.agent_mut().pending_acp_permission.as_mut() else {
+            return;
+        };
+        let last = prompt.options.len().saturating_sub(1) as isize;
+        let next = (prompt.selected as isize + delta).clamp(0, last);
+        prompt.selected = next as usize;
+    }
+
+    /// Answer the selected agent's pending ACP permission prompt. `None`
+    /// rejects the request and lets the agent decide how to continue.
+    pub fn respond_acp_permission(&mut self, option_id: Option<String>) {
+        let agent_idx = self.selected_agent;
+        let Some(prompt) = self.agents[agent_idx].pending_acp_permission.take() else {
+            return;
+        };
+        let resolved = self.agents[agent_idx]
+            .backend
+            .respond_permission(prompt.request_id, option_id);
+        self.agents[agent_idx].status = if resolved {
+            AiStatus::Waiting
+        } else {
+            AiStatus::Error
+        };
+        self.agents[agent_idx].tool_status = None;
+        self.status = if resolved {
+            "Permission sent to ACP agent...".to_string()
+        } else {
+            "ACP permission request is no longer pending".to_string()
+        };
     }
 
     fn start_agent_backend(&mut self, agent_idx: usize) -> bool {
@@ -1700,8 +1751,26 @@ impl App {
             match command.and_then(|command| {
                 let mut config = teshi_agent_runtime::backend::AcpBackendConfig::new(command);
                 config.auth_method = std::env::var("TESHI_ACP_AUTH_METHOD").ok();
+                // The approval badge drives the ACP permission policy: Manual
+                // prompts through a PermissionHost (Zed-style allow/reject
+                // list), Auto and Bypass answer inside the ACP client.
+                match self.approval_mode {
+                    teshi_agent::approval::ApprovalMode::Manual => {
+                        config.permission_policy = teshi_acp::PermissionPolicy::Manual;
+                        config.permission_host =
+                            Some(teshi_agent_runtime::ChannelPermissionHost::new());
+                    }
+                    teshi_agent::approval::ApprovalMode::Auto => {
+                        config.permission_policy = teshi_acp::PermissionPolicy::Auto;
+                    }
+                    teshi_agent::approval::ApprovalMode::Bypass => {
+                        config.permission_policy = teshi_acp::PermissionPolicy::Bypass;
+                    }
+                }
+                // Explicit override wins for scripted runs and tests.
                 if std::env::var("TESHI_ACP_PERMISSION_POLICY").as_deref() == Ok("auto") {
                     config.permission_policy = teshi_acp::PermissionPolicy::Auto;
+                    config.permission_host = None;
                 }
                 self.agents[agent_idx].backend.configure_acp(config)
             }) {
@@ -1797,6 +1866,8 @@ impl App {
                         self.agents[i].last_finish_reason = finish_reason;
                         self.agents[i].status = AiStatus::Idle;
                         self.agents[i].tool_status = None;
+                        // The agent finished without waiting for an answer.
+                        self.agents[i].pending_acp_permission = None;
                         self.agents[i].total_input_tokens += input_tokens.unwrap_or(0) as u64;
                         self.agents[i].last_input_tokens = input_tokens;
                         self.agents[i].total_output_tokens += output_tokens.unwrap_or(0) as u64;
@@ -1935,6 +2006,7 @@ impl App {
                         self.agents[i].partial_response_mut().clear();
                         self.agents[i].status = AiStatus::Idle;
                         self.agents[i].tool_status = None;
+                        self.agents[i].pending_acp_permission = None;
                         if i == self.selected_agent {
                             self.status = format!("AI: {message}");
                         }
@@ -1945,12 +2017,36 @@ impl App {
                             None => title,
                         });
                     }
+                    Ok(Some(AgentBackendEvent::PermissionRequest {
+                        request_id,
+                        options,
+                    })) => {
+                        // Park the turn until the user picks an option (or
+                        // rejects). Empty option lists reject immediately.
+                        if options.is_empty() {
+                            self.agents[i].backend.respond_permission(request_id, None);
+                            continue;
+                        }
+                        self.agents[i].pending_acp_permission = Some(AcpPermissionPrompt {
+                            request_id,
+                            options,
+                            selected: 0,
+                        });
+                        self.agents[i].status = AiStatus::AwaitingApproval;
+                        self.agents[i].tool_status = None;
+                        if i == self.selected_agent {
+                            self.status =
+                                "ACP agent requests permission — Enter to allow, Esc to reject"
+                                    .to_string();
+                        }
+                    }
                     Ok(Some(AgentBackendEvent::MessageChunk { .. })) => {}
                     Ok(None) | Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         self.agents[i].partial_response_mut().clear();
                         self.agents[i].status = AiStatus::Error;
                         self.agents[i].tool_status = None;
+                        self.agents[i].pending_acp_permission = None;
                         if i == self.selected_agent {
                             self.status = "AI error: background LLM thread has exited".to_string();
                         }
@@ -2221,6 +2317,7 @@ impl App {
         }
         self.agent_mut().status = AiStatus::Waiting;
         self.agent_mut().partial_response_mut().clear();
+        self.agent_mut().pending_acp_permission = None;
         if !self.start_agent_backend(self.selected_agent) {
             return Ok(());
         }
@@ -6211,6 +6308,26 @@ impl App {
                 self.slash_suggestion_active = false;
                 self.slash_suggestion_selection = 0;
                 self.quit_pending_confirm = false;
+            }
+            Action::AcpPermissionUp => {
+                self.move_acp_permission_selection(-1);
+            }
+            Action::AcpPermissionDown => {
+                self.move_acp_permission_selection(1);
+            }
+            Action::AcpPermissionConfirm => {
+                let option_id = self
+                    .agent()
+                    .pending_acp_permission
+                    .as_ref()
+                    .and_then(|prompt| prompt.options.get(prompt.selected))
+                    .map(|option| option.id.clone());
+                if let Some(option_id) = option_id {
+                    self.respond_acp_permission(Some(option_id));
+                }
+            }
+            Action::AcpPermissionReject => {
+                self.respond_acp_permission(None);
             }
             Action::AiBlurInput => {
                 self.ai_input_focused = false;

@@ -141,6 +141,15 @@ impl AgentBackendRuntime {
         }
     }
 
+    /// Answer a pending ACP `session/request_permission`. `None` rejects.
+    /// Native backends never prompt through this path and return false.
+    pub fn respond_permission(&mut self, request_id: u64, option_id: Option<String>) -> bool {
+        match self {
+            Self::Native(_) => false,
+            Self::Acp(backend) => backend.respond_permission(request_id, option_id),
+        }
+    }
+
     pub fn try_next_event(&mut self) -> Result<Option<AgentBackendEvent>, TryRecvError> {
         match self {
             Self::Native(backend) => backend

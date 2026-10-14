@@ -50,6 +50,9 @@ pub struct KeyContext {
 
     /// Whether the quit confirmation panel is open.
     pub quit_pending_confirm: bool,
+
+    /// Whether an external ACP agent has a pending permission prompt.
+    pub acp_permission_pending: bool,
 }
 
 /// High-level editor command derived from keyboard input.
@@ -212,6 +215,15 @@ pub enum Action {
     AiSlashNext,
     AiSlashSelect,
     AiSlashDismiss,
+    // ── ACP agent permission prompt ───────────────────
+    /// Move the ACP permission prompt selection up.
+    AcpPermissionUp,
+    /// Move the ACP permission prompt selection down.
+    AcpPermissionDown,
+    /// Allow the highlighted ACP permission option.
+    AcpPermissionConfirm,
+    /// Reject the ACP permission request.
+    AcpPermissionReject,
     /// Send the selected MindMap node context as a user message to the AI.
     MindMapSendToAi,
     /// Toggle the AI preview panel visibility (global `Ctrl+\`).
@@ -394,6 +406,23 @@ impl Action {
                 | (KeyCode::Char('D'), KeyModifiers::SHIFT) => Some(Self::AgentChangeDiff),
                 (KeyCode::Char('s'), KeyModifiers::NONE)
                 | (KeyCode::Char('S'), KeyModifiers::SHIFT) => Some(Self::ToggleChangeSummary),
+                _ => None,
+            };
+        }
+
+        // ACP permission prompt intercepts list navigation and the decision.
+        // Mirrors Zed's agent permission panel: move, Enter to allow the
+        // highlighted option, Esc to reject.
+        if context.acp_permission_pending {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                    Some(Self::AcpPermissionUp)
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    Some(Self::AcpPermissionDown)
+                }
+                (KeyCode::Enter, _) => Some(Self::AcpPermissionConfirm),
+                (KeyCode::Esc, _) => Some(Self::AcpPermissionReject),
                 _ => None,
             };
         }
@@ -1143,6 +1172,7 @@ mod tests {
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -1181,12 +1211,91 @@ mod tests {
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
             context,
         );
         assert_eq!(action, Some(Action::Insert('1')));
+    }
+
+    #[test]
+    fn acp_permission_prompt_intercepts_navigation_and_decision() {
+        let mut context = KeyContext {
+            step_keyword_picker_active: false,
+            step_input_active: false,
+            external_change_prompt_active: false,
+            agent_change_prompt_active: false,
+            active_tab: MainTab::Ai,
+            view_stage: ViewStage::TreeOnly,
+            explore_edit_mode: false,
+            pending_char: None,
+            mindmap_focus: MindMapFocus::Main,
+            mindmap_ai_panel_visible: false,
+            ai_input_focused: true,
+            slash_suggestion_active: false,
+            auth_panel_active: false,
+            model_panel_active: false,
+            model_panel_adding: false,
+            session_panel_active: false,
+            change_summary_visible: false,
+            ai_status_waiting: true,
+            scenario_dropdown_open: false,
+            approval_panel_active: false,
+            agent_profile_panel_active: false,
+            requirements_focus: RequirementsFocus::Tree,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
+            test_points_focus: TestPointsFocus::Tree,
+            requirements_overlay_active: false,
+            generation_scope_prompt_active: false,
+            quit_pending_confirm: false,
+            acp_permission_pending: true,
+        };
+        let keys = [
+            (KeyCode::Up, KeyModifiers::NONE, Action::AcpPermissionUp),
+            (
+                KeyCode::Char('k'),
+                KeyModifiers::NONE,
+                Action::AcpPermissionUp,
+            ),
+            (KeyCode::Down, KeyModifiers::NONE, Action::AcpPermissionDown),
+            (
+                KeyCode::Char('j'),
+                KeyModifiers::NONE,
+                Action::AcpPermissionDown,
+            ),
+            (
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                Action::AcpPermissionConfirm,
+            ),
+            (
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+                Action::AcpPermissionReject,
+            ),
+        ];
+        for (code, modifiers, expected) in keys {
+            assert_eq!(
+                Action::from_key_event(KeyEvent::new(code, modifiers), context),
+                Some(expected.clone()),
+                "{code:?} must be captured by the ACP permission prompt"
+            );
+        }
+        // Ordinary typing must not leak into the input while prompting.
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                context
+            ),
+            None
+        );
+        context.acp_permission_pending = false;
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
+            Some(Action::AiSendMessage)
+        );
     }
 
     #[test]
@@ -1219,6 +1328,7 @@ mod tests {
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -1267,6 +1377,7 @@ mod tests {
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -1315,6 +1426,7 @@ mod tests {
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
@@ -1371,6 +1483,7 @@ mod tests {
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
@@ -1409,6 +1522,7 @@ mod tests {
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
@@ -1447,6 +1561,7 @@ mod tests {
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), context),
@@ -1509,6 +1624,7 @@ mod tests {
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false,
         };
         let copy_context = KeyContext {
             pending_char: Some('y'),
@@ -1564,6 +1680,7 @@ mod tests {
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
@@ -1724,6 +1841,7 @@ mod tests {
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false,
         }
     }
 

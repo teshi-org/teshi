@@ -570,6 +570,45 @@ fn visual_cursor_pos(input: &str, cursor_char_idx: usize, width: u16) -> (u16, u
     (visual_row, col)
 }
 
+/// Appends the pending ACP permission prompt, if the active agent has one.
+/// Mirrors Zed's agent permission panel: a highlighted option list with
+/// Enter to allow and Esc to reject.
+fn push_acp_permission_prompt(chat_lines: &mut Vec<Line<'static>>, app: &App) {
+    let Some(prompt) = app.agent().pending_acp_permission.as_ref() else {
+        return;
+    };
+    chat_lines.push(Line::raw(""));
+    chat_lines.push(
+        Line::raw("  ◆ ACP agent requests permission").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    );
+    for (index, option) in prompt.options.iter().enumerate() {
+        let marker = if index == prompt.selected { "▶" } else { " " };
+        let style = if index == prompt.selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        chat_lines.push(Line::styled(
+            format!("    {marker} {}", option.display_label()),
+            style,
+        ));
+    }
+    chat_lines.push(
+        Line::raw("    Enter: allow · Esc: reject · j/k: move").style(
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        ),
+    );
+    chat_lines.push(Line::raw(""));
+}
+
 /// Renders the active agent's chat panel.
 fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     use crate::app::{AiRole, AiStatus};
@@ -896,6 +935,8 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         chat_lines.push(Line::raw(""));
     }
 
+    push_acp_permission_prompt(&mut chat_lines, app);
+
     // Paragraph wrapping changes the number of terminal rows. Measure the
     // wrapped content before choosing the bottom viewport so long messages do
     // not push the newest response below the rendered area.
@@ -953,7 +994,9 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             format!("{} Teshi is thinking...", spinner_frame())
         }
         AiStatus::AwaitingApproval => {
-            if matches!(app.generation_stage, GenerationStage::Confirming) {
+            if app.has_acp_permission_prompt() {
+                "◆ ACP permission requested — Enter to allow, Esc to reject".into()
+            } else if matches!(app.generation_stage, GenerationStage::Confirming) {
                 format!(
                     "◆ Changes pending — Press Y to accept, N to reject · {}",
                     app.generation_stage.label()
@@ -2959,6 +3002,8 @@ pub(crate) fn render_agent_chat_inner(
         chat_lines.push(Line::raw(""));
     }
 
+    push_acp_permission_prompt(&mut chat_lines, app);
+
     // Measure wrapped rows before scrolling; logical Markdown lines may occupy
     // several terminal rows in the narrower MindMap chat panel.
     let paragraph = Paragraph::new(Text::from(chat_lines))
@@ -2986,7 +3031,13 @@ pub(crate) fn render_agent_chat_inner(
         AiStatus::Waiting if app.agent().partial_response().is_empty() => {
             format!("{} Teshi is thinking...", spinner_frame())
         }
-        AiStatus::AwaitingApproval => "◆ Waiting for approval — Y/N".into(),
+        AiStatus::AwaitingApproval => {
+            if app.has_acp_permission_prompt() {
+                "◆ ACP permission requested — Enter to allow, Esc to reject".into()
+            } else {
+                "◆ Waiting for approval — Y/N".into()
+            }
+        }
         AiStatus::Error => {
             if app.status.starts_with("AI error:") {
                 app.status.clone()

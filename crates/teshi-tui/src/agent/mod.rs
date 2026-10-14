@@ -2995,6 +2995,7 @@ mod pipeline_gate_tests {
             requirements_overlay_active: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
+            acp_permission_pending: false,
         };
         assert_eq!(
             Action::from_key_event(

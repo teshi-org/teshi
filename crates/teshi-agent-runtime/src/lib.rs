@@ -12,6 +12,8 @@ use teshi_engine::llm::{LlmConfig, LlmEvent, LlmHandle, LlmRequest};
 mod acp_backend;
 pub mod backend;
 
+pub use acp_backend::ChannelPermissionHost;
+
 /// Conversation record shared with frontends and persisted sessions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiChatMessage {

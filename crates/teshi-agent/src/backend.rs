@@ -32,12 +32,34 @@ pub enum AgentBackendDecision {
     Cancelled,
 }
 
+/// One option offered by an external ACP agent when it asks for permission.
+#[derive(Debug, Clone)]
+pub struct PermissionChoice {
+    pub id: String,
+    pub label: Option<String>,
+    pub kind: Option<String>,
+}
+
+impl PermissionChoice {
+    /// Best available display text for a frontend list.
+    pub fn display_label(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.id)
+    }
+}
+
 /// Events seen by a frontend. Neither provider nor ACP wire messages cross
 /// this boundary.
 #[derive(Debug)]
 pub enum AgentBackendEvent {
     MessageChunk {
         content: String,
+    },
+    /// An external ACP agent asked the frontend to choose a permission option.
+    /// The frontend answers through the backend with the matching
+    /// `request_id`; the turn stays parked until it does.
+    PermissionRequest {
+        request_id: u64,
+        options: Vec<PermissionChoice>,
     },
     Completed {
         model: String,

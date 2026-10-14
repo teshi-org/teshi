@@ -333,6 +333,7 @@ pub fn run() -> Result<()> {
                             requirements_overlay_active: app.authoring_ui.overlay_active(),
                             generation_scope_prompt_active: app.generation_scope_prompt.is_some(),
                             quit_pending_confirm: app.quit_pending_confirm,
+                            acp_permission_pending: app.has_acp_permission_prompt(),
                         },
                     ) {
                         app.handle_action(action)?;

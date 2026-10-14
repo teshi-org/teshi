@@ -27,6 +27,26 @@ fn backend(mode: &str) -> AgentBackendRuntime {
     backend
 }
 
+/// Same as [`backend`] but wired with an interactive permission host, the
+/// configuration the TUI uses for its Manual approval mode.
+fn backend_with_permission_host(mode: &str) -> AgentBackendRuntime {
+    let mut backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_acp_agent.py");
+    let command = AcpAgentCommand {
+        program: PathBuf::from(if cfg!(windows) { "python" } else { "python3" }),
+        args: vec![script.display().to_string(), mode.into()],
+        cwd: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        env: HashMap::new(),
+    };
+    let mut config = AcpBackendConfig::new(command);
+    config.client.initialize_timeout = Duration::from_secs(2);
+    config.client.request_timeout = Duration::from_secs(2);
+    config.client.shutdown_timeout = Duration::from_secs(2);
+    config.permission_host = Some(teshi_agent_runtime::ChannelPermissionHost::new());
+    backend.configure_acp(config).unwrap();
+    backend
+}
+
 fn events_until_terminal(backend: &mut AgentBackendRuntime) -> Vec<AgentBackendEvent> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut result = Vec::new();
@@ -206,6 +226,118 @@ fn manual_permission_without_host_aborts_turn_when_agent_exits() {
             AgentBackendEvent::Failed(error) if error.contains("ACP prompt failed")
         )),
         "expected prompt failure after agent exits; got {events:?}"
+    );
+    assert_eq!(backend.status(), AgentBackendStatus::Failed);
+}
+
+#[test]
+fn manual_permission_with_host_continues_after_user_allows() {
+    // Zed-style flow: the agent asks, the frontend renders the options, the
+    // user allows, and the parked turn resumes to completion.
+    let mut backend = backend_with_permission_host("permission_then_exit");
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "do task")], None)
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut events = Vec::new();
+    let mut request_id = None;
+    while Instant::now() < deadline {
+        match backend.try_next_event() {
+            Ok(Some(event)) => {
+                if let AgentBackendEvent::PermissionRequest {
+                    request_id: id,
+                    options,
+                } = &event
+                {
+                    assert_eq!(options.len(), 1, "expected one option; got {options:?}");
+                    assert_eq!(options[0].display_label(), "Allow once");
+                    request_id = Some(*id);
+                    assert!(
+                        backend.respond_permission(*id, Some("allow_once".into())),
+                        "permission request must resolve while the turn is parked"
+                    );
+                    assert_eq!(backend.status(), AgentBackendStatus::Running);
+                    continue;
+                }
+                let terminal = matches!(
+                    event,
+                    AgentBackendEvent::Completed { .. } | AgentBackendEvent::Failed(_)
+                );
+                events.push(event);
+                if terminal {
+                    break;
+                }
+            }
+            Ok(None) | Err(std::sync::mpsc::TryRecvError::Empty) => {
+                thread::sleep(Duration::from_millis(10))
+            }
+            Err(error) => panic!("event channel disconnected: {error}"),
+        }
+    }
+    assert!(request_id.is_some(), "agent never asked for permission");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentBackendEvent::MessageChunk { content } if content == " world"
+        )),
+        "expected the post-permission chunk; got {events:?}"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentBackendEvent::Completed { finish_reason: Some(reason), .. } if reason == "end_turn"
+    )));
+    assert_eq!(backend.messages().last().unwrap().content, "hello world");
+    assert_eq!(backend.status(), AgentBackendStatus::Completed);
+}
+
+#[test]
+fn manual_permission_with_host_rejection_fails_turn() {
+    // Rejecting must reach the agent as a cancellation so it can stop; the
+    // turn then fails exactly like a host-less Manual policy.
+    let mut backend = backend_with_permission_host("permission_then_exit");
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "do task")], None)
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut events = Vec::new();
+    let mut answered = false;
+    while Instant::now() < deadline {
+        match backend.try_next_event() {
+            Ok(Some(event)) => {
+                if let AgentBackendEvent::PermissionRequest { request_id, .. } = &event {
+                    assert!(
+                        backend.respond_permission(*request_id, None),
+                        "rejection must resolve while the turn is parked"
+                    );
+                    answered = true;
+                    continue;
+                }
+                let terminal = matches!(
+                    event,
+                    AgentBackendEvent::Completed { .. } | AgentBackendEvent::Failed(_)
+                );
+                events.push(event);
+                if terminal {
+                    break;
+                }
+            }
+            Ok(None) | Err(std::sync::mpsc::TryRecvError::Empty) => {
+                thread::sleep(Duration::from_millis(10))
+            }
+            Err(error) => panic!("event channel disconnected: {error}"),
+        }
+    }
+    assert!(answered, "agent never asked for permission");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentBackendEvent::Failed(error) if error.contains("ACP prompt failed")
+        )),
+        "expected prompt failure after the rejected agent exits; got {events:?}"
     );
     assert_eq!(backend.status(), AgentBackendStatus::Failed);
 }
