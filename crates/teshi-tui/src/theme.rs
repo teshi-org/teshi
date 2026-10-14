@@ -11,6 +11,9 @@ use ratatui::widgets::{Block, BorderType, Borders};
 use crate::app::RunStatus;
 use teshi_core::git::DiffStatus;
 
+/// Explicit terminal default for unchanged diff surfaces.
+pub(crate) const RESET: Color = Color::Reset;
+
 /// Main brand color: headings, focused borders, bullets, links.
 pub(crate) const PRIMARY: Color = Color::Rgb(0xAF, 0x87, 0xFF);
 /// Subdued primary for quote bars and other low-emphasis brand accents.
@@ -55,32 +58,20 @@ pub(crate) const TAB_INACTIVE: Color = Color::Rgb(0xB2, 0xB2, 0xB2);
 /// Selection retained outside the focused widget.
 pub(crate) const SELECTION_INACTIVE_BG: Color = Color::Rgb(0x44, 0x44, 0x44);
 /// Selected editor text.
-// Consumed by subsequent surface migrations in adopt-chrys-tui-style.
-#[allow(dead_code)]
 pub(crate) const EDITOR_SELECTION_BG: Color = Color::Rgb(0x5F, 0x5F, 0x87);
 /// Current preview line surface.
-// Consumed by subsequent surface migrations in adopt-chrys-tui-style.
-#[allow(dead_code)]
 pub(crate) const CURRENT_LINE_BG: Color = Color::Rgb(0x30, 0x30, 0x30);
 /// Overlay and toast surface.
 // Consumed by subsequent surface migrations in adopt-chrys-tui-style.
 #[allow(dead_code)]
 pub(crate) const OVERLAY_BG: Color = Color::Rgb(0x3A, 0x3A, 0x3A);
 /// Added-line tint.
-// Consumed by subsequent surface migrations in adopt-chrys-tui-style.
-#[allow(dead_code)]
 pub(crate) const DIFF_ADDED_BG: Color = Color::Rgb(0x26, 0x3E, 0x2C);
 /// Modified-line tint.
-// Consumed by subsequent surface migrations in adopt-chrys-tui-style.
-#[allow(dead_code)]
 pub(crate) const DIFF_MODIFIED_BG: Color = Color::Rgb(0x3E, 0x32, 0x26);
 /// Deleted-line tint.
-// Consumed by subsequent surface migrations in adopt-chrys-tui-style.
-#[allow(dead_code)]
 pub(crate) const DIFF_DELETED_BG: Color = Color::Rgb(0x3E, 0x26, 0x26);
 /// Gherkin string literals.
-// Consumed by subsequent surface migrations in adopt-chrys-tui-style.
-#[allow(dead_code)]
 pub(crate) const SYNTAX_STRING: Color = Color::Rgb(0xD7, 0xAF, 0x87);
 
 /// Rounded panel chrome; callers retain their existing interior geometry.
@@ -103,13 +94,12 @@ pub(crate) fn popup_rows<'a>(lines: Vec<Line<'a>>, width: u16) -> Vec<Line<'a>> 
     lines
         .into_iter()
         .map(|mut line| {
-            if line.style.bg == Some(CURSOR_BG)
-                || line
-                    .spans
-                    .iter()
-                    .any(|span| span.style.bg == Some(CURSOR_BG))
-            {
-                let selection = selected_row(true);
+            let background = std::iter::once(line.style.bg)
+                .chain(line.spans.iter().map(|span| span.style.bg))
+                .flatten()
+                .find(|bg| *bg == CURSOR_BG || *bg == SELECTION_INACTIVE_BG);
+            if let Some(background) = background {
+                let selection = selected_row(background == CURSOR_BG);
                 for span in &mut line.spans {
                     span.style = span.style.patch(selection);
                 }
@@ -211,8 +201,6 @@ pub(crate) fn muted() -> Style {
 }
 
 /// Semantic run state foreground.
-// Consumed by subsequent surface migrations in adopt-chrys-tui-style.
-#[allow(dead_code)]
 pub(crate) fn status_style(status: RunStatus) -> Style {
     Style::default().fg(match status {
         RunStatus::Idle => MUTED,
@@ -224,8 +212,6 @@ pub(crate) fn status_style(status: RunStatus) -> Style {
 }
 
 /// Semantic diff foreground without imposing a background on unchanged rows.
-// Consumed by subsequent surface migrations in adopt-chrys-tui-style.
-#[allow(dead_code)]
 pub(crate) fn diff_style(kind: DiffStatus) -> Style {
     Style::default().fg(match kind {
         DiffStatus::Added => SUCCESS,
@@ -334,8 +320,8 @@ mod tests {
     #[test]
     fn test_page_color_budget() {
         const CAPS: &[(&str, &str, usize)] = &[
-            ("ui.rs", include_str!("ui.rs"), 99),
-            ("highlight.rs", include_str!("highlight.rs"), 14),
+            ("ui.rs", include_str!("ui.rs"), 35),
+            ("highlight.rs", include_str!("highlight.rs"), 0),
             ("mindmap.rs", include_str!("mindmap.rs"), 19),
             ("authoring_tab.rs", include_str!("authoring_tab.rs"), 10),
             ("test_points_tab.rs", include_str!("test_points_tab.rs"), 10),

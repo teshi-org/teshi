@@ -21,12 +21,12 @@
 
 ## 3. Phase 2: Explore tab and editor
 
-- [ ] 3.1 Switch `explore_block` to `panel_block`. Use `selected_row(focused)` for column selection, and remove `EXPLORE_SELECTED_*`, `HIGHLIGHT_*`, and `selected_style` once nothing references them.
-- [ ] 3.2 Replace the `STATUS_*` constants and `status_color` with `status_style`. Route `git_file_status_style`, `git_diff_status_style`, and the `DIFF_*_BG` constants through `diff_style` and the theme tokens.
-- [ ] 3.3 Switch the Explore horizontal scrollbars to the shared `scrollbar_lines` glyphs and colors.
-- [ ] 3.4 Editor: use `EDITOR_SELECTION_BG` for text selection, and use `CURRENT_LINE_BG` with `FG` for the preview cursor line (replacing `PREVIEW_CURSOR_*`). Diagnostics use `ERROR` for errors, `WARNING` for warnings, and the muted color for repair hints.
-- [ ] 3.5 Remap `highlight.rs::kind_to_style` to the Gherkin palette from design.md. Replace the `KEYWORD_*` constants in `ui.rs` with the same mapping, and update the foreground assertions in the `highlight.rs` tests.
-- [ ] 3.6 Lower the `ui.rs` cap and set the `highlight.rs` cap to zero, run the gates, check visually, and commit as `feat(tui): apply chrys style to Explore and editor`.
+- [x] 3.1 Switch `explore_block` to `panel_block`. Use `selected_row(focused)` for column selection, and remove `EXPLORE_SELECTED_*`, `HIGHLIGHT_*`, and `selected_style` once nothing references them.
+- [x] 3.2 Replace the `STATUS_*` constants and `status_color` with `status_style`. Route `git_file_status_style`, `git_diff_status_style`, and the `DIFF_*_BG` constants through `diff_style` and the theme tokens.
+- [x] 3.3 Switch the Explore horizontal scrollbars to the shared `scrollbar_lines` glyphs and colors.
+- [x] 3.4 Editor: use `EDITOR_SELECTION_BG` for text selection, and use `CURRENT_LINE_BG` with `FG` for the preview cursor line (replacing `PREVIEW_CURSOR_*`). Diagnostics use `ERROR` for errors, `WARNING` for warnings, and the muted color for repair hints.
+- [x] 3.5 Remap `highlight.rs::kind_to_style` to the Gherkin palette from design.md. Replace the `KEYWORD_*` constants in `ui.rs` with the same mapping, and update the foreground assertions in the `highlight.rs` tests.
+- [x] 3.6 Lower the `ui.rs` cap and set the `highlight.rs` cap to zero, run the gates, check visually, and commit as `feat(tui): apply chrys style to Explore and editor`.
 
 ## 4. Phase 3: MindMap tab
 
@@ -106,3 +106,15 @@
   Captures are under `D:\teshi-style-tests-e71789e671124e31b7ffe7d82d0a59d6`.
   Task 2.6 is now complete. Final added helper tests passed (358 unit tests,
   1 existing ignored test, 2 doctests) and workspace Clippy passed again.
+
+### Explore and editor phase
+
+- Rounded focused panels, full-width active/inactive selection, shared status
+  and diff roles, shared scrollbar glyphs, editor selection/current-line tokens,
+  diagnostics and Gherkin palette are implemented. Removed the old local color
+  constants; the compatibility selection wrapper remains while later surfaces
+  still call it, and delegates to the shared helper.
+- `highlight.rs` cap is zero; `ui.rs` cap is 35.
+- Final workspace Clippy and complete serialized workspace tests passed.
+- Installed successfully and visually reviewed real PTY Explore and editor
+  screenshots, including inactive row fills and Given/When/Then colors.

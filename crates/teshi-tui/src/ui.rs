@@ -23,22 +23,6 @@ use teshi_core::gherkin_lang::{
 mod chat;
 
 /// Stage-2 preview: one solid style for the tree-selected line (avoids span-patch gaps that read as bright blocks).
-const PREVIEW_CURSOR_BG: Color = Color::DarkGray;
-const PREVIEW_CURSOR_FG: Color = Color::White;
-const STATUS_PENDING: Color = Color::DarkGray;
-const STATUS_RUNNING: Color = Color::Yellow;
-const STATUS_PASSED: Color = Color::Green;
-const STATUS_FAILED: Color = Color::Red;
-const STATUS_SKIPPED: Color = Color::Gray;
-const KEYWORD_GIVEN: Color = Color::Blue;
-const KEYWORD_WHEN: Color = Color::Yellow;
-const KEYWORD_THEN: Color = Color::Green;
-const KEYWORD_AND: Color = Color::Gray;
-const KEYWORD_BUT: Color = Color::Gray;
-const SELECTION_BG: Color = Color::Rgb(64, 96, 160);
-const SELECTION_FG: Color = Color::White;
-const HIGHLIGHT_SELECTED_FG: Color = Color::Yellow;
-const HIGHLIGHT_UNFOCUSED_FG: Color = Color::Cyan;
 const MAIN_TABS: &[(MainTab, &str)] = &[
     (MainTab::Explore, " Explore [1] "),
     (MainTab::MindMap, " MindMap [2] "),
@@ -118,13 +102,7 @@ fn token_usage_label(in_tokens: u64, out_tokens: u64) -> String {
 }
 
 fn selected_style(focused: bool) -> Style {
-    if focused {
-        Style::default()
-            .fg(HIGHLIGHT_SELECTED_FG)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(HIGHLIGHT_UNFOCUSED_FG)
-    }
+    theme::selected_row(focused)
 }
 
 /// Applies `patch` on UTF-8 character indices `[range.start, range.end)` within each span.
@@ -252,16 +230,6 @@ fn step_line_display(
     // Padding is inserted before the keyword; buffer columns from indent onward shift visually.
     let pad_start = leading;
     (out, pad, pad_start)
-}
-
-fn status_color(status: RunStatus) -> Color {
-    match status {
-        RunStatus::Idle => STATUS_PENDING,
-        RunStatus::Running => STATUS_RUNNING,
-        RunStatus::Passed => STATUS_PASSED,
-        RunStatus::Failed => STATUS_FAILED,
-        RunStatus::Skipped => STATUS_SKIPPED,
-    }
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
@@ -563,17 +531,7 @@ fn explore_select_style(focused: bool) -> Style {
 }
 
 fn explore_block(title: &str, focused: bool) -> Block<'_> {
-    let title_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .title_style(title_style)
+    theme::panel_block(title, focused)
 }
 
 fn feature_display_name(path: &std::path::Path) -> String {
@@ -602,38 +560,25 @@ fn render_explore_lines<'a>(
     let offset = app.explore_horizontal_scroll[column.index()].min(max_scroll);
     app.explore_horizontal_scroll[column.index()] = offset;
     frame.render_widget(
-        Paragraph::new(Text::from(lines)).scroll((0, offset.min(u16::MAX as usize) as u16)),
+        Paragraph::new(Text::from(theme::popup_rows(
+            lines,
+            content_width.max(viewport_width).min(u16::MAX as usize) as u16,
+        )))
+        .scroll((0, offset.min(u16::MAX as usize) as u16)),
         content_area,
     );
 
     if overflow {
         let scrollbar = Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 2);
-        let track_width = scrollbar.width as usize;
-        let thumb_width =
-            ((viewport_width * track_width) / content_width).clamp(4.min(track_width), track_width);
-        let travel = track_width.saturating_sub(thumb_width);
-        let thumb_start = offset
-            .saturating_mul(travel)
-            .checked_div(max_scroll)
-            .unwrap_or(0);
-        let track_style = Style::default().fg(Color::DarkGray);
-        let thumb_style = Style::default().fg(if app.explore_focus == column {
-            Color::Yellow
-        } else {
-            Color::Gray
-        });
-        let scrollbar_line = || {
-            Line::from(vec![
-                Span::styled("━".repeat(thumb_start), track_style),
-                Span::styled("█".repeat(thumb_width), thumb_style),
-                Span::styled(
-                    "━".repeat(track_width.saturating_sub(thumb_start + thumb_width)),
-                    track_style,
-                ),
-            ])
-        };
+        let cells = theme::scrollbar_lines(content_width, viewport_width, offset);
+        let scrollbar_line = Line::from(
+            cells
+                .into_iter()
+                .flat_map(|line| line.spans)
+                .collect::<Vec<_>>(),
+        );
         frame.render_widget(
-            Paragraph::new(vec![scrollbar_line(), scrollbar_line()]),
+            Paragraph::new(vec![scrollbar_line.clone(), scrollbar_line]),
             scrollbar,
         );
         app.clickable_regions
@@ -648,25 +593,18 @@ fn render_explore_lines<'a>(
 }
 
 fn git_file_status_style(status: teshi_core::git::FileGitStatus) -> Style {
-    let color = match status {
-        teshi_core::git::FileGitStatus::Added | teshi_core::git::FileGitStatus::Untracked => {
-            Color::Green
-        }
-        teshi_core::git::FileGitStatus::Modified => Color::Yellow,
-        teshi_core::git::FileGitStatus::Deleted => Color::Red,
-        teshi_core::git::FileGitStatus::Unmodified => Color::DarkGray,
-    };
-    Style::default().fg(color).add_modifier(Modifier::BOLD)
+    use teshi_core::git::{DiffStatus, FileGitStatus};
+    theme::diff_style(match status {
+        FileGitStatus::Added | FileGitStatus::Untracked => DiffStatus::Added,
+        FileGitStatus::Modified => DiffStatus::Modified,
+        FileGitStatus::Deleted => DiffStatus::Deleted,
+        FileGitStatus::Unmodified => DiffStatus::Unchanged,
+    })
+    .add_modifier(Modifier::BOLD)
 }
 
 fn git_diff_status_style(status: teshi_core::git::DiffStatus) -> Style {
-    let color = match status {
-        teshi_core::git::DiffStatus::Added => Color::Green,
-        teshi_core::git::DiffStatus::Deleted => Color::Red,
-        teshi_core::git::DiffStatus::Modified => Color::Yellow,
-        teshi_core::git::DiffStatus::Unchanged => Color::DarkGray,
-    };
-    Style::default().fg(color).add_modifier(Modifier::BOLD)
+    theme::diff_style(status).add_modifier(Modifier::BOLD)
 }
 
 fn truncate_string_to_cols(text: &str, max_cols: u16) -> String {
@@ -705,7 +643,7 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         if app.git_status.deleted.is_empty() {
             lines.push(Line::styled(
                 " (no features)",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::MUTED),
             ));
         }
     } else {
@@ -741,7 +679,7 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let label_style = if selected {
             highlight_style
         } else {
-            Style::default().fg(Color::Red)
+            Style::default().fg(theme::ERROR)
         };
         let mut line = Line::from(vec![
             Span::raw(" "),
@@ -810,7 +748,7 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         if deleted_scenarios.is_empty() {
             lines.push(Line::styled(
                 " (deleted Feature; see Git diff)",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::MUTED),
             ));
         } else {
             for (scenario_idx, name) in deleted_scenarios.iter().enumerate() {
@@ -825,7 +763,7 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                         if selected {
                             explore_select_style(focused)
                         } else {
-                            Style::default().fg(Color::Red)
+                            Style::default().fg(theme::ERROR)
                         },
                     ),
                 ]);
@@ -871,7 +809,7 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if scenarios.as_ref().is_none_or(|s| s.is_empty()) && deleted_scenarios.is_empty() {
         lines.push(Line::styled(
             " (no scenarios)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         ));
     }
     let current_scenario_count = scenarios.as_ref().map_or(0, Vec::len);
@@ -882,7 +820,7 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .get(&(app.explore_selected_feature, i))
                 .copied()
                 .unwrap_or(RunStatus::Idle);
-            let status_dot = Span::styled("●", Style::default().fg(status_color(status)));
+            let status_dot = Span::styled("●", theme::status_style(status));
             let tp_ids = app
                 .authoring_ui
                 .artifacts
@@ -936,7 +874,7 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 if selected {
                     explore_select_style(focused)
                 } else {
-                    Style::default().fg(Color::Red)
+                    Style::default().fg(theme::ERROR)
                 },
             ),
         ]);
@@ -1018,19 +956,15 @@ fn explore_scenarios_title(app: &App) -> String {
     format!("Scenarios ({})", current_count + deleted_count)
 }
 
-const DIFF_ADDED_BG: Color = Color::Rgb(24, 72, 36);
-const DIFF_MODIFIED_BG: Color = Color::Rgb(68, 56, 16);
-const DIFF_DELETED_BG: Color = Color::Rgb(72, 24, 24);
-
 fn render_git_diff_line(diff_line: &teshi_core::git::GitDiffLine) -> Line<'static> {
     let marker = diff_line.status.marker();
     let background = match diff_line.status {
-        teshi_core::git::DiffStatus::Added => DIFF_ADDED_BG,
-        teshi_core::git::DiffStatus::Deleted => DIFF_DELETED_BG,
-        teshi_core::git::DiffStatus::Modified => DIFF_MODIFIED_BG,
-        teshi_core::git::DiffStatus::Unchanged => Color::Reset,
+        teshi_core::git::DiffStatus::Added => theme::DIFF_ADDED_BG,
+        teshi_core::git::DiffStatus::Deleted => theme::DIFF_DELETED_BG,
+        teshi_core::git::DiffStatus::Modified => theme::DIFF_MODIFIED_BG,
+        teshi_core::git::DiffStatus::Unchanged => theme::RESET,
     };
-    let line_style = Style::default().bg(background);
+    let line_style = theme::diff_style(diff_line.status).bg(background);
     let marker_style = git_diff_status_style(diff_line.status).bg(background);
     Line::from(vec![
         Span::styled(format!("{marker} "), marker_style),
@@ -1077,7 +1011,7 @@ fn render_git_steps(
         lines.push(Line::styled(
             " Feature",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme::WARNING)
                 .add_modifier(Modifier::BOLD),
         ));
         render_git_diff_lines(&view.feature_diff_lines, &mut lines);
@@ -1089,7 +1023,7 @@ fn render_git_steps(
         lines.push(Line::styled(
             " Background",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme::WARNING)
                 .add_modifier(Modifier::BOLD),
         ));
         for diff_line in &background.diff_lines {
@@ -1199,7 +1133,7 @@ fn render_git_file_fallback(
     if lines.is_empty() {
         lines.push(Line::styled(
             " (Git diff unavailable)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         ));
     }
     render_explore_lines(frame, app, ColumnFocus::Step, inner, lines);
@@ -1235,7 +1169,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         lines.push(Line::styled(
             format!(" {} changed line(s) — [D] close", diff_lines.len()),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme::WARNING)
                 .add_modifier(Modifier::BOLD),
         ));
         lines.push(Line::raw(""));
@@ -1252,15 +1186,17 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         if relevant.is_empty() {
             lines.push(Line::styled(
                 " (no changes in this scenario)",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::MUTED),
             ));
         } else {
             for dl in relevant {
                 let (gutter_ch, gutter_color, bg_color) = match dl.kind {
-                    crate::app::ChangeKind::Added => ("+", Color::Green, DIFF_ADDED_BG),
-                    crate::app::ChangeKind::Modified => ("~", Color::Yellow, DIFF_MODIFIED_BG),
-                    crate::app::ChangeKind::Deleted => ("-", Color::Red, DIFF_DELETED_BG),
-                    crate::app::ChangeKind::Unchanged => (" ", Color::DarkGray, Color::Reset),
+                    crate::app::ChangeKind::Added => ("+", theme::SUCCESS, theme::DIFF_ADDED_BG),
+                    crate::app::ChangeKind::Modified => {
+                        ("~", theme::WARNING, theme::DIFF_MODIFIED_BG)
+                    }
+                    crate::app::ChangeKind::Deleted => ("-", theme::ERROR, theme::DIFF_DELETED_BG),
+                    crate::app::ChangeKind::Unchanged => (" ", theme::MUTED, theme::RESET),
                 };
                 let line_style = Style::default().bg(bg_color);
                 let gutter_style = Style::default()
@@ -1356,7 +1292,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if background_steps.is_empty() && scenario_steps.is_empty() {
         lines.push(Line::styled(
             " (no steps)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         ));
         line_idx += 1;
     } else {
@@ -1371,33 +1307,31 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             lines.push(Line::styled(
                 background_label,
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(theme::MUTED)
                     .add_modifier(Modifier::BOLD),
             ));
             line_idx += 1;
             for step in background_steps {
                 let kw_color = match step.keyword_type {
                     StepKeywordType::Given => {
-                        last_major = Some(KEYWORD_GIVEN);
-                        KEYWORD_GIVEN
+                        last_major = Some(theme::PRIMARY);
+                        theme::PRIMARY
                     }
                     StepKeywordType::When => {
-                        last_major = Some(KEYWORD_WHEN);
-                        KEYWORD_WHEN
+                        last_major = Some(theme::WARNING);
+                        theme::WARNING
                     }
                     StepKeywordType::Then => {
-                        last_major = Some(KEYWORD_THEN);
-                        KEYWORD_THEN
+                        last_major = Some(theme::SUCCESS);
+                        theme::SUCCESS
                     }
-                    StepKeywordType::And => last_major.unwrap_or(KEYWORD_AND),
-                    StepKeywordType::But => last_major.unwrap_or(KEYWORD_BUT),
+                    StepKeywordType::And => last_major.unwrap_or(theme::TAB_INACTIVE),
+                    StepKeywordType::But => last_major.unwrap_or(theme::TAB_INACTIVE),
                 };
                 let (kw_span, _) =
                     step_keyword_gutter_styled_span(&step.keyword, Style::default().fg(kw_color));
-                let body_span = Span::styled(
-                    format!(" {}", step.text),
-                    Style::default().fg(Color::DarkGray),
-                );
+                let body_span =
+                    Span::styled(format!(" {}", step.text), Style::default().fg(theme::MUTED));
                 let mut line = Line::from(vec![kw_span, body_span]);
                 line = pad_line_to_width(line, inner.width, Style::default());
                 lines.push(line);
@@ -1412,7 +1346,7 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         {
             lines.push(Line::styled(
                 format!(" {}", scenario.tags.join(" ")),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::MUTED),
             ));
             line_idx += 1;
         }
@@ -1420,19 +1354,19 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         for (i, step) in scenario_steps.iter().enumerate() {
             let kw_color = match step.keyword_type {
                 StepKeywordType::Given => {
-                    last_major = Some(KEYWORD_GIVEN);
-                    KEYWORD_GIVEN
+                    last_major = Some(theme::PRIMARY);
+                    theme::PRIMARY
                 }
                 StepKeywordType::When => {
-                    last_major = Some(KEYWORD_WHEN);
-                    KEYWORD_WHEN
+                    last_major = Some(theme::WARNING);
+                    theme::WARNING
                 }
                 StepKeywordType::Then => {
-                    last_major = Some(KEYWORD_THEN);
-                    KEYWORD_THEN
+                    last_major = Some(theme::SUCCESS);
+                    theme::SUCCESS
                 }
-                StepKeywordType::And => last_major.unwrap_or(KEYWORD_AND),
-                StepKeywordType::But => last_major.unwrap_or(KEYWORD_BUT),
+                StepKeywordType::And => last_major.unwrap_or(theme::TAB_INACTIVE),
+                StepKeywordType::But => last_major.unwrap_or(theme::TAB_INACTIVE),
             };
             let (kw_span, _) =
                 step_keyword_gutter_styled_span(&step.keyword, Style::default().fg(kw_color));
@@ -1467,14 +1401,14 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 if !table.tags.is_empty() {
                     lines.push(Line::styled(
                         format!(" {}", table.tags.join(" ")),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme::MUTED),
                     ));
                     line_idx += 1;
                 }
                 lines.push(Line::styled(
                     " Examples:",
                     Style::default()
-                        .fg(Color::DarkGray)
+                        .fg(theme::MUTED)
                         .add_modifier(Modifier::BOLD),
                 ));
                 line_idx += 1;
@@ -2028,7 +1962,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
     } else {
         title_base
     };
-    let editor_block = Block::default().borders(Borders::ALL).title(title);
+    let editor_block = theme::panel_block(title, !preview);
     let editor_inner = editor_block.inner(area);
     frame.render_widget(editor_block, area);
     frame.render_widget(Clear, editor_inner);
@@ -2097,7 +2031,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
     }
 
     let mut lines = Vec::with_capacity(visible_lines);
-    let preview_row_style = Style::default().bg(PREVIEW_CURSOR_BG).fg(PREVIEW_CURSOR_FG);
+    let preview_row_style = Style::default().bg(theme::CURRENT_LINE_BG).fg(theme::FG);
     let mut step_state = StepHighlightState::default();
     for &row in visible_rows.iter().take(scroll_idx) {
         if row >= buffer.line_count() {
@@ -2142,7 +2076,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             styled = apply_line_background(
                 styled,
                 Style::default()
-                    .fg(Color::Red)
+                    .fg(theme::ERROR)
                     .add_modifier(Modifier::UNDERLINED),
             );
         }
@@ -2160,7 +2094,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
                 styled = apply_line_background(
                     styled,
                     Style::default()
-                        .fg(Color::DarkGray)
+                        .fg(theme::MUTED)
                         .add_modifier(Modifier::DIM),
                 );
             }
@@ -2169,7 +2103,9 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
         if row == cursor_row && !preview {
             // Use a block-cursor background for edit mode so the cursor is visible
             // even when positioned at the end of the line (on a space character).
-            let edit_cursor_style = Style::default().fg(Color::White).bg(SELECTION_BG);
+            let edit_cursor_style = Style::default()
+                .fg(theme::FG)
+                .bg(theme::EDITOR_SELECTION_BG);
             let line_len = display_len;
             if app.is_editor_nav_mode() {
                 let focus_patch = selected_style(true);
@@ -2219,7 +2155,9 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
             let sel_lo = anchor.0.min(end.0);
             let sel_hi = anchor.0.max(end.0);
             if !preview && row >= sel_lo && row <= sel_hi {
-                let sel_style = Style::default().bg(SELECTION_BG).fg(SELECTION_FG);
+                let sel_style = Style::default()
+                    .bg(theme::EDITOR_SELECTION_BG)
+                    .fg(theme::FG);
                 let mut range = if sel_lo == sel_hi {
                     // Single row: highlight the exact column range
                     let lo_col = anchor.1.min(end.1);
@@ -2315,10 +2253,7 @@ fn render_buffer_diagnostics(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 
     let title = format!("Diagnostics ({})", app.buffer_diagnostics.len());
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .title_style(Style::default().fg(Color::Yellow));
+    let block = theme::panel_block(title, false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -2331,9 +2266,9 @@ fn render_buffer_diagnostics(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .take(inner.height as usize)
         .map(|diagnostic| {
             let severity = match diagnostic.severity {
-                teshi_core::DiagnosticSeverity::Error => ("error", Color::Red),
-                teshi_core::DiagnosticSeverity::Warning => ("warning", Color::Yellow),
-                teshi_core::DiagnosticSeverity::Suggestion => ("suggestion", Color::Cyan),
+                teshi_core::DiagnosticSeverity::Error => ("error", theme::ERROR),
+                teshi_core::DiagnosticSeverity::Warning => ("warning", theme::WARNING),
+                teshi_core::DiagnosticSeverity::Suggestion => ("suggestion", theme::MUTED),
             };
             let suggestion = diagnostic
                 .suggestion
@@ -2436,10 +2371,7 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rec
 
 /// Renders the reserved panel placeholder (stage 3, right side).
 fn render_reserved_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Run Details")
-        .style(Style::default().fg(Color::DarkGray));
+    let block = theme::panel_block("Run Details", false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -2458,7 +2390,7 @@ fn render_reserved_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         truncate_lines(no_run_detail_lines(), inner.width)
     };
-    let planned_style = Style::default().fg(Color::DarkGray);
+    let planned_style = Style::default().fg(theme::MUTED);
     let mut content = vec![
         Line::styled(
             "Planned features:",
@@ -3874,7 +3806,9 @@ fn render_requirements_editor(
                         styled,
                         lo_col,
                         hi_col,
-                        Style::default().bg(SELECTION_BG).fg(SELECTION_FG),
+                        Style::default()
+                            .bg(theme::EDITOR_SELECTION_BG)
+                            .fg(theme::FG),
                     );
                 }
             }
@@ -3883,7 +3817,9 @@ fn render_requirements_editor(
         if focused && row == cursor_row {
             let line_len = line_text.chars().count();
             let cursor_col = ui.cursor_col.min(line_len);
-            let cursor_style = Style::default().fg(Color::White).bg(SELECTION_BG);
+            let cursor_style = Style::default()
+                .fg(Color::White)
+                .bg(theme::EDITOR_SELECTION_BG);
             if line_len == 0 {
                 styled = Line::from(vec![Span::styled(" ", cursor_style)]);
             } else if cursor_col < line_len {

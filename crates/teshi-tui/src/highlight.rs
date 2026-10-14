@@ -1,4 +1,5 @@
-use ratatui::style::{Color, Modifier, Style};
+use crate::theme;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use teshi_core::gherkin_lang::GherkinLanguage;
@@ -48,20 +49,19 @@ pub fn highlight_line_with_state(
     Line::from(spans)
 }
 
-fn kind_to_style(kind: HighlightKind) -> Style {
+/// Shared Gherkin token style; continuation inheritance is resolved by the core highlighter.
+pub(crate) fn kind_to_style(kind: HighlightKind) -> Style {
     match kind {
         HighlightKind::Default => Style::default(),
-        HighlightKind::Comment => Style::default().fg(Color::DarkGray),
-        HighlightKind::Header => Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-        HighlightKind::Tag => Style::default().fg(Color::Yellow),
-        HighlightKind::Given => Style::default().fg(Color::Blue),
-        HighlightKind::When => Style::default().fg(Color::Yellow),
-        HighlightKind::Then => Style::default().fg(Color::Green),
-        HighlightKind::AndBut => Style::default().fg(Color::Gray),
-        HighlightKind::String => Style::default().fg(Color::Green),
-        HighlightKind::Meta | HighlightKind::DocString => Style::default().fg(Color::Blue),
+        HighlightKind::Comment => Style::default().fg(theme::MUTED),
+        HighlightKind::Header => Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+        HighlightKind::Tag => Style::default().fg(theme::ACCENT),
+        HighlightKind::Given => Style::default().fg(theme::PRIMARY),
+        HighlightKind::When => Style::default().fg(theme::WARNING),
+        HighlightKind::Then => Style::default().fg(theme::SUCCESS),
+        HighlightKind::AndBut => Style::default().fg(theme::TAB_INACTIVE),
+        HighlightKind::String => Style::default().fg(theme::SYNTAX_STRING),
+        HighlightKind::Meta | HighlightKind::DocString => Style::default().fg(theme::SECONDARY),
     }
 }
 
@@ -129,13 +129,13 @@ mod tests {
     fn test_and_inherits_previous_major_color() {
         let mut state = StepHighlightState::default();
         let line1 = highlight_line_with_state("When I log in", &mut state, en());
-        assert_eq!(keyword_fg(&line1, "When"), Some(Color::Yellow));
+        assert_eq!(keyword_fg(&line1, "When"), Some(theme::WARNING));
         let line2 = highlight_line_with_state("And I see home", &mut state, en());
-        assert_eq!(keyword_fg(&line2, "And"), Some(Color::Yellow));
+        assert_eq!(keyword_fg(&line2, "And"), Some(theme::WARNING));
         let line3 = highlight_line_with_state("Then I log out", &mut state, en());
-        assert_eq!(keyword_fg(&line3, "Then"), Some(Color::Green));
+        assert_eq!(keyword_fg(&line3, "Then"), Some(theme::SUCCESS));
         let line4 = highlight_line_with_state("And I see login", &mut state, en());
-        assert_eq!(keyword_fg(&line4, "And"), Some(Color::Green));
+        assert_eq!(keyword_fg(&line4, "And"), Some(theme::SUCCESS));
     }
 
     #[test]
@@ -144,7 +144,7 @@ mod tests {
         let _ = highlight_line_with_state("Given A", &mut state, en());
         let _ = highlight_line_with_state("Scenario: Next", &mut state, en());
         let line = highlight_line_with_state("And B", &mut state, en());
-        assert_eq!(keyword_fg(&line, "And"), Some(Color::Gray));
+        assert_eq!(keyword_fg(&line, "And"), Some(theme::TAB_INACTIVE));
     }
 
     fn gutter_keyword_end_col(line: &Line<'_>) -> usize {
