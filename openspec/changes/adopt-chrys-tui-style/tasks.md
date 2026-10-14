@@ -199,3 +199,12 @@
   The local dev install script succeeded. Its default Cargo install resolves
   dependencies independently; a locked reinstall is used for the final
   installed build so it matches the validated workspace lockfile.
+- Final phase committed as `5ec42c0`. Locked dev reinstall succeeded from the
+  isolated worktree at that exact commit; PATH resolves to
+  `C:\Users\lilin\.cargo\bin\teshi.exe`, reporting
+  `0.7.10-local.20261014.2107+0800 (5ec42c0)`.
+  Captured the installed executable across all five tabs and visually verified
+  its Test Points selection, footer and unobscured active underline.
+- Implementation close-out is 31/32 complete. OpenSpec validation passes;
+  archive is pending the user's required main-spec synchronization choice
+  (11 new requirements; no existing main specification).
