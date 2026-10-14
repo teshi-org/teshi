@@ -201,4 +201,36 @@ mod tests {
     fn malformed_registry_fails() {
         assert!(Registry::parse("not json").is_err());
     }
+
+    #[test]
+    fn parses_codebuddy_code_npx_distribution() {
+        const CODEBUDDY_FIXTURE: &str = r#"{
+          "agents": [{
+            "id": "codebuddy-code",
+            "name": "Codebuddy Code",
+            "version": "2.164.0",
+            "description": "Tencent Cloud's official intelligent coding tool",
+            "distribution": {
+              "npx": {
+                "package": "@tencent-ai/codebuddy-code@2.164.0",
+                "args": ["--acp"]
+              }
+            }
+          }]
+        }"#;
+        let reg = Registry::parse(CODEBUDDY_FIXTURE).unwrap();
+        let agent = reg.lookup("codebuddy-code").unwrap();
+        assert_eq!(agent.name.as_deref(), Some("Codebuddy Code"));
+        let dist = agent.resolve_for_platform("windows-x86_64").unwrap();
+        assert!(
+            matches!(
+                dist,
+                ResolvedDistribution::Npx {
+                    package: "@tencent-ai/codebuddy-code@2.164.0",
+                    args,
+                } if args == ["--acp"]
+            ),
+            "unexpected distribution: {dist:?}"
+        );
+    }
 }

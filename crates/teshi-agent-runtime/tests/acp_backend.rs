@@ -159,3 +159,53 @@ fn dropping_backend_closes_worker_and_agent() {
     };
     assert!(!alive, "ACP agent process {pid} survived backend drop");
 }
+
+#[test]
+fn manual_permission_without_host_aborts_turn_when_agent_exits() {
+    // Reproduces the "suddenly stops after a few words" scenario:
+    // ACP agent streams some text, then asks for permission. Teshi's default
+    // ACP backend uses PermissionPolicy::Manual with no PermissionHost, so it
+    // rejects the request. The agent (like CodeBuddy) treats the rejection as
+    // fatal and exits, cutting the response short.
+    let mut backend = backend("permission_then_exit");
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "do task")], None)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut events = Vec::new();
+    while Instant::now() < deadline {
+        match backend.try_next_event() {
+            Ok(Some(event)) => {
+                eprintln!("ACP event: {event:?}");
+                let terminal = matches!(
+                    event,
+                    AgentBackendEvent::Completed { .. } | AgentBackendEvent::Failed(_)
+                );
+                events.push(event);
+                if terminal {
+                    break;
+                }
+            }
+            Ok(None) | Err(std::sync::mpsc::TryRecvError::Empty) => {
+                thread::sleep(Duration::from_millis(10))
+            }
+            Err(error) => panic!("event channel disconnected: {error}"),
+        }
+    }
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentBackendEvent::MessageChunk { content } if content == "hello"
+        )),
+        "expected at least one chunk before the permission failure; got {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentBackendEvent::Failed(error) if error.contains("ACP prompt failed")
+        )),
+        "expected prompt failure after agent exits; got {events:?}"
+    );
+    assert_eq!(backend.status(), AgentBackendStatus::Failed);
+}
