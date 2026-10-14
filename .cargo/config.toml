@@ -1,0 +1,10 @@
+# Local development ergonomics for this checkout.
+#
+# NOTE: `[install] profile = "dev"` is NOT a valid Cargo config key. Cargo
+# silently ignores unknown keys, so `cargo install` would still build the
+# `release` profile (`lto = true` in Cargo.toml). That costs a full LTO link on
+# every iteration (~4 min) and shares no cache with `cargo build`
+# (target/debug). The profile has to be passed explicitly, so use the alias
+# below (or scripts/install-local.ps1 / .sh) instead of bare `cargo install`.
+[alias]
+install-dev = "install --path apps/teshi-cli --profile dev"

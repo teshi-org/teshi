@@ -10,6 +10,37 @@
 
 ## Building
 
+### Terminal application tests
+
+The Rust TUI runner uses the existing `tui-test-rs` framework and has an isolated
+Cargo workspace because its Unicode dependency conflicts with Ratatui 0.29.
+Native workspace checks do not include this runner; run its gates explicitly:
+
+```bash
+cargo build -p teshi-cli --locked
+cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked
+cargo clippy --manifest-path crates/teshi-tui-runner/Cargo.toml --locked --all-targets -- -D warnings
+TESHI_SELF_TEST_BIN="$PWD/target/debug/teshi" cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked -- --ignored
+```
+
+On Windows, set `$env:TESHI_SELF_TEST_BIN = (Resolve-Path target/debug/teshi.exe).Path`
+before the final command. CI runs the real PTY backend and self-regressions on
+Windows and Linux. The self-tests launch the actual Teshi TUI with isolated data
+directories, replay the English and Chinese `@tui` Features, and verify saved file
+contents after navigation, running a scenario from Explore, editing, saving and
+exit. These regressions have also been verified locally on Windows and Linux
+(WSL). The CI matrix keeps both platforms covered independently.
+
+For another application, install the runner with
+`cargo install --path crates/teshi-tui-runner --profile dev --locked`, record a
+`name.tui.json` sidecar next to `name.feature`, then run `teshi tui name.feature`.
+Use `--scenario NAME` to select a scenario and `--runner-cmd PATH` or
+`TESHI_TUI_RUNNER` to locate the runner. `teshi run` and Explore select it when all
+selected Features have TUI sidecars and no external runner is configured.
+Explicit external runner configuration retains precedence. See
+[the runner guide](../crates/teshi-tui-runner/README.md) for the action schema,
+failure evidence and current Gherkin limitations.
+
 `teshi-web` is the web GPUI shell and compiles only for `wasm32-unknown-unknown`. On native hosts (Linux/macOS/Windows), exclude it from workspace commands:
 
 ```bash
@@ -27,9 +58,44 @@ bash scripts/build-teshi-web.sh
 
 This requires the nightly toolchain, the `wasm32-unknown-unknown` target, and the `wasm-bindgen` CLI.
 
+## Installing the local build (development loop)
+
+Install the CLI from the checkout so `teshi` resolves from any directory and every
+agent tool picks up the same binary:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-local.ps1   # Windows
+bash scripts/install-local.sh                                                   # Linux / WSL
+```
+
+Both wrappers run `cargo install --path apps/teshi-cli --profile dev`.
+
+`--profile dev` is not optional. `cargo install` defaults to `release`, and
+`[profile.release]` enables `lto = true`, so a bare install rebuilds and relinks the
+whole workspace every iteration (~4 min) instead of reusing the `target/debug` cache
+that `cargo build` maintains. Measured with the dev profile: ~14 s after a one-line
+edit, ~4 s when nothing changed.
+
+No Cargo config key changes the default install profile — Cargo ignores unknown keys
+silently, so `[install] profile = "dev"` has no effect and the omitted flag silently
+costs a full release build. Use the wrappers, or pass the flag explicitly.
+
+Reserve the packaged `setup.exe` flow below for work that targets the installer or the
+update stream; that path cannot be exercised any other way, and it is what pays for the
+full release build.
+
 ## Local source build identity
 
-Use `TESHI_BUILD_CHANNEL=local` for a deliberately identified source build,
+`crates/teshi-core/build.rs` derives a complete `local` identity automatically
+whenever the build injects no `TESHI_BUILD_*` variable at all, so plain `cargo run`,
+`cargo build`, and `cargo install --path apps/teshi-cli` already report as local
+source builds; no manual export is needed for day-to-day iteration. The fallback is
+all-or-nothing: if any `TESHI_BUILD_*` variable is set, the rest are passed through
+untouched, so a half-configured CI job still fails closed to `dev` rather than
+looking like a deliberate local build.
+
+To pin identity explicitly, which is what release automation does, use
+`TESHI_BUILD_CHANNEL=local` for a deliberately identified source build,
 separate from GitHub stable/nightly streams. Set `TESHI_GIT_SHA` to the full
 source commit, `TESHI_BUILD_TIMESTAMP` to a UTC RFC3339 timestamp,
 `TESHI_BUILD_DATE` to its `YYYYMMDD` date, and `TESHI_BUILD_SEQUENCE` to a positive
