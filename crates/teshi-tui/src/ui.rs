@@ -4351,18 +4351,61 @@ const AGENT_PROFILE_PANEL_MIN_WIDTH: u16 = 60;
 fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let panel = agent_profile_panel_rect(area);
     frame.render_widget(Clear, panel);
-    let title = match app.agent_panel_mode {
-        crate::app::AgentPanelMode::SelectBackend => " Select Agent for this session ",
-        crate::app::AgentPanelMode::InstalledAcp => " Installed ACP Agents ",
-        crate::app::AgentPanelMode::Registry => " Official ACP Registry ",
-        _ => " Agents ",
+    let (title, hint) = match app.agent_panel_mode {
+        crate::app::AgentPanelMode::SelectBackend => (
+            " Select Agent for this session ".to_string(),
+            "↑↓ move · Enter select · Esc close",
+        ),
+        crate::app::AgentPanelMode::InstalledAcp => (
+            format!(
+                " Installed ACP Agents ({}) ",
+                app.installed_acp_agents.len()
+            ),
+            "↑↓ move · Enter select · i Registry · Esc close",
+        ),
+        crate::app::AgentPanelMode::Registry => (
+            format!(
+                " Official ACP Registry ({} agents) ",
+                app.acp_registry_agents.len()
+            ),
+            "↑↓ move · Enter install · Esc close",
+        ),
+        _ => (" Agents ".to_string(), "Esc close"),
     };
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .title(title)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(Color::Cyan))
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
     let inner = block.inner(panel);
     frame.render_widget(block, panel);
+    let [list_area, footer_area] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .areas(inner);
+    frame.render_widget(
+        Paragraph::new(Line::styled(hint, Style::default().fg(Color::DarkGray))),
+        footer_area,
+    );
+
+    let muted = Style::default().fg(Color::DarkGray);
+    let id_style = Style::default().fg(Color::Cyan);
+    let detail_width = list_area.width.saturating_sub(4) as usize;
+    let selected_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let rows = |index| {
+        if index == app.agent_profile_panel_selection {
+            selected_style
+        } else {
+            Style::default()
+        }
+    };
     let mut lines: Vec<Line<'static>> = Vec::new();
     if app.agent_panel_mode == crate::app::AgentPanelMode::SelectBackend {
         let marker = if app.agent_profile_panel_selection == 0 {
@@ -4376,7 +4419,11 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         } else {
             ""
         };
-        lines.push(Line::from(format!("{marker}Teshi Native{active}")));
+        lines.push(Line::from(vec![
+            Span::raw(marker),
+            Span::styled("Teshi Native", rows(0)),
+            Span::styled(active, Style::default().fg(Color::Green)),
+        ]));
     }
     match app.agent_panel_mode {
         crate::app::AgentPanelMode::SelectBackend | crate::app::AgentPanelMode::InstalledAcp => {
@@ -4395,19 +4442,13 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 } else {
                     ""
                 };
-                lines.push(Line::from(format!(
-                    "{marker}{} ({}) [installed]{active}",
-                    agent.name, agent.id
-                )));
-            }
-            if app.agent_panel_mode == crate::app::AgentPanelMode::InstalledAcp {
-                lines.push(Line::from(""));
-                lines.push(Line::from(
-                    "Press i to browse and install from the Registry.",
-                ));
-                lines.push(Line::from(
-                    "Custom: /acp add <id> [\"program\",\"arg\",...]",
-                ));
+                lines.push(Line::from(vec![
+                    Span::raw(marker),
+                    Span::styled(agent.name.clone(), rows(row)),
+                    Span::styled(format!(" ({}) ", agent.id), id_style),
+                    Span::styled("[installed]", Style::default().fg(Color::Green)),
+                    Span::styled(active, Style::default().fg(Color::Green)),
+                ]));
             }
         }
         crate::app::AgentPanelMode::Registry => {
@@ -4417,35 +4458,63 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 } else {
                     "  "
                 };
-                let installed = if app
+                let (badge, badge_style) = if app
                     .installed_acp_agents
                     .iter()
                     .any(|item| item.id == agent.id)
                 {
-                    "installed"
+                    ("[installed]", Style::default().fg(Color::Green))
                 } else {
-                    "available"
+                    ("[available]", muted)
                 };
-                lines.push(Line::from(format!(
-                    "{marker}{} ({}) [{installed}]",
-                    agent.name.as_deref().unwrap_or(&agent.id),
-                    agent.id
-                )));
-                lines.push(Line::from(format!(
-                    "   {}",
-                    agent.description.as_deref().unwrap_or("No description")
-                )));
+                lines.push(Line::from(vec![
+                    Span::raw(marker),
+                    Span::styled(agent.name.clone().unwrap_or(agent.id.clone()), rows(index)),
+                    Span::styled(format!(" ({}) ", agent.id), id_style),
+                    Span::styled(badge, badge_style),
+                ]));
+                let description = agent.description.as_deref().unwrap_or("No description");
+                lines.push(Line::styled(
+                    format!("   {}", truncate_str_to_width(description, detail_width)),
+                    muted,
+                ));
+                lines.push(Line::raw(""));
             }
         }
         _ => {}
     }
-    let selected_line = if app.agent_panel_mode == crate::app::AgentPanelMode::Registry {
-        app.agent_profile_panel_selection * 2
+    if lines.is_empty() {
+        let label = match app.agent_panel_mode {
+            crate::app::AgentPanelMode::Registry if app.acp_registry_rx.is_some() => {
+                "Loading official ACP Registry..."
+            }
+            crate::app::AgentPanelMode::Registry => "No agents published in the registry",
+            crate::app::AgentPanelMode::InstalledAcp => {
+                "No ACP agents installed · press i to browse the Registry"
+            }
+            _ => "No agents available",
+        };
+        frame.render_widget(
+            Paragraph::new(Line::styled(label, muted)).alignment(Alignment::Center),
+            Rect::new(
+                list_area.x,
+                list_area.y + list_area.height / 2,
+                list_area.width,
+                1,
+            ),
+        );
+        return;
+    }
+    let per_row = if app.agent_panel_mode == crate::app::AgentPanelMode::Registry {
+        3
     } else {
-        app.agent_profile_panel_selection
+        1
     };
-    let scroll = selected_line.saturating_sub(inner.height.saturating_sub(3) as usize);
-    frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), inner);
+    let selected_line = app.agent_profile_panel_selection * per_row;
+    let scroll = selected_line
+        .saturating_add(per_row)
+        .saturating_sub(list_area.height as usize);
+    frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), list_area);
 }
 const AGENT_PROFILE_PANEL_MAX_WIDTH: u16 = 100;
 const AGENT_PROFILE_PANEL_MIN_HEIGHT: u16 = 18;
