@@ -10796,6 +10796,53 @@ mod tests {
     }
 
     #[test]
+    fn test_tab_click_moves_underline_to_registered_title() {
+        let mut app = App::from_args().expect("app init should work");
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let regions = app
+            .clickable_regions
+            .iter()
+            .filter_map(|region| match region {
+                ClickableRegion::Tab { tab, rect } => Some((*tab, *rect)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(regions.len(), 5);
+        for (tab, rect) in regions {
+            app.handle_mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                rect.x + rect.width / 2,
+                rect.y,
+                KeyModifiers::NONE,
+            )
+            .unwrap();
+            assert_eq!(app.active_tab, tab);
+            terminal
+                .draw(|frame| crate::ui::render(frame, &mut app))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            for x in 0..83 {
+                assert_eq!(
+                    buffer[(x, 1)].symbol(),
+                    if (rect.x..rect.right()).contains(&x) {
+                        "━"
+                    } else {
+                        "─"
+                    },
+                    "tab {tab:?}, column {x}"
+                );
+                if (rect.x..rect.right()).contains(&x) {
+                    assert_eq!(buffer[(x, 1)].fg, crate::theme::PRIMARY);
+                    assert_eq!(buffer[(x, 0)].bg, crate::theme::TAB_ACTIVE_BG);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_clipped_tab_title_only_registers_visible_columns() {
         let mut app = App::from_args().expect("app init should work");
         render_test_app(&mut app, 70);

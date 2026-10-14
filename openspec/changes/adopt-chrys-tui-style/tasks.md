@@ -12,12 +12,12 @@
 
 ## 2. Phase 1: Global chrome
 
-- [ ] 2.1 Restyle the top tab bar. Inactive tabs use `TAB_INACTIVE`; the active tab is bold on `TAB_ACTIVE_BG`. Keep the `ratatui::Tabs` padding and divider constants unchanged.
-- [ ] 2.2 Replace the divider and version row with a `BORDER` `─` rule plus a `PRIMARY` `━` segment under the active tab's registered `ClickableRegion::Tab` rect. Keep the version label right-aligned in the muted color.
-- [ ] 2.3 Switch the footer helpers (`footer_pill`, `footer_hints`, `render_explore_footer`, `render_ai_footer`) to `key_hint` and `footer_line` on the `FOOTER_BG` strip, without changing any hint text. Style `status_message` in `WARNING` bold.
-- [ ] 2.4 Move these popups to `popup_block`, `selected_row`, and `chip`: auth, model list and form, session, quit, approval, ACP agent, agent profile, failure detail, external change, change summary, scenario dropdown, step keyword picker, and the requirements overlay. Then remove `popup_highlight_block`.
-- [ ] 2.5 Add a `TestBackend` test that clicks every tab, checks that the tab activates, and checks that the `━` segment lines up with that tab's title.
-- [ ] 2.6 Lower the `ui.rs` cap in the budget test, run the gates, install with `scripts/install-local.ps1`, check the result visually, and commit as `feat(tui): apply chrys style to tabs, footers, and popups`.
+- [x] 2.1 Restyle the top tab bar. Inactive tabs use `TAB_INACTIVE`; the active tab is bold on `TAB_ACTIVE_BG`. Keep the `ratatui::Tabs` padding and divider constants unchanged.
+- [x] 2.2 Replace the divider and version row with a `BORDER` `─` rule plus a `PRIMARY` `━` segment under the active tab's registered `ClickableRegion::Tab` rect. Keep the version label right-aligned in the muted color.
+- [x] 2.3 Switch the footer helpers (`footer_pill`, `footer_hints`, `render_explore_footer`, `render_ai_footer`) to `key_hint` and `footer_line` on the `FOOTER_BG` strip, without changing any hint text. Style `status_message` in `WARNING` bold.
+- [x] 2.4 Move these popups to `popup_block`, `selected_row`, and `chip`: auth, model list and form, session, quit, approval, ACP agent, agent profile, failure detail, external change, change summary, scenario dropdown, step keyword picker, and the requirements overlay. Then remove `popup_highlight_block`.
+- [x] 2.5 Add a `TestBackend` test that clicks every tab, checks that the tab activates, and checks that the `━` segment lines up with that tab's title.
+- [x] 2.6 Lower the `ui.rs` cap in the budget test, run the gates, install with `scripts/install-local.ps1`, check the result visually, and commit as `feat(tui): apply chrys style to tabs, footers, and popups`.
 
 ## 3. Phase 2: Explore tab and editor
 
@@ -77,3 +77,32 @@
 - The complete workspace suite passed with isolated temporary directories and
   `-- --test-threads=1`; no tests were skipped beyond their existing ignore flags.
   No project discovery code or user configuration was changed.
+
+### Global chrome implementation and installation gate
+
+- Tasks 2.1–2.5 are implemented: registered-region tab underline, themed footer
+  hints and status strip, rounded popup chrome, full-width option selection and
+  action badges. All five tab click/underline assertions pass.
+- The `ui.rs` color budget was lowered from 182 to 99. Consumed foundation items
+  no longer carry their temporary dead-code allowances.
+- Passed workspace Clippy and the complete workspace tests using the isolated
+  temporary root and `-- --test-threads=1`.
+- Unchanged real-PTY self-tests `english_tui_command_edits_and_saves` and
+  `chinese_run_command_routes_to_tui_and_saves` passed against the newly built CLI.
+- Installation through `scripts/install-local.ps1` built successfully but failed
+  replacing `C:\Users\lilin\.cargo\bin\teshi.exe` with access denied (os error 5).
+  Process 8900 was running that exact executable. It was not terminated.
+- Task 2.6 remains unchecked: installation, visual inspection and phase commit
+  are pending normal closure of the installed application. Later phases have
+  not started. The existing runner change was independently committed as
+  `d0d8bab`; it is not part of this style implementation.
+
+- After the user closed the application, the local install script succeeded.
+  Captured installed-binary PTY viewports for all five tabs and the model popup
+  in an isolated fixture; reviewed the rendered model screenshot for active tab
+  fill/underline, rounded purple popup, full-width selected option and footer.
+  The agent shell inherits `NO_COLOR=1` and `TERM=dumb`; capture child overrides
+  were limited to `NO_COLOR=""`, `TERM=xterm-256color`, `COLORTERM=truecolor`.
+  Captures are under `D:\teshi-style-tests-e71789e671124e31b7ffe7d82d0a59d6`.
+  Task 2.6 is now complete. Final added helper tests passed (358 unit tests,
+  1 existing ignored test, 2 doctests) and workspace Clippy passed again.

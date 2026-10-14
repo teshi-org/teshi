@@ -45,20 +45,12 @@ pub(crate) const CURSOR_FG: Color = Color::Rgb(0x30, 0x30, 0x30);
 pub(crate) const CHIP_FG: Color = Color::Rgb(0x1C, 0x1C, 0x1C);
 
 /// Full-width footer strip.
-// Consumed by subsequent surface migrations in adopt-chrys-tui-style.
-#[allow(dead_code)]
 pub(crate) const FOOTER_BG: Color = Color::Rgb(0x26, 0x26, 0x26);
 /// Footer hint descriptions.
-// Consumed by subsequent surface migrations in adopt-chrys-tui-style.
-#[allow(dead_code)]
 pub(crate) const FOOTER_DESC: Color = Color::Rgb(0xD0, 0xD0, 0xD0);
 /// Active tab surface.
-// Consumed by subsequent surface migrations in adopt-chrys-tui-style.
-#[allow(dead_code)]
 pub(crate) const TAB_ACTIVE_BG: Color = Color::Rgb(0x41, 0x37, 0x55);
 /// Inactive tabs and continuation keywords.
-// Consumed by subsequent surface migrations in adopt-chrys-tui-style.
-#[allow(dead_code)]
 pub(crate) const TAB_INACTIVE: Color = Color::Rgb(0xB2, 0xB2, 0xB2);
 /// Selection retained outside the focused widget.
 pub(crate) const SELECTION_INACTIVE_BG: Color = Color::Rgb(0x44, 0x44, 0x44);
@@ -102,10 +94,48 @@ pub(crate) fn panel_block<'a>(title: impl Into<Line<'a>>, focused: bool) -> Bloc
 }
 
 /// Popup chrome; the caller must clear the destination before rendering.
-// Consumed by subsequent surface migrations in adopt-chrys-tui-style.
-#[allow(dead_code)]
 pub(crate) fn popup_block<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
     panel_block(title, true)
+}
+
+/// Extends a selected option's fill across its row, including styled metadata.
+pub(crate) fn popup_rows<'a>(lines: Vec<Line<'a>>, width: u16) -> Vec<Line<'a>> {
+    lines
+        .into_iter()
+        .map(|mut line| {
+            if line.style.bg == Some(CURSOR_BG)
+                || line
+                    .spans
+                    .iter()
+                    .any(|span| span.style.bg == Some(CURSOR_BG))
+            {
+                let selection = selected_row(true);
+                for span in &mut line.spans {
+                    span.style = span.style.patch(selection);
+                }
+                let padding = (width as usize).saturating_sub(line.width());
+                line.push_span(Span::styled(" ".repeat(padding), selection));
+                line.style = selection;
+            }
+            line
+        })
+        .collect()
+}
+
+/// Popup action badges without altering label text or spacing.
+pub(crate) fn action_line(text: &'static str) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('[') {
+        let Some(end) = rest[start..].find(']').map(|end| start + end + 1) else {
+            break;
+        };
+        spans.push(Span::raw(&rest[..start]));
+        spans.push(chip(&rest[start..end], PRIMARY));
+        rest = &rest[end..];
+    }
+    spans.push(Span::styled(rest, muted()));
+    Line::from(spans)
 }
 
 /// Selection fill to apply across the entire row.
@@ -132,8 +162,6 @@ pub(crate) fn chip<'a>(label: impl Into<std::borrow::Cow<'a, str>>, bg: Color) -
 }
 
 /// Key and description spans retaining the supplied punctuation and spacing.
-// Consumed by subsequent surface migrations in adopt-chrys-tui-style.
-#[allow(dead_code)]
 pub(crate) fn key_hint<'a>(key: &'a str, desc: &'a str) -> Vec<Span<'a>> {
     vec![
         Span::styled(
@@ -148,16 +176,33 @@ pub(crate) fn key_hint<'a>(key: &'a str, desc: &'a str) -> Vec<Span<'a>> {
 }
 
 /// Footer line; paragraph styling should extend its background to the full strip.
-// Consumed by subsequent surface migrations in adopt-chrys-tui-style.
-#[allow(dead_code)]
-pub(crate) fn footer_line<'a>(hints: impl IntoIterator<Item = (&'a str, &'a str)>) -> Line<'a> {
-    Line::from(
-        hints
-            .into_iter()
-            .flat_map(|(key, desc)| key_hint(key, desc))
-            .collect::<Vec<_>>(),
-    )
-    .style(Style::default().fg(FOOTER_DESC).bg(FOOTER_BG))
+pub(crate) fn footer_line(hints: impl IntoIterator<Item = Span<'static>>) -> Line<'static> {
+    let mut spans = Vec::new();
+    for hint in hints {
+        let text = hint.content;
+        let mut rest = text.as_ref();
+        // Preserve the legacy description-before-key wording and all whitespace.
+        while let Some(start) = rest.find('[') {
+            let Some(end) = rest[start..].find(']').map(|end| start + end + 1) else {
+                break;
+            };
+            spans.push(Span::styled(
+                rest[..start].to_owned(),
+                Style::default().fg(FOOTER_DESC),
+            ));
+            spans.extend(
+                key_hint(&rest[start..end], "")
+                    .into_iter()
+                    .map(|span| Span::styled(span.content.into_owned(), span.style)),
+            );
+            rest = &rest[end..];
+        }
+        spans.push(Span::styled(
+            rest.to_owned(),
+            Style::default().fg(FOOTER_DESC).patch(hint.style),
+        ));
+    }
+    Line::from(spans).style(Style::default().fg(FOOTER_DESC).bg(FOOTER_BG))
 }
 
 /// Low-emphasis metadata style.
@@ -254,9 +299,42 @@ mod tests {
     }
 
     #[test]
+    fn test_footer_preserves_text_and_styles_only_key_as_primary() {
+        let line = footer_line([Span::raw(" Save [Ctrl+s] ")]);
+        assert_eq!(line.to_string(), " Save [Ctrl+s] ");
+        assert_eq!(line.style.bg, Some(FOOTER_BG));
+        let key = line
+            .spans
+            .iter()
+            .find(|span| span.content == "[Ctrl+s]")
+            .unwrap();
+        assert_eq!(key.style.fg, Some(PRIMARY));
+        assert!(key.style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(line.spans[0].style.fg, Some(FOOTER_DESC));
+    }
+
+    #[test]
+    fn test_popup_selection_fills_metadata_and_trailing_cells() {
+        let lines = popup_rows(
+            vec![Line::from(vec![
+                Span::styled("Selected", selected_row(true)),
+                Span::styled(" meta", muted()),
+            ])],
+            20,
+        );
+        assert_eq!(lines[0].width(), 20);
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .all(|span| span.style.bg == Some(CURSOR_BG) && span.style.fg == Some(CURSOR_FG))
+        );
+    }
+
+    #[test]
     fn test_page_color_budget() {
         const CAPS: &[(&str, &str, usize)] = &[
-            ("ui.rs", include_str!("ui.rs"), 182),
+            ("ui.rs", include_str!("ui.rs"), 99),
             ("highlight.rs", include_str!("highlight.rs"), 14),
             ("mindmap.rs", include_str!("mindmap.rs"), 19),
             ("authoring_tab.rs", include_str!("authoring_tab.rs"), 10),

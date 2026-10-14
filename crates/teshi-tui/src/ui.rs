@@ -1,8 +1,9 @@
+use crate::theme;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Tabs};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use tui_tree_widget::Tree;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -34,8 +35,6 @@ const KEYWORD_WHEN: Color = Color::Yellow;
 const KEYWORD_THEN: Color = Color::Green;
 const KEYWORD_AND: Color = Color::Gray;
 const KEYWORD_BUT: Color = Color::Gray;
-const EXPLORE_SELECTED_FOCUSED_BG: Color = Color::Rgb(16, 64, 168);
-const EXPLORE_SELECTED_UNFOCUSED_BG: Color = Color::Rgb(125, 170, 242);
 const SELECTION_BG: Color = Color::Rgb(64, 96, 160);
 const SELECTION_FG: Color = Color::White;
 const HIGHLIGHT_SELECTED_FG: Color = Color::Yellow;
@@ -126,14 +125,6 @@ fn selected_style(focused: bool) -> Style {
     } else {
         Style::default().fg(HIGHLIGHT_UNFOCUSED_FG)
     }
-}
-
-fn popup_highlight_block(title: &'static str) -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .title_style(Style::default().fg(EXPLORE_SELECTED_FOCUSED_BG))
-        .border_style(Style::default().fg(EXPLORE_SELECTED_UNFOCUSED_BG))
 }
 
 /// Applies `patch` on UTF-8 character indices `[range.start, range.end)` within each span.
@@ -303,10 +294,11 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         MainTab::Requirements => 3,
         MainTab::TestPoints => 4,
     })
-    .style(Style::default().fg(Color::DarkGray))
+    .style(Style::default().fg(theme::TAB_INACTIVE))
     .highlight_style(
         Style::default()
-            .fg(Color::White)
+            .fg(theme::FG)
+            .bg(theme::TAB_ACTIVE_BG)
             .add_modifier(Modifier::BOLD),
     )
     .padding(TAB_PADDING_LEFT, TAB_PADDING_RIGHT)
@@ -327,12 +319,12 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         let rule_w = rule_area.width as usize;
         let divider_line = "─".repeat(rule_w.max(1));
         frame.render_widget(
-            Paragraph::new(divider_line).style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(divider_line).style(Style::default().fg(theme::BORDER)),
             rule_area,
         );
         frame.render_widget(
             Paragraph::new(version_text)
-                .style(Style::default().fg(Color::DarkGray))
+                .style(theme::muted())
                 .alignment(Alignment::Right),
             version_area,
         );
@@ -340,11 +332,40 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         let divider_w = chunks[1].width as usize;
         let divider_line = "─".repeat(divider_w.max(1));
         frame.render_widget(
-            Paragraph::new(divider_line).style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(divider_line).style(Style::default().fg(theme::BORDER)),
             chunks[1],
         );
     }
 
+    if let Some(rect) = app
+        .clickable_regions
+        .iter()
+        .find_map(|region| match region {
+            ClickableRegion::Tab { tab, rect } if *tab == app.active_tab => Some(*rect),
+            _ => None,
+        })
+    {
+        let available = if !app.version.is_empty() && chunks[1].width > version_width + 1 {
+            chunks[1].width - version_width
+        } else {
+            chunks[1].width
+        };
+        let width = rect
+            .width
+            .min(chunks[1].x.saturating_add(available).saturating_sub(rect.x));
+        if width > 0 && chunks[1].height > 0 {
+            frame.render_widget(
+                Paragraph::new("━".repeat(width as usize))
+                    .style(Style::default().fg(theme::PRIMARY)),
+                Rect::new(rect.x, chunks[1].y, width, 1),
+            );
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new("").style(Style::default().bg(theme::FOOTER_BG).fg(theme::FOOTER_DESC)),
+        chunks[3],
+    );
     render_main_panel(frame, app, chunks[2]);
 
     // Agent change approval status is shown only in the AI chat panel's status
@@ -353,7 +374,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         let status_line = Line::from(vec![Span::styled(
             msg.as_str(),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme::WARNING)
+                .bg(theme::FOOTER_BG)
                 .add_modifier(Modifier::BOLD),
         )]);
         frame.render_widget(Paragraph::new(status_line), chunks[3]);
@@ -383,7 +405,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     } else if app.active_tab == MainTab::TestPoints {
         frame.render_widget(crate::test_points_tab::test_points_footer_line(), chunks[3]);
     } else {
-        let key_hints = footer_hints(app);
+        let key_hints = theme::footer_line(footer_hints(app).spans);
         frame.render_widget(Paragraph::new(key_hints), chunks[3]);
     }
 
@@ -482,7 +504,7 @@ fn render_ai_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Style::default().fg(crate::theme::WARNING),
         ));
     }
-    let hints = Line::from(hint_spans);
+    let hints = theme::footer_line(hint_spans);
     frame.render_widget(Paragraph::new(hints), area);
 }
 
@@ -1535,7 +1557,7 @@ fn render_failure_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
 
     frame.render_widget(Clear, popup);
-    let block = popup_highlight_block("Failure Details");
+    let block = theme::popup_block("Failure Details");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -1569,11 +1591,7 @@ fn render_external_change_prompt(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
 
     frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .title_style(Style::default().fg(EXPLORE_SELECTED_FOCUSED_BG))
-        .border_style(Style::default().fg(EXPLORE_SELECTED_UNFOCUSED_BG));
+    let block = theme::popup_block(title);
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     if inner.width == 0 || inner.height == 0 {
@@ -1583,8 +1601,8 @@ fn render_external_change_prompt(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let lines = vec![
         Line::raw(format!("Detected external updates for {file_name}.")),
         Line::raw(""),
-        Line::raw("Reload latest input: [Enter] / [r]"),
-        Line::raw("Keep local buffer: [Esc] / [k]"),
+        theme::action_line("Reload latest input: [Enter] / [r]"),
+        theme::action_line("Keep local buffer: [Esc] / [k]"),
     ];
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
@@ -1607,7 +1625,7 @@ fn render_change_summary_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let popup = Rect::new(popup_x, popup_y, popup_w, popup_h);
 
     frame.render_widget(Clear, popup);
-    let block = popup_highlight_block("Change Summary");
+    let block = theme::popup_block("Change Summary");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     if inner.width < 10 || inner.height < 3 {
@@ -1621,7 +1639,7 @@ fn render_change_summary_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         " {} change(s) pending — ↑↓ navigate, Enter jump, Esc close",
         app.pending_change_summary.len()
     );
-    lines.push(Line::styled(header, Style::default().fg(Color::DarkGray)));
+    lines.push(Line::styled(header, Style::default().fg(theme::MUTED)));
     lines.push(Line::raw(""));
 
     // List each change node
@@ -1632,9 +1650,9 @@ fn render_change_summary_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
             "  "
         };
         let (label, label_color) = match node.kind {
-            crate::app::ChangeKind::Added => ("[+]", Color::Green),
-            crate::app::ChangeKind::Modified => ("[~]", Color::Yellow),
-            crate::app::ChangeKind::Deleted => ("[-]", Color::Red),
+            crate::app::ChangeKind::Added => ("[+]", theme::SUCCESS),
+            crate::app::ChangeKind::Modified => ("[~]", theme::WARNING),
+            crate::app::ChangeKind::Deleted => ("[-]", theme::ERROR),
             crate::app::ChangeKind::Unchanged => continue,
         };
         let label_span = Span::styled(
@@ -1645,20 +1663,23 @@ fn render_change_summary_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         );
         let scenario_span = Span::styled(
             format!(" {}  ", node.scenario_name),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(theme::PRIMARY),
         );
         let step_span = Span::raw(node.step_text.clone());
         let mut line = Line::from(vec![label_span, scenario_span, step_span]);
         // Highlight selected row
         if i == app.change_summary_selection {
-            line = apply_line_background(line, Style::default().bg(Color::Rgb(30, 30, 60)));
+            line = apply_line_background(line, theme::selected_row(true));
         }
         line = truncate_line_to_cols(line, inner.width);
         line = pad_line_to_width(line, inner.width, Style::default());
         lines.push(line);
     }
 
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(theme::popup_rows(lines, inner.width))),
+        inner,
+    );
 }
 
 fn apply_line_background(line: Line<'static>, bg: Style) -> Line<'static> {
@@ -1910,10 +1931,7 @@ fn render_scenario_dropdown(
     }
 
     // Render dropdown block
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Open Scenario")
-        .border_style(Style::default().fg(Color::Cyan));
+    let block = theme::popup_block("Open Scenario");
     let inner = block.inner(dropdown_area);
     frame.render_widget(Clear, dropdown_area);
     frame.render_widget(block, dropdown_area);
@@ -1928,24 +1946,25 @@ fn render_scenario_dropdown(
         let is_selected = idx == selection;
         let prefix = if is_selected { "▸ " } else { "  " };
         let style = if is_selected {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
+            theme::selected_row(true)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(theme::FG)
         };
         let text = truncate_str(item, inner.width.saturating_sub(2) as usize);
         lines.push(Line::styled(format!("{}{}", prefix, text), style));
     }
 
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(theme::popup_rows(lines, inner.width))),
+        inner,
+    );
 
     // Hint line at the bottom of the dropdown area
     if dropdown_area.y + dropdown_area.height < area.y + area.height {
         let hint_y = dropdown_area.y + dropdown_area.height;
         let hint_line = Line::styled(
             " j/k navigate · Enter select · Esc close ",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         );
         frame.render_widget(
             Paragraph::new(hint_line),
@@ -2384,7 +2403,7 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rec
 
     frame.render_widget(Clear, area);
 
-    let block = Block::default().borders(Borders::ALL).title(TITLE);
+    let block = theme::popup_block(TITLE);
     let inner = block.inner(area);
     if inner.width == 0 || inner.height == 0 {
         return;
@@ -2393,7 +2412,7 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rec
     let row_width = inner.width as usize;
     let max_rows = inner.height as usize;
 
-    let selected_row_style = selected_style(true);
+    let selected_row_style = theme::selected_row(true);
     let normal = Style::default();
 
     let mut lines: Vec<Line> = Vec::with_capacity(max_rows.min(n_items));
@@ -2620,11 +2639,11 @@ fn render_explore_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         out
     };
 
-    frame.render_widget(Paragraph::new(text), area);
+    frame.render_widget(Paragraph::new(theme::footer_line([Span::raw(text)])), area);
 }
 
 fn footer_pill(label: &'static str) -> Span<'static> {
-    Span::styled(label, selected_style(false))
+    Span::raw(label)
 }
 
 fn footer_hints(app: &App) -> Line<'static> {
@@ -2740,10 +2759,7 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     frame.render_widget(Clear, panel_area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Auth Management ")
-        .style(Style::default().fg(Color::White));
+    let block = theme::popup_block(" Auth Management ");
     let inner = block.inner(panel_area);
     frame.render_widget(block, panel_area);
 
@@ -2768,7 +2784,7 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
             lines.push(Line::styled(
                 format!("Remove Provider: {}", provider),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme::WARNING)
                     .add_modifier(Modifier::BOLD),
             ));
             lines.push(Line::raw(
@@ -2790,7 +2806,11 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 for profile in &app.model_profiles {
                     let has_key = !profile.api_key.is_empty();
                     let key_status = if has_key { "✓" } else { "✗" };
-                    let key_color = if has_key { Color::Green } else { Color::Red };
+                    let key_color = if has_key {
+                        theme::SUCCESS
+                    } else {
+                        theme::ERROR
+                    };
                     let active = if app.model_active_id.as_deref() == Some(profile.id.as_str()) {
                         " *"
                     } else {
@@ -2818,7 +2838,7 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 lines.push(Line::raw(""));
                 lines.push(Line::from(vec![
                     Span::raw("  Active id: "),
-                    Span::styled(active.as_str(), Style::default().fg(Color::Cyan)),
+                    Span::styled(active.as_str(), Style::default().fg(theme::PRIMARY)),
                 ]));
             }
         }
@@ -2827,10 +2847,10 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         "Esc to close",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme::MUTED),
     ));
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(theme::popup_rows(lines, inner.width)), inner);
 }
 
 /// Renders the model profile management overlay panel.
@@ -2856,10 +2876,7 @@ fn render_model_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 /// Renders the list of model profiles.
 fn render_model_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Model Profiles ")
-        .style(Style::default().fg(Color::White));
+    let block = theme::popup_block(" Model Profiles ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -2871,11 +2888,11 @@ fn render_model_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![Span::styled(
             "  Press 'a' to add one, or place a TOML file in",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         )]));
         lines.push(Line::from(vec![Span::styled(
             "  ~/.config/teshi/models/",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         )]));
     } else {
         for (i, profile) in app.model_profiles.iter().enumerate() {
@@ -2888,11 +2905,9 @@ fn render_model_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
             let active_mark = if is_active { "  [ACTIVE]" } else { "" };
 
             let style = if i == app.model_panel_selection {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
+                theme::selected_row(true)
             } else if is_active {
-                Style::default().fg(Color::Green)
+                Style::default().fg(theme::SUCCESS)
             } else {
                 Style::default()
             };
@@ -2903,9 +2918,9 @@ fn render_model_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Span::raw("  "),
                 Span::styled(
                     format!("{} | {}", profile.provider, profile.model_id),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(theme::PRIMARY),
                 ),
-                Span::styled(active_mark, Style::default().fg(Color::Green)),
+                Span::styled(active_mark, Style::default().fg(theme::SUCCESS)),
             ]));
         }
     }
@@ -2913,18 +2928,15 @@ fn render_model_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         "a add · e edit · d delete · ↑↓ select · Enter activate · Esc close",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme::MUTED),
     ));
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(theme::popup_rows(lines, inner.width)), inner);
 }
 
 /// Renders the model profile form (add or edit).
 fn render_model_form(frame: &mut Frame<'_>, app: &App, title: &str, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .style(Style::default().fg(Color::White));
+    let block = theme::popup_block(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -2946,16 +2958,14 @@ fn render_model_form(frame: &mut Frame<'_>, app: &App, title: &str, area: Rect) 
         let focused = i == app.model_form_focus;
         let indicator = if focused { " ▸ " } else { "   " };
         let label_style = if focused {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
+            theme::selected_row(true)
         } else {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(theme::PRIMARY)
         };
         let val_style = if focused {
-            Style::default().bg(Color::DarkGray).fg(Color::White)
+            theme::selected_row(true)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(theme::FG)
         };
         let display_val = if value.is_empty() {
             if focused {
@@ -2980,14 +2990,10 @@ fn render_model_form(frame: &mut Frame<'_>, app: &App, title: &str, area: Rect) 
         ]));
     }
 
-    let footer = Line::styled(
-        "Save [Enter]  Cancel [Esc]",
-        Style::default().fg(Color::DarkGray),
-    )
-    .alignment(Alignment::Center);
+    let footer = theme::action_line("Save [Enter]  Cancel [Esc]").alignment(Alignment::Center);
     lines.push(footer);
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(theme::popup_rows(lines, inner.width)), inner);
 }
 
 /// Renders the session browser overlay panel.
@@ -3001,10 +3007,7 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     // Dim background
     frame.render_widget(Clear, panel_area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Sessions ")
-        .style(Style::default());
+    let block = theme::popup_block(" Sessions ");
     let inner = block.inner(panel_area);
     frame.render_widget(block, panel_area);
 
@@ -3028,17 +3031,14 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
             let date = session.created_at.as_str();
             let label = format!("{}{} msgs — {}", prefix, session.message_count, date);
             let style = if is_selected {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
+                theme::selected_row(true)
             } else {
                 Style::default()
             };
             lines.push(Line::styled(label, style));
             if let Some(ref ml) = session.model_label {
                 lines.push(
-                    Line::raw(format!("    Model: {ml}"))
-                        .style(Style::default().fg(Color::DarkGray)),
+                    Line::raw(format!("    Model: {ml}")).style(Style::default().fg(theme::MUTED)),
                 );
             }
         }
@@ -3047,11 +3047,14 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         " ↑↓ select · Enter load · d delete · Esc close ",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme::MUTED),
     ));
 
     let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
-    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(theme::popup_rows(visible, inner.width))),
+        inner,
+    );
 }
 
 /// Render the quit confirmation popup panel.
@@ -3064,10 +3067,7 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     frame.render_widget(Clear, panel_area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Quit Teshi? ")
-        .border_style(Style::default().fg(Color::Red));
+    let block = theme::popup_block(" Quit Teshi? ");
     let inner = block.inner(panel_area);
     frame.render_widget(block, panel_area);
 
@@ -3079,7 +3079,7 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let msg_pad = (inner_w.saturating_sub(msg.len())) / 2;
     lines.push(Line::styled(
         format!("{}{}", " ".repeat(msg_pad), msg),
-        Style::default().fg(Color::White),
+        Style::default().fg(theme::FG),
     ));
     lines.push(Line::raw(""));
 
@@ -3116,33 +3116,25 @@ fn render_quit_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         col_right: col_no_start + 6,
     });
 
-    let yes_style = if yes_hovered {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Red)
-            .add_modifier(Modifier::BOLD)
-    } else if yes_focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD)
+    let yes_style = if yes_focused {
+        theme::selected_row(true)
     } else {
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        theme::chip("", theme::ERROR).style
+    };
+    let yes_style = if yes_hovered {
+        yes_style.add_modifier(Modifier::REVERSED)
+    } else {
+        yes_style
+    };
+    let no_style = if no_focused {
+        theme::selected_row(true)
+    } else {
+        theme::chip("", theme::BORDER).style
     };
     let no_style = if no_hovered {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD)
-    } else if no_focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD)
+        no_style.add_modifier(Modifier::REVERSED)
     } else {
-        Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD)
+        no_style
     };
 
     let btn_line = Line::from(vec![
@@ -3174,10 +3166,7 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     frame.render_widget(Clear, panel_area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Approval Mode ")
-        .border_style(Style::default().fg(Color::Cyan));
+    let block = theme::popup_block(" Approval Mode ");
     let inner = block.inner(panel_area);
     frame.render_widget(block, panel_area);
 
@@ -3194,12 +3183,12 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         // ── Title line ──
         let (main_fg, desc_fg, marker) = if is_selected {
             // Selected item: always yellow with arrow, regardless of current
-            (Color::Yellow, Color::DarkGray, "\u{25b6}")
+            (theme::WARNING, theme::MUTED, "\u{25b6}")
         } else if is_current {
             // Current but not selected: dimmed with circle
-            (Color::DarkGray, Color::DarkGray, "\u{25cb}")
+            (theme::MUTED, theme::MUTED, "\u{25cb}")
         } else {
-            (Color::White, Color::Gray, "  ")
+            (theme::FG, theme::TAB_INACTIVE, "  ")
         };
         let title = format!(" {} {}", marker, label);
         let mut title_style =
@@ -3210,6 +3199,9 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 } else {
                     Modifier::empty()
                 });
+        if is_selected {
+            title_style = theme::selected_row(true);
+        }
         // Hover effect: reverse video to indicate clickability
         let is_hovered = app
             .mouse_position
@@ -3241,7 +3233,10 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
-    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(theme::popup_rows(visible, inner.width))),
+        inner,
+    );
 }
 
 /// Sidebar width for the agent configuration modal (matches AI agent sidebar).
@@ -3272,16 +3267,7 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ),
         _ => (" Agents ".to_string(), "Esc close"),
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(title)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
+    let block = theme::popup_block(title);
     let inner = block.inner(panel);
     frame.render_widget(block, panel);
     let [list_area, footer_area] = Layout::default()
@@ -3289,16 +3275,14 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .areas(inner);
     frame.render_widget(
-        Paragraph::new(Line::styled(hint, Style::default().fg(Color::DarkGray))),
+        Paragraph::new(Line::styled(hint, Style::default().fg(theme::MUTED))),
         footer_area,
     );
 
-    let muted = Style::default().fg(Color::DarkGray);
-    let id_style = Style::default().fg(Color::Cyan);
+    let muted = Style::default().fg(theme::MUTED);
+    let id_style = Style::default().fg(theme::PRIMARY);
     let detail_width = list_area.width.saturating_sub(4) as usize;
-    let selected_style = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
+    let selected_style = theme::selected_row(true);
     let rows = |index| {
         if index == app.agent_profile_panel_selection {
             selected_style
@@ -3322,7 +3306,7 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         lines.push(Line::from(vec![
             Span::raw(marker),
             Span::styled("Teshi Native", rows(0)),
-            Span::styled(active, Style::default().fg(Color::Green)),
+            Span::styled(active, Style::default().fg(theme::SUCCESS)),
         ]));
     }
     match app.agent_panel_mode {
@@ -3346,8 +3330,8 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     Span::raw(marker),
                     Span::styled(agent.name.clone(), rows(row)),
                     Span::styled(format!(" ({}) ", agent.id), id_style),
-                    Span::styled("[installed]", Style::default().fg(Color::Green)),
-                    Span::styled(active, Style::default().fg(Color::Green)),
+                    Span::styled("[installed]", Style::default().fg(theme::SUCCESS)),
+                    Span::styled(active, Style::default().fg(theme::SUCCESS)),
                 ]));
             }
         }
@@ -3363,7 +3347,7 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     .iter()
                     .any(|item| item.id == agent.id)
                 {
-                    ("[installed]", Style::default().fg(Color::Green))
+                    ("[installed]", Style::default().fg(theme::SUCCESS))
                 } else {
                     ("[available]", muted)
                 };
@@ -3414,7 +3398,10 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let scroll = selected_line
         .saturating_add(per_row)
         .saturating_sub(list_area.height as usize);
-    frame.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), list_area);
+    frame.render_widget(
+        Paragraph::new(theme::popup_rows(lines, inner.width)).scroll((scroll as u16, 0)),
+        list_area,
+    );
 }
 const AGENT_PROFILE_PANEL_MAX_WIDTH: u16 = 100;
 const AGENT_PROFILE_PANEL_MIN_HEIGHT: u16 = 18;
@@ -3440,16 +3427,7 @@ fn render_agent_profile_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let panel_area = agent_profile_panel_rect(area);
     frame.render_widget(Clear, panel_area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(" Agent Configuration ")
-        .border_style(Style::default().fg(Color::Cyan))
-        .title_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
+    let block = theme::popup_block(" Agent Configuration ");
     let inner = block.inner(panel_area);
     frame.render_widget(block, panel_area);
 
@@ -3469,7 +3447,7 @@ fn render_agent_profile_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
 fn render_agent_profile_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::RIGHT)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(theme::MUTED));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -3492,19 +3470,21 @@ fn render_agent_profile_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
             "  "
         };
         let main_fg = if is_selected {
-            Color::Yellow
+            theme::WARNING
         } else if is_active {
-            Color::Green
+            theme::SUCCESS
         } else {
-            Color::White
+            theme::FG
         };
-        let name_style = Style::default()
-            .fg(main_fg)
-            .add_modifier(if is_selected || is_active {
+        let name_style = if is_selected {
+            theme::selected_row(true)
+        } else {
+            Style::default().fg(main_fg).add_modifier(if is_active {
                 Modifier::BOLD
             } else {
                 Modifier::empty()
-            });
+            })
+        };
 
         let desc = if profile.description.is_empty() {
             "(no description)".to_string()
@@ -3519,7 +3499,7 @@ fn render_agent_profile_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ]));
         lines.push(Line::styled(
             format!("    {}", desc_trunc),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         ));
         if i + 1 < app.agent_registry.len() {
             lines.push(Line::raw(""));
@@ -3529,12 +3509,15 @@ fn render_agent_profile_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if app.agent_registry.is_empty() {
         lines.push(Line::styled(
             "  No profiles",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         ));
     }
 
     let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
-    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(theme::popup_rows(visible, inner.width))),
+        inner,
+    );
 }
 
 /// Right panel: read-only profile summary.
@@ -3559,10 +3542,10 @@ fn render_agent_profile_summary(frame: &mut Frame<'_>, app: &App, area: Rect) {
     };
 
     let section = Style::default()
-        .fg(Color::Cyan)
+        .fg(theme::PRIMARY)
         .add_modifier(Modifier::BOLD);
-    let muted = Style::default().fg(Color::DarkGray);
-    let body = Style::default().fg(Color::White);
+    let muted = Style::default().fg(theme::MUTED);
+    let body = Style::default().fg(theme::FG);
 
     lines.push(Line::styled("Profile", section));
     lines.push(Line::raw(""));
@@ -4027,15 +4010,13 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 .unwrap_or("Requirement");
             frame.render_widget(Clear, panel);
             frame.render_widget(
-                Paragraph::new(format!(
-                    "{title} has unsaved changes.\n\n[S] Save   [D] Discard   [Esc] Cancel"
-                ))
+                Paragraph::new(vec![
+                    Line::raw(format!("{title} has unsaved changes.")),
+                    Line::raw(""),
+                    theme::action_line("[S] Save   [D] Discard   [Esc] Cancel"),
+                ])
                 .wrap(ratatui::widgets::Wrap { trim: false })
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Unsaved requirement "),
-                ),
+                .block(theme::popup_block(" Unsaved requirement ")),
                 panel,
             );
         }
@@ -4064,9 +4045,7 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
                         }
                     };
                     let style = if i == *selection {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
+                        theme::selected_row(true)
                     } else {
                         Style::default()
                     };
@@ -4074,11 +4053,7 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 })
                 .collect();
             frame.render_widget(
-                Paragraph::new(lines).block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Filter iteration "),
-                ),
+                Paragraph::new(lines).block(theme::popup_block(" Filter iteration ")),
                 panel_area,
             );
         }
@@ -4093,11 +4068,8 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
             );
             frame.render_widget(Clear, panel_area);
             frame.render_widget(
-                Paragraph::new(format!("Iteration: {buffer}")).block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Set iteration (empty = Unassigned) "),
-                ),
+                Paragraph::new(format!("Iteration: {buffer}"))
+                    .block(theme::popup_block(" Set iteration (empty = Unassigned) ")),
                 panel_area,
             );
         }
@@ -4138,11 +4110,7 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Line::raw("Enter confirm · Esc cancel · i change iteration"),
         ];
         frame.render_widget(
-            Paragraph::new(lines).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Confirm generation source scope "),
-            ),
+            Paragraph::new(lines).block(theme::popup_block(" Confirm generation source scope ")),
             panel_area,
         );
     }
