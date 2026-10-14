@@ -52,6 +52,7 @@ Preserve visible text, key bindings, tab padding, dividers, and click regions.
 | DIFF_MODIFIED_BG | #3E3226 | Modified-line tint |
 | DIFF_DELETED_BG | #3E2626 | Deleted-line tint |
 | SYNTAX_STRING | #D7AF87 | Gherkin strings |
+| RESET | Terminal default | Unchanged diff surfaces |
 
 ## Component helper catalog
 
@@ -59,6 +60,8 @@ Preserve visible text, key bindings, tab padding, dividers, and click regions.
 |---|---|
 | `panel_block(title, focused)` | Rounded semantic border and PRIMARY bold title |
 | `popup_block(title)` | Focused panel chrome; caller draws Clear first |
+| `popup_rows(lines, width)` | Extend active/inactive selected options across metadata and trailing cells |
+| `action_line(text)` | Preserve action text while rendering bracketed keys as chips |
 | `selected_row(focused)` | Full-row fill style; apply to row widget |
 | `chip(label, bg)` | Solid background, CHIP_FG bold text |
 | `key_hint(key, desc)` | PRIMARY bold key, FOOTER_DESC description |
@@ -67,6 +70,7 @@ Preserve visible text, key bindings, tab padding, dividers, and click regions.
 | `status_style(status)` | Idle muted, running warning, passed success, failed error, skipped border |
 | `diff_style(kind)` | Semantic diff foreground; apply matching tint for tinted rows |
 | `scrollbar_lines(total, height, start)` | Vertical track/thumb with clamped position |
+| `highlight_color(color)` | Map existing named MindMap highlights onto theme roles |
 
 Gherkin: Header FG bold; Tag ACCENT; Given PRIMARY; When WARNING; Then SUCCESS;
 And/But TAB_INACTIVE; Comment MUTED; String SYNTAX_STRING; Meta/DocString SECONDARY.
@@ -114,3 +118,61 @@ For every phase run formatting, workspace clippy and workspace tests excluding
 the wasm-only teshi-web crate. Install with the dev-profile local install script
 and inspect the affected surfaces visually. Record failed gates and visual
 acceptance separately; text tests alone do not prove visual acceptance.
+
+## Reviewed tab samples
+
+These compact text samples show the preserved structure of real PTY captures.
+The terminal owns the background; footer strips span the full width. Active
+tab underlines follow registered click regions, including clipped tab widths.
+When a local version label would overlap the active underline, keep the complete
+registered underline and clip the version's right-aligned viewport to the space
+remaining after it. Do not shrink or move the active tab's click region.
+
+```text
+Explore [1]
+━━━━━━━━━━━━━
+╭Features────╮╭Scenarios (1)──────────────╮╭Steps────────────────────────╮
+│ sample     ││● Show the shared palette││Given a feature is selected  │
+╰────────────╯╰─────────────────────────╯╰─────────────────────────────╯
+sample  Show the shared palette                                0/1 通过
+```
+
+```text
+MindMap [2]
+━━━━━━━━━━━━━
+╭MindMap────────────────────╮╭Scenario: Show the shared palette╮
+│▼ project                  ││Given a feature is selected      │
+│  ▸ a feature is selected   │╰─────────────────────────────────╯
+│                           │╭ AI Chat · Default ──────────────╮
+╰───────────────────────────╯╰─────────────────────────────────╯
+ Navigate [↑↓]   Toggle [Space]   Expand [→]   Collapse [←]
+```
+
+```text
+AI [3]
+━━━━━━━━
+╭ Agents ─────────╮╭ AI Chat · Default ───────────────── Manual ─╮
+│○ Agent 1        ││ Welcome to AI Chat!                        │
+╰─────────────────╯╰───────────────────────────────────────────╯
+ Focus [Enter]   Clear [Esc]   Model [m]   Quit [q]
+```
+
+```text
+Requirements [4]
+━━━━━━━━━━━━━━━━━━
+╭Requirements · All──────╮╭Shared visual language──╮╭Linked test points╮
+│Shared visual language ││# Shared visual language││                  │
+╰───────────────────────╯╰───────────────────────╯╰──────────────────╯
+ [BROWSE] hjkl/arrows Move  i Insert  s Save  n Test point  I Iteration
+ [INSERT] Esc Browse  Ctrl+S Save  Tab Indent  Arrows/Home/End Move
+```
+
+```text
+Test Points [5]
+━━━━━━━━━━━━━━━━━
+╭Test Points────────╮╭Details───────────────────╮╭Requirement excerpts╮
+│Visual style       ││Focus is visible          ││                    │
+│  Focus is visible ││Verify panel focus        ││                    │
+╰───────────────────╯╰─────────────────────────╯╰────────────────────╯
+ Focus [Tab]   Approve [a]   Reject [r]   Batch [A]   Continue [c]
+```

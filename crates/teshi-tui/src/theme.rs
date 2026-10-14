@@ -1,8 +1,8 @@
 //! Shared chrys-derived palette and component styles for the terminal UI.
 //!
 //! Values follow the default `chrys` theme (a Dracula-inspired purple palette).
-//! The terminal background is intentionally never painted so the chat blends
-//! into the user's own terminal theme; only block surfaces use `BLOCK_BG`.
+//! The terminal background stays visible. Fills are limited to component
+//! surfaces such as selection, chips, footers, overlays, code and diff tints.
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -77,8 +77,6 @@ pub(crate) const EDITOR_SELECTION_BG: Color = Color::Rgb(0x5F, 0x5F, 0x87);
 /// Current preview line surface.
 pub(crate) const CURRENT_LINE_BG: Color = Color::Rgb(0x30, 0x30, 0x30);
 /// Overlay and toast surface.
-// Consumed by subsequent surface migrations in adopt-chrys-tui-style.
-#[allow(dead_code)]
 pub(crate) const OVERLAY_BG: Color = Color::Rgb(0x3A, 0x3A, 0x3A);
 /// Added-line tint.
 pub(crate) const DIFF_ADDED_BG: Color = Color::Rgb(0x26, 0x3E, 0x2C);
@@ -101,7 +99,7 @@ pub(crate) fn panel_block<'a>(title: impl Into<Line<'a>>, focused: bool) -> Bloc
 
 /// Popup chrome; the caller must clear the destination before rendering.
 pub(crate) fn popup_block<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
-    panel_block(title, true)
+    panel_block(title, true).style(Style::default().bg(OVERLAY_BG))
 }
 
 /// Extends a selected option's fill across its row, including styled metadata.
@@ -335,12 +333,12 @@ mod tests {
     #[test]
     fn test_page_color_budget() {
         const CAPS: &[(&str, &str, usize)] = &[
-            ("ui.rs", include_str!("ui.rs"), 28),
+            ("ui.rs", include_str!("ui.rs"), 0),
             ("highlight.rs", include_str!("highlight.rs"), 0),
             ("mindmap.rs", include_str!("mindmap.rs"), 0),
-            ("authoring_tab.rs", include_str!("authoring_tab.rs"), 10),
-            ("test_points_tab.rs", include_str!("test_points_tab.rs"), 10),
-            ("ui/chat.rs", include_str!("ui/chat.rs"), 1),
+            ("authoring_tab.rs", include_str!("authoring_tab.rs"), 0),
+            ("test_points_tab.rs", include_str!("test_points_tab.rs"), 0),
+            ("ui/chat.rs", include_str!("ui/chat.rs"), 0),
             ("markdown.rs", include_str!("markdown.rs"), 0),
         ];
         for &(path, source, cap) in CAPS {

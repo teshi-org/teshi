@@ -834,7 +834,6 @@ fn build_row(cells: Vec<(char, Style)>, width: usize, pad_style: Option<Style>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::Color;
 
     fn row_texts(rows: &[Line<'_>]) -> Vec<String> {
         rows.iter()
@@ -882,7 +881,7 @@ mod tests {
 
     #[test]
     fn test_wrap_line_to_width_pads_background_lines() {
-        let bg = Style::default().bg(Color::Rgb(1, 2, 3));
+        let bg = Style::default().bg(theme::BLOCK_BG);
         let rows = wrap_line_to_width(Line::from("abcdefg").style(bg), 5);
         assert_eq!(rows.len(), 2);
         for row in &rows {

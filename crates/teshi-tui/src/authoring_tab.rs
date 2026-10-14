@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::theme;
 use anyhow::{Context, Result};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use teshi_core::authoring::{
     AuthoringArtifacts, AuthoringDiagnostic, HierarchyPath, RequirementDocumentMeta,
@@ -1142,10 +1143,10 @@ pub fn review_state_label(state: ReviewState) -> &'static str {
 /// Style for a test-point review state badge.
 pub fn review_state_style(state: ReviewState) -> Style {
     match state {
-        ReviewState::Proposed => Style::default().fg(Color::Yellow),
-        ReviewState::Approved => Style::default().fg(Color::Green),
-        ReviewState::Rejected => Style::default().fg(Color::Red),
-        ReviewState::NeedsReview => Style::default().fg(Color::Magenta),
+        ReviewState::Proposed => Style::default().fg(theme::WARNING),
+        ReviewState::Approved => Style::default().fg(theme::SUCCESS),
+        ReviewState::Rejected => Style::default().fg(theme::ERROR),
+        ReviewState::NeedsReview => Style::default().fg(theme::ACCENT),
     }
 }
 
@@ -1159,24 +1160,27 @@ pub fn requirements_footer_line(
         RequirementIterationFilter::Unassigned => UNASSIGNED_ITERATION_LABEL.to_string(),
         RequirementIterationFilter::Named(name) => name.clone(),
     };
-    Line::from(vec![
+    theme::footer_line(vec![
         Span::styled(
             format!(" Store {} ", store_path.display()),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::FOOTER_DESC),
         ),
         Span::raw(" "),
         Span::styled(
             format!(" Filter {filter_label} [i] "),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::FOOTER_DESC),
         ),
         Span::raw(" "),
-        Span::styled(" Group [g] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Group [g] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
-        Span::styled(" Iteration [I] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Iteration [I] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
-        Span::styled(" New doc [Ctrl+n] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " New doc [Ctrl+n] ",
+            Style::default().fg(theme::FOOTER_DESC),
+        ),
         Span::raw(" "),
-        Span::styled(" Save [s] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Save [s] ", Style::default().fg(theme::FOOTER_DESC)),
     ])
 }
 

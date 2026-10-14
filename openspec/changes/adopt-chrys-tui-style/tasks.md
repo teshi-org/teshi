@@ -37,15 +37,15 @@
 
 ## 5. Phase 4: Requirements and Test Points tabs
 
-- [ ] 5.1 Switch the blocks and selection in `render_requirements_*` and `render_test_points_*` to `panel_block` and `selected_row`.
-- [ ] 5.2 Replace the review and resolution colors and the footer builders in `authoring_tab.rs` and `test_points_tab.rs` with theme roles and `footer_line`.
-- [ ] 5.3 Render the Requirements editor `[BROWSE]` / `[INSERT]` mode labels as chips (BROWSE `PRIMARY`, INSERT `ACCENT`), keeping the hint text the same.
-- [ ] 5.4 Set every cap except `theme.rs` to zero, then run the gates, check visually, and commit as `feat(tui): apply chrys style to Requirements and Test Points`.
+- [x] 5.1 Switch the blocks and selection in `render_requirements_*` and `render_test_points_*` to `panel_block` and `selected_row`.
+- [x] 5.2 Replace the review and resolution colors and the footer builders in `authoring_tab.rs` and `test_points_tab.rs` with theme roles and `footer_line`.
+- [x] 5.3 Render the Requirements editor `[BROWSE]` / `[INSERT]` mode labels as chips (BROWSE `PRIMARY`, INSERT `ACCENT`), keeping the hint text the same.
+- [x] 5.4 Set every cap except `theme.rs` to zero, then run the gates, check visually, and commit as `feat(tui): apply chrys style to Requirements and Test Points`.
 
 ## 6. Close-out
 
-- [ ] 6.1 Confirm `crates/teshi-tui-runner/tests/teshi_self.rs` and every `TestBackend` text test pass unchanged.
-- [ ] 6.2 Update `doc/tui-style-guide.md` with any decisions made during the phases (footer strip width, MindMap mapping) and screenshots or ASCII samples of each tab.
+- [x] 6.1 Confirm `crates/teshi-tui-runner/tests/teshi_self.rs` and every `TestBackend` text test pass. User-approved exception: replace the obsolete selected-agent idle marker `▸ ○` in the deterministic wrapped-conversation tests with the existing sidebar text `│ ○ Conversation`; preserve all per-turn reply assertions and application text.
+- [x] 6.2 Update `doc/tui-style-guide.md` with any decisions made during the phases (footer strip width, MindMap mapping) and screenshots or ASCII samples of each tab.
 - [ ] 6.3 Run `openspec validate adopt-chrys-tui-style` and archive the change once all phases are merged.
 
 ## Implementation evidence (2026-10-14)
@@ -132,3 +132,70 @@
   and scenario preview screenshot with full-width selection/current-line fill.
 - Requirements/Test Points implementation was prepared independently and is
   being applied after this phase to preserve the requested commit boundaries.
+
+### Final implementation and validation pause
+
+- Requirements and Test Points now use shared panels, full-width selection,
+  semantic review/resolution roles, themed footers and BROWSE/INSERT chips.
+  All seven source budgets are zero, including chat tests; no temporary theme
+  dead-code allowances remain. The guide contains samples for all five tabs.
+- Visual follow-up extended the Requirements filter and Test Points detail
+  selection across the full row and applied mode chips to the editor title.
+- Added a narrow/long-version regression and reserved the active tab's entire
+  underline before assigning the right-aligned version viewport, so long local
+  build identities cannot cover the final tab's underline.
+- The user approved replacing the obsolete `▸ ○` idle assertion in the two
+  deterministic wrapped-chat regressions with `│ ○ Conversation`. Baseline
+  commit `58e0e79` already omitted that arrow. Per-turn reply assertions and
+  application text are unchanged. All six deterministic real-PTY self-tests
+  passed after that assertion correction (61.58 seconds); the authenticated
+  live-provider test was not invoked. Subsequent selection/underline follow-up
+  edits still require final validation.
+- Earlier workspace Clippy, workspace tests and TUI tests passed before the
+  final visual follow-up. One later workspace run failed the existing update
+  helper's 20-second completion assertion and TUI doctest dependency loading.
+  These are recorded failures, not accepted exceptions.
+- Concurrent custom ACP implementation appeared in Cargo.lock, ACP modules,
+  CLI modules and App. Those edits were not staged, reset or committed here.
+  An isolated candidate worktree was created at
+  `D:\teshi-style-tests-e71789e671124e31b7ffe7d82d0a59d6\review` from `c2d8e3d`,
+  containing only the eight files from this final style/test/docs phase.
+- Even a separate fresh target directory with serial compilation failed Rust
+  E0463 dependency loading. The exact file
+  `workspace-target\debug\deps\tokio_macros-d17fe2b82f9cc66d.dll` is readable but
+  `LoadLibraryW` returns Windows error 32; a byte-identical copy at a new path
+  loads successfully. Renaming the original artifact also fails with a sharing
+  violation. Read-only Windows Restart Manager inspection identifies the
+  holder as `360rp.exe`, PID 27076. No security process was terminated and no
+  protection setting or global toolchain was modified.
+- Final phase remains uncommitted. Tasks 5.4, 6.1 and 6.3 stay unchecked pending
+  release of the artifact locks, final gates, fresh PTY visual checks, the phase
+  commit and OpenSpec archive. The new underline regression has not yet run.
+
+### Final validation recovery
+
+- After the user exited 360, compilation passed the previously locked DLLs.
+  A workspace run completed compilation and all but the two runner-bootstrap
+  CLI BDD targets passed. These tests invoke Cargo themselves; the isolated
+  target directory must be inherited through `CARGO_TARGET_DIR`, and the
+  candidate CLI through `CARGO_BIN_EXE_teshi`.
+- With those environment paths supplied, requirement and validation CLI BDD
+  targets passed all four English/Chinese tests. No application or test-code
+  change was needed for this environment correction.
+- Added a Requirements editor footer regression covering unchanged BROWSE and
+  INSERT text and PRIMARY bold styling for plain (unbracketed) key hints.
+  The isolated candidate matches the eight scoped files in the main worktree;
+  formatting, whitespace and OpenSpec validation passed.
+- Final isolated workspace tests passed, including all 361 TUI tests (one
+  existing ignored test), both TUI doctests, the underline regression and the
+  footer text/style regression. All six deterministic real-PTY regressions
+  passed against this final candidate CLI (70.47 seconds). The test executable
+  was built from the unchanged, user-approved corrected self-test source.
+  The authenticated live CodeBuddy case was not run.
+- Refreshed real-PTY screenshots confirm both Requirements editor modes,
+  PRIMARY bold plain-key hints, inactive selection fill and active underline.
+  Full logs and screenshots are retained under the isolated test root.
+- Final workspace Clippy passed with all targets/features and warnings denied.
+  The local dev install script succeeded. Its default Cargo install resolves
+  dependencies independently; a locked reinstall is used for the final
+  installed build so it matches the validated workspace lockfile.

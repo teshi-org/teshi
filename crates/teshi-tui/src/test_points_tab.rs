@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::theme;
 use anyhow::{Context, Result};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use teshi_core::authoring::{
     AuthoringArtifacts, RequirementLink, ResolutionState, ReviewState, TestPoint, TextRange,
@@ -505,22 +506,25 @@ fn document_excerpt(artifacts: &AuthoringArtifacts, link: &RequirementLink) -> (
 
 /// Footer hint line for the Test Points tab.
 pub fn test_points_footer_line() -> Line<'static> {
-    Line::from(vec![
-        Span::styled(" Focus [Tab] ", Style::default().fg(Color::DarkGray)),
+    theme::footer_line(vec![
+        Span::styled(" Focus [Tab] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
-        Span::styled(" Approve [a] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Approve [a] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
-        Span::styled(" Reject [r] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Reject [r] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
-        Span::styled(" Batch [A] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Batch [A] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
-        Span::styled(" Continue [c] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Continue [c] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
-        Span::styled(" Open scenario [o] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " Open scenario [o] ",
+            Style::default().fg(theme::FOOTER_DESC),
+        ),
         Span::raw(" "),
-        Span::styled(" Filter [f] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Filter [f] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
-        Span::styled(" Save [s] ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" Save [s] ", Style::default().fg(theme::FOOTER_DESC)),
     ])
 }
 
@@ -537,8 +541,8 @@ pub fn review_state_name(state: ReviewState) -> &'static str {
 /// Style for excerpt resolution badges in the right pane.
 pub fn excerpt_resolution_style(resolution: ResolutionState) -> Style {
     match resolution {
-        ResolutionState::Resolved => Style::default().fg(Color::Green),
-        ResolutionState::Stale => Style::default().fg(Color::Red),
+        ResolutionState::Resolved => Style::default().fg(theme::SUCCESS),
+        ResolutionState::Stale => Style::default().fg(theme::ERROR),
     }
 }
 

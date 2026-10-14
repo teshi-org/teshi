@@ -101,10 +101,6 @@ fn token_usage_label(in_tokens: u64, out_tokens: u64) -> String {
     )
 }
 
-fn selected_style(focused: bool) -> Style {
-    theme::selected_row(focused)
-}
-
 /// Applies `patch` on UTF-8 character indices `[range.start, range.end)` within each span.
 fn apply_patch_to_char_range(
     line: Line<'static>,
@@ -275,59 +271,50 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     register_tab_regions(app, chunks[0]);
 
-    let version_text = format!("v{}", app.version);
-    let version_width = version_text.width() as u16;
-    if !app.version.is_empty() && chunks[1].width > version_width + 1 {
-        let rule_width = chunks[1].width - version_width - 1;
-        let [rule_area, version_area] = Layout::horizontal([
-            Constraint::Length(rule_width),
-            Constraint::Length(version_width),
-        ])
-        .areas(chunks[1]);
-        let rule_w = rule_area.width as usize;
-        let divider_line = "─".repeat(rule_w.max(1));
-        frame.render_widget(
-            Paragraph::new(divider_line).style(Style::default().fg(theme::BORDER)),
-            rule_area,
-        );
-        frame.render_widget(
-            Paragraph::new(version_text)
-                .style(theme::muted())
-                .alignment(Alignment::Right),
-            version_area,
-        );
-    } else {
-        let divider_w = chunks[1].width as usize;
-        let divider_line = "─".repeat(divider_w.max(1));
-        frame.render_widget(
-            Paragraph::new(divider_line).style(Style::default().fg(theme::BORDER)),
-            chunks[1],
-        );
-    }
-
-    if let Some(rect) = app
+    let active_tab_rect = app
         .clickable_regions
         .iter()
         .find_map(|region| match region {
             ClickableRegion::Tab { tab, rect } if *tab == app.active_tab => Some(*rect),
             _ => None,
+        });
+    let version_text = format!("v{}", app.version);
+    // A long local build identity must not consume the active tab's underline.
+    // Clip only the version's viewport when both labels cannot fit on this row.
+    let version_room = active_tab_rect
+        .map(|rect| {
+            chunks[1]
+                .right()
+                .saturating_sub(rect.right().saturating_add(1))
         })
+        .unwrap_or(chunks[1].width);
+    let version_width = (version_text.width() as u16).min(version_room);
+    frame.render_widget(
+        Paragraph::new("─".repeat(chunks[1].width as usize))
+            .style(Style::default().fg(theme::BORDER)),
+        chunks[1],
+    );
+    if !app.version.is_empty() && version_width > 0 && chunks[1].height > 0 {
+        frame.render_widget(
+            Paragraph::new(version_text)
+                .style(theme::muted())
+                .alignment(Alignment::Right),
+            Rect::new(
+                chunks[1].right() - version_width,
+                chunks[1].y,
+                version_width,
+                1,
+            ),
+        );
+    }
+    if let Some(rect) = active_tab_rect
+        && chunks[1].height > 0
     {
-        let available = if !app.version.is_empty() && chunks[1].width > version_width + 1 {
-            chunks[1].width - version_width
-        } else {
-            chunks[1].width
-        };
-        let width = rect
-            .width
-            .min(chunks[1].x.saturating_add(available).saturating_sub(rect.x));
-        if width > 0 && chunks[1].height > 0 {
-            frame.render_widget(
-                Paragraph::new("━".repeat(width as usize))
-                    .style(Style::default().fg(theme::PRIMARY)),
-                Rect::new(rect.x, chunks[1].y, width, 1),
-            );
-        }
+        frame.render_widget(
+            Paragraph::new("━".repeat(rect.width as usize))
+                .style(Style::default().fg(theme::PRIMARY)),
+            Rect::new(rect.x, chunks[1].y, rect.width, 1),
+        );
     }
 
     frame.render_widget(
@@ -354,14 +341,40 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     } else if app.active_tab == MainTab::Requirements {
         frame.render_widget(
             if app.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor {
-                Line::raw(match app.authoring_ui.editor_mode {
-                    crate::authoring_tab::RequirementsEditorMode::Browse => {
-                        " [BROWSE] hjkl/arrows Move  i Insert  s Save  n Test point  I Iteration"
-                    }
-                    crate::authoring_tab::RequirementsEditorMode::Insert => {
-                        " [INSERT] Esc Browse  Ctrl+S Save  Tab Indent  Arrows/Home/End Move"
-                    }
-                })
+                {
+                    let (label, hints, color): (&str, &[(&str, &str)], _) =
+                        match app.authoring_ui.editor_mode {
+                            crate::authoring_tab::RequirementsEditorMode::Browse => (
+                                "[BROWSE]",
+                                &[
+                                    ("hjkl/arrows", " Move  "),
+                                    ("i", " Insert  "),
+                                    ("s", " Save  "),
+                                    ("n", " Test point  "),
+                                    ("I", " Iteration"),
+                                ],
+                                theme::PRIMARY,
+                            ),
+                            crate::authoring_tab::RequirementsEditorMode::Insert => (
+                                "[INSERT]",
+                                &[
+                                    ("Esc", " Browse  "),
+                                    ("Ctrl+S", " Save  "),
+                                    ("Tab", " Indent  "),
+                                    ("Arrows/Home/End", " Move"),
+                                ],
+                                theme::ACCENT,
+                            ),
+                        };
+                    let footer = theme::footer_line(
+                        hints
+                            .iter()
+                            .flat_map(|&(key, desc)| theme::key_hint(key, desc)),
+                    );
+                    let mut spans = vec![Span::raw(" "), theme::chip(label, color), Span::raw(" ")];
+                    spans.extend(footer.spans);
+                    Line::from(spans).style(footer.style)
+                }
             } else {
                 crate::authoring_tab::requirements_footer_line(
                     &app.requirements_root,
@@ -527,7 +540,7 @@ fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn explore_select_style(focused: bool) -> Style {
-    selected_style(focused)
+    theme::selected_row(focused)
 }
 
 fn explore_block(title: &str, focused: bool) -> Block<'_> {
@@ -2064,7 +2077,7 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
                 .bg(theme::EDITOR_SELECTION_BG);
             let line_len = display_len;
             if app.is_editor_nav_mode() {
-                let focus_patch = selected_style(true);
+                let focus_patch = theme::selected_row(true);
                 let hl_range = nav_body_char_range_in_buffer(buffer, row, &line)
                     .or_else(|| structural_prefix_char_range(&line, buffer.language()));
                 if let Some(mut r) = hl_range
@@ -2446,7 +2459,7 @@ fn no_run_detail_lines() -> Vec<Line<'static>> {
         Line::styled(
             "  No run details yet",
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(theme::MUTED)
                 .add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
@@ -3218,7 +3231,7 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     Span::raw(marker),
                     Span::styled(agent.name.clone(), rows(row)),
                     Span::styled(format!(" ({}) ", agent.id), id_style),
-                    Span::styled("[installed]", Style::default().fg(theme::SUCCESS)),
+                    theme::chip("[installed]", theme::SUCCESS),
                     Span::styled(active, Style::default().fg(theme::SUCCESS)),
                 ]));
             }
@@ -3531,14 +3544,11 @@ fn hatched_empty_lines(height: usize, label: &str) -> Vec<Line<'static>> {
             let pad = " ".repeat(4);
             lines.push(Line::styled(
                 format!("{pad}{label}{pad}"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::MUTED),
             ));
         } else if row > 1 && row < h.saturating_sub(1) {
             let hatch = " ╲ ".repeat(8);
-            lines.push(Line::styled(
-                hatch,
-                Style::default().fg(Color::Rgb(40, 40, 40)),
-            ));
+            lines.push(Line::styled(hatch, Style::default().fg(theme::BORDER)));
         } else {
             lines.push(Line::raw(""));
         }
@@ -3596,19 +3606,10 @@ fn render_requirements_tree(
     area: Rect,
     focused: bool,
 ) {
-    let title_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(crate::authoring_tab::requirements_tree_title(
-            &ui.iteration_filter,
-        ))
-        .title_style(title_style);
+    let block = theme::panel_block(
+        crate::authoring_tab::requirements_tree_title(&ui.iteration_filter),
+        focused,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -3618,13 +3619,13 @@ fn render_requirements_tree(
     if !ui.discovered {
         frame.render_widget(
             Paragraph::new("No requirement artifacts. Ctrl+n to create.")
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(theme::MUTED)),
             inner,
         );
         return;
     }
 
-    let highlight_style = selected_style(focused);
+    let highlight_style = theme::selected_row(focused);
     let tree = Tree::new(&ui.tree_items)
         .expect("requirement tree")
         .highlight_style(highlight_style);
@@ -3634,7 +3635,12 @@ fn render_requirements_tree(
         .visible_diagnostics()
         .iter()
         .take(3)
-        .map(|d| Line::styled(format!("! {}", d.message), Style::default().fg(Color::Red)))
+        .map(|d| {
+            Line::styled(
+                format!("! {}", d.message),
+                Style::default().fg(theme::ERROR),
+            )
+        })
         .collect();
     if !diag_lines.is_empty() {
         let diag_height = diag_lines.len() as u16;
@@ -3669,23 +3675,17 @@ fn render_requirements_editor(
     } else {
         title
     };
-    let title_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
+    let (mode, mode_color) = match ui.editor_mode {
+        crate::authoring_tab::RequirementsEditorMode::Browse => ("[BROWSE]", theme::PRIMARY),
+        crate::authoring_tab::RequirementsEditorMode::Insert => ("[INSERT]", theme::ACCENT),
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(
-            "{display_title} [{}]",
-            match ui.editor_mode {
-                crate::authoring_tab::RequirementsEditorMode::Browse => "BROWSE",
-                crate::authoring_tab::RequirementsEditorMode::Insert => "INSERT",
-            }
-        ))
-        .title_style(title_style);
+    let block = theme::panel_block(
+        Line::from(vec![
+            Span::raw(format!("{display_title} ")),
+            theme::chip(mode, mode_color),
+        ]),
+        focused,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -3696,7 +3696,7 @@ fn render_requirements_editor(
     if missing {
         frame.render_widget(
             Paragraph::new("Indexed document file is missing on disk.")
-                .style(Style::default().fg(Color::Red)),
+                .style(Style::default().fg(theme::ERROR)),
             inner,
         );
         return;
@@ -3737,7 +3737,7 @@ fn render_requirements_editor(
                 range,
                 buffer,
                 row,
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(theme::PRIMARY),
             );
         }
 
@@ -3774,7 +3774,7 @@ fn render_requirements_editor(
             let line_len = line_text.chars().count();
             let cursor_col = ui.cursor_col.min(line_len);
             let cursor_style = Style::default()
-                .fg(Color::White)
+                .fg(theme::FG)
                 .bg(theme::EDITOR_SELECTION_BG);
             if line_len == 0 {
                 styled = Line::from(vec![Span::styled(" ", cursor_style)]);
@@ -3793,7 +3793,10 @@ fn render_requirements_editor(
         lines.push(styled);
     }
 
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(theme::popup_rows(lines, inner.width))),
+        inner,
+    );
 }
 
 fn apply_col_range_highlight(
@@ -3838,17 +3841,7 @@ fn render_requirements_linked(
     area: Rect,
     focused: bool,
 ) {
-    let title_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Linked test points")
-        .title_style(title_style);
+    let block = theme::panel_block("Linked test points", focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -3860,7 +3853,7 @@ fn render_requirements_linked(
     if linked.is_empty() {
         lines.push(Line::styled(
             " (no linked test points)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         ));
     } else {
         for (i, tp) in linked.iter().enumerate() {
@@ -3868,18 +3861,21 @@ fn render_requirements_linked(
             let badge_style = crate::authoring_tab::review_state_style(tp.review_state);
             let label = truncate_string_to_cols(&tp.title, inner.width.saturating_sub(4));
             let style = if i == ui.selected_linked_index {
-                selected_style(focused)
+                theme::selected_row(focused)
             } else {
                 Style::default()
             };
             lines.push(Line::from(vec![
-                Span::styled(format!("[{badge}] "), badge_style),
+                theme::chip(
+                    format!("[{badge}] "),
+                    badge_style.fg.unwrap_or(theme::MUTED),
+                ),
                 Span::styled(label, style),
             ]));
         }
     }
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(theme::popup_rows(lines, inner.width)), inner);
 }
 
 fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -3945,7 +3941,8 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 })
                 .collect();
             frame.render_widget(
-                Paragraph::new(lines).block(theme::popup_block(" Filter iteration ")),
+                Paragraph::new(theme::popup_rows(lines, panel_area.width.saturating_sub(2)))
+                    .block(theme::popup_block(" Filter iteration ")),
                 panel_area,
             );
         }
@@ -4061,17 +4058,7 @@ fn render_test_points_tree(
         crate::test_points_tab::ReviewFilter::NeedsReview => "needs review",
     };
     let title = format!("Test points ({filter_label})");
-    let title_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .title_style(title_style);
+    let block = theme::panel_block(title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -4081,13 +4068,13 @@ fn render_test_points_tree(
     if artifacts.is_none() || ui.tree_items.is_empty() {
         frame.render_widget(
             Paragraph::new("No test points yet. Create links from Requirements [4].")
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(theme::MUTED)),
             inner,
         );
         return;
     }
 
-    let highlight_style = selected_style(focused);
+    let highlight_style = theme::selected_row(focused);
     let tree = Tree::new(&ui.tree_items)
         .expect("test point tree")
         .highlight_style(highlight_style);
@@ -4101,17 +4088,7 @@ fn render_test_points_details(
     area: Rect,
     focused: bool,
 ) {
-    let title_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Intent & review")
-        .title_style(title_style);
+    let block = theme::panel_block("Intent & review", focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -4121,7 +4098,7 @@ fn render_test_points_details(
     let Some(tp_id) = ui.selected_test_point_id.as_ref() else {
         frame.render_widget(
             Paragraph::new("Select a test point in the tree.")
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(theme::MUTED)),
             inner,
         );
         return;
@@ -4131,7 +4108,7 @@ fn render_test_points_details(
     else {
         frame.render_widget(
             Paragraph::new("Selected test point is unavailable.")
-                .style(Style::default().fg(Color::Red)),
+                .style(Style::default().fg(theme::ERROR)),
             inner,
         );
         return;
@@ -4193,23 +4170,26 @@ fn render_test_points_details(
     let badge = crate::authoring_tab::review_state_label(tp.review_state);
     let badge_style = crate::authoring_tab::review_state_style(tp.review_state);
     lines.push(Line::from(vec![
-        Span::styled(format!("[{badge}] "), badge_style),
+        theme::chip(
+            format!("[{badge}] "),
+            badge_style.fg.unwrap_or(theme::MUTED),
+        ),
         Span::styled(
             crate::test_points_tab::review_state_name(tp.review_state),
-            Style::default().fg(Color::White),
+            Style::default().fg(theme::FG),
         ),
         Span::raw(format!("  id: {}", tp.id)),
     ]));
 
     for (field, label, value) in fields {
         let active = ui.detail_field == field;
-        let label_style = if active && focused {
-            selected_style(true)
+        let label_style = if active {
+            theme::selected_row(focused)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(theme::MUTED)
         };
-        let value_style = if active && focused {
-            selected_style(true)
+        let value_style = if active {
+            theme::selected_row(focused)
         } else {
             Style::default()
         };
@@ -4225,7 +4205,7 @@ fn render_test_points_details(
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             "Realized scenarios [o]:",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         ));
         for (i, sc_ref) in tp.scenario_refs.iter().enumerate() {
             let label = sc_ref
@@ -4234,7 +4214,7 @@ fn render_test_points_details(
                 .unwrap_or_else(|| format!("line {}", sc_ref.scenario_line.unwrap_or(0)));
             let selected = i == ui.selected_scenario_ref_index;
             let style = if selected && focused {
-                selected_style(true)
+                theme::selected_row(true)
             } else {
                 Style::default()
             };
@@ -4245,7 +4225,7 @@ fn render_test_points_details(
         }
     }
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(theme::popup_rows(lines, inner.width)), inner);
 }
 
 fn render_test_points_excerpts(
@@ -4255,17 +4235,7 @@ fn render_test_points_excerpts(
     area: Rect,
     focused: bool,
 ) {
-    let title_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Requirement excerpts")
-        .title_style(title_style);
+    let block = theme::panel_block("Requirement excerpts", focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -4287,7 +4257,7 @@ fn render_test_points_excerpts(
     if excerpts.is_empty() {
         lines.push(Line::styled(
             " (no linked excerpts)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED),
         ));
     } else {
         for (i, excerpt) in excerpts.iter().enumerate() {
@@ -4300,7 +4270,7 @@ fn render_test_points_excerpts(
                 truncate_string_to_cols(&excerpt.document_title, inner.width.saturating_sub(8));
             let quote = truncate_string_to_cols(&excerpt.quote, inner.width.saturating_sub(4));
             let row_style = if i == ui.selected_excerpt_index {
-                selected_style(focused)
+                theme::selected_row(focused)
             } else {
                 Style::default()
             };
@@ -4315,7 +4285,7 @@ fn render_test_points_excerpts(
         }
     }
 
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(theme::popup_rows(lines, inner.width)), inner);
 }
 
 #[cfg(test)]
@@ -4328,6 +4298,75 @@ mod truncate_tests {
     use crate::app::{App, CaseDetail, ClickableRegion, RunStatus};
     use ratatui::{Terminal, backend::TestBackend};
     use teshi_core::gherkin;
+
+    #[test]
+    fn long_local_version_does_not_clip_active_tab_underline() {
+        let mut app = App::from_args().expect("app init");
+        app.version = "0.7.10-local.20261014.1700+0800 (1234567)".into();
+        app.active_tab = crate::app::MainTab::TestPoints;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let rect = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::Tab {
+                    tab: crate::app::MainTab::TestPoints,
+                    rect,
+                } => Some(*rect),
+                _ => None,
+            })
+            .unwrap();
+        for x in rect.x..rect.right() {
+            assert_eq!(
+                terminal.backend().buffer()[(x, 1)].symbol(),
+                "━",
+                "column {x}"
+            );
+        }
+        assert_eq!(
+            terminal.backend().buffer()[(119, 1)].fg,
+            crate::theme::MUTED
+        );
+    }
+
+    #[test]
+    fn requirements_mode_footer_keeps_text_and_emphasizes_plain_keys() {
+        use crate::authoring_tab::{RequirementsEditorMode, RequirementsFocus};
+        for (mode, expected, first_key) in [
+            (
+                RequirementsEditorMode::Browse,
+                " [BROWSE] hjkl/arrows Move  i Insert  s Save  n Test point  I Iteration",
+                "hjkl/arrows",
+            ),
+            (
+                RequirementsEditorMode::Insert,
+                " [INSERT] Esc Browse  Ctrl+S Save  Tab Indent  Arrows/Home/End Move",
+                "Esc",
+            ),
+        ] {
+            let mut app = App::from_args().expect("app init");
+            app.active_tab = crate::app::MainTab::Requirements;
+            app.status_message = None;
+            app.authoring_ui.focus = RequirementsFocus::Editor;
+            app.authoring_ui.editor_mode = mode;
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let text = (0..120)
+                .map(|x| buffer[(x, 23)].symbol())
+                .collect::<String>();
+            assert_eq!(text.trim_end(), expected);
+            for x in 10..10 + first_key.len() as u16 {
+                assert_eq!(buffer[(x, 23)].fg, crate::theme::PRIMARY);
+                assert!(
+                    buffer[(x, 23)]
+                        .modifier
+                        .contains(ratatui::style::Modifier::BOLD)
+                );
+            }
+        }
+    }
 
     #[test]
     fn truncate_line_to_cols_limits_display_width() {
