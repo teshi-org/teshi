@@ -8,6 +8,10 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use tui_test::{KeyAction, OpenOptions, Operation, OperationResult, RunOptions, Session};
 
+/// Delay after writing a lone Escape so the application consumes it before the
+/// next key byte can arrive in the same read and be parsed as an Alt prefix.
+const ESCAPE_SETTLE_MS: u64 = 50;
+
 /// Executable configuration; arguments are passed directly without a shell.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -99,6 +103,15 @@ impl Terminal {
             keys: vec![key.into()],
             action: KeyAction::Press,
         })?;
+        // A lone Escape is the byte 0x1b. Crossterm parses it as an Alt prefix
+        // when the next key byte lands in the same read (`\x1b` + `q` becomes
+        // Alt+q), which swallows the Escape and misinterprets the follow-up
+        // key. Byte-stream PTYs (Linux) race here; ConPTY (Windows) delivers
+        // discrete key records and cannot merge. Let the application consume
+        // the Escape before the scenario writes the next key.
+        if key == "Escape" {
+            std::thread::sleep(Duration::from_millis(ESCAPE_SETTLE_MS));
+        }
         Ok(())
     }
 
