@@ -479,7 +479,7 @@ fn render_ai_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         hint_spans.push(Span::raw("  "));
         hint_spans.push(Span::styled(
             tool_status.clone(),
-            Style::default().fg(crate::chat_theme::WARNING),
+            Style::default().fg(crate::theme::WARNING),
         ));
     }
     let hints = Line::from(hint_spans);

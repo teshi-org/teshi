@@ -17,8 +17,8 @@ use super::token_usage_label;
 use crate::app::{
     AiChatMessage, AiRole, AiStatus, App, ChangeKind, ClickableRegion, SLASH_COMMANDS,
 };
-use crate::chat_theme;
 use crate::markdown::render_markdown_width;
+use crate::theme;
 
 /// Left rail drawn on every row of a user or assistant message.
 const RAIL: &str = "▌ ";
@@ -41,14 +41,11 @@ fn fg(color: ratatui::style::Color) -> Style {
 }
 
 fn muted() -> Style {
-    fg(chat_theme::MUTED)
+    theme::muted()
 }
 
 fn selected_row() -> Style {
-    Style::default()
-        .bg(chat_theme::CURSOR_BG)
-        .fg(chat_theme::CURSOR_FG)
-        .add_modifier(Modifier::BOLD)
+    theme::selected_row(true)
 }
 
 /// Frame-clock helper shared by the animated glyphs below.
@@ -82,24 +79,17 @@ pub(super) fn render_agent_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect)
     if area.width < 5 || area.height < 3 {
         return;
     }
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(fg(chat_theme::BORDER))
-        .title(Span::styled(
-            " Agents ",
-            fg(chat_theme::PRIMARY).add_modifier(Modifier::BOLD),
-        ));
+    let block = theme::panel_block(" Agents ", false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (i, agent) in app.agents.iter().enumerate() {
         let (dot, dot_color) = match agent.status {
-            AiStatus::Waiting => ("●", chat_theme::WARNING),
-            AiStatus::AwaitingApproval => ("◆", chat_theme::PRIMARY),
-            AiStatus::Error => ("●", chat_theme::ERROR),
-            AiStatus::Idle => ("○", chat_theme::SUCCESS),
+            AiStatus::Waiting => ("●", theme::WARNING),
+            AiStatus::AwaitingApproval => ("◆", theme::PRIMARY),
+            AiStatus::Error => ("●", theme::ERROR),
+            AiStatus::Idle => ("○", theme::SUCCESS),
         };
         let title = truncate_chars(&agent.title, 12);
         let line = if i == app.selected_agent {
@@ -108,7 +98,7 @@ pub(super) fn render_agent_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect)
             Line::from(vec![
                 Span::raw(" "),
                 Span::styled(dot, fg(dot_color)),
-                Span::styled(format!(" {title}"), fg(chat_theme::FG)),
+                Span::styled(format!(" {title}"), fg(theme::FG)),
             ])
         };
         lines.extend(wrap_line_to_width(line, inner.width as usize));
@@ -147,23 +137,11 @@ pub(super) fn render_chat_panel(
         return;
     }
 
-    let border_color = if focused {
-        chat_theme::PRIMARY
-    } else {
-        chat_theme::BORDER
-    };
     let title = Line::from(vec![
-        Span::styled(
-            " AI Chat ",
-            fg(chat_theme::PRIMARY).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(" AI Chat ", fg(theme::PRIMARY).add_modifier(Modifier::BOLD)),
         Span::styled(format!("· {} ", app.active_agent_profile().name), muted()),
     ]);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(fg(border_color))
-        .title(title);
+    let block = theme::panel_block(title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     render_approval_badge(frame, app, area);
@@ -232,11 +210,11 @@ fn render_approval_badge(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mode = &app.approval_mode;
     let label = format!(" {} ", mode.display_name());
     let chip_bg = if mode.requires_manual_approval() {
-        chat_theme::PRIMARY
+        theme::PRIMARY
     } else if mode.auto_accepts() {
-        chat_theme::WARNING
+        theme::WARNING
     } else {
-        chat_theme::ERROR
+        theme::ERROR
     };
     let width = label.width() as u16;
     // Keep one border cell plus one gap cell to the right of the chip.
@@ -251,10 +229,7 @@ fn render_approval_badge(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         col_right,
     });
 
-    let mut style = Style::default()
-        .bg(chip_bg)
-        .fg(chat_theme::CHIP_FG)
-        .add_modifier(Modifier::BOLD);
+    let mut style = theme::chip(label.as_str(), chip_bg).style;
     if app
         .mouse_position
         .is_some_and(|(mx, my)| my == area.y && mx >= badge_x && mx < col_right)
@@ -291,19 +266,7 @@ fn render_scrollbar(frame: &mut Frame<'_>, area: Rect, total: usize, height: usi
     if total <= height || area.width == 0 || height == 0 {
         return;
     }
-    let thumb_len = (height * height).div_ceil(total).clamp(1, height);
-    let track = height - thumb_len;
-    let scrollable = total - height;
-    let thumb_pos = start * track / scrollable.max(1);
-    let lines: Vec<Line<'static>> = (0..height)
-        .map(|i| {
-            if (thumb_pos..thumb_pos + thumb_len).contains(&i) {
-                Line::styled("┃", fg(chat_theme::SCROLL_THUMB))
-            } else {
-                Line::styled("│", fg(chat_theme::SCROLL_TRACK))
-            }
-        })
-        .collect();
+    let lines = theme::scrollbar_lines(total, height, start);
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
@@ -330,7 +293,7 @@ fn build_chat_lines(
             let note =
                 "Note: Run 'teshi auth login' or set TESHI_LLM_API_KEY to enable AI responses.";
             out.extend(wrap_line_to_width(
-                Line::styled(note, fg(chat_theme::WARNING)),
+                Line::styled(note, fg(theme::WARNING)),
                 width,
             ));
         }
@@ -354,13 +317,13 @@ fn build_chat_lines(
         ));
         let cursor = Span::styled(
             STREAM_CURSOR,
-            fg(chat_theme::ACCENT).add_modifier(Modifier::SLOW_BLINK),
+            fg(theme::ACCENT).add_modifier(Modifier::SLOW_BLINK),
         );
         match body.last_mut() {
             Some(last) => last.spans.push(cursor),
             None => body.push(Line::from(cursor)),
         }
-        push_railed(&mut out, body, chat_theme::SUCCESS, width);
+        push_railed(&mut out, body, theme::SUCCESS, width);
         out.push(Line::default());
     }
 
@@ -374,8 +337,8 @@ fn rail_body_width(width: usize) -> u16 {
 
 fn role_header(role: AiRole, source: Option<&str>) -> Line<'static> {
     let (label, color) = match role {
-        AiRole::User => ("You", chat_theme::ACCENT),
-        _ => ("Teshi", chat_theme::SUCCESS),
+        AiRole::User => ("You", theme::ACCENT),
+        _ => ("Teshi", theme::SUCCESS),
     };
     let mut spans = Vec::with_capacity(2);
     if let Some(source) = source {
@@ -414,8 +377,8 @@ fn push_message(out: &mut Vec<Line<'static>>, app: &App, msg: &AiChatMessage, wi
         body.extend(tool_calls.iter().map(|tc| tool_call_line(app, tc)));
     }
     let color = match msg.role {
-        AiRole::User => chat_theme::ACCENT,
-        _ => chat_theme::SUCCESS,
+        AiRole::User => theme::ACCENT,
+        _ => theme::SUCCESS,
     };
     push_railed(out, body, color, width);
 }
@@ -434,10 +397,10 @@ fn tool_call_line(app: &App, tc: &ToolCall) -> Line<'static> {
             .iter()
             .any(|c| c.tool_call_id == tc.id);
     let (icon, color) = match result {
-        Some(m) if m.content.starts_with("Error:") => ("✗", chat_theme::ERROR),
-        Some(_) => ("✓", chat_theme::SUCCESS),
-        None if is_pending => ("◆", chat_theme::WARNING),
-        None => (tool_spinner_frame(), chat_theme::WARNING),
+        Some(m) if m.content.starts_with("Error:") => ("✗", theme::ERROR),
+        Some(_) => ("✓", theme::SUCCESS),
+        None if is_pending => ("◆", theme::WARNING),
+        None => (tool_spinner_frame(), theme::WARNING),
     };
     let mut spans = vec![
         Span::styled(icon, fg(color).add_modifier(Modifier::BOLD)),
@@ -457,9 +420,9 @@ fn tool_call_line(app: &App, tc: &ToolCall) -> Line<'static> {
 fn push_tool_result(out: &mut Vec<Line<'static>>, msg: &AiChatMessage, width: usize) {
     let is_error = msg.content.starts_with("Error:");
     let (icon, color) = if is_error {
-        ("✗", chat_theme::ERROR)
+        ("✗", theme::ERROR)
     } else {
-        ("✓", chat_theme::MUTED)
+        ("✓", theme::MUTED)
     };
     let tool_id = msg.tool_call_id.as_deref().unwrap_or("?");
     out.extend(wrap_line_to_width(
@@ -502,7 +465,7 @@ fn push_pending_diff(out: &mut Vec<Line<'static>>, app: &App, width: usize, view
     out.extend(wrap_line_to_width(
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(title, fg(chat_theme::WARNING).add_modifier(Modifier::BOLD)),
+            Span::styled(title, fg(theme::WARNING).add_modifier(Modifier::BOLD)),
         ]),
         width,
     ));
@@ -510,10 +473,10 @@ fn push_pending_diff(out: &mut Vec<Line<'static>>, app: &App, width: usize, view
         let max_lines = view_height.saturating_sub(out.len()).clamp(3, 20);
         for dl in diff.iter().take(max_lines) {
             let (prefix, color) = match dl.kind {
-                ChangeKind::Added => ("+", chat_theme::SUCCESS),
-                ChangeKind::Modified => ("~", chat_theme::WARNING),
-                ChangeKind::Deleted => ("-", chat_theme::ERROR),
-                ChangeKind::Unchanged => (" ", chat_theme::MUTED),
+                ChangeKind::Added => ("+", theme::SUCCESS),
+                ChangeKind::Modified => ("~", theme::WARNING),
+                ChangeKind::Deleted => ("-", theme::ERROR),
+                ChangeKind::Unchanged => (" ", theme::MUTED),
             };
             out.extend(wrap_line_to_width(
                 Line::styled(format!("    {prefix} {}", dl.text), fg(color)),
@@ -535,7 +498,7 @@ fn push_acp_permission_prompt(out: &mut Vec<Line<'static>>, app: &App, width: us
     out.extend(wrap_line_to_width(
         Line::styled(
             "  ◆ ACP agent requests permission",
-            fg(chat_theme::WARNING).add_modifier(Modifier::BOLD),
+            fg(theme::WARNING).add_modifier(Modifier::BOLD),
         ),
         width,
     ));
@@ -543,10 +506,7 @@ fn push_acp_permission_prompt(out: &mut Vec<Line<'static>>, app: &App, width: us
         let line = if index == prompt.selected {
             Line::from(format!("    ▶ {}", option.display_label())).style(selected_row())
         } else {
-            Line::styled(
-                format!("      {}", option.display_label()),
-                fg(chat_theme::FG),
-            )
+            Line::styled(format!("      {}", option.display_label()), fg(theme::FG))
         };
         out.extend(wrap_line_to_width(line, width));
     }
@@ -599,15 +559,15 @@ fn render_chat_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
         AiStatus::Waiting if thinking => {
             left.push(Span::styled(
                 thinking_pulse_frame(),
-                fg(chat_theme::ACCENT).add_modifier(Modifier::BOLD),
+                fg(theme::ACCENT).add_modifier(Modifier::BOLD),
             ));
-            left.push(Span::styled(format!(" {status_text}"), fg(chat_theme::FG)));
+            left.push(Span::styled(format!(" {status_text}"), fg(theme::FG)));
         }
         AiStatus::AwaitingApproval => {
-            left.push(Span::styled(status_text, fg(chat_theme::WARNING)));
+            left.push(Span::styled(status_text, fg(theme::WARNING)));
         }
         AiStatus::Error => {
-            left.push(Span::styled(status_text, fg(chat_theme::ERROR)));
+            left.push(Span::styled(status_text, fg(theme::ERROR)));
             left.push(Span::styled("  Enter retry · Esc clear", muted()));
         }
         _ => {}
@@ -635,7 +595,7 @@ fn render_chat_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
         frame.render_widget(
             Paragraph::new(Line::styled(
                 tag,
-                fg(chat_theme::ACCENT).add_modifier(Modifier::BOLD),
+                fg(theme::ACCENT).add_modifier(Modifier::BOLD),
             )),
             status_right,
         );
@@ -673,7 +633,7 @@ fn render_slash_suggestions(frame: &mut Frame<'_>, app: &App, area: Rect, filter
             Line::from(format!(" /{name}  {desc}")).style(selected_row())
         } else {
             Line::from(vec![
-                Span::styled(format!(" /{name}"), fg(chat_theme::PRIMARY)),
+                Span::styled(format!(" /{name}"), fg(theme::PRIMARY)),
                 Span::styled(format!("  {desc}"), muted()),
             ])
         };
@@ -689,11 +649,7 @@ fn render_slash_suggestions(frame: &mut Frame<'_>, app: &App, area: Rect, filter
 }
 
 fn render_chat_input(frame: &mut Frame<'_>, app: &App, area: Rect, active: bool) {
-    let border_color = if active {
-        chat_theme::ACCENT
-    } else {
-        chat_theme::BORDER
-    };
+    let border_color = if active { theme::ACCENT } else { theme::BORDER };
     let agent = app.agent();
     let label = token_usage_label(agent.total_input_tokens, agent.total_output_tokens);
     let mut block = Block::default()
@@ -940,11 +896,11 @@ mod tests {
     fn test_push_railed_prefixes_every_wrapped_row() {
         let mut out = Vec::new();
         let long = Line::raw("one two three four five six seven");
-        push_railed(&mut out, vec![long], chat_theme::ACCENT, 12);
+        push_railed(&mut out, vec![long], theme::ACCENT, 12);
         assert!(out.len() > 1, "expected wrapping, got {out:?}");
         for row in &out {
             assert_eq!(row.spans[0].content, RAIL);
-            assert_eq!(row.spans[0].style.fg, Some(chat_theme::ACCENT));
+            assert_eq!(row.spans[0].style.fg, Some(theme::ACCENT));
             assert!(row.width() <= 12 + 1, "row too wide: {row:?}");
         }
     }
@@ -996,7 +952,7 @@ mod tests {
         );
         for y in message_rows {
             assert_eq!(buffer[(rail_x, y)].symbol(), "▌", "row {y} missing rail");
-            assert_eq!(buffer[(rail_x, y)].fg, chat_theme::ACCENT);
+            assert_eq!(buffer[(rail_x, y)].fg, theme::ACCENT);
         }
     }
 

@@ -4,7 +4,6 @@ mod app;
 mod auth;
 mod authoring_tab;
 mod bdd_nav;
-mod chat_theme;
 mod cli;
 mod config;
 mod diff;
@@ -21,6 +20,7 @@ mod profiles;
 mod runner;
 mod session;
 mod test_points_tab;
+mod theme;
 mod ui;
 mod version;
 

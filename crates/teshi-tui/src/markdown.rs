@@ -3,7 +3,7 @@ use ratatui::text::{Line, Span};
 use teshi_core::markdown::strip_think_tags;
 use unicode_width::UnicodeWidthStr;
 
-use crate::chat_theme;
+use crate::theme;
 
 /// Bullet glyphs for unordered lists, cycled by nesting depth.
 const BULLETS: [&str; 5] = ["• ", "▪ ", "‣ ", "⭑ ", "◦ "];
@@ -22,15 +22,13 @@ const QUOTE_BAR: &str = "▌ ";
 fn heading_style(level: usize) -> Style {
     let base = Style::default();
     match level {
-        1 | 3 => base.fg(chat_theme::PRIMARY).add_modifier(Modifier::BOLD),
-        2 => base
-            .fg(chat_theme::PRIMARY)
-            .add_modifier(Modifier::UNDERLINED),
+        1 | 3 => base.fg(theme::PRIMARY).add_modifier(Modifier::BOLD),
+        2 => base.fg(theme::PRIMARY).add_modifier(Modifier::UNDERLINED),
         4 => base
-            .fg(chat_theme::FG)
+            .fg(theme::FG)
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        5 => base.fg(chat_theme::FG).add_modifier(Modifier::BOLD),
-        _ => base.fg(chat_theme::MUTED).add_modifier(Modifier::BOLD),
+        5 => base.fg(theme::FG).add_modifier(Modifier::BOLD),
+        _ => base.fg(theme::MUTED).add_modifier(Modifier::BOLD),
     }
 }
 
@@ -235,8 +233,8 @@ fn try_fenced_code_block(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
     // Clamp consumed to text length.
     consumed = consumed.min(text.len());
 
-    let surface = Style::default().bg(chat_theme::BLOCK_BG);
-    let code_style = surface.fg(chat_theme::FG);
+    let surface = Style::default().bg(theme::BLOCK_BG);
+    let code_style = surface.fg(theme::FG);
     let surface_line = |spans: Vec<Span<'static>>| {
         let mut line = Line::from(spans).style(surface);
         pad_to_width(&mut line, ctx.width, surface);
@@ -248,10 +246,7 @@ fn try_fenced_code_block(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
     // costs an extra row.
     let mut top = vec![Span::styled(CODE_LEFT_PAD, surface)];
     if has_lang {
-        top.push(Span::styled(
-            lang.to_string(),
-            surface.fg(chat_theme::MUTED),
-        ));
+        top.push(Span::styled(lang.to_string(), surface.fg(theme::MUTED)));
     }
     out.push(surface_line(top));
 
@@ -300,7 +295,7 @@ fn try_horizontal_rule(text: &str, ctx: BlockCtx) -> Option<SingleLineResult> {
         };
         Some(SingleLineResult {
             consumed: line.len() + 1,
-            line: Line::styled("─".repeat(len), Style::default().fg(chat_theme::SECONDARY)),
+            line: Line::styled("─".repeat(len), Style::default().fg(theme::SECONDARY)),
         })
     } else {
         None
@@ -335,8 +330,8 @@ fn try_blockquote(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
 
     // Quote bodies are full Markdown, so nested quotes, lists, and code render
     // recursively; nested bars accumulate one `▌` per level.
-    let surface = Style::default().bg(chat_theme::BLOCK_BG);
-    let bar = Span::styled(QUOTE_BAR, surface.fg(chat_theme::PRIMARY_MUTED));
+    let surface = Style::default().bg(theme::BLOCK_BG);
+    let bar = Span::styled(QUOTE_BAR, surface.fg(theme::PRIMARY_MUTED));
     let inner_ctx = BlockCtx {
         width: ctx.width.saturating_sub(QUOTE_BAR.width()),
         ..ctx
@@ -424,24 +419,16 @@ fn try_list(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
     for (idx, item_lines) in items.iter().enumerate() {
         let first = &item_lines[0];
         // Check for task list: "- [x] ..." or "- [ ] ..."
-        let primary = Style::default().fg(chat_theme::PRIMARY);
+        let primary = Style::default().fg(theme::PRIMARY);
         let (bullet, bullet_style, first_text) = if is_ordered {
             (format!("{}. ", idx + 1), primary, first.as_str())
         } else if let Some(rest) = first
             .strip_prefix("[x] ")
             .or_else(|| first.strip_prefix("[X] "))
         {
-            (
-                "✓ ".to_string(),
-                Style::default().fg(chat_theme::SUCCESS),
-                rest,
-            )
+            ("✓ ".to_string(), Style::default().fg(theme::SUCCESS), rest)
         } else if let Some(rest) = first.strip_prefix("[ ] ") {
-            (
-                "☐ ".to_string(),
-                Style::default().fg(chat_theme::MUTED),
-                rest,
-            )
+            ("☐ ".to_string(), Style::default().fg(theme::MUTED), rest)
         } else {
             let glyph = BULLETS[ctx.list_depth % BULLETS.len()];
             (glyph.to_string(), primary, first.as_str())
@@ -527,10 +514,10 @@ fn try_table(text: &str) -> Option<BlockResult> {
     }
 
     let header_style = Style::default()
-        .fg(chat_theme::PRIMARY)
+        .fg(theme::PRIMARY)
         .add_modifier(Modifier::BOLD);
     let border_style = Style::default()
-        .fg(chat_theme::BORDER)
+        .fg(theme::BORDER)
         .add_modifier(Modifier::DIM);
 
     // Horizontal rule row such as `┌───┬───┐`; each column gets 1 cell of
@@ -733,7 +720,7 @@ fn parse_inline_with_style(text: &str, base: Style) -> Line<'static> {
                 }
                 let (inner, found) = collect_until_backticks(&mut chars, backtick_count);
                 if found {
-                    let code_style = base.fg(chat_theme::WARNING);
+                    let code_style = base.fg(theme::WARNING);
                     spans.push(Span::styled(inner, code_style));
                 } else {
                     // Unclosed backticks — render literally
@@ -752,7 +739,7 @@ fn parse_inline_with_style(text: &str, base: Style) -> Line<'static> {
                     let (_url, _) = collect_until_single(&mut chars, ')');
                     spans.push(Span::styled(
                         format!(" 🖼 {alt} "),
-                        Style::default().fg(chat_theme::MUTED),
+                        Style::default().fg(theme::MUTED),
                     ));
                 } else {
                     buf.push_str("![");
@@ -765,9 +752,7 @@ fn parse_inline_with_style(text: &str, base: Style) -> Line<'static> {
                 if chars.peek() == Some(&'(') {
                     chars.next(); // consume '('
                     let (url, _) = collect_until_single(&mut chars, ')');
-                    let link_style = base
-                        .fg(chat_theme::PRIMARY)
-                        .add_modifier(Modifier::UNDERLINED);
+                    let link_style = base.fg(theme::PRIMARY).add_modifier(Modifier::UNDERLINED);
                     spans.push(Span::styled(link_text, link_style));
                     // Store the URL as a hidden tooltip-like suffix is not possible in ratatui,
                     // so we just render the link text styled.
@@ -942,7 +927,7 @@ mod tests {
         let lines = render_markdown("> quote");
         assert_eq!(lines.len(), 1);
         assert!(lines[0].spans[0].content.starts_with('▌'));
-        assert_eq!(lines[0].style.bg, Some(chat_theme::BLOCK_BG));
+        assert_eq!(lines[0].style.bg, Some(theme::BLOCK_BG));
     }
 
     #[test]
@@ -970,7 +955,7 @@ mod tests {
         for (i, line) in lines.iter().enumerate() {
             assert_eq!(
                 line.style.bg,
-                Some(chat_theme::BLOCK_BG),
+                Some(theme::BLOCK_BG),
                 "line {i} missing block background"
             );
         }
@@ -1068,10 +1053,10 @@ mod tests {
         // Label lives in the top padding row: label row + 1 code line + bottom padding.
         assert_eq!(lines.len(), 3, "got {} lines", lines.len());
         assert_eq!(lines[0].spans[1].content, "rust", "language label");
-        assert_eq!(lines[0].spans[1].style.fg, Some(chat_theme::MUTED));
+        assert_eq!(lines[0].spans[1].style.fg, Some(theme::MUTED));
         assert_eq!(lines[1].spans[1].content, "fn main() {}", "code line");
-        assert_eq!(lines[0].style.bg, Some(chat_theme::BLOCK_BG));
-        assert_eq!(lines[1].style.bg, Some(chat_theme::BLOCK_BG));
+        assert_eq!(lines[0].style.bg, Some(theme::BLOCK_BG));
+        assert_eq!(lines[1].style.bg, Some(theme::BLOCK_BG));
     }
 
     #[test]
@@ -1157,7 +1142,7 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].spans[0].content, "✓ ");
         assert_eq!(lines[1].spans[0].content, "✓ ");
-        assert_eq!(lines[0].spans[0].style.fg, Some(chat_theme::SUCCESS));
+        assert_eq!(lines[0].spans[0].style.fg, Some(theme::SUCCESS));
     }
 
     #[test]
@@ -1402,12 +1387,12 @@ mod tests {
     #[test]
     fn test_heading_levels_use_theme_styles() {
         let h1 = &render_markdown("# a")[0].spans[0].style;
-        assert_eq!(h1.fg, Some(chat_theme::PRIMARY));
+        assert_eq!(h1.fg, Some(theme::PRIMARY));
         assert!(h1.add_modifier.contains(Modifier::BOLD));
         let h2 = &render_markdown("## a")[0].spans[0].style;
         assert!(h2.add_modifier.contains(Modifier::UNDERLINED));
         let h6 = &render_markdown("###### a")[0].spans[0].style;
-        assert_eq!(h6.fg, Some(chat_theme::MUTED));
+        assert_eq!(h6.fg, Some(theme::MUTED));
     }
 
     #[test]
