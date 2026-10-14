@@ -70,8 +70,13 @@ Preserve visible text, key bindings, tab padding, dividers, and click regions.
 
 Gherkin: Header FG bold; Tag ACCENT; Given PRIMARY; When WARNING; Then SUCCESS;
 And/But TAB_INACTIVE; Comment MUTED; String SYNTAX_STRING; Meta/DocString SECONDARY.
-Preserve And/But inheritance. MindMap: Feature FG bold, Scenario PRIMARY,
-Background SECONDARY, step keywords via the shared Gherkin mapping.
+Preserve And/But inheritance. MindMap has a project-root and step-body trie;
+it has no Feature/Scenario title nodes or visible keyword labels. Root uses FG
+bold, background-derived steps use SECONDARY, and scenario-derived steps use
+their source keyword's Gherkin palette (including continuation inheritance).
+For merged nodes, background wins; otherwise use the first source location.
+Explicit highlight rules and relationship categories override these base roles.
+Keep existing node text, shape, IDs, navigation, and grouping unchanged.
 
 ## Glyph vocabulary
 

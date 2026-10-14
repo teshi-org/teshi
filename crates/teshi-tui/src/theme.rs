@@ -14,6 +14,21 @@ use teshi_core::git::DiffStatus;
 /// Explicit terminal default for unchanged diff surfaces.
 pub(crate) const RESET: Color = Color::Reset;
 
+/// Maps existing named MindMap highlight rules onto the shared palette.
+pub(crate) fn highlight_color(color: teshi_core::mindmap::HighlightColor) -> Color {
+    use teshi_core::mindmap::HighlightColor;
+    match color {
+        HighlightColor::Red => ERROR,
+        HighlightColor::Green => SUCCESS,
+        HighlightColor::Yellow => WARNING,
+        HighlightColor::Blue => SECONDARY,
+        HighlightColor::Magenta => ACCENT,
+        HighlightColor::Cyan => PRIMARY,
+        HighlightColor::White => FG,
+        HighlightColor::Black => CHIP_FG,
+    }
+}
+
 /// Main brand color: headings, focused borders, bullets, links.
 pub(crate) const PRIMARY: Color = Color::Rgb(0xAF, 0x87, 0xFF);
 /// Subdued primary for quote bars and other low-emphasis brand accents.
@@ -320,9 +335,9 @@ mod tests {
     #[test]
     fn test_page_color_budget() {
         const CAPS: &[(&str, &str, usize)] = &[
-            ("ui.rs", include_str!("ui.rs"), 35),
+            ("ui.rs", include_str!("ui.rs"), 28),
             ("highlight.rs", include_str!("highlight.rs"), 0),
-            ("mindmap.rs", include_str!("mindmap.rs"), 19),
+            ("mindmap.rs", include_str!("mindmap.rs"), 0),
             ("authoring_tab.rs", include_str!("authoring_tab.rs"), 10),
             ("test_points_tab.rs", include_str!("test_points_tab.rs"), 10),
             ("ui/chat.rs", include_str!("ui/chat.rs"), 1),

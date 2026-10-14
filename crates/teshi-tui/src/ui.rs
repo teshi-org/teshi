@@ -1633,7 +1633,7 @@ fn apply_line_background(line: Line<'static>, bg: Style) -> Line<'static> {
 fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: bool) {
     let items = &app.mindmap_index.items;
 
-    let highlight_style = selected_style(true);
+    let highlight_style = theme::selected_row(focused);
 
     // Build title with indicators when highlights/filter are active
     let mut title_parts: Vec<&str> = vec!["MindMap"];
@@ -1645,21 +1645,7 @@ fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: 
     }
     let title = title_parts.join(" ");
 
-    let block = if focused {
-        Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .title_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-    } else {
-        Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .title_style(Style::default().fg(Color::DarkGray))
-    };
+    let block = theme::panel_block(title, focused);
 
     let block_inner = block.inner(area);
     let tree = Tree::new(items)
@@ -1688,16 +1674,7 @@ fn render_mindmap_scenario_preview(
     let Some(buffer) = app.preview_buffer.as_ref() else {
         // No preview available — render an empty placeholder panel
         let title = "Preview";
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .title_style(if focused {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            });
+        let block = theme::panel_block(title, focused);
         frame.render_widget(block, area);
         return;
     };
@@ -1708,16 +1685,7 @@ fn render_mindmap_scenario_preview(
         app.preview_title.as_str()
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .title_style(if focused {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        });
+    let block = theme::panel_block(title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -1765,7 +1733,7 @@ fn render_mindmap_scenario_preview(
 
     // Render lines with Gherkin syntax highlighting
     let mut step_state = crate::highlight::StepHighlightState::default();
-    let highlight_style = Style::default().fg(Color::Yellow);
+    let highlight_style = Style::default().bg(theme::CURRENT_LINE_BG).fg(theme::FG);
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible_lines);
 
     for i in 0..visible_lines {
@@ -1782,19 +1750,7 @@ fn render_mindmap_scenario_preview(
         let mut styled = highlight_line_with_state(&line, &mut step_state, buffer.language());
 
         if buf_row == cursor_row {
-            // Highlight the selected step in yellow, but keep step keywords
-            // (Given/When/Then/And/But) in their original colors.
-            let mut new_spans: Vec<Span<'static>> = Vec::with_capacity(styled.spans.len());
-            for span in styled.spans.iter() {
-                if span.style.fg.is_some() {
-                    // Keyword, tag, string literal, etc. — keep original color
-                    new_spans.push(span.clone());
-                } else {
-                    // Description text / rest — highlight in yellow
-                    new_spans.push(Span::styled(span.content.clone(), highlight_style));
-                }
-            }
-            styled = Line::from(new_spans);
+            styled = apply_line_background(styled, highlight_style);
         }
 
         styled = truncate_line_to_cols(styled, inner.width);

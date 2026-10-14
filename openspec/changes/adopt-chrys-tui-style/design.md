@@ -147,4 +147,4 @@ Commit messages are English Conventional Commits with no `Co-authored-by` traile
 ## Open Questions
 
 - Should the footer strip background (`FOOTER_BG`) span the full width or only behind hints? Default: full width, as in chrys.
-- Mapping MindMap node categories (Feature, Scenario, Background) to `FG` bold, `PRIMARY`, and `SECONDARY` is a proposal. Confirm visually in Phase 3 and record the outcome in the style guide.
+- Confirmed during implementation: the MindMap is a project-root and step-body trie, with no Feature/Scenario title nodes or keyword labels. Preserve that structure and text. Render the project root in `FG` bold, background-derived steps in `SECONDARY`, and scenario-derived steps using the shared Gherkin keyword palette from their source locations, including And/But inheritance. For merged nodes, background context wins; otherwise the first source location determines the base style. Existing explicit highlights and relationship categories keep precedence over base styles. Do not introduce new nodes or visible keywords.

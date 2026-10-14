@@ -5,15 +5,16 @@
 
 use std::collections::HashMap;
 
+use crate::{highlight, theme};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Text as TuiText;
 use tui_tree_widget::TreeItem;
 
 // ── Re-exports from core ──────────────────────────────────────────────
 pub use teshi_core::mindmap::{
-    HighlightCategory, HighlightColor, HighlightRule, LocationContext, MatchCondition,
-    MindMapContext, MindMapFilter, NodeLocation, evaluate_condition, find_closest_node,
-    matches_filter, node_id_to_path, parse_color, parse_node_line_number,
+    HighlightCategory, HighlightRule, LocationContext, MatchCondition, MindMapContext,
+    MindMapFilter, NodeLocation, evaluate_condition, find_closest_node, matches_filter,
+    node_id_to_path, parse_color, parse_node_line_number,
 };
 
 pub use tui_tree_widget::TreeState;
@@ -21,7 +22,66 @@ pub use tui_tree_widget::TreeState;
 /// Build a TUI [`MindMapIndex`] from a parsed project.
 /// Wraps the core `build_index` with TreeItem construction.
 pub fn build_index(project: &teshi_core::gherkin::BddProject) -> MindMapIndex {
-    MindMapIndex::new(teshi_core::mindmap::build_index(project))
+    let mut index = MindMapIndex::new(teshi_core::mindmap::build_index(project));
+    index.base_styles = index
+        .node_locations
+        .iter()
+        .map(|(id, locations)| {
+            let style = if id == "root" {
+                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)
+            } else if locations
+                .iter()
+                .any(|loc| loc.context == LocationContext::Background)
+            {
+                Style::default().fg(theme::SECONDARY)
+            } else {
+                locations
+                    .first()
+                    .and_then(|loc| {
+                        let LocationContext::Scenario(scenario_idx) = loc.context else {
+                            return None;
+                        };
+                        let steps = &project
+                            .features
+                            .get(loc.feature_idx)?
+                            .scenario_at(scenario_idx)?
+                            .steps;
+                        let step = steps.get(loc.step_idx)?;
+                        use teshi_core::gherkin_lang::StepKeywordType;
+                        use teshi_core::highlight::HighlightKind;
+                        let keyword = if matches!(
+                            step.keyword_type,
+                            StepKeywordType::And | StepKeywordType::But
+                        ) {
+                            steps[..loc.step_idx]
+                                .iter()
+                                .rev()
+                                .find(|step| {
+                                    matches!(
+                                        step.keyword_type,
+                                        StepKeywordType::Given
+                                            | StepKeywordType::When
+                                            | StepKeywordType::Then
+                                    )
+                                })
+                                .map(|step| step.keyword_type)
+                                .unwrap_or(step.keyword_type)
+                        } else {
+                            step.keyword_type
+                        };
+                        Some(highlight::kind_to_style(match keyword {
+                            StepKeywordType::Given => HighlightKind::Given,
+                            StepKeywordType::When => HighlightKind::When,
+                            StepKeywordType::Then => HighlightKind::Then,
+                            StepKeywordType::And | StepKeywordType::But => HighlightKind::AndBut,
+                        }))
+                    })
+                    .unwrap_or_else(|| Style::default().fg(theme::FG))
+            };
+            (id.clone(), style)
+        })
+        .collect();
+    index
 }
 
 // ── TUI wrapper around core MindMapIndex ─────────────────────────────
@@ -30,6 +90,7 @@ pub fn build_index(project: &teshi_core::gherkin::BddProject) -> MindMapIndex {
 pub struct MindMapIndex {
     pub inner: teshi_core::mindmap::MindMapIndex,
     pub items: Vec<TreeItem<'static, String>>,
+    base_styles: HashMap<String, Style>,
 }
 
 impl std::ops::Deref for MindMapIndex {
@@ -51,6 +112,7 @@ impl MindMapIndex {
         Self {
             inner,
             items: Vec::new(),
+            base_styles: HashMap::new(),
         }
     }
 
@@ -118,6 +180,7 @@ impl MindMapIndex {
             node_labels: &mut inner.node_labels,
             label_colors: &label_colors,
             node_categories: &inner.node_categories,
+            base_styles: &self.base_styles,
             filter: &inner.filter,
             parent_map: &mut inner.parent_map,
             children_map: &mut inner.children_map,
@@ -138,26 +201,12 @@ fn build_label_colors(
     for (id, label) in node_labels {
         for rule in rules {
             if evaluate_condition(&rule.condition, label) {
-                map.insert(id.clone(), highlight_color_to_ratatui(rule.color));
+                map.insert(id.clone(), theme::highlight_color(rule.color));
                 break;
             }
         }
     }
     map
-}
-
-/// Convert a core [`HighlightColor`] to a ratatui [`Color`].
-fn highlight_color_to_ratatui(c: HighlightColor) -> Color {
-    match c {
-        HighlightColor::Red => Color::Red,
-        HighlightColor::Green => Color::Green,
-        HighlightColor::Yellow => Color::Yellow,
-        HighlightColor::Blue => Color::Blue,
-        HighlightColor::Magenta => Color::Magenta,
-        HighlightColor::Cyan => Color::Cyan,
-        HighlightColor::White => Color::White,
-        HighlightColor::Black => Color::Black,
-    }
 }
 
 /// Mutable state shared while converting the trie arena into `TreeItem`s.
@@ -170,6 +219,7 @@ struct BuildItemsCtx<'a> {
     node_labels: &'a mut HashMap<String, String>,
     label_colors: &'a HashMap<String, Color>,
     node_categories: &'a HashMap<String, HighlightCategory>,
+    base_styles: &'a HashMap<String, Style>,
     filter: &'a Option<MindMapFilter>,
     parent_map: &'a mut HashMap<String, String>,
     children_map: &'a mut HashMap<String, Vec<String>>,
@@ -229,18 +279,22 @@ fn build_items(
         TuiText::styled(label, Style::default().fg(color))
     } else {
         match ctx.node_categories.get(&id) {
-            Some(HighlightCategory::Selected) => TuiText::from(label),
+            Some(HighlightCategory::Selected) => {
+                TuiText::styled(label, ctx.base_styles.get(&id).copied().unwrap_or_default())
+            }
             Some(HighlightCategory::Ancestor) => {
-                TuiText::styled(label, Style::default().fg(Color::Cyan))
+                TuiText::styled(label, Style::default().fg(theme::PRIMARY))
             }
             Some(HighlightCategory::Descendant) => {
-                TuiText::styled(label, Style::default().fg(Color::Green))
+                TuiText::styled(label, Style::default().fg(theme::SUCCESS))
             }
-            Some(HighlightCategory::Sibling) => TuiText::from(label),
-            Some(HighlightCategory::GrayedOut) | None => TuiText::styled(
+            Some(HighlightCategory::Sibling) | None => {
+                TuiText::styled(label, ctx.base_styles.get(&id).copied().unwrap_or_default())
+            }
+            Some(HighlightCategory::GrayedOut) => TuiText::styled(
                 label,
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(theme::MUTED)
                     .add_modifier(Modifier::DIM),
             ),
         }
@@ -309,6 +363,46 @@ Feature: F
         BddProject {
             root_dir: PathBuf::from("."),
             features: vec![feature],
+        }
+    }
+
+    #[test]
+    fn test_base_palette_preserves_step_trie_and_continuation_inheritance() {
+        let feature = gherkin::parse_feature(
+            "Feature: F\n  Background:\n    Given setup\n  Scenario: One\n    When action\n    And continuation\n    Then result\n  Scenario: Two\n    Given action\n    Then result\n",
+            PathBuf::from("palette.feature"),
+        );
+        let project = BddProject {
+            root_dir: PathBuf::from("palette"),
+            features: vec![feature],
+        };
+        let mut index = build_index(&project);
+        let labels = index.node_labels.clone();
+        let _ = init_tree_state(&mut index);
+        assert_eq!(
+            index.node_labels, labels,
+            "styling must preserve every node id and label"
+        );
+        assert!(
+            index
+                .node_labels
+                .values()
+                .all(|label| !label.contains("Given") && !label.contains("Scenario:"))
+        );
+        assert_eq!(index.base_styles["root"].fg, Some(crate::theme::FG));
+        assert!(
+            index.base_styles["root"]
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        for (id, label) in &index.node_labels {
+            let expected = match label.trim_start_matches("(BG) ") {
+                "setup" => Some(crate::theme::SECONDARY),
+                "action" | "continuation" => Some(crate::theme::WARNING),
+                "result" => Some(crate::theme::SUCCESS),
+                _ => continue,
+            };
+            assert_eq!(index.base_styles[id].fg, expected, "node {label}");
         }
     }
 

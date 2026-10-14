@@ -30,10 +30,10 @@
 
 ## 4. Phase 3: MindMap tab
 
-- [ ] 4.1 Switch `render_tree_panel` to `panel_block` and `selected_row`.
-- [ ] 4.2 Map the node category colors in `mindmap.rs` to semantic roles: Feature `FG` bold, Scenario `PRIMARY`, Background `SECONDARY`, and step keywords via the Gherkin palette. Record the final mapping in the style guide.
-- [ ] 4.3 Use `CURRENT_LINE_BG` for the selected line in `render_mindmap_scenario_preview`, and move the scenario dropdown and change summary to the theme if phase 1 has not already done so.
-- [ ] 4.4 Set the `mindmap.rs` cap to zero, lower the `ui.rs` cap, run the gates, check visually, and commit as `feat(tui): apply chrys style to MindMap`.
+- [x] 4.1 Switch `render_tree_panel` to `panel_block` and `selected_row`.
+- [x] 4.2 Preserve the project-root/step-body trie and visible text. Map the root to `FG` bold, background-derived steps to `SECONDARY`, and scenario-derived steps via the source keyword's Gherkin palette, including continuation inheritance. Preserve explicit and relationship highlight precedence. Record the user-confirmed mapping in the style guide.
+- [x] 4.3 Use `CURRENT_LINE_BG` for the selected line in `render_mindmap_scenario_preview`, and move the scenario dropdown and change summary to the theme if phase 1 has not already done so.
+- [x] 4.4 Set the `mindmap.rs` cap to zero, lower the `ui.rs` cap, run the gates, check visually, and commit as `feat(tui): apply chrys style to MindMap`.
 
 ## 5. Phase 4: Requirements and Test Points tabs
 
@@ -118,3 +118,17 @@
 - Final workspace Clippy and complete serialized workspace tests passed.
 - Installed successfully and visually reviewed real PTY Explore and editor
   screenshots, including inactive row fills and Given/When/Then colors.
+
+### MindMap phase
+
+- The user approved preserving the actual root/step trie instead of adding
+  nonexistent Feature/Scenario nodes. Design and guide now describe the actual
+  source-location mapping and merged-node precedence.
+- Added a regression for node IDs/text, merged source locations, background
+  styling and continuation inheritance. MindMap raw-color cap is zero;
+  the intermediate `ui.rs` cap is 28.
+- Workspace tests and Clippy passed. Installed successfully after workspace
+  subprocess tests had exited, then reviewed the expanded real-PTY MindMap
+  and scenario preview screenshot with full-width selection/current-line fill.
+- Requirements/Test Points implementation was prepared independently and is
+  being applied after this phase to preserve the requested commit boundaries.
