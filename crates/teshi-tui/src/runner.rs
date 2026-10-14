@@ -14,6 +14,17 @@ struct RunnerConfigFile {
     runner: Option<RunnerConfigPartial>,
 }
 
+#[derive(Debug)]
+struct RunnerNotConfigured;
+
+impl std::fmt::Display for RunnerNotConfigured {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("runner cmd missing (set in teshi.toml or TESHI_RUNNER_CMD)")
+    }
+}
+
+impl std::error::Error for RunnerNotConfigured {}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 struct RunnerConfigPartial {
     cmd: Option<String>,
@@ -170,9 +181,10 @@ pub fn load_runner_config(cli: Option<RunnerCliOverride>) -> Result<RunnerConfig
         merged = merge_config(merged, cli_partial);
     }
 
-    let cmd = merged.cmd.filter(|s| !s.trim().is_empty()).ok_or_else(|| {
-        anyhow::anyhow!("runner cmd missing (set in teshi.toml or TESHI_RUNNER_CMD)")
-    })?;
+    let cmd = merged
+        .cmd
+        .filter(|s| !s.trim().is_empty())
+        .ok_or(RunnerNotConfigured)?;
 
     Ok(RunnerConfig {
         cmd,
@@ -212,6 +224,91 @@ pub fn spawn_runner(config: RunnerConfig, request: RunRequest) -> Result<Receive
         }
     });
     Ok(rx)
+}
+
+/// Returns whether every selected case has a terminal binding sidecar.
+pub fn all_tui_cases(cases: &[RunCase]) -> bool {
+    !cases.is_empty()
+        && cases.iter().all(|case| {
+            Path::new(&case.feature_path)
+                .with_extension("tui.json")
+                .is_file()
+        })
+}
+
+/// Resolves the separately packaged Rust terminal runner without invoking Cargo.
+pub fn tui_runner_config(command: Option<String>) -> RunnerConfig {
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            exe.parent()
+                .map(|dir| dir.join(format!("teshi-tui-runner{}", std::env::consts::EXE_SUFFIX)))
+        })
+        .filter(|path| path.is_file());
+    RunnerConfig {
+        cmd: command
+            .or_else(|| std::env::var("TESHI_TUI_RUNNER").ok())
+            .or_else(|| sibling.map(|path| path.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "teshi-tui-runner".into()),
+        args: Vec::new(),
+        cwd: None,
+        env: HashMap::new(),
+    }
+}
+
+/// Runs TUI scenarios with raw NDJSON output and a failing exit on case failure.
+///
+/// # Errors
+/// Returns source validation, selection, spawn, protocol write or runner exit errors.
+pub fn run_tui(path: &Path, scenario: Option<&str>, command: Option<String>) -> Result<()> {
+    let path = std::fs::canonicalize(path)?;
+    let root = teshi_engine::find_project_root(Some(&path)).unwrap_or(std::env::current_dir()?);
+    let validation = teshi_engine::validate_feature_scope(&root, Some(&path))?;
+    if validation.has_errors() {
+        anyhow::bail!(
+            "Feature validation failed: {}",
+            serde_json::to_string(&validation)?
+        );
+    }
+    let cases = build_cases_from_path(&path, scenario)?;
+    if !all_tui_cases(&cases) {
+        anyhow::bail!(
+            "TUI execution requires selected scenarios and a .tui.json sidecar for each feature"
+        );
+    }
+    let config = tui_runner_config(command);
+    let request = RunRequest {
+        command: "run".into(),
+        cases,
+        meta: HashMap::from([("project_root".into(), root.to_string_lossy().into_owned())]),
+    };
+    let mut child = Command::new(&config.cmd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "failed to launch TUI runner {}; install it or set TESHI_TUI_RUNNER",
+                config.cmd
+            )
+        })?;
+    let write_result = (|| -> Result<()> {
+        let mut stdin = child.stdin.take().context("TUI runner stdin unavailable")?;
+        serde_json::to_writer(&mut stdin, &request)?;
+        stdin.write_all(b"\n")?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    let status = child.wait()?;
+    if !status.success() {
+        anyhow::bail!("TUI runner failed with {status}");
+    }
+    Ok(())
 }
 
 /// Walk API/mixed scenarios in-process and emit the same NDJSON event types as an external runner.
@@ -452,6 +549,8 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
         .path
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let feature_path = std::fs::canonicalize(&feature_path)
+        .with_context(|| format!("resolve feature scope {}", feature_path.display()))?;
 
     // Resolve project root once and reuse
     let project_root = teshi_engine::find_project_root(Some(&feature_path))
@@ -470,6 +569,21 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
         args: opts.runner_args.clone(),
         cwd: opts.runner_cwd.clone(),
     }));
+    let runner_config = match runner_config {
+        Err(error) if !error.is::<RunnerNotConfigured>() => return Err(error),
+        result => result,
+    };
+
+    if runner_config
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.is::<RunnerNotConfigured>())
+    {
+        let selected = build_cases_from_path(&feature_path, opts.scenario.as_deref())?;
+        if all_tui_cases(&selected) {
+            return run_tui(&feature_path, opts.scenario.as_deref(), None);
+        }
+    }
 
     // An explicit NDJSON runner must win over a live daemon and Python engine
     // auto-detect (`import engine.cli` succeeds on many developer machines).
@@ -522,10 +636,7 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
     let mut meta = HashMap::new();
     meta.insert(
         "project_root".to_string(),
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .to_string_lossy()
-            .to_string(),
+        project_root.to_string_lossy().to_string(),
     );
     if let Some(mode) = read_sidecar_mode(&feature_path) {
         match mode.as_str() {
@@ -541,11 +652,26 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
         meta,
     };
     let rx = spawn_runner(config, request)?;
+    let mut failed = false;
+    let mut exited = false;
     while let Ok(event) = rx.recv() {
         println!("{}", format_event(&event));
+        failed |= matches!(
+            event,
+            RunEvent::CaseFailed { .. }
+                | RunEvent::RunnerError { .. }
+                | RunEvent::RunnerExit { success: false, .. }
+        );
+        if let RunEvent::EndRun { failed: count, .. } = &event {
+            failed |= *count > 0;
+        }
         if matches!(event, RunEvent::RunnerExit { .. }) {
+            exited = true;
             break;
         }
+    }
+    if failed || !exited {
+        anyhow::bail!("test runner failed or exited without a completion status");
     }
     Ok(())
 }

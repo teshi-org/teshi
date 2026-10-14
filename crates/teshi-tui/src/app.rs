@@ -660,7 +660,7 @@ pub struct App {
     pub agent_panel_mode: AgentPanelMode,
     pub installed_acp_agents: Vec<crate::acp_agents::InstalledAgent>,
     pub acp_registry_agents: Vec<teshi_acp::registry::RegistryAgent>,
-    acp_registry_rx:
+    pub(crate) acp_registry_rx:
         Option<Receiver<std::result::Result<Vec<teshi_acp::registry::RegistryAgent>, String>>>,
     acp_install_rx:
         Option<Receiver<std::result::Result<crate::acp_agents::InstalledAgent, String>>>,
@@ -3973,14 +3973,21 @@ impl App {
         let started = if needs_dispatch {
             runner::spawn_teshi_dispatch(self.project.root_dir.clone(), cases)
         } else {
-            let Some(config) = self.runner_config.clone() else {
+            let Some(config) = self
+                .runner_config
+                .clone()
+                .or_else(|| runner::all_tui_cases(&cases).then(|| runner::tui_runner_config(None)))
+            else {
                 self.status = "Runner not configured (teshi.toml or TESHI_RUNNER_CMD)".to_string();
                 return;
             };
             let request = RunRequest {
                 command: "run".to_string(),
                 cases,
-                meta: HashMap::new(),
+                meta: HashMap::from([(
+                    "project_root".into(),
+                    self.project.root_dir.to_string_lossy().into_owned(),
+                )]),
             };
             runner::spawn_runner(config, request)
         };
@@ -8553,6 +8560,38 @@ mod tests {
         )
         .unwrap();
         (app, project, store)
+    }
+
+    #[test]
+    fn tui_runner_failure_events_preserve_step_and_screen_attachment_in_explore() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.explore_case_map.insert("f0:s0".into(), (0, 0));
+        for line in [
+            r#"{"type":"start_run","total":1}"#,
+            r#"{"type":"start_case","case_id":"f0:s0","name":"Sample"}"#,
+            r#"{"type":"start_step","case_id":"f0:s0","step_id":"3","text":"expected content is visible"}"#,
+            r#"{"type":"end_step","case_id":"f0:s0","step_id":"3","status":"failed","message":"timed out waiting for content"}"#,
+            r#"{"type":"case_failed","case_id":"f0:s0","duration_ms":50,"error":{"message":"TUI step at line 3: timed out","attachments":[{"type":"text","path":"owned-case/screen.txt"}]}}"#,
+            r#"{"type":"end_run","passed":0,"failed":1,"skipped":0}"#,
+        ] {
+            app.apply_run_event(
+                crate::runner::parse_event_line(line).expect("valid native TUI event"),
+            );
+        }
+        assert_eq!(app.explore_run_summary.as_ref().unwrap().failed, 1);
+        assert_eq!(
+            app.explore_case_status.get(&(0, 0)),
+            Some(&super::RunStatus::Failed)
+        );
+        let detail = app.explore_case_details.get(&(0, 0)).unwrap();
+        assert_eq!(detail.steps[0].status.as_deref(), Some("failed"));
+        assert_eq!(
+            detail.steps[0].message.as_deref(),
+            Some("timed out waiting for content")
+        );
+        assert_eq!(detail.attachments[0].kind, "text");
+        assert_eq!(detail.attachments[0].path, "owned-case/screen.txt");
+        assert_eq!(detail.duration_ms, Some(50));
     }
 
     #[test]

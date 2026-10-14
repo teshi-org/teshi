@@ -896,17 +896,17 @@ fn render_agent_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         chat_lines.push(Line::raw(""));
     }
 
-    // Slice chat history based on scroll offset (0 = show bottom)
-    let total_lines = chat_lines.len();
+    // Paragraph wrapping changes the number of terminal rows. Measure the
+    // wrapped content before choosing the bottom viewport so long messages do
+    // not push the newest response below the rendered area.
+    let paragraph = Paragraph::new(Text::from(chat_lines))
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .style(Style::default());
+    let total_lines = paragraph.line_count(chat_body.width);
     let max_start = total_lines.saturating_sub(chat_body.height as usize);
     let start = max_start.saturating_sub(app.agent().scroll_offset.min(max_start));
-    let end = (start + chat_body.height as usize).min(total_lines);
-    let visible_lines: Vec<Line<'static>> = chat_lines[start..end].to_vec();
-
     frame.render_widget(
-        Paragraph::new(Text::from(visible_lines))
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .style(Style::default()),
+        paragraph.scroll((start.min(u16::MAX as usize) as u16, 0)),
         chat_body,
     );
 
@@ -2959,17 +2959,16 @@ pub(crate) fn render_agent_chat_inner(
         chat_lines.push(Line::raw(""));
     }
 
-    // Slice chat history based on scroll offset
-    let total_lines = chat_lines.len();
+    // Measure wrapped rows before scrolling; logical Markdown lines may occupy
+    // several terminal rows in the narrower MindMap chat panel.
+    let paragraph = Paragraph::new(Text::from(chat_lines))
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .style(Style::default());
+    let total_lines = paragraph.line_count(chat_area.width);
     let max_start = total_lines.saturating_sub(chat_area.height as usize);
     let start = max_start.saturating_sub(app.agent().scroll_offset.min(max_start));
-    let end = (start + chat_area.height as usize).min(total_lines);
-    let visible_lines: Vec<Line<'static>> = chat_lines[start..end].to_vec();
-
     frame.render_widget(
-        Paragraph::new(Text::from(visible_lines))
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .style(Style::default()),
+        paragraph.scroll((start.min(u16::MAX as usize) as u16, 0)),
         chat_area,
     );
 

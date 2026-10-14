@@ -86,6 +86,45 @@ jobs:
       - name: Build doc
         run: cargo doc --workspace --exclude teshi-web --locked --no-deps --document-private-items
 
+  tui-tests:
+    name: Terminal interface tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            crates/teshi-tui-runner -> target
+      - name: Check terminal runner formatting
+        run: cargo fmt --manifest-path crates/teshi-tui-runner/Cargo.toml --check
+      - name: Test real PTY backend and scenario protocol
+        run: cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked
+      - name: Lint terminal runner
+        run: cargo clippy --manifest-path crates/teshi-tui-runner/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Build Teshi CLI
+        run: cargo build -p teshi-cli --locked
+      - name: Run actual Teshi terminal regressions (Linux)
+        if: runner.os != 'Windows'
+        env:
+          TESHI_SELF_TEST_BIN: ${{ github.workspace }}/target/debug/teshi
+        run: cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked -- --ignored
+      - name: Run actual Teshi terminal regressions (Windows)
+        if: runner.os == 'Windows'
+        env:
+          TESHI_SELF_TEST_BIN: ${{ github.workspace }}/target/debug/teshi.exe
+        run: cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked -- --ignored
+
   desktop:
     name: teshi-desktop build (GPUI)
     runs-on: windows-latest

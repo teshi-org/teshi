@@ -213,6 +213,13 @@ pub fn run() -> Result<()> {
                 requirements_root.as_deref(),
             );
         }
+        Some(cli::Command::Tui {
+            path,
+            scenario,
+            runner_cmd,
+        }) => {
+            return runner::run_tui(std::path::Path::new(&path), scenario.as_deref(), runner_cmd);
+        }
         Some(cli::Command::Run {
             path,
             scenario,

@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 FEATURES = ROOT / "features"
-RUNNER_TAGS = {"@api", "@cli", "@validation-e2e", "@web-ui", "@winapp"}
+RUNNER_TAGS = {"@api", "@cli", "@validation-e2e", "@web-ui", "@winapp", "@tui"}
 LANGUAGE_BY_DIRECTORY = {"en-US": "# language: en", "zh-CN": "# language: zh-CN"}
 
 

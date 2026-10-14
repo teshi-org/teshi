@@ -65,6 +65,18 @@ pub fn parse_cli() -> Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Run recorded terminal application scenarios through the Rust TUI runner
+    Tui {
+        /// Feature file or directory
+        #[arg(value_name = "PATH")]
+        path: String,
+        /// Run only the named scenario
+        #[arg(long)]
+        scenario: Option<String>,
+        /// TUI runner executable (default: TESHI_TUI_RUNNER or teshi-tui-runner)
+        #[arg(long)]
+        runner_cmd: Option<String>,
+    },
     /// Check for and install a verified Teshi release bundle
     Update {
         /// Read the last local helper result without contacting GitHub
