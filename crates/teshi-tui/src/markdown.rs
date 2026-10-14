@@ -1,47 +1,56 @@
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use teshi_core::markdown::strip_think_tags;
 use unicode_width::UnicodeWidthStr;
 
-use std::collections::HashMap;
+use crate::chat_theme;
 
-/// Per-level heading styles: larger levels get less emphasis.
-fn heading_styles() -> HashMap<usize, Style> {
-    let mut m = HashMap::new();
-    m.insert(
-        1,
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    );
-    m.insert(
-        2,
-        Style::default()
-            .fg(Color::Rgb(220, 220, 255))
-            .add_modifier(Modifier::BOLD),
-    );
-    m.insert(
-        3,
-        Style::default()
-            .fg(Color::Rgb(200, 200, 230))
-            .add_modifier(Modifier::BOLD),
-    );
-    m.insert(
-        4,
-        Style::default()
-            .fg(Color::Rgb(180, 180, 210))
-            .add_modifier(Modifier::BOLD),
-    );
-    m.insert(5, Style::default().fg(Color::Rgb(160, 160, 190)));
-    m.insert(6, Style::default().fg(Color::Rgb(140, 140, 170)));
-    m
+/// Bullet glyphs for unordered lists, cycled by nesting depth.
+const BULLETS: [&str; 5] = ["• ", "▪ ", "‣ ", "⭑ ", "◦ "];
+
+/// Fallback horizontal-rule length when the caller does not supply a width.
+const DEFAULT_RULE_WIDTH: usize = 50;
+
+/// Left padding (in cells) inside fenced code blocks.
+const CODE_LEFT_PAD: &str = "  ";
+
+/// Prefix drawn in front of every blockquote line, repeated per nesting level.
+const QUOTE_BAR: &str = "▌ ";
+
+/// Per-level heading styles: H1-H3 use the primary color, H4-H6 step down to
+/// the plain and muted foregrounds so deep headings do not compete with H1.
+fn heading_style(level: usize) -> Style {
+    let base = Style::default();
+    match level {
+        1 | 3 => base.fg(chat_theme::PRIMARY).add_modifier(Modifier::BOLD),
+        2 => base
+            .fg(chat_theme::PRIMARY)
+            .add_modifier(Modifier::UNDERLINED),
+        4 => base
+            .fg(chat_theme::FG)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        5 => base.fg(chat_theme::FG).add_modifier(Modifier::BOLD),
+        _ => base.fg(chat_theme::MUTED).add_modifier(Modifier::BOLD),
+    }
+}
+
+/// Layout context threaded through the recursive block renderer.
+#[derive(Clone, Copy)]
+struct BlockCtx {
+    /// Target width in cells; `0` disables full-width padding.
+    width: usize,
+    /// Current unordered-list nesting depth, used to pick the bullet glyph.
+    list_depth: usize,
+    /// Suppresses blank separator lines between blocks (list item bodies).
+    compact: bool,
 }
 
 /// Renders a Markdown text string into styled `ratatui` lines.
 ///
-/// Supports block-level elements (headings, lists, blockquotes, fenced code blocks,
-/// tables, and paragraphs) and inline formatting (bold, italic, inline code, links,
-/// and strikethrough).
+/// Supports block-level elements (headings, nested lists, blockquotes, fenced
+/// code blocks, tables, and paragraphs) and inline formatting (bold, italic,
+/// inline code, links, and strikethrough). Surfaces are not padded to a fixed
+/// width; use [`render_markdown_width`] when the target width is known.
 ///
 /// # Examples
 ///
@@ -51,10 +60,38 @@ fn heading_styles() -> HashMap<usize, Style> {
 /// assert_eq!(lines.len(), 1);
 /// ```
 pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
+    render_markdown_width(text, 0)
+}
+
+/// Renders Markdown like [`render_markdown`], padding full-width elements to `width`.
+///
+/// Code fences and blockquotes get their background extended to `width` cells
+/// and horizontal rules span the full width. A `width` of `0` disables padding.
+/// Lines are not wrapped; callers that need wrapping must do it afterwards and
+/// should preserve each line's `style`, which carries the block background.
+///
+/// # Examples
+///
+/// ```
+/// use teshi_tui::markdown::render_markdown_width;
+/// let lines = render_markdown_width("---", 10);
+/// assert_eq!(lines[0].width(), 10);
+/// ```
+pub fn render_markdown_width(text: &str, width: u16) -> Vec<Line<'static>> {
     // Strip <think>...</think> blocks (reasoning model output)
     let text = strip_think_tags(text);
+    render_blocks(
+        &text,
+        BlockCtx {
+            width: width as usize,
+            list_depth: 0,
+            compact: false,
+        },
+    )
+}
+
+fn render_blocks(input: &str, ctx: BlockCtx) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let input = &text;
     let mut pos = 0usize;
     let mut needs_sep = false;
 
@@ -68,30 +105,27 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
         let remaining = &input[pos..];
 
         // Insert a blank line between consecutive blocks for visual breathing room.
-        if needs_sep {
-            let last = lines.last();
-            let already_blank = last.is_some_and(|l: &Line| {
-                l.spans.iter().all(|s| s.content.as_ref().is_empty()) && l.style == Style::default()
-            });
+        if needs_sep && !ctx.compact {
+            let already_blank = lines.last().is_some_and(is_blank_line);
             if !already_blank {
-                lines.push(Line::raw(""));
+                lines.push(Line::default());
             }
         }
 
         // Detect block type by the first non-empty line.
-        if let Some(block) = try_fenced_code_block(remaining) {
+        if let Some(block) = try_fenced_code_block(remaining, ctx) {
             pos += block.consumed;
             lines.extend(block.lines);
         } else if let Some(block) = try_heading(remaining) {
             pos += block.consumed;
             lines.push(block.line);
-        } else if let Some(block) = try_horizontal_rule(remaining) {
+        } else if let Some(block) = try_horizontal_rule(remaining, ctx) {
             pos += block.consumed;
             lines.push(block.line);
-        } else if let Some(block) = try_blockquote(remaining) {
+        } else if let Some(block) = try_blockquote(remaining, ctx) {
             pos += block.consumed;
             lines.extend(block.lines);
-        } else if let Some(block) = try_list(remaining) {
+        } else if let Some(block) = try_list(remaining, ctx) {
             pos += block.consumed;
             lines.extend(block.lines);
         } else if let Some(block) = try_table(remaining) {
@@ -110,6 +144,33 @@ pub fn render_markdown(text: &str) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+fn is_blank_line(line: &Line<'_>) -> bool {
+    line.spans.iter().all(|s| s.content.is_empty()) && line.style == Style::default()
+}
+
+/// Appends trailing spaces in `style` so the line spans `width` cells.
+/// A `width` of `0` (unknown) leaves the line untouched.
+fn pad_to_width(line: &mut Line<'static>, width: usize, style: Style) {
+    let current = line.width();
+    if width > current {
+        line.spans
+            .push(Span::styled(" ".repeat(width - current), style));
+    }
+}
+
+/// Prefixes every line with `prefix`, keeping each line's own block style.
+fn prefix_lines<'a>(
+    lines: Vec<Line<'static>>,
+    prefix: &'a Span<'static>,
+) -> impl Iterator<Item = Line<'static>> + 'a {
+    lines.into_iter().map(move |line| {
+        let mut spans = Vec::with_capacity(line.spans.len() + 1);
+        spans.push(prefix.clone());
+        spans.extend(line.spans.into_iter().filter(|s| !s.content.is_empty()));
+        Line::from(spans).style(line.style)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +201,7 @@ fn skip_empty_lines(text: &str) -> usize {
     count
 }
 
-fn try_fenced_code_block(text: &str) -> Option<BlockResult> {
+fn try_fenced_code_block(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
     let first_line = text.lines().next()?;
     let trimmed = first_line.trim_start();
     if !trimmed.starts_with("```") && !trimmed.starts_with("~~~") {
@@ -174,25 +235,33 @@ fn try_fenced_code_block(text: &str) -> Option<BlockResult> {
     // Clamp consumed to text length.
     consumed = consumed.min(text.len());
 
-    let bg = Style::default().bg(Color::Rgb(30, 30, 30)).fg(Color::Gray);
+    let surface = Style::default().bg(chat_theme::BLOCK_BG);
+    let code_style = surface.fg(chat_theme::FG);
+    let surface_line = |spans: Vec<Span<'static>>| {
+        let mut line = Line::from(spans).style(surface);
+        pad_to_width(&mut line, ctx.width, surface);
+        line
+    };
     let mut out: Vec<Line<'static>> = Vec::with_capacity(code_lines.len().saturating_add(2));
 
-    // Language label line (if present)
+    // The top padding row doubles as the language label so the label never
+    // costs an extra row.
+    let mut top = vec![Span::styled(CODE_LEFT_PAD, surface)];
     if has_lang {
-        let label_style = Style::default()
-            .bg(Color::Rgb(30, 30, 30))
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD);
-        let mut label_line = Line::styled(format!(" {} ", lang), label_style);
-        label_line.style = bg;
-        out.push(label_line);
+        top.push(Span::styled(
+            lang.to_string(),
+            surface.fg(chat_theme::MUTED),
+        ));
     }
+    out.push(surface_line(top));
 
     for code in code_lines {
-        let mut line = Line::from(Span::styled(code, bg));
-        line.style = bg;
-        out.push(line);
+        out.push(surface_line(vec![
+            Span::styled(CODE_LEFT_PAD, surface),
+            Span::styled(code, code_style),
+        ]));
     }
+    out.push(surface_line(vec![Span::styled(CODE_LEFT_PAD, surface)]));
 
     Some(BlockResult {
         consumed,
@@ -208,13 +277,7 @@ fn try_heading(text: &str) -> Option<SingleLineResult> {
         return None;
     }
     let content = &trimmed[level + 1..];
-    let styles = heading_styles();
-    let heading_style = styles.get(&level).copied().unwrap_or(
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    );
-    let line = parse_inline_with_style(content, heading_style);
+    let line = parse_inline_with_style(content, heading_style(level));
     Some(SingleLineResult {
         consumed: first_line.len() + 1,
         line,
@@ -222,7 +285,7 @@ fn try_heading(text: &str) -> Option<SingleLineResult> {
 }
 
 /// Detects and renders a horizontal rule: `---`, `***`, or `___` (3+ characters).
-fn try_horizontal_rule(text: &str) -> Option<SingleLineResult> {
+fn try_horizontal_rule(text: &str, ctx: BlockCtx) -> Option<SingleLineResult> {
     let line = text.lines().next()?;
     let trimmed = line.trim();
     if trimmed.len() < 3 {
@@ -230,18 +293,21 @@ fn try_horizontal_rule(text: &str) -> Option<SingleLineResult> {
     }
     let ch = trimmed.chars().next()?;
     if (ch == '-' || ch == '*' || ch == '_') && trimmed.chars().all(|c| c == ch) {
-        // Repeat the horizontal rule character to fill available width (use a fixed count)
-        let rule = "─".repeat(50); // arbitrary fill
+        let len = if ctx.width > 0 {
+            ctx.width
+        } else {
+            DEFAULT_RULE_WIDTH
+        };
         Some(SingleLineResult {
             consumed: line.len() + 1,
-            line: Line::styled(rule, Style::default().fg(Color::DarkGray)),
+            line: Line::styled("─".repeat(len), Style::default().fg(chat_theme::SECONDARY)),
         })
     } else {
         None
     }
 }
 
-fn try_blockquote(text: &str) -> Option<BlockResult> {
+fn try_blockquote(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
     let first_line = text.lines().next()?;
     if !first_line.trim_start().starts_with('>') {
         return None;
@@ -267,27 +333,28 @@ fn try_blockquote(text: &str) -> Option<BlockResult> {
 
     consumed = consumed.min(text.len());
 
-    let base_style = Style::default()
-        .fg(Color::Gray)
-        .add_modifier(Modifier::ITALIC);
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(raw_lines.len());
-    for raw in raw_lines {
-        let mut line = parse_inline_with_style(&raw, base_style);
-        // Prefix with a blockquote indicator styled dimly.
-        let mut spans = vec![Span::styled("│ ", Style::default().fg(Color::DarkGray))];
-        spans.extend(
-            line.spans
-                .into_iter()
-                .map(|s| Span::styled(s.content.to_string(), s.style)),
-        );
-        line = Line::from(spans);
-        lines.push(line);
-    }
+    // Quote bodies are full Markdown, so nested quotes, lists, and code render
+    // recursively; nested bars accumulate one `▌` per level.
+    let surface = Style::default().bg(chat_theme::BLOCK_BG);
+    let bar = Span::styled(QUOTE_BAR, surface.fg(chat_theme::PRIMARY_MUTED));
+    let inner_ctx = BlockCtx {
+        width: ctx.width.saturating_sub(QUOTE_BAR.width()),
+        ..ctx
+    };
+    let inner = render_blocks(&raw_lines.join("\n"), inner_ctx);
+    let lines = prefix_lines(inner, &bar)
+        .map(|line| {
+            let style = surface.patch(line.style);
+            let mut line = line.style(style);
+            pad_to_width(&mut line, ctx.width, style);
+            line
+        })
+        .collect();
 
     Some(BlockResult { consumed, lines })
 }
 
-fn try_list(text: &str) -> Option<BlockResult> {
+fn try_list(text: &str, ctx: BlockCtx) -> Option<BlockResult> {
     let first_line = text.lines().next()?;
     let (is_ordered, indent, marker_len) = list_marker_info(first_line)?;
 
@@ -295,6 +362,7 @@ fn try_list(text: &str) -> Option<BlockResult> {
     let mut items: Vec<Vec<String>> = Vec::new();
     let mut current_item: Vec<String> = Vec::new();
 
+    let mut prev_blank = false;
     for line in text.lines() {
         let line_indent = leading_spaces(line);
         let t = line.trim_start();
@@ -302,6 +370,7 @@ fn try_list(text: &str) -> Option<BlockResult> {
         if line.trim().is_empty() {
             current_item.push(String::new());
             consumed += line.len() + 1;
+            prev_blank = true;
             continue;
         }
 
@@ -309,10 +378,19 @@ fn try_list(text: &str) -> Option<BlockResult> {
             break;
         }
 
-        if line_indent == indent
-            && let Some((ordered, _i, mlen)) = list_marker_info(line)
-            && ordered == is_ordered
-        {
+        let same_level_marker = if line_indent == indent {
+            list_marker_info(line).filter(|(ordered, _, _)| *ordered == is_ordered)
+        } else {
+            None
+        };
+        // An unindented, non-marker line after a blank line starts a new block
+        // (e.g. a closing paragraph) rather than continuing the last item.
+        if prev_blank && line_indent <= indent && same_level_marker.is_none() {
+            break;
+        }
+        prev_blank = false;
+
+        if let Some((_, _, mlen)) = same_level_marker {
             if !current_item.is_empty() {
                 items.push(current_item);
                 current_item = Vec::new();
@@ -346,36 +424,45 @@ fn try_list(text: &str) -> Option<BlockResult> {
     for (idx, item_lines) in items.iter().enumerate() {
         let first = &item_lines[0];
         // Check for task list: "- [x] ..." or "- [ ] ..."
-        let (bullet, checked, first_text) = if is_ordered {
-            (format!("{}. ", idx + 1), None, first.as_str())
+        let primary = Style::default().fg(chat_theme::PRIMARY);
+        let (bullet, bullet_style, first_text) = if is_ordered {
+            (format!("{}. ", idx + 1), primary, first.as_str())
         } else if let Some(rest) = first
             .strip_prefix("[x] ")
             .or_else(|| first.strip_prefix("[X] "))
         {
-            ("☑ ".to_string(), Some(true), rest)
+            (
+                "✓ ".to_string(),
+                Style::default().fg(chat_theme::SUCCESS),
+                rest,
+            )
         } else if let Some(rest) = first.strip_prefix("[ ] ") {
-            ("☐ ".to_string(), Some(false), rest)
+            (
+                "☐ ".to_string(),
+                Style::default().fg(chat_theme::MUTED),
+                rest,
+            )
         } else {
-            ("• ".to_string(), None, first.as_str())
+            let glyph = BULLETS[ctx.list_depth % BULLETS.len()];
+            (glyph.to_string(), primary, first.as_str())
         };
-        let bullet_style = match checked {
-            Some(true) => Style::default().fg(Color::Green),
-            Some(false) => Style::default().fg(Color::DarkGray),
-            None => Style::default().fg(Color::Yellow),
-        };
-        let bullet_span = Span::styled(bullet, bullet_style);
+        let marker_width = bullet.width();
 
-        for (li, raw) in item_lines.iter().enumerate() {
-            let text = if li == 0 { first_text } else { raw };
-            let inline = parse_inline(text);
-            let mut spans = Vec::new();
-            if li == 0 {
-                spans.push(bullet_span.clone());
-            } else {
-                spans.push(Span::styled("   ", Style::default()));
-            }
-            spans.extend(inline.spans);
-            lines.push(Line::from(spans));
+        let mut spans = vec![Span::styled(bullet, bullet_style)];
+        spans.extend(parse_inline(first_text).spans);
+        lines.push(Line::from(spans));
+
+        // Continuation lines (including nested lists) render recursively and
+        // hang under the item text, so wrapped bodies align with the marker.
+        let body = item_lines[1..].join("\n");
+        if !body.trim().is_empty() {
+            let child_ctx = BlockCtx {
+                width: ctx.width.saturating_sub(marker_width),
+                list_depth: ctx.list_depth + 1,
+                compact: true,
+            };
+            let indent = Span::raw(" ".repeat(marker_width));
+            lines.extend(prefix_lines(render_blocks(&body, child_ctx), &indent));
         }
     }
 
@@ -440,34 +527,39 @@ fn try_table(text: &str) -> Option<BlockResult> {
     }
 
     let header_style = Style::default()
-        .fg(Color::White)
+        .fg(chat_theme::PRIMARY)
         .add_modifier(Modifier::BOLD);
-    let cell_style = Style::default().fg(Color::Gray);
-    let sep_style = Style::default().fg(Color::DarkGray);
+    let border_style = Style::default()
+        .fg(chat_theme::BORDER)
+        .add_modifier(Modifier::DIM);
 
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows.len());
+    // Horizontal rule row such as `┌───┬───┐`; each column gets 1 cell of
+    // padding on both sides of its content.
+    let rule = |left: &str, mid: &str, right: &str| {
+        let body = col_widths
+            .iter()
+            .map(|w| "─".repeat(w + 2))
+            .collect::<Vec<_>>()
+            .join(mid);
+        Line::styled(format!("{left}{body}{right}"), border_style)
+    };
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows.len() + 2);
+    lines.push(rule("┌", "┬", "┐"));
 
     for (ri, row) in rows.iter().enumerate() {
         if ri == 1 {
-            // Separator row: render as a dashed line.
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            for (ci, width) in col_widths.iter().enumerate() {
-                if ci > 0 {
-                    spans.push(Span::styled("|", sep_style));
-                }
-                let dash_len = width.saturating_add(2); // +2 for padding spaces
-                spans.push(Span::styled("-".repeat(dash_len), sep_style));
-            }
-            lines.push(Line::from(spans));
+            lines.push(rule("├", "┼", "┤"));
             continue;
         }
 
-        let base_style = if ri == 0 { header_style } else { cell_style };
-        let mut spans: Vec<Span<'static>> = Vec::new();
+        let base_style = if ri == 0 {
+            header_style
+        } else {
+            Style::default()
+        };
+        let mut spans: Vec<Span<'static>> = vec![Span::styled("│", border_style)];
         for (ci, cell) in row.iter().enumerate() {
-            if ci > 0 {
-                spans.push(Span::styled("|", sep_style));
-            }
             let trimmed = cell.trim();
             let w = UnicodeWidthStr::width(trimmed);
             let pad = col_widths[ci].saturating_sub(w);
@@ -475,9 +567,11 @@ fn try_table(text: &str) -> Option<BlockResult> {
             // Apply inline Markdown parsing to cell content with the row base style.
             let cell_line = parse_inline_with_style(&padded, base_style);
             spans.extend(cell_line.spans);
+            spans.push(Span::styled("│", border_style));
         }
         lines.push(Line::from(spans));
     }
+    lines.push(rule("└", "┴", "┘"));
 
     Some(BlockResult { consumed, lines })
 }
@@ -639,9 +733,7 @@ fn parse_inline_with_style(text: &str, base: Style) -> Line<'static> {
                 }
                 let (inner, found) = collect_until_backticks(&mut chars, backtick_count);
                 if found {
-                    let code_style = Style::default()
-                        .bg(Color::Rgb(40, 40, 40))
-                        .fg(Color::Rgb(255, 220, 100));
+                    let code_style = base.fg(chat_theme::WARNING);
                     spans.push(Span::styled(inner, code_style));
                 } else {
                     // Unclosed backticks — render literally
@@ -660,7 +752,7 @@ fn parse_inline_with_style(text: &str, base: Style) -> Line<'static> {
                     let (_url, _) = collect_until_single(&mut chars, ')');
                     spans.push(Span::styled(
                         format!(" 🖼 {alt} "),
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+                        Style::default().fg(chat_theme::MUTED),
                     ));
                 } else {
                     buf.push_str("![");
@@ -673,8 +765,8 @@ fn parse_inline_with_style(text: &str, base: Style) -> Line<'static> {
                 if chars.peek() == Some(&'(') {
                     chars.next(); // consume '('
                     let (url, _) = collect_until_single(&mut chars, ')');
-                    let link_style = Style::default()
-                        .fg(Color::Cyan)
+                    let link_style = base
+                        .fg(chat_theme::PRIMARY)
                         .add_modifier(Modifier::UNDERLINED);
                     spans.push(Span::styled(link_text, link_style));
                     // Store the URL as a hidden tooltip-like suffix is not possible in ratatui,
@@ -849,7 +941,8 @@ mod tests {
     fn test_blockquote() {
         let lines = render_markdown("> quote");
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].spans[0].content.starts_with("│"));
+        assert!(lines[0].spans[0].content.starts_with('▌'));
+        assert_eq!(lines[0].style.bg, Some(chat_theme::BLOCK_BG));
     }
 
     #[test]
@@ -870,12 +963,17 @@ mod tests {
     fn test_fenced_code_block() {
         let text = "```\nhello\nworld\n```";
         let lines = render_markdown(text);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].spans[0].content, "hello");
-        assert_eq!(lines[1].spans[0].content, "world");
-        // Verify line style has background (covers entire line).
-        assert_eq!(lines[0].style.bg, Some(Color::Rgb(30, 30, 30)));
-        assert_eq!(lines[1].style.bg, Some(Color::Rgb(30, 30, 30)));
+        // Top padding + 2 code lines + bottom padding.
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[1].spans[1].content, "hello");
+        assert_eq!(lines[2].spans[1].content, "world");
+        for (i, line) in lines.iter().enumerate() {
+            assert_eq!(
+                line.style.bg,
+                Some(chat_theme::BLOCK_BG),
+                "line {i} missing block background"
+            );
+        }
     }
 
     #[test]
@@ -897,20 +995,23 @@ mod tests {
     fn test_table() {
         let text = "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |";
         let lines = render_markdown(text);
-        // Header + separator + 2 data rows = 4 lines
-        assert_eq!(lines.len(), 4);
+        // Top rule + header + separator + 2 data rows + bottom rule = 6 lines
+        assert_eq!(lines.len(), 6);
+        assert!(lines[0].spans[0].content.starts_with('┌'));
         // Header should be bold
         assert!(
-            lines[0]
+            lines[1]
                 .spans
                 .iter()
                 .any(|s| s.style.add_modifier.contains(Modifier::BOLD))
         );
-        // Separator should contain dashes
-        assert!(lines[1].spans.iter().any(|s| s.content.contains('-')));
-        // Data rows should exist
-        assert!(lines[2].spans.iter().any(|s| s.content.contains("Alice")));
-        assert!(lines[3].spans.iter().any(|s| s.content.contains("Bob")));
+        assert!(lines[2].spans[0].content.starts_with('├'));
+        assert!(lines[3].spans.iter().any(|s| s.content.contains("Alice")));
+        assert!(lines[4].spans.iter().any(|s| s.content.contains("Bob")));
+        assert!(lines[5].spans[0].content.starts_with('└'));
+        // Every row must have the same display width so the box lines up.
+        let widths: Vec<usize> = lines.iter().map(Line::width).collect();
+        assert!(widths.iter().all(|w| *w == widths[0]), "got {widths:?}");
     }
 
     #[test]
@@ -964,20 +1065,21 @@ mod tests {
     fn test_code_block_with_language() {
         let text = "```rust\nfn main() {}\n```";
         let lines = render_markdown(text);
-        // Language label + 1 code line
-        assert_eq!(lines.len(), 2, "got {} lines", lines.len());
-        assert_eq!(lines[0].spans[0].content, " rust ", "language label");
-        assert_eq!(lines[1].spans[0].content, "fn main() {}", "code line");
-        assert_eq!(lines[0].style.bg, Some(Color::Rgb(30, 30, 30)));
-        assert_eq!(lines[1].style.bg, Some(Color::Rgb(30, 30, 30)));
+        // Label lives in the top padding row: label row + 1 code line + bottom padding.
+        assert_eq!(lines.len(), 3, "got {} lines", lines.len());
+        assert_eq!(lines[0].spans[1].content, "rust", "language label");
+        assert_eq!(lines[0].spans[1].style.fg, Some(chat_theme::MUTED));
+        assert_eq!(lines[1].spans[1].content, "fn main() {}", "code line");
+        assert_eq!(lines[0].style.bg, Some(chat_theme::BLOCK_BG));
+        assert_eq!(lines[1].style.bg, Some(chat_theme::BLOCK_BG));
     }
 
     #[test]
     fn test_code_block_tilde_fence() {
         let text = "~~~\ncode here\n~~~";
         let lines = render_markdown(text);
-        assert_eq!(lines.len(), 1, "got {} lines", lines.len());
-        assert_eq!(lines[0].spans[0].content, "code here");
+        assert_eq!(lines.len(), 3, "got {} lines", lines.len());
+        assert_eq!(lines[1].spans[1].content, "code here");
     }
 
     #[test]
@@ -1009,8 +1111,8 @@ mod tests {
         assert_eq!(lines.len(), 3);
         for (i, line) in lines.iter().enumerate() {
             assert!(
-                line.spans[0].content.starts_with('│'),
-                "line {i} missing │ prefix"
+                line.spans[0].content.starts_with('▌'),
+                "line {i} missing ▌ prefix"
             );
             assert!(
                 line.spans[1]
@@ -1030,7 +1132,7 @@ mod tests {
         assert_eq!(
             lines[1].spans.len(),
             1,
-            "blank quote line has only │ prefix"
+            "blank quote line has only ▌ prefix"
         );
         assert!(lines[2].spans[1].content.contains("para2"));
     }
@@ -1053,8 +1155,9 @@ mod tests {
     fn test_task_list_checked() {
         let lines = render_markdown("- [x] done\n- [X] also done");
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].spans[0].content, "☑ ");
-        assert_eq!(lines[1].spans[0].content, "☑ ");
+        assert_eq!(lines[0].spans[0].content, "✓ ");
+        assert_eq!(lines[1].spans[0].content, "✓ ");
+        assert_eq!(lines[0].spans[0].style.fg, Some(chat_theme::SUCCESS));
     }
 
     #[test]
@@ -1068,7 +1171,7 @@ mod tests {
     fn test_task_list_star_marker() {
         // `* [x]` is recognized as a task list (same as `- [x]`)
         let lines = render_markdown("* [x] star task");
-        assert_eq!(lines[0].spans[0].content, "☑ ");
+        assert_eq!(lines[0].spans[0].content, "✓ ");
     }
 
     #[test]
@@ -1077,7 +1180,10 @@ mod tests {
         let lines = render_markdown(text);
         assert_eq!(lines.len(), 3);
         assert!(lines[0].spans[0].content.starts_with('•'));
-        assert_eq!(lines[1].spans[0].content, "   ", "continuation indent");
+        assert_eq!(
+            lines[1].spans[0].content, "  ",
+            "continuation hangs under item text"
+        );
         assert_eq!(lines[1].spans[1].content, "continuation");
         assert!(lines[2].spans[0].content.starts_with('•'));
     }
@@ -1097,9 +1203,9 @@ mod tests {
     fn test_table_single_column() {
         let text = "| H |\n|---|\n| v |";
         let lines = render_markdown(text);
-        assert_eq!(lines.len(), 3, "got {} lines", lines.len());
-        assert!(lines[0].spans.iter().any(|s| s.content.contains("H")));
-        assert!(lines[2].spans.iter().any(|s| s.content.contains("v")));
+        assert_eq!(lines.len(), 5, "got {} lines", lines.len());
+        assert!(lines[1].spans.iter().any(|s| s.content.contains("H")));
+        assert!(lines[3].spans.iter().any(|s| s.content.contains("v")));
     }
 
     #[test]
@@ -1258,6 +1364,50 @@ mod tests {
                 .iter()
                 .any(|l| l.spans.iter().any(|s| s.content.contains("list")))
         );
+    }
+
+    #[test]
+    fn test_nested_list_cycles_bullets_by_depth() {
+        let text = "- one\n  - two\n    - three";
+        let lines = render_markdown(text);
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(rendered, vec!["• one", "  ▪ two", "    ‣ three"]);
+    }
+
+    #[test]
+    fn test_paragraph_after_list_is_not_continuation() {
+        let lines = render_markdown("- a\n- b\n\nClosing text");
+        assert_eq!(lines.len(), 4, "list, list, blank, paragraph");
+        assert_eq!(lines[3].spans[0].content, "Closing text");
+    }
+
+    #[test]
+    fn test_render_markdown_width_pads_full_width_blocks() {
+        let cases = [
+            ("```\nx\n```", "code fence"),
+            ("> quoted", "blockquote"),
+            ("---", "horizontal rule"),
+        ];
+        for (text, label) in cases {
+            let lines = render_markdown_width(text, 24);
+            for line in &lines {
+                assert_eq!(line.width(), 24, "{label}: line not padded: {line:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_heading_levels_use_theme_styles() {
+        let h1 = &render_markdown("# a")[0].spans[0].style;
+        assert_eq!(h1.fg, Some(chat_theme::PRIMARY));
+        assert!(h1.add_modifier.contains(Modifier::BOLD));
+        let h2 = &render_markdown("## a")[0].spans[0].style;
+        assert!(h2.add_modifier.contains(Modifier::UNDERLINED));
+        let h6 = &render_markdown("###### a")[0].spans[0].style;
+        assert_eq!(h6.fg, Some(chat_theme::MUTED));
     }
 
     #[test]
