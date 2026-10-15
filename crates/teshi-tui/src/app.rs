@@ -5918,17 +5918,8 @@ impl App {
                     ) {
                         return Ok(());
                     }
-                    let n = self
-                        .authoring_ui
-                        .artifacts
-                        .as_ref()
-                        .map(|a| a.index.documents.len())
-                        .unwrap_or(0)
-                        + 1;
-                    let path = format!("doc-{n}.md");
-                    let title = format!("Document {n}");
-                    self.authoring_ui.create_document(&path, &title);
-                    self.status = format!("Created requirement document {path}");
+                    let id = self.authoring_ui.create_default_document();
+                    self.status = format!("Created requirement document {id}.md");
                     self.quit_pending_confirm = false;
                 }
             }
@@ -6540,6 +6531,7 @@ impl App {
                     .save_current_document(&self.project.root_dir)
                 {
                     self.status = format!("Could not save requirement: {error}");
+                    self.set_status_message(self.status.clone());
                     return Ok(());
                 }
             }
@@ -6580,6 +6572,7 @@ impl App {
                     Ok(()) => self.status = "Saved requirement document".to_string(),
                     Err(error) => self.status = format!("Could not save requirement: {error}"),
                 }
+                self.set_status_message(self.status.clone());
             }
             return Ok(());
         }
@@ -8695,6 +8688,90 @@ mod tests {
         (app, project, store)
     }
 
+    #[test]
+    fn requirements_save_refreshes_rendered_title_and_rejects_invalid_edits() {
+        let (mut app, _project, store) = requirements_test_app();
+        let original = app.authoring_ui.artifacts.as_ref().unwrap().index.documents[0].clone();
+        let renamed = "用户认证需求";
+        app.authoring_ui.buffer =
+            EditorBuffer::from_string(format!("#    {renamed}    \n\nBody\n"));
+        app.authoring_ui.buffer_dirty = true;
+        app.handle_action(Action::Save).unwrap();
+        assert_eq!(app.status, "Saved requirement document");
+        assert!(!app.authoring_ui.buffer_dirty);
+        let saved = teshi_engine::read_requirement_document(store.path(), &original.id).unwrap();
+        assert_eq!(saved.meta.title, renamed);
+        assert_eq!(saved.meta.id, original.id);
+        assert_eq!(saved.meta.path, original.path);
+        assert_eq!(
+            app.authoring_ui.selected_document_id.as_deref(),
+            Some(original.id.as_str())
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(150, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let tree = app.authoring_ui.pane_areas[0];
+        let mut tree_text = String::new();
+        for y in tree.y..tree.bottom() {
+            let mut x = tree.x;
+            while x < tree.right() {
+                let symbol = terminal.backend().buffer()[(x, y)].symbol();
+                tree_text.push_str(symbol);
+                x += unicode_width::UnicodeWidthStr::width(symbol).max(1) as u16;
+            }
+        }
+        assert!(tree_text.contains(renamed), "tree was: {tree_text}");
+
+        for (body, message) in [
+            ("#   \n", "Requirement title cannot be empty"),
+            (
+                "No H1\n# Later",
+                "Requirement must start with an H1 title: # Title",
+            ),
+        ] {
+            app.authoring_ui.buffer = EditorBuffer::from_string(body.into());
+            app.authoring_ui.buffer_dirty = true;
+            app.handle_action(Action::Save).unwrap();
+            assert!(app.status.contains(message), "{}", app.status);
+            terminal
+                .draw(|frame| crate::ui::render(frame, &mut app))
+                .unwrap();
+            let footer = (0..150)
+                .map(|x| terminal.backend().buffer()[(x, 23)].symbol())
+                .collect::<String>();
+            assert!(footer.contains(message), "footer was: {footer}");
+            assert!(app.authoring_ui.buffer_dirty);
+            assert_eq!(app.authoring_ui.buffer.as_string(), body);
+            assert_eq!(
+                teshi_engine::read_requirement_document(store.path(), &original.id).unwrap(),
+                saved
+            );
+            assert_eq!(
+                app.authoring_ui.artifacts.as_ref().unwrap().documents[0].meta,
+                saved.meta
+            );
+        }
+    }
+
+    #[test]
+    fn requirements_new_document_action_uses_matching_id_path_and_title() {
+        let (mut app, _project, _store) = requirements_test_app();
+        app.handle_action(Action::ReqNewDocument).unwrap();
+        assert_eq!(
+            app.authoring_ui.selected_document_id.as_deref(),
+            Some("doc-2")
+        );
+        assert_eq!(app.authoring_ui.buffer.as_string(), "# Document 2\n\n");
+        assert!(app.authoring_ui.buffer_dirty);
+        let artifacts = app.authoring_ui.artifacts.as_ref().unwrap();
+        let new = artifacts.index.documents.last().unwrap();
+        assert_eq!(new.id, "doc-2");
+        assert_eq!(new.path, "doc-2.md");
+        assert_eq!(new.title, "Document 2");
+    }
+
     fn slash_test_app() -> (App, tempfile::TempDir, tempfile::TempDir) {
         let project = tempdir().unwrap();
         let store = tempdir().unwrap();
@@ -10238,6 +10315,7 @@ mod tests {
             app.handle_action(action).unwrap();
         }
         assert_eq!(app.authoring_ui.buffer.as_string(), original);
+        app.authoring_ui.cursor_row = 2;
         app.handle_action(Action::ReqEnterInsert).unwrap();
         for ch in "hjkl nsmq12345 中文🙂".chars() {
             app.handle_action(Action::Insert(ch)).unwrap();
@@ -10257,6 +10335,7 @@ mod tests {
     fn test_requirements_unsaved_cancel_discard_and_save_resume_navigation() {
         let (mut app, _project, store) = requirements_test_app();
         let original = app.authoring_ui.buffer.as_string();
+        app.authoring_ui.cursor_row = 2;
         app.authoring_ui.enter_insert_mode();
         app.authoring_ui.insert_char('中');
         let edited = app.authoring_ui.buffer.as_string();
@@ -10275,6 +10354,7 @@ mod tests {
             original
         );
         app.select_tab(MainTab::Requirements);
+        app.authoring_ui.cursor_row = 2;
         app.authoring_ui.insert_char('新');
         let saved = app.authoring_ui.buffer.as_string();
         app.handle_action(Action::ReqNewDocument).unwrap();
@@ -10318,6 +10398,7 @@ mod tests {
         let blocked = store.path().join("blocked");
         fs::write(&blocked, "file prevents directory creation").unwrap();
         app.authoring_ui.requirements_root = blocked;
+        app.authoring_ui.cursor_row = 2;
         app.authoring_ui.insert_char('中');
         let body = app.authoring_ui.buffer.as_string();
         app.authoring_ui.enter_insert_mode();

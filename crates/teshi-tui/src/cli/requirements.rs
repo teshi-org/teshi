@@ -700,8 +700,8 @@ mod tests {
 
     fn seed_store(root: &Path) {
         let mut index = initialize_requirement_store(root).unwrap();
-        let login = "# Login\n";
-        let mobile = "# Login\n\nmobile\n";
+        let login = "# 登录需求\n";
+        let mobile = "# 登录需求\n\nmobile\n";
         let checkout = "# Checkout\n";
         index.documents = vec![
             RequirementDocumentMeta::new(
@@ -983,6 +983,40 @@ mod tests {
         assert_eq!(conflict.exit_code, 1);
         let conflict_value: serde_json::Value = serde_json::from_str(&conflict.stdout).unwrap();
         assert_eq!(conflict_value["code"], "conflicting_edit_input");
+    }
+
+    #[test]
+    fn edit_syncs_title_and_reports_invalid_titles_without_partial_updates() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        let original = read_requirement_document(store.path(), "doc-12").unwrap();
+        let action = RequirementsCommand::Edit {
+            reference: "doc-12".into(),
+            file: None,
+            force: false,
+            json: true,
+        };
+        let renamed = execute_store_command(
+            &action,
+            Some(store.path()),
+            &runtime_non_tty("# Renamed login\n\nBody\n"),
+        );
+        assert_eq!(renamed.exit_code, 0, "{}", renamed.stdout);
+        let saved = read_requirement_document(store.path(), "doc-12").unwrap();
+        assert_eq!(saved.meta.title, "Renamed login");
+        assert_eq!(saved.meta.id, original.meta.id);
+        assert_eq!(saved.meta.path, original.meta.path);
+        for body in ["#\n", "Missing H1\n"] {
+            let invalid =
+                execute_store_command(&action, Some(store.path()), &runtime_non_tty(body));
+            assert_eq!(invalid.exit_code, 1);
+            let value: serde_json::Value = serde_json::from_str(&invalid.stdout).unwrap();
+            assert_eq!(value["code"], "invalid_requirement_title");
+            assert_eq!(
+                read_requirement_document(store.path(), "doc-12").unwrap(),
+                saved
+            );
+        }
     }
 
     #[test]

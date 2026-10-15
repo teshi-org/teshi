@@ -11,7 +11,7 @@ use teshi_core::authoring::{
     AuthoringArtifacts, AuthoringDiagnostic, HierarchyPath, RequirementDocumentMeta,
     RequirementGroupMode, RequirementIterationFilter, ResolutionState, ReviewState, TestPoint,
     TextRange, UNASSIGNED_ITERATION_LABEL, create_requirement_link, line_col_range_to_char_range,
-    re_resolve_document_links,
+    re_resolve_document_links, requirement_title,
 };
 use teshi_engine::{
     compute_document_revision, initialize_requirement_store, load_authoring_artifacts,
@@ -716,8 +716,34 @@ impl AuthoringUiState {
         Some(id)
     }
 
+    /// Creates a default document using one available number for its ID, path, and title.
+    pub fn create_default_document(&mut self) -> String {
+        let n = self.next_document_number();
+        self.create_document(&format!("doc-{n}.md"), &format!("Document {n}"))
+    }
+
+    fn next_document_number(&self) -> u32 {
+        let mut n = 1;
+        loop {
+            let id = format!("doc-{n}");
+            let path = format!("doc-{n}.md");
+            let indexed = self.artifacts.as_ref().is_some_and(|artifacts| {
+                artifacts
+                    .index
+                    .documents
+                    .iter()
+                    .any(|doc| doc.id == id || doc.path == path)
+            });
+            if !indexed && !self.requirements_root.join(&path).exists() {
+                return n;
+            }
+            n += 1;
+        }
+    }
+
     /// Creates a new requirement document under `relative_path` with the given title.
     pub fn create_document(&mut self, relative_path: &str, title: &str) -> String {
+        let id = format!("doc-{}", self.next_document_number());
         if self.artifacts.is_none() {
             self.artifacts = Some(AuthoringArtifacts {
                 index: Default::default(),
@@ -728,8 +754,6 @@ impl AuthoringUiState {
             self.discovered = true;
         }
         let artifacts = self.artifacts.as_mut().expect("artifacts initialized");
-        let id = next_document_id(&artifacts.index.documents);
-
         let body = format!("# {}\n\n", title.trim());
         let revision = compute_document_revision(&body);
         let meta = RequirementDocumentMeta::new(id.clone(), relative_path, title, revision);
@@ -750,7 +774,13 @@ impl AuthoringUiState {
     }
 
     /// Saves the current requirement document and refreshes link resolutions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid first-line H1 title or failed persistence.
     pub fn save_current_document(&mut self, project_root: &Path) -> Result<()> {
+        let body = self.buffer.as_string();
+        requirement_title(&body)?;
         let requirements_root = if self.requirements_root.as_os_str().is_empty() {
             project_root.to_path_buf()
         } else {
@@ -776,7 +806,6 @@ impl AuthoringUiState {
             .find(|d| d.id == doc_id)
             .context("selected document not in index")?;
         let relative_path = meta.path.clone();
-        let body = self.buffer.as_string();
         save_requirement_markdown(
             &requirements_root,
             &mut artifacts.index,
@@ -788,7 +817,7 @@ impl AuthoringUiState {
         if let Some(doc) = artifacts.documents.iter_mut().find(|d| d.meta.id == doc_id) {
             doc.body = body.clone();
             if let Some(index_meta) = artifacts.index.documents.iter().find(|d| d.id == doc_id) {
-                doc.meta.revision = index_meta.revision.clone();
+                doc.meta = index_meta.clone();
             }
         }
         let store_id = artifacts.index.store_id.clone();
@@ -806,7 +835,10 @@ impl AuthoringUiState {
             &revision,
             &mut artifacts.test_points.test_points,
         );
-        save_test_points(project_root, &artifacts.test_points)?;
+        let test_points_result = save_test_points(project_root, &artifacts.test_points);
+        // The saved title must be visible even if linked test-point persistence fails.
+        self.rebuild_tree();
+        test_points_result?;
         self.buffer_dirty = false;
         self.draft_document_id = None;
         Ok(())
@@ -961,17 +993,6 @@ impl AuthoringUiState {
 
 fn ranges_overlap(a: TextRange, b: TextRange) -> bool {
     a.start.offset() < b.end.offset() && b.start.offset() < a.end.offset()
-}
-
-fn next_document_id(existing: &[RequirementDocumentMeta]) -> String {
-    let mut n = 1u32;
-    loop {
-        let id = format!("doc-{n}");
-        if !existing.iter().any(|d| d.id == id) {
-            return id;
-        }
-        n += 1;
-    }
 }
 
 fn next_test_point_id(existing: &[TestPoint]) -> String {
@@ -1293,6 +1314,111 @@ mod tests {
         assert!(reloaded.discovered);
         let body = reloaded.buffer.as_string();
         assert!(body.contains("edited"));
+    }
+
+    #[test]
+    fn title_rename_preserves_linked_test_point_identity_and_resolution() {
+        let project = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        let mut state = AuthoringUiState::empty();
+        state.requirements_root = store.path().to_path_buf();
+        let id = state.create_default_document();
+        state.buffer = EditorBuffer::from_string("# Original\n\nStable text\n".into());
+        state.save_current_document(project.path()).unwrap();
+        state.selection_anchor = Some((2, 0));
+        state.selection_end = Some((2, 11));
+        state.create_test_point_from_selection().unwrap();
+        let artifacts = state.artifacts.as_mut().unwrap();
+        artifacts.test_points.test_points[0].review_state = ReviewState::Approved;
+        let original = artifacts.test_points.test_points[0].clone();
+
+        state.buffer =
+            EditorBuffer::from_string("# A longer renamed requirement\n\nStable text\n".into());
+        state.buffer_dirty = true;
+        state.save_current_document(project.path()).unwrap();
+        let artifacts = state.artifacts.as_ref().unwrap();
+        assert_eq!(
+            artifacts.documents[0].meta.title,
+            "A longer renamed requirement"
+        );
+        let test_point = &artifacts.test_points.test_points[0];
+        assert_eq!(test_point.id, original.id);
+        assert_eq!(test_point.title, original.title);
+        assert_eq!(test_point.review_state, ReviewState::Approved);
+        assert_eq!(test_point.requirement_links[0].document_id, id);
+        assert_eq!(
+            test_point.requirement_links[0].store_id,
+            original.requirement_links[0].store_id
+        );
+        assert_eq!(
+            test_point.requirement_links[0].resolution,
+            ResolutionState::Resolved
+        );
+        let reloaded = AuthoringUiState::load_from_project(project.path(), store.path());
+        assert_eq!(
+            reloaded.artifacts.as_ref().unwrap().test_points.test_points[0],
+            *test_point
+        );
+    }
+
+    #[test]
+    fn default_document_number_avoids_id_path_and_unindexed_file_collisions() {
+        for (reserved_path, unindexed_file, expected) in
+            [(false, false, 2), (true, false, 4), (false, true, 4)]
+        {
+            let store = tempdir().unwrap();
+            let mut state = AuthoringUiState::empty();
+            state.requirements_root = store.path().to_path_buf();
+            let mut index = RequirementDocumentIndex::default();
+            for n in [1, 3] {
+                index.documents.push(RequirementDocumentMeta::new(
+                    format!("doc-{n}"),
+                    format!("doc-{n}.md"),
+                    format!("Document {n}"),
+                    compute_document_revision(""),
+                ));
+            }
+            if reserved_path {
+                index.documents.push(RequirementDocumentMeta::new(
+                    "custom-id",
+                    "doc-2.md",
+                    "Custom",
+                    compute_document_revision(""),
+                ));
+            }
+            if unindexed_file {
+                fs::write(store.path().join("doc-2.md"), "keep me").unwrap();
+            }
+            state.artifacts = Some(AuthoringArtifacts {
+                index,
+                documents: vec![],
+                test_points: Default::default(),
+                diagnostics: vec![],
+            });
+            let id = state.create_default_document();
+            assert_eq!(id, format!("doc-{expected}"));
+            let meta = &state
+                .artifacts
+                .as_ref()
+                .unwrap()
+                .index
+                .documents
+                .last()
+                .unwrap();
+            assert_eq!(meta.path, format!("doc-{expected}.md"));
+            assert_eq!(meta.title, format!("Document {expected}"));
+            assert_eq!(
+                state.buffer.as_string(),
+                format!("# Document {expected}\n\n")
+            );
+            assert_eq!(state.selected_document_id.as_deref(), Some(id.as_str()));
+            if unindexed_file {
+                assert_eq!(
+                    fs::read_to_string(store.path().join("doc-2.md")).unwrap(),
+                    "keep me"
+                );
+            }
+        }
     }
 
     #[test]

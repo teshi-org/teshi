@@ -75,6 +75,11 @@ Override for this process with `teshi --requirements-root PATH`, or persistently
 
 Select text and press `n` to create a `Proposed` test point linked to that exact range (identity is `(store_id, document_id)`). Press `Ctrl+n` for a new document.
 
+To rename a requirement, edit its first line (`# Title`) and press `Ctrl+s`.
+Saving synchronizes the name in the Requirements tree while preserving the
+document ID, file path, and test-point links. An empty title or a first line
+without an H1 heading prevents saving and leaves the existing document intact.
+
 `/generate` asks you to confirm the source scope (store path, store ID, iteration). The Requirements filter is only a suggestion; it does not silently bind the AI session. Pasted chat text is not a requirement-library source.
 
 Agents and scripts should use the same store through `teshi requirements` rather than editing `_teshi.json` directly:

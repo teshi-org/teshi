@@ -17,6 +17,49 @@ pub const REQUIREMENT_INDEX_VERSION: u32 = 2;
 /// Filename of the requirement store index written at the store root.
 pub const REQUIREMENT_INDEX_FILE: &str = "_teshi.json";
 
+/// Why the first line of a requirement document cannot supply its display title.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidRequirementTitle {
+    /// The first line is not an ATX level-one heading.
+    MissingH1,
+    /// The heading contains no title after trimming whitespace.
+    Empty,
+}
+
+impl fmt::Display for InvalidRequirementTitle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingH1 => f.write_str("Requirement must start with an H1 title: # Title"),
+            Self::Empty => f.write_str("Requirement title cannot be empty"),
+        }
+    }
+}
+
+impl std::error::Error for InvalidRequirementTitle {}
+
+/// Extracts the display title from the first line's `# Title` heading.
+///
+/// Surrounding title whitespace is ignored without rewriting the Markdown.
+/// Later headings never supply the document title.
+///
+/// # Errors
+///
+/// Returns [`InvalidRequirementTitle`] when the first line lacks an H1 or its
+/// title is empty.
+pub fn requirement_title(body: &str) -> Result<&str, InvalidRequirementTitle> {
+    let first_line = body.lines().next().unwrap_or_default();
+    let heading = first_line
+        .strip_prefix('#')
+        .ok_or(InvalidRequirementTitle::MissingH1)?;
+    if heading.trim().is_empty() {
+        return Err(InvalidRequirementTitle::Empty);
+    }
+    if !heading.starts_with([' ', '\t']) {
+        return Err(InvalidRequirementTitle::MissingH1);
+    }
+    Ok(heading.trim())
+}
+
 /// Stable identity for a user-level requirement store.
 ///
 /// Generated once when the store is first initialized and never changed when
@@ -417,6 +460,37 @@ impl RequirementDocumentIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_line_h1_supplies_trimmed_title_without_changing_markdown() {
+        for (body, expected) in [
+            ("# Login\n\nBody\n# Another title", "Login"),
+            ("#    用户登录需求    \r\n\r\nBody", "用户登录需求"),
+            ("#\tTabbed title\t\n", "Tabbed title"),
+        ] {
+            assert_eq!(requirement_title(body), Ok(expected), "body: {body:?}");
+        }
+    }
+
+    #[test]
+    fn missing_first_line_h1_and_empty_titles_are_rejected() {
+        for body in [
+            "",
+            "Login\n# Later",
+            "\n# Login",
+            "## Login",
+            "#Login",
+            " # Login",
+        ] {
+            assert_eq!(
+                requirement_title(body),
+                Err(InvalidRequirementTitle::MissingH1)
+            );
+        }
+        for body in ["#", "#    \nBody", "#\t\r\nBody"] {
+            assert_eq!(requirement_title(body), Err(InvalidRequirementTitle::Empty));
+        }
+    }
 
     #[test]
     fn index_serde_roundtrip() {

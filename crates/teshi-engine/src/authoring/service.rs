@@ -6,14 +6,16 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use teshi_core::authoring::{
-    normalize_iteration_name, resolve_requirement_store_path, InvalidIterationName,
-    RequirementDocumentContent, RequirementDocumentIndex, RequirementDocumentMeta,
-    RequirementIterationFilter, RequirementStoreId,
+    normalize_iteration_name, requirement_title, resolve_requirement_store_path,
+    InvalidIterationName, InvalidRequirementTitle, RequirementDocumentContent,
+    RequirementDocumentIndex, RequirementDocumentMeta, RequirementIterationFilter,
+    RequirementStoreId,
 };
 
 use super::store::{
     compute_document_revision as hash_document_revision, read_requirement_index_unlocked,
     with_requirement_store_lock, write_requirement_index_unlocked,
+    write_requirement_markdown_unlocked,
 };
 
 /// One candidate returned when a document reference is ambiguous.
@@ -84,6 +86,8 @@ pub enum RequirementStoreError {
     },
     /// Iteration name failed validation.
     InvalidIterationName(InvalidIterationName),
+    /// Markdown lacks a non-empty first-line H1 title.
+    InvalidTitle(InvalidRequirementTitle),
     /// Batch update was called with no document ids.
     EmptyDocumentIdList,
     /// I/O or path-safety failure while reading or writing the store.
@@ -101,6 +105,7 @@ impl RequirementStoreError {
             Self::Ambiguous { .. } => "ambiguous_requirement_ref",
             Self::RevisionConflict { .. } => "revision_conflict",
             Self::InvalidIterationName(_) => "invalid_iteration_name",
+            Self::InvalidTitle(_) => "invalid_requirement_title",
             Self::EmptyDocumentIdList => "empty_document_id_list",
             Self::Io(_) => "requirement_store_io",
         }
@@ -148,6 +153,7 @@ impl fmt::Display for RequirementStoreError {
                 "requirement document '{document_id}' changed on disk (expected revision {expected}, found {actual})"
             ),
             Self::InvalidIterationName(err) => write!(f, "{err}"),
+            Self::InvalidTitle(err) => write!(f, "{err}"),
             Self::EmptyDocumentIdList => {
                 f.write_str("at least one requirement document id is required")
             }
@@ -160,6 +166,7 @@ impl std::error::Error for RequirementStoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidIterationName(err) => Some(err),
+            Self::InvalidTitle(err) => Some(err),
             Self::Io(err) => Some(err.as_ref()),
             _ => None,
         }
@@ -334,14 +341,15 @@ pub fn read_requirement_document(
     Ok(RequirementDocumentContent { meta, body })
 }
 
-/// Writes a document body by id and updates the index revision.
+/// Writes a document body by id and synchronizes its first-line H1 title and revision.
 ///
 /// When `expected_revision` is set and `force` is false, the on-disk revision
-/// must still match. Identical body content is a successful no-op.
+/// must still match. Identical content with an already synchronized title is a
+/// successful no-op.
 ///
 /// # Errors
 ///
-/// Returns a store, not-found, revision-conflict, or I/O error.
+/// Returns a store, not-found, revision-conflict, invalid-title, or I/O error.
 pub fn update_requirement_document_body(
     requirements_root: &Path,
     document_id: &str,
@@ -349,6 +357,7 @@ pub fn update_requirement_document_body(
     expected_revision: Option<&str>,
     force: bool,
 ) -> Result<RequirementDocumentMeta, RequirementStoreError> {
+    let title = requirement_title(body).map_err(RequirementStoreError::InvalidTitle)?;
     with_store_lock(requirements_root, || {
         let mut index = require_initialized_index(requirements_root)?;
         let doc_index = index
@@ -379,24 +388,13 @@ pub fn update_requirement_document_body(
         } else {
             String::new()
         };
-        if existing == body {
+        if existing == body && index.documents[doc_index].title == title {
             return Ok(index.documents[doc_index].clone());
         }
 
-        fs::create_dir_all(requirements_root)
-            .context("create requirements directory")
-            .map_err(RequirementStoreError::from)?;
-        if let Some(parent) = markdown_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))
-                .map_err(RequirementStoreError::from)?;
-        }
-        fs::write(&markdown_path, body)
-            .with_context(|| format!("write {}", markdown_path.display()))
-            .map_err(RequirementStoreError::from)?;
-
+        index.documents[doc_index].title = title.to_string();
         index.documents[doc_index].revision = hash_document_revision(body);
-        write_requirement_index_unlocked(requirements_root, &index)
+        write_requirement_markdown_unlocked(requirements_root, &index, &relative_path, body)
             .map_err(RequirementStoreError::from)?;
         Ok(index.documents[doc_index].clone())
     })
@@ -472,8 +470,8 @@ mod tests {
 
     fn seed_store(root: &Path) -> RequirementDocumentIndex {
         let mut index = initialize_requirement_store(root).unwrap();
-        let login = "# Login\n";
-        let mobile = "# Login\n\nmobile";
+        let login = "# 登录需求\n";
+        let mobile = "# 登录需求\n\nmobile";
         let checkout = "# Checkout\n";
         index.documents = vec![
             RequirementDocumentMeta::new(
@@ -666,6 +664,52 @@ mod tests {
         )
         .unwrap();
         assert_eq!(updated.revision, before);
+    }
+
+    #[test]
+    fn body_update_syncs_title_and_preserves_identity_path_and_iteration() {
+        let store = tempfile::tempdir().unwrap();
+        let index = seed_store(store.path());
+        let original = &index.documents[0];
+        let body = "#    用户认证需求    \r\n\r\nBody\r\n# Later heading\r\n";
+        let updated = update_requirement_document_body(
+            store.path(),
+            &original.id,
+            body,
+            Some(original.revision.as_str()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(updated.title, "用户认证需求");
+        assert_eq!(updated.id, original.id);
+        assert_eq!(updated.path, original.path);
+        assert_eq!(updated.iteration, original.iteration);
+        assert_eq!(
+            read_requirement_document(store.path(), &original.id)
+                .unwrap()
+                .body,
+            body
+        );
+        assert_eq!(
+            resolve_requirement_ref_in_store(store.path(), "用户认证需求").unwrap(),
+            original.id
+        );
+    }
+
+    #[test]
+    fn body_update_rejects_invalid_title_and_preserves_saved_document() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        let original = read_requirement_document(store.path(), "doc-12").unwrap();
+        for body in ["#", "#    \n", "No H1\n# Later"] {
+            let error = update_requirement_document_body(store.path(), "doc-12", body, None, true)
+                .unwrap_err();
+            assert_eq!(error.code(), "invalid_requirement_title");
+            assert_eq!(
+                read_requirement_document(store.path(), "doc-12").unwrap(),
+                original
+            );
+        }
     }
 
     #[test]

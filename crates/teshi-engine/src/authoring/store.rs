@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use teshi_core::authoring::{
-    legacy_project_requirements_dir, re_resolve_document_links, resolve_requirement_store_path,
-    testpoints_file, validate_loaded_artifacts, validate_requirement_path, AuthoringArtifacts,
-    AuthoringDiagnostic, AuthoringSeverity, DocumentRevision, RequirementDocumentContent,
-    RequirementDocumentIndex, TestPointsFile,
+    legacy_project_requirements_dir, re_resolve_document_links, requirement_title,
+    resolve_requirement_store_path, testpoints_file, validate_loaded_artifacts,
+    validate_requirement_path, AuthoringArtifacts, AuthoringDiagnostic, AuthoringSeverity,
+    DocumentRevision, RequirementDocumentContent, RequirementDocumentIndex, TestPointsFile,
 };
 
 use crate::fs_util::{with_exclusive_lock, write_atomic, write_json_unlocked};
@@ -417,7 +417,7 @@ pub fn save_requirement_document_index(
     })
 }
 
-/// Writes requirement Markdown and updates the matching index entry revision.
+/// Writes requirement Markdown and synchronizes its first-line H1 title and revision.
 ///
 /// Creates parent directories as needed. The caller must ensure `relative_path` is
 /// indexed in `index` before calling. The on-disk index is reloaded under the
@@ -426,37 +426,85 @@ pub fn save_requirement_document_index(
 ///
 /// # Errors
 ///
-/// Returns an error when the path is unsafe, the file cannot be written, or the
-/// index save fails.
+/// Returns an error when the title or path is invalid, the document is not
+/// indexed, or persistence fails. An index write failure restores the old body.
 pub fn save_requirement_markdown(
     requirements_root: &Path,
     index: &mut RequirementDocumentIndex,
     relative_path: &str,
     body: &str,
 ) -> Result<()> {
-    let markdown_path = resolve_requirement_store_path(requirements_root, relative_path)
+    resolve_requirement_store_path(requirements_root, relative_path)
         .with_context(|| format!("unsafe requirement path '{relative_path}'"))?;
+    let title = requirement_title(body)?;
 
     with_requirement_store_lock(requirements_root, || {
-        fs::create_dir_all(requirements_root).context("create requirements directory")?;
-        if let Some(parent) = markdown_path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        }
-        fs::write(&markdown_path, body)
-            .with_context(|| format!("write {}", markdown_path.display()))?;
-
-        let revision = compute_document_revision(body);
-        if let Some(meta) = index.documents.iter_mut().find(|d| d.path == relative_path) {
-            meta.revision = revision;
-        }
-
+        // Work on a candidate so a failed save leaves the caller's metadata intact.
+        let mut candidate = index.clone();
+        let meta = candidate
+            .documents
+            .iter_mut()
+            .find(|d| d.path == relative_path)
+            .context("requirement document is not indexed")?;
+        meta.title = title.to_string();
+        meta.revision = compute_document_revision(body);
         let disk =
             read_requirement_index_unlocked(requirements_root)?.unwrap_or_else(|| index.clone());
-        let merged = upsert_saved_document(disk, index, relative_path)?;
-        write_requirement_index_unlocked(requirements_root, &merged)?;
+        let merged = upsert_saved_document(disk, &candidate, relative_path)?;
+        write_requirement_markdown_unlocked(requirements_root, &merged, relative_path, body)?;
         *index = merged;
         Ok(())
     })
+}
+
+/// Commits the body and index under the caller's store lock, restoring the body
+/// if the index cannot be replaced. Each individual replacement is atomic.
+///
+/// # Errors
+///
+/// Returns an error for unsafe paths, failed writes, or failed body restoration.
+pub(crate) fn write_requirement_markdown_unlocked(
+    requirements_root: &Path,
+    index: &RequirementDocumentIndex,
+    relative_path: &str,
+    body: &str,
+) -> Result<()> {
+    validate_index_document_paths(index)?;
+    let markdown_path = resolve_requirement_store_path(requirements_root, relative_path)?;
+    let previous = match fs::read(&markdown_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| format!("read {}", markdown_path.display()))
+        }
+    };
+    replace_markdown(&markdown_path, body.as_bytes())?;
+    if let Err(error) = write_requirement_index_unlocked(requirements_root, index) {
+        let rollback = match previous {
+            Some(bytes) => replace_markdown(&markdown_path, &bytes),
+            None => fs::remove_file(&markdown_path).context("remove unsaved requirement document"),
+        };
+        rollback
+            .with_context(|| format!("{error:#}; could not restore previous requirement body"))?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn replace_markdown(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("requirement document has no parent")?;
+    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let temp = parent.join(format!(".teshi-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        fs::write(&temp, bytes).with_context(|| format!("write {}", temp.display()))?;
+        fs::rename(&temp, path).with_context(|| format!("replace {}", path.display()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
 }
 
 /// Atomically updates a document's iteration without changing IDs, path, body, or revision.
@@ -906,7 +954,7 @@ mod tests {
 
         let mut caller = index.clone();
         caller.documents.retain(|d| d.id == "doc-a");
-        save_requirement_markdown(store.path(), &mut caller, "a.md", "A-updated").unwrap();
+        save_requirement_markdown(store.path(), &mut caller, "a.md", "# A-updated").unwrap();
 
         let reloaded: RequirementDocumentIndex = serde_json::from_str(
             &fs::read_to_string(store.path().join(REQUIREMENTS_INDEX_FILE)).unwrap(),
@@ -916,7 +964,78 @@ mod tests {
         assert!(reloaded.documents.iter().any(|d| d.id == "doc-b"));
         assert_eq!(
             fs::read_to_string(store.path().join("a.md")).unwrap(),
-            "A-updated"
+            "# A-updated"
         );
+    }
+
+    #[test]
+    fn markdown_save_rolls_back_body_and_metadata_when_index_write_fails() {
+        let store = tempfile::tempdir().unwrap();
+        let mut index = initialize_requirement_store(store.path()).unwrap();
+        index.documents.push(RequirementDocumentMeta::new(
+            "doc-1",
+            "doc-1.md",
+            "Original",
+            compute_document_revision("# Original\n"),
+        ));
+        save_requirement_markdown(store.path(), &mut index, "doc-1.md", "# Original\n").unwrap();
+        let before = index.clone();
+        let index_bytes = fs::read(store.path().join(REQUIREMENTS_INDEX_FILE)).unwrap();
+        fs::create_dir(store.path().join("_teshi.tmp")).unwrap();
+
+        save_requirement_markdown(store.path(), &mut index, "doc-1.md", "# Renamed\n")
+            .expect_err("index replacement must fail");
+        assert_eq!(index, before);
+        assert_eq!(
+            fs::read(store.path().join(REQUIREMENTS_INDEX_FILE)).unwrap(),
+            index_bytes
+        );
+        assert_eq!(
+            fs::read_to_string(store.path().join("doc-1.md")).unwrap(),
+            "# Original\n"
+        );
+
+        index.documents.push(RequirementDocumentMeta::new(
+            "doc-2",
+            "doc-2.md",
+            "New",
+            compute_document_revision("# New\n"),
+        ));
+        let before = index.clone();
+        save_requirement_markdown(store.path(), &mut index, "doc-2.md", "# New\n")
+            .expect_err("new document must not survive a failed index write");
+        assert_eq!(index, before);
+        assert!(!store.path().join("doc-2.md").exists());
+        assert_eq!(
+            fs::read(store.path().join(REQUIREMENTS_INDEX_FILE)).unwrap(),
+            index_bytes
+        );
+    }
+
+    #[test]
+    fn markdown_save_rejects_invalid_titles_before_mutating_body_or_index() {
+        let store = tempfile::tempdir().unwrap();
+        let mut index = initialize_requirement_store(store.path()).unwrap();
+        index.documents.push(RequirementDocumentMeta::new(
+            "doc-1",
+            "doc-1.md",
+            "Original",
+            compute_document_revision("# Original\n"),
+        ));
+        save_requirement_markdown(store.path(), &mut index, "doc-1.md", "# Original\n").unwrap();
+        let before = index.clone();
+        let index_bytes = fs::read(store.path().join(REQUIREMENTS_INDEX_FILE)).unwrap();
+        for body in ["#", "#   \nBody", "## Wrong level", "Body\n# Later"] {
+            save_requirement_markdown(store.path(), &mut index, "doc-1.md", body).unwrap_err();
+            assert_eq!(index, before);
+            assert_eq!(
+                fs::read_to_string(store.path().join("doc-1.md")).unwrap(),
+                "# Original\n"
+            );
+            assert_eq!(
+                fs::read(store.path().join(REQUIREMENTS_INDEX_FILE)).unwrap(),
+                index_bytes
+            );
+        }
     }
 }

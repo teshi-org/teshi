@@ -84,7 +84,7 @@ Document arguments (`<REF>`) resolve in this order: exact document ID, then stor
 
 Unassigned documents use JSON `null` for `iteration`. `show` prints Markdown only; `show --json` adds the same metadata plus `body`.
 
-`edit` on a TTY copies the current body to a temporary `.md` file and opens `$VISUAL`, then `$EDITOR`. On Windows, if both are unset, Teshi falls back to `notepad`. After the editor exits, Teshi writes through the store API and updates `_teshi.json` revision. Non-interactive agents should pass `--file` or stdin; a non-TTY with neither input fails instead of launching an editor. If the on-disk revision changed during the edit, Teshi refuses to overwrite unless `--force` is set and leaves the temp file path in the error.
+`edit` on a TTY copies the current body to a temporary `.md` file and opens `$VISUAL`, then `$EDITOR`. On Windows, if both are unset, Teshi falls back to `notepad`. After the editor exits, Teshi writes through the store API and updates `_teshi.json` revision and title from the first-line H1 (`# Title`). Renaming preserves the document ID and file path. Empty titles or a missing first-line H1 fail with `invalid_requirement_title` without changing the saved document. Non-interactive agents should pass `--file` or stdin; a non-TTY with neither input fails instead of launching an editor. If the on-disk revision changed during the edit, Teshi refuses to overwrite unless `--force` is set and leaves the temp file path in the error.
 
 `--iteration` and `--unassigned` cannot be combined. The iteration value for `set-iteration` must be `--iteration <name>` so multiple refs can be listed.
 
