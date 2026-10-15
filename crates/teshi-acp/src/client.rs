@@ -72,6 +72,9 @@ pub struct InitializeResult {
 pub struct AcpSession {
     pub id: String,
     pub cwd: PathBuf,
+    /// Settings discovered while creating or loading this session.
+    #[serde(default)]
+    pub config: crate::session_config::SessionConfig,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -120,7 +123,7 @@ pub struct AcpClient<W> {
     events: mpsc::Sender<AcpEvent>,
     lifecycle: Arc<Mutex<AcpLifecycle>>,
     config: AcpClientConfig,
-    permission_policy: PermissionPolicy,
+    permission_policy: Arc<Mutex<PermissionPolicy>>,
     permission_host: Option<Arc<dyn PermissionHost>>,
     initialized: Arc<Mutex<Option<InitializeResult>>>,
     prompt_running: Arc<AtomicBool>,
@@ -195,7 +198,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             events,
             lifecycle: Arc::new(Mutex::new(AcpLifecycle::Created)),
             config,
-            permission_policy,
+            permission_policy: Arc::new(Mutex::new(permission_policy)),
             permission_host,
             initialized: Arc::new(Mutex::new(None)),
             prompt_running: Arc::new(AtomicBool::new(false)),
@@ -208,6 +211,11 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
 
     pub async fn lifecycle(&self) -> AcpLifecycle {
         *self.lifecycle.lock().await
+    }
+
+    /// Set the policy for future permission requests; pending requests keep their decision path.
+    pub async fn set_permission_policy(&self, policy: PermissionPolicy) {
+        *self.permission_policy.lock().await = policy;
     }
 
     async fn set_state(&self, to: AcpLifecycle) {
@@ -325,7 +333,11 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             .ok_or_else(|| AcpError::SessionFailed("session/new missing sessionId".into()))?
             .to_string();
         self.set_state(AcpLifecycle::Ready).await;
-        Ok(AcpSession { id, cwd })
+        Ok(AcpSession {
+            id,
+            cwd,
+            config: crate::session_config::SessionConfig::from_response(&result),
+        })
     }
 
     pub async fn list_sessions(&self) -> AcpResult<Value> {
@@ -375,10 +387,69 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             .and_then(Value::as_str)
             .unwrap_or(id)
             .to_string();
+        self.set_state(AcpLifecycle::Ready).await;
         Ok(AcpSession {
             id: session_id,
             cwd,
+            config: crate::session_config::SessionConfig::from_response(&result),
         })
+    }
+
+    /// Change an advertised setting on the existing session.
+    ///
+    /// # Errors
+    /// Rejects unsupported values, active turns, and remote protocol errors.
+    pub async fn set_session_option(
+        &self,
+        session: &AcpSession,
+        option: &crate::session_config::ConfigOption,
+        value: Value,
+    ) -> AcpResult<Value> {
+        use crate::session_config::ConfigRoute;
+        self.ensure_state(&[AcpLifecycle::Ready], "set session option")
+            .await?;
+        if self.prompt_running.load(Ordering::SeqCst) {
+            return Err(AcpError::PromptAlreadyRunning);
+        }
+        if !option.accepts(&value) {
+            return Err(AcpError::ProtocolViolation(
+                "unsupported configuration value".into(),
+            ));
+        }
+        let (method, params) = match option.route {
+            ConfigRoute::Config => {
+                use agent_client_protocol::schema::v1::{
+                    SessionConfigOptionValue, SetSessionConfigOptionRequest,
+                };
+                let value = match value {
+                    Value::Bool(value) => SessionConfigOptionValue::boolean(value),
+                    Value::String(value) => SessionConfigOptionValue::value_id(value),
+                    _ => {
+                        return Err(AcpError::ProtocolViolation(
+                            "unsupported configuration type".into(),
+                        ));
+                    }
+                };
+                (
+                    "session/set_config_option",
+                    serialize_params(SetSessionConfigOptionRequest::new(
+                        session.id.clone(),
+                        option.id.clone(),
+                        value,
+                    ))?,
+                )
+            }
+            ConfigRoute::Mode => (
+                "session/set_mode",
+                json!({"sessionId":session.id,"modeId":value}),
+            ),
+            ConfigRoute::Model => (
+                "session/set_model",
+                json!({"sessionId":session.id,"modelId":value}),
+            ),
+        };
+        self.request_with_timeout(method, params, self.config.request_timeout)
+            .await
     }
 
     pub async fn prompt(&self, session: &AcpSession, prompt: &str) -> AcpResult<Option<String>> {
@@ -493,7 +564,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
         };
         let peer = self.peer.clone();
         let events = self.events.clone();
-        let policy = self.permission_policy;
+        let policy = Arc::clone(&self.permission_policy);
         let host = self.permission_host.clone();
         let pending_permissions = Arc::clone(&self.pending_permissions);
         tokio::spawn(async move {
@@ -524,6 +595,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
                         .unwrap_or_default();
                         let peer = peer.clone();
                         let host = host.clone();
+                        let policy = *policy.lock().await;
                         let pending = Arc::clone(&pending_permissions);
                         let (cancel_tx, cancel_rx) = oneshot::channel();
                         pending.lock().await.insert(id.clone(), cancel_tx);

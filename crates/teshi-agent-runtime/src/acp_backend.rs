@@ -49,8 +49,33 @@ impl AcpBackendConfig {
 
 enum WorkerCommand {
     Prompt(String),
+    Configure {
+        option: Box<teshi_acp::session_config::ConfigOption>,
+        value: serde_json::Value,
+        revision: u64,
+    },
+    Policy(PermissionPolicy),
     Cancel,
     Shutdown,
+}
+
+/// Confirmed settings and asynchronous operation state for one backend instance.
+#[derive(Debug, Clone, Default)]
+pub struct AcpControls {
+    /// Remote session identity, absent while connecting.
+    pub session_id: Option<String>,
+    /// Last confirmed settings.
+    pub config: teshi_acp::session_config::SessionConfig,
+    /// Whether configuration has been discovered.
+    pub ready: bool,
+    /// One configuration mutation is awaiting confirmation.
+    pub pending: bool,
+    /// Recoverable settings error, or reconciliation requirement.
+    pub error: Option<String>,
+    /// Monotonic snapshot revision for stale picker rejection.
+    pub revision: u64,
+    /// Effective client approval policy.
+    pub policy: Option<PermissionPolicy>,
 }
 
 /// Bridges an ACP agent's `session/request_permission` to a synchronous
@@ -158,6 +183,7 @@ impl PermissionHost for ChannelPermissionHost {
 }
 
 pub struct AcpAgentBackend {
+    controls: Arc<Mutex<AcpControls>>,
     pub messages: Vec<AiChatMessage>,
     pub partial_response: String,
     config: Option<AcpBackendConfig>,
@@ -182,6 +208,7 @@ impl std::fmt::Debug for AcpAgentBackend {
 impl Default for AcpAgentBackend {
     fn default() -> Self {
         Self {
+            controls: Arc::new(Mutex::new(AcpControls::default())),
             messages: Vec::new(),
             partial_response: String::new(),
             config: None,
@@ -197,6 +224,10 @@ impl Default for AcpAgentBackend {
 impl AcpAgentBackend {
     pub fn configure(&mut self, config: AcpBackendConfig) {
         self.stop();
+        self.controls = Arc::new(Mutex::new(AcpControls {
+            policy: Some(config.permission_policy),
+            ..Default::default()
+        }));
         self.permission_host = config.permission_host.clone();
         self.config = Some(config);
         self.state = AgentBackendStatus::Idle;
@@ -210,23 +241,36 @@ impl AcpAgentBackend {
         self.commands.is_some()
     }
 
-    pub fn start(&mut self) -> anyhow::Result<()> {
+    /// Connect and discover settings without starting a prompt.
+    ///
+    /// # Errors
+    /// Returns an error if no command is configured or the worker cannot start.
+    pub fn connect(&mut self) -> anyhow::Result<()> {
         let config = self.config.clone().ok_or_else(|| {
             anyhow::anyhow!("ACP backend is not configured; supply an AcpAgentCommand")
         })?;
         if matches!(
             self.state,
-            AgentBackendStatus::Running
-                | AgentBackendStatus::Failed
-                | AgentBackendStatus::Cancelled
+            AgentBackendStatus::Failed | AgentBackendStatus::Cancelled
         ) || self
-            .worker
-            .as_ref()
-            .is_some_and(thread::JoinHandle::is_finished)
+            .controls
+            .lock()
+            .is_ok_and(|s| !s.ready && s.error.is_some())
+            || self
+                .worker
+                .as_ref()
+                .is_some_and(thread::JoinHandle::is_finished)
         {
             self.stop();
         }
         if self.worker.is_none() {
+            let revision = self.controls().revision.saturating_add(1);
+            self.controls = Arc::new(Mutex::new(AcpControls {
+                policy: Some(config.permission_policy),
+                revision,
+                ..Default::default()
+            }));
+            let controls = Arc::clone(&self.controls);
             let (commands_tx, commands_rx) = async_mpsc::unbounded_channel();
             let (events_tx, events_rx) = mpsc::channel();
             let worker = thread::Builder::new()
@@ -236,7 +280,9 @@ impl AcpAgentBackend {
                         .enable_all()
                         .build();
                     match runtime {
-                        Ok(runtime) => runtime.block_on(run_worker(config, commands_rx, events_tx)),
+                        Ok(runtime) => {
+                            runtime.block_on(run_worker(config, commands_rx, events_tx, controls))
+                        }
                         Err(error) => {
                             let _ = events_tx.send(AgentBackendEvent::Failed(format!(
                                 "ACP runtime initialization failed: {error}"
@@ -247,9 +293,92 @@ impl AcpAgentBackend {
             self.commands = Some(commands_tx);
             self.events = Some(events_rx);
             self.worker = Some(worker);
+            self.state = AgentBackendStatus::Idle;
         }
+        Ok(())
+    }
+
+    /// Start a prompt using the discovered session.
+    ///
+    /// # Errors
+    /// Fails when connecting fails or a setting change is pending.
+    pub fn start(&mut self) -> anyhow::Result<()> {
+        if self.controls().pending {
+            anyhow::bail!("ACP settings change is pending");
+        }
+        self.connect()?;
         self.partial_response.clear();
         self.state = AgentBackendStatus::Running;
+        Ok(())
+    }
+
+    /// Read a snapshot without exposing transport state to the frontend.
+    pub fn controls(&self) -> AcpControls {
+        self.controls
+            .lock()
+            .map(|state| state.clone())
+            .unwrap_or_default()
+    }
+
+    /// Queue a validated setting change for this conversation.
+    ///
+    /// # Errors
+    /// Rejects stale selections, busy sessions, and unavailable workers.
+    pub fn set_option(
+        &mut self,
+        id: &str,
+        value: serde_json::Value,
+        revision: u64,
+    ) -> anyhow::Result<()> {
+        if matches!(
+            self.state,
+            AgentBackendStatus::Running | AgentBackendStatus::WaitingForPermission
+        ) {
+            anyhow::bail!("Wait for the current turn to finish");
+        }
+        let mut state = self
+            .controls
+            .lock()
+            .map_err(|_| anyhow::anyhow!("ACP settings lock poisoned"))?;
+        if !state.ready || state.pending || state.revision != revision {
+            anyhow::bail!("ACP settings changed; reopen the picker");
+        }
+        let option = state
+            .config
+            .options
+            .iter()
+            .find(|o| o.id == id && o.accepts(&value))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("ACP setting is no longer available"))?;
+        self.commands
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("ACP worker unavailable"))?
+            .send(WorkerCommand::Configure {
+                option: Box::new(option),
+                value,
+                revision,
+            })
+            .map_err(|_| anyhow::anyhow!("ACP worker exited"))?;
+        state.pending = true;
+        state.error = None;
+        Ok(())
+    }
+
+    /// Update future permission requests without resolving any pending prompt.
+    ///
+    /// # Errors
+    /// Returns an error if the connected worker has exited.
+    pub fn set_policy(&mut self, policy: PermissionPolicy) -> anyhow::Result<()> {
+        if let Some(config) = &mut self.config {
+            config.permission_policy = policy;
+        }
+        if let Some(commands) = &self.commands {
+            commands
+                .send(WorkerCommand::Policy(policy))
+                .map_err(|_| anyhow::anyhow!("ACP worker exited"))?;
+        } else if let Ok(mut state) = self.controls.lock() {
+            state.policy = Some(policy);
+        }
         Ok(())
     }
 
@@ -383,6 +512,7 @@ async fn run_worker(
     config: AcpBackendConfig,
     mut commands: async_mpsc::UnboundedReceiver<WorkerCommand>,
     output: mpsc::Sender<AgentBackendEvent>,
+    controls: Arc<Mutex<AcpControls>>,
 ) {
     let (updates_tx, mut updates_rx) = async_mpsc::channel(128);
     let cwd: PathBuf = config.command.cwd.clone();
@@ -402,6 +532,9 @@ async fn run_worker(
     {
         Ok(client) => client,
         Err(error) => {
+            if let Ok(mut state) = controls.lock() {
+                state.error = Some(format!("ACP process launch failed: {error}"));
+            }
             let _ = output.send(AgentBackendEvent::Failed(format!(
                 "ACP process launch failed: {error}"
             )));
@@ -435,13 +568,83 @@ async fn run_worker(
     let (session, model) = match result {
         Ok(value) => value,
         Err(error) => {
+            if let Ok(mut state) = controls.lock() {
+                state.error = Some(error.clone());
+            }
             let _ = output.send(AgentBackendEvent::Failed(error));
             let _ = client.shutdown().await;
             return;
         }
     };
-    while let Some(command) = commands.recv().await {
+    if let Ok(mut state) = controls.lock() {
+        state.config = session.config.clone();
+        state.session_id = Some(session.id.clone());
+        state.ready = true;
+        state.revision += 1;
+    }
+    loop {
+        let command = tokio::select! {
+            command = commands.recv() => match command { Some(command) => command, None => break },
+            Some(update) = updates_rx.recv() => {
+                apply_control_update(&update, &session.id, &controls);
+                if forward_update(update, &output) { break; }
+                continue;
+            }
+        };
         match command {
+            WorkerCommand::Policy(policy) => {
+                client.set_permission_policy(policy).await;
+                if let Ok(mut state) = controls.lock() {
+                    state.policy = Some(policy);
+                }
+            }
+            WorkerCommand::Configure {
+                option,
+                value,
+                revision,
+            } => {
+                let valid = controls
+                    .lock()
+                    .is_ok_and(|state| state.revision == revision && state.ready);
+                let result = if valid {
+                    client
+                        .set_session_option(&session, &option, value.clone())
+                        .await
+                } else {
+                    Err(teshi_acp::AcpError::ProtocolViolation(
+                        "ACP settings changed; reopen the picker".into(),
+                    ))
+                };
+                let uncertain = matches!(&result, Err(teshi_acp::AcpError::Timeout(_)));
+                if let Ok(mut state) = controls.lock() {
+                    state.pending = false;
+                    match result {
+                        Ok(response) => {
+                            if response.get("configOptions").is_some() {
+                                state.config.replace_modern(response.get("configOptions"));
+                            } else if let Some(current) =
+                                state.config.options.iter_mut().find(|o| o.id == option.id)
+                            {
+                                current.current = value;
+                            }
+                            state.error = None;
+                            state.revision += 1;
+                        }
+                        Err(error) => {
+                            state.error = Some(format!("ACP setting change failed: {error}"));
+                        }
+                    }
+                    if uncertain {
+                        state.ready = false;
+                        state.error = Some(
+                            "ACP setting timed out; reconnect to discover confirmed values".into(),
+                        );
+                    }
+                }
+                if uncertain {
+                    break;
+                }
+            }
             WorkerCommand::Prompt(prompt) => {
                 let mut turn = Box::pin(client.prompt(&session, &prompt));
                 let mut cancelled = false;
@@ -451,6 +654,7 @@ async fn run_worker(
                     tokio::select! {
                         result = &mut turn => {
                             while let Ok(update) = updates_rx.try_recv() {
+                                apply_control_update(&update, &session.id, &controls);
                                 protocol_failed |= forward_update(update, &output);
                             }
                             if !cancelled && !protocol_failed {
@@ -467,9 +671,17 @@ async fn run_worker(
                             break;
                         }
                         Some(update) = updates_rx.recv() => {
+                            apply_control_update(&update, &session.id, &controls);
                             protocol_failed |= forward_update(update, &output);
                         }
                         Some(command) = commands.recv() => match command {
+                            WorkerCommand::Policy(policy) => {
+                                client.set_permission_policy(policy).await;
+                                if let Ok(mut state) = controls.lock() { state.policy = Some(policy); }
+                            }
+                            WorkerCommand::Configure { .. } => {
+                                if let Ok(mut state) = controls.lock() { state.pending = false; state.error = Some("Wait for the current turn to finish".into()); }
+                            }
                             WorkerCommand::Cancel | WorkerCommand::Shutdown => {
                                 cancelled = true;
                                 drop(turn);
@@ -487,7 +699,20 @@ async fn run_worker(
             WorkerCommand::Cancel | WorkerCommand::Shutdown => break,
         }
     }
+    if let Ok(mut state) = controls.lock() {
+        state.ready = false;
+        state.pending = false;
+    }
     let _ = client.shutdown().await;
+}
+
+fn apply_control_update(update: &AcpEvent, session: &str, controls: &Mutex<AcpControls>) {
+    if let AcpEvent::SessionUpdate(params) = update
+        && let Ok(mut state) = controls.lock()
+        && state.config.apply_update(session, params)
+    {
+        state.revision += 1;
+    }
 }
 
 fn forward_update(update: AcpEvent, output: &mpsc::Sender<AgentBackendEvent>) -> bool {

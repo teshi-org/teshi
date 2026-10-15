@@ -151,7 +151,8 @@ pub(super) fn render_chat_panel(
     }
 
     let input_active = focused && app.ai_input_focused;
-    let status_height: u16 = 1;
+    let has_acp = app.agent().backend.acp_controls().is_some();
+    let status_height: u16 = if has_acp { 2 } else { 1 };
 
     // The input grows with its wrapped content but never takes more than a
     // third of the panel, so history always stays visible.
@@ -195,7 +196,18 @@ pub(super) fn render_chat_panel(
     );
 
     render_chat_history(frame, app, chat_area, placement);
-    render_chat_status(frame, app, status_area);
+    render_chat_status(
+        frame,
+        app,
+        Rect::new(status_area.x, status_area.y, status_area.width, 1),
+    );
+    if has_acp {
+        crate::acp_controls::render_bar(
+            frame,
+            app,
+            Rect::new(status_area.x, status_area.y + 1, status_area.width, 1),
+        );
+    }
     if let Some(filter) = filter.as_deref()
         && sugg_height > 0
     {
@@ -207,7 +219,7 @@ pub(super) fn render_chat_panel(
 /// Draws the approval-mode chip on the panel's top border and registers it as
 /// a click target that opens the approval picker.
 fn render_approval_badge(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let mode = &app.approval_mode;
+    let mode = app.effective_approval_mode();
     let label = format!(" {} ", mode.display_name());
     let chip_bg = if mode.requires_manual_approval() {
         theme::PRIMARY
@@ -585,7 +597,11 @@ fn render_chat_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ));
     }
 
-    let model_label = app.active_model_label.as_deref().unwrap_or("");
+    let model_label = if app.agent().backend.acp_controls().is_some() {
+        ""
+    } else {
+        app.active_model_label.as_deref().unwrap_or("")
+    };
     let model_tag = (!model_label.is_empty()).then(|| format!(" {model_label} "));
     let tag_width = model_tag.as_deref().map_or(0, |t| t.width() as u16);
     let [status_left, status_right] =

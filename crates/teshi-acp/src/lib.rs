@@ -13,6 +13,7 @@ pub mod jsonrpc;
 pub mod permission;
 pub mod profile;
 pub mod registry;
+pub mod session_config;
 
 pub use client::{AcpClient, AcpEvent, AcpLifecycle, AcpSession, ClientInfo, InitializeResult};
 pub use command::{AcpAgentCommand, CursorAcpConfig, EnvironmentRedaction, resolve_executable};

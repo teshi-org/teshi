@@ -1,4 +1,5 @@
 mod acp_agents;
+mod acp_controls;
 mod agent;
 mod app;
 mod auth;
@@ -304,6 +305,9 @@ pub fn run() -> Result<()> {
             match terminal_event {
                 Event::Key(key_event) => {
                     if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                        continue;
+                    }
+                    if app.handle_acp_controls_key(key_event) {
                         continue;
                     }
                     if let Some(action) = Action::from_key_event(

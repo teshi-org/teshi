@@ -38,6 +38,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("approval", "Switch approval mode (Manual/Auto/Bypass)"),
     ("agent", "Select session Agent (Native or installed ACP)"),
     ("acp", "Manage installed ACP Agents"),
+    (
+        "settings",
+        "Select ACP model, mode, thinking and other settings",
+    ),
     ("agent-profile", "Select Native agent profile"),
     (
         "generate",
@@ -89,7 +93,9 @@ pub struct AgentThread {
     pub tool_status: Option<String>,
     pub scroll_offset: usize,
     pub horizontal_scroll: usize,
-    backend: teshi_agent_runtime::backend::AgentBackendRuntime,
+    pub(crate) backend: teshi_agent_runtime::backend::AgentBackendRuntime,
+    /// Conversation-local ACP picker and hit regions.
+    pub(crate) acp_controls_ui: crate::acp_controls::ControlsUi,
     /// Cumulative input tokens across all requests for this agent.
     pub total_input_tokens: u64,
     /// Cumulative output tokens across all requests for this agent.
@@ -142,6 +148,7 @@ impl AgentThread {
             last_input_tokens: None,
             profile_id: None,
             selected_acp_id: None,
+            acp_controls_ui: Default::default(),
             pending_acp_permission: None,
             latest_visual_observation: None,
             last_finish_reason: None,
@@ -1709,7 +1716,7 @@ impl App {
         };
     }
 
-    fn start_agent_backend(&mut self, agent_idx: usize) -> bool {
+    pub(crate) fn ensure_agent_backend(&mut self, agent_idx: usize) -> bool {
         if self.agents[agent_idx].backend.kind() == teshi_agent::backend::AgentBackendKind::Acp
             && self.agents[agent_idx].backend.status()
                 == teshi_agent::backend::AgentBackendStatus::Unavailable
@@ -1771,8 +1778,8 @@ impl App {
                 // Explicit override wins for scripted runs and tests.
                 if std::env::var("TESHI_ACP_PERMISSION_POLICY").as_deref() == Ok("auto") {
                     config.permission_policy = teshi_acp::PermissionPolicy::Auto;
-                    config.permission_host = None;
                 }
+                config.permission_host = Some(teshi_agent_runtime::ChannelPermissionHost::new());
                 self.agents[agent_idx].backend.configure_acp(config)
             }) {
                 Ok(()) => {}
@@ -1782,6 +1789,13 @@ impl App {
                     return false;
                 }
             }
+        }
+        true
+    }
+
+    fn start_agent_backend(&mut self, agent_idx: usize) -> bool {
+        if !self.ensure_agent_backend(agent_idx) {
+            return false;
         }
         match self.agents[agent_idx].backend.start() {
             Ok(()) => true,
@@ -1854,6 +1868,7 @@ impl App {
     /// The backend owns model events, conversation records, and continuation.
     pub fn poll_llm_events(&mut self) {
         use teshi_agent::backend::AgentBackendEvent;
+        self.sync_acp_policy();
         for i in 0..self.agents.len() {
             loop {
                 match self.agents[i].backend.try_next_event() {
@@ -5302,13 +5317,7 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::ModelPanelOpen => {
-                self.model_panel_active = true;
-                self.model_panel_selection = 0;
-                self.model_panel_mode = ModelPanelMode::List;
-                self.model_profiles = crate::profiles::load_all();
-                self.status =
-                    "Model profiles [m]. a add · e edit · ↑↓ select · Enter activate · Esc close"
-                        .to_string();
+                self.cmd_models()?;
                 self.quit_pending_confirm = false;
             }
             Action::ModelPanelClose => {
@@ -7236,6 +7245,9 @@ impl App {
         if self.authoring_ui.overlay_active() {
             return Ok(());
         }
+        if self.handle_acp_controls_mouse(kind, col, row) {
+            return Ok(());
+        }
         // Update hover tracking
         let pos = ratatui::layout::Position::new(col, row);
 
@@ -8303,6 +8315,7 @@ impl App {
         );
         *thread.messages_mut() = messages;
         thread.selected_acp_id = selected_id;
+        thread.acp_controls_ui = Default::default();
         thread.status = AiStatus::Idle;
         self.active_model_label = installed.as_ref().map(|agent| agent.name.clone());
         self.status = match installed {
@@ -8310,6 +8323,9 @@ impl App {
             None => "Selected Teshi Native for this session".into(),
         };
         self.agent_profile_panel_active = false;
+        if kind == teshi_agent::backend::AgentBackendKind::Acp {
+            self.connect_acp_controls();
+        }
     }
 
     fn handle_acp_panel_action(&mut self, action: Action) -> Result<()> {
@@ -8399,8 +8415,12 @@ impl App {
     /// The suggestion menu clears the input before calling this method, so all
     /// commands that have executable behavior must be handled here rather than
     /// in a second dispatcher.
-    fn execute_slash_command(&mut self, command: &str) -> Result<()> {
+    pub(crate) fn execute_slash_command(&mut self, command: &str) -> Result<()> {
         let command = command.trim();
+        if command == "settings" {
+            self.open_acp_controls(None);
+            return Ok(());
+        }
         if command == "auth" || command.starts_with("auth ") {
             self.open_auth_panel(command.strip_prefix("auth ").unwrap_or(""));
             return Ok(());
@@ -8598,6 +8618,16 @@ impl App {
 
     /// Handle `/models` — open the model profile panel.
     fn cmd_models(&mut self) -> Result<()> {
+        if let Some(state) = self.agent().backend.acp_controls() {
+            let id = state
+                .config
+                .options
+                .iter()
+                .find(|o| o.category.as_deref() == Some("model"))
+                .map(|o| o.id.clone());
+            self.open_acp_controls(id);
+            return Ok(());
+        }
         self.model_panel_active = true;
         self.model_panel_selection = 0;
         self.model_panel_mode = ModelPanelMode::List;

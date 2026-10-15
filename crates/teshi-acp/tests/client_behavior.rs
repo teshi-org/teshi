@@ -27,6 +27,60 @@ fn prompts_have_no_default_turn_timeout() {
 }
 
 #[tokio::test]
+async fn settings_use_advertised_routes_and_typed_values() {
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let (cr, cw) = tokio::io::split(client_io);
+    let (sr, mut sw) = tokio::io::split(server_io);
+    let (tx, _rx) = mpsc::channel(16);
+    let mut client = AcpClient::from_io(cr, cw, test_config(), tx, PermissionPolicy::Manual, None);
+    let server = tokio::spawn(async move {
+        let mut reader = BufReader::new(sr);
+        for (method_expected, result) in [
+            ("initialize", json!({"protocolVersion":1})),
+            (
+                "session/new",
+                json!({"sessionId":"s","configOptions":[{"id":"fast","type":"boolean","currentValue":false}],"modes":{"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask"}]},"models":{"currentModelId":"a","availableModels":[{"modelId":"a","name":"A"}]}}),
+            ),
+            ("session/set_config_option", json!({})),
+            ("session/set_mode", json!({})),
+            ("session/set_model", json!({})),
+        ] {
+            let JsonRpcMessage::Request { id, method, params } =
+                read_next(&mut reader).await.unwrap().unwrap()
+            else {
+                panic!("request expected");
+            };
+            assert_eq!(method, method_expected);
+            match method.as_str() {
+                "session/set_config_option" => assert_eq!(
+                    params,
+                    json!({"sessionId":"s","configId":"fast","type":"boolean","value":true})
+                ),
+                "session/set_mode" => assert_eq!(params, json!({"sessionId":"s","modeId":"ask"})),
+                "session/set_model" => assert_eq!(params, json!({"sessionId":"s","modelId":"a"})),
+                _ => {}
+            }
+            write_message(&mut sw, &response(id, result)).await.unwrap();
+        }
+    });
+    client.initialize().await.unwrap();
+    let session = client.new_session(PathBuf::from("/project")).await.unwrap();
+    for (option, value) in
+        session
+            .config
+            .options
+            .iter()
+            .zip([json!(true), json!("ask"), json!("a")])
+    {
+        client
+            .set_session_option(&session, option, value)
+            .await
+            .unwrap();
+    }
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn initialize_sends_required_fields_and_session_uses_cwd() {
     let (client_io, server_io) = tokio::io::duplex(8192);
     let (cr, cw) = tokio::io::split(client_io);

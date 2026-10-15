@@ -5,6 +5,19 @@ import threading
 from pathlib import Path
 
 mode = sys.argv[1]
+model = "a"
+fast = False
+
+
+def config_options():
+    return [
+        {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": model,
+         "options": [{"value": "a", "name": "Alpha"}, {"value": "b", "name": "Beta"}, {"value": "reject", "name": "Rejected"}]},
+        {"id": "effort", "name": "Thinking", "category": "thought_level", "type": "select", "currentValue": "high" if model == "a" else "low",
+         "options": [{"value": "high" if model == "a" else "low", "name": "High" if model == "a" else "Low"}]},
+        {"id": "fast", "name": "Fast", "type": "boolean", "currentValue": fast},
+    ]
+
 if len(sys.argv) > 2:
     marker = Path(sys.argv[2])
     marker.write_text(str(os.getpid()), encoding="utf-8")
@@ -28,7 +41,28 @@ for line in sys.stdin:
         if mode == "session_failed":
             send({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -1, "message": "session rejected"}})
         else:
-            send({"jsonrpc": "2.0", "id": message["id"], "result": {"sessionId": "fake-session"}})
+            result = {"sessionId": "fake-session"}
+            if mode.startswith("settings"):
+                result["configOptions"] = config_options()
+            send({"jsonrpc": "2.0", "id": message["id"], "result": result})
+            if mode == "settings_idle":
+                model = "b"
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "fake-session", "update": {"sessionUpdate": "config_option_update", "configOptions": config_options()}}})
+    elif method == "session/set_config_option":
+        params = message["params"]
+        assert params["sessionId"] == "fake-session"
+        if params["value"] == "reject":
+            send({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32602, "message": "setting rejected"}})
+            continue
+        if mode == "settings_timeout":
+            continue
+        if params["configId"] == "model":
+            assert isinstance(params["value"], str)
+            model = params["value"]
+        elif params["configId"] == "fast":
+            assert params["type"] == "boolean" and isinstance(params["value"], bool)
+            fast = params["value"]
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"configOptions": config_options()}})
     elif method == "session/prompt":
         if mode == "crash":
             sys.exit(13)

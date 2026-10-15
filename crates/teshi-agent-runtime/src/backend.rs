@@ -37,6 +37,51 @@ pub enum AgentBackendRuntime {
 }
 
 impl AgentBackendRuntime {
+    /// Discover ACP controls without sending a prompt.
+    ///
+    /// # Errors
+    /// Returns connection or configuration errors for ACP backends.
+    pub fn connect_acp(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Acp(backend) => backend.connect(),
+            Self::Native(_) => Ok(()),
+        }
+    }
+
+    /// Snapshot of external-agent settings, absent for native conversations.
+    pub fn acp_controls(&self) -> Option<crate::AcpControls> {
+        match self {
+            Self::Acp(backend) => Some(backend.controls()),
+            Self::Native(_) => None,
+        }
+    }
+
+    /// Change one advertised setting on the current remote session.
+    ///
+    /// # Errors
+    /// Rejects unsupported backends, stale selections, and busy sessions.
+    pub fn set_acp_option(
+        &mut self,
+        id: &str,
+        value: serde_json::Value,
+        revision: u64,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Acp(backend) => backend.set_option(id, value, revision),
+            Self::Native(_) => anyhow::bail!("No ACP agent selected"),
+        }
+    }
+
+    /// Synchronize the effective client approval policy.
+    ///
+    /// # Errors
+    /// Returns an error if the external worker exited.
+    pub fn set_acp_policy(&mut self, policy: teshi_acp::PermissionPolicy) -> anyhow::Result<()> {
+        match self {
+            Self::Acp(backend) => backend.set_policy(policy),
+            Self::Native(_) => Ok(()),
+        }
+    }
     /// Temporarily releases the backend while AgentHost calls mutate the
     /// application. The replacement has the same selected kind.
     pub fn take_for_host_call(&mut self) -> Self {

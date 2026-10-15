@@ -92,6 +92,198 @@ fn successful_session_converts_stream_and_completion() {
     assert_eq!(backend.status(), AgentBackendStatus::Completed);
 }
 
+fn wait_controls(
+    backend: &AgentBackendRuntime,
+    predicate: impl Fn(&teshi_agent_runtime::AcpControls) -> bool,
+) -> teshi_agent_runtime::AcpControls {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let state = backend.acp_controls().unwrap();
+        if predicate(&state) {
+            return state;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "settings did not settle: {state:?}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn settings_discovery_mutation_and_prompt_share_one_session() {
+    let mut backend = backend("settings");
+    backend.connect_acp().unwrap();
+    let initial = wait_controls(&backend, |s| s.ready);
+    assert_eq!(backend.status(), AgentBackendStatus::Idle);
+    backend
+        .set_acp_option("model", "b".into(), initial.revision)
+        .unwrap();
+    let updated = wait_controls(&backend, |s| !s.pending);
+    assert_eq!(updated.session_id, initial.session_id);
+    assert_eq!(updated.config.options[1].current, "low");
+    assert!(
+        backend
+            .set_acp_option("effort", "high".into(), updated.revision)
+            .is_err()
+    );
+    assert!(
+        backend
+            .set_acp_option("model", "a".into(), initial.revision)
+            .is_err()
+    );
+    backend
+        .set_acp_option("fast", true.into(), updated.revision)
+        .unwrap();
+    let updated = wait_controls(&backend, |s| !s.pending);
+    assert_eq!(updated.config.options[2].current, true);
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "hello")], None)
+        .unwrap();
+    events_until_terminal(&mut backend);
+    assert_eq!(
+        backend.acp_controls().unwrap().session_id,
+        initial.session_id
+    );
+}
+
+#[test]
+fn settings_rejection_preserves_confirmed_values_and_recovers() {
+    let mut backend = backend("settings");
+    backend.connect_acp().unwrap();
+    let initial = wait_controls(&backend, |s| s.ready);
+    backend
+        .set_acp_option("model", "reject".into(), initial.revision)
+        .unwrap();
+    let rejected = wait_controls(&backend, |s| !s.pending);
+    assert_eq!(rejected.config, initial.config);
+    assert!(rejected.error.unwrap().contains("setting rejected"));
+    backend
+        .set_acp_option("model", "b".into(), rejected.revision)
+        .unwrap();
+    assert!(wait_controls(&backend, |s| !s.pending).error.is_none());
+}
+
+#[test]
+fn idle_updates_are_applied_without_a_prompt() {
+    let mut backend = backend("settings_idle");
+    backend.connect_acp().unwrap();
+    let state = wait_controls(&backend, |s| {
+        s.config.options.first().is_some_and(|o| o.current == "b")
+    });
+    assert!(state.ready);
+    assert_eq!(backend.status(), AgentBackendStatus::Idle);
+}
+
+#[test]
+fn timeout_requires_reconciliation() {
+    let mut backend = backend("settings_timeout");
+    backend.connect_acp().unwrap();
+    let initial = wait_controls(&backend, |s| s.ready);
+    backend
+        .set_acp_option("model", "b".into(), initial.revision)
+        .unwrap();
+    let timed_out = wait_controls(&backend, |s| !s.pending);
+    assert!(!timed_out.ready);
+    assert!(timed_out.error.unwrap().contains("reconnect"));
+    assert!(
+        backend
+            .set_acp_option("model", "a".into(), timed_out.revision)
+            .is_err()
+    );
+}
+
+#[test]
+fn policy_changes_apply_after_connection_without_approving_pending_requests() {
+    let mut backend = backend_with_permission_host("permission_then_exit");
+    backend.connect_acp().unwrap();
+    wait_controls(&backend, |s| s.ready);
+    backend
+        .set_acp_policy(teshi_acp::PermissionPolicy::Auto)
+        .unwrap();
+    wait_controls(&backend, |s| {
+        s.policy == Some(teshi_acp::PermissionPolicy::Auto)
+    });
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "hello")], None)
+        .unwrap();
+    let events = events_until_terminal(&mut backend);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentBackendEvent::PermissionRequest { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentBackendEvent::Completed { .. }))
+    );
+    backend
+        .set_acp_policy(teshi_acp::PermissionPolicy::Manual)
+        .unwrap();
+    wait_controls(&backend, |s| {
+        s.policy == Some(teshi_acp::PermissionPolicy::Manual)
+    });
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "hello")], None)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let request_id = loop {
+        if let Ok(Some(AgentBackendEvent::PermissionRequest { request_id, .. })) =
+            backend.try_next_event()
+        {
+            break request_id;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    };
+    backend
+        .set_acp_policy(teshi_acp::PermissionPolicy::Auto)
+        .unwrap();
+    wait_controls(&backend, |s| {
+        s.policy == Some(teshi_acp::PermissionPolicy::Auto)
+    });
+    assert!(
+        backend.respond_permission(request_id, Some("allow_once".into())),
+        "pending request must still require its explicit answer"
+    );
+    assert!(
+        events_until_terminal(&mut backend)
+            .iter()
+            .any(|e| matches!(e, AgentBackendEvent::Completed { .. }))
+    );
+}
+
+#[test]
+fn separate_backends_keep_configuration_isolated() {
+    let mut first = backend("settings");
+    let mut second = backend("settings");
+    first.connect_acp().unwrap();
+    second.connect_acp().unwrap();
+    let initial = wait_controls(&first, |s| s.ready);
+    wait_controls(&second, |s| s.ready);
+    first
+        .set_acp_option("model", "b".into(), initial.revision)
+        .unwrap();
+    wait_controls(&first, |s| !s.pending);
+    assert_eq!(
+        second.acp_controls().unwrap().config.options[0].current,
+        "a"
+    );
+    first.cancel();
+    first.connect_acp().unwrap();
+    let fresh = wait_controls(&first, |s| s.ready);
+    assert_eq!(fresh.config.options[0].current, "a");
+    assert!(
+        first
+            .set_acp_option("model", "b".into(), initial.revision)
+            .is_err()
+    );
+}
+
 #[test]
 fn process_launch_failure_is_reported() {
     let mut backend = backend("success");

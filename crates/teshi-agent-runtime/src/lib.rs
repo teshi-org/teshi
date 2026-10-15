@@ -12,6 +12,7 @@ use teshi_engine::llm::{LlmConfig, LlmEvent, LlmHandle, LlmRequest};
 mod acp_backend;
 pub mod backend;
 
+pub use acp_backend::AcpControls;
 pub use acp_backend::ChannelPermissionHost;
 
 /// Conversation record shared with frontends and persisted sessions.

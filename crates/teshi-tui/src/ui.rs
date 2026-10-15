@@ -234,6 +234,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     // and never prevent Browse/Insert rendering or input handling.
     app.refresh_buffer_diagnostics();
     app.clickable_regions.clear();
+    app.agent_mut().acp_controls_ui.clear_regions();
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -430,6 +431,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     {
         render_requirements_overlay(frame, app, frame.area());
     }
+    crate::acp_controls::render_picker(frame, app);
 }
 
 fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -3067,7 +3069,13 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     frame.render_widget(Clear, panel_area);
 
-    let block = theme::popup_block(" Approval Mode ");
+    let overridden = app.agent().backend.acp_controls().is_some()
+        && std::env::var("TESHI_ACP_PERMISSION_POLICY").as_deref() == Ok("auto");
+    let block = theme::popup_block(if overridden {
+        " Approvals (environment override: Auto) "
+    } else {
+        " Approval Mode "
+    });
     let inner = block.inner(panel_area);
     frame.render_widget(block, panel_area);
 
@@ -3076,7 +3084,7 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     for (i, mode) in modes.iter().enumerate() {
-        let is_current = *mode == app.approval_mode;
+        let is_current = *mode == app.effective_approval_mode();
         let is_selected = i == app.approval_panel_selection;
         let label = mode.display_name();
         let desc = mode.description();

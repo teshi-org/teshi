@@ -94,6 +94,41 @@ IDs contain only ASCII letters, numbers, `-`, and `_`. IDs must be unique; names
 
 Adding an existing ID replaces that definition. Configuration does not select an agent globally: use `/agent` in the TUI to select one for the current conversation.
 
+## Interactive session settings
+
+Selecting an installed ACP agent connects and discovers its settings before the
+first prompt. The TUI shows clickable controls beside the composer. Use
+`/settings` or `Ctrl+,` to open all settings; `More` retains access on narrow
+terminals. In the picker, Up/Down select, Enter confirms, Left returns to the
+settings list, and Escape closes. The footer also provides Agent and Approvals
+actions (`a` and `p`).
+
+Settings are advertised by the agent: models, modes, reasoning effort, speed,
+and additional categories are not hard-coded. Select options can be grouped;
+boolean options show On/Off. Unknown option types remain visible as unsupported.
+Modern `configOptions` take precedence over legacy modes/models per category.
+Legacy controls use `session/set_mode` or `session/set_model`.
+
+The runtime owns a configuration snapshot per conversation. Mutations are
+serialized, reject stale selections, and retain the last confirmed values until
+the agent responds. Complete option lists replace prior choices, including
+reasoning options changed by a model selection. Idle `session/update`
+notifications refresh controls. A timed-out mutation requires reconnection to
+discover confirmed values. Settings are not persisted by Teshi.
+
+Agent modes and Teshi approvals are independent. Approvals control Teshi's
+responses to tool permission requests, not the external agent's sandbox.
+Changing approvals updates future requests; an already pending request still
+requires an explicit answer. `TESHI_ACP_PERMISSION_POLICY=auto` overrides the
+user selection and the badge displays the effective policy. Test-point review
+gates remain independent. Settings cannot be changed during an active turn.
+
+For a live smoke test using the same runtime as the TUI, run
+`cargo run -p teshi-agent-runtime --example acp-settings -- <program> <args...>`.
+It uses an isolated temporary project, discovers settings, changes supported
+model/effort values on the same session, restores the original model, and checks
+a bounded text-only prompt. This invokes the configured provider.
+
 ## ACP vs MCP
 
 ACP is Agent-to-Client integration: Teshi connects to an external agent. MCP is Agent-to-Tool integration: an agent connects to external tools. They are intentionally not conflated.

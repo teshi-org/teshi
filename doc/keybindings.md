@@ -79,6 +79,19 @@ A failed save keeps the buffer and prompt open so the operation can be retried.
 | `y` `y` | Copy current step |
 | `p` | Paste copied step |
 
+## ACP session settings
+
+Select an external agent with `/agent`. Click the bottom model, mode, thinking,
+or other advertised setting to choose a value. `More` opens the full list when
+the terminal is narrow. `/settings` and `Ctrl+,` also open the list; terminals
+that do not encode `Ctrl+,` can use `/settings`. `/models` and the existing
+model shortcut open the external agent's model choices in ACP conversations.
+
+In a settings picker, use Up/Down (or j/k), Enter to apply, Left/Backspace to
+return, and Escape to close. `a` opens agent selection and `p` opens Teshi
+approvals. Agent modes and Teshi approvals are separate controls. Busy turns
+and pending settings changes prevent conflicting mutations.
+
 ## Structural editing
 
 | Key | Action |
