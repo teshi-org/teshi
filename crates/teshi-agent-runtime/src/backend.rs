@@ -37,6 +37,49 @@ pub enum AgentBackendRuntime {
 }
 
 impl AgentBackendRuntime {
+    /// Reconnect ACP with a new profile's MCP catalog and retain local history.
+    ///
+    /// # Errors
+    /// Returns configuration, bridge, or worker startup errors for ACP backends.
+    pub fn reconnect_acp_host_tools(
+        &mut self,
+        tools: crate::tool_bridge::ToolBridgeConfig,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Acp(backend) => backend.reconnect_host_tools(tools),
+            Self::Native(_) => Ok(()),
+        }
+    }
+    /// Poll a live MCP call from the external agent without blocking the UI.
+    pub fn host_tool_request(&self) -> Option<crate::tool_bridge::HostToolRequest> {
+        match self {
+            Self::Acp(backend) => backend.host_tool_request(),
+            Self::Native(_) => None,
+        }
+    }
+
+    /// Keep an MCP call pending while the existing file approval UI is open.
+    pub fn defer_host_tool(&mut self, request: crate::tool_bridge::HostToolRequest) {
+        if let Self::Acp(backend) = self {
+            backend.defer_host_tool(request);
+        }
+    }
+
+    /// Deliver an accepted or rejected file change to its waiting MCP caller.
+    pub fn resolve_host_tool(&mut self, id: &str, result: Result<String, String>) -> bool {
+        match self {
+            Self::Acp(backend) => backend.resolve_host_tool(id, result),
+            Self::Native(_) => false,
+        }
+    }
+
+    /// Check that a queued file mutation still belongs to a connected MCP call.
+    pub fn host_tool_is_pending(&self, id: &str) -> bool {
+        match self {
+            Self::Acp(backend) => backend.host_tool_is_pending(id),
+            Self::Native(_) => false,
+        }
+    }
     /// Discover ACP controls without sending a prompt.
     ///
     /// # Errors
@@ -175,7 +218,10 @@ impl AgentBackendRuntime {
     ) -> anyhow::Result<()> {
         match self {
             Self::Native(backend) => backend.runtime.send_chat(system, messages, tools),
-            Self::Acp(backend) => backend.submit_turn(system, &messages),
+            Self::Acp(backend) => {
+                backend.set_host_tools(tools.unwrap_or_default());
+                backend.submit_turn(system, &messages)
+            }
         }
     }
 

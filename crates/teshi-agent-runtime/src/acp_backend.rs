@@ -35,6 +35,8 @@ pub struct AcpBackendConfig {
     pub permission_host: Option<Arc<ChannelPermissionHost>>,
     /// Optional per-agent file for the last successfully selected model.
     pub model_preference_path: Option<PathBuf>,
+    /// Optional live-host MCP transport supplied by an interactive frontend.
+    pub tool_bridge: Option<crate::tool_bridge::ToolBridgeConfig>,
 }
 
 impl AcpBackendConfig {
@@ -46,6 +48,7 @@ impl AcpBackendConfig {
             client: AcpClientConfig::default(),
             permission_host: None,
             model_preference_path: None,
+            tool_bridge: None,
         }
     }
 }
@@ -186,6 +189,7 @@ impl PermissionHost for ChannelPermissionHost {
 }
 
 pub struct AcpAgentBackend {
+    tool_bridge: Option<crate::tool_bridge::ToolBridge>,
     controls: Arc<Mutex<AcpControls>>,
     pub messages: Vec<AiChatMessage>,
     pub partial_response: String,
@@ -212,6 +216,7 @@ impl std::fmt::Debug for AcpAgentBackend {
 impl Default for AcpAgentBackend {
     fn default() -> Self {
         Self {
+            tool_bridge: None,
             controls: Arc::new(Mutex::new(AcpControls::default())),
             messages: Vec::new(),
             partial_response: String::new(),
@@ -270,6 +275,16 @@ impl AcpAgentBackend {
             self.stop();
         }
         if self.worker.is_none() {
+            self.tool_bridge = config
+                .tool_bridge
+                .as_ref()
+                .map(crate::tool_bridge::ToolBridge::start)
+                .transpose()?;
+            let servers = self
+                .tool_bridge
+                .as_ref()
+                .map(|bridge| vec![bridge.server()])
+                .unwrap_or_default();
             let revision = self.controls().revision.saturating_add(1);
             self.controls = Arc::new(Mutex::new(AcpControls {
                 policy: Some(config.permission_policy),
@@ -286,9 +301,13 @@ impl AcpAgentBackend {
                         .enable_all()
                         .build();
                     match runtime {
-                        Ok(runtime) => {
-                            runtime.block_on(run_worker(config, commands_rx, events_tx, controls))
-                        }
+                        Ok(runtime) => runtime.block_on(run_worker(
+                            config,
+                            commands_rx,
+                            events_tx,
+                            controls,
+                            servers,
+                        )),
                         Err(error) => {
                             let _ = events_tx.send(AgentBackendEvent::Failed(format!(
                                 "ACP runtime initialization failed: {error}"
@@ -397,6 +416,9 @@ impl AcpAgentBackend {
             anyhow::bail!("ACP backend has no active turn");
         }
         let mut prompt = prompt_text(system.as_deref(), messages);
+        if self.tool_bridge.is_some() {
+            prompt.push_str("\n\nTeshi tools are available through the teshi-authoring MCP server. Your MCP client may prefix tool names with the server name. Use its submit_requirements, propose_test_points, generate_plan, create_feature_file, insert_scenario, and validate_feature tools for this workflow. Do not replace human review with chat approval. After proposing test points, stop and wait for the user to review them in Teshi and continue generation.");
+        }
         // A new ACP process has no remote history. Supply the saved transcript
         // once, then let that process maintain its own conversation.
         if !self.submitted_prompt && messages.len() > 1 {
@@ -424,6 +446,9 @@ impl AcpAgentBackend {
     }
 
     pub fn cancel(&mut self) {
+        if let Some(bridge) = &mut self.tool_bridge {
+            bridge.cancel_pending();
+        }
         if let Some(commands) = &self.commands {
             let _ = commands.send(WorkerCommand::Cancel);
         }
@@ -529,6 +554,7 @@ impl AcpAgentBackend {
     }
 
     fn stop(&mut self) {
+        self.tool_bridge = None;
         if let Some(commands) = self.commands.take() {
             let _ = commands.send(WorkerCommand::Shutdown);
         }
@@ -536,6 +562,50 @@ impl AcpAgentBackend {
             let _ = worker.join();
         }
         self.events = None;
+    }
+
+    pub(crate) fn host_tool_request(&self) -> Option<crate::tool_bridge::HostToolRequest> {
+        self.tool_bridge.as_ref()?.try_recv()
+    }
+
+    pub(crate) fn defer_host_tool(&mut self, request: crate::tool_bridge::HostToolRequest) {
+        if let Some(bridge) = &mut self.tool_bridge {
+            bridge.defer(request);
+        }
+    }
+
+    pub(crate) fn resolve_host_tool(&mut self, id: &str, result: Result<String, String>) -> bool {
+        self.tool_bridge
+            .as_mut()
+            .is_some_and(|bridge| bridge.resolve(id, result))
+    }
+
+    pub(crate) fn host_tool_is_pending(&self, id: &str) -> bool {
+        self.tool_bridge
+            .as_ref()
+            .is_some_and(|bridge| bridge.is_pending(id))
+    }
+
+    pub(crate) fn set_host_tools(&self, tools: Vec<teshi_core::llm::ToolDefinition>) {
+        if let Some(bridge) = &self.tool_bridge {
+            bridge.set_tools(tools);
+        }
+    }
+
+    pub(crate) fn reconnect_host_tools(
+        &mut self,
+        tools: crate::tool_bridge::ToolBridgeConfig,
+    ) -> anyhow::Result<()> {
+        let config = self
+            .config
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("ACP backend is not configured"))?;
+        config.tool_bridge = Some(tools);
+        self.stop();
+        // A fresh remote session needs the saved transcript on its first turn.
+        self.submitted_prompt = false;
+        self.state = AgentBackendStatus::Idle;
+        self.connect()
     }
 
     /// Answer a pending ACP permission prompt. `None` rejects the request.
@@ -585,6 +655,7 @@ async fn run_worker(
     mut commands: async_mpsc::UnboundedReceiver<WorkerCommand>,
     output: mpsc::Sender<AgentBackendEvent>,
     controls: Arc<Mutex<AcpControls>>,
+    servers: Vec<teshi_acp::McpServer>,
 ) {
     let (updates_tx, mut updates_rx) = async_mpsc::channel(128);
     let cwd: PathBuf = config.command.cwd.clone();
@@ -632,7 +703,7 @@ async fn run_worker(
             .unwrap_or("ACP agent")
             .to_string();
         let session = client
-            .new_session(cwd)
+            .new_session_with_mcp(cwd, servers)
             .await
             .map_err(|e| format!("ACP session creation failed: {e}"))?;
         Ok::<_, String>((session, model))

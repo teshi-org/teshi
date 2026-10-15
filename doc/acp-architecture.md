@@ -132,3 +132,42 @@ a bounded text-only prompt. This invokes the configured provider.
 ## ACP vs MCP
 
 ACP is Agent-to-Client integration: Teshi connects to an external agent. MCP is Agent-to-Tool integration: an agent connects to external tools. They are intentionally not conflated.
+
+### Live Teshi tools in ACP conversations
+
+The TUI supplies a `teshi-authoring` STDIO MCP server in each ACP
+`session/new` request. This server exposes the selected profile's built-in
+Teshi tools, including requirement inspection, `submit_requirements`,
+`propose_test_points`, `generate_plan`, and Feature editing and validation.
+An external agent may prefix these names with the MCP server name.
+
+Calls return to the owning live TUI through an authenticated loopback bridge;
+the existing AgentHost executes them on the UI thread. Test points appear in
+the Test Points tab and still require human review followed by Continue.
+Auto/Bypass file permissions do not grant that review. Manual file edits keep
+their MCP response pending until acceptance or rejection. Accepted scenario
+edits remain in editor buffers until the user saves, matching native editing;
+validation checks those buffers. Cancelled or disconnected pending edits
+cannot be accepted. Replacing or stopping the backend closes its bridge.
+If a manual acceptance fails, its MCP caller receives the error and the failed
+approval is cleared. The STDIO proxy continues reading while calls wait;
+MCP cancellation closes the matching host connection, and STDIN EOF closes all
+pending connections. Selecting an Agent Profile reconnects ACP with that
+profile's permitted tools so the agent rediscovers additions and removals.
+The saved transcript is included on the first prompt of the new connection.
+
+The internal proxy uses the currently running Teshi executable, requires no
+global agent MCP configuration, and keeps its ephemeral token in the MCP
+child environment. It does not expose the bridge outside loopback.
+Restart an older Teshi binary and create a new ACP connection to use this path.
+
+Run the isolated provider interoperability probe with:
+
+```text
+cargo run -p teshi-agent-runtime --example acp-authoring-probe -- <installed-agent-id> <new-teshi-executable>
+```
+
+This invokes the real provider and verifies two calls through the actual
+STDIO MCP proxy. Its host is non-writing; it does not establish visual TUI
+acceptance. Deterministic TUI tests separately exercise persistence, review,
+planning, editing, validation, saving, and file approval through the live host.

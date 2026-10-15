@@ -15,6 +15,9 @@ pub mod profile;
 pub mod registry;
 pub mod session_config;
 
+/// Official ACP schema types for client-provided MCP server descriptors.
+pub use agent_client_protocol::schema::v1::{EnvVariable, McpServer, McpServerStdio};
+
 pub use client::{AcpClient, AcpEvent, AcpLifecycle, AcpSession, ClientInfo, InitializeResult};
 pub use command::{AcpAgentCommand, CursorAcpConfig, EnvironmentRedaction, resolve_executable};
 pub use error::{AcpError, AcpResult};

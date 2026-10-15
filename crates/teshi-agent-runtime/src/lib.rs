@@ -11,6 +11,7 @@ use teshi_engine::llm::{LlmConfig, LlmEvent, LlmHandle, LlmRequest};
 
 mod acp_backend;
 pub mod backend;
+pub mod tool_bridge;
 
 pub use acp_backend::AcpControls;
 pub use acp_backend::ChannelPermissionHost;

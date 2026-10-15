@@ -2,6 +2,9 @@ import json
 import sys
 import os
 import threading
+import time
+import socket
+import re
 from pathlib import Path
 
 mode = sys.argv[1]
@@ -39,6 +42,9 @@ for line in sys.stdin:
             send({"jsonrpc": "2.0", "id": message["id"], "result": {
                 "protocolVersion": 1, "agentInfo": {"name": "fake-agent"}}})
     elif method == "session/new":
+        if mode.startswith("mcp_"):
+            mcp_server = message["params"]["mcpServers"][0]
+            assert mcp_server["name"] == "teshi-authoring"
         if mode == "session_failed":
             send({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -1, "message": "session rejected"}})
         else:
@@ -66,6 +72,96 @@ for line in sys.stdin:
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"configOptions": config_options()}})
     elif method == "session/prompt":
         prompt_count += 1
+        if mode.startswith("mcp_"):
+            address = mcp_server["args"][-1]
+            host, port = address.rsplit(":", 1)
+            token = next(item["value"] for item in mcp_server["env"]
+                         if item["name"] == "TESHI_AUTHORING_BRIDGE_TOKEN")
+
+            def mcp_request(method, params=None):
+                with socket.create_connection((host, int(port)), timeout=10) as connection:
+                    connection.settimeout(20)
+                    connection.sendall((json.dumps({"token": token, "request": {
+                        "jsonrpc": "2.0", "id": 1, "method": method,
+                        "params": params or {}}}) + "\n").encode())
+                    return json.loads(connection.makefile("r").readline())["result"]
+
+            discovery = mcp_request("tools/list")
+            if mode == "mcp_catalog":
+                prompt = message["params"]["prompt"][0]["text"]
+                text = json.dumps({"tools": [tool["name"] for tool in discovery["tools"]],
+                                   "restored": "[Restored conversation history]" in prompt})
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                    "sessionId": "fake-session", "update": {"sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": text}}}})
+                send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
+                continue
+            assert any(tool["name"] == "submit_requirements" for tool in discovery["tools"])
+            results = []
+            if mode == "mcp_review" and prompt_count > 1:
+                prompt = message["params"]["prompt"][0]["text"]
+                ids = re.search(r"Human approved test points \[([^]]+)\]", prompt).group(1).split(", ")
+                steps = ["Given a user", "When the user signs in", "Then access is granted"]
+                calls = [
+                    ("generate_plan", {"features": [{"file_name": "approved.feature", "feature_name": "Auth",
+                        "scenarios": [{"name": "Valid login", "steps": steps, "test_point_ids": ids}]}]}),
+                    ("create_feature_file", {"file_name": "approved.feature", "feature_name": "Auth"}),
+                    ("insert_scenario", {"file_path": "approved.feature", "scenario_name": "Valid login",
+                        "steps": steps, "test_point_ids": ids}),
+                    ("validate_feature", {"file_path": "approved.feature"}),
+                ]
+            elif mode == "mcp_review":
+                calls = [
+                    ("submit_requirements", {"feature_name": "Auth", "scenario_descriptions": ["login"]}),
+                    ("propose_test_points", {"test_points": [{"title": "Valid login", "objective": "User authenticates", "hierarchy_path": ["Auth", "Login"]}]}),
+                    ("generate_plan", {"features": []}),
+                    ("create_feature_file", {"file_name": "blocked.feature", "feature_name": "Blocked"}),
+                ]
+            else:
+                calls = [("create_feature_file", {"file_name": "mcp-created.feature", "feature_name": "MCP created"})]
+            for name, arguments in calls:
+                results.append(mcp_request("tools/call", {"name": name, "arguments": arguments}))
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": "fake-session", "update": {"sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": json.dumps(results)}}}})
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
+            continue
+        if mode.startswith("visual_"):
+            gate = Path(os.environ["TESHI_ACTIVITY_GATE"])
+
+            def update(value):
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                    "sessionId": "fake-session", "update": value}})
+
+            def wait_stage(stage):
+                deadline = time.monotonic() + 30
+                while not gate.with_suffix("." + stage).exists():
+                    if time.monotonic() > deadline:
+                        raise TimeoutError(stage)
+                    time.sleep(0.02)
+
+            update({"sessionUpdate": "agent_message_chunk", "content": {
+                "type": "text", "text": "I will inspect the project"}})
+            wait_stage("tools")
+            if mode == "visual_failed":
+                send({"jsonrpc": "2.0", "id": message["id"], "error": {
+                    "code": -1, "message": "controlled failure"}})
+                continue
+            if mode == "visual_cancelled":
+                send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "cancelled"}})
+                continue
+            update({"sessionUpdate": "tool_call", "toolCallId": "read-project",
+                    "title": "Read project", "status": "in_progress"})
+            update({"sessionUpdate": "tool_call_update", "toolCallId": "read-project",
+                    "status": "completed"})
+            if mode == "visual_no_final":
+                send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
+                continue
+            update({"sessionUpdate": "agent_message_chunk", "content": {
+                "type": "text", "text": "Inspection finished"}})
+            wait_stage("finish")
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
+            continue
         if mode == "restored":
             prompt = message["params"]["prompt"][0]["text"]
             if prompt_count == 1:
@@ -108,6 +204,7 @@ for line in sys.stdin:
         else:
             if mode == "activity":
                 for update in [
+                    {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "I will inspect the project"}},
                     {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "Inspecting "}},
                     {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "the project"}},
                     {"sessionUpdate": "tool_call", "toolCallId": "read-1", "title": "Read project", "status": "in_progress"},
@@ -120,4 +217,8 @@ for line in sys.stdin:
             send({"jsonrpc": "2.0", "method": "session/update", "params": {
                 "sessionId": "fake-session", "update": {
                     "sessionUpdate": "tool_call", "title": "reading project", "status": "in_progress"}}})
+            if mode == "activity":
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                    "sessionId": "fake-session", "update": {
+                        "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Inspection finished"}}}})
             send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})

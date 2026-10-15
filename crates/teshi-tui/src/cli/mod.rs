@@ -1341,6 +1341,13 @@ pub struct BrowserNetworkDetailArgs {
 pub enum McpCommand {
     /// Serve the browser-agent tools over newline-delimited JSON-RPC on STDIO
     Serve(McpServeArgs),
+    /// Internal proxy for a live ACP conversation's host tools
+    #[command(hide = true)]
+    AuthoringProxy {
+        /// Private loopback listener of the owning conversation
+        #[arg(long)]
+        address: std::net::SocketAddr,
+    },
 }
 
 #[derive(Debug, Args)]

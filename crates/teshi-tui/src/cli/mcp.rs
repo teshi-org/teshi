@@ -24,6 +24,9 @@ const TOOL_CACHE_TTL_MS: u64 = 5_000;
 pub fn handle_mcp_command(action: &McpCommand) -> Result<()> {
     match action {
         McpCommand::Serve(args) => serve(args),
+        McpCommand::AuthoringProxy { address } => {
+            teshi_agent_runtime::tool_bridge::run_stdio_proxy(*address)
+        }
     }
 }
 

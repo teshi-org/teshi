@@ -7071,6 +7071,7 @@ name = "teshi-agent-runtime"
 version = "0.7.10"
 dependencies = [
  "anyhow",
+ "getrandom 0.3.4",
  "serde",
  "serde_json",
  "tempfile",

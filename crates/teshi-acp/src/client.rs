@@ -312,7 +312,23 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
         }
     }
 
+    /// Create a session without client-provided MCP servers.
+    ///
+    /// # Errors
+    /// Returns lifecycle, serialization, transport, or remote session errors.
     pub async fn new_session(&self, cwd: PathBuf) -> AcpResult<AcpSession> {
+        self.new_session_with_mcp(cwd, Vec::new()).await
+    }
+
+    /// Create a session with client-provided MCP tool servers.
+    ///
+    /// # Errors
+    /// Returns lifecycle, serialization, transport, or remote session errors.
+    pub async fn new_session_with_mcp(
+        &self,
+        cwd: PathBuf,
+        servers: Vec<crate::McpServer>,
+    ) -> AcpResult<AcpSession> {
         self.ensure_state(
             &[
                 AcpLifecycle::Initialized,
@@ -322,7 +338,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             "session/new",
         )
         .await?;
-        let params = serialize_params(NewSessionRequest::new(cwd.clone()))?;
+        let params = serialize_params(NewSessionRequest::new(cwd.clone()).mcp_servers(servers))?;
         let result = self
             .request_with_timeout("session/new", params, self.config.request_timeout)
             .await?;

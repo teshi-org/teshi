@@ -1943,12 +1943,19 @@ fn execute_validate_feature(app: &mut crate::app::App, args_json: &str) -> Resul
 
     let mut issues = Vec::new();
     for feature in selected {
-        match std::fs::read_to_string(&feature.file_path) {
-            Ok(content) => issues.extend(teshi_agent::validator::validate_feature(
+        // Accepted host edits live in buffers until Save. Validate the same
+        // content the user sees, including scenarios just inserted through MCP.
+        let content = app
+            .find_feature_idx_for_file(&feature.file_path.to_string_lossy())
+            .and_then(|index| app.buffers.get(index))
+            .map(|buffer| buffer.as_string())
+            .or_else(|| std::fs::read_to_string(&feature.file_path).ok());
+        match content {
+            Some(content) => issues.extend(teshi_agent::validator::validate_feature(
                 &content,
                 &feature.file_path,
             )),
-            Err(_) => issues.extend(teshi_agent::validator::validate_project(
+            None => issues.extend(teshi_agent::validator::validate_project(
                 &teshi_core::gherkin::BddProject {
                     root_dir: project.root_dir.clone(),
                     features: vec![feature.clone()],
@@ -2304,6 +2311,27 @@ mod pipeline_gate_tests {
                 .as_ref()
                 .unwrap()
                 .has_usable_sources()
+        );
+    }
+
+    #[test]
+    fn validate_feature_uses_accepted_buffer_edits_before_save() {
+        let (mut app, dir) = app_in_temp_project();
+        let original = fs::read_to_string(dir.path().join("sample.feature")).unwrap();
+        let edited = "Feature: Sample\n  Scenario: Unsaved empty scenario\n";
+        app.buffers[0] = crate::editor_buffer::EditorBuffer::from_string(edited.into());
+        let result = app
+            .execute_tool(
+                "validate_feature",
+                r#"{"file_path":"sample.feature"}"#,
+                "validate",
+                0,
+            )
+            .unwrap();
+        assert!(result.contains("Unsaved empty scenario"), "{result}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("sample.feature")).unwrap(),
+            original
         );
     }
 

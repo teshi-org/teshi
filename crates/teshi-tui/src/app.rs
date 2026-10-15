@@ -1894,6 +1894,10 @@ impl App {
             };
             match command.and_then(|command| {
                 let mut config = teshi_agent_runtime::backend::AcpBackendConfig::new(command);
+                config.tool_bridge = Some(teshi_agent_runtime::tool_bridge::ToolBridgeConfig {
+                    executable: std::env::current_exe()?,
+                    tools: self.agent_tools(agent_idx),
+                });
                 if let Some(id) = self.agents[agent_idx].selected_acp_id.as_ref() {
                     let root = self.agents[agent_idx]
                         .selection_root
@@ -2006,6 +2010,19 @@ impl App {
         self.agent_registry.get(id)
     }
 
+    fn agent_tools(&self, agent_idx: usize) -> Vec<teshi_core::llm::ToolDefinition> {
+        match self.agent_profile(agent_idx).map(|profile| &profile.tools) {
+            Some(teshi_agent::definition::ToolPermission::None) => Vec::new(),
+            Some(teshi_agent::definition::ToolPermission::Whitelist(names)) if names.is_empty() => {
+                Vec::new()
+            }
+            Some(teshi_agent::definition::ToolPermission::Whitelist(names)) => {
+                teshi_agent::get_tools(Some(names))
+            }
+            _ => teshi_agent::get_tools(None),
+        }
+    }
+
     /// Get the active agent definition for the selected agent.
     pub(crate) fn active_agent_profile(&self) -> &teshi_agent::definition::AgentDefinition {
         self.agent_profile(self.selected_agent)
@@ -2023,6 +2040,7 @@ impl App {
         use teshi_agent::backend::AgentBackendEvent;
         self.sync_acp_policy();
         for i in 0..self.agents.len() {
+            self.poll_acp_host_tools(i);
             loop {
                 match self.agents[i].backend.try_next_event() {
                     Ok(Some(AgentBackendEvent::Ignored)) => continue,
@@ -2249,6 +2267,79 @@ impl App {
             agent.last_session_save = Some(std::time::Instant::now());
         }
         Ok(())
+    }
+
+    fn poll_acp_host_tools(&mut self, agent_idx: usize) {
+        while let Some(request) = self.agents[agent_idx].backend.host_tool_request() {
+            if !request.is_pending() {
+                continue;
+            }
+            if self.agents[agent_idx].backend.status()
+                != teshi_agent::backend::AgentBackendStatus::Running
+            {
+                request.respond(Err("ACP conversation has no active turn".into()));
+                continue;
+            }
+            let allowed =
+                self.agent_profile(agent_idx)
+                    .is_none_or(|profile| match &profile.tools {
+                        teshi_agent::definition::ToolPermission::All => true,
+                        teshi_agent::definition::ToolPermission::None => false,
+                        teshi_agent::definition::ToolPermission::Whitelist(names) => {
+                            names.contains(&request.call.name)
+                        }
+                    });
+            if !allowed {
+                request.respond(Err(
+                    "Tool is not allowed by the current agent profile".into()
+                ));
+                continue;
+            }
+            if self.has_agent_change_prompt() {
+                request.respond(Err(
+                    "Wait for the pending file approval before calling another host tool".into(),
+                ));
+                continue;
+            }
+            let pending_before = self.pending_agent_changes.len();
+            let result = teshi_agent::execute_tool(
+                self,
+                &request.call.name,
+                &request.call.arguments,
+                &request.call.id,
+                agent_idx,
+            )
+            .map_err(|error| error.to_string());
+            if result.is_ok() && self.pending_agent_changes.len() > pending_before {
+                self.agents[agent_idx].backend.defer_host_tool(request);
+                if self.approval_mode.requires_manual_approval() {
+                    self.agents[agent_idx].status = AiStatus::AwaitingApproval;
+                } else {
+                    while self.has_agent_change_prompt() {
+                        let id = self.pending_agent_changes[0].tool_call_id.clone();
+                        let result = match self.accept_agent_change() {
+                            Ok((_, result)) => Ok(result),
+                            Err(error) => {
+                                if self
+                                    .pending_agent_changes
+                                    .first()
+                                    .is_some_and(|change| change.tool_call_id == id)
+                                {
+                                    self.pending_agent_changes.remove(0);
+                                }
+                                self.clear_pending_change_state();
+                                Err(error.to_string())
+                            }
+                        };
+                        self.agents[agent_idx]
+                            .backend
+                            .resolve_host_tool(&id, result);
+                    }
+                }
+            } else {
+                request.respond(result);
+            }
+        }
     }
 
     fn send_backend_followup(&mut self, agent_idx: usize, allow_tools: bool) {
@@ -2841,6 +2932,16 @@ impl App {
         tool_call_id: String,
         result: String,
     ) {
+        if self.agents[agent_idx]
+            .backend
+            .resolve_host_tool(&tool_call_id, Ok(result.clone()))
+        {
+            self.agents[agent_idx].status = AiStatus::Waiting;
+            if self.generation_stage == teshi_agent::pipeline::GenerationStage::Confirming {
+                self.generation_stage = teshi_agent::pipeline::GenerationStage::Writing;
+            }
+            return;
+        }
         if self.agents[agent_idx].backend.status()
             != teshi_agent::backend::AgentBackendStatus::WaitingForPermission
         {
@@ -3660,6 +3761,14 @@ impl App {
     ///
     /// Returns `(tool_call_id, result_text)` for feeding back to the LLM.
     pub fn accept_agent_change(&mut self) -> Result<(String, String)> {
+        if let Some(change) = self.pending_agent_changes.first()
+            && change.tool_call_id.starts_with("teshi-mcp-")
+            && !self.agents[change.agent_idx]
+                .backend
+                .host_tool_is_pending(&change.tool_call_id)
+        {
+            anyhow::bail!("ACP tool call is no longer pending; reject this stale file change");
+        }
         if let Some(change) = self.pending_agent_changes.first()
             && matches!(&change.mutation, AgentMutation::InsertAfterLine { .. })
         {
@@ -5119,13 +5228,54 @@ impl App {
                 return match action {
                     Action::AgentChangeAccept => {
                         let agent_idx = self.pending_agent_changes[0].agent_idx;
-                        let (tool_call_id, result) = self.accept_agent_change()?;
-                        self.feed_agent_tool_result_for_agent(agent_idx, tool_call_id, result);
+                        let call_id = self.pending_agent_changes[0].tool_call_id.clone();
+                        match self.accept_agent_change() {
+                            Ok((tool_call_id, result)) => {
+                                self.feed_agent_tool_result_for_agent(
+                                    agent_idx,
+                                    tool_call_id,
+                                    result,
+                                );
+                            }
+                            Err(error) if call_id.starts_with("teshi-mcp-") => {
+                                // Acceptance can fail either before or after it
+                                // removes the proposal. Complete the MCP call in
+                                // both cases and discard only this failed item.
+                                if self
+                                    .pending_agent_changes
+                                    .first()
+                                    .is_some_and(|change| change.tool_call_id == call_id)
+                                {
+                                    self.pending_agent_changes.remove(0);
+                                }
+                                self.clear_pending_change_state();
+                                self.agents[agent_idx]
+                                    .backend
+                                    .resolve_host_tool(&call_id, Err(error.to_string()));
+                                self.agents[agent_idx].status =
+                                    if self.agents[agent_idx].backend.status()
+                                        == teshi_agent::backend::AgentBackendStatus::Running
+                                    {
+                                        AiStatus::Waiting
+                                    } else {
+                                        AiStatus::Idle
+                                    };
+                                self.status = format!("Could not apply ACP file change: {error}");
+                            }
+                            Err(error) => return Err(error),
+                        }
                         Ok(())
                     }
                     Action::AgentChangeReject => {
                         let agent_idx = self.pending_agent_changes[0].agent_idx;
                         let (tool_call_id, result) = self.reject_agent_change();
+                        if self.agents[agent_idx]
+                            .backend
+                            .resolve_host_tool(&tool_call_id, Err(result.clone()))
+                        {
+                            self.agents[agent_idx].status = AiStatus::Waiting;
+                            return Ok(());
+                        }
                         self.feed_agent_tool_result_for_agent(agent_idx, tool_call_id, result);
                         Ok(())
                     }
@@ -5228,10 +5378,31 @@ impl App {
                     let selected_idx = self.agent_profile_panel_selection;
                     let profile_clone = self.agent_registry.get_index(selected_idx).cloned();
                     if let Some(profile) = profile_clone {
+                        let acp = self.agent().backend.kind()
+                            == teshi_agent::backend::AgentBackendKind::Acp;
+                        if acp {
+                            self.cancel_agent_turn();
+                        }
                         let agent = self.agent_mut();
                         agent.profile_id = Some(profile.id.clone());
                         let _ = agent;
-                        if !profile.model_ref.is_empty() {
+                        if acp {
+                            let tools = teshi_agent_runtime::tool_bridge::ToolBridgeConfig {
+                                executable: std::env::current_exe()?,
+                                tools: self.agent_tools(self.selected_agent),
+                            };
+                            if let Err(error) =
+                                self.agent_mut().backend.reconnect_acp_host_tools(tools)
+                            {
+                                self.agent_mut().status = AiStatus::Error;
+                                self.status = format!(
+                                    "Could not reconnect ACP for profile {}: {error}",
+                                    profile.name
+                                );
+                                self.agent_profile_panel_active = false;
+                                return Ok(());
+                            }
+                        } else if !profile.model_ref.is_empty() {
                             let model_id = &profile.model_ref;
                             let model_profile_clone = self
                                 .model_profiles
@@ -9510,6 +9681,255 @@ mod tests {
         );
         assert_eq!(app.agents[0].status, AiStatus::Idle);
         assert_eq!(app.agents[0].messages().len(), 2);
+    }
+
+    fn start_mcp_fixture(app: &mut App, mode: &str) {
+        use teshi_agent_runtime::{backend::AcpBackendConfig, tool_bridge::ToolBridgeConfig};
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../teshi-agent-runtime/tests/fixtures/fake_acp_agent.py");
+        let command = teshi_acp::AcpAgentCommand {
+            program: PathBuf::from(if cfg!(windows) { "python" } else { "python3" }),
+            args: vec![script.display().to_string(), mode.into()],
+            cwd: app.find_project_dir().to_path_buf(),
+            env: std::collections::HashMap::new(),
+        };
+        let mut config = AcpBackendConfig::new(command);
+        config.client.shutdown_timeout = Duration::from_millis(100);
+        config.tool_bridge = Some(ToolBridgeConfig {
+            executable: std::env::current_exe().unwrap(),
+            tools: app.agent_tools(0),
+        });
+        app.agents[0].backend = teshi_agent_runtime::backend::AgentBackendRuntime::new(
+            teshi_agent::backend::AgentBackendKind::Acp,
+            1,
+        );
+        app.agents[0].backend.configure_acp(config).unwrap();
+        app.agents[0].backend.start().unwrap();
+        let tools = app.agent_tools(0);
+        app.agents[0]
+            .backend
+            .submit_turn(
+                None,
+                vec![crate::llm::ChatMessage::text("user", "Generate a feature")],
+                Some(tools),
+            )
+            .unwrap();
+    }
+
+    fn wait_mcp_fixture(app: &mut App, condition: impl Fn(&App) -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            app.poll_llm_events();
+            if condition(app) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ACP fixture timed out: {}",
+                app.status
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn acp_mcp_tools_persist_test_points_and_enforce_human_review() {
+        for mode in [
+            teshi_agent::approval::ApprovalMode::Manual,
+            teshi_agent::approval::ApprovalMode::Auto,
+            teshi_agent::approval::ApprovalMode::Bypass,
+        ] {
+            let (mut app, project, _store) = requirements_test_app();
+            app.approval_mode = mode;
+            start_mcp_fixture(&mut app, "mcp_review");
+            wait_mcp_fixture(&mut app, |app| {
+                app.agents[0].backend.status()
+                    == teshi_agent::backend::AgentBackendStatus::Completed
+            });
+            assert_eq!(
+                app.generation_stage,
+                teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
+            );
+            let points = &app
+                .authoring_ui
+                .artifacts
+                .as_ref()
+                .unwrap()
+                .test_points
+                .test_points;
+            assert_eq!(points.len(), 1);
+            assert_eq!(
+                points[0].review_state,
+                teshi_core::authoring::ReviewState::Proposed
+            );
+            assert!(project.path().join("testpoints/testpoints.json").exists());
+            assert!(!project.path().join("blocked.feature").exists());
+            let result: serde_json::Value =
+                serde_json::from_str(&app.agents[0].messages().last().unwrap().content).unwrap();
+            assert_eq!(result[0]["isError"], false);
+            assert_eq!(result[1]["isError"], false);
+            assert_eq!(result[2]["isError"], true);
+            assert_eq!(result[3]["isError"], true);
+            // Use the same review state and continue action that the TUI uses;
+            // an external agent must not be able to grant this approval itself.
+            assert!(crate::test_points_tab::TestPointsUiState::approve(
+                &mut app
+                    .authoring_ui
+                    .artifacts
+                    .as_mut()
+                    .unwrap()
+                    .test_points
+                    .test_points[0]
+            ));
+            app.approval_mode = teshi_agent::approval::ApprovalMode::Auto;
+            app.active_tab = MainTab::TestPoints;
+            app.handle_action(Action::TpContinueGeneration).unwrap();
+            wait_mcp_fixture(&mut app, |app| {
+                app.agents[0].backend.status()
+                    == teshi_agent::backend::AgentBackendStatus::Completed
+            });
+            let result: serde_json::Value =
+                serde_json::from_str(&app.agents[0].messages().last().unwrap().content).unwrap();
+            for (index, result) in result.as_array().unwrap().iter().enumerate() {
+                assert_eq!(result["isError"], false, "tool {index}: {result}");
+            }
+            let index = app.find_feature_idx_for_file("approved.feature").unwrap();
+            let feature = app.buffers[index].as_string();
+            assert!(
+                feature.contains("Scenario: Valid login"),
+                "generated feature: {feature}"
+            );
+            assert!(feature.contains("Then access is granted"));
+            app.active_tab = MainTab::Explore;
+            app.handle_action(Action::Save).unwrap();
+            assert_eq!(
+                fs::read_to_string(project.path().join("approved.feature")).unwrap(),
+                feature
+            );
+        }
+    }
+
+    #[test]
+    fn acp_mcp_file_changes_wait_for_acceptance_and_report_rejection() {
+        for accept in [true, false] {
+            let (mut app, project, _store) = requirements_test_app();
+            app.approval_mode = teshi_agent::approval::ApprovalMode::Manual;
+            start_mcp_fixture(&mut app, "mcp_file");
+            wait_mcp_fixture(&mut app, App::has_agent_change_prompt);
+            assert!(!project.path().join("mcp-created.feature").exists());
+            assert_eq!(app.agents[0].status, AiStatus::AwaitingApproval);
+            app.handle_action(if accept {
+                Action::AgentChangeAccept
+            } else {
+                Action::AgentChangeReject
+            })
+            .unwrap();
+            wait_mcp_fixture(&mut app, |app| {
+                app.agents[0].backend.status()
+                    == teshi_agent::backend::AgentBackendStatus::Completed
+            });
+            assert_eq!(project.path().join("mcp-created.feature").exists(), accept);
+            let result: serde_json::Value =
+                serde_json::from_str(&app.agents[0].messages().last().unwrap().content).unwrap();
+            assert_eq!(result[0]["isError"], !accept);
+        }
+    }
+
+    #[test]
+    fn cancelled_acp_mcp_file_change_cannot_be_accepted() {
+        let (mut app, project, _store) = requirements_test_app();
+        app.approval_mode = teshi_agent::approval::ApprovalMode::Manual;
+        start_mcp_fixture(&mut app, "mcp_file");
+        wait_mcp_fixture(&mut app, App::has_agent_change_prompt);
+        app.cancel_agent_turn();
+        assert!(app.accept_agent_change().is_err());
+        assert!(!project.path().join("mcp-created.feature").exists());
+        app.reject_agent_change();
+    }
+
+    #[test]
+    fn acp_mcp_manual_write_failure_returns_error_and_clears_approval() {
+        let (mut app, project, _store) = requirements_test_app();
+        app.approval_mode = teshi_agent::approval::ApprovalMode::Manual;
+        start_mcp_fixture(&mut app, "mcp_file");
+        wait_mcp_fixture(&mut app, App::has_agent_change_prompt);
+        // Make the queued destination unwritable as a file after proposal.
+        fs::create_dir(project.path().join("mcp-created.feature")).unwrap();
+        app.handle_action(Action::AgentChangeAccept).unwrap();
+        assert!(!app.has_agent_change_prompt());
+        assert!(app.pending_change_diffs.is_empty());
+        assert!(app.pending_change_summary.is_empty());
+        assert!(app.status.contains("Could not apply ACP file change"));
+        wait_mcp_fixture(&mut app, |app| {
+            app.agents[0].backend.status() == teshi_agent::backend::AgentBackendStatus::Completed
+        });
+        let result: serde_json::Value =
+            serde_json::from_str(&app.agents[0].messages().last().unwrap().content).unwrap();
+        assert_eq!(result[0]["isError"], true);
+        assert!(
+            result[0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("failed to create")
+        );
+        assert!(project.path().join("mcp-created.feature").is_dir());
+    }
+
+    #[test]
+    fn acp_mcp_profile_switch_rediscovers_added_and_removed_tools() {
+        let (mut app, project, _store) = requirements_test_app();
+        for (id, tools) in [("mcp-chat", "[]"), ("mcp-author", "[submit_requirements]")] {
+            let root = project.path().join(".teshi/agents").join(id);
+            fs::create_dir_all(&root).unwrap();
+            fs::write(root.join("agent.yaml"), format!("id: {id}\nname: {id}\ndescription: MCP profile test\nmodel_ref: ''\ntools: {tools}\n")).unwrap();
+        }
+        app.agent_registry = teshi_agent::registry::AgentRegistry::load(Some(project.path()));
+        assert!(app.agent_registry.get("mcp-chat").is_some());
+        app.agents[0].profile_id = Some("mcp-chat".into());
+        start_mcp_fixture(&mut app, "mcp_catalog");
+        wait_mcp_fixture(&mut app, |app| {
+            app.agents[0].backend.status() == teshi_agent::backend::AgentBackendStatus::Completed
+        });
+        let initial: serde_json::Value =
+            serde_json::from_str(&app.agents[0].messages().last().unwrap().content).unwrap();
+        assert_eq!(initial["tools"], serde_json::json!([]));
+        for (id, expected) in [
+            ("mcp-author", serde_json::json!(["submit_requirements"])),
+            ("mcp-chat", serde_json::json!([])),
+        ] {
+            let previous_revision = app.agents[0].backend.acp_controls().unwrap().revision;
+            app.agent_panel_mode = AgentPanelMode::List;
+            app.agent_profile_panel_active = true;
+            app.agent_profile_panel_selection = app
+                .agent_registry
+                .iter()
+                .position(|profile| profile.id == id)
+                .unwrap();
+            app.handle_action(Action::AgentPanelSelect).unwrap();
+            assert_eq!(app.agents[0].profile_id.as_deref(), Some(id));
+            assert!(app.agents[0].backend.acp_controls().unwrap().revision > previous_revision);
+            let tools = app.agent_tools(0);
+            app.agents[0].backend.start().unwrap();
+            app.agents[0]
+                .backend
+                .submit_turn(
+                    None,
+                    vec![
+                        crate::llm::ChatMessage::text("assistant", "Previous conversation"),
+                        crate::llm::ChatMessage::text("user", "List permitted tools"),
+                    ],
+                    Some(tools),
+                )
+                .unwrap();
+            wait_mcp_fixture(&mut app, |app| {
+                app.agents[0].backend.status()
+                    == teshi_agent::backend::AgentBackendStatus::Completed
+            });
+            let result: serde_json::Value =
+                serde_json::from_str(&app.agents[0].messages().last().unwrap().content).unwrap();
+            assert_eq!(result["tools"], expected);
+            assert_eq!(result["restored"], true);
+        }
     }
 
     #[test]
