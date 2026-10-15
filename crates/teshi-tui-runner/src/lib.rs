@@ -160,6 +160,37 @@ impl Terminal {
         }
     }
 
+    /// Clicks the leftmost viewport cell rendering `text`.
+    ///
+    /// The coordinate is resolved from the live viewport rather than from the
+    /// binding, so a click follows the layout across terminal resizes. The
+    /// first matching line wins; close any overlay that duplicates `text`
+    /// before clicking or the topmost copy receives the press.
+    ///
+    /// # Errors
+    /// Returns errors for timeouts outside 1–120000ms, empty text, expiry
+    /// without a match, or PTY write failure.
+    pub fn click_text(&self, text: &str, timeout_ms: u64) -> Result<()> {
+        validate_timeout(timeout_ms)?;
+        if text.is_empty() {
+            bail!("click target requires nonempty text");
+        }
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            let screen = self.screen()?;
+            if let Some((row, col)) = locate(&screen, text) {
+                // SGR 1006 encodes 1-based row/column. Crossterm's mouse
+                // parser needs a press and release pair for one click.
+                self.write(&format!("\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m"))?;
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                bail!("timed out after {timeout_ms}ms waiting for {text:?} to click\n{screen}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// Waits for the application to exit with the expected code.
     ///
     /// # Errors
@@ -205,6 +236,17 @@ fn validate_size(cols: u16, rows: u16) -> Result<()> {
         bail!("terminal dimensions must be positive");
     }
     Ok(())
+}
+
+/// Resolves `text` to a 1-based (row, column) cell in `screen`.
+///
+/// The column counts characters, not bytes: control labels carry glyphs such as
+/// `▾`, and a byte offset would aim the press to the right of the target.
+fn locate(screen: &str, text: &str) -> Option<(usize, usize)> {
+    screen.lines().enumerate().find_map(|(row, line)| {
+        line.find(text)
+            .map(|index| (row + 1, line[..index].chars().count() + 1))
+    })
 }
 
 fn validate_timeout(timeout_ms: u64) -> Result<()> {

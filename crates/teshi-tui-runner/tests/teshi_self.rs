@@ -434,6 +434,131 @@ fn verify_permission_prompt(source: &str, allow: bool) {
     );
 }
 
+#[test]
+#[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
+fn acp_settings_switch_model_by_mouse_and_keyboard() {
+    let source = include_str!("../../../features/en-US/tui_acp_settings.feature");
+    let binary = std::fs::canonicalize(
+        std::env::var("TESHI_SELF_TEST_BIN").expect("set TESHI_SELF_TEST_BIN"),
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(
+        project.join("sample.feature"),
+        "Feature: Settings fixture\n",
+    )
+    .unwrap();
+    let feature = root.path().join("settings.feature");
+    std::fs::write(&feature, source).unwrap();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../teshi-agent-runtime/tests/fixtures/fake_acp_agent.py")
+        .canonicalize()
+        .unwrap();
+    let python = std::env::var("TESHI_TEST_PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "python".into()
+        } else {
+            "python3".into()
+        }
+    });
+    let text = |value: &str| json!({"action":"expect_text","text":value,"visible":true,"timeout_ms":15000});
+    let key = |value: &str| json!({"action":"key","key":value});
+    let write = |value: &str| json!({"action":"write","text":value});
+    let click = |value: &str| json!({"action":"click_text","text":value,"timeout_ms":15000});
+    let parsed = teshi_core::gherkin::parse_feature(source, feature.clone());
+    let background = parsed.background.as_ref().unwrap();
+    let scenario = parsed.all_scenarios()[0];
+    let open_settings = || write("/settings");
+    let actions = vec![
+        // Background: a chat session against an agent that advertises settings.
+        vec![
+            json!({"action":"launch","config":{
+                "program":binary,
+                "args":[project,"--requirements-root",root.path().join("requirements")],
+                "cwd":root.path(),
+                "env":[
+                    ["APPDATA",root.path().join("appdata")],
+                    ["LOCALAPPDATA",root.path().join("localappdata")],
+                    ["XDG_CONFIG_HOME",root.path().join("config")],
+                    ["XDG_DATA_HOME",root.path().join("data")],
+                    ["TESHI_AGENT_BACKEND","acp"],
+                    ["TESHI_ACP_PROGRAM",python],
+                    ["TESHI_ACP_ARGS_JSON",serde_json::to_string(&vec![fixture.to_string_lossy().as_ref(),"settings"]).unwrap()]
+                ],
+                "cols":140,
+                "rows":32
+            }}),
+            text("sample"),
+        ],
+        // The chat tab is entered before any settings are touched.
+        vec![key("3"), text("Welcome to AI Chat!"), key("Enter")],
+        vec![open_settings(), key("Enter"), text("Model: Alpha")],
+        // Escape closes the picker so the click resolves against the bottom row.
+        vec![text("Thinking"), text("[More"), key("Escape"), text("[More")],
+        vec![click("Model: Alpha"), text("Beta")],
+        vec![key("Down"), key("Enter")],
+        vec![text("Model: Beta")],
+        vec![text("Thinking: Low")],
+        vec![json!({"action":"resize","cols":64,"rows":24})],
+        vec![text("[More")],
+        vec![
+            open_settings(),
+            key("Enter"),
+            text("Fast: Off"),
+            // Two rows down reaches the boolean; activating it opens its own
+            // Off/On choice, and the next pair commits On and closes it.
+            key("Down"),
+            key("Down"),
+            key("Enter"),
+            key("Down"),
+            key("Enter"),
+        ],
+        // Reopening proves the value was stored on the session, not just drawn.
+        vec![
+            open_settings(),
+            key("Enter"),
+            text("Fast: On"),
+            key("Escape"),
+        ],
+        // Leave the chat input first; a bare q would be typed as message text.
+        vec![key("Escape")],
+        vec![key("q")],
+        vec![json!({"action":"expect_exit","code":0,"timeout_ms":10000})],
+    ];
+    let steps = background
+        .steps
+        .iter()
+        .chain(scenario.steps.iter())
+        .collect::<Vec<_>>();
+    assert_eq!(steps.len(), actions.len(), "one action group per Feature step");
+    let bindings = steps
+        .into_iter()
+        .zip(actions)
+        .map(|(step, actions)| {
+            json!({"line":step.line_number,"text":step.text,"confirmed":true,"actions":actions})
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(
+        feature.with_extension("tui.json"),
+        serde_json::to_vec_pretty(&json!({"version":1,"mode":"tui","steps":bindings})).unwrap(),
+    )
+    .unwrap();
+    let output = Command::new(&binary)
+        .args(["tui", &feature.to_string_lossy()])
+        .env("TESHI_TUI_RUNNER", env!("CARGO_BIN_EXE_teshi-tui-runner"))
+        .current_dir(root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn verify(source: &str, command: &str) {
     let binary = std::fs::canonicalize(
         std::env::var("TESHI_SELF_TEST_BIN").expect("set TESHI_SELF_TEST_BIN"),

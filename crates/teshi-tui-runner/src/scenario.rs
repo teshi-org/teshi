@@ -24,6 +24,8 @@ pub enum Action {
     Key { key: String },
     /// Resize the viewport.
     Resize { cols: u16, rows: u16 },
+    /// Click the leftmost viewport cell currently rendering this text.
+    ClickText { text: String, timeout_ms: u64 },
     /// Assert current viewport text with a finite deadline.
     ExpectText {
         text: String,
@@ -261,6 +263,9 @@ fn execute(
                     Action::Write { text } => session.write(&text)?,
                     Action::Key { key } => session.key(&key)?,
                     Action::Resize { cols, rows } => session.resize(cols, rows)?,
+                    Action::ClickText { text, timeout_ms } => {
+                        session.click_text(&text, timeout_ms)?
+                    }
                     Action::ExpectText {
                         text,
                         visible,

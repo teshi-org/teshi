@@ -192,10 +192,18 @@ fn when(world: &mut World, step: &BddStep) -> Result<()> {
         .strip_prefix("the tester replaces the body of document ")
         .and_then(|rest| rest.strip_suffix(" with:"))
         .or_else(|| {
-            text.strip_prefix("测试人员将文档 ")
+            text.strip_prefix("测试人员")
+                .map(|rest| rest.strip_prefix("以 JSON ").unwrap_or(rest))
+                .and_then(|rest| rest.strip_prefix("将文档 "))
                 .and_then(|rest| rest.strip_suffix(" 的正文替换为:"))
         })
     {
+        // An optional trailing "as JSON" selects the machine-readable error
+        // envelope; without it failures go to stderr and leave stdout empty.
+        let id = id
+            .strip_suffix(" as JSON")
+            .or_else(|| id.strip_suffix("以 JSON"))
+            .unwrap_or(id);
         let id = unquote(id)?;
         let body = step
             .doc_string
@@ -203,12 +211,12 @@ fn when(world: &mut World, step: &BddStep) -> Result<()> {
             .context("missing replacement body")?;
         let path = world.store_path().join("replacement.md");
         fs::write(&path, format!("{body}\n")).context("write replacement file")?;
-        world.run(&[
-            "edit",
-            &id,
-            "--file",
-            path.to_str().context("replacement path")?,
-        ])?;
+        let file = path.to_str().context("replacement path")?;
+        let mut args = vec!["edit", id.as_str(), "--file", file];
+        if wants_json(text) {
+            args.push("--json");
+        }
+        world.run(&args)?;
         return Ok(());
     }
     if let Some(id) = text
