@@ -7250,8 +7250,82 @@ impl App {
             let pane = ui.pane_areas.iter().position(|area| area.contains(pos));
             if matches!(kind, MouseEventKind::Up(MouseButton::Left)) {
                 ui.selection_dragging = false;
+                ui.scrollbar_drag = None;
+            }
+            let dragging = matches!(kind, MouseEventKind::Drag(MouseButton::Left));
+            if dragging && let Some((pane, axis)) = ui.scrollbar_drag {
+                let area = ui.pane_areas[pane];
+                let (position, start, length) = if axis == 0 {
+                    (col, area.x + 1, area.width.saturating_sub(2))
+                } else {
+                    (row, area.y + 1, area.height.saturating_sub(2))
+                };
+                let value = position.saturating_sub(start).min(length.saturating_sub(1)) as usize
+                    * ui.scroll_limits[pane][axis]
+                    / length.saturating_sub(1).max(1) as usize;
+                ui.set_pane_scroll(pane, axis, value);
+                return Ok(());
             }
             if let Some(pane) = pane {
+                let area = ui.pane_areas[pane];
+                if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+                    let axis = if row == area.bottom().saturating_sub(1)
+                        && ui.scroll_limits[pane][0] > 0
+                    {
+                        Some(0)
+                    } else if col == area.right().saturating_sub(1) && ui.scroll_limits[pane][1] > 0
+                    {
+                        Some(1)
+                    } else {
+                        None
+                    };
+                    if let Some(axis) = axis {
+                        let (position, start, length) = if axis == 0 {
+                            (col, area.x + 1, area.width.saturating_sub(2))
+                        } else {
+                            (row, area.y + 1, area.height.saturating_sub(2))
+                        };
+                        let value = position.saturating_sub(start).min(length.saturating_sub(1))
+                            as usize
+                            * ui.scroll_limits[pane][axis]
+                            / length.saturating_sub(1).max(1) as usize;
+                        ui.set_pane_scroll(pane, axis, value);
+                        ui.scrollbar_drag = Some((pane, axis));
+                        return Ok(());
+                    }
+                }
+                if matches!(
+                    kind,
+                    MouseEventKind::ScrollUp
+                        | MouseEventKind::ScrollDown
+                        | MouseEventKind::ScrollLeft
+                        | MouseEventKind::ScrollRight
+                ) {
+                    let axis = usize::from(
+                        !modifiers.contains(KeyModifiers::SHIFT)
+                            && !matches!(
+                                kind,
+                                MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
+                            ),
+                    );
+                    let old = if axis == 0 {
+                        ui.horizontal_scroll[pane]
+                    } else {
+                        match pane {
+                            0 => ui.tree_state.get_offset(),
+                            1 => ui.scroll_row,
+                            _ => ui.linked_scroll,
+                        }
+                    };
+                    let value =
+                        if matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft) {
+                            old.saturating_sub(3)
+                        } else {
+                            old.saturating_add(3)
+                        };
+                    ui.set_pane_scroll(pane, axis, value);
+                    return Ok(());
+                }
                 if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
                     let focus = [
                         RequirementsFocus::Tree,
@@ -7264,7 +7338,12 @@ impl App {
                     ui.focus = focus;
                     if pane == 0 {
                         let previous = ui.tree_state.selected().to_vec();
-                        ui.tree_state.click_at(pos);
+                        ui.tree_state.click_at(ratatui::layout::Position::new(
+                            pos.x.saturating_add(
+                                ui.horizontal_scroll[0].min(u16::MAX as usize) as u16
+                            ),
+                            pos.y,
+                        ));
                         if let Some(id) = ui.tree_state.selected().last().cloned() {
                             ui.select_tree_node(&id);
                             if ui.overlay_active() {
@@ -7283,19 +7362,12 @@ impl App {
                         vertical: 1,
                     });
                     if inner.contains(pos) {
-                        let row = (ui.scroll_row + (pos.y - inner.y) as usize)
-                            .min(ui.buffer.line_count().saturating_sub(1));
-                        let x = (pos.x - inner.x) as usize;
-                        let mut width = 0;
-                        let col = ui
-                            .buffer
-                            .line(row)
-                            .chars()
-                            .take_while(|ch| {
-                                width += unicode_width::UnicodeWidthChar::width(*ch).unwrap_or(0);
-                                width <= x
-                            })
-                            .count();
+                        let Some((row, col)) = ui.editor_position_at(
+                            (pos.x - inner.x) as usize,
+                            (pos.y - inner.y) as usize,
+                        ) else {
+                            return Ok(());
+                        };
                         if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
                             ui.selection_anchor = Some((row, col));
                             ui.selection_dragging = true;
@@ -10424,6 +10496,98 @@ mod tests {
             fs::read_to_string(store.path().join("req.md")).unwrap(),
             body
         );
+    }
+
+    #[test]
+    fn test_requirements_scrollbar_drag_and_wheel_preserve_document() {
+        let (mut app, _project, _store) = requirements_test_app();
+        app.authoring_ui.buffer = crate::editor_buffer::EditorBuffer::from_string(
+            (0..100)
+                .map(|_| "abcdefghijklmnopqrstuvwxyz".repeat(8))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        render_test_app(&mut app, 120);
+        let pane = app.authoring_ui.pane_areas[1];
+        let original = app.authoring_ui.buffer.as_string();
+        assert_eq!(app.authoring_ui.scroll_limits[1][0], 0);
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            pane.right() - 1,
+            pane.y + 3,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(app.authoring_ui.scroll_row > 0);
+        assert!(!app.authoring_ui.selection_dragging);
+        app.handle_mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            pane.right() - 1,
+            pane.y + 1,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(app.authoring_ui.scroll_row, 0);
+        app.handle_mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            pane.right() - 1,
+            pane.y + 1,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(app.authoring_ui.scrollbar_drag.is_none());
+        app.handle_mouse_event(
+            MouseEventKind::ScrollDown,
+            pane.x + 2,
+            pane.y + 2,
+            KeyModifiers::SHIFT,
+        )
+        .unwrap();
+        assert_eq!(app.authoring_ui.horizontal_scroll[1], 0);
+        app.handle_mouse_event(
+            MouseEventKind::ScrollDown,
+            pane.x + 2,
+            pane.y + 2,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(app.authoring_ui.scroll_row, 3);
+        assert_eq!(app.authoring_ui.buffer.as_string(), original);
+    }
+
+    #[test]
+    fn test_requirements_mouse_selection_across_soft_wrap_preserves_source_range() {
+        let (mut app, _project, _store) = requirements_test_app();
+        let original = "中文".repeat(100);
+        app.authoring_ui.buffer = crate::editor_buffer::EditorBuffer::from_string(original.clone());
+        render_test_app(&mut app, 120);
+        let pane = app.authoring_ui.pane_areas[1];
+        let start = app.authoring_ui.editor_position_at(2, 0).unwrap();
+        let end = app.authoring_ui.editor_position_at(4, 1).unwrap();
+        assert_eq!(start, (0, 1));
+        assert!(end.1 > start.1);
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            pane.x + 3,
+            pane.y + 1,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        app.handle_mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            pane.x + 5,
+            pane.y + 2,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(
+            app.authoring_ui.selection_char_range(),
+            Some(teshi_core::authoring::TextRange::new(
+                start.1 as u32,
+                end.1 as u32
+            ))
+        );
+        assert_eq!(app.authoring_ui.buffer.as_string(), original);
     }
 
     #[test]

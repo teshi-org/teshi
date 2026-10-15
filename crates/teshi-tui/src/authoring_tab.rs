@@ -97,7 +97,22 @@ pub struct AuthoringUiState {
     pub cursor_row: usize,
     pub cursor_col: usize,
     pub desired_col: usize,
+    /// First visible soft-wrapped display row in the Markdown editor.
     pub scroll_row: usize,
+    /// Display rows mapped to document row and character range, including an end cursor cell.
+    pub editor_display_rows: Vec<(usize, usize, usize)>,
+    /// Width used by the most recent editor wrap map.
+    pub editor_wrap_width: usize,
+    /// Horizontal offsets for the tree, editor, and linked test points.
+    pub horizontal_scroll: [usize; 3],
+    /// Cursor position at the previous render, used to follow keyboard navigation.
+    pub rendered_cursor: Option<(usize, usize)>,
+    /// Linked test point viewport start.
+    pub linked_scroll: usize,
+    /// Last rendered overflow limits, indexed by pane and axis (horizontal, vertical).
+    pub scroll_limits: [[usize; 2]; 3],
+    /// Scrollbar being dragged (pane, axis).
+    pub scrollbar_drag: Option<(usize, usize)>,
     pub selection_anchor: Option<(usize, usize)>,
     pub selection_end: Option<(usize, usize)>,
     pub iteration_filter: RequirementIterationFilter,
@@ -106,6 +121,75 @@ pub struct AuthoringUiState {
 }
 
 impl AuthoringUiState {
+    /// Moves a pane viewport, clamping to the last rendered overflow limits.
+    pub fn set_pane_scroll(&mut self, pane: usize, axis: usize, value: usize) {
+        let value = value.min(self.scroll_limits[pane][axis]);
+        if axis == 0 {
+            self.horizontal_scroll[pane] = value;
+        } else {
+            match pane {
+                0 => {
+                    let old = self.tree_state.get_offset();
+                    if value < old {
+                        self.tree_state.scroll_up(old - value);
+                    } else {
+                        self.tree_state.scroll_down(value - old);
+                    }
+                }
+                1 => {
+                    self.scroll_row = value;
+                    self.rendered_cursor = Some((self.cursor_row, self.cursor_col));
+                }
+                _ => {
+                    self.linked_scroll = value;
+                    self.selected_linked_index = value;
+                }
+            }
+        }
+    }
+
+    /// Rebuilds soft-wrap coordinates without changing the document or its source ranges.
+    pub fn wrap_editor_rows(&mut self, width: usize) {
+        self.editor_display_rows.clear();
+        let width = width.max(1);
+        self.editor_wrap_width = width;
+        for row in 0..self.buffer.line_count() {
+            let text = self.buffer.line(row);
+            let mut start = 0;
+            let mut cells = 0;
+            let mut end = 0;
+            // Reserve a trailing cell so the insertion cursor remains visible at line end.
+            for (col, ch) in text.chars().chain(std::iter::once(' ')).enumerate() {
+                let size = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if cells + size > width && col > start {
+                    self.editor_display_rows.push((row, start, col));
+                    start = col;
+                    cells = 0;
+                }
+                cells += size;
+                end = col + 1;
+            }
+            self.editor_display_rows.push((row, start, end));
+        }
+    }
+
+    /// Maps a viewport cell to document character coordinates for clicking and selection.
+    pub fn editor_position_at(&self, x: usize, y: usize) -> Option<(usize, usize)> {
+        let &(row, start, end) = self.editor_display_rows.get(self.scroll_row + y)?;
+        let text = self.buffer.line(row);
+        let mut cells = 0;
+        let mut col = start;
+        for ch in text.chars().skip(start).take(end - start) {
+            let size = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if cells + size > x {
+                break;
+            }
+            cells += size;
+            col += 1;
+        }
+        Some((row, col.min(text.chars().count())))
+    }
+
     /// Enters text input when a document is selected.
     pub fn enter_insert_mode(&mut self) {
         if self.selected_document_id.is_some() {
@@ -168,6 +252,13 @@ impl AuthoringUiState {
             cursor_col: 0,
             desired_col: 0,
             scroll_row: 0,
+            editor_display_rows: Vec::new(),
+            editor_wrap_width: 0,
+            horizontal_scroll: [0; 3],
+            rendered_cursor: None,
+            linked_scroll: 0,
+            scroll_limits: [[0; 2]; 3],
+            scrollbar_drag: None,
             selection_anchor: None,
             selection_end: None,
             iteration_filter: RequirementIterationFilter::All,
@@ -555,6 +646,9 @@ impl AuthoringUiState {
         self.cursor_col = 0;
         self.desired_col = 0;
         self.scroll_row = 0;
+        self.horizontal_scroll[1] = 0;
+        self.rendered_cursor = None;
+        self.linked_scroll = 0;
 
         if let Some(artifacts) = self.artifacts.as_ref()
             && let Some(doc) = artifacts.documents.iter().find(|d| d.meta.id == doc_id)
@@ -977,9 +1071,6 @@ impl AuthoringUiState {
         self.desired_col = self
             .desired_col
             .min(self.buffer.line_len_chars(self.cursor_row));
-        if self.cursor_row < self.scroll_row {
-            self.scroll_row = self.cursor_row;
-        }
     }
 
     /// Returns validation and load diagnostics for display in the tree pane.

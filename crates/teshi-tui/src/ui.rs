@@ -3564,9 +3564,53 @@ fn hatched_empty_lines(height: usize, label: &str) -> Vec<Line<'static>> {
     lines
 }
 
+/// Draw overflow indicators on panel borders, preserving the content viewport.
+fn render_requirement_scrollbars(
+    frame: &mut Frame<'_>,
+    ui: &mut crate::authoring_tab::AuthoringUiState,
+    pane: usize,
+    area: Rect,
+    extent: (usize, usize),
+    offset: (usize, usize),
+) {
+    let inner = area.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let (width, height) = extent;
+    ui.scroll_limits[pane] = [
+        width.saturating_sub(inner.width as usize),
+        height.saturating_sub(inner.height as usize),
+    ];
+    if width > inner.width as usize && inner.width > 0 {
+        let lines = theme::scrollbar_lines(width, inner.width as usize, offset.0);
+        let line = Line::from(
+            lines
+                .into_iter()
+                .flat_map(|line| line.spans)
+                .collect::<Vec<_>>(),
+        );
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect::new(inner.x, area.bottom().saturating_sub(1), inner.width, 1),
+        );
+    }
+    if height > inner.height as usize && inner.height > 0 {
+        frame.render_widget(
+            Paragraph::new(theme::scrollbar_lines(
+                height,
+                inner.height as usize,
+                offset.1,
+            )),
+            Rect::new(area.right().saturating_sub(1), inner.y, 1, inner.height),
+        );
+    }
+}
+
 /// Requirements tab: tree, Markdown editor, and linked test points.
 fn render_requirements_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     app.authoring_ui.pane_areas = [Rect::default(); 3];
+    app.authoring_ui.scroll_limits = [[0; 2]; 3];
     if area.width < 20 || area.height < 3 {
         return;
     }
@@ -3633,11 +3677,66 @@ fn render_requirements_tree(
         return;
     }
 
-    let highlight_style = theme::selected_row(focused);
+    let visible = ui.tree_state.flatten(&ui.tree_items);
+    let height = visible.len();
+    let width = visible
+        .iter()
+        .map(|node| {
+            let id = node.item.identifier();
+            let label = if let Some(doc_id) = id.strip_prefix(crate::authoring_tab::TREE_DOC_PREFIX)
+            {
+                ui.artifacts
+                    .as_ref()
+                    .and_then(|a| a.index.documents.iter().find(|d| d.id == doc_id))
+                    .map(|d| {
+                        if d.title.trim().is_empty() {
+                            d.path.as_str()
+                        } else {
+                            d.title.as_str()
+                        }
+                    })
+                    .unwrap_or("")
+            } else if let Some(name) = id.strip_prefix(crate::authoring_tab::TREE_ITER_PREFIX) {
+                name
+            } else {
+                id.rsplit('/')
+                    .next()
+                    .unwrap_or(id)
+                    .trim_start_matches(crate::authoring_tab::TREE_DIR_PREFIX)
+            };
+            node.depth() * 2 + 2 + UnicodeWidthStr::width(label)
+        })
+        .max()
+        .unwrap_or(0)
+        .min(u16::MAX.saturating_sub(inner.x) as usize);
+    ui.horizontal_scroll[0] =
+        ui.horizontal_scroll[0].min(width.saturating_sub(inner.width as usize));
+    // Render at full width so clipping does not discard text before horizontal scrolling.
+    let wide = Rect::new(
+        inner.x,
+        inner.y,
+        width.max(inner.width as usize) as u16,
+        inner.height,
+    );
+    let mut buffer = ratatui::buffer::Buffer::empty(wide);
     let tree = Tree::new(&ui.tree_items)
         .expect("requirement tree")
-        .highlight_style(highlight_style);
-    frame.render_stateful_widget(tree, inner, &mut ui.tree_state);
+        .highlight_style(theme::selected_row(focused));
+    ratatui::widgets::StatefulWidget::render(tree, wide, &mut buffer, &mut ui.tree_state);
+    for y in inner.y..inner.bottom() {
+        for x in 0..inner.width {
+            frame.buffer_mut()[(inner.x + x, y)] =
+                buffer[(inner.x + x + ui.horizontal_scroll[0] as u16, y)].clone();
+        }
+    }
+    render_requirement_scrollbars(
+        frame,
+        ui,
+        0,
+        area,
+        (width, height),
+        (ui.horizontal_scroll[0], ui.tree_state.get_offset()),
+    );
 
     let diag_lines: Vec<Line> = ui
         .visible_diagnostics()
@@ -3710,18 +3809,31 @@ fn render_requirements_editor(
         return;
     }
 
-    let buffer = &ui.buffer;
-    let cursor_row = ui.cursor_row;
+    ui.horizontal_scroll[1] = 0;
+    let resized = ui.editor_wrap_width != inner.width as usize;
+    ui.wrap_editor_rows(inner.width as usize);
+    let cursor = (ui.cursor_row, ui.cursor_col);
+    let cursor_display_row = ui
+        .editor_display_rows
+        .iter()
+        .position(|&(row, start, end)| {
+            row == ui.cursor_row && start <= ui.cursor_col && ui.cursor_col < end
+        })
+        .unwrap_or(0);
     let visible_lines = inner.height as usize;
-    let line_count = buffer.line_count();
-    let max_scroll = line_count.saturating_sub(visible_lines);
-    if cursor_row < ui.scroll_row {
-        ui.scroll_row = cursor_row;
-    } else if cursor_row >= ui.scroll_row + visible_lines {
-        ui.scroll_row = cursor_row.saturating_sub(visible_lines.saturating_sub(1));
+    let line_count = ui.editor_display_rows.len();
+    if focused && (resized || ui.rendered_cursor != Some(cursor)) {
+        if cursor_display_row < ui.scroll_row {
+            ui.scroll_row = cursor_display_row;
+        } else if cursor_display_row >= ui.scroll_row + visible_lines {
+            ui.scroll_row = cursor_display_row.saturating_sub(visible_lines - 1);
+        }
     }
-    let scroll_row = ui.scroll_row.min(max_scroll);
-    ui.scroll_row = scroll_row;
+    ui.rendered_cursor = Some(cursor);
+    ui.scroll_row = ui.scroll_row.min(line_count.saturating_sub(visible_lines));
+    let scroll_row = ui.scroll_row;
+    let cursor_row = ui.cursor_row;
+    let buffer = &ui.buffer;
 
     let highlight_ranges = ui
         .highlight_test_point_id
@@ -3730,12 +3842,12 @@ fn render_requirements_editor(
         .unwrap_or_default();
 
     let mut lines = Vec::with_capacity(visible_lines);
-    for visible_idx in 0..visible_lines {
-        let row = scroll_row + visible_idx;
-        if row >= line_count {
-            lines.push(Line::raw(""));
-            continue;
-        }
+    for &(row, start, end) in ui
+        .editor_display_rows
+        .iter()
+        .skip(scroll_row)
+        .take(visible_lines)
+    {
         let line_text = buffer.line(row);
         let mut styled = Line::from(line_text.clone());
 
@@ -3796,14 +3908,34 @@ fn render_requirements_editor(
             }
         }
 
-        styled = truncate_line_to_cols(styled, inner.width);
-        styled = pad_line_to_width(styled, inner.width, Style::default());
-        lines.push(styled);
+        // Slice styled source characters using the same wrap map as mouse hit testing.
+        let mut col = 0;
+        let spans = styled
+            .spans
+            .into_iter()
+            .filter_map(|span| {
+                let len = span.content.chars().count();
+                let text: String = span
+                    .content
+                    .chars()
+                    .skip(start.saturating_sub(col))
+                    .take(end.saturating_sub(col.max(start)))
+                    .collect();
+                col += len;
+                (!text.is_empty()).then(|| Span::styled(text, span.style))
+            })
+            .collect::<Vec<_>>();
+        lines.push(Line::from(spans));
     }
 
-    frame.render_widget(
-        Paragraph::new(Text::from(theme::popup_rows(lines, inner.width))),
-        inner,
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    render_requirement_scrollbars(
+        frame,
+        ui,
+        1,
+        area,
+        (inner.width as usize, line_count),
+        (0, scroll_row),
     );
 }
 
@@ -3867,7 +3999,7 @@ fn render_requirements_linked(
         for (i, tp) in linked.iter().enumerate() {
             let badge = crate::authoring_tab::review_state_label(tp.review_state);
             let badge_style = crate::authoring_tab::review_state_style(tp.review_state);
-            let label = truncate_string_to_cols(&tp.title, inner.width.saturating_sub(4));
+            let label = tp.title.clone();
             let style = if i == ui.selected_linked_index {
                 theme::selected_row(focused)
             } else {
@@ -3883,7 +4015,33 @@ fn render_requirements_linked(
         }
     }
 
-    frame.render_widget(Paragraph::new(theme::popup_rows(lines, inner.width)), inner);
+    let height = lines.len();
+    let width = lines.iter().map(Line::width).max().unwrap_or(0);
+    ui.linked_scroll = ui
+        .linked_scroll
+        .min(height.saturating_sub(inner.height as usize));
+    if ui.selected_linked_index < ui.linked_scroll {
+        ui.linked_scroll = ui.selected_linked_index;
+    } else if ui.selected_linked_index >= ui.linked_scroll + inner.height as usize {
+        ui.linked_scroll = ui.selected_linked_index + 1 - inner.height as usize;
+    }
+    ui.horizontal_scroll[2] =
+        ui.horizontal_scroll[2].min(width.saturating_sub(inner.width as usize));
+    frame.render_widget(
+        Paragraph::new(lines).scroll((
+            ui.linked_scroll.min(u16::MAX as usize) as u16,
+            ui.horizontal_scroll[2].min(u16::MAX as usize) as u16,
+        )),
+        inner,
+    );
+    render_requirement_scrollbars(
+        frame,
+        ui,
+        2,
+        area,
+        (width, height),
+        (ui.horizontal_scroll[2], ui.linked_scroll),
+    );
 }
 
 fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -4506,6 +4664,120 @@ Feature: Rule only
             .collect::<String>();
         assert!(screen.contains("M  backup"), "screen was: {screen}");
         assert!(!screen.contains("backup.feature"), "screen was: {screen}");
+    }
+
+    #[test]
+    fn requirements_editor_scrollbars_reveal_overflow_and_disappear_when_content_fits() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        ui.buffer = crate::editor_buffer::EditorBuffer::from_string(
+            (0..20)
+                .map(|_| "abcdefghijklmnopqrstuvwxyz")
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        ui.horizontal_scroll[1] = 10;
+        ui.cursor_row = 19;
+        let mut terminal = Terminal::new(TestBackend::new(12, 6)).expect("terminal");
+        terminal
+            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert_eq!(ui.scroll_limits[1], [0, 56]);
+        assert_eq!(ui.scroll_row, 54);
+        assert_eq!(terminal.backend().buffer()[(1, 1)].symbol(), "a");
+        assert!((1..5).any(|y| terminal.backend().buffer()[(11, y)].symbol() == "┃"));
+        ui.buffer = crate::editor_buffer::EditorBuffer::from_string("short".into());
+        ui.cursor_row = 0;
+        terminal
+            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert_eq!(ui.scroll_limits[1], [0, 0]);
+        assert_eq!(ui.horizontal_scroll[1], 0);
+        assert_eq!(ui.scroll_row, 0);
+    }
+
+    #[test]
+    fn requirements_editor_wraps_unicode_and_tracks_cursor_after_resize() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        let original = "ab中文cdefghijklmnop";
+        ui.buffer = crate::editor_buffer::EditorBuffer::from_string(original.into());
+        ui.cursor_col = original.chars().count();
+        let mut terminal = Terminal::new(TestBackend::new(8, 4)).expect("terminal");
+        terminal
+            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert_eq!(ui.scroll_limits[1], [0, 2]);
+        assert_eq!(ui.scroll_row, 2);
+        ui.set_pane_scroll(1, 1, 0);
+        terminal
+            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert_eq!(ui.scroll_row, 0);
+        assert_eq!(ui.cursor_col, original.chars().count());
+        assert_eq!(ui.editor_position_at(0, 1), Some((0, 4)));
+        assert_eq!(ui.editor_position_at(3, 0), Some((0, 2)));
+        assert_eq!(ui.editor_position_at(4, 0), Some((0, 3)));
+        assert_eq!(terminal.backend().buffer()[(1, 2)].symbol(), "c");
+        let mut narrow = Terminal::new(TestBackend::new(6, 4)).expect("terminal");
+        narrow
+            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert!(ui.scroll_row > 0);
+        assert_eq!(ui.scroll_limits[1][0], 0);
+        assert_eq!(ui.buffer.as_string(), original);
+    }
+
+    #[test]
+    fn requirements_linked_scrollbars_follow_selection_and_reveal_long_titles() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        ui.create_document("req.md", "A very long requirement title");
+        ui.artifacts.as_mut().unwrap().index.store_id =
+            Some(teshi_core::authoring::RequirementStoreId::parse("reqstore-test").unwrap());
+        ui.selection_anchor = Some((0, 0));
+        ui.selection_end = Some((0, 25));
+        for _ in 0..10 {
+            ui.create_test_point_from_selection().expect("test point");
+        }
+        ui.selection_anchor = None;
+        ui.selection_end = None;
+        ui.horizontal_scroll[2] = 5;
+        let mut terminal = Terminal::new(TestBackend::new(12, 6)).expect("terminal");
+        terminal
+            .draw(|frame| super::render_requirements_linked(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert!(ui.scroll_limits[2][0] > 0);
+        assert_eq!(ui.scroll_limits[2][1], 6);
+        assert_eq!(ui.linked_scroll, 6);
+        ui.selected_linked_index = 0;
+        terminal
+            .draw(|frame| super::render_requirements_linked(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert_eq!(ui.linked_scroll, 0);
+    }
+
+    #[test]
+    fn requirements_tree_scrollbars_track_expanded_rows() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        ui.discovered = true;
+        ui.tree_items = (0..10)
+            .map(|i| {
+                tui_tree_widget::TreeItem::new_leaf(
+                    format!("req-iter:long-iteration-{i}"),
+                    format!("long-iteration-{i}"),
+                )
+            })
+            .collect();
+        ui.horizontal_scroll[0] = 5;
+        let mut terminal = Terminal::new(TestBackend::new(12, 6)).expect("terminal");
+        terminal
+            .draw(|frame| super::render_requirements_tree(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert!(ui.scroll_limits[0][0] > 0);
+        assert_eq!(ui.scroll_limits[0][1], 6);
+        ui.tree_items.clear();
+        terminal
+            .draw(|frame| super::render_requirements_tree(frame, &mut ui, frame.area(), true))
+            .expect("render");
+        assert_eq!(ui.scroll_limits[0], [0, 0]);
     }
 
     #[test]

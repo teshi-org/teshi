@@ -45,6 +45,10 @@ In Insert, all printable ASCII and Unicode characters are text, including
 the document; `Tab` inserts four spaces. `Ctrl+S` saves and stays in Insert.
 Bracketed paste accepts text in Insert.
 Mouse dragging selects Markdown text for creating a test point in Browse.
+The Markdown editor soft-wraps long lines and shows a vertical scrollbar when
+content overflows. The tree and linked test points support both scrollbar axes. Click or drag a scrollbar to scroll that pane. The mouse
+wheel scrolls vertically; `Shift` + wheel (or a horizontal wheel) scrolls
+horizontally. Keyboard navigation keeps the selected row or editor cursor visible.
 
 Leaving a dirty document through document selection, a filter that hides it,
 main-tab navigation, new-document creation, or quit opens an unsaved-changes
