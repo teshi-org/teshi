@@ -219,6 +219,12 @@ pub fn run() -> Result<()> {
                 requirements_root.as_deref(),
             );
         }
+        Some(cli::Command::Testpoints { action }) => {
+            return cli::testpoints::handle_testpoints_command(
+                &action,
+                requirements_root.as_deref(),
+            );
+        }
         Some(cli::Command::Tui {
             path,
             scenario,

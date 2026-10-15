@@ -14,6 +14,7 @@ pub mod replay_screenshots;
 pub mod requirements;
 pub mod steps;
 pub mod terminal;
+pub mod testpoints;
 pub mod trace;
 pub mod update;
 pub mod winapp;
@@ -124,6 +125,11 @@ pub enum Command {
     Requirements {
         #[command(subcommand)]
         action: RequirementsCommand,
+    },
+    /// Inspect a project's test points and maintain their requirement links
+    Testpoints {
+        #[command(subcommand)]
+        action: TestpointsCommand,
     },
     /// Run BDD features headlessly (CI / scripts; streams NDJSON runner events)
     Run {
@@ -375,6 +381,84 @@ pub enum RequirementsCommand {
         /// Machine-readable JSON
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// Subcommands for `teshi testpoints`.
+#[derive(Debug, Subcommand)]
+pub enum TestpointsCommand {
+    /// List test points with their review state and requirement links
+    List {
+        /// Project directory containing `testpoints/testpoints.json`
+        /// (default: current directory)
+        #[arg(long, value_name = "PROJECT")]
+        project: Option<PathBuf>,
+        /// Machine-readable JSON envelope
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add, remove, or retarget one requirement link
+    Link {
+        #[command(subcommand)]
+        action: TestpointLinkCommand,
+    },
+}
+
+/// Arguments shared by every `teshi testpoints link` subcommand.
+#[derive(Debug, Args)]
+pub struct TestpointArgs {
+    /// Project directory containing `testpoints/testpoints.json`
+    /// (default: current directory)
+    #[arg(long, value_name = "PROJECT")]
+    pub project: Option<PathBuf>,
+    /// Test point ID such as `tp-1`
+    #[arg(value_name = "TP_ID")]
+    pub test_point_id: String,
+    /// Machine-readable JSON envelope
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TestpointLinkCommand {
+    /// Append a resolved requirement link to an existing test point
+    Add {
+        #[command(flatten)]
+        base: TestpointArgs,
+        /// Requirement document ID in the current requirement store
+        #[arg(long)]
+        document: String,
+        /// `START:END` Unicode scalar range inside the target document
+        #[arg(long)]
+        range: String,
+    },
+    /// Remove one requirement link; with no selector the test point must have exactly one
+    Remove {
+        #[command(flatten)]
+        base: TestpointArgs,
+        /// Match only links to this requirement document ID
+        #[arg(long)]
+        document: Option<String>,
+        /// Match only the link at this `START:END` Unicode scalar range
+        #[arg(long)]
+        range: Option<String>,
+    },
+    /// Replace one requirement link's document or range instead of appending
+    Update {
+        #[command(flatten)]
+        base: TestpointArgs,
+        /// Match only links to this requirement document ID
+        #[arg(long)]
+        document: Option<String>,
+        /// Match only the link at this `START:END` Unicode scalar range
+        #[arg(long)]
+        range: Option<String>,
+        /// New target requirement document ID
+        #[arg(long)]
+        to_document: String,
+        /// New `START:END` Unicode scalar range inside the target document
+        #[arg(long)]
+        to_range: String,
     },
 }
 
@@ -1709,6 +1793,97 @@ mod tests {
     #[test]
     fn cli_command_factory_has_valid_args() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn testpoints_link_add_parses_the_target_range_and_json() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "testpoints",
+            "link",
+            "add",
+            "tp-1",
+            "--document",
+            "doc-9",
+            "--range",
+            "0:14",
+            "--json",
+            "--project",
+            "/tmp/project",
+        ])
+        .expect("parse testpoints link add");
+        let Some(Command::Testpoints {
+            action:
+                TestpointsCommand::Link {
+                    action:
+                        TestpointLinkCommand::Add {
+                            base,
+                            document,
+                            range,
+                        },
+                },
+        }) = cli.command
+        else {
+            panic!("expected testpoints link add");
+        };
+        assert_eq!(base.test_point_id, "tp-1");
+        assert_eq!(
+            base.project.as_deref(),
+            Some(std::path::Path::new("/tmp/project"))
+        );
+        assert!(base.json);
+        assert_eq!(document, "doc-9");
+        assert_eq!(range, "0:14");
+    }
+
+    #[test]
+    fn testpoints_link_update_leaves_the_selector_optional() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "testpoints",
+            "link",
+            "update",
+            "tp-1",
+            "--to-document",
+            "doc-9",
+            "--to-range",
+            "0:14",
+        ])
+        .expect("parse testpoints link update");
+        let Some(Command::Testpoints {
+            action:
+                TestpointsCommand::Link {
+                    action:
+                        TestpointLinkCommand::Update {
+                            document,
+                            range,
+                            to_document,
+                            to_range,
+                            ..
+                        },
+                },
+        }) = cli.command
+        else {
+            panic!("expected testpoints link update");
+        };
+        assert!(document.is_none(), "selector document should be optional");
+        assert!(range.is_none(), "selector range should be optional");
+        assert_eq!(to_document, "doc-9");
+        assert_eq!(to_range, "0:14");
+    }
+
+    #[test]
+    fn testpoints_list_defaults_to_the_current_directory() {
+        let cli = Cli::try_parse_from(["teshi", "testpoints", "list", "--json"])
+            .expect("parse testpoints list");
+        let Some(Command::Testpoints {
+            action: TestpointsCommand::List { project, json },
+        }) = cli.command
+        else {
+            panic!("expected testpoints list");
+        };
+        assert!(project.is_none());
+        assert!(json);
     }
 
     #[test]

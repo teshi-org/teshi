@@ -1,15 +1,19 @@
 //! Isolated requirement-store world for CLI E2E steps.
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
-use teshi_core::authoring::RequirementDocumentMeta;
+use teshi_core::authoring::{
+    RequirementDocumentMeta, RequirementLink, RequirementStoreId, ReviewState, TestPoint,
+    TestPointsFile, TextRange, create_requirement_link, testpoints_file,
+};
 use teshi_engine::{
     compute_document_revision, initialize_requirement_store, save_requirement_document_index,
-    save_requirement_markdown,
+    save_requirement_markdown, save_test_points,
 };
 
 /// Canonical login document body used by the sample fixture.
@@ -18,6 +22,22 @@ const LOGIN_BODY: &str = "# Login\n\nUsers can sign in.\n";
 const MOBILE_BODY: &str = "# Login\n\nMobile users can sign in.\n";
 /// Canonical checkout document body used by the sample fixture.
 pub const CHECKOUT_BODY: &str = "# Checkout\n\nShoppers can pay.\n";
+/// Sentence the sample test point anchors inside `auth/login.md`.
+pub const LOGIN_LINK_NEEDLE: &str = "Users can sign in.";
+/// Sentence the sample test point anchors inside `shop/checkout.md`.
+pub const CHECKOUT_LINK_NEEDLE: &str = "Shoppers can pay.";
+/// Sentence the sample test point anchors inside `mobile/login.md`.
+pub const MOBILE_LINK_NEEDLE: &str = "Mobile users can sign in.";
+
+/// Anchor sentence the sample fixture uses inside the seeded `document_id`.
+pub fn link_needle(document_id: &str) -> Result<&'static str> {
+    match document_id {
+        "doc-12" => Ok(LOGIN_LINK_NEEDLE),
+        "doc-37" => Ok(MOBILE_LINK_NEEDLE),
+        "doc-9" => Ok(CHECKOUT_LINK_NEEDLE),
+        other => bail!("no sample anchor sentence for {other}"),
+    }
+}
 
 /// Captured result of one `teshi requirements` invocation.
 #[derive(Debug, Clone)]
@@ -30,26 +50,31 @@ pub struct CommandResult {
     pub stderr: String,
 }
 
-/// Per-scenario store and last command result.
+/// Per-scenario store, project, and last command result.
 pub struct World {
     teshi: PathBuf,
     store: tempfile::TempDir,
+    project: tempfile::TempDir,
     app_data: tempfile::TempDir,
     last: Option<CommandResult>,
     tab: Option<teshi_tui::RequirementsTabSnapshot>,
     revisions: HashMap<String, String>,
+    store_id: Option<RequirementStoreId>,
 }
 
 impl World {
-    /// Creates an empty isolated store. Call [`Self::seed_sample`] from Background.
+    /// Creates an empty isolated store and project. Call [`Self::seed_sample`]
+    /// and [`Self::seed_test_point`] from Background.
     pub fn new(teshi: PathBuf) -> Result<Self> {
         Ok(Self {
             teshi,
             store: tempfile::tempdir().context("create requirement store temp dir")?,
+            project: tempfile::tempdir().context("create project temp dir")?,
             app_data: tempfile::tempdir().context("create TESHI_APP_DATA_DIR temp dir")?,
             last: None,
             tab: None,
             revisions: HashMap::new(),
+            store_id: None,
         })
     }
 
@@ -82,6 +107,7 @@ impl World {
         save_requirement_markdown(root, &mut index, "shop/checkout.md", CHECKOUT_BODY)?;
         index.documents[0].iteration = Some("Sprint 12".into());
         save_requirement_document_index(root, &index)?;
+        self.store_id = index.store_id.clone();
         self.revisions = index
             .documents
             .iter()
@@ -111,6 +137,138 @@ impl World {
             "doc-9" => Ok(CHECKOUT_BODY),
             other => bail!("no seeded body for {other}"),
         }
+    }
+
+    /// Ensures the isolated project has `test_point_id`, linked to each document.
+    ///
+    /// Re-seeding the same id replaces its links, so a Background step and a
+    /// scenario-local step can both describe the same test point.
+    pub fn seed_test_point(&mut self, test_point_id: &str, documents: &[&str]) -> Result<()> {
+        let links = documents
+            .iter()
+            .map(|document| self.build_link(document))
+            .collect::<Result<Vec<RequirementLink>>>()?;
+        let mut file = self.load_project_test_points()?;
+        file.test_points
+            .retain(|test_point| test_point.id != test_point_id);
+        file.test_points.push(TestPoint {
+            id: test_point_id.to_string(),
+            title: test_point_id.to_uppercase(),
+            objective: format!("Verify {test_point_id}"),
+            preconditions: None,
+            expected_outcomes: None,
+            hierarchy_path: teshi_core::authoring::HierarchyPath::new(vec!["Auth".into()]),
+            review_state: ReviewState::Proposed,
+            requirement_links: links,
+            scenario_refs: Vec::new(),
+        });
+        self.save_project_test_points(&file)
+    }
+
+    /// Appends one requirement link to an already seeded test point.
+    pub fn add_test_point_link(&mut self, test_point_id: &str, document: &str) -> Result<()> {
+        let link = self.build_link(document)?;
+        let mut file = self.load_project_test_points()?;
+        let test_point = file
+            .test_points
+            .iter_mut()
+            .find(|test_point| test_point.id == test_point_id)
+            .with_context(|| format!("test point {test_point_id} is not seeded"))?;
+        test_point.requirement_links.push(link);
+        self.save_project_test_points(&file)
+    }
+
+    /// Overwrites a seeded test point's review state, standing in for human review.
+    pub fn set_test_point_review_state(
+        &mut self,
+        test_point_id: &str,
+        state: ReviewState,
+    ) -> Result<()> {
+        let mut file = self.load_project_test_points()?;
+        let test_point = file
+            .test_points
+            .iter_mut()
+            .find(|test_point| test_point.id == test_point_id)
+            .with_context(|| format!("test point {test_point_id} is not seeded"))?;
+        test_point.review_state = state;
+        self.save_project_test_points(&file)
+    }
+
+    fn build_link(&self, document_id: &str) -> Result<RequirementLink> {
+        let store_id = self
+            .store_id
+            .clone()
+            .context("seed the sample requirement store before linking test points")?;
+        let revision = self.seeded_revision(document_id)?.to_string();
+        let body = self.seeded_body(document_id)?;
+        let needle = link_needle(document_id)?;
+        let byte = body
+            .find(needle)
+            .with_context(|| format!("anchor sentence {needle:?} is absent from {document_id}"))?;
+        let start = body[..byte].chars().count() as u32;
+        let end = start + needle.chars().count() as u32;
+        create_requirement_link(
+            store_id,
+            document_id,
+            revision,
+            body,
+            TextRange::new(start, end),
+        )
+        .with_context(|| format!("cannot anchor {needle:?} in {document_id}"))
+    }
+
+    fn load_project_test_points(&self) -> Result<TestPointsFile> {
+        let path = testpoints_file(self.project.path());
+        if !path.is_file() {
+            return Ok(TestPointsFile::default());
+        }
+        let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))
+    }
+
+    fn save_project_test_points(&self, file: &TestPointsFile) -> Result<()> {
+        save_test_points(self.project.path(), file)
+    }
+
+    /// Runs `teshi --requirements-root <store> testpoints ... --project <project>`.
+    pub fn run_testpoints(&mut self, args: &[&str]) -> Result<&CommandResult> {
+        let result = self.testpoints_command(args)?;
+        self.last = Some(result);
+        self.last()
+    }
+
+    /// Runs a testpoints command without recording it as the scenario When result.
+    pub fn inspect_testpoints(&self, args: &[&str]) -> Result<CommandResult> {
+        let result = self.testpoints_command(args)?;
+        if result.status != 0 {
+            bail!(
+                "testpoints inspect failed (exit {}): {}{}",
+                result.status,
+                result.stderr,
+                result.stdout
+            );
+        }
+        Ok(result)
+    }
+
+    fn testpoints_command(&self, args: &[&str]) -> Result<CommandResult> {
+        let output = Command::new(&self.teshi)
+            .arg("--requirements-root")
+            .arg(self.store.path())
+            .arg("testpoints")
+            .args(args)
+            .arg("--project")
+            .arg(self.project.path())
+            .env("TESHI_APP_DATA_DIR", self.app_data.path())
+            .env_remove("TESHI_REQUIREMENTS_DIR")
+            .stdin(Stdio::null())
+            .output()
+            .with_context(|| format!("spawn {}", self.teshi.display()))?;
+        Ok(CommandResult {
+            status: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
     }
 
     /// Isolated store root passed as `--requirements-root`.

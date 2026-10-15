@@ -5,10 +5,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use teshi_core::authoring::ReviewState;
 use teshi_core::gherkin_lang::StepKeywordType;
 use teshi_core::{BddStep, parse_feature};
 
-use crate::world::{CHECKOUT_BODY, World};
+use crate::world::{CHECKOUT_BODY, World, link_needle};
 
 /// Runs Background plus scenario steps for one NDJSON case.
 pub fn run_case(teshi: &Path, feature_path: &str, scenario_name: &str) -> Result<()> {
@@ -77,7 +78,57 @@ fn given(world: &mut World, step: &BddStep) -> Result<()> {
         }
         return Ok(());
     }
+    // Order matters inside `test_point_setup`: the zh append wording
+    // ("还链接到文档") contains the plain form ("链接到文档") as a substring.
+    if let Some(setup) = test_point_setup(text) {
+        let parts = quoted_parts(text);
+        let test_point = parts.first().context("missing test point id")?.clone();
+        match setup {
+            TestPointSetup::SetLinks => {
+                let document = parts.get(1).context("missing document id")?.clone();
+                world.seed_test_point(&test_point, &[document.as_str()])?;
+            }
+            TestPointSetup::NoLinks => world.seed_test_point(&test_point, &[])?,
+            TestPointSetup::AddLink => {
+                let document = parts.get(1).context("missing document id")?;
+                world.add_test_point_link(&test_point, document)?;
+            }
+            TestPointSetup::Approve => {
+                world.set_test_point_review_state(&test_point, ReviewState::Approved)?;
+            }
+        }
+        return Ok(());
+    }
     unimplemented_step("Given", text)
+}
+
+/// Fixture mutation a test-point `Given` step asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestPointSetup {
+    /// Replace the test point's links with the single document named in the step.
+    SetLinks,
+    /// Create the test point with no links.
+    NoLinks,
+    /// Append a link to the test point named in the step.
+    AddLink,
+    /// Mark the test point as approved, standing in for human review.
+    Approve,
+}
+
+fn test_point_setup(text: &str) -> Option<TestPointSetup> {
+    if text.contains("also links to document") || text.contains("还链接到文档") {
+        return Some(TestPointSetup::AddLink);
+    }
+    if text.contains("has no links") || text.contains("没有链接") {
+        return Some(TestPointSetup::NoLinks);
+    }
+    if text.contains("linked to document") || text.contains("链接到文档") {
+        return Some(TestPointSetup::SetLinks);
+    }
+    if text.contains("is approved") || text.contains("已批准") {
+        return Some(TestPointSetup::Approve);
+    }
+    None
 }
 
 fn when(world: &mut World, step: &BddStep) -> Result<()> {
@@ -251,6 +302,85 @@ fn when(world: &mut World, step: &BddStep) -> Result<()> {
         || text == "测试人员在不提供项目路径的情况下打开 teshi"
     {
         world.open_tui_without_project()?;
+        return Ok(());
+    }
+    if text == "the tester lists test points as JSON" || text == "测试人员以 JSON 列出测试点"
+    {
+        world.run_testpoints(&["list", "--json"])?;
+        return Ok(());
+    }
+    if text.starts_with("the tester adds a link on test point ")
+        || text.starts_with("测试人员以 JSON 在测试点 ")
+    {
+        let parts = quoted_parts(text);
+        let test_point = parts.first().context("missing test point id")?;
+        let document = parts.get(1).context("missing document id")?;
+        let range = parts.get(2).context("missing range")?;
+        world.run_testpoints(&[
+            "link",
+            "add",
+            test_point,
+            "--document",
+            document,
+            "--range",
+            range,
+            "--json",
+        ])?;
+        return Ok(());
+    }
+    if text.starts_with("the tester removes the link of test point ")
+        || text.starts_with("测试人员以 JSON 删除测试点 ")
+    {
+        let parts = quoted_parts(text);
+        let test_point = parts.first().context("missing test point id")?;
+        let document = parts.get(1).context("missing document id")?;
+        world.run_testpoints(&[
+            "link",
+            "remove",
+            test_point,
+            "--document",
+            document,
+            "--json",
+        ])?;
+        return Ok(());
+    }
+    if text.starts_with("the tester retargets the link of test point ")
+        || text.starts_with("测试人员以 JSON 将测试点 ")
+    {
+        let parts = quoted_parts(text);
+        let test_point = parts.first().context("missing test point id")?;
+        let document = parts.get(1).context("missing document id")?;
+        let range = parts.get(2).context("missing range")?;
+        world.run_testpoints(&[
+            "link",
+            "update",
+            test_point,
+            "--to-document",
+            document,
+            "--to-range",
+            range,
+            "--json",
+        ])?;
+        return Ok(());
+    }
+    if text.contains("rewrites document") || text.contains("改写文档") {
+        let id = quoted_parts(text)
+            .first()
+            .context("missing document id")?
+            .clone();
+        // Dropping the anchored sentence from the body is what stales the link,
+        // so the rewrite is derived from the same sample sentence the fixture used.
+        let needle = link_needle(&id)?;
+        let rewritten = world.seeded_body(&id)?.replace(needle, "");
+        let path = world.store_path().join("rewritten.md");
+        fs::write(&path, rewritten).context("write rewritten body")?;
+        world.run(&[
+            "edit",
+            &id,
+            "--file",
+            path.to_str().context("rewritten path")?,
+            "--json",
+        ])?;
         return Ok(());
     }
     unimplemented_step("When", text)
@@ -521,7 +651,132 @@ fn then(world: &mut World, step: &BddStep) -> Result<()> {
         }
         return Ok(());
     }
+    if let Some((id, expected)) = json_test_point_link_count(text) {
+        let value = json_test_points(world)?;
+        let links = links_of(find_test_point(&value, &id)?);
+        if links.len() != expected {
+            bail!(
+                "test point {id} has {} link(s), expected {expected}: {links:?}",
+                links.len()
+            );
+        }
+        return Ok(());
+    }
+    if text.contains("points at document") || text.contains("的链接指向文档") {
+        let parts = quoted_parts(text);
+        let id = parts.first().context("missing test point id")?;
+        let document = parts.get(1).context("missing document id")?;
+        let links = links_of(find_test_point(&json_test_points(world)?, id)?);
+        matching_link(&links, document)?;
+        return Ok(());
+    }
+    if text.contains("is resolved") || text.contains("的链接已解析") {
+        let parts = quoted_parts(text);
+        let id = parts.first().context("missing test point id")?;
+        let document = parts.get(1).context("missing document id")?;
+        let links = links_of(find_test_point(&json_test_points(world)?, id)?);
+        let matched = matching_link(&links, document)?;
+        if matched.get("resolution").and_then(|v| v.as_str()) != Some("resolved") {
+            bail!("link of {id} to {document} is not resolved: {matched}");
+        }
+        return Ok(());
+    }
+    if text.contains("is stale") || text.contains("的链接已陈旧") {
+        let id = quoted_parts(text)
+            .first()
+            .context("missing test point id")?
+            .clone();
+        let links = links_of(find_test_point(&json_test_points(world)?, &id)?);
+        if links.is_empty() {
+            bail!("test point {id} has no link to report as stale");
+        }
+        for link in &links {
+            if link.get("resolution").and_then(|v| v.as_str()) != Some("stale") {
+                bail!("test point {id} has a non-stale link: {link}");
+            }
+        }
+        return Ok(());
+    }
+    if text.contains("is in review state") || text.contains("的审核状态为") {
+        let parts = quoted_parts(text);
+        let id = parts.first().context("missing test point id")?;
+        let expected = parts.get(1).context("missing review state")?;
+        let value = json_test_points(world)?;
+        let actual = find_test_point(&value, id)?
+            .get("review_state")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if actual != expected {
+            bail!("test point {id} review state is {actual:?}, expected {expected:?}");
+        }
+        return Ok(());
+    }
     unimplemented_step("Then", text)
+}
+
+/// Reads the persisted test points back through the CLI.
+///
+/// Asserting through a fresh `list` rather than the mutation envelope is what
+/// makes "nothing was written" observable for the rejected-target scenarios.
+fn json_test_points(world: &World) -> Result<serde_json::Value> {
+    let listed = world.inspect_testpoints(&["list", "--json"])?;
+    serde_json::from_str(listed.stdout.trim()).context("parse test points JSON")
+}
+
+fn find_test_point<'a>(
+    value: &'a serde_json::Value,
+    test_point_id: &str,
+) -> Result<&'a serde_json::Value> {
+    value
+        .get("test_points")
+        .and_then(|v| v.as_array())
+        .context("test points JSON missing test_points")?
+        .iter()
+        .find(|point| point.get("id").and_then(|v| v.as_str()) == Some(test_point_id))
+        .with_context(|| format!("test point {test_point_id} missing from the list"))
+}
+
+fn links_of(test_point: &serde_json::Value) -> Vec<serde_json::Value> {
+    test_point
+        .get("links")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Requires exactly one link of `test_point` to target `document`.
+fn matching_link<'a>(
+    links: &'a [serde_json::Value],
+    document: &str,
+) -> Result<&'a serde_json::Value> {
+    let matched: Vec<&serde_json::Value> = links
+        .iter()
+        .filter(|link| link.get("document_id").and_then(|v| v.as_str()) == Some(document))
+        .collect();
+    match matched.as_slice() {
+        [link] => Ok(link),
+        other => bail!(
+            "expected exactly one link to {document}, found {}: {other:?}",
+            other.len()
+        ),
+    }
+}
+
+/// Extracts the id and expected count from a `has N link(s)` assertion.
+fn json_test_point_link_count(text: &str) -> Option<(String, usize)> {
+    if !(text.contains("test point") || text.contains("测试点")) {
+        return None;
+    }
+    if !(text.contains("has") || text.contains('有')) {
+        return None;
+    }
+    let id = quoted_parts(text).first()?.clone();
+    let count = text
+        .split('"')
+        .nth(2)?
+        .split_whitespace()
+        .find_map(|token| token.parse::<usize>().ok())?;
+    Some((id, count))
 }
 
 fn assert_iteration(world: &World, document_id: &str, expected: Option<&str>) -> Result<()> {
@@ -616,11 +871,84 @@ fn unimplemented_step(kind: &str, text: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::quoted_parts;
+    use super::{TestPointSetup, json_test_point_link_count, quoted_parts, test_point_setup};
 
     #[test]
     fn quoted_parts_keeps_blank_iteration_name() {
         let parts = quoted_parts(r#"assigns document "doc-12" to iteration "   ""#);
         assert_eq!(parts, ["doc-12", "   "]);
+    }
+
+    #[test]
+    fn test_point_setup_reads_the_append_form_before_the_plain_form() {
+        let cases = [
+            (
+                r#"test point "tp-1" also links to document "doc-9""#,
+                TestPointSetup::AddLink,
+            ),
+            (
+                r#"测试点 "tp-1" 还链接到文档 "doc-9""#,
+                TestPointSetup::AddLink,
+            ),
+            (
+                r#"an isolated project with a test point "tp-1" linked to document "doc-12""#,
+                TestPointSetup::SetLinks,
+            ),
+            (
+                r#"已有一份隔离项目，其中测试点 "tp-1" 链接到文档 "doc-12""#,
+                TestPointSetup::SetLinks,
+            ),
+            (
+                r#"an isolated project with a test point "tp-2" that has no links"#,
+                TestPointSetup::NoLinks,
+            ),
+            (
+                r#"已有一份隔离项目，其中测试点 "tp-2" 没有链接"#,
+                TestPointSetup::NoLinks,
+            ),
+            (r#"test point "tp-1" is approved"#, TestPointSetup::Approve),
+            (r#"测试点 "tp-1" 已批准"#, TestPointSetup::Approve),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(test_point_setup(text), Some(expected), "for {text:?}");
+        }
+        assert_eq!(
+            test_point_setup(
+                "an isolated requirement library with sample login and checkout documents"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn link_count_assertion_parses_both_locales() {
+        assert_eq!(
+            json_test_point_link_count(r#"the JSON test point "tp-1" has 1 link"#),
+            Some(("tp-1".to_string(), 1))
+        );
+        assert_eq!(
+            json_test_point_link_count(r#"the JSON test point "tp-2" has 0 links"#),
+            Some(("tp-2".to_string(), 0))
+        );
+        assert_eq!(
+            json_test_point_link_count(r#"JSON 测试点 "tp-1" 有 2 条链接"#),
+            Some(("tp-1".to_string(), 2))
+        );
+    }
+
+    #[test]
+    fn link_count_assertion_ignores_the_other_test_point_assertions() {
+        for text in [
+            r#"the JSON test point "tp-1" is in review state "proposed""#,
+            r#"the JSON link of test point "tp-1" is stale"#,
+            r#"the JSON link of test point "tp-1" to document "doc-9" is resolved"#,
+            r#"the JSON link of test point "tp-1" points at document "doc-9""#,
+            r#"JSON 测试点 "tp-1" 的审核状态为 "proposed""#,
+            r#"JSON 测试点 "tp-1" 的链接已陈旧"#,
+            r#"JSON 测试点 "tp-1" 指向文档 "doc-9" 的链接已解析"#,
+            r#"the JSON show envelope has id "doc-12""#,
+        ] {
+            assert_eq!(json_test_point_link_count(text), None, "matched {text:?}");
+        }
     }
 }

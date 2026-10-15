@@ -1,4 +1,117 @@
 {
   "version": 1,
-  "test_points": []
+  "test_points": [
+    {
+      "id": "tp-1",
+      "title": "List test-point requirement links",
+      "objective": "Verify that the command reports every test point with its id, review state, and existing requirement links, each showing the linked document, range, and resolution state, so later link edits are grounded in observed state.",
+      "preconditions": "An isolated project with test points whose links reference the sample requirement documents.",
+      "expected_outcomes": "The command succeeds and the output enumerates each test point with its links; a test point with no links is reported as having none.",
+      "hierarchy_path": [
+        "Test point requirement links",
+        "Inspection"
+      ],
+      "review_state": "approved",
+      "requirement_links": [],
+      "scenario_refs": []
+    },
+    {
+      "id": "tp-2",
+      "title": "Add a requirement link",
+      "objective": "Verify that a new link can be appended to an existing test point, pointing at a range within a requirement document in the current store.A",
+      "preconditions": "An existing test point and a requirement document in the current store; a non-empty range inside that document.",
+      "expected_outcomes": "The command succeeds, the test point gains exactly one additional link, and that link anchors the quoted text at the requested range and reports as resolved.",
+      "hierarchy_path": [
+        "Test point requirement links",
+        "Add"
+      ],
+      "review_state": "approved",
+      "requirement_links": [],
+      "scenario_refs": []
+    },
+    {
+      "id": "tp-3",
+      "title": "Remove a requirement link",
+      "objective": "Verify that a single link can be removed by locating it with its document and range, without disturbing the test point's other links or the test point itself.",
+      "preconditions": "An existing test point carrying at least two requirement links.",
+      "expected_outcomes": "The command succeeds, the targeted link is gone, and every remaining link is unchanged in document, range, and resolution state.",
+      "hierarchy_path": [
+        "Test point requirement links",
+        "Remove"
+      ],
+      "review_state": "approved",
+      "requirement_links": [],
+      "scenario_refs": []
+    },
+    {
+      "id": "tp-4",
+      "title": "Retarget a requirement link",
+      "objective": "Verify that an existing link can be redirected to a different document or a different range, replacing the previous anchor instead of accumulating a second one.",
+      "preconditions": "An existing test point carrying a link to one document and range, plus a different target document or range in the current store.",
+      "expected_outcomes": "The command succeeds, the number of links is unchanged, the old anchor no longer appears, and the new anchor reports as resolved.",
+      "hierarchy_path": [
+        "Test point requirement links",
+        "Retarget"
+      ],
+      "review_state": "approved",
+      "requirement_links": [],
+      "scenario_refs": []
+    },
+    {
+      "id": "tp-5",
+      "title": "Review state regresses after link mutation",
+      "objective": "Verify that mutating links on an approved test point returns it to the proposed state, and that no command can mark a test point approved.",
+      "preconditions": "An approved test point with resolved links.",
+      "expected_outcomes": "After any add, remove, or retarget the test point's review state is proposed; the command surface exposes no way to set a test point to approved.",
+      "hierarchy_path": [
+        "Test point requirement links",
+        "Review state"
+      ],
+      "review_state": "approved",
+      "requirement_links": [],
+      "scenario_refs": []
+    },
+    {
+      "id": "tp-6",
+      "title": "Out-of-scope or invalid target is rejected without writing",
+      "objective": "Verify that a link aimed outside the current requirement store, at a non-existent document, or at an empty or out-of-bounds range fails and leaves the persisted file untouched.",
+      "preconditions": "An isolated project with a persisted test point set and a known file revision.",
+      "expected_outcomes": "The command fails with a specific error code naming the offending input, and the test-point file's content and revision are unchanged.",
+      "hierarchy_path": [
+        "Test point requirement links",
+        "Rejection"
+      ],
+      "review_state": "approved",
+      "requirement_links": [],
+      "scenario_refs": []
+    },
+    {
+      "id": "tp-7",
+      "title": "Stale anchor is preserved instead of deleted",
+      "objective": "Verify that when a requirement body changes so an existing anchor no longer matches, the link is retained and reported as stale rather than being silently dropped, and an approved test point moves to needs-review.",
+      "preconditions": "A test point linked to a requirement document whose body is subsequently rewritten.",
+      "expected_outcomes": "The link survives inspection after the rewrite with a stale resolution state, and an approved test point is reported as needs-review rather than approved.",
+      "hierarchy_path": [
+        "Test point requirement links",
+        "Staleness"
+      ],
+      "review_state": "approved",
+      "requirement_links": [],
+      "scenario_refs": []
+    },
+    {
+      "id": "tp-8",
+      "title": "Unknown test point or unmatched link selector fails cleanly",
+      "objective": "Verify that an unknown test-point id, or a selector matching no existing link, fails with a specific error code and writes nothing.",
+      "preconditions": "An isolated project with a persisted test point set whose link inventory is known.",
+      "expected_outcomes": "The command fails with a distinct error code for each case, and the persisted test-point file is unchanged.",
+      "hierarchy_path": [
+        "Test point requirement links",
+        "Rejection"
+      ],
+      "review_state": "approved",
+      "requirement_links": [],
+      "scenario_refs": []
+    }
+  ]
 }

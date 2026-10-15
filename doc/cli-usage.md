@@ -96,6 +96,53 @@ Unassigned documents use JSON `null` for `iteration`. `show` prints Markdown onl
 
 Path resolution: `--requirements-root` → non-empty `TESHI_REQUIREMENTS_DIR` → `<app_data>/requirements`. Put the store in a separate Git repo if you want version control independent of application projects. Import copies legacy `<project>/requirements/` into the current store and rewrites that project's test-point links; it does not delete the source directory.
 
+### Test points (`teshi testpoints`) — 0.7.10+
+
+Test points are per-project (`testpoints/testpoints.json`), while their requirement links point into the **user-level requirement store**. These commands therefore resolve both at once: `--project` (default: current directory) for the test points and `--requirements-root` (or the default store) for the linked documents.
+
+```bash
+teshi testpoints list --project .
+teshi testpoints list --project . --json
+
+teshi testpoints link add    tp-1 --project . --document doc-9 --range 0:14 --json
+teshi testpoints link remove tp-1 --project . --document doc-12 --json
+teshi testpoints link update tp-1 --project . --to-document doc-9 --to-range 0:14 --json
+```
+
+Ranges are `START:END` half-open **Unicode scalar** offsets into the target document body, matching the anchors the TUI writes.
+
+`list --json` returns a stable envelope:
+
+```json
+{
+  "ok": true,
+  "store_id": "reqstore-...",
+  "test_points": [
+    {
+      "id": "tp-1",
+      "title": "Login",
+      "review_state": "proposed",
+      "links": [
+        {
+          "document_id": "doc-9",
+          "store_id": "reqstore-...",
+          "revision": "...",
+          "position": { "start": 0, "end": 14 },
+          "resolution": "resolved",
+          "quote": "# Checkout\n\nSh"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`resolution` is recomputed on every read, so `list` reports `stale` as soon as an edited document no longer contains a link's quoted text. `review_state` is one of `proposed`, `approved`, `rejected`, `needs_review`.
+
+`link remove` and `link update` select the affected link with `--document` and/or `--range`; with no selector the test point must have exactly one link. `link add` always appends, while `link update` replaces the matched link in place. Any link change on an `approved` test point resets it to `proposed`: approving is a human-only action in the Test Points tab (`5`, then `A`), and no command moves a test point back to `approved`.
+
+`--json` failures print `{ "code": "...", "error": "..." }` to stdout and exit `1`. Codes: `unknown_test_point`, `unknown_document`, `invalid_range`, `link_not_found`, `ambiguous_link`, `requirement_store_uninitialized`, `testpoints_io`.
+
 ### Browser GUI (`teshi web`)
 
 Latest GPUI WASM workspace UI hosted at `https://teshi-org.github.io/app/`; the local
