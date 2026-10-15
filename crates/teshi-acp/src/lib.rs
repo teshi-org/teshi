@@ -11,9 +11,11 @@ pub mod command;
 pub mod error;
 pub mod jsonrpc;
 pub mod permission;
+pub mod profile;
 pub mod registry;
 
 pub use client::{AcpClient, AcpEvent, AcpLifecycle, AcpSession, ClientInfo, InitializeResult};
 pub use command::{AcpAgentCommand, CursorAcpConfig, EnvironmentRedaction, resolve_executable};
 pub use error::{AcpError, AcpResult};
 pub use permission::{PermissionDecision, PermissionHost, PermissionOption, PermissionPolicy};
+pub use profile::AcpAgentProfile;

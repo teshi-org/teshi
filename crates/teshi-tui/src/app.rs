@@ -1722,6 +1722,7 @@ impl App {
                         .into_iter()
                         .find(|item| &item.id == id)
                         .map(|item| item.command(cwd))
+                        .transpose()?
                         .ok_or_else(|| anyhow::anyhow!("ACP Agent {id} is not installed"))
                 })
             } else {
@@ -8751,6 +8752,7 @@ mod tests {
             program: "fixture".into(),
             args: vec![],
             env: Default::default(),
+            env_from: Default::default(),
         }];
         app.agent_panel_mode = AgentPanelMode::SelectBackend;
         app.agent_profile_panel_active = true;
@@ -8783,6 +8785,7 @@ mod tests {
             program: "fixture".into(),
             args: vec![],
             env: Default::default(),
+            env_from: Default::default(),
         }];
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         terminal
@@ -8808,6 +8811,7 @@ mod tests {
             program: id.into(),
             args: vec![],
             env: Default::default(),
+            env_from: Default::default(),
         };
         app.installed_acp_agents = vec![installed("first"), installed("second")];
         app.agent_panel_mode = AgentPanelMode::InstalledAcp;

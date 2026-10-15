@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod api;
 pub mod auth;
 pub mod browser;
@@ -101,6 +102,11 @@ pub enum Command {
     Auth {
         #[command(subcommand)]
         action: AuthCommand,
+    },
+    /// Manage user-level ACP agent definitions
+    Acp {
+        #[command(subcommand)]
+        action: AcpCommand,
     },
     /// Native desktop shell (Chrome extension locator, embedded terminal)
     Desktop {
@@ -212,6 +218,54 @@ pub enum Command {
         #[command(subcommand)]
         action: TraceCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AcpCommand {
+    /// List configured ACP agents
+    List {
+        /// Print the definitions as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one configured ACP agent
+    Show {
+        /// ACP Agent ID
+        id: String,
+        /// Print the definition as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add or replace a custom ACP agent
+    Add {
+        /// Stable ACP Agent ID (letters, numbers, '-' and '_')
+        id: String,
+        /// Executable path or name on PATH
+        #[arg(long)]
+        program: PathBuf,
+        /// Display name (defaults to ID)
+        #[arg(long)]
+        name: Option<String>,
+        /// Structured executable argument (repeatable)
+        #[arg(long = "arg", allow_hyphen_values = true)]
+        args: Vec<String>,
+        /// Child environment reference NAME or NAME=SOURCE_ENV (repeatable)
+        #[arg(long = "env", value_name = "NAME[=SOURCE_ENV]")]
+        env_from: Vec<String>,
+        /// Print the persisted definition as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a configured ACP agent
+    Remove {
+        /// ACP Agent ID
+        id: String,
+        /// Print the removed definition as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the resolved user-level ACP configuration path
+    ConfigPath,
 }
 
 #[derive(Debug, Args)]

@@ -54,6 +54,46 @@ Teshi never fabricates an option. If no safe allowing option exists, it rejects 
 
 Teshi parses the official ACP Registry for discovery, metadata, platform resolution, and future managed installation. V1 does not install arbitrary Registry packages automatically. Cursor V1 prefers an explicitly configured executable, then a PATH lookup for `agent`, and launches it as structured arguments: `agent` + `acp`.
 
+## Custom ACP configuration
+
+Custom and Registry-installed agents share one user-level JSON file:
+
+```text
+<local-data-dir>/teshi/acp/installed.json
+```
+
+Run `teshi acp config-path` to print the exact absolute path on the current platform. Manage custom entries without editing JSON by hand:
+
+```text
+teshi acp list
+teshi acp show codex --json
+teshi acp add codex --program codex-acp --name "Codex" --arg acp
+teshi acp add company-agent --program company-acp --arg --stdio --env API_KEY=COMPANY_ACP_KEY
+teshi acp remove company-agent
+```
+
+`--arg` is repeatable and passes each value directly to the process; Teshi does not invoke a shell. `--env CHILD=SOURCE` records an environment-variable reference, and `--env NAME` is shorthand for `NAME=NAME`. Teshi reads the source variable only when it starts that agent. List, show, and the configuration file contain the source variable name, never its resolved value.
+
+The configuration file is an array of definitions and may also be edited directly:
+
+```json
+[
+  {
+    "id": "company-agent",
+    "name": "Company Agent",
+    "program": "C:\\Tools\\company-acp.exe",
+    "args": ["--stdio"],
+    "env_from": {
+      "API_KEY": "COMPANY_ACP_KEY"
+    }
+  }
+]
+```
+
+IDs contain only ASCII letters, numbers, `-`, and `_`. IDs must be unique; names and programs must be non-empty. Invalid manual edits fail closed and are not partially loaded or rewritten. The legacy `env` object remains readable for Registry packages and existing records, but custom credentials should use `env_from` so secret values stay outside this file.
+
+Adding an existing ID replaces that definition. Configuration does not select an agent globally: use `/agent` in the TUI to select one for the current conversation.
+
 ## ACP vs MCP
 
 ACP is Agent-to-Client integration: Teshi connects to an external agent. MCP is Agent-to-Tool integration: an agent connects to external tools. They are intentionally not conflated.

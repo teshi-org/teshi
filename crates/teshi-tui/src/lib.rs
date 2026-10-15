@@ -196,6 +196,9 @@ pub fn run() -> Result<()> {
         Some(cli::Command::Auth { action }) => {
             return cli::auth::handle_auth_command(&action);
         }
+        Some(cli::Command::Acp { action }) => {
+            return cli::acp::handle_acp_command(&action);
+        }
         Some(cli::Command::Desktop {
             project,
             path,

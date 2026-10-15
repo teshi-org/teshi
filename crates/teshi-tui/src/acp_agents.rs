@@ -8,58 +8,21 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use teshi_acp::registry::{RegistryAgent, ResolvedDistribution};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct InstalledAgent {
-    pub id: String,
-    pub name: String,
-    pub program: PathBuf,
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub env: HashMap<String, String>,
-}
-
-impl InstalledAgent {
-    pub fn command(&self, cwd: PathBuf) -> teshi_acp::AcpAgentCommand {
-        teshi_acp::AcpAgentCommand {
-            program: self.program.clone(),
-            args: self.args.clone(),
-            cwd,
-            env: self.env.clone(),
-        }
-    }
-}
+pub use teshi_acp::profile::AcpAgentProfile as InstalledAgent;
 
 pub fn store_dir() -> Result<PathBuf> {
-    Ok(dirs::data_local_dir()
-        .context("user data directory is unavailable")?
-        .join("teshi")
-        .join("acp"))
-}
-
-fn manifest(root: &Path) -> PathBuf {
-    root.join("installed.json")
+    teshi_acp::profile::store_dir()
 }
 
 pub fn load(root: &Path) -> Result<Vec<InstalledAgent>> {
-    let path = manifest(root);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    serde_json::from_slice(&fs::read(&path).with_context(|| format!("read {}", path.display()))?)
-        .with_context(|| format!("parse {}", path.display()))
-}
-
-fn save(root: &Path, agents: &[InstalledAgent]) -> Result<()> {
-    fs::create_dir_all(root)?;
-    teshi_engine::write_atomic(&manifest(root), &agents)
+    teshi_acp::profile::load(root)
 }
 
 pub fn install(root: &Path, agent: &RegistryAgent) -> Result<InstalledAgent> {
-    validate_id(&agent.id)?;
+    teshi_acp::profile::validate_id(&agent.id)?;
     let platform = teshi_acp::registry::current_platform()?;
     let distribution = agent.resolve_for_platform(&platform)?;
     let target = root.join("packages").join(&agent.id);
@@ -122,6 +85,7 @@ pub fn install(root: &Path, agent: &RegistryAgent) -> Result<InstalledAgent> {
                 program: executable,
                 args: args.to_vec(),
                 env: package_env(agent.distribution.npx.as_ref()),
+                env_from: HashMap::new(),
             }
         }
         ResolvedDistribution::Uvx { package, args } => {
@@ -159,6 +123,7 @@ pub fn install(root: &Path, agent: &RegistryAgent) -> Result<InstalledAgent> {
                     env.extend(package_env(agent.distribution.uvx.as_ref()));
                     env
                 },
+                env_from: HashMap::new(),
             }
         }
     };
@@ -182,40 +147,14 @@ fn package_env(
         .unwrap_or_default()
 }
 
-fn validate_id(id: &str) -> Result<()> {
-    if id.is_empty()
-        || !id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        bail!("invalid ACP Agent ID");
-    }
-    Ok(())
-}
-
 fn record(root: &Path, installed: InstalledAgent) -> Result<InstalledAgent> {
-    let mut agents = load(root)?;
-    agents.retain(|item| item.id != installed.id);
-    agents.push(installed.clone());
-    agents.sort_by(|a, b| a.name.cmp(&b.name));
-    save(root, &agents)?;
-    Ok(installed)
+    teshi_acp::profile::upsert(root, installed)
 }
 
 pub fn add_custom(root: &Path, id: &str, argv: &[String]) -> Result<InstalledAgent> {
-    validate_id(id)?;
+    teshi_acp::profile::validate_id(id)?;
     let (program, args) = argv.split_first().context("custom ACP command is empty")?;
-    let path = Path::new(program);
-    let executable = if path.components().count() > 1 || path.is_absolute() {
-        teshi_acp::resolve_executable(Some(path), program, None)?
-    } else {
-        teshi_acp::resolve_executable(None, program, std::env::var_os("PATH").as_deref())?
-    };
-    let executable = if executable.is_absolute() {
-        executable
-    } else {
-        std::env::current_dir()?.join(executable)
-    };
+    let executable = teshi_acp::profile::resolve_program(Path::new(program))?;
     record(
         root,
         InstalledAgent {
@@ -224,6 +163,7 @@ pub fn add_custom(root: &Path, id: &str, argv: &[String]) -> Result<InstalledAge
             program: executable,
             args: args.to_vec(),
             env: HashMap::new(),
+            env_from: HashMap::new(),
         },
     )
 }
@@ -333,6 +273,7 @@ fn install_binary_payload(
         program: target.join(command),
         args: binary.args.clone(),
         env: HashMap::new(),
+        env_from: HashMap::new(),
     })
 }
 
@@ -348,8 +289,9 @@ mod tests {
             program: "sample".into(),
             args: vec!["acp".into()],
             env: HashMap::new(),
+            env_from: HashMap::new(),
         };
-        save(root.path(), std::slice::from_ref(&agent)).unwrap();
+        record(root.path(), agent.clone()).unwrap();
         assert_eq!(load(root.path()).unwrap(), vec![agent]);
     }
     #[test]
