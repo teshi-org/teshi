@@ -1,5 +1,31 @@
 # Teshi TUI runner
 
+## ACP model preference acceptance
+
+`teshi-acp-model-feature-runner` binds the paired
+`tui_acp_model_persistence.feature` / `ACP模型选择持久化.feature` files through
+`tests/fixtures/model_feature_steps.py`. It reads source steps with Teshi's
+Gherkin parser, expands each English Examples row for both locales, and rejects
+unknown steps. This external semantic runner does not use `.tui.json` sidecars.
+The Python bindings drive a Rust-owned real PTY and assert the rendered controls,
+replies, and the controlled ACP agent's model/session trace. Rejection, removed
+models, and restoration timeouts are deterministic fixture behaviors, not live
+provider tests. Every case uses a temporary project, profile store, and app data.
+
+```powershell
+cargo build -p teshi-cli --locked
+cargo build --manifest-path crates/teshi-tui-runner/Cargo.toml --bin teshi-acp-model-feature-runner --locked
+$env:TESHI_SELF_TEST_BIN = (Resolve-Path target/debug/teshi.exe).Path
+$runner = (Resolve-Path crates/teshi-tui-runner/target/debug/teshi-acp-model-feature-runner.exe).Path
+teshi run (Resolve-Path features/en-US/tui_acp_model_persistence.feature).Path --runner-cmd $runner
+teshi run (Resolve-Path features/zh-CN/ACP模型选择持久化.feature).Path --runner-cmd $runner
+```
+
+Each locale executes seven isolated terminal flows across five scenario
+definitions (the outline has three rows). Step results use the standard runner
+protocol. Screens and ACP traces are retained under `.teshi/tui-results/model`,
+or the requested artifacts directory. A failed assertion fails its case.
+
 Rust terminal testing adapter using `tui-test-rs` 0.1.0. It launches actual
 applications in a PTY and asserts the rendered viewport, without shell inference.
 

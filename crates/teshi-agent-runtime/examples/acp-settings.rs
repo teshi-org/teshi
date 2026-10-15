@@ -42,6 +42,7 @@ fn main() -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("pass agent executable and arguments"))?,
     );
     let project = tempfile::tempdir()?;
+    let verify_persistence = std::env::var_os("TESHI_ACP_VERIFY_PERSISTENCE").is_some();
     let mut config = AcpBackendConfig::new(teshi_acp::AcpAgentCommand {
         program,
         args: args.collect(),
@@ -50,6 +51,10 @@ fn main() -> anyhow::Result<()> {
     });
     config.permission_host = Some(teshi_agent_runtime::ChannelPermissionHost::new());
     config.client.prompt_timeout = Some(Duration::from_secs(90));
+    if verify_persistence {
+        config.model_preference_path = Some(project.path().join("model-preference.json"));
+    }
+    let reconnect_config = config.clone();
     let mut backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
     backend.configure_acp(config)?;
     backend.connect_acp()?;
@@ -98,6 +103,32 @@ fn main() -> anyhow::Result<()> {
             option.name, choice.name
         );
         if category == "model" && choice.value != option.current {
+            if verify_persistence {
+                let selected = choice.value.clone();
+                let option_id = option.id.clone();
+                let persisted: serde_json::Value = serde_json::from_slice(&std::fs::read(
+                    project.path().join("model-preference.json"),
+                )?)?;
+                anyhow::ensure!(persisted == selected, "saved model differs from selection");
+                // Drop the entire backend and external process so the next
+                // connection cannot inherit the old process's in-memory state.
+                drop(backend);
+                backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 2);
+                backend.configure_acp(reconnect_config.clone())?;
+                backend.connect_acp()?;
+                let fresh = wait(&mut backend, |s| s.ready)?;
+                anyhow::ensure!(fresh.error.is_none(), "restore failed: {:?}", fresh.error);
+                anyhow::ensure!(
+                    fresh
+                        .config
+                        .options
+                        .iter()
+                        .any(|o| o.id == option_id && o.current == selected),
+                    "new process did not restore model"
+                );
+                println!("ACP_MODEL_PERSISTENCE_OK: new process confirmed {selected}");
+                break;
+            }
             backend.set_acp_option(&option.id, option.current.clone(), updated.revision)?;
             let restored = wait(&mut backend, |s| !s.pending)?;
             anyhow::ensure!(restored.error.is_none(), "model restoration failed");

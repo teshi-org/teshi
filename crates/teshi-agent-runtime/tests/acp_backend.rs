@@ -11,6 +11,10 @@ use teshi_agent_runtime::backend::{AcpBackendConfig, AgentBackendRuntime};
 use teshi_core::llm::ChatMessage;
 
 fn backend(mode: &str) -> AgentBackendRuntime {
+    backend_with_preference(mode, None)
+}
+
+fn backend_with_preference(mode: &str, path: Option<PathBuf>) -> AgentBackendRuntime {
     let mut backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_acp_agent.py");
     let command = AcpAgentCommand {
@@ -20,11 +24,58 @@ fn backend(mode: &str) -> AgentBackendRuntime {
         env: HashMap::new(),
     };
     let mut config = AcpBackendConfig::new(command);
+    config.model_preference_path = path;
     config.client.initialize_timeout = Duration::from_secs(2);
     config.client.request_timeout = Duration::from_secs(2);
     config.client.shutdown_timeout = Duration::from_secs(2);
     backend.configure_acp(config).unwrap();
     backend
+}
+
+#[test]
+fn confirmed_model_survives_backend_recreation() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("model.json");
+    {
+        let mut first = backend_with_preference("settings", Some(path.clone()));
+        first.connect_acp().unwrap();
+        let initial = wait_controls(&first, |s| s.ready);
+        first
+            .set_acp_option("model", "b".into(), initial.revision)
+            .unwrap();
+        let changed = wait_controls(&first, |s| !s.pending);
+        assert!(changed.error.is_none(), "{:?}", changed.error);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "\"b\"");
+        first
+            .set_acp_option("model", "reject".into(), changed.revision)
+            .unwrap();
+        let rejected = wait_controls(&first, |s| !s.pending);
+        assert!(rejected.error.is_some());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "\"b\"");
+    }
+    let mut second = backend_with_preference("settings", Some(path.clone()));
+    second.connect_acp().unwrap();
+    let restored = wait_controls(&second, |s| s.ready);
+    assert_eq!(restored.config.options[0].current, "b");
+    assert!(restored.error.is_none(), "{:?}", restored.error);
+    let mut other = backend_with_preference("settings", Some(root.path().join("other.json")));
+    other.connect_acp().unwrap();
+    assert_eq!(
+        wait_controls(&other, |s| s.ready).config.options[0].current,
+        "a"
+    );
+}
+
+#[test]
+fn unavailable_saved_model_keeps_agent_default() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("model.json");
+    std::fs::write(&path, "\"removed\"").unwrap();
+    let mut backend = backend_with_preference("settings", Some(path));
+    backend.connect_acp().unwrap();
+    let state = wait_controls(&backend, |s| s.ready);
+    assert_eq!(state.config.options[0].current, "a");
+    assert!(state.error.unwrap().contains("no longer available"));
 }
 
 #[test]

@@ -107,8 +107,10 @@ pub struct AgentThread {
     pub last_input_tokens: Option<u32>,
     /// Selected agent profile ID (None = use default).
     pub profile_id: Option<String>,
-    /// Current conversation's ACP selection; never persisted.
+    /// Current conversation's ACP selection, also included in session snapshots.
     pub selected_acp_id: Option<String>,
+    selection_root: Option<std::path::PathBuf>,
+    selection_warning: Option<String>,
     /// Permission prompt from the external ACP agent, if one is pending.
     pub pending_acp_permission: Option<AcpPermissionPrompt>,
     /// Latest on-demand browser visual observation. Older image bytes are not
@@ -139,11 +141,52 @@ impl AgentThread {
     }
 
     pub fn new(id: usize, title: &str) -> Self {
+        // Unit tests opt in with an isolated root; never write user preferences.
+        let root = if cfg!(test) {
+            None
+        } else {
+            crate::acp_agents::store_dir().ok()
+        };
+        Self::new_with_selection(id, title, root)
+    }
+
+    fn new_with_selection(id: usize, title: &str, root: Option<std::path::PathBuf>) -> Self {
         let kind = match std::env::var("TESHI_AGENT_BACKEND").as_deref() {
             Ok("acp") => teshi_agent::backend::AgentBackendKind::Acp,
             _ => teshi_agent::backend::AgentBackendKind::Native,
         };
-        Self::new_with_backend(id, title, kind)
+        let mut thread = Self::new_with_backend(id, title, kind);
+        thread.selection_root = root;
+        if std::env::var("TESHI_AGENT_BACKEND").is_ok() {
+            return thread;
+        }
+        let Some(root) = thread.selection_root.as_ref() else {
+            return thread;
+        };
+        let choice = crate::agent_selection::load(root).and_then(|choice| match choice {
+            Some(crate::agent_selection::Selection::Acp { agent_id }) => {
+                if !crate::acp_agents::load(root)?
+                    .iter()
+                    .any(|agent| agent.id == agent_id)
+                {
+                    anyhow::bail!("ACP Agent {agent_id} is unavailable; using Teshi Native");
+                }
+                Ok(Some(agent_id))
+            }
+            _ => Ok(None),
+        });
+        match choice {
+            Ok(Some(id)) => {
+                thread.backend = teshi_agent_runtime::backend::AgentBackendRuntime::new(
+                    teshi_agent::backend::AgentBackendKind::Acp,
+                    teshi_agent_runtime::max_agent_iterations(),
+                );
+                thread.selected_acp_id = Some(id);
+            }
+            Ok(None) => {}
+            Err(error) => thread.selection_warning = Some(format!("Agent preference: {error}")),
+        }
+        thread
     }
 
     pub fn new_with_backend(
@@ -170,6 +213,8 @@ impl AgentThread {
             last_input_tokens: None,
             profile_id: None,
             selected_acp_id: None,
+            selection_root: None,
+            selection_warning: None,
             acp_controls_ui: Default::default(),
             pending_acp_permission: None,
             latest_visual_observation: None,
@@ -1145,6 +1190,7 @@ impl App {
         app.status = format!("Opened directory with {n} feature file(s)");
         app.sync_cursor_to_first_node();
         app.normalize_explore_selection();
+        app.show_selection_warning();
         Ok(app)
     }
 
@@ -1320,6 +1366,7 @@ impl App {
         app.sync_cursor_to_first_node();
         app.normalize_explore_selection();
         app.mindmap_index.apply_highlight_categories("root");
+        app.show_selection_warning();
         Ok(app)
     }
 
@@ -1481,6 +1528,7 @@ impl App {
         app.sync_cursor_to_first_node();
         app.normalize_explore_selection();
         app.mindmap_index.apply_highlight_categories("root");
+        app.show_selection_warning();
         app
     }
 
@@ -1746,6 +1794,12 @@ impl App {
         }
     }
 
+    fn show_selection_warning(&mut self) {
+        if let Some(warning) = self.agent_mut().selection_warning.take() {
+            self.status = warning;
+        }
+    }
+
     fn cancel_agent_turn(&mut self) {
         let agent = self.agent_mut();
         agent.retain_partial_response();
@@ -1801,7 +1855,11 @@ impl App {
         {
             let cwd = self.find_project_dir().to_path_buf();
             let command = if let Some(id) = self.agents[agent_idx].selected_acp_id.as_ref() {
-                let root = crate::acp_agents::store_dir();
+                let root = self.agents[agent_idx]
+                    .selection_root
+                    .clone()
+                    .map(Ok)
+                    .unwrap_or_else(crate::acp_agents::store_dir);
                 root.and_then(|root| {
                     crate::acp_agents::load(&root)?
                         .into_iter()
@@ -1836,6 +1894,20 @@ impl App {
             };
             match command.and_then(|command| {
                 let mut config = teshi_agent_runtime::backend::AcpBackendConfig::new(command);
+                if let Some(id) = self.agents[agent_idx].selected_acp_id.as_ref() {
+                    let root = self.agents[agent_idx]
+                        .selection_root
+                        .clone()
+                        .map(Ok)
+                        .unwrap_or_else(crate::acp_agents::store_dir)?;
+                    let key: String = id
+                        .as_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
+                    config.model_preference_path =
+                        Some(root.join("model-preferences").join(format!("{key}.json")));
+                }
                 config.auth_method = std::env::var("TESHI_ACP_AUTH_METHOD").ok();
                 // The approval badge drives the ACP permission policy: Manual
                 // prompts through a PermissionHost (Zed-style allow/reject
@@ -1887,6 +1959,9 @@ impl App {
 
     /// Activate the saved active profile (if any) that has a matching file on disk.
     pub fn activate_active_profile(&mut self) {
+        if self.agent().backend_kind() == teshi_agent::backend::AgentBackendKind::Acp {
+            return;
+        }
         let active_id = match self.model_active_id.clone() {
             Some(id) => id,
             None => return,
@@ -6473,12 +6548,17 @@ impl App {
             Action::AgentNew => {
                 let id = self.next_agent_id;
                 self.next_agent_id += 1;
-                self.agents
-                    .push(AgentThread::new(id, &format!("Agent {id}")));
+                let root = self.agent().selection_root.clone();
+                self.agents.push(AgentThread::new_with_selection(
+                    id,
+                    &format!("Agent {id}"),
+                    root,
+                ));
                 self.selected_agent = self.agents.len() - 1;
                 self.ai_input_focused = true;
                 self.spawn_llm_if_configured();
                 self.status = format!("Created agent {id}");
+                self.show_selection_warning();
                 self.quit_pending_confirm = false;
             }
             Action::AgentClose => {
@@ -8491,9 +8571,21 @@ impl App {
         thread.status = AiStatus::Idle;
         self.active_model_label = installed.as_ref().map(|agent| agent.name.clone());
         self.status = match installed {
-            Some(agent) => format!("Selected ACP Agent {} for this session", agent.name),
-            None => "Selected Teshi Native for this session".into(),
+            Some(agent) => format!(
+                "Selected ACP Agent {}; remembered for new sessions",
+                agent.name
+            ),
+            None => "Selected Teshi Native; remembered for new sessions".into(),
         };
+        if let Some(root) = self.agent().selection_root.as_ref() {
+            let selection = match self.agent().selected_acp_id.clone() {
+                Some(agent_id) => crate::agent_selection::Selection::Acp { agent_id },
+                None => crate::agent_selection::Selection::Native,
+            };
+            if let Err(error) = crate::agent_selection::save(root, &selection) {
+                self.status = format!("Agent selected, but preference could not be saved: {error}");
+            }
+        }
         self.agent_profile_panel_active = false;
         if kind == teshi_agent::backend::AgentBackendKind::Acp {
             self.connect_acp_controls();
@@ -8720,8 +8812,15 @@ impl App {
         self.agent_mut().status = AiStatus::Idle;
         self.agent_mut().tool_status = None;
         self.agent_mut().scroll_offset = 0;
-        self.select_backend(None);
+        let id = self.agent().id;
+        let title = self.agent().title.clone();
+        let profile_id = self.agent().profile_id.clone();
+        let root = self.agent().selection_root.clone();
+        *self.agent_mut() = AgentThread::new_with_selection(id, &title, root);
+        self.agent_mut().profile_id = profile_id;
+        self.spawn_llm_if_configured();
         self.status = "New session started".to_string();
+        self.show_selection_warning();
         Ok(())
     }
 
@@ -9133,8 +9232,10 @@ mod tests {
     }
 
     #[test]
-    fn agent_panel_selection_is_session_only_and_new_resets_to_native() {
+    fn agent_selection_survives_new_agent_new_session_and_restart() {
         let (mut app, _project, _store) = slash_test_app();
+        let preferences = tempdir().unwrap();
+        app.agent_mut().selection_root = Some(preferences.path().to_path_buf());
         assert_eq!(
             app.agent().backend.kind(),
             teshi_agent::backend::AgentBackendKind::Native
@@ -9147,6 +9248,8 @@ mod tests {
             env: Default::default(),
             env_from: Default::default(),
         }];
+        teshi_acp::profile::upsert(preferences.path(), app.installed_acp_agents[0].clone())
+            .unwrap();
         app.agent_panel_mode = AgentPanelMode::SelectBackend;
         app.agent_profile_panel_active = true;
         app.handle_action(Action::AgentPanelDown).unwrap();
@@ -9157,10 +9260,68 @@ mod tests {
             teshi_agent::backend::AgentBackendKind::Acp
         );
         app.execute_slash_command("new").unwrap();
-        assert_eq!(app.agent().selected_acp_id, None);
+        assert_eq!(app.agent().selected_acp_id.as_deref(), Some("fixture"));
         assert_eq!(
             app.agent().backend.kind(),
+            teshi_agent::backend::AgentBackendKind::Acp
+        );
+        app.handle_action(Action::AgentNew).unwrap();
+        assert_eq!(app.agent().selected_acp_id.as_deref(), Some("fixture"));
+        let restarted =
+            AgentThread::new_with_selection(9, "Restarted", Some(preferences.path().into()));
+        assert_eq!(restarted.selected_acp_id.as_deref(), Some("fixture"));
+        assert!(restarted.messages().is_empty());
+        app.select_backend(None);
+        let restarted =
+            AgentThread::new_with_selection(10, "Native", Some(preferences.path().into()));
+        assert_eq!(
+            restarted.backend_kind(),
             teshi_agent::backend::AgentBackendKind::Native
+        );
+        assert_eq!(restarted.selected_acp_id, None);
+        crate::agent_selection::save(
+            preferences.path(),
+            &crate::agent_selection::Selection::Acp {
+                agent_id: "removed".into(),
+            },
+        )
+        .unwrap();
+        let restarted =
+            AgentThread::new_with_selection(11, "Removed", Some(preferences.path().into()));
+        assert_eq!(
+            restarted.backend_kind(),
+            teshi_agent::backend::AgentBackendKind::Native
+        );
+        assert!(restarted.selection_warning.unwrap().contains("removed"));
+    }
+
+    #[test]
+    fn restoring_history_does_not_replace_explicit_agent_preference() {
+        let (mut app, _project, _store) = slash_test_app();
+        let root = tempdir().unwrap();
+        app.agent_mut().selection_root = Some(root.path().into());
+        crate::agent_selection::save(
+            root.path(),
+            &crate::agent_selection::Selection::Acp {
+                agent_id: "beta".into(),
+            },
+        )
+        .unwrap();
+        let mut session = crate::session::Session::from_messages(Vec::new(), None);
+        session.backend_kind = Some(teshi_agent::backend::AgentBackendKind::Acp);
+        session.acp_agent_id = Some("alpha".into());
+        app.restore_session(session);
+        assert_eq!(app.agent().selected_acp_id.as_deref(), Some("alpha"));
+        assert_eq!(
+            crate::agent_selection::load(root.path()).unwrap(),
+            Some(crate::agent_selection::Selection::Acp {
+                agent_id: "beta".into()
+            })
+        );
+        app.select_backend(None);
+        assert_eq!(
+            crate::agent_selection::load(root.path()).unwrap(),
+            Some(crate::agent_selection::Selection::Native)
         );
     }
 

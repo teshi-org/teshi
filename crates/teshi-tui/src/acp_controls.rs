@@ -49,6 +49,52 @@ mod tests {
     }
 
     #[test]
+    fn opening_restore_error_preserves_it_and_wraps_the_message() {
+        let (mut app, project, _store) = app_with_agent();
+        let preference = project.path().join("model.json");
+        std::fs::write(&preference, "\"b\"").unwrap();
+        let mut config =
+            teshi_agent_runtime::backend::AcpBackendConfig::new(teshi_acp::AcpAgentCommand {
+                program: PathBuf::from(if cfg!(windows) { "python" } else { "python3" }),
+                args: vec![
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../teshi-agent-runtime/tests/fixtures/fake_acp_agent.py")
+                        .display()
+                        .to_string(),
+                    "settings_timeout".into(),
+                ],
+                cwd: project.path().into(),
+                env: HashMap::new(),
+            });
+        config.model_preference_path = Some(preference);
+        config.client.request_timeout = Duration::from_millis(200);
+        app.agent_mut().backend.configure_acp(config).unwrap();
+        app.agent_mut().backend.connect_acp().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.agent().backend.acp_controls().unwrap().error.is_none() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let before = app.agent().backend.acp_controls().unwrap();
+        app.open_acp_controls(None);
+        let after = app.agent().backend.acp_controls().unwrap();
+        assert_eq!(before.revision, after.revision);
+        assert_eq!(before.error, after.error);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|frame| render_picker(frame, &mut app))
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(content.contains("timed out"), "{content}");
+    }
+
+    #[test]
     fn controls_click_keyboard_and_narrow_overflow() {
         let (mut app, _project, _store) = app_with_agent();
         app.agent_mut().selected_acp_id = Some("模型 Agent".into());
@@ -190,11 +236,13 @@ impl App {
             self.status = "Select an ACP agent with /agent first".into();
             return;
         }
+        // Opening an error must preserve it for inspection. Reconnecting here
+        // would clear the failed snapshot before the picker can display it.
         if !self
             .agent()
             .backend
             .acp_controls()
-            .is_some_and(|s| s.ready || s.pending)
+            .is_some_and(|s| s.ready || s.pending || s.error.is_some())
         {
             self.connect_acp_controls();
         }
@@ -573,7 +621,9 @@ pub(crate) fn render_picker(frame: &mut Frame<'_>, app: &mut App) {
             "↑/↓ select · Enter apply · ← settings · Esc close"
         });
     frame.render_widget(
-        Paragraph::new(message).style(Style::default().fg(theme::FG)),
+        Paragraph::new(message)
+            .style(Style::default().fg(theme::FG))
+            .wrap(ratatui::widgets::Wrap { trim: true }),
         Rect::new(inner.x, inner.bottom().saturating_sub(3), inner.width, 2),
     );
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);

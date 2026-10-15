@@ -33,6 +33,8 @@ pub struct AcpBackendConfig {
     /// host every `session/request_permission` fails immediately and tool-using
     /// agents abort their turn after the first streamed chunk.
     pub permission_host: Option<Arc<ChannelPermissionHost>>,
+    /// Optional per-agent file for the last successfully selected model.
+    pub model_preference_path: Option<PathBuf>,
 }
 
 impl AcpBackendConfig {
@@ -43,6 +45,7 @@ impl AcpBackendConfig {
             auth_method: None,
             client: AcpClientConfig::default(),
             permission_host: None,
+            model_preference_path: None,
         }
     }
 }
@@ -585,6 +588,7 @@ async fn run_worker(
 ) {
     let (updates_tx, mut updates_rx) = async_mpsc::channel(128);
     let cwd: PathBuf = config.command.cwd.clone();
+    let model_preference_path = config.model_preference_path.clone();
     let auth_method = config.auth_method.clone();
     let permission_host: Option<Arc<dyn PermissionHost>> = config
         .permission_host
@@ -634,7 +638,7 @@ async fn run_worker(
         Ok::<_, String>((session, model))
     }
     .await;
-    let (session, model) = match result {
+    let (mut session, model) = match result {
         Ok(value) => value,
         Err(error) => {
             if let Ok(mut state) = controls.lock() {
@@ -645,8 +649,62 @@ async fn run_worker(
             return;
         }
     };
+    let mut preference_error = None;
+    if let Some(path) = &model_preference_path {
+        let restored = async {
+            let bytes = match std::fs::read(path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(anyhow::Error::from(error)),
+            };
+            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            let option = session
+                .config
+                .options
+                .iter()
+                .find(|o| o.category.as_deref() == Some("model") || o.id == "model")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Agent has no model setting"))?;
+            anyhow::ensure!(option.accepts(&value), "Saved model is no longer available");
+            if option.current != value {
+                let response = client
+                    .set_session_option(&session, &option, value.clone())
+                    .await?;
+                if response.get("configOptions").is_some() {
+                    session.config.replace_modern(response.get("configOptions"));
+                } else if let Some(current) = session
+                    .config
+                    .options
+                    .iter_mut()
+                    .find(|o| o.id == option.id)
+                {
+                    current.current = value;
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        if let Err(error) = restored {
+            preference_error = Some(format!(
+                "ACP model preference could not be restored: {error}"
+            ));
+            // A timed-out mutation leaves the remote model uncertain. Do not
+            // send prompts on a session whose configuration is unknown.
+            if error
+                .downcast_ref::<teshi_acp::AcpError>()
+                .is_some_and(|e| matches!(e, teshi_acp::AcpError::Timeout(_)))
+            {
+                if let Ok(mut state) = controls.lock() {
+                    state.error = preference_error;
+                }
+                let _ = client.shutdown().await;
+                return;
+            }
+        }
+    }
     if let Ok(mut state) = controls.lock() {
         state.config = session.config.clone();
+        state.error = preference_error;
         state.session_id = Some(session.id.clone());
         state.ready = true;
         state.revision += 1;
@@ -697,6 +755,17 @@ async fn run_worker(
                                 current.current = value;
                             }
                             state.error = None;
+                            if (option.category.as_deref() == Some("model") || option.id == "model")
+                                && let Some(path) = &model_preference_path
+                                && let Some(current) =
+                                    state.config.options.iter().find(|o| o.id == option.id)
+                                && let Err(error) =
+                                    teshi_engine::write_atomic(path, &current.current)
+                            {
+                                state.error = Some(format!(
+                                    "Model changed, but saving its preference failed: {error}"
+                                ));
+                            }
                             state.revision += 1;
                         }
                         Err(error) => {

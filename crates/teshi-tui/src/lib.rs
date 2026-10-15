@@ -1,6 +1,7 @@
 mod acp_agents;
 mod acp_controls;
 mod agent;
+mod agent_selection;
 mod app;
 mod auth;
 mod authoring_tab;
