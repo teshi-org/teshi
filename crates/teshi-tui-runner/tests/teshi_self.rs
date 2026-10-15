@@ -496,7 +496,12 @@ fn acp_settings_switch_model_by_mouse_and_keyboard() {
         vec![key("3"), text("Welcome to AI Chat!"), key("Enter")],
         vec![open_settings(), key("Enter"), text("Model: Alpha")],
         // Escape closes the picker so the click resolves against the bottom row.
-        vec![text("Thinking"), text("[More"), key("Escape"), text("[More")],
+        vec![
+            text("Thinking"),
+            text("[More"),
+            key("Escape"),
+            text("[More"),
+        ],
         vec![click("Model: Alpha"), text("Beta")],
         vec![key("Down"), key("Enter")],
         vec![text("Model: Beta")],
@@ -532,7 +537,11 @@ fn acp_settings_switch_model_by_mouse_and_keyboard() {
         .iter()
         .chain(scenario.steps.iter())
         .collect::<Vec<_>>();
-    assert_eq!(steps.len(), actions.len(), "one action group per Feature step");
+    assert_eq!(
+        steps.len(),
+        actions.len(),
+        "one action group per Feature step"
+    );
     let bindings = steps
         .into_iter()
         .zip(actions)
