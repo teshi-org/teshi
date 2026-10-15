@@ -47,3 +47,11 @@ The bridge MUST bind only to loopback, authenticate requests with an ephemeral t
 #### Scenario: STDIO cancellation or disconnect while awaiting approval
 - **WHEN** the MCP client cancels a pending call or closes STDIO
 - **THEN** the proxy closes the corresponding bridge connection and the change cannot be accepted
+
+### Requirement: Executable TUI acceptance
+
+The ACP authoring workflow SHALL have paired English and Chinese executable `.feature` coverage. The acceptance path MUST drive a real PTY, select a deterministic ACP agent, approve proposed test points in the Test Points tab, accept queued file changes, continue the ACP turn, and verify that Save writes the generated Feature to disk.
+
+#### Scenario: ACP generation closes through human review and Save
+- **WHEN** the deterministic ACP agent submits requirements and proposes a test point
+- **THEN** the TUI pauses for human review, resumes only after approval, accepts the generated file changes, and saves the resulting Feature to disk

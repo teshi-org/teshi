@@ -19,6 +19,12 @@ the failed UI proposal. Changing profile permissions cancels the previous
 turn and reconnects ACP with a fresh catalog, so agents rediscover both added
 and removed tools without requiring MCP list-change notifications.
 
+The workflow is also exercised by paired English/Chinese `.feature` files through
+an external runner that owns a real PTY. Its deterministic ACP fixture uses the
+same MCP authoring calls as the runtime integration tests, while the runner
+performs the actual Test Points approval, file-change confirmations, continuation,
+and disk Save assertion.
+
 ## Risks / Trade-offs
 
 - Agent MCP naming differs: prompt guidance identifies the Teshi MCP server and underlying tool names.

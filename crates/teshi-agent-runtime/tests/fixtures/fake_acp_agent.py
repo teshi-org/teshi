@@ -99,8 +99,14 @@ for line in sys.stdin:
             assert any(tool["name"] == "submit_requirements" for tool in discovery["tools"])
             results = []
             if mode == "mcp_review" and prompt_count > 1:
-                prompt = message["params"]["prompt"][0]["text"]
-                ids = re.search(r"Human approved test points \[([^]]+)\]", prompt).group(1).split(", ")
+                prompt = "\n".join(
+                    item.get("text", "")
+                    for item in message["params"].get("prompt", [])
+                    if isinstance(item, dict)
+                )
+                approved = re.search(r"Human approved test points \[([^]]+)\]", prompt)
+                assert approved, "approved test-point ids missing from continuation prompt"
+                ids = [item.strip() for item in approved.group(1).split(",") if item.strip()]
                 steps = ["Given a user", "When the user signs in", "Then access is granted"]
                 calls = [
                     ("generate_plan", {"features": [{"file_name": "approved.feature", "feature_name": "Auth",
