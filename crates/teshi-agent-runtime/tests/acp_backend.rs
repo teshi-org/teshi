@@ -27,6 +27,59 @@ fn backend(mode: &str) -> AgentBackendRuntime {
     backend
 }
 
+#[test]
+fn acp_activity_retains_thoughts_and_merges_partial_tool_updates() {
+    let mut backend = backend("activity");
+    backend.start().unwrap();
+    backend
+        .submit_turn(None, vec![ChatMessage::text("user", "hello")], None)
+        .unwrap();
+    let events = events_until_terminal(&mut backend);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentBackendEvent::ReasoningChunk { .. }))
+    );
+    let thought = backend
+        .messages()
+        .iter()
+        .find(|m| m.source.as_deref() == Some("acp_reasoning"))
+        .unwrap();
+    assert_eq!(
+        thought.reasoning_content.as_deref(),
+        Some("Inspecting the project")
+    );
+    let tools: Vec<_> = backend
+        .messages()
+        .iter()
+        .filter(|m| m.tool_call_id.as_deref() == Some("read-1"))
+        .collect();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].content, "Read project");
+    assert_eq!(tools[0].reasoning_content.as_deref(), Some("completed"));
+}
+
+#[test]
+fn fresh_acp_process_receives_saved_context_only_on_first_prompt() {
+    let mut backend = backend("restored");
+    let messages = vec![
+        ChatMessage::text("user", "previous question"),
+        ChatMessage::text("assistant", "previous answer"),
+        ChatMessage::text("user", "current question"),
+    ];
+    for _ in 0..2 {
+        backend.start().unwrap();
+        backend.submit_turn(None, messages.clone(), None).unwrap();
+        let events = events_until_terminal(&mut backend);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentBackendEvent::Completed { .. })),
+            "{events:?}"
+        );
+    }
+}
+
 /// Same as [`backend`] but wired with an interactive permission host, the
 /// configuration the TUI uses for its Manual approval mode.
 fn backend_with_permission_host(mode: &str) -> AgentBackendRuntime {

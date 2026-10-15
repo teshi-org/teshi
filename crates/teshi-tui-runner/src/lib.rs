@@ -136,6 +136,20 @@ impl Terminal {
         }
     }
 
+    /// Saves the current styled terminal viewport as an SVG screenshot.
+    ///
+    /// # Errors
+    /// Returns terminal observation or screenshot file errors.
+    pub fn screenshot(&self, path: &std::path::Path) -> Result<()> {
+        self.session.execute(Operation::Screenshot {
+            full: false,
+            path: Some(path.to_string_lossy().into_owned()),
+            zoom: None,
+            background: None,
+        })?;
+        Ok(())
+    }
+
     /// Waits for text to become visible or absent in the current viewport.
     ///
     /// # Errors

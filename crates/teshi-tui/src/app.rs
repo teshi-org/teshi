@@ -33,6 +33,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("exit", "Exit Teshi"),
     ("resume", "Resume the most recent session"),
     ("copy", "Copy last N assistant responses to clipboard"),
+    ("details", "Expand or collapse thinking and tool details"),
     ("models", "Open model settings"),
     ("sessions", "Browse saved sessions"),
     ("approval", "Switch approval mode (Manual/Auto/Bypass)"),
@@ -93,6 +94,8 @@ pub struct AgentThread {
     pub tool_status: Option<String>,
     pub scroll_offset: usize,
     pub horizontal_scroll: usize,
+    /// Whether supporting reasoning and tool titles are expanded in this conversation.
+    pub activity_details_expanded: bool,
     pub(crate) backend: teshi_agent_runtime::backend::AgentBackendRuntime,
     /// Conversation-local ACP picker and hit regions.
     pub(crate) acp_controls_ui: crate::acp_controls::ControlsUi,
@@ -114,9 +117,27 @@ pub struct AgentThread {
     pub latest_visual_observation: Option<teshi_engine::BrowserScreenshot>,
     /// Finish reason from the most recent production model response.
     pub last_finish_reason: Option<String>,
+    saved_session: Option<crate::session::Session>,
+    last_session_snapshot: String,
+    last_session_save: Option<std::time::Instant>,
 }
 
 impl AgentThread {
+    fn retain_partial_response(&mut self) {
+        let content = std::mem::take(self.partial_response_mut());
+        let reasoning = self.backend.take_partial_reasoning();
+        if !content.is_empty() || !reasoning.is_empty() {
+            self.messages_mut().push(AiChatMessage {
+                role: AiRole::Assistant,
+                content,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
+                source: None,
+            });
+        }
+    }
+
     pub fn new(id: usize, title: &str) -> Self {
         let kind = match std::env::var("TESHI_AGENT_BACKEND").as_deref() {
             Ok("acp") => teshi_agent::backend::AgentBackendKind::Acp,
@@ -139,6 +160,7 @@ impl AgentThread {
             tool_status: None,
             scroll_offset: 0,
             horizontal_scroll: 0,
+            activity_details_expanded: false,
             backend: teshi_agent_runtime::backend::AgentBackendRuntime::new(
                 kind,
                 teshi_agent_runtime::max_agent_iterations(),
@@ -152,11 +174,66 @@ impl AgentThread {
             pending_acp_permission: None,
             latest_visual_observation: None,
             last_finish_reason: None,
+            saved_session: None,
+            last_session_snapshot: String::new(),
+            last_session_save: None,
         }
     }
 }
 
 impl AgentThread {
+    /// Checkpoint visible history, including an unfinished streamed reply.
+    fn save_session_to(
+        &mut self,
+        root: &Path,
+        project: &Path,
+        model: Option<String>,
+    ) -> Result<()> {
+        if self.messages().is_empty() {
+            return Ok(());
+        }
+        let mut messages = self.messages().to_vec();
+        if !self.partial_response().is_empty() || !self.backend.partial_reasoning().is_empty() {
+            messages.push(AiChatMessage {
+                role: AiRole::Assistant,
+                content: self.partial_response().to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: (!self.backend.partial_reasoning().is_empty())
+                    .then(|| self.backend.partial_reasoning().to_string()),
+                source: None,
+            });
+        }
+        let snapshot = serde_json::to_string(&(
+            &messages,
+            self.backend_kind(),
+            &self.selected_acp_id,
+            &model,
+            project,
+        ))?;
+        if snapshot == self.last_session_snapshot {
+            return Ok(());
+        }
+        let mut session = self
+            .saved_session
+            .clone()
+            .unwrap_or_else(|| crate::session::Session::from_messages(Vec::new(), model.clone()));
+        session.messages = messages;
+        session.message_count = session.messages.len();
+        session.model_label = model;
+        session.project_root = Some(project.to_path_buf());
+        session.backend_kind = Some(self.backend_kind());
+        session.acp_agent_id = self.selected_acp_id.clone();
+        session.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis()
+            .to_string();
+        teshi_engine::write_atomic(&root.join(format!("{}.json", session.id)), &session)?;
+        self.saved_session = Some(session);
+        self.last_session_snapshot = snapshot;
+        Ok(())
+    }
+
     pub fn backend_kind(&self) -> teshi_agent::backend::AgentBackendKind {
         self.backend.kind()
     }
@@ -1671,6 +1748,7 @@ impl App {
 
     fn cancel_agent_turn(&mut self) {
         let agent = self.agent_mut();
+        agent.retain_partial_response();
         agent.backend.cancel();
         agent.status = AiStatus::Idle;
         agent.tool_status = None;
@@ -2019,7 +2097,7 @@ impl App {
                         }
                     }
                     Ok(Some(AgentBackendEvent::Failed(message))) => {
-                        self.agents[i].partial_response_mut().clear();
+                        self.agents[i].retain_partial_response();
                         self.agents[i].status = AiStatus::Idle;
                         self.agents[i].tool_status = None;
                         self.agents[i].pending_acp_permission = None;
@@ -2027,7 +2105,7 @@ impl App {
                             self.status = format!("AI: {message}");
                         }
                     }
-                    Ok(Some(AgentBackendEvent::ExternalToolActivity { title, status })) => {
+                    Ok(Some(AgentBackendEvent::ExternalToolActivity { title, status, .. })) => {
                         self.agents[i].tool_status = Some(match status {
                             Some(status) => format!("{title}: {status}"),
                             None => title,
@@ -2056,10 +2134,13 @@ impl App {
                                     .to_string();
                         }
                     }
-                    Ok(Some(AgentBackendEvent::MessageChunk { .. })) => {}
+                    Ok(Some(
+                        AgentBackendEvent::MessageChunk { .. }
+                        | AgentBackendEvent::ReasoningChunk { .. },
+                    )) => {}
                     Ok(None) | Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        self.agents[i].partial_response_mut().clear();
+                        self.agents[i].retain_partial_response();
                         self.agents[i].status = AiStatus::Error;
                         self.agents[i].tool_status = None;
                         self.agents[i].pending_acp_permission = None;
@@ -2071,6 +2152,28 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Persist all conversations periodically, or immediately before leaving one.
+    ///
+    /// # Errors
+    /// Returns an error if a conversation checkpoint cannot be written.
+    pub fn save_sessions(&mut self, force: bool) -> Result<()> {
+        let root = crate::session::Session::storage_dir();
+        let project = self.project.root_dir.clone();
+        let model = self.active_model_label.clone();
+        for agent in &mut self.agents {
+            if !force
+                && agent
+                    .last_session_save
+                    .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1))
+            {
+                continue;
+            }
+            agent.save_session_to(&root, &project, model.clone())?;
+            agent.last_session_save = Some(std::time::Instant::now());
+        }
+        Ok(())
     }
 
     fn send_backend_followup(&mut self, agent_idx: usize, allow_tools: bool) {
@@ -2200,6 +2303,9 @@ impl App {
 
         // Original 1:1 mapping
         for (message_idx, m) in self.agents[agent_idx].messages().iter().enumerate() {
+            if matches!(m.source.as_deref(), Some("acp_activity" | "acp_reasoning")) {
+                continue;
+            }
             let content = if Some(message_idx) == latest_visual_message {
                 if let Some(observation) = &self.agents[agent_idx].latest_visual_observation {
                     teshi_core::llm::MessageContent::Blocks(vec![
@@ -5563,8 +5669,8 @@ impl App {
             Action::SessionPanelActivate => {
                 if let Some(session) = self.session_list.get(self.session_panel_selection).cloned()
                 {
-                    self.select_backend(None);
-                    *self.agent_mut().messages_mut() = session.messages;
+                    self.save_sessions(true)?;
+                    self.restore_session(session);
                     self.agent_mut().partial_response_mut().clear();
                     self.agent_mut().input.clear();
                     self.agent_mut().input_cursor = 0;
@@ -5585,7 +5691,7 @@ impl App {
                     if let Err(e) = crate::session::Session::delete(&id) {
                         self.status = format!("Failed to delete session: {e}");
                     } else {
-                        self.session_list = crate::session::Session::load_all();
+                        self.session_list = self.project_sessions();
                         if self.session_panel_selection >= self.session_list.len() {
                             self.session_panel_selection =
                                 self.session_list.len().saturating_sub(1);
@@ -6379,6 +6485,7 @@ impl App {
                 if self.agents.len() <= 1 {
                     self.status = "Cannot close the last agent".to_string();
                 } else {
+                    self.save_sessions(true)?;
                     let name = self.agents[self.selected_agent].title.clone();
                     self.agents.remove(self.selected_agent);
                     if self.selected_agent >= self.agents.len() {
@@ -8482,6 +8589,13 @@ impl App {
     /// in a second dispatcher.
     pub(crate) fn execute_slash_command(&mut self, command: &str) -> Result<()> {
         let command = command.trim();
+        if command == "details" {
+            let agent = self.agent_mut();
+            agent.activity_details_expanded = !agent.activity_details_expanded;
+            agent.scroll_offset = 0;
+            self.status = "Thinking and tool details toggled".into();
+            return Ok(());
+        }
         if command == "settings" {
             self.open_acp_controls(None);
             return Ok(());
@@ -8595,15 +8709,10 @@ impl App {
 
     /// Handle `/new` — start a new session.
     fn cmd_new(&mut self) -> Result<()> {
+        self.save_sessions(true)?;
         self.cancel_agent_turn();
-        // Save current session if there are messages
-        if !self.agent().messages().is_empty() {
-            let session = crate::session::Session::from_messages(
-                std::mem::take(self.agent_mut().messages_mut()),
-                self.active_model_label.clone(),
-            );
-            let _ = session.save();
-        }
+        self.agent_mut().saved_session = None;
+        self.agent_mut().last_session_snapshot.clear();
         self.agent_mut().messages_mut().clear();
         self.agent_mut().partial_response_mut().clear();
         self.agent_mut().input.clear();
@@ -8618,25 +8727,18 @@ impl App {
 
     /// Handle `/exit` or `/quit` — exit the application.
     fn cmd_exit(&mut self) -> Result<()> {
-        // Save current session if there are messages
-        if !self.agent().messages().is_empty() {
-            let session = crate::session::Session::from_messages(
-                std::mem::take(self.agent_mut().messages_mut()),
-                self.active_model_label.clone(),
-            );
-            let _ = session.save();
-        }
+        self.save_sessions(true)?;
         self.should_quit = true;
         Ok(())
     }
 
     /// Handle `/resume` — load the most recent session.
     fn cmd_resume(&mut self) -> Result<()> {
+        self.save_sessions(true)?;
         self.cancel_agent_turn();
-        let sessions = crate::session::Session::load_all();
+        let sessions = self.project_sessions();
         if let Some(s) = sessions.into_iter().next() {
-            self.select_backend(None);
-            *self.agent_mut().messages_mut() = s.messages;
+            self.restore_session(s);
             self.agent_mut().partial_response_mut().clear();
             self.agent_mut().input.clear();
             self.agent_mut().input_cursor = 0;
@@ -8706,9 +8808,39 @@ impl App {
     fn cmd_sessions(&mut self) -> Result<()> {
         self.session_panel_active = true;
         self.session_panel_selection = 0;
-        self.session_list = crate::session::Session::load_all();
+        self.session_list = self.project_sessions();
         self.status = "Sessions. ↑↓ select · Enter load · d delete · Esc close".to_string();
         Ok(())
+    }
+
+    fn project_sessions(&self) -> Vec<crate::session::Session> {
+        crate::session::Session::load_all()
+            .into_iter()
+            .filter(|s| {
+                s.project_root
+                    .as_ref()
+                    .is_none_or(|root| root == &self.project.root_dir)
+            })
+            .collect()
+    }
+
+    fn restore_session(&mut self, session: crate::session::Session) {
+        self.cancel_agent_turn();
+        let kind = session
+            .backend_kind
+            .unwrap_or(teshi_agent::backend::AgentBackendKind::Native);
+        self.active_model_label = session.model_label.clone();
+        let agent = self.agent_mut();
+        agent.backend = teshi_agent_runtime::backend::AgentBackendRuntime::new(
+            kind,
+            teshi_agent_runtime::max_agent_iterations(),
+        );
+        *agent.messages_mut() = session.messages.clone();
+        agent.selected_acp_id = session.acp_agent_id.clone();
+        agent.acp_controls_ui = Default::default();
+        agent.saved_session = Some(session);
+        agent.last_session_snapshot.clear();
+        agent.tool_status = None;
     }
 }
 
@@ -8857,6 +8989,88 @@ mod tests {
         )
         .unwrap();
         (app, project, store)
+    }
+
+    #[test]
+    fn session_checkpoints_keep_identity_partial_reply_and_backend() {
+        let root = tempdir().unwrap();
+        let project = tempdir().unwrap();
+        let mut agent =
+            AgentThread::new_with_backend(1, "ACP", teshi_agent::backend::AgentBackendKind::Acp);
+        agent.selected_acp_id = Some("example".into());
+        agent.messages_mut().push(super::AiChatMessage {
+            role: AiRole::User,
+            content: "question".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+        });
+        agent.partial_response_mut().push_str("unfinished");
+        agent
+            .save_session_to(root.path(), project.path(), None)
+            .unwrap();
+        let id = agent.saved_session.as_ref().unwrap().id.clone();
+        let path = root.path().join(format!("{id}.json"));
+        let first = crate::session::Session::load_from_file(&path).unwrap();
+        assert_eq!(first.messages.last().unwrap().content, "unfinished");
+        assert_eq!(first.acp_agent_id.as_deref(), Some("example"));
+        assert_eq!(first.project_root.as_deref(), Some(project.path()));
+        agent.partial_response_mut().push_str(" reply");
+        agent
+            .save_session_to(root.path(), project.path(), None)
+            .unwrap();
+        let second = crate::session::Session::load_from_file(&path).unwrap();
+        assert_eq!(second.id, id);
+        assert_eq!(second.created_at, first.created_at);
+        assert_eq!(second.messages.len(), 2);
+        assert_eq!(second.messages.last().unwrap().content, "unfinished reply");
+        assert_eq!(
+            agent.messages().len(),
+            1,
+            "checkpoint must not mutate model history"
+        );
+
+        let (mut app, _project, _store) = slash_test_app();
+        app.restore_session(second);
+        assert_eq!(
+            app.agent().backend_kind(),
+            teshi_agent::backend::AgentBackendKind::Acp
+        );
+        assert_eq!(app.agent().selected_acp_id.as_deref(), Some("example"));
+        assert_eq!(app.agent().saved_session.as_ref().unwrap().id, id);
+    }
+
+    #[test]
+    fn failed_session_checkpoint_retains_previous_identity() {
+        let root = tempdir().unwrap();
+        let project = tempdir().unwrap();
+        let mut agent = AgentThread::new_with_backend(
+            1,
+            "Native",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        agent.messages_mut().push(super::AiChatMessage {
+            role: AiRole::User,
+            content: "question".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+        });
+        let blocked = root.path().join("file");
+        fs::write(&blocked, "not a directory").unwrap();
+        assert!(
+            agent
+                .save_session_to(&blocked, project.path(), None)
+                .is_err()
+        );
+        assert!(agent.saved_session.is_none());
+        assert!(agent.last_session_snapshot.is_empty());
+        agent
+            .save_session_to(root.path(), project.path(), None)
+            .unwrap();
+        assert!(agent.saved_session.is_some());
     }
 
     #[test]

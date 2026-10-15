@@ -54,6 +54,10 @@ pub enum AgentBackendEvent {
     MessageChunk {
         content: String,
     },
+    /// Visible reasoning supplied by the external agent.
+    ReasoningChunk {
+        content: String,
+    },
     /// An external ACP agent asked the frontend to choose a permission option.
     /// The frontend answers through the backend with the matching
     /// `request_id`; the turn stays parked until it does.
@@ -74,6 +78,7 @@ pub enum AgentBackendEvent {
     },
     /// Progress from a tool owned and executed by the external ACP agent.
     ExternalToolActivity {
+        tool_call_id: Option<String>,
         title: String,
         status: Option<String>,
     },

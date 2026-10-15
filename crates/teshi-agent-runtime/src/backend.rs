@@ -280,6 +280,22 @@ impl AgentBackendRuntime {
         }
     }
 
+    /// Reasoning streamed by a native provider before response completion.
+    pub fn partial_reasoning(&self) -> &str {
+        match self {
+            Self::Native(backend) => &backend.runtime.partial_reasoning,
+            Self::Acp(_) => "",
+        }
+    }
+
+    /// Move streamed reasoning into a retained interrupted response.
+    pub fn take_partial_reasoning(&mut self) -> String {
+        match self {
+            Self::Native(backend) => std::mem::take(&mut backend.runtime.partial_reasoning),
+            Self::Acp(_) => String::new(),
+        }
+    }
+
     pub fn partial_response_mut(&mut self) -> &mut String {
         match self {
             Self::Native(backend) => &mut backend.runtime.partial_response,
@@ -291,6 +307,7 @@ impl AgentBackendRuntime {
 impl From<NativeRuntimeEvent> for AgentBackendEvent {
     fn from(value: NativeRuntimeEvent) -> Self {
         match value {
+            NativeRuntimeEvent::ReasoningChunk { content } => Self::ReasoningChunk { content },
             NativeRuntimeEvent::MessageChunk { content } => Self::MessageChunk { content },
             NativeRuntimeEvent::Completed {
                 model,

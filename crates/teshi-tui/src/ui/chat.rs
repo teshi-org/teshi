@@ -311,7 +311,27 @@ fn build_chat_lines(
         }
     }
 
-    for msg in agent.messages() {
+    let mut messages = agent.messages().iter().peekable();
+    while let Some(msg) = messages.next() {
+        if msg.source.as_deref() == Some("acp_activity") {
+            let mut group = vec![msg];
+            while let Some(activity) =
+                messages.next_if(|m| m.source.as_deref() == Some("acp_activity"))
+            {
+                group.push(activity);
+            }
+            let active = matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval)
+                && !messages.clone().any(|m| matches!(m.role, AiRole::User));
+            push_activity_group(
+                &mut out,
+                &group,
+                width,
+                agent.activity_details_expanded,
+                active,
+            );
+            out.push(Line::default());
+            continue;
+        }
         match msg.role {
             AiRole::Tool => push_tool_result(&mut out, msg, width),
             AiRole::User | AiRole::Assistant => push_message(&mut out, app, msg, width),
@@ -320,6 +340,15 @@ fn build_chat_lines(
     }
 
     push_pending_diff(&mut out, app, width, view_height);
+
+    if !agent.backend.partial_reasoning().is_empty() {
+        push_thinking(
+            &mut out,
+            agent.backend.partial_reasoning(),
+            width,
+            agent.activity_details_expanded,
+        );
+    }
 
     if !agent.partial_response().is_empty() {
         let mut body = vec![role_header(AiRole::Assistant, None)];
@@ -381,6 +410,20 @@ fn push_railed(
 }
 
 fn push_message(out: &mut Vec<Line<'static>>, app: &App, msg: &AiChatMessage, width: usize) {
+    if msg.source.as_deref() == Some("acp_reasoning") {
+        push_thinking(
+            out,
+            msg.reasoning_content.as_deref().unwrap_or_default(),
+            width,
+            app.agent().activity_details_expanded,
+        );
+        return;
+    }
+    if let Some(reasoning) = &msg.reasoning_content
+        && !reasoning.is_empty()
+    {
+        push_thinking(out, reasoning, width, app.agent().activity_details_expanded);
+    }
     let mut body = vec![role_header(msg.role, msg.source.as_deref())];
     if !msg.content.is_empty() {
         body.extend(render_markdown_width(&msg.content, rail_body_width(width)));
@@ -392,6 +435,115 @@ fn push_message(out: &mut Vec<Line<'static>>, app: &App, msg: &AiChatMessage, wi
         AiRole::User => theme::ACCENT,
         _ => theme::SUCCESS,
     };
+    push_railed(out, body, color, width);
+}
+
+/// Fits compact activity labels in terminal cells, including wide Unicode.
+fn activity_summary(text: &str, width: usize) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.width() <= width {
+        return text;
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut result = String::new();
+    let mut cells = 0;
+    for ch in text.chars() {
+        let size = ch.width().unwrap_or(0);
+        if cells + size > width.saturating_sub(1) {
+            break;
+        }
+        result.push(ch);
+        cells += size;
+    }
+    result.push('…');
+    result
+}
+
+fn push_thinking(out: &mut Vec<Line<'static>>, text: &str, width: usize, expanded: bool) {
+    let mut body = vec![Line::styled(
+        if width < 42 && expanded {
+            "▾ Thinking"
+        } else if width < 42 {
+            "▸ Thinking"
+        } else if expanded {
+            "▾ Thinking · /details to collapse"
+        } else {
+            "▸ Thinking · /details to expand"
+        },
+        muted(),
+    )];
+    if expanded {
+        body.extend(
+            text.lines()
+                .map(|line| Line::styled(line.to_owned(), muted())),
+        );
+    } else if !text.is_empty() {
+        body.push(Line::styled(
+            activity_summary(text, rail_body_width(width) as usize),
+            muted(),
+        ));
+    }
+    push_railed(out, body, theme::MUTED, width);
+}
+
+fn push_activity_group(
+    out: &mut Vec<Line<'static>>,
+    group: &[&AiChatMessage],
+    width: usize,
+    expanded: bool,
+    active: bool,
+) {
+    let done = group
+        .iter()
+        .filter(|m| matches!(m.reasoning_content.as_deref(), Some("completed" | "failed")))
+        .count();
+    let failed = group
+        .iter()
+        .any(|m| m.reasoning_content.as_deref() == Some("failed"));
+    let color = if failed {
+        theme::ERROR
+    } else if done == group.len() || !active {
+        theme::MUTED
+    } else {
+        theme::WARNING
+    };
+    let mut body = vec![Line::styled(
+        format!(
+            "{} Tools ({done}/{}){}",
+            if expanded { "▾" } else { "▸" },
+            group.len(),
+            if width < 42 { "" } else { " · /details" }
+        ),
+        fg(color),
+    )];
+    for msg in group {
+        let (icon, status, tint) = match msg.reasoning_content.as_deref() {
+            Some("completed") => ("✓", "Done", theme::SUCCESS),
+            Some("failed") => ("✗", "Failed", theme::ERROR),
+            Some("in_progress") if active => (tool_spinner_frame(), "Running", theme::WARNING),
+            _ if !active => ("○", "Unconfirmed", theme::MUTED),
+            _ => ("○", "Pending", theme::MUTED),
+        };
+        let prefix = format!("{icon} {status}  ");
+        let label = activity_summary(
+            &msg.content,
+            (rail_body_width(width) as usize).saturating_sub(prefix.width()),
+        );
+        let show_full_title = expanded && (msg.content.contains('\n') || label != msg.content);
+        body.push(Line::from(vec![
+            Span::styled(prefix, fg(tint)),
+            Span::styled(label, muted()),
+        ]));
+        if show_full_title {
+            body.extend(
+                msg.content
+                    .lines()
+                    .map(|line| Line::styled(format!("    {line}"), muted())),
+            );
+        }
+    }
     push_railed(out, body, color, width);
 }
 
@@ -969,6 +1121,107 @@ mod tests {
             assert_eq!(buffer[(rail_x, y)].symbol(), "▌", "row {y} missing rail");
             assert_eq!(buffer[(rail_x, y)].fg, theme::ACCENT);
         }
+    }
+
+    #[test]
+    fn reasoning_and_acp_tool_status_are_visible_in_chat_history() {
+        let project = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        let feature = project.path().join("sample.feature");
+        std::fs::write(&feature, "Feature: Sample\n").unwrap();
+        let mut app = App::from_file(
+            &feature,
+            crate::config::load_config().unwrap(),
+            store.path().to_path_buf(),
+        )
+        .unwrap();
+        let thought = AiChatMessage {
+            role: AiRole::Assistant,
+            content: "Answer".into(),
+            reasoning_content: Some("Inspecting the project".into()),
+            source: None,
+            tool_calls: None,
+            tool_call_id: None,
+        };
+        let tool = AiChatMessage {
+            role: AiRole::Assistant,
+            content: "Read project".into(),
+            reasoning_content: Some("completed".into()),
+            source: Some("acp_activity".into()),
+            tool_calls: None,
+            tool_call_id: Some("read-1".into()),
+        };
+        app.agents[0].messages_mut().extend([thought, tool]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.agents[0]
+            .backend
+            .attach_model_event_receiver_for_tests(rx);
+        app.agents[0].backend.start().unwrap();
+        tx.send(teshi_engine::llm::LlmEvent::ReasoningChunk {
+            content: "Live reasoning before completion".into(),
+        })
+        .unwrap();
+        app.poll_llm_events();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(72, 24)).unwrap();
+        terminal
+            .draw(|f| render_chat_panel(f, &mut app, f.area(), true, ChatPlacement::Tab))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in [
+            "Thinking",
+            "Inspecting the project",
+            "Answer",
+            "Tools (1/1)",
+            "Done  Read project",
+            "Live reasoning before completion",
+        ] {
+            assert!(screen.contains(expected), "Missing {expected}: {screen}");
+        }
+    }
+
+    #[test]
+    fn compact_activity_keeps_status_and_expands_full_unicode_title() {
+        let title = "Read 项目目录 with a very long command and all its arguments";
+        let tool = AiChatMessage {
+            role: AiRole::Assistant,
+            content: title.into(),
+            reasoning_content: Some("failed".into()),
+            source: Some("acp_activity".into()),
+            tool_calls: None,
+            tool_call_id: Some("read".into()),
+        };
+        let mut compact = Vec::new();
+        push_activity_group(&mut compact, &[&tool], 34, false, false);
+        let compact_text = row_texts(&compact).join("\n");
+        assert!(compact_text.contains("Failed"));
+        assert!(compact_text.contains('…'));
+        assert!(!compact_text.contains("all its arguments"));
+        assert!(compact.iter().all(|line| line.width() <= 34));
+        let mut expanded = Vec::new();
+        push_activity_group(&mut expanded, &[&tool], 100, true, false);
+        assert!(row_texts(&expanded).join("\n").contains(title));
+        let mut thoughts = Vec::new();
+        push_thinking(&mut thoughts, "First line\nSecond line", 72, false);
+        assert_eq!(thoughts.len(), 2);
+        assert!(
+            thoughts
+                .iter()
+                .flat_map(|line| &line.spans)
+                .all(|span| span.style.fg == Some(theme::MUTED))
+        );
+        thoughts.clear();
+        push_thinking(&mut thoughts, "First line\nSecond line", 72, true);
+        assert_eq!(thoughts.len(), 3);
     }
 
     #[test]

@@ -292,6 +292,9 @@ pub fn run() -> Result<()> {
         app.poll_runner_events();
         app.poll_acp_registry();
         app.poll_llm_events();
+        if let Err(error) = app.save_sessions(false) {
+            app.status = format!("Failed to save conversations: {error}");
+        }
         app.poll_git_status();
         app.poll_external_feature_changes();
         app.poll_status_message_expiry();
@@ -379,6 +382,7 @@ pub fn run() -> Result<()> {
         }
     }
 
+    app.save_sessions(true)?;
     Ok(())
 }
 

@@ -191,6 +191,7 @@ pub struct AcpAgentBackend {
     events: Option<mpsc::Receiver<AgentBackendEvent>>,
     worker: Option<thread::JoinHandle<()>>,
     state: AgentBackendStatus,
+    submitted_prompt: bool,
     /// Shared with the ACP client inside the worker; delivers and answers
     /// `session/request_permission` prompts while the turn stays parked.
     permission_host: Option<Arc<ChannelPermissionHost>>,
@@ -216,6 +217,7 @@ impl Default for AcpAgentBackend {
             events: None,
             worker: None,
             state: AgentBackendStatus::Unavailable,
+            submitted_prompt: false,
             permission_host: None,
         }
     }
@@ -224,6 +226,7 @@ impl Default for AcpAgentBackend {
 impl AcpAgentBackend {
     pub fn configure(&mut self, config: AcpBackendConfig) {
         self.stop();
+        self.submitted_prompt = false;
         self.controls = Arc::new(Mutex::new(AcpControls {
             policy: Some(config.permission_policy),
             ..Default::default()
@@ -390,12 +393,31 @@ impl AcpAgentBackend {
         if self.state != AgentBackendStatus::Running {
             anyhow::bail!("ACP backend has no active turn");
         }
-        let prompt = prompt_text(system.as_deref(), messages);
+        let mut prompt = prompt_text(system.as_deref(), messages);
+        // A new ACP process has no remote history. Supply the saved transcript
+        // once, then let that process maintain its own conversation.
+        if !self.submitted_prompt && messages.len() > 1 {
+            let history = messages[..messages.len() - 1]
+                .iter()
+                .map(|message| {
+                    format!(
+                        "{}: {}",
+                        message.role,
+                        message.content.text().unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            prompt =
+                format!("[Restored conversation history]\n{history}\n\n[Current turn]\n{prompt}");
+        }
         self.commands
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("ACP worker is unavailable"))?
             .send(WorkerCommand::Prompt(prompt))
-            .map_err(|_| anyhow::anyhow!("ACP worker exited"))
+            .map_err(|_| anyhow::anyhow!("ACP worker exited"))?;
+        self.submitted_prompt = true;
+        Ok(())
     }
 
     pub fn cancel(&mut self) {
@@ -427,6 +449,54 @@ impl AcpAgentBackend {
                     AgentBackendEvent::MessageChunk { content } => {
                         self.partial_response.push_str(content)
                     }
+                    AgentBackendEvent::ReasoningChunk { content } => {
+                        if let Some(last) = self.messages.last_mut()
+                            && last.source.as_deref() == Some("acp_reasoning")
+                        {
+                            last.reasoning_content
+                                .get_or_insert_default()
+                                .push_str(content);
+                        } else {
+                            self.messages.push(AiChatMessage {
+                                role: AiRole::Assistant,
+                                content: String::new(),
+                                reasoning_content: Some(content.clone()),
+                                tool_calls: None,
+                                tool_call_id: None,
+                                source: Some("acp_reasoning".into()),
+                            });
+                        }
+                    }
+                    AgentBackendEvent::ExternalToolActivity {
+                        tool_call_id,
+                        title,
+                        status,
+                    } => {
+                        let existing = tool_call_id.as_ref().and_then(|id| {
+                            self.messages.iter_mut().rev().find(|m| {
+                                m.source.as_deref() == Some("acp_activity")
+                                    && m.tool_call_id.as_ref() == Some(id)
+                            })
+                        });
+                        if let Some(message) = existing {
+                            // ACP updates may omit the original title.
+                            if title != "ACP agent tool" {
+                                message.content = title.clone();
+                            }
+                            if let Some(status) = status {
+                                message.reasoning_content = Some(status.clone());
+                            }
+                        } else {
+                            self.messages.push(AiChatMessage {
+                                role: AiRole::Assistant,
+                                content: title.clone(),
+                                reasoning_content: status.clone(),
+                                tool_calls: None,
+                                tool_call_id: tool_call_id.clone(),
+                                source: Some("acp_activity".into()),
+                            });
+                        }
+                    }
                     AgentBackendEvent::Completed { .. } => {
                         let content = std::mem::take(&mut self.partial_response);
                         if !content.is_empty() {
@@ -442,7 +512,6 @@ impl AcpAgentBackend {
                         self.state = AgentBackendStatus::Completed;
                     }
                     AgentBackendEvent::Failed(_) => {
-                        self.partial_response.clear();
                         self.state = AgentBackendStatus::Failed;
                     }
                     _ => {}
@@ -730,7 +799,33 @@ fn forward_update(update: AcpEvent, output: &mpsc::Sender<AgentBackendEvent>) ->
                 .get("status")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string);
-            Some(AgentBackendEvent::ExternalToolActivity { title, status })
+            let tool_call_id = update
+                .get("toolCallId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            Some(AgentBackendEvent::ExternalToolActivity {
+                tool_call_id,
+                title,
+                status,
+            })
+        }
+        AcpEvent::SessionUpdate(value)
+            if value
+                .get("update")
+                .unwrap_or(&value)
+                .get("sessionUpdate")
+                .and_then(serde_json::Value::as_str)
+                == Some("agent_thought_chunk") =>
+        {
+            value
+                .get("update")
+                .unwrap_or(&value)
+                .get("content")
+                .and_then(|v| v.get("text"))
+                .and_then(serde_json::Value::as_str)
+                .map(|content| AgentBackendEvent::ReasoningChunk {
+                    content: content.into(),
+                })
         }
         AcpEvent::Error(error) => Some(AgentBackendEvent::Failed(format!(
             "ACP protocol error: {error}"

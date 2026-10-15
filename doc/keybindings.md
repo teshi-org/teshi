@@ -96,6 +96,27 @@ return, and Escape to close. `a` opens agent selection and `p` opens Teshi
 approvals. Agent modes and Teshi approvals are separate controls. Busy turns
 and pending settings changes prevent conflicting mutations.
 
+## AI conversation history
+
+The AI chat streams `reasoning_content` supplied by compatible native providers
+and thoughts supplied by ACP agents. It also shows native tool
+requests and results, and retained ACP tool progress. Tool updates with the same
+ACP call ID update their existing entry, including updates that omit the title.
+Consecutive ACP tools share a progress group. Compact rows keep their status
+visible and shorten long titles to the available terminal width. `/details`
+toggles full thinking text and ACP tool titles for the current conversation.
+
+Conversations are checkpointed every second while the TUI runs, including partial
+replies, and saved before starting a new conversation, closing an agent, loading
+another session, or exiting normally. Each conversation keeps one stable file in
+the user configuration directory under `teshi/sessions`. `/sessions` lists the
+current project's conversations and legacy sessions; `/resume` loads the most
+recently updated one. Existing session files remain readable.
+
+Restoring an ACP conversation retains its installed agent selection. A new ACP
+process receives the saved text history on its first prompt; this does not restore
+the previous external process, its tool state, or transient session settings.
+
 ## Structural editing
 
 | Key | Action |

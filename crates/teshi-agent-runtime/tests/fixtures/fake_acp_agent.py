@@ -7,6 +7,7 @@ from pathlib import Path
 mode = sys.argv[1]
 model = "a"
 fast = False
+prompt_count = 0
 
 
 def config_options():
@@ -64,6 +65,14 @@ for line in sys.stdin:
             fast = params["value"]
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"configOptions": config_options()}})
     elif method == "session/prompt":
+        prompt_count += 1
+        if mode == "restored":
+            prompt = message["params"]["prompt"][0]["text"]
+            if prompt_count == 1:
+                assert "previous question" in prompt and "previous answer" in prompt
+                assert "current question" in prompt
+            else:
+                assert "[Restored conversation history]" not in prompt
         if mode == "crash":
             sys.exit(13)
         if mode == "prompt_failed":
@@ -97,6 +106,14 @@ for line in sys.stdin:
                 sys.exit(7)
             send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
         else:
+            if mode == "activity":
+                for update in [
+                    {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "Inspecting "}},
+                    {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "the project"}},
+                    {"sessionUpdate": "tool_call", "toolCallId": "read-1", "title": "Read project", "status": "in_progress"},
+                    {"sessionUpdate": "tool_call_update", "toolCallId": "read-1", "status": "completed"},
+                ]:
+                    send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "fake-session", "update": update}})
             send({"jsonrpc": "2.0", "method": "session/update", "params": {
                 "sessionId": "fake-session", "update": {
                     "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hello"}}}})

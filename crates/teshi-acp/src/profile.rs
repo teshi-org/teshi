@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AcpAgentCommand, resolve_executable};
 
+const ACP_STORE_DIR_ENV: &str = "TESHI_ACP_STORE_DIR";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AcpAgentProfile {
     pub id: String,
@@ -47,6 +49,12 @@ impl AcpAgentProfile {
 }
 
 pub fn store_dir() -> Result<PathBuf> {
+    if let Ok(override_dir) = std::env::var(ACP_STORE_DIR_ENV) {
+        let trimmed = override_dir.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
     Ok(dirs::data_local_dir()
         .context("user data directory is unavailable")?
         .join("teshi")
@@ -283,5 +291,36 @@ mod tests {
         assert!(error.contains("custom"));
         assert!(error.contains("API_KEY"));
         assert!(error.contains(&name));
+    }
+
+    #[test]
+    fn store_dir_uses_non_empty_environment_override() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os(super::ACP_STORE_DIR_ENV);
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(super::ACP_STORE_DIR_ENV, temp.path()) };
+
+        assert_eq!(super::store_dir().unwrap(), temp.path());
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var(super::ACP_STORE_DIR_ENV, value) },
+            None => unsafe { std::env::remove_var(super::ACP_STORE_DIR_ENV) },
+        }
+    }
+
+    #[test]
+    fn store_dir_ignores_empty_environment_override() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os(super::ACP_STORE_DIR_ENV);
+        unsafe { std::env::set_var(super::ACP_STORE_DIR_ENV, "   ") };
+
+        assert_ne!(super::store_dir().unwrap(), PathBuf::from("   "));
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var(super::ACP_STORE_DIR_ENV, value) },
+            None => unsafe { std::env::remove_var(super::ACP_STORE_DIR_ENV) },
+        }
     }
 }

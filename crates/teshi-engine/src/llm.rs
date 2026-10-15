@@ -162,7 +162,7 @@ pub async fn call_llm_with_tool_config(
 
         for event in events {
             match event {
-                LlmEvent::Chunk { .. } => {}
+                LlmEvent::Chunk { .. } | LlmEvent::ReasoningChunk { .. } => {}
                 LlmEvent::ToolCallRequest { tool_calls, .. } => {
                     let tool_call = tool_calls
                         .into_iter()
@@ -288,6 +288,8 @@ pub enum LlmRequest {
 /// An event emitted by the LLM background thread.
 #[derive(Debug, Clone)]
 pub enum LlmEvent {
+    /// A streaming reasoning fragment explicitly returned by the provider.
+    ReasoningChunk { content: String },
     /// A streaming text chunk.
     Chunk { content: String },
     /// The completion finished successfully with a text response.
@@ -1069,6 +1071,9 @@ async fn read_chat_completions_sse(
                     // DeepSeek V4 reasoning_content — accumulate and preserve
                     if let Some(rc) = delta["reasoning_content"].as_str() {
                         full_reasoning.push_str(rc);
+                        let _ = evt_tx.send(LlmEvent::ReasoningChunk {
+                            content: rc.to_string(),
+                        });
                     }
 
                     // Tool calls
@@ -1550,6 +1555,16 @@ mod tests {
                 ..
             } => {
                 assert_eq!(reasoning_content.as_deref(), Some("ab"));
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter_map(|event| match event {
+                            LlmEvent::ReasoningChunk { content } => Some(content.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>(),
+                    "ab"
+                );
                 assert_eq!(*input_tokens, Some(3));
                 assert_eq!(*output_tokens, Some(4));
                 assert_eq!(finish_reason.as_deref(), Some("stop"));

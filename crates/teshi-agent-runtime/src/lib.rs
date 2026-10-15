@@ -16,6 +16,10 @@ pub use acp_backend::AcpControls;
 pub use acp_backend::ChannelPermissionHost;
 
 /// Conversation record shared with frontends and persisted sessions.
+/// ACP display records use `acp_reasoning` or `acp_activity` as their source.
+/// Activity records store the title in `content`, the latest status in
+/// `reasoning_content`, and the external call ID in `tool_call_id`; frontends
+/// exclude these display records from model requests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiChatMessage {
     pub role: AiRole,
@@ -57,6 +61,10 @@ pub enum NativeContinuation {
 /// Progress emitted to a frontend after the native runtime consumes a model event.
 #[derive(Debug)]
 pub enum NativeRuntimeEvent {
+    /// Reasoning explicitly returned by the provider during a turn.
+    ReasoningChunk {
+        content: String,
+    },
     MessageChunk {
         content: String,
     },
@@ -88,6 +96,8 @@ pub struct NativeToolExecution {
 pub struct NativeAgentRuntime {
     pub messages: Vec<AiChatMessage>,
     pub partial_response: String,
+    /// Reasoning accumulated during the current streaming response.
+    pub partial_reasoning: String,
     pub llm_handle: Option<LlmHandle>,
     pub llm_rx: Option<Receiver<LlmEvent>>,
     model_config: Option<LlmConfig>,
@@ -110,6 +120,7 @@ impl NativeAgentRuntime {
         Self {
             messages: Vec::new(),
             partial_response: String::new(),
+            partial_reasoning: String::new(),
             llm_handle: None,
             llm_rx: None,
             model_config: None,
@@ -133,6 +144,7 @@ impl NativeAgentRuntime {
         {
             self.state = NativeTurnState::Cancelled;
             self.partial_response.clear();
+            self.partial_reasoning.clear();
         }
         if let Some(handle) = self.llm_handle.take() {
             handle.cancel();
@@ -190,6 +202,10 @@ impl NativeAgentRuntime {
             return NativeRuntimeEvent::Ignored;
         }
         match event {
+            LlmEvent::ReasoningChunk { content } => {
+                self.partial_reasoning.push_str(&content);
+                NativeRuntimeEvent::ReasoningChunk { content }
+            }
             LlmEvent::Chunk { content } => {
                 self.append_chunk(&content);
                 NativeRuntimeEvent::MessageChunk { content }
@@ -243,6 +259,7 @@ impl NativeAgentRuntime {
         self.loops = 0;
         self.final_request_sent = false;
         self.partial_response.clear();
+        self.partial_reasoning.clear();
         self.state = NativeTurnState::WaitingForModel;
     }
 
@@ -256,6 +273,9 @@ impl NativeAgentRuntime {
         if !self.accepts_model_event() {
             return;
         }
+        let streamed_reasoning = std::mem::take(&mut self.partial_reasoning);
+        let reasoning_content = reasoning_content
+            .or_else(|| (!streamed_reasoning.is_empty()).then_some(streamed_reasoning));
         let content = if self.partial_response.is_empty() {
             full_text
         } else {
@@ -281,6 +301,9 @@ impl NativeAgentRuntime {
             self.state = NativeTurnState::Failed;
             return None;
         }
+        let streamed_reasoning = std::mem::take(&mut self.partial_reasoning);
+        let reasoning_content = reasoning_content
+            .or_else(|| (!streamed_reasoning.is_empty()).then_some(streamed_reasoning));
         self.messages.push(AiChatMessage {
             role: AiRole::Assistant,
             content: std::mem::take(&mut self.partial_response),
@@ -387,6 +410,7 @@ impl NativeAgentRuntime {
         self.llm_handle = None;
         self.llm_rx = None;
         self.partial_response.clear();
+        self.partial_reasoning.clear();
         self.state = NativeTurnState::Cancelled;
     }
 
@@ -452,6 +476,31 @@ pub fn max_agent_iterations() -> u32 {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn streamed_reasoning_is_visible_then_retained_once_on_completion() {
+        let mut runtime = NativeAgentRuntime::new(2);
+        runtime.start();
+        assert!(matches!(
+            runtime.consume_model_event(LlmEvent::ReasoningChunk {
+                content: "Inspect ".into()
+            }),
+            NativeRuntimeEvent::ReasoningChunk { .. }
+        ));
+        runtime.consume_model_event(LlmEvent::ReasoningChunk {
+            content: "project".into(),
+        });
+        assert_eq!(runtime.partial_reasoning, "Inspect project");
+        runtime.finish_text("Answer".into(), Some("Inspect project".into()));
+        assert!(runtime.partial_reasoning.is_empty());
+        assert_eq!(runtime.messages.len(), 1);
+        assert_eq!(
+            runtime.messages[0].reasoning_content.as_deref(),
+            Some("Inspect project")
+        );
+        runtime.start();
+        assert!(runtime.partial_reasoning.is_empty());
+    }
 
     #[test]
     fn multi_loop_limit_and_final_request() {

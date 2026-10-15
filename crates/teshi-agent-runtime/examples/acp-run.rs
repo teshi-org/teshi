@@ -151,7 +151,10 @@ fn pump_turn(backend: &mut AgentBackendRuntime, started: Instant, deadline: Inst
                         use std::io::Write;
                         let _ = std::io::stdout().flush();
                     }
-                    AgentBackendEvent::ExternalToolActivity { title, status } => {
+                    AgentBackendEvent::ReasoningChunk { content } => {
+                        eprint!("{content}");
+                    }
+                    AgentBackendEvent::ExternalToolActivity { title, status, .. } => {
                         println!("  [{ms}ms] tool  : {title} ({status:?})");
                     }
                     AgentBackendEvent::PermissionRequest {
