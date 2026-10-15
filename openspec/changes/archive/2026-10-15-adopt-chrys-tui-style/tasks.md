@@ -46,7 +46,7 @@
 
 - [x] 6.1 Confirm `crates/teshi-tui-runner/tests/teshi_self.rs` and every `TestBackend` text test pass. User-approved exception: replace the obsolete selected-agent idle marker `▸ ○` in the deterministic wrapped-conversation tests with the existing sidebar text `│ ○ Conversation`; preserve all per-turn reply assertions and application text.
 - [x] 6.2 Update `doc/tui-style-guide.md` with any decisions made during the phases (footer strip width, MindMap mapping) and screenshots or ASCII samples of each tab.
-- [ ] 6.3 Run `openspec validate adopt-chrys-tui-style` and archive the change once all phases are merged.
+- [x] 6.3 Run `openspec validate adopt-chrys-tui-style` and archive the change once all phases are merged.
 
 ## Implementation evidence (2026-10-14)
 
@@ -208,3 +208,15 @@
 - Implementation close-out is 31/32 complete. OpenSpec validation passes;
   archive is pending the user's required main-spec synchronization choice
   (11 new requirements; no existing main specification).
+
+### Archive close-out (2026-10-15)
+
+- The user approved main-spec synchronization before archive. Created
+  `openspec/specs/tui-visual-style/spec.md` with all 11 requirements and 16
+  scenarios; requirement bodies match the delta exactly.
+- Strict validation passed for the change and the new main specification.
+  Archived the complete change, including `.openspec.yaml`, to
+  `openspec/changes/archive/2026-10-15-adopt-chrys-tui-style`.
+- All 32 implementation and close-out tasks are complete. No application
+  code, concurrent custom ACP changes or installed executable was modified
+  during this documentation-only close-out.
