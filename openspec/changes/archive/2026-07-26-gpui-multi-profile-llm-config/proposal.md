@@ -1,6 +1,6 @@
 ## Why
 
-The GPUI settings LLM form is a single flat config (base URL, model, API key) that cannot express real provider choice or chrys-style model profiles. Users need first-class OpenAI, Anthropic, and DeepSeek (OpenAI-compatible) profiles with API style, streaming, and HTTP extras, plus engine transport that actually routes those choices—without waiting for a full TUI/GPUI store unification.
+The GPUI settings LLM form is a single flat config (base URL, model, API key) that cannot express real provider choice or multiple named model profiles. Users need first-class OpenAI, Anthropic, and DeepSeek (OpenAI-compatible) profiles with API style, streaming, and HTTP extras, plus engine transport that actually routes those choices—without waiting for a full TUI/GPUI store unification.
 
 ## What Changes
 
@@ -10,7 +10,7 @@ The GPUI settings LLM form is a single flat config (base URL, model, API key) th
 - Extend profile fields beyond the spike: provider, API style (OpenAI only: chat completions vs responses), model, max context / max output tokens, base URL, API key, streaming flag, HTTP extra headers, chat options.
 - Extend `teshi-engine` LLM transport to honor provider + API style (chat completions, OpenAI Responses, Anthropic Messages), streaming on/off, and HTTP extras, while keeping a unified `LlmEvent` surface.
 - Extend daemon HTTP APIs for profile CRUD + activate; keep `GET/PUT /api/v1/llm/config` as a flat projection of the **active** profile for compatibility.
-- **Out of scope**: GLM; Vision / skip-TLS / bypass-proxy / HTTP timeout UI; migrating or rewriting TUI `~/.config/teshi/models/`; Python chrys runtime.
+- **Out of scope**: GLM; Vision / skip-TLS / bypass-proxy / HTTP timeout UI; migrating or rewriting TUI `~/.config/teshi/models/`; external Python runtimes.
 
 ## Capabilities
 

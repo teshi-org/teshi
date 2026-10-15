@@ -1,6 +1,6 @@
 ## Context
 
-Desktop/daemon already share `teshi-engine` JSON model profiles under `%APPDATA%/teshi-desktop/model-profiles/`. TUI keeps a parallel stack: `dirs::config_dir()/teshi/config.toml` providers, `auth.json`, and `models/*.toml`. Chrys unifies all surfaces on one `ModelProfile` store; Teshi should match that shape.
+Desktop/daemon already share `teshi-engine` JSON model profiles under `%APPDATA%/teshi-desktop/model-profiles/`. TUI keeps a parallel stack: `dirs::config_dir()/teshi/config.toml` providers, `auth.json`, and `models/*.toml`. All Teshi surfaces should share one `ModelProfile` store.
 
 ## Goals / Non-Goals
 
@@ -45,4 +45,4 @@ Desktop/daemon already share `teshi-engine` JSON model profiles under `%APPDATA%
 
 ## Open Questions
 
-None — Chrys-aligned decisions locked by product direction.
+None — shared-profile decisions locked by product direction.

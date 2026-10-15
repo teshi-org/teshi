@@ -2,7 +2,7 @@
 
 GPUI settings currently host a single-form LLM config (`base_url`, `model`, `api_key`) persisted as `llm-config.json` under app data, with daemon `GET/PUT /api/v1/llm/config`. The engine speaks only OpenAI-compatible streaming `/chat/completions` (with DeepSeek `reasoning_content` support). The TUI already has a separate multi-profile store under `~/.config/teshi/models/`, but that store is not shared with GPUI and lacks Anthropic / API style / HTTP extras.
 
-Product reference for UX and field shape: Chrys model configuration (providers `openai` / `anthropic` / `deepseek-openai`, API style for OpenAI, streaming, HTTP extra headers and chat options). Implementation stays in Teshi GPUI + `teshi-engine`, not Chrys/Python.
+The model configuration UX supports providers `openai` / `anthropic` / `deepseek-openai`, API style for OpenAI, streaming, HTTP extra headers and chat options. Implementation stays in Teshi GPUI + `teshi-engine`.
 
 ## Goals / Non-Goals
 
@@ -32,7 +32,7 @@ Product reference for UX and field shape: Chrys model configuration (providers `
 
 **Alternatives considered:** Reuse `~/.config/teshi/models/` — rejected for this change to avoid breaking TUI mid-flight; schema lives in `teshi-engine` so a later unification is possible.
 
-### 2. Provider IDs match Chrys naming
+### 2. Provider IDs identify the transport contract
 
 **Choice:** `openai`, `anthropic`, `deepseek-openai` with defaults:
 
@@ -42,13 +42,13 @@ Product reference for UX and field shape: Chrys model configuration (providers `
 | `anthropic` | `https://api.anthropic.com` |
 | `deepseek-openai` | `https://api.deepseek.com` |
 
-**Why:** Aligns with the referenced Chrys UX and client factory naming; DeepSeek stays explicitly OpenAI-compatible.
+**Why:** Keeps provider IDs consistent with client factory naming; DeepSeek stays explicitly OpenAI-compatible.
 
 ### 3. Profile schema (engine-owned)
 
 **Choice:** `ModelProfile` fields: `id`, `name`, `provider`, `api_style`, `model_id`, `max_context_tokens`, `max_output_tokens`, `base_url`, `api_key`, `stream` (default `true`), `http_headers` (object/map), `chat_options` (object/map).
 
-**Why:** Covers Chrys Model Options + Extra Options needed for transport; omits Connection Options for this change. Empty `base_url` resolves via provider default at effective-config time. `api_style` is meaningful only for `openai`; other providers force chat-completions semantics (Anthropic uses Messages transport regardless of stored style).
+**Why:** Covers model and extra options needed for transport; omits connection options for this change. Empty `base_url` resolves via provider default at effective-config time. `api_style` is meaningful only for `openai`; other providers force chat-completions semantics (Anthropic uses Messages transport regardless of stored style).
 
 ### 4. Transport router in `teshi-engine`
 
@@ -66,7 +66,7 @@ HTTP extras: merge profile headers into the request; shallow-merge `chat_options
 
 ### 5. GPUI UI shape
 
-**Choice:** Rebuild settings LLM section as list + form (left profiles, right editor), chrys-inspired field grouping, GPUI-native controls (no Textual). Select-like fields cycle with Space when focused. Headers/chat options: editable key=value rows (JSON textarea acceptable fallback if row editor is too heavy).
+**Choice:** Rebuild settings LLM section as list + form (left profiles, right editor), field grouping by provider, model and transport options, GPUI-native controls (no Textual). Select-like fields cycle with Space when focused. Headers/chat options: editable key=value rows (JSON textarea acceptable fallback if row editor is too heavy).
 
 **Why:** Fits existing settings surface and keyboard model (`LlmConfigView` key context).
 

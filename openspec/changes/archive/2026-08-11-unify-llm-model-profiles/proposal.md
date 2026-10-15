@@ -1,6 +1,6 @@
 ## Why
 
-TUI/CLI and Desktop/daemon keep separate LLM provider stores (TOML + `auth.json` vs app-data JSON model profiles). Users must configure the same credentials twice, provider ids diverge (`deepseek` vs `deepseek-openai`), and TUI hardcodes OpenAI chat-completions even when profiles exist. Unifying on the engine `ModelProfile` store (Chrys-style) gives one source of truth across all surfaces.
+TUI/CLI and Desktop/daemon keep separate LLM provider stores (TOML + `auth.json` vs app-data JSON model profiles). Users must configure the same credentials twice, provider ids diverge (`deepseek` vs `deepseek-openai`), and TUI hardcodes OpenAI chat-completions even when profiles exist. Unifying on the engine `ModelProfile` store gives one source of truth across all surfaces.
 
 ## What Changes
 

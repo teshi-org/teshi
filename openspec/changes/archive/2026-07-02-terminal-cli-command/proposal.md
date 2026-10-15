@@ -1,6 +1,6 @@
 ## Why
 
-teshi currently has an embedded terminal panel (Tauri/Web xterm.js), but lacks a programmatic interface for AI agents or CLI tools to control an interactive terminal. The existing `teshi browser` and `teshi winapp` provide automated CLI for browsers and Windows applications, but terminal automation is still a gap. The `teshi terminal` subcommand fills this gap, enabling agents (Chrys, Claude Code, etc.) to read/write terminals in real-time via CLI commands, obtain structured screen grids, and execute commands with result waiting.
+teshi currently has an embedded terminal panel (Tauri/Web xterm.js), but lacks a programmatic interface for AI agents or CLI tools to control an interactive terminal. The existing `teshi browser` and `teshi winapp` provide automated CLI for browsers and Windows applications, but terminal automation is still a gap. The `teshi terminal` subcommand fills this gap, enabling AI agents to read/write terminals in real-time via CLI commands, obtain structured screen grids, and execute commands with result waiting.
 
 ## What Changes
 
