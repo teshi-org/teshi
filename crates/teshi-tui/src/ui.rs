@@ -377,10 +377,23 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                     Line::from(spans).style(footer.style)
                 }
             } else {
-                crate::authoring_tab::requirements_footer_line(
+                let footer = crate::authoring_tab::requirements_footer_line(
                     &app.requirements_root,
                     &app.authoring_ui.iteration_filter,
-                )
+                );
+                let delete_label_width = " Delete [d/Delete] ".width() as u16;
+                if delete_label_width > 0 && chunks[3].width > 0 {
+                    app.clickable_regions
+                        .push(ClickableRegion::RequirementsDelete {
+                            rect: Rect::new(
+                                chunks[3].x,
+                                chunks[3].y,
+                                delete_label_width.min(chunks[3].width),
+                                1,
+                            ),
+                        });
+                }
+                footer
             },
             chunks[3],
         );
@@ -4128,6 +4141,28 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 panel_area,
             );
         }
+        RequirementsOverlay::DeleteConfirmation { document_id, title } => {
+            let panel_w = area.width.min(72);
+            let panel_h = 7.min(area.height);
+            let panel_area = Rect::new(
+                (area.width.saturating_sub(panel_w)) / 2,
+                (area.height.saturating_sub(panel_h)) / 2,
+                panel_w,
+                panel_h,
+            );
+            frame.render_widget(Clear, panel_area);
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::raw(format!("Delete requirement '{title}' ({document_id})?")),
+                    Line::raw("This removes it from the global requirement library."),
+                    Line::raw("Linked test points stay and become missing-source links."),
+                    theme::action_line("[Enter] Confirm   [Esc] Cancel"),
+                ])
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .block(theme::popup_block(" Delete requirement ")),
+                panel_area,
+            );
+        }
     }
 
     if let Some(prompt) = &app.generation_scope_prompt {
@@ -4729,7 +4764,8 @@ Feature: Rule only
     #[test]
     fn requirements_linked_scrollbars_follow_selection_and_reveal_long_titles() {
         let mut ui = crate::authoring_tab::AuthoringUiState::empty();
-        ui.create_document("req.md", "A very long requirement title");
+        ui.create_document("req.md", "A very long requirement title")
+            .unwrap();
         ui.artifacts.as_mut().unwrap().index.store_id =
             Some(teshi_core::authoring::RequirementStoreId::parse("reqstore-test").unwrap());
         ui.selection_anchor = Some((0, 0));

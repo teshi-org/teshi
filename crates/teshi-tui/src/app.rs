@@ -892,6 +892,10 @@ pub enum ClickableRegion {
     /// Preview panel area — reserved for click-to-focus.
     #[allow(dead_code)]
     PreviewPanel,
+    /// Delete control in the Requirements tree footer.
+    RequirementsDelete {
+        rect: ratatui::layout::Rect,
+    },
     /// Quit confirmation "Yes" button.
     QuitConfirmYes {
         row_y: u16,
@@ -2528,6 +2532,21 @@ impl App {
     }
 
     fn confirm_requirements_overlay(&mut self) -> Result<()> {
+        if let crate::authoring_tab::RequirementsOverlay::DeleteConfirmation {
+            document_id, ..
+        } = self.authoring_ui.overlay.clone()
+        {
+            match self
+                .authoring_ui
+                .delete_current_document(&self.project.root_dir)
+            {
+                Ok(()) => self.status = format!("Deleted global requirement {document_id}"),
+                Err(error) => {
+                    self.status = format!("Could not delete requirement: {error}");
+                }
+            }
+            return Ok(());
+        }
         if self.generation_scope_prompt.is_some()
             && let crate::authoring_tab::RequirementsOverlay::FilterPicker { selection } =
                 self.authoring_ui.overlay.clone()
@@ -6275,8 +6294,29 @@ impl App {
                     ) {
                         return Ok(());
                     }
-                    let id = self.authoring_ui.create_default_document();
-                    self.status = format!("Created requirement document {id}.md");
+                    match self.authoring_ui.create_default_document() {
+                        Ok(id) => {
+                            self.status = format!("Created requirement document {id}.md");
+                        }
+                        Err(error) => {
+                            self.status = format!("Could not create requirement: {error}");
+                        }
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
+            Action::ReqDeleteDocument => {
+                if self.active_tab == MainTab::Requirements {
+                    if self.authoring_ui.guard_unsaved(
+                        crate::authoring_tab::RequirementsPendingAction::Action(
+                            Action::ReqDeleteDocument,
+                        ),
+                    ) {
+                        return Ok(());
+                    }
+                    if let Err(error) = self.authoring_ui.open_delete_confirmation() {
+                        self.status = error;
+                    }
                     self.quit_pending_confirm = false;
                 }
             }
@@ -7997,6 +8037,11 @@ impl App {
                         return Some(region);
                     }
                 }
+                ClickableRegion::RequirementsDelete { rect } => {
+                    if rect.contains(*pos) {
+                        return Some(region);
+                    }
+                }
                 ClickableRegion::QuitConfirmYes {
                     row_y,
                     col_x,
@@ -8111,6 +8156,9 @@ impl App {
                 }
             }
             ClickableRegion::EditorPanel | ClickableRegion::PreviewPanel => {}
+            ClickableRegion::RequirementsDelete { .. } => {
+                self.handle_action(Action::ReqDeleteDocument)?;
+            }
             ClickableRegion::QuitConfirmYes { .. } => {
                 self.should_quit = true;
             }
@@ -9160,7 +9208,7 @@ mod tests {
         )
         .unwrap();
         app.active_tab = MainTab::Requirements;
-        app.authoring_ui.create_document("req.md", "Req");
+        app.authoring_ui.create_document("req.md", "Req").unwrap();
         app.authoring_ui
             .save_current_document(project.path())
             .unwrap();
@@ -11184,7 +11232,7 @@ mod tests {
         let store = tempdir().unwrap();
         teshi_engine::initialize_requirement_store(store.path()).unwrap();
         let mut writer = AuthoringUiState::load_from_project(project.path(), store.path());
-        writer.create_document("login.md", "Login");
+        writer.create_document("login.md", "Login").unwrap();
         writer.buffer = EditorBuffer::from_string("# Login\n\nMust authenticate.\n".into());
         writer.save_current_document(project.path()).unwrap();
 
@@ -11243,6 +11291,72 @@ mod tests {
         );
         app.handle_action(Action::ReqExitInsert).unwrap();
         assert_eq!(app.authoring_ui.editor_mode, RequirementsEditorMode::Browse);
+    }
+
+    #[test]
+    fn requirements_delete_cancel_preserves_document_and_dirty_guard() {
+        let (mut app, _project, store) = requirements_test_app();
+        let original = app.authoring_ui.buffer.as_string();
+        app.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Tree;
+        app.handle_action(Action::ReqDeleteDocument).unwrap();
+        assert!(matches!(
+            app.authoring_ui.overlay,
+            crate::authoring_tab::RequirementsOverlay::DeleteConfirmation { .. }
+        ));
+        app.handle_action(Action::OverlayCancel).unwrap();
+        assert_eq!(app.authoring_ui.buffer.as_string(), original);
+        assert!(teshi_engine::read_requirement_document(store.path(), "doc-1").is_ok());
+
+        app.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Editor;
+        app.authoring_ui.enter_insert_mode();
+        app.authoring_ui.insert_char('x');
+        app.handle_action(Action::ReqDeleteDocument).unwrap();
+        assert!(matches!(
+            app.authoring_ui.overlay,
+            crate::authoring_tab::RequirementsOverlay::Unsaved { .. }
+        ));
+        app.handle_action(Action::OverlayCancel).unwrap();
+        assert!(app.authoring_ui.buffer_dirty);
+        assert_ne!(app.authoring_ui.buffer.as_string(), original);
+        assert!(app.authoring_ui.buffer.as_string().contains('x'));
+        assert!(teshi_engine::read_requirement_document(store.path(), "doc-1").is_ok());
+    }
+
+    #[test]
+    fn requirements_delete_confirmation_removes_document_and_click_control_is_registered() {
+        let (mut app, project, store) = requirements_test_app();
+        app.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Tree;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let delete_rect = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::RequirementsDelete { rect } => Some(*rect),
+                _ => None,
+            })
+            .expect("requirements delete control");
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            delete_rect.x,
+            delete_rect.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(matches!(
+            app.authoring_ui.overlay,
+            crate::authoring_tab::RequirementsOverlay::DeleteConfirmation { .. }
+        ));
+        app.handle_action(Action::OverlayConfirm).unwrap();
+        assert!(app.status.contains("Deleted global requirement"));
+        assert!(matches!(
+            teshi_engine::read_requirement_document(store.path(), "doc-1"),
+            Err(teshi_engine::RequirementStoreError::NotFound { .. })
+        ));
+        assert!(app.authoring_ui.selected_document_id.is_none());
+        assert!(project.path().join("testpoints/testpoints.json").exists());
     }
 
     #[test]
@@ -11817,7 +11931,9 @@ mod tests {
         app.handle_action(Action::SelectTab(MainTab::Requirements))
             .expect("select requirements");
         assert_eq!(app.active_tab, MainTab::Requirements);
-        app.authoring_ui.create_document("new-req.md", "New Req");
+        app.authoring_ui
+            .create_document("new-req.md", "New Req")
+            .unwrap();
         assert!(app.authoring_ui.buffer.as_string().contains("New Req"));
         assert!(app.authoring_ui.buffer_dirty);
     }
@@ -12148,7 +12264,7 @@ mod tests {
             store.path().to_path_buf(),
         )
         .expect("app init should work");
-        app.authoring_ui.create_document("req.md", "Req");
+        app.authoring_ui.create_document("req.md", "Req").unwrap();
         app.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Editor;
         app.authoring_ui.selection_anchor = Some((0, 0));
         app.authoring_ui.selection_end = Some((0, 4));

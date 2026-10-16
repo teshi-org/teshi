@@ -11,11 +11,12 @@ use teshi_core::authoring::{
     AuthoringArtifacts, AuthoringDiagnostic, HierarchyPath, RequirementDocumentMeta,
     RequirementGroupMode, RequirementIterationFilter, ResolutionState, ReviewState, TestPoint,
     TextRange, UNASSIGNED_ITERATION_LABEL, create_requirement_link, line_col_range_to_char_range,
-    re_resolve_document_links, requirement_title,
+    mark_document_links_missing, re_resolve_document_links, requirement_title,
 };
 use teshi_engine::{
-    compute_document_revision, initialize_requirement_store, load_authoring_artifacts,
-    save_requirement_markdown, save_test_points,
+    compute_document_revision, delete_requirement_document, initialize_requirement_store,
+    is_requirement_document_id_reserved, load_authoring_artifacts, save_requirement_markdown,
+    save_test_points,
 };
 use tui_tree_widget::{TreeItem, TreeState};
 
@@ -62,6 +63,13 @@ pub enum RequirementsOverlay {
     IterationEdit {
         /// Current input buffer.
         buffer: String,
+    },
+    /// Confirm removal of the selected document from the global library.
+    DeleteConfirmation {
+        /// Stable id being removed.
+        document_id: String,
+        /// Display title shown in the confirmation.
+        title: String,
     },
 }
 
@@ -388,6 +396,8 @@ impl AuthoringUiState {
             && let Some(path) = find_tree_path(&self.tree_items, &format!("{TREE_DOC_PREFIX}{id}"))
         {
             self.select_document_tree_path(path);
+        } else if visible.is_empty() && self.selected_document_id.is_none() {
+            self.tree_state.select(Vec::new());
         }
     }
 
@@ -435,6 +445,109 @@ impl AuthoringUiState {
             .and_then(|m| m.iteration.clone())
             .unwrap_or_default();
         self.overlay = RequirementsOverlay::IterationEdit { buffer: current };
+    }
+
+    /// Opens the explicit global-library deletion confirmation.
+    pub fn open_delete_confirmation(&mut self) -> Result<(), String> {
+        let document_id = self
+            .selected_document_id
+            .clone()
+            .ok_or_else(|| "Select a requirement document to delete".to_string())?;
+        let title = self
+            .current_document_meta()
+            .map(|meta| meta.title.clone())
+            .unwrap_or_else(|| document_id.clone());
+        self.overlay = RequirementsOverlay::DeleteConfirmation { document_id, title };
+        Ok(())
+    }
+
+    /// Removes the selected saved document and moves selection to the next
+    /// visible document, then the previous one, or the empty state.
+    pub fn delete_current_document(&mut self, project_root: &Path) -> Result<(), String> {
+        let document_id = self
+            .selected_document_id
+            .clone()
+            .ok_or_else(|| "Select a requirement document to delete".to_string())?;
+        let index_before = self
+            .artifacts
+            .as_ref()
+            .map(|artifacts| artifacts.index.clone())
+            .ok_or_else(|| "Requirement library is not loaded".to_string())?;
+        let meta = index_before
+            .documents
+            .iter()
+            .find(|doc| doc.id == document_id)
+            .cloned()
+            .ok_or_else(|| format!("Requirement document '{document_id}' is not indexed"))?;
+        let visible = visible_document_ids(&index_before, &self.iteration_filter);
+        let current_position = visible
+            .iter()
+            .position(|id| id == &document_id)
+            .ok_or_else(|| "Selected requirement is hidden by the active filter".to_string())?;
+        let next_document_id = visible.get(current_position + 1).cloned().or_else(|| {
+            current_position
+                .checked_sub(1)
+                .and_then(|i| visible.get(i).cloned())
+        });
+
+        delete_requirement_document(
+            &self.requirements_root,
+            &document_id,
+            Some(meta.revision.as_str()),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let test_points_result = {
+            let artifacts = self
+                .artifacts
+                .as_mut()
+                .ok_or_else(|| "Requirement library is not loaded".to_string())?;
+            artifacts
+                .index
+                .documents
+                .retain(|doc| doc.id != document_id);
+            artifacts.documents.retain(|doc| doc.meta.id != document_id);
+            artifacts
+                .diagnostics
+                .retain(|diagnostic| diagnostic.record_id.as_deref() != Some(&document_id));
+            let before = artifacts.test_points.clone();
+            mark_document_links_missing(&document_id, &mut artifacts.test_points.test_points);
+            if artifacts.test_points != before {
+                Some(
+                    save_test_points(project_root, &artifacts.test_points)
+                        .map_err(|error| error.to_string()),
+                )
+            } else {
+                None
+            }
+        };
+
+        self.overlay = RequirementsOverlay::None;
+        self.buffer_dirty = false;
+        self.draft_document_id = None;
+        self.selection_anchor = None;
+        self.selection_end = None;
+        self.selected_linked_index = 0;
+        self.highlight_test_point_id = None;
+        self.focus = RequirementsFocus::Tree;
+        if let Some(next_id) = next_document_id {
+            self.selected_document_id = Some(next_id.clone());
+            self.select_document_by_id(&next_id);
+        } else {
+            self.selected_document_id = None;
+            self.buffer = EditorBuffer::from_string(String::new());
+            self.editor_mode = RequirementsEditorMode::Browse;
+            self.cursor_row = 0;
+            self.cursor_col = 0;
+            self.desired_col = 0;
+            self.scroll_row = 0;
+        }
+        self.rebuild_tree();
+
+        if let Some(result) = test_points_result {
+            result?;
+        }
+        Ok(())
     }
 
     /// Applies `filter`, or asks to resolve unsaved changes before hiding the document.
@@ -495,6 +608,7 @@ impl AuthoringUiState {
                 self.try_set_iteration_filter(filter)
             }
             RequirementsOverlay::IterationEdit { buffer } => self.save_current_iteration(&buffer),
+            RequirementsOverlay::DeleteConfirmation { .. } => Ok(()),
         }
     }
 
@@ -811,12 +925,12 @@ impl AuthoringUiState {
     }
 
     /// Creates a default document using one available number for its ID, path, and title.
-    pub fn create_default_document(&mut self) -> String {
-        let n = self.next_document_number();
+    pub fn create_default_document(&mut self) -> Result<String> {
+        let n = self.next_document_number()?;
         self.create_document(&format!("doc-{n}.md"), &format!("Document {n}"))
     }
 
-    fn next_document_number(&self) -> u32 {
+    fn next_document_number(&self) -> Result<u32> {
         let mut n = 1;
         loop {
             let id = format!("doc-{n}");
@@ -828,16 +942,19 @@ impl AuthoringUiState {
                     .iter()
                     .any(|doc| doc.id == id || doc.path == path)
             });
-            if !indexed && !self.requirements_root.join(&path).exists() {
-                return n;
+            if !indexed
+                && !self.requirements_root.join(&path).exists()
+                && !is_requirement_document_id_reserved(&self.requirements_root, &id)?
+            {
+                return Ok(n);
             }
             n += 1;
         }
     }
 
     /// Creates a new requirement document under `relative_path` with the given title.
-    pub fn create_document(&mut self, relative_path: &str, title: &str) -> String {
-        let id = format!("doc-{}", self.next_document_number());
+    pub fn create_document(&mut self, relative_path: &str, title: &str) -> Result<String> {
+        let id = format!("doc-{}", self.next_document_number()?);
         if self.artifacts.is_none() {
             self.artifacts = Some(AuthoringArtifacts {
                 index: Default::default(),
@@ -850,7 +967,12 @@ impl AuthoringUiState {
         let artifacts = self.artifacts.as_mut().expect("artifacts initialized");
         let body = format!("# {}\n\n", title.trim());
         let revision = compute_document_revision(&body);
-        let meta = RequirementDocumentMeta::new(id.clone(), relative_path, title, revision);
+        let mut meta = RequirementDocumentMeta::new(id.clone(), relative_path, title, revision);
+        if let RequirementIterationFilter::Named(name) = &self.iteration_filter
+            && !name.trim().is_empty()
+        {
+            meta.iteration = Some(name.clone());
+        }
 
         artifacts.index.documents.push(meta.clone());
         artifacts
@@ -859,12 +981,12 @@ impl AuthoringUiState {
                 meta,
                 body: body.clone(),
             });
-        self.rebuild_tree();
         self.select_document_by_id(&id);
+        self.rebuild_tree();
         self.buffer = EditorBuffer::from_string(body);
         self.buffer_dirty = true;
         self.draft_document_id = Some(id.clone());
-        id
+        Ok(id)
     }
 
     /// Saves the current requirement document and refreshes link resolutions.
@@ -1274,6 +1396,11 @@ pub fn requirements_footer_line(
     };
     theme::footer_line(vec![
         Span::styled(
+            " Delete [d/Delete] ",
+            Style::default().fg(theme::FOOTER_DESC),
+        ),
+        Span::raw(" "),
+        Span::styled(
             format!(" Store {} ", store_path.display()),
             Style::default().fg(theme::FOOTER_DESC),
         ),
@@ -1398,7 +1525,7 @@ mod tests {
         let mut state = AuthoringUiState::empty();
         state.project_root = root.to_path_buf();
         state.requirements_root = store.path().to_path_buf();
-        state.create_document("sample.md", "Sample");
+        state.create_document("sample.md", "Sample").unwrap();
         state.buffer = EditorBuffer::from_string("# Sample\n\nedited".into());
         state.save_current_document(root).expect("save");
         let reloaded = AuthoringUiState::load_from_project(root, store.path());
@@ -1408,12 +1535,88 @@ mod tests {
     }
 
     #[test]
+    fn delete_document_marks_links_missing_selects_next_and_reserves_id() {
+        let project = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        initialize_requirement_store(store.path()).unwrap();
+        let mut state = AuthoringUiState::load_from_project(project.path(), store.path());
+        for (path, title) in [("one.md", "One"), ("two.md", "Two"), ("three.md", "Three")] {
+            state.create_document(path, title).unwrap();
+            state.save_current_document(project.path()).unwrap();
+        }
+
+        state.select_document_by_id("doc-2");
+        state.buffer = EditorBuffer::from_string("# Two\n\nText".into());
+        state.buffer_dirty = true;
+        state.selection_anchor = Some((2, 0));
+        state.selection_end = Some((2, 4));
+        state.create_test_point_from_selection().unwrap();
+        state.save_current_document(project.path()).unwrap();
+        state.artifacts.as_mut().unwrap().test_points.test_points[0].review_state =
+            ReviewState::Approved;
+        state.open_delete_confirmation().unwrap();
+        assert!(matches!(
+            state.overlay,
+            RequirementsOverlay::DeleteConfirmation { ref document_id, .. }
+                if document_id == "doc-2"
+        ));
+
+        state.delete_current_document(project.path()).unwrap();
+
+        assert_eq!(state.selected_document_id.as_deref(), Some("doc-3"));
+        assert_eq!(state.buffer.as_string(), "# Three\n\n");
+        assert_eq!(
+            state.tree_state.selected(),
+            [format!("{TREE_DOC_PREFIX}doc-3")].as_slice()
+        );
+        let test_point = &state.artifacts.as_ref().unwrap().test_points.test_points[0];
+        assert_eq!(test_point.review_state, ReviewState::NeedsReview);
+        assert_eq!(
+            test_point.requirement_links[0].resolution,
+            ResolutionState::Stale
+        );
+        assert!(teshi_engine::is_requirement_document_id_reserved(store.path(), "doc-2").unwrap());
+        assert_eq!(state.create_default_document().unwrap(), "doc-4");
+    }
+
+    #[test]
+    fn delete_first_last_and_only_documents_choose_next_previous_and_empty() {
+        let project = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        initialize_requirement_store(store.path()).unwrap();
+        let mut state = AuthoringUiState::load_from_project(project.path(), store.path());
+        for (path, title) in [("one.md", "One"), ("two.md", "Two"), ("three.md", "Three")] {
+            state.create_document(path, title).unwrap();
+            state.save_current_document(project.path()).unwrap();
+        }
+
+        state.select_document_by_id("doc-1");
+        state.open_delete_confirmation().unwrap();
+        state.delete_current_document(project.path()).unwrap();
+        assert_eq!(state.selected_document_id.as_deref(), Some("doc-2"));
+
+        state.select_document_by_id("doc-3");
+        state.open_delete_confirmation().unwrap();
+        state.delete_current_document(project.path()).unwrap();
+        assert_eq!(state.selected_document_id.as_deref(), Some("doc-2"));
+
+        state.open_delete_confirmation().unwrap();
+        state.delete_current_document(project.path()).unwrap();
+        assert!(state.selected_document_id.is_none());
+        assert!(state.buffer.as_string().is_empty());
+        assert!(state.tree_state.selected().is_empty());
+        assert!(teshi_engine::is_requirement_document_id_reserved(store.path(), "doc-1").unwrap());
+        assert!(teshi_engine::is_requirement_document_id_reserved(store.path(), "doc-2").unwrap());
+        assert!(teshi_engine::is_requirement_document_id_reserved(store.path(), "doc-3").unwrap());
+    }
+
+    #[test]
     fn title_rename_preserves_linked_test_point_identity_and_resolution() {
         let project = tempdir().unwrap();
         let store = tempdir().unwrap();
         let mut state = AuthoringUiState::empty();
         state.requirements_root = store.path().to_path_buf();
-        let id = state.create_default_document();
+        let id = state.create_default_document().unwrap();
         state.buffer = EditorBuffer::from_string("# Original\n\nStable text\n".into());
         state.save_current_document(project.path()).unwrap();
         state.selection_anchor = Some((2, 0));
@@ -1486,7 +1689,7 @@ mod tests {
                 test_points: Default::default(),
                 diagnostics: vec![],
             });
-            let id = state.create_default_document();
+            let id = state.create_default_document().unwrap();
             assert_eq!(id, format!("doc-{expected}"));
             let meta = &state
                 .artifacts
@@ -1510,6 +1713,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn create_document_keeps_document_tree_and_editor_selection_in_sync() {
+        let mut state = sample_authoring_state();
+
+        let id = state.create_document("draft.md", "Draft").unwrap();
+        let node_id = format!("{TREE_DOC_PREFIX}{id}");
+        let path = find_tree_path(&state.tree_items, &node_id).expect("new document in tree");
+
+        assert_eq!(state.selected_document_id.as_deref(), Some(id.as_str()));
+        assert_eq!(state.tree_state.selected(), path.as_slice());
+        assert!(
+            state
+                .tree_items
+                .iter()
+                .any(|item| item.identifier() == &node_id)
+        );
+        assert_eq!(state.buffer.as_string(), "# Draft\n\n");
+        assert!(state.buffer_dirty);
+    }
+
+    #[test]
+    fn create_document_inherits_named_filter_and_reopens_collapsed_group() {
+        let mut state = sample_authoring_state();
+        state
+            .try_set_iteration_filter(RequirementIterationFilter::Named("Sprint 1".into()))
+            .unwrap();
+        state.toggle_group_mode();
+        let group_path = vec![format!("{TREE_ITER_PREFIX}Sprint 1")];
+        state.tree_state.close(&group_path);
+
+        let id = state.create_document("draft.md", "Draft").unwrap();
+        let node_id = format!("{TREE_DOC_PREFIX}{id}");
+        let path = find_tree_path(&state.tree_items, &node_id).expect("new document in tree");
+        let meta = state
+            .artifacts
+            .as_ref()
+            .and_then(|artifacts| artifacts.index.documents.iter().find(|doc| doc.id == id))
+            .expect("new document metadata");
+
+        assert_eq!(meta.iteration.as_deref(), Some("Sprint 1"));
+        assert_eq!(state.selected_document_id.as_deref(), Some(id.as_str()));
+        assert_eq!(state.tree_state.selected(), path.as_slice());
+        assert!(state.tree_state.opened().contains(&group_path));
+        assert_eq!(state.buffer.as_string(), "# Draft\n\n");
     }
 
     #[test]
@@ -1544,7 +1793,7 @@ mod tests {
     #[test]
     fn discard_new_document_removes_unsaved_draft() {
         let mut state = sample_authoring_state();
-        let id = state.create_document("draft.md", "Draft");
+        let id = state.create_document("draft.md", "Draft").unwrap();
         state.discard_current_document();
         assert!(!state.buffer_dirty);
         assert!(
@@ -1670,7 +1919,7 @@ mod tests {
         let project_a = tempdir().unwrap();
         let project_b = tempdir().unwrap();
         let mut writer = AuthoringUiState::load_from_project(project_a.path(), store.path());
-        writer.create_document("shared.md", "Shared");
+        writer.create_document("shared.md", "Shared").unwrap();
         writer
             .save_current_document(project_a.path())
             .expect("save");
@@ -1693,7 +1942,7 @@ mod tests {
         let project = tempdir().unwrap();
         let mut state = AuthoringUiState::load_from_project(project.path(), store.path());
         assert!(state.artifacts.as_ref().unwrap().index.store_id.is_none());
-        state.create_document("doc-1.md", "Doc");
+        state.create_document("doc-1.md", "Doc").unwrap();
         assert!(state.artifacts.as_ref().unwrap().index.store_id.is_none());
         let err = state
             .save_current_document(project.path())

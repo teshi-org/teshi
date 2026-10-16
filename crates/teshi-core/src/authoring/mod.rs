@@ -26,8 +26,8 @@ pub use requirements::{
     resolve_requirement_store_path, validate_requirement_path,
 };
 pub use resolve::{
-    ANCHOR_CONTEXT_CHARS, create_requirement_link, re_resolve_document_links,
-    resolve_requirement_link,
+    ANCHOR_CONTEXT_CHARS, create_requirement_link, mark_document_links_missing,
+    re_resolve_document_links, resolve_requirement_link,
 };
 pub use scenario_links::{
     TESHI_TP_TAG_PREFIX, format_teshi_tp_tag, merge_scenario_tags, parse_teshi_tp_tags,

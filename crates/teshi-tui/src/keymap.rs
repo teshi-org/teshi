@@ -101,6 +101,8 @@ pub enum Action {
     /// Return to Requirements navigation.
     ReqExitInsert,
     ReqNewDocument,
+    /// Open confirmation to remove the selected document from the global library.
+    ReqDeleteDocument,
     /// Open the iteration filter picker (`i` on the Requirements tree).
     ReqFilterOverlay,
     /// Toggle path vs iteration grouping (`g` on the Requirements tree).
@@ -729,6 +731,9 @@ impl Action {
                     Some(Self::MoveDown)
                 }
                 (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(Self::ReqNewDocument),
+                (KeyCode::Delete, _) | (KeyCode::Char('d'), KeyModifiers::NONE) => {
+                    Some(Self::ReqDeleteDocument)
+                }
                 (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Self::ReqFilterOverlay),
                 (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Self::ReqGroupToggle),
                 (KeyCode::Char('I'), KeyModifiers::SHIFT) => Some(Self::ReqEditIteration),

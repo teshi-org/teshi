@@ -14,8 +14,9 @@ use teshi_core::authoring::{
 
 use super::store::{
     compute_document_revision as hash_document_revision, read_requirement_index_unlocked,
+    read_requirement_trash_unlocked, recover_requirement_store_unlocked, replace_markdown,
     with_requirement_store_lock, write_requirement_index_unlocked,
-    write_requirement_markdown_unlocked,
+    write_requirement_markdown_unlocked, write_requirement_trash_unlocked, RequirementTombstone,
 };
 
 /// One candidate returned when a document reference is ambiguous.
@@ -341,6 +342,104 @@ pub fn read_requirement_document(
     Ok(RequirementDocumentContent { meta, body })
 }
 
+/// Removes one saved requirement from the active library and records a
+/// recoverable store-local tombstone.
+///
+/// The body and metadata are captured before the source file is removed. The
+/// index replacement is the commit point: if it fails, the body and tombstone
+/// are restored so callers never observe a half-deleted active document.
+///
+/// When `expected_revision` is supplied, the current index must still contain
+/// that body revision. Deleted ids remain reserved by the tombstone and are
+/// never reused by the default document allocator.
+pub fn delete_requirement_document(
+    requirements_root: &Path,
+    document_id: &str,
+    expected_revision: Option<&str>,
+) -> Result<RequirementDocumentMeta, RequirementStoreError> {
+    with_store_lock(requirements_root, || {
+        recover_requirement_store_unlocked(requirements_root)
+            .map_err(RequirementStoreError::from)?;
+        let index = require_initialized_index(requirements_root)?;
+        let document_index = index
+            .documents
+            .iter()
+            .position(|doc| doc.id == document_id)
+            .ok_or_else(|| RequirementStoreError::NotFound {
+                query: document_id.to_string(),
+            })?;
+        let meta = index.documents[document_index].clone();
+        let actual_revision = meta.revision.as_str().to_string();
+        if let Some(expected) = expected_revision {
+            if expected != actual_revision {
+                return Err(RequirementStoreError::RevisionConflict {
+                    document_id: document_id.to_string(),
+                    expected: expected.to_string(),
+                    actual: actual_revision,
+                });
+            }
+        }
+
+        let markdown_path = resolve_requirement_store_path(requirements_root, &meta.path)
+            .map_err(|err| io_err(format!("unsafe requirement path '{}'", meta.path), err))?;
+        let body = fs::read_to_string(&markdown_path)
+            .with_context(|| format!("read {}", markdown_path.display()))
+            .map_err(RequirementStoreError::from)?;
+
+        let mut trash = read_requirement_trash_unlocked(requirements_root)
+            .map_err(RequirementStoreError::from)?;
+        if trash
+            .documents
+            .iter()
+            .any(|tombstone| tombstone.meta.id == meta.id)
+        {
+            return Err(RequirementStoreError::Io(anyhow::anyhow!(
+                "requirement document '{}' already has a deletion tombstone",
+                meta.id
+            )));
+        }
+        trash.documents.push(RequirementTombstone {
+            meta: meta.clone(),
+            body: body.clone(),
+        });
+        write_requirement_trash_unlocked(requirements_root, &trash)
+            .map_err(RequirementStoreError::from)?;
+
+        if let Err(error) = fs::remove_file(&markdown_path) {
+            return Err(io_err(format!("remove {}", markdown_path.display()), error));
+        }
+
+        let mut replacement = index.clone();
+        replacement.documents.remove(document_index);
+        if let Err(error) = write_requirement_index_unlocked(requirements_root, &replacement) {
+            let restore = replace_markdown(&markdown_path, body.as_bytes());
+            if let Err(restore_error) = restore {
+                return Err(io_err(
+                    format!(
+                        "{error:#}; could not restore deleted requirement body: {restore_error:#}"
+                    ),
+                    error,
+                ));
+            }
+            trash
+                .documents
+                .retain(|tombstone| tombstone.meta.id != meta.id);
+            if let Err(cleanup_error) = write_requirement_trash_unlocked(requirements_root, &trash)
+            {
+                return Err(io_err(
+                    format!(
+                        "{error:#}; restored body but could not remove deletion tombstone: {cleanup_error:#}"
+                    ),
+                    error,
+                ));
+            }
+            return Err(RequirementStoreError::from(error));
+        }
+
+        Ok(meta)
+    })
+}
+
 /// Writes a document body by id and synchronizes its first-line H1 title and revision.
 ///
 /// When `expected_revision` is set and `force` is false, the on-disk revision
@@ -463,8 +562,9 @@ pub fn resolve_requirement_ref_in_store(
 mod tests {
     use super::*;
     use crate::authoring::{
-        initialize_requirement_store, save_requirement_document_index, save_requirement_markdown,
-        REQUIREMENTS_INDEX_FILE,
+        initialize_requirement_store, is_requirement_document_id_reserved,
+        load_authoring_artifacts, save_requirement_document_index, save_requirement_markdown,
+        REQUIREMENTS_INDEX_FILE, REQUIREMENTS_TRASH_FILE,
     };
     use teshi_core::authoring::RequirementDocumentMeta;
 
@@ -710,6 +810,126 @@ mod tests {
                 original
             );
         }
+    }
+
+    #[test]
+    fn delete_removes_active_document_keeps_body_and_reserves_id() {
+        let store = tempfile::tempdir().unwrap();
+        let index = seed_store(store.path());
+        let deleted = delete_requirement_document(
+            store.path(),
+            "doc-12",
+            Some(index.documents[0].revision.as_str()),
+        )
+        .unwrap();
+
+        assert_eq!(deleted.id, "doc-12");
+        assert!(!store.path().join("auth/login.md").exists());
+        assert!(matches!(
+            read_requirement_document(store.path(), "doc-12"),
+            Err(RequirementStoreError::NotFound { .. })
+        ));
+        assert!(is_requirement_document_id_reserved(store.path(), "doc-12").unwrap());
+        let trash: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(store.path().join(REQUIREMENTS_TRASH_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(trash["documents"][0]["meta"]["id"], "doc-12");
+        assert_eq!(trash["documents"][0]["body"], "# 登录需求\n");
+    }
+
+    #[test]
+    fn delete_rejects_missing_and_stale_documents() {
+        let store = tempfile::tempdir().unwrap();
+        let index = seed_store(store.path());
+        let stale = delete_requirement_document(store.path(), "doc-12", Some("stale")).unwrap_err();
+        assert!(matches!(
+            stale,
+            RequirementStoreError::RevisionConflict { .. }
+        ));
+        assert!(store.path().join("auth/login.md").exists());
+
+        let missing = delete_requirement_document(store.path(), "missing", None).unwrap_err();
+        assert!(matches!(missing, RequirementStoreError::NotFound { .. }));
+        assert_eq!(
+            require_initialized_index(store.path())
+                .unwrap()
+                .documents
+                .len(),
+            index.documents.len()
+        );
+    }
+
+    #[test]
+    fn delete_rolls_back_body_and_tombstone_when_index_replace_fails() {
+        let store = tempfile::tempdir().unwrap();
+        let index = seed_store(store.path());
+        fs::create_dir(store.path().join("_teshi.tmp")).unwrap();
+
+        let error = delete_requirement_document(
+            store.path(),
+            "doc-12",
+            Some(index.documents[0].revision.as_str()),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "requirement_store_io");
+        assert_eq!(
+            fs::read_to_string(store.path().join("auth/login.md")).unwrap(),
+            "# 登录需求\n"
+        );
+        assert!(!store.path().join(REQUIREMENTS_TRASH_FILE).exists());
+        assert!(!is_requirement_document_id_reserved(store.path(), "doc-12").unwrap());
+    }
+
+    #[test]
+    fn delete_rolls_back_before_body_mutation_when_tombstone_write_fails() {
+        let store = tempfile::tempdir().unwrap();
+        let index = seed_store(store.path());
+        fs::create_dir(store.path().join("_teshi-trash.tmp")).unwrap();
+
+        delete_requirement_document(
+            store.path(),
+            "doc-12",
+            Some(index.documents[0].revision.as_str()),
+        )
+        .unwrap_err();
+        assert!(store.path().join("auth/login.md").exists());
+        assert!(require_initialized_index(store.path())
+            .unwrap()
+            .documents
+            .iter()
+            .any(|doc| doc.id == "doc-12"));
+    }
+
+    #[test]
+    fn load_recovers_an_interrupted_delete_with_active_index() {
+        let store = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let index = seed_store(store.path());
+        let body = fs::read_to_string(store.path().join("auth/login.md")).unwrap();
+        fs::remove_file(store.path().join("auth/login.md")).unwrap();
+        let trash = serde_json::json!({
+            "version": 1,
+            "documents": [{"meta": index.documents[0], "body": body}]
+        });
+        fs::write(
+            store.path().join(REQUIREMENTS_TRASH_FILE),
+            serde_json::to_string_pretty(&trash).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_authoring_artifacts(project.path(), store.path()).unwrap();
+        assert!(loaded
+            .artifacts
+            .unwrap()
+            .documents
+            .iter()
+            .any(|doc| doc.meta.id == "doc-12"));
+        assert_eq!(
+            fs::read_to_string(store.path().join("auth/login.md")).unwrap(),
+            "# 登录需求\n"
+        );
+        assert!(!store.path().join(REQUIREMENTS_TRASH_FILE).exists());
     }
 
     #[test]
