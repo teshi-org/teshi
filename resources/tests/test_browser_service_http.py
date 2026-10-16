@@ -14,7 +14,8 @@ import unittest
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
+from types import SimpleNamespace
 
 RESOURCES = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RESOURCES))
@@ -28,7 +29,7 @@ from chrome_broker_oracle import (  # noqa: E402
     run_http_discovery,
 )
 
-from browser_service import embedded_browser_headless, handle_embedded_command, paths_equal, write_cdp_endpoint_file
+from browser_service import EmbeddedSession, embedded_browser_headless, handle_embedded_command, paths_equal, write_cdp_endpoint_file
 
 
 class FakeEmbeddedSession:
@@ -52,6 +53,21 @@ class FakeEmbeddedSession:
 
 
 class BrowserServiceHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_embedded_snapshot_supports_page_without_accessibility_api(self) -> None:
+        body = SimpleNamespace(aria_snapshot=AsyncMock(return_value='- heading "Loaded"'))
+        session = EmbeddedSession()
+        session.page = SimpleNamespace(
+            title=AsyncMock(return_value="Test"),
+            url="about:blank",
+            locator=Mock(return_value=body),
+            evaluate=AsyncMock(side_effect=[[], "revision-a", True]),
+        )
+        result = await session.get_page_snapshot()
+        self.assertTrue(result["ok"])
+        self.assertIn("Loaded", result["accessibility_tree"])
+        self.assertEqual(result["page_context_revision"], "revision-a")
+        session.page.locator.assert_called_once_with("body")
+
     async def test_python_discovery_get_is_public_but_post_keeps_extension_compatibility(self) -> None:
         with tempfile.TemporaryDirectory(prefix="teshi-discovery-http-") as root:
             project_root = Path(root)

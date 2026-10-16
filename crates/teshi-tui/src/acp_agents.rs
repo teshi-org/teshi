@@ -1,4 +1,4 @@
-//! User-level ACP installation records. Selection is deliberately not persisted.
+//! User-level ACP installation records. Last selection is stored separately.
 use std::{
     collections::HashMap,
     fs, io,

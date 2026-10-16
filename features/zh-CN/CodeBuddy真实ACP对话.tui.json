@@ -1,0 +1,496 @@
+{
+  "version": 1,
+  "mode": "tui",
+  "steps": [
+    {
+      "line": 8,
+      "text": "Teshi 使用已认证的真实 CodeBuddy ACP 代理启动",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "launch",
+          "config": {
+            "program": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-runtime\\bin-v5\\teshi.exe",
+            "args": [
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-tx5_sqor\\project",
+              "--requirements-root",
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-tx5_sqor\\requirements"
+            ],
+            "cwd": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-tx5_sqor",
+            "env": [
+              [
+                "APPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-tx5_sqor\\appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-tx5_sqor\\localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-tx5_sqor\\config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-tx5_sqor\\data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-tx5_sqor\\acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-tx5_sqor\\sessions"
+              ],
+              [
+                "TESHI_AGENT_BACKEND",
+                "acp"
+              ],
+              [
+                "TESHI_ACP_PROGRAM",
+                "node"
+              ],
+              [
+                "TESHI_ACP_ARGS_JSON",
+                "[\"D:\\\\Dev\\\\Rust\\\\teshi\\\\dev\\\\crates\\\\teshi-tui-runner\\\\tests\\\\fixtures\\\\codebuddy_acp_proxy.mjs\"]"
+              ],
+              [
+                "TESHI_CODEBUDDY_ENTRY",
+                "C:\\Users\\lilin\\AppData\\Local\\teshi\\acp\\packages\\codebuddy-code\\node_modules\\@tencent-ai\\codebuddy-code\\bin\\codebuddy"
+              ],
+              [
+                "TESHI_CODEBUDDY_ARGS_JSON",
+                "[\"--acp\"]"
+              ],
+              [
+                "TESHI_CODEBUDDY_PROTOCOL_LOG",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-tx5_sqor\\codebuddy-protocol.ndjson"
+              ],
+              [
+                "TESHI_CODEBUDDY_APPDATA",
+                "C:\\Users\\lilin\\AppData\\Roaming"
+              ],
+              [
+                "TESHI_CODEBUDDY_LOCALAPPDATA",
+                "C:\\Users\\lilin\\AppData\\Local"
+              ]
+            ],
+            "cols": 100,
+            "rows": 30
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 11,
+      "text": "我打开真实 CodeBuddy 对话的 AI 聊天",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 12,
+      "text": "我发送第 1 轮真实 CodeBuddy 对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "This is live conversation turn 1. Reply only with the concatenation of LIVE_REPLY_ and 01. Do not use tools or add explanation."
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 13,
+      "text": "第 1 轮真实 CodeBuddy 回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "LIVE_REPLY_01",
+          "visible": true,
+          "timeout_ms": 120000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 120000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 14,
+      "text": "我发送第 2 轮真实 CodeBuddy 对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "This is live conversation turn 2. Reply only with the concatenation of LIVE_REPLY_ and 02. Do not use tools or add explanation."
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 15,
+      "text": "第 2 轮真实 CodeBuddy 回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "LIVE_REPLY_02",
+          "visible": true,
+          "timeout_ms": 120000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 120000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 16,
+      "text": "我发送第 3 轮真实 CodeBuddy 对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "This is live conversation turn 3. Reply only with the concatenation of LIVE_REPLY_ and 03. Do not use tools or add explanation."
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 17,
+      "text": "第 3 轮真实 CodeBuddy 回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "LIVE_REPLY_03",
+          "visible": true,
+          "timeout_ms": 120000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 120000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 18,
+      "text": "我发送第 4 轮真实 CodeBuddy 对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "This is live conversation turn 4. Reply only with the concatenation of LIVE_REPLY_ and 04. Do not use tools or add explanation."
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 19,
+      "text": "第 4 轮真实 CodeBuddy 回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "LIVE_REPLY_04",
+          "visible": true,
+          "timeout_ms": 120000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 120000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 20,
+      "text": "我发送第 5 轮真实 CodeBuddy 对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "This is live conversation turn 5. Reply only with the concatenation of LIVE_REPLY_ and 05. Do not use tools or add explanation."
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 21,
+      "text": "第 5 轮真实 CodeBuddy 回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "LIVE_REPLY_05",
+          "visible": true,
+          "timeout_ms": 120000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 120000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 22,
+      "text": "我发送第 6 轮真实 CodeBuddy 对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "This is live conversation turn 6. Reply only with the concatenation of LIVE_REPLY_ and 06. Do not use tools or add explanation."
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 23,
+      "text": "第 6 轮真实 CodeBuddy 回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "LIVE_REPLY_06",
+          "visible": true,
+          "timeout_ms": 120000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 120000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 24,
+      "text": "我发送第 7 轮真实 CodeBuddy 对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "This is live conversation turn 7. Reply only with the concatenation of LIVE_REPLY_ and 07. Do not use tools or add explanation."
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 25,
+      "text": "第 7 轮真实 CodeBuddy 回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "LIVE_REPLY_07",
+          "visible": true,
+          "timeout_ms": 120000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 120000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 26,
+      "text": "我发送第 8 轮真实 CodeBuddy 对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "This is live conversation turn 8. Reply only with the concatenation of LIVE_REPLY_ and 08. Do not use tools or add explanation."
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 27,
+      "text": "第 8 轮真实 CodeBuddy 回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "LIVE_REPLY_08",
+          "visible": true,
+          "timeout_ms": 120000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 120000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 28,
+      "text": "我发送第 9 轮真实 CodeBuddy 对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "This is live conversation turn 9. Reply only with the concatenation of LIVE_REPLY_ and 09. Do not use tools or add explanation."
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 29,
+      "text": "第 9 轮真实 CodeBuddy 回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "LIVE_REPLY_09",
+          "visible": true,
+          "timeout_ms": 120000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 120000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 30,
+      "text": "我发送第 10 轮真实 CodeBuddy 对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "This is live conversation turn 10. Reply only with the concatenation of LIVE_REPLY_ and 10. Do not use tools or add explanation."
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 31,
+      "text": "第 10 轮真实 CodeBuddy 回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "LIVE_REPLY_10",
+          "visible": true,
+          "timeout_ms": 120000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 120000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 32,
+      "text": "我离开真实 CodeBuddy 对话输入框",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        }
+      ]
+    },
+    {
+      "line": 33,
+      "text": "我退出真实 CodeBuddy 对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 34,
+      "text": "真实 CodeBuddy 对话成功退出",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 10000
+        }
+      ]
+    }
+  ]
+}

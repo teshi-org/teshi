@@ -108,6 +108,13 @@ fn acp_activity_retains_thoughts_and_merges_partial_tool_updates() {
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].content, "Read project");
     assert_eq!(tools[0].reasoning_content.as_deref(), Some("completed"));
+    let messages = backend.messages();
+    assert_eq!(messages[0].content, "I will inspect the project");
+    assert_eq!(messages[0].source.as_deref(), Some("agent_progress"));
+    assert_eq!(messages[1].source.as_deref(), Some("acp_reasoning"));
+    assert_eq!(messages[2].source.as_deref(), Some("acp_activity"));
+    assert_eq!(messages.last().unwrap().content, "Inspection finished");
+    assert!(messages.last().unwrap().source.is_none());
 }
 
 #[test]
@@ -192,7 +199,16 @@ fn successful_session_converts_stream_and_completion() {
     ));
     assert!(events.iter().any(|event| matches!(event, AgentBackendEvent::ExternalToolActivity { title, .. } if title == "reading project")));
     assert!(events.iter().any(|event| matches!(event, AgentBackendEvent::Completed { model, finish_reason: Some(reason), .. } if model == "fake-agent" && reason == "end_turn")));
-    assert_eq!(backend.messages().last().unwrap().content, "hello");
+    // Text preceding a tool event is progress, even if no final text follows.
+    assert_eq!(backend.messages()[0].content, "hello");
+    assert_eq!(
+        backend.messages()[0].source.as_deref(),
+        Some("agent_progress")
+    );
+    assert_eq!(
+        backend.messages().last().unwrap().source.as_deref(),
+        Some("acp_activity")
+    );
     assert_eq!(backend.status(), AgentBackendStatus::Completed);
 }
 

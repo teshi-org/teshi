@@ -1,0 +1,515 @@
+{
+  "version": 1,
+  "mode": "tui",
+  "steps": [
+    {
+      "line": 10,
+      "text": "Teshi is open with an isolated project and conversation storage",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "launch",
+          "config": {
+            "program": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-runtime\\bin-v5\\teshi.exe",
+            "args": [
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v\\project",
+              "--requirements-root",
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v\\requirements"
+            ],
+            "cwd": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v",
+            "env": [
+              [
+                "APPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v\\appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v\\localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v\\config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v\\data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v\\acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v\\sessions"
+              ],
+              [
+                "TESHI_AGENT_BACKEND",
+                "acp"
+              ],
+              [
+                "TESHI_ACP_PROGRAM",
+                "D:\\Env\\Python\\Python313\\python.exe"
+              ],
+              [
+                "TESHI_ACP_ARGS_JSON",
+                "[\"D:\\\\Dev\\\\Rust\\\\teshi\\\\dev\\\\crates\\\\teshi-tui-runner\\\\tests\\\\fixtures\\\\agent_acceptance_fixture.py\", \"acp\", \"D:\\\\Dev\\\\Rust\\\\teshi\\\\dev\\\\.teshi\\\\feature-results\\\\runs\\\\20261016T034038.600597Z-29240\\\\teshi-tui-feature-4qmh2s5v\\\\exit-trace\", \"Exit Agent\"]"
+              ]
+            ],
+            "cols": 100,
+            "rows": 30
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 11,
+      "text": "the project has no unsaved edits",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 12,
+      "text": "keyboard focus allows \"q\" to quit Teshi",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 15,
+      "text": "the agent state is \"<state>\"",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 16,
+      "text": "I press \"q\"",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 17,
+      "text": "the Teshi process exits successfully within 1000 milliseconds",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 18,
+      "text": "the terminal input mode and screen are restored",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 27,
+      "text": "a controlled ACP agent is waiting at \"<phase>\"",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 28,
+      "text": "the agent exits promptly when its input is closed",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 29,
+      "text": "I press \"q\"",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 30,
+      "text": "the Teshi process exits successfully within 3000 milliseconds",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 3000
+        }
+      ]
+    },
+    {
+      "line": 31,
+      "text": "no process owned by that ACP agent remains running",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 32,
+      "text": "the terminal input mode and screen are restored",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 43,
+      "text": "a controlled ACP agent \"<behavior>\"",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 44,
+      "text": "I press \"q\"",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 45,
+      "text": "the Teshi process exits successfully within 5000 milliseconds",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 5000
+        }
+      ]
+    },
+    {
+      "line": 46,
+      "text": "no process owned by that ACP agent remains running",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 47,
+      "text": "the terminal input mode and screen are restored",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 55,
+      "text": "3 conversations each have a connected controlled ACP agent",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 56,
+      "text": "all 3 agents have completed their replies and exit promptly on input closure",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 57,
+      "text": "I press \"q\"",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 58,
+      "text": "the Teshi process exits successfully within 1000 milliseconds",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 59,
+      "text": "no process owned by those ACP agents remains running",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 62,
+      "text": "the selected backend is \"ACP\" with a controlled agent",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 63,
+      "text": "the agent has completed its reply \"Inspection finished\"",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Inspect the project"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Inspection finished",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 64,
+      "text": "I press \"q\"",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 65,
+      "text": "the Teshi process exits successfully within 1000 milliseconds",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 66,
+      "text": "I reopen Teshi with the same project and conversation storage",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "launch",
+          "config": {
+            "program": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-runtime\\bin-v5\\teshi.exe",
+            "args": [
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v\\project",
+              "--requirements-root",
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v\\requirements"
+            ],
+            "cwd": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v",
+            "env": [
+              [
+                "APPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v\\appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v\\localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v\\config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v\\data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v\\acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-4qmh2s5v\\sessions"
+              ],
+              [
+                "TESHI_AGENT_BACKEND",
+                "acp"
+              ],
+              [
+                "TESHI_ACP_PROGRAM",
+                "D:\\Env\\Python\\Python313\\python.exe"
+              ],
+              [
+                "TESHI_ACP_ARGS_JSON",
+                "[\"D:\\\\Dev\\\\Rust\\\\teshi\\\\dev\\\\crates\\\\teshi-tui-runner\\\\tests\\\\fixtures\\\\agent_acceptance_fixture.py\", \"acp\", \"D:\\\\Dev\\\\Rust\\\\teshi\\\\dev\\\\.teshi\\\\feature-results\\\\runs\\\\20261016T034038.600597Z-29240\\\\teshi-tui-feature-4qmh2s5v\\\\exit-trace\", \"Exit Agent\"]"
+              ]
+            ],
+            "cols": 100,
+            "rows": 30
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 67,
+      "text": "I open AI chat",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/resume"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 68,
+      "text": "\"Inspection finished\" is visible in AI chat",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Inspection finished",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,290 @@
+{
+  "version": 1,
+  "mode": "tui",
+  "steps": [
+    {
+      "line": 8,
+      "text": "Teshi is open on a sample project",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "launch",
+          "config": {
+            "program": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-runtime\\bin-v5\\teshi.exe",
+            "args": [
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-gf6vwyly\\project",
+              "--requirements-root",
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-gf6vwyly\\requirements"
+            ],
+            "cwd": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-gf6vwyly",
+            "env": [
+              [
+                "APPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-gf6vwyly\\appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-gf6vwyly\\localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-gf6vwyly\\config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-gf6vwyly\\data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-gf6vwyly\\acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-gf6vwyly\\sessions"
+              ],
+              [
+                "TESHI_TUI_RUNNER",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-runtime\\bin-v5\\teshi-tui-runner.exe"
+              ]
+            ],
+            "cols": 140,
+            "rows": 40
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Sample scenario",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 11,
+      "text": "the sample project is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Sample scenario",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 12,
+      "text": "I open AI chat",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        }
+      ]
+    },
+    {
+      "line": 13,
+      "text": "the chat introduction is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 14,
+      "text": "I return to Explore",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "1"
+        }
+      ]
+    },
+    {
+      "line": 15,
+      "text": "the sample scenario is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Sample scenario",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 16,
+      "text": "I quit Teshi",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 17,
+      "text": "Teshi exits successfully",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 10000
+        }
+      ]
+    },
+    {
+      "line": 20,
+      "text": "the sample project is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Sample scenario",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 21,
+      "text": "I run the sample scenario",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "r"
+        }
+      ]
+    },
+    {
+      "line": 22,
+      "text": "I open the sample editor",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "e"
+        },
+        {
+          "action": "expect_text",
+          "text": "Edit [Enter]",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 23,
+      "text": "the sample test has passed",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Status: Passed",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "[passed] a sample step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 24,
+      "text": "I edit the sample step",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "key",
+          "key": "End"
+        },
+        {
+          "action": "write",
+          "text": " updated"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 25,
+      "text": "the edited step is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "a sample step updated",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 26,
+      "text": "I save the feature",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "s"
+        }
+      ]
+    },
+    {
+      "line": 27,
+      "text": "the edited step remains visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "a sample step updated",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 28,
+      "text": "I quit Teshi",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 29,
+      "text": "Teshi exits successfully",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 10000
+        }
+      ]
+    }
+  ]
+}

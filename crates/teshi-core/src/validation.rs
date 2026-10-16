@@ -394,7 +394,7 @@ fn scan_source(
                     }
                 }
                 StructuralType::Examples => {
-                    if block != Block::ScenarioOutline {
+                    if !matches!(block, Block::ScenarioOutline | Block::Examples) {
                         push_diagnostic(
                             diagnostics,
                             path,
@@ -972,6 +972,21 @@ mod tests {
             .expect("missing separator diagnostic");
         assert_eq!(diagnostic.suggestion.as_deref(), Some("Étant donné que X"));
         assert_eq!(diagnostic.column, 20);
+    }
+
+    #[test]
+    fn multiple_examples_tables_belong_to_the_same_outline() {
+        for source in [
+            "Feature: Rows\n  Scenario Outline: Values\n    Given <value>\n    Examples:\n      | value |\n      | first |\n    @second\n    Examples:\n      | value |\n      | second |\n",
+            "# language: zh-CN\n功能: 数据行\n  场景大纲: 数值\n    假如 <value>\n    例子:\n      | value |\n      | first |\n    例子:\n      | value |\n      | second |\n",
+        ] {
+            assert!(!validate_feature_source(source, "rows.feature").has_errors());
+        }
+        let invalid = "Feature: Rows\n  Scenario Outline: Values\n    Given <value>\n    Examples:\n      | value |\n      | first |\n  Scenario: Normal\n    Given ready\n    Examples:\n      | value |\n      | second |\n";
+        assert!(
+            codes(&validate_feature_source(invalid, "rows.feature"))
+                .contains(&diagnostic_codes::EXAMPLES_WITHOUT_OUTLINE)
+        );
     }
 
     #[test]

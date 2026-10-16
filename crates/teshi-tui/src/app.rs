@@ -125,6 +125,11 @@ pub struct AgentThread {
 }
 
 impl AgentThread {
+    /// Startup backend fallback notice, retained until an explicit selection.
+    pub fn selection_warning(&self) -> Option<&str> {
+        self.selection_warning.as_deref()
+    }
+
     fn retain_partial_response(&mut self) {
         let content = std::mem::take(self.partial_response_mut());
         let reasoning = self.backend.take_partial_reasoning();
@@ -135,7 +140,7 @@ impl AgentThread {
                 tool_calls: None,
                 tool_call_id: None,
                 reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
-                source: None,
+                source: Some("agent_progress".into()),
             });
         }
     }
@@ -246,7 +251,7 @@ impl AgentThread {
                 tool_call_id: None,
                 reasoning_content: (!self.backend.partial_reasoning().is_empty())
                     .then(|| self.backend.partial_reasoning().to_string()),
-                source: None,
+                source: Some("agent_progress".into()),
             });
         }
         let snapshot = serde_json::to_string(&(
@@ -1795,8 +1800,8 @@ impl App {
     }
 
     fn show_selection_warning(&mut self) {
-        if let Some(warning) = self.agent_mut().selection_warning.take() {
-            self.status = warning;
+        if let Some(warning) = self.agent().selection_warning() {
+            self.status = warning.to_owned();
         }
     }
 
@@ -6705,7 +6710,7 @@ impl App {
                         tool_calls: None,
                         tool_call_id: None,
                         reasoning_content: None,
-                        source: None,
+                        source: Some("agent_progress".into()),
                     });
                     self.status = "AI request cancelled".to_string();
                 }
@@ -8738,6 +8743,7 @@ impl App {
         );
         *thread.messages_mut() = messages;
         thread.selected_acp_id = selected_id;
+        thread.selection_warning = None;
         thread.acp_controls_ui = Default::default();
         thread.status = AiStatus::Idle;
         self.active_model_label = installed.as_ref().map(|agent| agent.name.clone());
@@ -9344,6 +9350,41 @@ mod tests {
     }
 
     #[test]
+    fn unfinished_checkpoint_keeps_progress_style_after_restore_for_both_backends() {
+        use teshi_agent::backend::AgentBackendKind;
+        for kind in [AgentBackendKind::Native, AgentBackendKind::Acp] {
+            let (mut app, project, _store) = slash_test_app();
+            let storage = tempdir().unwrap();
+            let mut agent = AgentThread::new_with_backend(0, "Controlled", kind);
+            agent.messages_mut().push(super::AiChatMessage {
+                role: AiRole::User,
+                content: "Inspect".into(),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                source: None,
+            });
+            agent
+                .partial_response_mut()
+                .push_str("Partial result completed");
+            agent
+                .save_session_to(storage.path(), project.path(), None)
+                .unwrap();
+            let id = agent.saved_session.as_ref().unwrap().id.clone();
+            // Read the actual checkpoint, without relying on a graceful-exit save.
+            let saved =
+                crate::session::Session::load_from_file(&storage.path().join(format!("{id}.json")))
+                    .unwrap();
+            app.restore_session(saved);
+            assert_eq!(app.agent().backend_kind(), kind);
+            let reply = app.agent().messages().last().unwrap();
+            assert_eq!(reply.content, "Partial result completed");
+            assert_eq!(reply.source.as_deref(), Some("agent_progress"));
+            assert!(app.agent().partial_response().is_empty());
+        }
+    }
+
+    #[test]
     fn tui_runner_failure_events_preserve_step_and_screen_attachment_in_explore() {
         let (mut app, _project, _store) = slash_test_app();
         app.explore_case_map.insert("f0:s0".into(), (0, 0));
@@ -9463,7 +9504,13 @@ mod tests {
             restarted.backend_kind(),
             teshi_agent::backend::AgentBackendKind::Native
         );
-        assert!(restarted.selection_warning.unwrap().contains("removed"));
+        assert!(restarted.selection_warning().unwrap().contains("removed"));
+        *app.agent_mut() = restarted;
+        app.show_selection_warning();
+        assert!(app.agent().selection_warning().is_some());
+        assert!(app.status.contains("unavailable"));
+        app.select_backend(None);
+        assert!(app.agent().selection_warning().is_none());
     }
 
     #[test]

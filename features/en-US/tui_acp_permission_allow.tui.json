@@ -1,0 +1,208 @@
+{
+  "version": 1,
+  "mode": "tui",
+  "steps": [
+    {
+      "line": 9,
+      "text": "Teshi is open with a deterministic ACP agent in a narrow terminal",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "launch",
+          "config": {
+            "program": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-runtime\\bin-v5\\teshi.exe",
+            "args": [
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-sageuwy2\\project",
+              "--requirements-root",
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-sageuwy2\\requirements"
+            ],
+            "cwd": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-sageuwy2",
+            "env": [
+              [
+                "APPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-sageuwy2\\appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-sageuwy2\\localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-sageuwy2\\config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-sageuwy2\\data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-sageuwy2\\acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-sageuwy2\\sessions"
+              ],
+              [
+                "TESHI_AGENT_BACKEND",
+                "acp"
+              ],
+              [
+                "TESHI_ACP_PROGRAM",
+                "D:\\Env\\Python\\Python313\\python.exe"
+              ],
+              [
+                "TESHI_ACP_ARGS_JSON",
+                "[\"D:\\\\Dev\\\\Rust\\\\teshi\\\\dev\\\\crates\\\\teshi-tui-runner\\\\tests\\\\fixtures\\\\permission_prompt_acp.py\"]"
+              ]
+            ],
+            "cols": 100,
+            "rows": 30
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 12,
+      "text": "I open AI chat for the permission conversation",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 13,
+      "text": "I send permission conversation turn 1",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Please inspect the project and report back."
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 14,
+      "text": "the first permission reply is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "PERMISSION_BEFORE",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 15,
+      "text": "the ACP permission prompt is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "ACP agent requests permission",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "Allow once",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 16,
+      "text": "I move the permission selection down",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Down"
+        }
+      ]
+    },
+    {
+      "line": 17,
+      "text": "I confirm the permission selection",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 18,
+      "text": "the allowed permission reply is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "PERMISSION_AFTER_allow_always",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 19,
+      "text": "I leave permission chat input",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        }
+      ]
+    },
+    {
+      "line": 20,
+      "text": "I quit permission chat",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 21,
+      "text": "permission chat exits successfully",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 10000
+        }
+      ]
+    }
+  ]
+}

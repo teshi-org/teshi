@@ -1,0 +1,515 @@
+{
+  "version": 1,
+  "mode": "tui",
+  "steps": [
+    {
+      "line": 10,
+      "text": "Teshi 已打开使用隔离会话存储的隔离项目",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "launch",
+          "config": {
+            "program": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-runtime\\bin-v5\\teshi.exe",
+            "args": [
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp\\project",
+              "--requirements-root",
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp\\requirements"
+            ],
+            "cwd": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp",
+            "env": [
+              [
+                "APPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp\\appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp\\localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp\\config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp\\data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp\\acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp\\sessions"
+              ],
+              [
+                "TESHI_AGENT_BACKEND",
+                "acp"
+              ],
+              [
+                "TESHI_ACP_PROGRAM",
+                "D:\\Env\\Python\\Python313\\python.exe"
+              ],
+              [
+                "TESHI_ACP_ARGS_JSON",
+                "[\"D:\\\\Dev\\\\Rust\\\\teshi\\\\dev\\\\crates\\\\teshi-tui-runner\\\\tests\\\\fixtures\\\\agent_acceptance_fixture.py\", \"acp\", \"D:\\\\Dev\\\\Rust\\\\teshi\\\\dev\\\\.teshi\\\\feature-results\\\\runs\\\\20261016T034038.600597Z-29240\\\\teshi-tui-feature-nhjukkpp\\\\exit-trace\", \"Exit Agent\"]"
+              ]
+            ],
+            "cols": 100,
+            "rows": 30
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 11,
+      "text": "项目没有未保存的编辑",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 12,
+      "text": "当前键盘焦点允许按“q”退出 Teshi",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 15,
+      "text": "代理状态为“<状态>”",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 16,
+      "text": "我按下“q”",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 17,
+      "text": "Teshi 进程在 1000 毫秒内成功退出",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 18,
+      "text": "终端输入模式与屏幕已恢复",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 27,
+      "text": "受控 ACP 代理正在“<阶段>”阶段等待",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 28,
+      "text": "代理在输入关闭后立即退出",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 29,
+      "text": "我按下“q”",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 30,
+      "text": "Teshi 进程在 3000 毫秒内成功退出",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 3000
+        }
+      ]
+    },
+    {
+      "line": 31,
+      "text": "该 ACP 代理所属的进程均已结束",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 32,
+      "text": "终端输入模式与屏幕已恢复",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 43,
+      "text": "受控 ACP 代理“<行为>”",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 44,
+      "text": "我按下“q”",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 45,
+      "text": "Teshi 进程在 5000 毫秒内成功退出",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 5000
+        }
+      ]
+    },
+    {
+      "line": 46,
+      "text": "该 ACP 代理所属的进程均已结束",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 47,
+      "text": "终端输入模式与屏幕已恢复",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 55,
+      "text": "3 个会话分别连接了受控 ACP 代理",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 56,
+      "text": "这 3 个代理均已完成回复且在输入关闭后立即退出",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 57,
+      "text": "我按下“q”",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 58,
+      "text": "Teshi 进程在 1000 毫秒内成功退出",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 59,
+      "text": "这些 ACP 代理所属的进程均已结束",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 62,
+      "text": "已选择使用受控代理的后端“ACP”",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 63,
+      "text": "代理已完成回复“项目检查完成”",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Inspect the project"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Inspection finished",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 64,
+      "text": "我按下“q”",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 65,
+      "text": "Teshi 进程在 1000 毫秒内成功退出",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 1000
+        }
+      ]
+    },
+    {
+      "line": 66,
+      "text": "我使用相同项目和会话存储重新打开 Teshi",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "launch",
+          "config": {
+            "program": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-runtime\\bin-v5\\teshi.exe",
+            "args": [
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp\\project",
+              "--requirements-root",
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp\\requirements"
+            ],
+            "cwd": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp",
+            "env": [
+              [
+                "APPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp\\appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp\\localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp\\config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp\\data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp\\acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-nhjukkpp\\sessions"
+              ],
+              [
+                "TESHI_AGENT_BACKEND",
+                "acp"
+              ],
+              [
+                "TESHI_ACP_PROGRAM",
+                "D:\\Env\\Python\\Python313\\python.exe"
+              ],
+              [
+                "TESHI_ACP_ARGS_JSON",
+                "[\"D:\\\\Dev\\\\Rust\\\\teshi\\\\dev\\\\crates\\\\teshi-tui-runner\\\\tests\\\\fixtures\\\\agent_acceptance_fixture.py\", \"acp\", \"D:\\\\Dev\\\\Rust\\\\teshi\\\\dev\\\\.teshi\\\\feature-results\\\\runs\\\\20261016T034038.600597Z-29240\\\\teshi-tui-feature-nhjukkpp\\\\exit-trace\", \"Exit Agent\"]"
+              ]
+            ],
+            "cols": 100,
+            "rows": 30
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 67,
+      "text": "我打开 AI 聊天",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/resume"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 68,
+      "text": "AI 聊天中可见“项目检查完成”",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Inspection finished",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    }
+  ]
+}

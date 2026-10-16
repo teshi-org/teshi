@@ -660,24 +660,33 @@ class EmbeddedSession:
         self.playwright = None
         self.cdp_session = None
         self._lock = asyncio.Lock()
+        self.gpu_errors: list[str] = []
 
     async def start(self, cdp_port: int) -> None:
         from playwright.async_api import async_playwright
 
         self.playwright = await async_playwright().start()
+        args = [f"--remote-debugging-port={cdp_port}"]
+        if os.environ.get("TESHI_EMBEDDED_SOFTWARE_WEBGPU") == "1":
+            args.extend(["--enable-unsafe-webgpu", "--enable-unsafe-swiftshader", "--use-gl=angle", "--use-angle=swiftshader", "--use-webgpu-adapter=swiftshader"])
         self.browser = await self.playwright.chromium.launch(
             headless=embedded_browser_headless(),
-            args=[f"--remote-debugging-port={cdp_port}"],
+            args=args,
         )
         self.context = await self.browser.new_context(
             viewport={"width": 1920, "height": 1080}
         )
         self.page = await self.context.new_page()
+        self.page.on("console", self._observe_gpu_error)
         await self.page.goto("about:blank")
         self.cdp_session = await self.context.new_cdp_session(self.page)
 
         # Inject engine-inspired JS helpers
         await self.page.evaluate(MAKE_SHORT_SELECTOR_JS)
+
+    def _observe_gpu_error(self, message: Any) -> None:
+        if message.type == "error" and "gpu" in message.text.lower():
+            self.gpu_errors = (self.gpu_errors + [message.text[:2000]])[-5:]
 
     def current_url(self) -> str:
         if self.page is None:
@@ -687,6 +696,7 @@ class EmbeddedSession:
     async def navigate(self, url: str) -> None:
         async with self._lock:
             if self.page is not None:
+                self.gpu_errors.clear()
                 await self.page.goto(url, wait_until="domcontentloaded")
 
     async def screenshot_jpeg_b64(self) -> str:
@@ -967,7 +977,12 @@ class EmbeddedSession:
             title = await self.page.title()
             url = self.page.url
             try:
-                tree = await self.page.accessibility.snapshot(interesting_only=False)
+                if hasattr(self.page, "accessibility"):
+                    tree = await self.page.accessibility.snapshot(interesting_only=False)
+                else:
+                    # Recent Playwright releases expose ARIA snapshots through
+                    # locators instead of Page.accessibility.
+                    tree = await self.page.locator("body").aria_snapshot()
             except Exception as exc:  # noqa: BLE001
                 tree = {"error": str(exc)}
 
@@ -992,6 +1007,8 @@ class EmbeddedSession:
 
             snapshot = normalize_snapshot(url, title, tree, buttons)
             snapshot["page_context_revision"] = str(revision)
+            if self.gpu_errors:
+                snapshot["gpu_errors"] = list(self.gpu_errors)
             return snapshot
 
     async def verify_playwright_candidates(

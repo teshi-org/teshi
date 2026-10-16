@@ -1,0 +1,996 @@
+{
+  "version": 1,
+  "mode": "tui",
+  "steps": [
+    {
+      "line": 8,
+      "text": "Teshi is open with a deterministic ACP agent for a long conversation",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "launch",
+          "config": {
+            "program": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-runtime\\bin-v5\\teshi.exe",
+            "args": [
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-7lnthhf_\\project",
+              "--requirements-root",
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-7lnthhf_\\requirements"
+            ],
+            "cwd": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-7lnthhf_",
+            "env": [
+              [
+                "APPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-7lnthhf_\\appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-7lnthhf_\\localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-7lnthhf_\\config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-7lnthhf_\\data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-7lnthhf_\\acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-7lnthhf_\\sessions"
+              ],
+              [
+                "TESHI_AGENT_BACKEND",
+                "acp"
+              ],
+              [
+                "TESHI_ACP_PROGRAM",
+                "D:\\Env\\Python\\Python313\\python.exe"
+              ],
+              [
+                "TESHI_ACP_ARGS_JSON",
+                "[\"D:\\\\Dev\\\\Rust\\\\teshi\\\\dev\\\\crates\\\\teshi-tui-runner\\\\tests\\\\fixtures\\\\wrapped_chat_acp.py\"]"
+              ]
+            ],
+            "cols": 100,
+            "rows": 30
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 11,
+      "text": "I open AI chat for the long conversation",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 12,
+      "text": "I complete wrapped conversation turns 1 through 10",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Conversation turn 1: inspect the project context carefully and return the deterministic response marker. T01"
+        },
+        {
+          "action": "expect_text",
+          "text": "T01",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_01",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 2: inspect the project context carefully and return the deterministic response marker. T02"
+        },
+        {
+          "action": "expect_text",
+          "text": "T02",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_02",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 3: inspect the project context carefully and return the deterministic response marker. T03"
+        },
+        {
+          "action": "expect_text",
+          "text": "T03",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_03",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 4: inspect the project context carefully and return the deterministic response marker. T04"
+        },
+        {
+          "action": "expect_text",
+          "text": "T04",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_04",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 5: inspect the project context carefully and return the deterministic response marker. T05"
+        },
+        {
+          "action": "expect_text",
+          "text": "T05",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_05",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 6: inspect the project context carefully and return the deterministic response marker. T06"
+        },
+        {
+          "action": "expect_text",
+          "text": "T06",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_06",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 7: inspect the project context carefully and return the deterministic response marker. T07"
+        },
+        {
+          "action": "expect_text",
+          "text": "T07",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_07",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 8: inspect the project context carefully and return the deterministic response marker. T08"
+        },
+        {
+          "action": "expect_text",
+          "text": "T08",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_08",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 9: inspect the project context carefully and return the deterministic response marker. T09"
+        },
+        {
+          "action": "expect_text",
+          "text": "T09",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_09",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 10: inspect the project context carefully and return the deterministic response marker. T10"
+        },
+        {
+          "action": "expect_text",
+          "text": "T10",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_10",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 13,
+      "text": "wrapped ACP reply 10 is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_10",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 14,
+      "text": "I complete wrapped conversation turns 11 through 20",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Conversation turn 11: inspect the project context carefully and return the deterministic response marker. T11"
+        },
+        {
+          "action": "expect_text",
+          "text": "T11",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_11",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 12: inspect the project context carefully and return the deterministic response marker. T12"
+        },
+        {
+          "action": "expect_text",
+          "text": "T12",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_12",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 13: inspect the project context carefully and return the deterministic response marker. T13"
+        },
+        {
+          "action": "expect_text",
+          "text": "T13",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_13",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 14: inspect the project context carefully and return the deterministic response marker. T14"
+        },
+        {
+          "action": "expect_text",
+          "text": "T14",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_14",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 15: inspect the project context carefully and return the deterministic response marker. T15"
+        },
+        {
+          "action": "expect_text",
+          "text": "T15",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_15",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 16: inspect the project context carefully and return the deterministic response marker. T16"
+        },
+        {
+          "action": "expect_text",
+          "text": "T16",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_16",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 17: inspect the project context carefully and return the deterministic response marker. T17"
+        },
+        {
+          "action": "expect_text",
+          "text": "T17",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_17",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 18: inspect the project context carefully and return the deterministic response marker. T18"
+        },
+        {
+          "action": "expect_text",
+          "text": "T18",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_18",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 19: inspect the project context carefully and return the deterministic response marker. T19"
+        },
+        {
+          "action": "expect_text",
+          "text": "T19",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_19",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 20: inspect the project context carefully and return the deterministic response marker. T20"
+        },
+        {
+          "action": "expect_text",
+          "text": "T20",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_20",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 15,
+      "text": "wrapped ACP reply 20 is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_20",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 16,
+      "text": "I complete wrapped conversation turns 21 through 30",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Conversation turn 21: inspect the project context carefully and return the deterministic response marker. T21"
+        },
+        {
+          "action": "expect_text",
+          "text": "T21",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_21",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 22: inspect the project context carefully and return the deterministic response marker. T22"
+        },
+        {
+          "action": "expect_text",
+          "text": "T22",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_22",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 23: inspect the project context carefully and return the deterministic response marker. T23"
+        },
+        {
+          "action": "expect_text",
+          "text": "T23",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_23",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 24: inspect the project context carefully and return the deterministic response marker. T24"
+        },
+        {
+          "action": "expect_text",
+          "text": "T24",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_24",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 25: inspect the project context carefully and return the deterministic response marker. T25"
+        },
+        {
+          "action": "expect_text",
+          "text": "T25",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_25",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 26: inspect the project context carefully and return the deterministic response marker. T26"
+        },
+        {
+          "action": "expect_text",
+          "text": "T26",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_26",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 27: inspect the project context carefully and return the deterministic response marker. T27"
+        },
+        {
+          "action": "expect_text",
+          "text": "T27",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_27",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 28: inspect the project context carefully and return the deterministic response marker. T28"
+        },
+        {
+          "action": "expect_text",
+          "text": "T28",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_28",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 29: inspect the project context carefully and return the deterministic response marker. T29"
+        },
+        {
+          "action": "expect_text",
+          "text": "T29",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_29",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        },
+        {
+          "action": "write",
+          "text": "Conversation turn 30: inspect the project context carefully and return the deterministic response marker. T30"
+        },
+        {
+          "action": "expect_text",
+          "text": "T30",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_30",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 17,
+      "text": "wrapped ACP reply 30 is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_30",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 18,
+      "text": "I leave the long conversation input",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        }
+      ]
+    },
+    {
+      "line": 19,
+      "text": "I quit the long conversation",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 20,
+      "text": "the long conversation exits successfully",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 10000
+        }
+      ]
+    }
+  ]
+}

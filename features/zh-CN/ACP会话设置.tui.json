@@ -1,0 +1,316 @@
+{
+  "version": 1,
+  "mode": "tui",
+  "steps": [
+    {
+      "line": 8,
+      "text": "Teshi 已打开一个公布设置的确定性 ACP 代理",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "launch",
+          "config": {
+            "program": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-runtime\\bin-v5\\teshi.exe",
+            "args": [
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-mbegibhw\\project",
+              "--requirements-root",
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-mbegibhw\\requirements"
+            ],
+            "cwd": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-mbegibhw",
+            "env": [
+              [
+                "APPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-mbegibhw\\appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-mbegibhw\\localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-mbegibhw\\config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-mbegibhw\\data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-mbegibhw\\acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-mbegibhw\\sessions"
+              ],
+              [
+                "TESHI_AGENT_BACKEND",
+                "acp"
+              ],
+              [
+                "TESHI_ACP_PROGRAM",
+                "D:\\Env\\Python\\Python313\\python.exe"
+              ],
+              [
+                "TESHI_ACP_ARGS_JSON",
+                "[\"D:\\\\Dev\\\\Rust\\\\teshi\\\\dev\\\\crates\\\\teshi-agent-runtime\\\\tests\\\\fixtures\\\\fake_acp_agent.py\", \"settings\"]"
+              ]
+            ],
+            "cols": 140,
+            "rows": 32
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 11,
+      "text": "我为设置对话打开 AI 聊天",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 12,
+      "text": "我打开代理设置列表",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "/settings"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Model: Alpha",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 13,
+      "text": "公布的模型控件与溢出控件可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Thinking",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "[More",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 14,
+      "text": "我点击底部栏的模型控件",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Model: Alpha",
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "Beta",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 15,
+      "text": "我选择第二个模型选项",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Down"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 16,
+      "text": "模型变更已确认",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Model: Beta",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 17,
+      "text": "依赖模型的思考选项已刷新",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Thinking: Low",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 18,
+      "text": "我把终端宽度缩小到 64 列",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "resize",
+          "cols": 64,
+          "rows": 24
+        }
+      ]
+    },
+    {
+      "line": 19,
+      "text": "设置栏仍提供溢出控件",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "[More",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 20,
+      "text": "我在设置列表中开启快速选项",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "/settings"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Fast: Off",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Down"
+        },
+        {
+          "action": "key",
+          "key": "Down"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "key",
+          "key": "Down"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 21,
+      "text": "快速选项保持开启",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "/settings"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Fast: On",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Escape"
+        }
+      ]
+    },
+    {
+      "line": 22,
+      "text": "我离开聊天输入框",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        }
+      ]
+    },
+    {
+      "line": 23,
+      "text": "我退出 Teshi",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 24,
+      "text": "Teshi 正常退出",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 10000
+        }
+      ]
+    }
+  ]
+}

@@ -66,7 +66,7 @@ pub struct RunRequest {
     pub meta: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RunAttachment {
     pub kind: String,
     pub path: String,
@@ -541,6 +541,285 @@ pub struct RunCliOptions {
     pub runner_cmd: Option<String>,
     pub runner_args: Vec<String>,
     pub runner_cwd: Option<PathBuf>,
+    pub report_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RunStepReport {
+    step_id: String,
+    text: Option<String>,
+    status: String,
+    message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RunCaseReport {
+    case_id: String,
+    feature_path: String,
+    scenario: String,
+    status: String,
+    duration_ms: Option<u64>,
+    error: Option<String>,
+    steps: Vec<RunStepReport>,
+    attachments: Vec<RunAttachment>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct RunSummary {
+    total: usize,
+    passed: usize,
+    failed: usize,
+    skipped: usize,
+    blocked: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RunExitReport {
+    code: Option<i32>,
+    success: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RunReport {
+    schema_version: u32,
+    feature: String,
+    runner: String,
+    status: String,
+    started_at_unix_ms: u64,
+    finished_at_unix_ms: u64,
+    summary: RunSummary,
+    cases: Vec<RunCaseReport>,
+    runner_error: Option<String>,
+    runner_exit: Option<RunExitReport>,
+}
+
+struct RunReportCollector {
+    report: RunReport,
+    case_indexes: HashMap<String, usize>,
+}
+
+impl RunReportCollector {
+    fn new(feature: &Path, runner: &str, cases: &[RunCase]) -> Self {
+        let mut case_indexes = HashMap::new();
+        let mut reports = Vec::with_capacity(cases.len());
+        for case in cases {
+            case_indexes.insert(case.id.clone(), reports.len());
+            reports.push(RunCaseReport {
+                case_id: case.id.clone(),
+                feature_path: case.feature_path.clone(),
+                scenario: case.scenario.clone(),
+                status: "not_started".to_string(),
+                duration_ms: None,
+                error: None,
+                steps: Vec::new(),
+                attachments: Vec::new(),
+            });
+        }
+        let now = unix_timestamp_ms();
+        Self {
+            report: RunReport {
+                schema_version: 1,
+                feature: feature.to_string_lossy().into_owned(),
+                runner: runner.to_string(),
+                status: "running".to_string(),
+                started_at_unix_ms: now,
+                finished_at_unix_ms: now,
+                summary: RunSummary {
+                    total: reports.len(),
+                    ..RunSummary::default()
+                },
+                cases: reports,
+                runner_error: None,
+                runner_exit: None,
+            },
+            case_indexes,
+        }
+    }
+
+    fn case_mut(&mut self, case_id: &str) -> Option<&mut RunCaseReport> {
+        self.case_indexes
+            .get(case_id)
+            .and_then(|index| self.report.cases.get_mut(*index))
+    }
+
+    fn observe(&mut self, event: &RunEvent) {
+        match event {
+            RunEvent::StartCase { case_id, .. } => {
+                if let Some(case) = self.case_mut(case_id) {
+                    case.status = "running".to_string();
+                }
+            }
+            RunEvent::StartStep {
+                case_id: Some(case_id),
+                step_id,
+                text,
+                ..
+            } => {
+                if let Some(case) = self.case_mut(case_id) {
+                    case.steps.push(RunStepReport {
+                        step_id: step_id.clone(),
+                        text: text.clone(),
+                        status: "running".to_string(),
+                        message: None,
+                    });
+                }
+            }
+            RunEvent::EndStep {
+                case_id: Some(case_id),
+                step_id,
+                status,
+                message,
+            } => {
+                if let Some(case) = self.case_mut(case_id) {
+                    if let Some(step) = case
+                        .steps
+                        .iter_mut()
+                        .rev()
+                        .find(|step| step.step_id == *step_id)
+                    {
+                        step.status = status.clone().unwrap_or_else(|| "unknown".to_string());
+                        step.message = message.clone();
+                    } else {
+                        case.steps.push(RunStepReport {
+                            step_id: step_id.clone(),
+                            text: None,
+                            status: status.clone().unwrap_or_else(|| "unknown".to_string()),
+                            message: message.clone(),
+                        });
+                    }
+                }
+            }
+            RunEvent::CasePassed {
+                case_id,
+                duration_ms,
+            } => {
+                if let Some(case) = self.case_mut(case_id) {
+                    case.status = "passed".to_string();
+                    case.duration_ms = *duration_ms;
+                }
+            }
+            RunEvent::CaseFailed {
+                case_id,
+                duration_ms,
+                error,
+            } => {
+                if let Some(case) = self.case_mut(case_id) {
+                    case.status = "failed".to_string();
+                    case.duration_ms = *duration_ms;
+                    case.error = Some(error.message.clone());
+                    case.attachments.extend(error.attachments.clone());
+                }
+            }
+            RunEvent::CaseSkipped { case_id, reason } => {
+                if let Some(case) = self.case_mut(case_id) {
+                    let blocked = reason
+                        .as_deref()
+                        .is_some_and(|value| value.starts_with("blocked:"));
+                    case.status = if blocked { "blocked" } else { "skipped" }.to_string();
+                    case.error = reason.clone();
+                }
+            }
+            RunEvent::Artifact {
+                case_id: Some(case_id),
+                kind,
+                path,
+            } => {
+                if let Some(case) = self.case_mut(case_id) {
+                    case.attachments.push(RunAttachment {
+                        kind: kind.clone(),
+                        path: path.clone(),
+                    });
+                }
+            }
+            RunEvent::RunnerError { message } => {
+                self.report.runner_error = Some(message.clone());
+            }
+            RunEvent::RunnerExit { code, success } => {
+                self.report.runner_exit = Some(RunExitReport {
+                    code: *code,
+                    success: *success,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn finish(&mut self, exited: bool) {
+        let runner_failed = self
+            .report
+            .runner_exit
+            .as_ref()
+            .is_some_and(|exit| !exit.success)
+            || self.report.runner_error.is_some()
+            || !exited;
+        for case in &mut self.report.cases {
+            if matches!(case.status.as_str(), "not_started" | "running") {
+                case.status = "failed".to_string();
+                case.error = Some(if runner_failed {
+                    "runner did not complete this scenario".to_string()
+                } else {
+                    "runner completed without reporting a scenario result".to_string()
+                });
+            }
+        }
+        self.report.summary = RunSummary {
+            total: self.report.cases.len(),
+            passed: self
+                .report
+                .cases
+                .iter()
+                .filter(|case| case.status == "passed")
+                .count(),
+            failed: self
+                .report
+                .cases
+                .iter()
+                .filter(|case| case.status == "failed")
+                .count(),
+            skipped: self
+                .report
+                .cases
+                .iter()
+                .filter(|case| case.status == "skipped")
+                .count(),
+            blocked: self
+                .report
+                .cases
+                .iter()
+                .filter(|case| case.status == "blocked")
+                .count(),
+        };
+        self.report.status = if self.report.summary.failed > 0 {
+            "failed"
+        } else if self.report.summary.blocked > 0 {
+            "blocked"
+        } else {
+            "passed"
+        }
+        .to_string();
+        self.report.finished_at_unix_ms = unix_timestamp_ms();
+    }
+
+    fn write(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create report directory {}", parent.display()))?;
+        }
+        let contents = serde_json::to_vec_pretty(&self.report).context("serialize run report")?;
+        std::fs::write(path, contents)
+            .with_context(|| format!("write run report {}", path.display()))?;
+        Ok(())
+    }
+}
+
+fn unix_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// Runs BDD scenarios headlessly using the configured NDJSON runner.
@@ -638,6 +917,17 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
         "project_root".to_string(),
         project_root.to_string_lossy().to_string(),
     );
+    if let Some(report_path) = opts.report_path.as_ref() {
+        let artifacts_dir = report_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .join("artifacts");
+        meta.insert(
+            "artifacts_dir".to_string(),
+            artifacts_dir.to_string_lossy().into_owned(),
+        );
+    }
     if let Some(mode) = read_sidecar_mode(&feature_path) {
         match mode.as_str() {
             "winapp" | "embedded" | "chrome" => {
@@ -651,11 +941,18 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
         cases: rest,
         meta,
     };
+    let report_path = opts.report_path.clone();
+    let mut report = report_path
+        .as_ref()
+        .map(|_| RunReportCollector::new(&feature_path, &config.cmd, &request.cases));
     let rx = spawn_runner(config, request)?;
     let mut failed = false;
     let mut exited = false;
     while let Ok(event) = rx.recv() {
         println!("{}", format_event(&event));
+        if let Some(report) = &mut report {
+            report.observe(&event);
+        }
         failed |= matches!(
             event,
             RunEvent::CaseFailed { .. }
@@ -668,6 +965,12 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
         if matches!(event, RunEvent::RunnerExit { .. }) {
             exited = true;
             break;
+        }
+    }
+    if let Some(report) = &mut report {
+        report.finish(exited);
+        if let Some(path) = report_path {
+            report.write(&path)?;
         }
     }
     if failed || !exited {
@@ -901,5 +1204,64 @@ mod tests {
         .expect("cli runner override");
         assert_eq!(cfg.cmd, "teshi-requirement-cli-runner");
         assert_eq!(cfg.args, vec!["--quiet"]);
+    }
+
+    #[test]
+    fn report_collector_keeps_case_steps_attachments_and_blocked_status() {
+        let cases = vec![
+            RunCase {
+                id: "f0:s0".into(),
+                feature_path: "features/sample.feature".into(),
+                scenario: "passes".into(),
+                line_number: Some(3),
+                until_line: Some(5),
+            },
+            RunCase {
+                id: "f0:s1".into(),
+                feature_path: "features/sample.feature".into(),
+                scenario: "blocked".into(),
+                line_number: Some(8),
+                until_line: Some(10),
+            },
+        ];
+        let mut collector =
+            RunReportCollector::new(Path::new("features/sample.feature"), "runner", &cases);
+        collector.observe(&RunEvent::StartCase {
+            case_id: "f0:s0".into(),
+            name: Some("passes".into()),
+        });
+        collector.observe(&RunEvent::StartStep {
+            case_id: Some("f0:s0".into()),
+            step_id: "4".into(),
+            text: Some("the step".into()),
+            is_api: None,
+        });
+        collector.observe(&RunEvent::EndStep {
+            case_id: Some("f0:s0".into()),
+            step_id: "4".into(),
+            status: Some("passed".into()),
+            message: None,
+        });
+        collector.observe(&RunEvent::Artifact {
+            case_id: Some("f0:s0".into()),
+            kind: "text".into(),
+            path: "screen.txt".into(),
+        });
+        collector.observe(&RunEvent::CasePassed {
+            case_id: "f0:s0".into(),
+            duration_ms: Some(12),
+        });
+        collector.observe(&RunEvent::CaseSkipped {
+            case_id: "f0:s1".into(),
+            reason: Some("blocked: browser session unavailable".into()),
+        });
+        collector.finish(true);
+
+        assert_eq!(collector.report.status, "blocked");
+        assert_eq!(collector.report.summary.passed, 1);
+        assert_eq!(collector.report.summary.blocked, 1);
+        assert_eq!(collector.report.cases[0].steps[0].status, "passed");
+        assert_eq!(collector.report.cases[0].attachments[0].path, "screen.txt");
+        assert_eq!(collector.report.cases[1].status, "blocked");
     }
 }

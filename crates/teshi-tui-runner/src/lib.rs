@@ -174,6 +174,39 @@ impl Terminal {
         }
     }
 
+    /// Waits for a viewport condition to stay true across consecutive frames.
+    ///
+    /// # Errors
+    /// Returns an error for invalid timing, observation failure, or expiry.
+    pub fn expect_stable_text(
+        &self,
+        text: &str,
+        visible: bool,
+        timeout_ms: u64,
+        stable_ms: u64,
+    ) -> Result<()> {
+        validate_timeout(timeout_ms)?;
+        if text.is_empty() || stable_ms == 0 || stable_ms > timeout_ms {
+            bail!("invalid stable viewport condition");
+        }
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let mut matched_at = None;
+        loop {
+            if self.screen()?.contains(text) == visible {
+                let matched = matched_at.get_or_insert_with(Instant::now);
+                if matched.elapsed() >= Duration::from_millis(stable_ms) {
+                    return Ok(());
+                }
+            } else {
+                matched_at = None;
+            }
+            if Instant::now() >= deadline {
+                bail!("viewport did not stabilize for {text:?}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// Clicks the leftmost viewport cell rendering `text`.
     ///
     /// The coordinate is resolved from the live viewport rather than from the

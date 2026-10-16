@@ -185,6 +185,8 @@ fn scenario_protocol_replays_background_and_preserves_failure_screen() {
         text: text.into(),
         confirmed: true,
         actions,
+        doc_string: None,
+        data_table: None,
     };
     let bindings = Bindings {
         version: 1,

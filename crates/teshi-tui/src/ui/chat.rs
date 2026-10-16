@@ -294,6 +294,14 @@ fn build_chat_lines(
     let mut out: Vec<Line<'static>> = Vec::new();
     let agent = app.agent();
 
+    if let Some(warning) = agent.selection_warning() {
+        out.extend(wrap_line_to_width(
+            Line::styled(warning.to_owned(), fg(theme::WARNING)),
+            width,
+        ));
+        out.push(Line::default());
+    }
+
     if agent.messages().is_empty() {
         let greeting = match placement {
             ChatPlacement::Tab => "Welcome to AI Chat! Type a message below and press Enter.",
@@ -351,7 +359,7 @@ fn build_chat_lines(
     }
 
     if !agent.partial_response().is_empty() {
-        let mut body = vec![role_header(AiRole::Assistant, None)];
+        let mut body = vec![role_header(AiRole::Assistant, Some("agent_progress"))];
         body.extend(render_markdown_width(
             agent.partial_response(),
             rail_body_width(width),
@@ -364,7 +372,7 @@ fn build_chat_lines(
             Some(last) => last.spans.push(cursor),
             None => body.push(Line::from(cursor)),
         }
-        push_railed(&mut out, body, theme::SUCCESS, width);
+        push_railed(&mut out, body, theme::MUTED, width);
         out.push(Line::default());
     }
 
@@ -379,10 +387,11 @@ fn rail_body_width(width: usize) -> u16 {
 fn role_header(role: AiRole, source: Option<&str>) -> Line<'static> {
     let (label, color) = match role {
         AiRole::User => ("You", theme::ACCENT),
+        _ if source == Some("agent_progress") => ("Teshi", theme::MUTED),
         _ => ("Teshi", theme::SUCCESS),
     };
     let mut spans = Vec::with_capacity(2);
-    if let Some(source) = source {
+    if let Some(source) = source.filter(|source| *source != "agent_progress") {
         spans.push(Span::styled(format!("[{source}] "), muted()));
     }
     spans.push(Span::styled(label, fg(color).add_modifier(Modifier::BOLD)));
@@ -424,7 +433,19 @@ fn push_message(out: &mut Vec<Line<'static>>, app: &App, msg: &AiChatMessage, wi
     {
         push_thinking(out, reasoning, width, app.agent().activity_details_expanded);
     }
-    let mut body = vec![role_header(msg.role, msg.source.as_deref())];
+    let progress = msg.source.as_deref() == Some("agent_progress")
+        || msg
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty());
+    let mut body = vec![role_header(
+        msg.role,
+        if progress {
+            Some("agent_progress")
+        } else {
+            msg.source.as_deref()
+        },
+    )];
     if !msg.content.is_empty() {
         body.extend(render_markdown_width(&msg.content, rail_body_width(width)));
     }
@@ -433,6 +454,7 @@ fn push_message(out: &mut Vec<Line<'static>>, app: &App, msg: &AiChatMessage, wi
     }
     let color = match msg.role {
         AiRole::User => theme::ACCENT,
+        _ if progress => theme::MUTED,
         _ => theme::SUCCESS,
     };
     push_railed(out, body, color, width);
@@ -1001,7 +1023,232 @@ fn build_row(cells: Vec<(char, Style)>, width: usize, pad_style: Option<Style>) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn progress_header_is_muted_and_final_header_is_green() {
+        let progress = role_header(AiRole::Assistant, Some("agent_progress"));
+        assert_eq!(progress.spans.len(), 1);
+        assert_eq!(progress.spans[0].style.fg, Some(theme::MUTED));
+        let final_reply = role_header(AiRole::Assistant, None);
+        assert_eq!(final_reply.spans[0].style.fg, Some(theme::SUCCESS));
+    }
+
     use super::*;
+
+    fn activity_test_app() -> (App, tempfile::TempDir, tempfile::TempDir) {
+        let project = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        let feature = project.path().join("sample.feature");
+        std::fs::write(&feature, "Feature: Sample\n").unwrap();
+        let mut app = App::from_file(
+            &feature,
+            crate::config::load_config().unwrap(),
+            store.path().to_path_buf(),
+        )
+        .unwrap();
+        app.agents[0] = crate::app::AgentThread::new_with_backend(
+            0,
+            "Native",
+            teshi_agent::backend::AgentBackendKind::Native,
+        );
+        (app, project, store)
+    }
+
+    fn assert_reply_color(app: &App, text: &str, expected: ratatui::style::Color) {
+        let rows = build_chat_lines(app, 100, 60, ChatPlacement::Tab);
+        let texts = row_texts(&rows);
+        let indices: Vec<_> = texts
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.contains(text))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(indices.len(), 1, "reply must occur once: {texts:?}");
+        let index = indices[0];
+        assert_eq!(rows[index].spans[0].style.fg, Some(expected), "reply rail");
+        let header = (0..index)
+            .rev()
+            .find(|i| texts[*i].contains("Teshi"))
+            .unwrap();
+        assert_eq!(
+            rows[header].spans[0].style.fg,
+            Some(expected),
+            "header rail"
+        );
+        assert_eq!(
+            rows[header].spans.last().unwrap().style.fg,
+            Some(expected),
+            "header text"
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 60)).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new(Text::from(rows)), frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            buffer[(0, index as u16)].fg,
+            expected,
+            "rendered reply rail"
+        );
+        assert_eq!(
+            buffer[(0, header as u16)].fg,
+            expected,
+            "rendered header rail"
+        );
+    }
+
+    #[test]
+    fn native_stream_completion_failure_and_cancellation_match_feature_styles() {
+        use teshi_engine::llm::LlmEvent;
+        for ending in ["normal", "failure", "cancellation"] {
+            let (mut app, _project, _store) = activity_test_app();
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.agents[0]
+                .backend
+                .attach_model_event_receiver_for_tests(rx);
+            app.agents[0].backend.start().unwrap();
+            app.agents[0].status = AiStatus::Waiting;
+            tx.send(LlmEvent::Chunk {
+                content: "Partial result".into(),
+            })
+            .unwrap();
+            app.poll_llm_events();
+            assert_reply_color(&app, "Partial result", theme::MUTED);
+            match ending {
+                "normal" => tx
+                    .send(LlmEvent::Done {
+                        full_text: "Partial result".into(),
+                        reasoning_content: None,
+                        input_tokens: None,
+                        output_tokens: None,
+                        model: "controlled".into(),
+                        finish_reason: Some("stop".into()),
+                    })
+                    .unwrap(),
+                "failure" => tx
+                    .send(LlmEvent::Error {
+                        message: "controlled failure".into(),
+                    })
+                    .unwrap(),
+                _ => app.handle_action(crate::keymap::Action::AiCancel).unwrap(),
+            }
+            app.poll_llm_events();
+            assert_reply_color(
+                &app,
+                "Partial result",
+                if ending == "normal" {
+                    theme::SUCCESS
+                } else {
+                    theme::MUTED
+                },
+            );
+            if ending == "cancellation" {
+                assert_reply_color(&app, "[cancelled", theme::MUTED);
+            }
+        }
+    }
+
+    fn poll_activity_until(app: &mut App, condition: impl Fn(&App) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            app.poll_llm_events();
+            if condition(app) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "activity timed out: {}",
+                app.status
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn acp_stream_tools_completion_and_interruptions_match_feature_styles() {
+        use teshi_agent::backend::{AgentBackendKind, AgentBackendStatus};
+        use teshi_agent_runtime::backend::{AcpBackendConfig, AgentBackendRuntime};
+        for mode in [
+            "visual_success",
+            "visual_failed",
+            "visual_cancelled",
+            "visual_no_final",
+        ] {
+            let (mut app, project, _store) = activity_test_app();
+            let gate = project.path().join("gate");
+            let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../teshi-agent-runtime/tests/fixtures/fake_acp_agent.py");
+            let config = AcpBackendConfig::new(teshi_acp::AcpAgentCommand {
+                program: if cfg!(windows) { "python" } else { "python3" }.into(),
+                args: vec![script.to_string_lossy().into_owned(), mode.into()],
+                cwd: project.path().into(),
+                env: [(
+                    "TESHI_ACTIVITY_GATE".into(),
+                    gate.to_string_lossy().into_owned(),
+                )]
+                .into(),
+            });
+            app.agents[0].backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 2);
+            app.agents[0].backend.configure_acp(config).unwrap();
+            app.agents[0].backend.start().unwrap();
+            app.agents[0].status = AiStatus::Waiting;
+            app.agents[0]
+                .backend
+                .submit_turn(
+                    None,
+                    vec![teshi_core::llm::ChatMessage::text("user", "Inspect")],
+                    None,
+                )
+                .unwrap();
+            poll_activity_until(&mut app, |app| !app.agent().partial_response().is_empty());
+            assert_reply_color(&app, "I will inspect the project", theme::MUTED);
+            std::fs::write(gate.with_extension("tools"), "continue").unwrap();
+            if mode == "visual_success" {
+                poll_activity_until(&mut app, |app| {
+                    app.agent().partial_response() == "Inspection finished"
+                });
+                assert_reply_color(&app, "I will inspect the project", theme::MUTED);
+                assert_reply_color(&app, "Inspection finished", theme::MUTED);
+                std::fs::write(gate.with_extension("finish"), "continue").unwrap();
+            }
+            poll_activity_until(&mut app, |app| {
+                app.agent().backend.status() != AgentBackendStatus::Running
+            });
+            assert_reply_color(&app, "I will inspect the project", theme::MUTED);
+            if mode == "visual_success" || mode == "visual_no_final" {
+                let rows = row_texts(&build_chat_lines(&app, 100, 60, ChatPlacement::Tab));
+                let progress = rows
+                    .iter()
+                    .position(|row| row.contains("I will inspect the project"))
+                    .unwrap();
+                let tool = rows
+                    .iter()
+                    .position(|row| row.contains("Done  Read project"))
+                    .unwrap();
+                assert!(progress < tool, "{rows:?}");
+                assert_eq!(
+                    app.agent()
+                        .messages()
+                        .iter()
+                        .filter(|m| m.tool_call_id.as_deref() == Some("read-project"))
+                        .count(),
+                    1
+                );
+                if mode == "visual_success" {
+                    assert_reply_color(&app, "Inspection finished", theme::SUCCESS);
+                    assert!(
+                        tool < rows
+                            .iter()
+                            .position(|row| row.contains("Inspection finished"))
+                            .unwrap()
+                    );
+                } else {
+                    assert!(!rows.iter().any(|row| row.contains("Inspection finished")));
+                }
+            }
+        }
+    }
 
     fn row_texts(rows: &[Line<'_>]) -> Vec<String> {
         rows.iter()

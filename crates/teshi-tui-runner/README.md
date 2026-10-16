@@ -83,6 +83,19 @@ The binary reads one NDJSON `run` request from stdin and emits standard Teshi
 case/step events to stdout. Failed cases return exit status 1; request/protocol
 errors return 2. Failure screens are retained under `.teshi/tui-results` or
 `meta.artifacts_dir` and attached to the failure event. Feature Background and
-Rule-nested scenarios are supported. Scenario Outlines, Rule Background and
-multiple Background blocks fail explicitly. Bindings are authored as JSON; the
+Rule-nested scenarios and Scenario Outlines (including Chinese dialect keywords)
+are supported. Each Examples row runs all Background and scenario steps in its
+own terminal. Bindings retain the exact template text and source line; placeholders
+are substituted in action strings, step text, doc strings, and step tables after
+template validation. Missing parameters, malformed tables, empty Examples, and
+stale or unconfirmed bindings fail before any terminal launches.
+
+The NDJSON protocol keeps the requested parent case ID. Outline rows additionally
+emit `start_example` and `end_example` with `example_line`, status, and failure
+attachments. A failing row does not stop later rows; the parent fails if any row
+fails. `end_run` includes `examples_passed` and `examples_failed` in addition to
+the existing parent-case counts. A request's `line_number` can select either the
+Outline header (all rows) or a specific Examples data-row source line.
+
+Rule Background and multiple Background blocks still fail explicitly. Bindings are authored as JSON; the
 repository self-tests generate their bindings inside isolated fixture directories.

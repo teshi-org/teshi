@@ -473,6 +473,23 @@ impl AcpAgentBackend {
         };
         match events.try_recv() {
             Ok(event) => {
+                // Seal preceding text before activity so the transcript follows
+                // event order. Only text remaining at turn completion is final.
+                if matches!(
+                    &event,
+                    AgentBackendEvent::ReasoningChunk { .. }
+                        | AgentBackendEvent::ExternalToolActivity { .. }
+                ) && !self.partial_response.is_empty()
+                {
+                    self.messages.push(AiChatMessage {
+                        role: AiRole::Assistant,
+                        content: std::mem::take(&mut self.partial_response),
+                        reasoning_content: None,
+                        tool_calls: None,
+                        tool_call_id: None,
+                        source: Some("agent_progress".into()),
+                    });
+                }
                 match &event {
                     AgentBackendEvent::MessageChunk { content } => {
                         self.partial_response.push_str(content)
@@ -525,7 +542,7 @@ impl AcpAgentBackend {
                             });
                         }
                     }
-                    AgentBackendEvent::Completed { .. } => {
+                    AgentBackendEvent::Completed { finish_reason, .. } => {
                         let content = std::mem::take(&mut self.partial_response);
                         if !content.is_empty() {
                             self.messages.push(AiChatMessage {
@@ -534,7 +551,8 @@ impl AcpAgentBackend {
                                 tool_calls: None,
                                 tool_call_id: None,
                                 reasoning_content: None,
-                                source: None,
+                                source: matches!(finish_reason.as_deref(), Some("cancelled"))
+                                    .then(|| "agent_progress".into()),
                             });
                         }
                         self.state = AgentBackendStatus::Completed;

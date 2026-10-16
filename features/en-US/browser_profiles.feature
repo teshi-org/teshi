@@ -33,3 +33,8 @@ Feature: Browser profile selection
     Given the Chrome bridge is unavailable
     When the user requests a Chrome connection
     Then teshi web attempts to start the Chrome bridge
+
+# Acceptance note (2026-10-16): replay is blocked because the test browser
+# reports no usable WebGPU adapter and the GPUI page cannot initialize.
+# Rerun with a verified WebGPU browser in an interactive Windows session;
+# acceptance remains pending until the real UI assertions pass.

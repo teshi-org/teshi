@@ -57,35 +57,45 @@ class World:
     def launch(self):
         env = [(key, str(self.root / key.lower())) for key in
                ("APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME")]
-        env += [("TESHI_ACP_STORE_DIR", str(self.store)), ("TESHI_APP_DATA_DIR", str(self.root / "data"))]
+        env += [("TESHI_ACP_STORE_DIR", str(self.store)), ("TESHI_APP_DATA_DIR", str(self.root / "data")), ("TESHI_SESSION_DIR", str(self.root / "sessions"))]
         self.op("launch", config=dict(program=self.binary, args=[str(self.project), "--requirements-root", str(self.root / "requirements")],
                                       cwd=str(self.root), env=env, cols=140, rows=40))
         self.expect("Explore")
         self.op("key", "3")
         self.expect("Welcome to AI Chat!")
         self.op("key", "Enter")
+        self.expect("Type your message...")
         self.input = True
         self.discover()
 
     def discover(self):
-        if self.selected is not None:
-            deadline = time.monotonic() + 10
-            while not any(label in self.op("screen") for label in ("[Connect", "Model:", "[Error")):
-                assert time.monotonic() < deadline, "settings row did not appear"
-                time.sleep(.05)
-        if "[Connect" in self.op("screen"):
-            self.op("click", "[Connect")
-            # Opening settings discovers the restored session before a prompt.
-            deadline = time.monotonic() + 50
-            while "Model:" not in self.op("screen") and "[Error" not in self.op("screen"):
-                assert time.monotonic() < deadline, "connection deadline exceeded"
-                time.sleep(.05)
-            self.op("key", "Escape")
+        if self.selected is None:
+            return
+        deadline = time.monotonic() + 50
+        matched_at = None
+        clicked = False
+        while time.monotonic() < deadline:
+            screen = self.op("screen")
+            if "[Connect" in screen and not clicked:
+                self.op("click", "[Connect")
+                clicked = True
+            if "Model:" in screen or "[Error" in screen:
+                matched_at = matched_at or time.monotonic()
+                if time.monotonic() - matched_at >= .15:
+                    if clicked:
+                        self.op("key", "Escape")
+                    return
+            else:
+                matched_at = None
+            time.sleep(.05)
+        raise AssertionError("connection deadline exceeded")
 
     def focus(self):
-        if not self.input:
+        if "Focus [Enter]" in self.op("screen"):
             self.op("key", "Enter")
-            self.input = True
+            self.expect("Type your message...")
+        self.op("click", "Type your message...")
+        self.input = True
 
     def select(self, agent):
         self.focus()
@@ -94,8 +104,10 @@ class World:
         self.op("key", "Enter")
         self.expect("Fake Beta")
         self.op("key", "Down")
+        self.expect("▶ Fake Alpha")
         if agent == "Fake Beta":
             self.op("key", "Down")
+            self.expect("▶ Fake Beta")
         self.op("key", "Enter")
         self.selected = agent
         self.expect("Model:")
@@ -127,10 +139,14 @@ class World:
         self.launch()
 
     def new(self):
+        count = sum(line.startswith(("│ ○ ", "│ ● ")) for line in self.op("screen").splitlines())
         self.op("key", "Escape")
         self.op("key", "a")
         self.input = True
-        time.sleep(.1)
+        deadline = time.monotonic() + 10
+        while sum(line.startswith(("│ ○ ", "│ ● ")) for line in self.op("screen").splitlines()) <= count:
+            assert time.monotonic() < deadline, "new agent did not appear in the sidebar"
+            time.sleep(.05)
         self.discover()
         self.expect("Model:")
 
@@ -212,6 +228,7 @@ def main():
     emit("start_run", total=len(request["cases"]))
     failed = 0
     for case in request["cases"]:
+        started = time.monotonic()
         emit("start_case", case_id=case["id"], name=case["scenario"])
         variants = [{}]
         if case["examples"]:
@@ -229,14 +246,14 @@ def main():
                     world.step(text)
                     emit("end_step", case_id=case["id"], step_id=str(step["line"]), status="passed", example=variant)
             except Exception as error:
-                artifacts = Path(request["meta"].get("artifacts_dir", ".teshi/tui-results/model"))
+                artifacts = Path(os.environ.get("TESHI_FEATURE_ARTIFACTS", request["meta"].get("artifacts_dir", ".teshi/tui-results/model"))) / re.sub(r"[^A-Za-z0-9_-]", "_", str(case["id"])) / str(variant_index)
                 artifacts.mkdir(parents=True, exist_ok=True)
                 screen = artifacts / (re.sub(r"[^A-Za-z0-9_-]", "_", str(case["id"])) + "-" + str(len(errors)) + ".txt")
                 screen.write_text(world.op("screen"), encoding="utf-8")
                 errors.append(f"line {step['line']}: {text}: {error}; screen={screen}")
                 emit("end_step", case_id=case["id"], step_id=str(step["line"]), status="failed", message=str(error))
             finally:
-                evidence = Path(request["meta"].get("artifacts_dir", ".teshi/tui-results/model"))
+                evidence = Path(os.environ.get("TESHI_FEATURE_ARTIFACTS", request["meta"].get("artifacts_dir", ".teshi/tui-results/model"))) / re.sub(r"[^A-Za-z0-9_-]", "_", str(case["id"])) / str(variant_index)
                 evidence.mkdir(parents=True, exist_ok=True)
                 stem = Path(case["feature_path"]).stem + "-" + re.sub(r"[^A-Za-z0-9_-]", "_", str(case["id"])) + "-" + str(variant_index)
                 (evidence / (stem + "-trace.json")).write_text(json.dumps(world.records(), indent=2), encoding="utf-8")
@@ -244,9 +261,9 @@ def main():
                 world.close()
         if errors:
             failed += 1
-            emit("case_failed", case_id=case["id"], duration_ms=0, error={"message": "; ".join(errors)})
+            emit("case_failed", case_id=case["id"], duration_ms=int((time.monotonic()-started)*1000), error={"message": "; ".join(errors)})
         else:
-            emit("case_passed", case_id=case["id"], duration_ms=0)
+            emit("case_passed", case_id=case["id"], duration_ms=int((time.monotonic()-started)*1000))
     emit("end_run", passed=len(request["cases"])-failed, failed=failed, skipped=0)
     return bool(failed)
 

@@ -148,6 +148,9 @@ pub enum Command {
         /// Runner working directory
         #[arg(long)]
         runner_cwd: Option<String>,
+        /// Write a persistent Feature/Scenario result report as JSON
+        #[arg(long, value_name = "PATH")]
+        report: Option<String>,
         /// Deprecated alias for positional `PATH`
         #[arg(long, hide = true)]
         feature: Option<String>,
@@ -1085,6 +1088,9 @@ pub struct BrowserReplayArgs {
     /// Feature path relative to project root; defaults to active step feature
     #[arg(long)]
     pub feature: Option<String>,
+    /// Replay one named scenario, including its background and all source steps
+    #[arg(long)]
+    pub scenario: Option<String>,
     /// Only replay bindings up to this source line
     #[arg(long)]
     pub until_line: Option<usize>,
@@ -1754,6 +1760,7 @@ impl Command {
         runner_cmd: Option<String>,
         runner_arg: Option<Vec<String>>,
         runner_cwd: Option<String>,
+        report: Option<String>,
         feature: Option<String>,
     ) -> crate::runner::RunCliOptions {
         let path = path.or(feature).map(PathBuf::from);
@@ -1763,6 +1770,7 @@ impl Command {
             runner_cmd,
             runner_args: runner_arg.unwrap_or_default(),
             runner_cwd: runner_cwd.map(PathBuf::from),
+            report_path: report.map(PathBuf::from),
         }
     }
 }

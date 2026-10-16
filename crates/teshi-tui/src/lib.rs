@@ -238,10 +238,11 @@ pub fn run() -> Result<()> {
             runner_cmd,
             runner_arg,
             runner_cwd,
+            report,
             feature,
         }) => {
             let opts = cli::Command::run_options(
-                path, scenario, runner_cmd, runner_arg, runner_cwd, feature,
+                path, scenario, runner_cmd, runner_arg, runner_cwd, report, feature,
             );
             return runner::run_with_options(opts);
         }
@@ -307,7 +308,17 @@ pub fn run() -> Result<()> {
         app.poll_status_message_expiry();
         terminal.draw(|frame| ui::render(frame, &mut app))?;
 
-        if let Some(terminal_event) = event_source.next(Duration::from_millis(50))? {
+        // Drain bounded input bursts before redrawing the complete chat. A
+        // redraw per character makes pasted prompts stall as history grows.
+        for event_index in 0..128 {
+            let timeout = if event_index == 0 {
+                Duration::from_millis(50)
+            } else {
+                Duration::ZERO
+            };
+            let Some(terminal_event) = event_source.next(timeout)? else {
+                break;
+            };
             if let Some(file) = diag_file.as_mut() {
                 let _ = write_diagnostic_event(file, &terminal_event);
                 let _ = file.flush();
@@ -385,6 +396,9 @@ pub fn run() -> Result<()> {
                     app.handle_action(Action::AiPaste(text))?;
                 }
                 _ => {}
+            }
+            if app.should_quit {
+                break;
             }
         }
     }

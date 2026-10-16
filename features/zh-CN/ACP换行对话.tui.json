@@ -1,0 +1,372 @@
+{
+  "version": 1,
+  "mode": "tui",
+  "steps": [
+    {
+      "line": 8,
+      "text": "Teshi 在窄终端中使用确定性的 ACP 代理启动",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "launch",
+          "config": {
+            "program": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-runtime\\bin-v5\\teshi.exe",
+            "args": [
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-z40cjj6u\\project",
+              "--requirements-root",
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-z40cjj6u\\requirements"
+            ],
+            "cwd": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-z40cjj6u",
+            "env": [
+              [
+                "APPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-z40cjj6u\\appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-z40cjj6u\\localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-z40cjj6u\\config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-z40cjj6u\\data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-z40cjj6u\\acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-z40cjj6u\\sessions"
+              ],
+              [
+                "TESHI_AGENT_BACKEND",
+                "acp"
+              ],
+              [
+                "TESHI_ACP_PROGRAM",
+                "D:\\Env\\Python\\Python313\\python.exe"
+              ],
+              [
+                "TESHI_ACP_ARGS_JSON",
+                "[\"D:\\\\Dev\\\\Rust\\\\teshi\\\\dev\\\\crates\\\\teshi-tui-runner\\\\tests\\\\fixtures\\\\wrapped_chat_acp.py\"]"
+              ]
+            ],
+            "cols": 100,
+            "rows": 30
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 11,
+      "text": "我打开换行对话的 AI 聊天",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 12,
+      "text": "我发送第 1 轮换行对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Conversation turn 1: inspect the project context carefully. T01"
+        },
+        {
+          "action": "expect_text",
+          "text": "T01",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 13,
+      "text": "第 1 轮 ACP 换行回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_01",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 14,
+      "text": "我发送第 2 轮换行对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Conversation turn 2: inspect the project context carefully. T02"
+        },
+        {
+          "action": "expect_text",
+          "text": "T02",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 15,
+      "text": "第 2 轮 ACP 换行回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_02",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 16,
+      "text": "我发送第 3 轮换行对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Conversation turn 3: inspect the project context carefully. T03"
+        },
+        {
+          "action": "expect_text",
+          "text": "T03",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 17,
+      "text": "第 3 轮 ACP 换行回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_03",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 18,
+      "text": "我发送第 4 轮换行对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Conversation turn 4: inspect the project context carefully. T04"
+        },
+        {
+          "action": "expect_text",
+          "text": "T04",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 19,
+      "text": "第 4 轮 ACP 换行回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_04",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 20,
+      "text": "我发送第 5 轮换行对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Conversation turn 5: inspect the project context carefully. T05"
+        },
+        {
+          "action": "expect_text",
+          "text": "T05",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 21,
+      "text": "第 5 轮 ACP 换行回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_05",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 22,
+      "text": "我发送第 6 轮换行对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Conversation turn 6: inspect the project context carefully. T06"
+        },
+        {
+          "action": "expect_text",
+          "text": "T06",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 23,
+      "text": "第 6 轮 ACP 换行回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_06",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 24,
+      "text": "我离开换行聊天输入框",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        }
+      ]
+    },
+    {
+      "line": 25,
+      "text": "我退出换行聊天",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 26,
+      "text": "换行聊天成功退出",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 10000
+        }
+      ]
+    }
+  ]
+}

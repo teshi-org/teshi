@@ -46,3 +46,8 @@
     假如 运行检查界面已显示
     当 用户打开浏览器配置表面
     那么 浏览器配置表面已显示
+
+# Acceptance note (2026-10-16): replay is blocked because the test browser
+# reports no usable WebGPU adapter and the GPUI page cannot initialize.
+# Rerun with a verified WebGPU browser in an interactive Windows session;
+# acceptance remains pending until the real UI assertions pass.

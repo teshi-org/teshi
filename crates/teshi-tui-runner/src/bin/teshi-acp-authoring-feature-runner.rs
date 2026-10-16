@@ -82,7 +82,11 @@ fn main() -> Result<()> {
                         .is_none_or(|line| line as usize == scenario.line_number)
             })
             .context("scenario not found")?;
-        let english_name = match path.file_name().and_then(|name| name.to_str()).unwrap_or("") {
+        let english_name = match path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("")
+        {
             "ACP功能生成.feature" => "tui_acp_authoring.feature",
             name => name,
         };

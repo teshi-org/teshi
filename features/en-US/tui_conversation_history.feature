@@ -9,8 +9,8 @@ Feature: Durable agent conversations
     Given Teshi is open with an isolated project and conversation storage
     And I open AI chat
 
-  Scenario Outline: Save an unfinished reply without a lifecycle command
-    Given the selected backend is "<backend>" with a controlled agent
+  Scenario: Save an unfinished reply without a lifecycle command (Native)
+    Given the selected backend is "Native" with a controlled agent
     When I send the message "Inspect this project"
     And the agent streams reasoning "Inspecting files" and reply "Partial result" without finishing
     Then conversation storage contains the message "Inspect this project"
@@ -19,13 +19,18 @@ Feature: Durable agent conversations
     Then the same saved conversation contains reply "Partial result completed"
     And conversation storage contains exactly one conversation
 
-    Examples:
-      | backend |
-      | Native  |
-      | ACP     |
+  Scenario: Save an unfinished reply without a lifecycle command (ACP)
+    Given the selected backend is "ACP" with a controlled agent
+    When I send the message "Inspect this project"
+    And the agent streams reasoning "Inspecting files" and reply "Partial result" without finishing
+    Then conversation storage contains the message "Inspect this project"
+    And the saved conversation contains reasoning "Inspecting files" and reply "Partial result"
+    When the agent extends its reply to "Partial result completed"
+    Then the same saved conversation contains reply "Partial result completed"
+    And conversation storage contains exactly one conversation
 
-  Scenario Outline: Recover a checkpoint after an unexpected termination
-    Given the selected backend is "<backend>" with a controlled agent
+  Scenario: Recover a checkpoint after an unexpected termination (Native)
+    Given the selected backend is "Native" with a controlled agent
     And a checkpoint contains the current unfinished conversation with question "Inspect this project", reasoning "Inspecting files", and reply "Partial result completed"
     When Teshi is terminated without a graceful exit
     And I reopen Teshi for the same project with the same conversation storage
@@ -34,11 +39,19 @@ Feature: Durable agent conversations
     Then "Inspect this project" is visible in AI chat
     And "Inspecting files" is visible in AI chat
     And "Partial result completed" is visible in AI chat
+    And reply "Partial result completed" has neutral styling without a green final-answer header or rail
 
-    Examples:
-      | backend |
-      | Native  |
-      | ACP     |
+  Scenario: Recover a checkpoint after an unexpected termination (ACP)
+    Given the selected backend is "ACP" with a controlled agent
+    And a checkpoint contains the current unfinished conversation with question "Inspect this project", reasoning "Inspecting files", and reply "Partial result completed"
+    When Teshi is terminated without a graceful exit
+    And I reopen Teshi for the same project with the same conversation storage
+    And I open AI chat
+    And I resume the most recently updated conversation
+    Then "Inspect this project" is visible in AI chat
+    And "Inspecting files" is visible in AI chat
+    And "Partial result completed" is visible in AI chat
+    And reply "Partial result completed" has neutral styling without a green final-answer header or rail
 
   Scenario: Restore ACP selection and execution history
     Given the selected backend is the controlled installed ACP agent "History agent"

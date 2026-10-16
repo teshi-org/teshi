@@ -46,3 +46,8 @@ Feature: Run and inspect scenarios
     Given the Run inspect surface is shown
     When the user opens the Browser Profiles surface
     Then the Browser Profiles surface is shown
+
+# Acceptance note (2026-10-16): replay is blocked because the test browser
+# reports no usable WebGPU adapter and the GPUI page cannot initialize.
+# Rerun with a verified WebGPU browser in an interactive Windows session;
+# acceptance remains pending until the real UI assertions pass.

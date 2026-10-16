@@ -1,0 +1,290 @@
+{
+  "version": 1,
+  "mode": "tui",
+  "steps": [
+    {
+      "line": 8,
+      "text": "Teshi 已打开一个样例项目",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "launch",
+          "config": {
+            "program": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-runtime\\bin-v5\\teshi.exe",
+            "args": [
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-w7k4escy\\project",
+              "--requirements-root",
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-w7k4escy\\requirements"
+            ],
+            "cwd": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-w7k4escy",
+            "env": [
+              [
+                "APPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-w7k4escy\\appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-w7k4escy\\localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-w7k4escy\\config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-w7k4escy\\data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-w7k4escy\\acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-w7k4escy\\sessions"
+              ],
+              [
+                "TESHI_TUI_RUNNER",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-runtime\\bin-v5\\teshi-tui-runner.exe"
+              ]
+            ],
+            "cols": 140,
+            "rows": 40
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Sample scenario",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 11,
+      "text": "样例项目可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Sample scenario",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 12,
+      "text": "我打开 AI 聊天",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        }
+      ]
+    },
+    {
+      "line": 13,
+      "text": "聊天介绍可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 14,
+      "text": "我返回 Explore",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "1"
+        }
+      ]
+    },
+    {
+      "line": 15,
+      "text": "样例场景可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Sample scenario",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 16,
+      "text": "我退出 Teshi",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 17,
+      "text": "Teshi 成功退出",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 10000
+        }
+      ]
+    },
+    {
+      "line": 20,
+      "text": "样例项目可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Sample scenario",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 21,
+      "text": "我运行样例场景",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "r"
+        }
+      ]
+    },
+    {
+      "line": 22,
+      "text": "我打开样例编辑器",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "e"
+        },
+        {
+          "action": "expect_text",
+          "text": "Edit [Enter]",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 23,
+      "text": "样例测试已通过",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Status: Passed",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "[passed] a sample step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 24,
+      "text": "我编辑样例步骤",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "key",
+          "key": "End"
+        },
+        {
+          "action": "write",
+          "text": " updated"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 25,
+      "text": "编辑后的步骤可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "a sample step updated",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 26,
+      "text": "我保存功能文件",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "s"
+        }
+      ]
+    },
+    {
+      "line": 27,
+      "text": "编辑后的步骤仍然可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "a sample step updated",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 28,
+      "text": "我退出 Teshi",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 29,
+      "text": "Teshi 成功退出",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 10000
+        }
+      ]
+    }
+  ]
+}

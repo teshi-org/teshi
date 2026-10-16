@@ -1399,7 +1399,38 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
         }
     };
     preflight_feature(project_root, &feature)?;
-    let steps = resolve_step_bindings(project_root, &feature, args.until_line)?;
+    let mut steps = resolve_step_bindings(project_root, &feature, args.until_line)?;
+    if let Some(name) = args.scenario.as_deref() {
+        let path = project_root.join(&feature);
+        let source = fs::read_to_string(&path)?;
+        let parsed = teshi_core::gherkin::parse_feature(&source, path);
+        let matches: Vec<_> = parsed
+            .all_scenarios()
+            .into_iter()
+            .filter(|s| s.name == name)
+            .collect();
+        if matches.len() != 1 {
+            return Err(anyhow!(
+                "scenario name must match exactly one scenario: {name}"
+            ));
+        }
+        let required: Vec<_> = parsed
+            .background
+            .iter()
+            .flat_map(|b| &b.steps)
+            .chain(&matches[0].steps)
+            .filter(|s| args.until_line.is_none_or(|line| s.line_number <= line))
+            .map(|s| s.line_number)
+            .collect();
+        for line in &required {
+            if !steps.iter().any(|step| step.step_line == *line) {
+                return Err(anyhow!(
+                    "unbound replay step at line {line} in scenario {name}"
+                ));
+            }
+        }
+        steps.retain(|step| required.contains(&step.step_line));
+    }
     if steps.is_empty() {
         return Err(anyhow!("no confirmed bindings found for {feature}"));
     }
@@ -1604,11 +1635,14 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
         if let Err(e) = save_index(&screenshot_dir, &index) {
             eprintln!("warning: failed to write screenshot index: {e}");
         }
+    }
+
+    if !args.dry_run {
         println!(
             "{}",
             serde_json::to_string(&json!({
-                "event": "replay_complete",
-                "screenshots_saved": index.steps.len(),
+                "event": "replay_complete", "steps_replayed": steps.len(),
+                "scenario": args.scenario,
                 "screenshots_dir": screenshot_dir.to_string_lossy(),
             }))?
         );
@@ -2014,6 +2048,14 @@ fn send_browser_command(
     timeout: Duration,
     health_check: bool,
 ) -> Result<serde_json::Value> {
+    // A project can also be connected to a native window. Never dispatch a
+    // browser action (or reconnect) through that unrelated sidecar.
+    let endpoint = read_cdp_endpoint(project_root)?;
+    if endpoint.mode == "winapp" {
+        return Err(anyhow!(
+            "browser target unavailable: project endpoint is in winapp mode; select an explicit browser session or use a separate browser test project"
+        ));
+    }
     let started = Instant::now();
     let cmd = command
         .get("cmd")
@@ -2254,6 +2296,7 @@ mod tests {
         .unwrap();
         let args = BrowserReplayArgs {
             feature: Some("features/example.feature".into()),
+            scenario: None,
             until_line: None,
             dry_run: false,
             non_interactive: true,
@@ -2269,6 +2312,67 @@ mod tests {
     }
 
     #[test]
+    fn browser_dispatch_rejects_winapp_endpoint_before_connecting() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_dir = temp.path().join(".teshi");
+        fs::create_dir_all(&endpoint_dir).unwrap();
+        let path = endpoint_dir.join("cdp-endpoint.json");
+        let original = r#"{"mode":"winapp","bridge":"python","ws_url":"ws://127.0.0.1:1"}"#;
+        fs::write(&path, original).unwrap();
+        let error = send_browser_command(
+            temp.path(),
+            json!({"cmd":"navigate", "url":"http://127.0.0.1/"}),
+            Duration::from_millis(1),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("endpoint is in winapp mode"));
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn scenario_replay_rejects_incomplete_bindings_before_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("case.feature"),
+            "Feature: Replay\n  Scenario: Sample\n    Given ready\n    Then complete\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("case.bindings.json"),
+            serde_json::to_vec(&json!({
+                "format_version":2, "feature":"case.feature", "steps":[{
+                    "step_line":3, "step_keyword":"Given", "step_text":"ready",
+                    "step_text_normalized":"ready", "source":"binding", "status":"confirmed",
+                    "primary":{"strategy":"css", "value":"body", "action":"assert_visible"}
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let args = BrowserReplayArgs {
+            feature: Some("case.feature".into()),
+            scenario: Some("Sample".into()),
+            until_line: None,
+            dry_run: true,
+            non_interactive: true,
+            yes: true,
+            target: BrowserTargetArgs {
+                session: None,
+                window: None,
+                tab: None,
+                lease_token: None,
+            },
+        };
+        assert!(
+            replay(temp.path(), &args)
+                .unwrap_err()
+                .to_string()
+                .contains("unbound replay step at line 4")
+        );
+    }
+
+    #[test]
     fn python_or_p1_replay_keeps_screenshot_capture_enabled() {
         let temp = tempfile::tempdir().unwrap();
         let endpoint_dir = temp.path().join(".teshi");
@@ -2280,6 +2384,7 @@ mod tests {
         .unwrap();
         let args = BrowserReplayArgs {
             feature: Some("features/example.feature".into()),
+            scenario: None,
             until_line: None,
             dry_run: false,
             non_interactive: true,

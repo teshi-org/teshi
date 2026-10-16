@@ -1,0 +1,316 @@
+{
+  "version": 1,
+  "mode": "tui",
+  "steps": [
+    {
+      "line": 9,
+      "text": "Teshi is open with a deterministic ACP agent that advertises settings",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "launch",
+          "config": {
+            "program": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-runtime\\bin-v5\\teshi.exe",
+            "args": [
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-bawd635h\\project",
+              "--requirements-root",
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-bawd635h\\requirements"
+            ],
+            "cwd": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-bawd635h",
+            "env": [
+              [
+                "APPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-bawd635h\\appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-bawd635h\\localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-bawd635h\\config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-bawd635h\\data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-bawd635h\\acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-bawd635h\\sessions"
+              ],
+              [
+                "TESHI_AGENT_BACKEND",
+                "acp"
+              ],
+              [
+                "TESHI_ACP_PROGRAM",
+                "D:\\Env\\Python\\Python313\\python.exe"
+              ],
+              [
+                "TESHI_ACP_ARGS_JSON",
+                "[\"D:\\\\Dev\\\\Rust\\\\teshi\\\\dev\\\\crates\\\\teshi-agent-runtime\\\\tests\\\\fixtures\\\\fake_acp_agent.py\", \"settings\"]"
+              ]
+            ],
+            "cols": 140,
+            "rows": 32
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 12,
+      "text": "I open AI chat for the settings conversation",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 13,
+      "text": "I open the agent settings list",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "/settings"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Model: Alpha",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 14,
+      "text": "the advertised model and overflow controls are visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Thinking",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "[More",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 15,
+      "text": "I click the model control in the bottom row",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Model: Alpha",
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "Beta",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 16,
+      "text": "I choose the second model option",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Down"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 17,
+      "text": "the model change is confirmed",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Model: Beta",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 18,
+      "text": "the dependent thinking choices are refreshed",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Thinking: Low",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 19,
+      "text": "I narrow the terminal to 64 columns",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "resize",
+          "cols": 64,
+          "rows": 24
+        }
+      ]
+    },
+    {
+      "line": 20,
+      "text": "the settings row still offers an overflow control",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "[More",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 21,
+      "text": "I turn on the fast option from the settings list",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "/settings"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Fast: Off",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Down"
+        },
+        {
+          "action": "key",
+          "key": "Down"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "key",
+          "key": "Down"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 22,
+      "text": "the fast option stays on",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "/settings"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Fast: On",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Escape"
+        }
+      ]
+    },
+    {
+      "line": 23,
+      "text": "I leave the chat input",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        }
+      ]
+    },
+    {
+      "line": 24,
+      "text": "I quit Teshi",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 25,
+      "text": "Teshi exits successfully",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 10000
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,372 @@
+{
+  "version": 1,
+  "mode": "tui",
+  "steps": [
+    {
+      "line": 8,
+      "text": "Teshi is open with a deterministic ACP agent in a narrow terminal",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "launch",
+          "config": {
+            "program": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-runtime\\bin-v5\\teshi.exe",
+            "args": [
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-ztw7xbvt\\project",
+              "--requirements-root",
+              "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-ztw7xbvt\\requirements"
+            ],
+            "cwd": "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-ztw7xbvt",
+            "env": [
+              [
+                "APPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-ztw7xbvt\\appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-ztw7xbvt\\localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-ztw7xbvt\\config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-ztw7xbvt\\data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-ztw7xbvt\\acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "D:\\Dev\\Rust\\teshi\\dev\\.teshi\\feature-results\\runs\\20261016T034038.600597Z-29240\\teshi-tui-feature-ztw7xbvt\\sessions"
+              ],
+              [
+                "TESHI_AGENT_BACKEND",
+                "acp"
+              ],
+              [
+                "TESHI_ACP_PROGRAM",
+                "D:\\Env\\Python\\Python313\\python.exe"
+              ],
+              [
+                "TESHI_ACP_ARGS_JSON",
+                "[\"D:\\\\Dev\\\\Rust\\\\teshi\\\\dev\\\\crates\\\\teshi-tui-runner\\\\tests\\\\fixtures\\\\wrapped_chat_acp.py\"]"
+              ]
+            ],
+            "cols": 100,
+            "rows": 30
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Explore",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 11,
+      "text": "I open AI chat for the wrapped conversation",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 12,
+      "text": "I send wrapped conversation turn 1",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Conversation turn 1: inspect the project context carefully. T01"
+        },
+        {
+          "action": "expect_text",
+          "text": "T01",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 13,
+      "text": "wrapped ACP reply 1 is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_01",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 14,
+      "text": "I send wrapped conversation turn 2",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Conversation turn 2: inspect the project context carefully. T02"
+        },
+        {
+          "action": "expect_text",
+          "text": "T02",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 15,
+      "text": "wrapped ACP reply 2 is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_02",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 16,
+      "text": "I send wrapped conversation turn 3",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Conversation turn 3: inspect the project context carefully. T03"
+        },
+        {
+          "action": "expect_text",
+          "text": "T03",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 17,
+      "text": "wrapped ACP reply 3 is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_03",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 18,
+      "text": "I send wrapped conversation turn 4",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Conversation turn 4: inspect the project context carefully. T04"
+        },
+        {
+          "action": "expect_text",
+          "text": "T04",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 19,
+      "text": "wrapped ACP reply 4 is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_04",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 20,
+      "text": "I send wrapped conversation turn 5",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Conversation turn 5: inspect the project context carefully. T05"
+        },
+        {
+          "action": "expect_text",
+          "text": "T05",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 21,
+      "text": "wrapped ACP reply 5 is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_05",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 22,
+      "text": "I send wrapped conversation turn 6",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "Conversation turn 6: inspect the project context carefully. T06"
+        },
+        {
+          "action": "expect_text",
+          "text": "T06",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 23,
+      "text": "wrapped ACP reply 6 is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "WRAPPED_REPLY_06",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_stable_text",
+          "text": "│ ○ ",
+          "visible": true,
+          "timeout_ms": 15000,
+          "stable_ms": 150
+        }
+      ]
+    },
+    {
+      "line": 24,
+      "text": "I leave wrapped chat input",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        }
+      ]
+    },
+    {
+      "line": 25,
+      "text": "I quit wrapped chat",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "q"
+        }
+      ]
+    },
+    {
+      "line": 26,
+      "text": "wrapped chat exits successfully",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 10000
+        }
+      ]
+    }
+  ]
+}

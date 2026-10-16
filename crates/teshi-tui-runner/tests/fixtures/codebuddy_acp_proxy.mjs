@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { spawn } from "node:child_process";
+import path from "node:path";
 
 const entry = process.env.TESHI_CODEBUDDY_ENTRY;
 const args = JSON.parse(process.env.TESHI_CODEBUDDY_ARGS_JSON ?? "[]");
@@ -20,6 +21,17 @@ const agentEnv = {
   APPDATA: process.env.TESHI_CODEBUDDY_APPDATA,
   LOCALAPPDATA: process.env.TESHI_CODEBUDDY_LOCALAPPDATA,
 };
+// Resolve the installed profile only at launch. Never serialize credentials
+// into generated sidecars or protocol evidence.
+const manifest = path.join(agentEnv.LOCALAPPDATA, "teshi", "acp", "installed.json");
+const profile = JSON.parse(fs.readFileSync(manifest, "utf8"))
+  .find((agent) => agent.id === "codebuddy-code");
+if (!profile) throw new Error("CodeBuddy ACP profile is unavailable");
+Object.assign(agentEnv, profile.env ?? {});
+for (const [name, source] of Object.entries(profile.env_from ?? {})) {
+  if (!(source in process.env)) throw new Error(`Missing CodeBuddy environment reference: ${source}`);
+  agentEnv[name] = process.env[source];
+}
 const child = spawn(process.execPath, [entry, ...args], {
   stdio: ["pipe", "pipe", "pipe"],
   env: agentEnv,
