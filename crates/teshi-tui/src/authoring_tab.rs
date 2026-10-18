@@ -375,28 +375,29 @@ impl AuthoringUiState {
             .unwrap_or_default();
         self.tree_items = build_requirement_tree(&index, &self.iteration_filter, self.group_mode);
         let visible = visible_document_ids(&index, &self.iteration_filter);
-        if let Some(selected) = self.selected_document_id.clone() {
-            if !visible.iter().any(|id| id == &selected) {
-                if let Some(first) = visible.first() {
-                    self.select_document_by_id(first);
+        let target = self
+            .selected_document_id
+            .as_ref()
+            .filter(|selected| visible.iter().any(|id| id == *selected))
+            .cloned()
+            .or_else(|| {
+                if self.buffer_dirty {
+                    None
                 } else {
-                    if self.buffer_dirty {
-                        return;
-                    }
-                    self.exit_insert_mode();
-                    self.selected_document_id = None;
-                    self.buffer = EditorBuffer::from_string(String::new());
-                    self.buffer_dirty = false;
+                    visible.first().cloned()
                 }
+            });
+
+        if let Some(id) = target {
+            if self.selected_document_id.as_deref() != Some(id.as_str()) {
+                self.load_document_state(&id);
             }
-        } else if let Some(first) = visible.first() {
-            self.select_document_by_id(first);
-        }
-        if let Some(id) = &self.selected_document_id
-            && let Some(path) = find_tree_path(&self.tree_items, &format!("{TREE_DOC_PREFIX}{id}"))
-        {
-            self.select_document_tree_path(path);
-        } else if visible.is_empty() && self.selected_document_id.is_none() {
+            self.sync_tree_selection();
+        } else if !self.buffer_dirty {
+            self.exit_insert_mode();
+            self.selected_document_id = None;
+            self.buffer = EditorBuffer::from_string(String::new());
+            self.buffer_dirty = false;
             self.tree_state.select(Vec::new());
         }
     }
@@ -750,6 +751,11 @@ impl AuthoringUiState {
             }
             return;
         }
+        self.load_document_state(doc_id);
+        self.sync_tree_selection();
+    }
+
+    fn load_document_state(&mut self, doc_id: &str) {
         self.exit_insert_mode();
         self.selected_document_id = Some(doc_id.to_string());
         self.selected_linked_index = 0;
@@ -775,15 +781,20 @@ impl AuthoringUiState {
         self.buffer_dirty = false;
     }
 
+    fn sync_tree_selection(&mut self) {
+        let Some(id) = self.selected_document_id.as_ref() else {
+            self.tree_state.select(Vec::new());
+            return;
+        };
+        if let Some(path) = find_tree_path(&self.tree_items, &format!("{TREE_DOC_PREFIX}{id}")) {
+            self.select_document_tree_path(path);
+        }
+    }
+
     /// Selects a document from a tree node id (`req-doc:<id>` or `req-dir:...`).
     pub fn select_tree_node(&mut self, node_id: &str) {
         if let Some(doc_id) = node_id.strip_prefix(TREE_DOC_PREFIX) {
             self.select_document_by_id(doc_id);
-            if self.selected_document_id.as_deref() == Some(doc_id)
-                && let Some(path) = find_tree_path(&self.tree_items, node_id)
-            {
-                self.select_document_tree_path(path);
-            }
         }
     }
 
@@ -981,9 +992,8 @@ impl AuthoringUiState {
                 meta,
                 body: body.clone(),
             });
-        self.select_document_by_id(&id);
         self.rebuild_tree();
-        self.buffer = EditorBuffer::from_string(body);
+        self.select_document_by_id(&id);
         self.buffer_dirty = true;
         self.draft_document_id = Some(id.clone());
         Ok(id)
@@ -1846,6 +1856,90 @@ mod tests {
         });
         state.rebuild_tree();
         state
+    }
+
+    #[test]
+    fn reload_from_disk_preserves_dirty_buffer_after_external_delete() {
+        let project = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        initialize_requirement_store(store.path()).unwrap();
+        let mut state = AuthoringUiState::load_from_project(project.path(), store.path());
+        state.create_document("req.md", "Requirement").unwrap();
+        state.save_current_document(project.path()).unwrap();
+        state.buffer = EditorBuffer::from_string("# Local draft\n\nKeep this edit\n".into());
+        state.buffer_dirty = true;
+
+        let meta = state.current_document_meta().cloned().unwrap();
+        teshi_engine::delete_requirement_document(
+            store.path(),
+            &meta.id,
+            Some(meta.revision.as_str()),
+        )
+        .unwrap();
+        state.reload_from_disk().unwrap();
+
+        assert!(state.buffer_dirty);
+        assert_eq!(
+            state.buffer.as_string(),
+            "# Local draft\n\nKeep this edit\n"
+        );
+        assert_eq!(
+            state.selected_document_id.as_deref(),
+            Some(meta.id.as_str())
+        );
+        assert!(state.current_document_meta().is_none());
+    }
+
+    #[test]
+    fn selecting_document_by_id_reveals_its_collapsed_tree_path() {
+        let mut state = sample_authoring_state();
+        let current_path = find_tree_path(&state.tree_items, "req-doc:doc-sprint")
+            .expect("selected document path");
+        state
+            .tree_state
+            .close(&current_path[..current_path.len().saturating_sub(1)]);
+
+        state.select_document_by_id("doc-sprint");
+
+        assert_eq!(state.tree_state.selected(), current_path.as_slice());
+        assert!(
+            state
+                .tree_state
+                .opened()
+                .contains(&current_path[..current_path.len() - 1])
+        );
+
+        state.select_document_by_id("doc-open");
+
+        let selected_path = find_tree_path(&state.tree_items, "req-doc:doc-open")
+            .expect("selected document in tree");
+        assert_eq!(state.selected_document_id.as_deref(), Some("doc-open"));
+        assert_eq!(state.tree_state.selected(), selected_path.as_slice());
+        assert_eq!(state.buffer.as_string(), "overview");
+    }
+
+    #[test]
+    fn create_document_rebuilds_before_selecting_new_nested_document() {
+        let mut state = sample_authoring_state();
+        let current_path = find_tree_path(&state.tree_items, "req-doc:doc-sprint")
+            .expect("selected document path");
+        state
+            .tree_state
+            .close(&current_path[..current_path.len().saturating_sub(1)]);
+
+        let id = state.create_document("auth/draft.md", "Draft").unwrap();
+        let node_id = format!("{TREE_DOC_PREFIX}{id}");
+        let selected_path = find_tree_path(&state.tree_items, &node_id).expect("new document path");
+
+        assert_eq!(state.selected_document_id.as_deref(), Some(id.as_str()));
+        assert_eq!(state.tree_state.selected(), selected_path.as_slice());
+        assert_eq!(state.buffer.as_string(), "# Draft\n\n");
+        assert!(
+            state
+                .tree_state
+                .opened()
+                .contains(&current_path[..current_path.len() - 1])
+        );
     }
 
     #[test]

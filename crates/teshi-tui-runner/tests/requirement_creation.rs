@@ -72,12 +72,27 @@ fn new_requirement_creation_keeps_tree_and_editor_in_sync() {
     terminal.expect_text("sample", true, 10000).unwrap();
     terminal.key("4").unwrap();
     terminal.expect_text("Requirements", true, 10000).unwrap();
+    terminal
+        .expect_text("No requirement artifacts", true, 10000)
+        .unwrap();
 
     for number in 1..=29 {
         terminal.key("Ctrl+n").unwrap();
         terminal
             .expect_text(&format!("# Document {number}"), true, 10000)
             .unwrap();
+        if number <= 2 {
+            let (tree_is_synchronized, screen) =
+                observe_tree_title(&terminal, &format!("Document {number}"), 3000);
+            assert!(
+                tree_is_synchronized,
+                "requirement tree did not show Document {number} before save:\n{screen}"
+            );
+            assert!(
+                screen.contains(&format!("# Document {number}")),
+                "editor did not show Document {number} before save:\n{screen}"
+            );
+        }
         if number == 1 {
             terminal.key("Right").unwrap();
         }
@@ -104,6 +119,63 @@ fn new_requirement_creation_keeps_tree_and_editor_in_sync() {
     assert!(
         screen.contains("# Document 30"),
         "editor did not show the new body:\n{screen}"
+    );
+
+    terminal.key("Ctrl+s").unwrap();
+    terminal
+        .expect_text("Saved requirement document", true, 10000)
+        .unwrap();
+    terminal.key("q").unwrap();
+    terminal.expect_exit(0, 10000).unwrap();
+}
+
+#[test]
+#[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
+fn new_requirement_creation_dirty_guard_supports_cancel_and_discard() {
+    let binary = fs::canonicalize(std::env::var("TESHI_SELF_TEST_BIN").unwrap()).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    let store = root.path().join("requirements");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("sample.feature"), "Feature: Sample\n").unwrap();
+
+    let terminal = Terminal::launch(launch_config(&binary, &project, &store, root.path())).unwrap();
+    terminal.expect_text("sample", true, 10000).unwrap();
+    terminal.key("4").unwrap();
+    terminal.expect_text("Requirements", true, 10000).unwrap();
+    terminal.key("Ctrl+n").unwrap();
+    terminal.expect_text("# Document 1", true, 10000).unwrap();
+    terminal.key("Right").unwrap();
+    terminal.key("Ctrl+s").unwrap();
+    terminal
+        .expect_text("Saved requirement document", true, 10000)
+        .unwrap();
+
+    terminal.key("i").unwrap();
+    terminal.write(" dirty").unwrap();
+    terminal.key("Escape").unwrap();
+    terminal.expect_text("[BROWSE]", true, 10000).unwrap();
+    terminal.key("Ctrl+n").unwrap();
+    terminal
+        .expect_text("Unsaved requirement", true, 10000)
+        .unwrap();
+    terminal.key("Escape").unwrap();
+    terminal.expect_text("# Document 1", true, 10000).unwrap();
+    terminal
+        .expect_text("Unsaved requirement", false, 10000)
+        .unwrap();
+    terminal.expect_text("# Document 2", false, 1000).unwrap();
+
+    terminal.key("Ctrl+n").unwrap();
+    terminal
+        .expect_text("Unsaved requirement", true, 10000)
+        .unwrap();
+    terminal.key("D").unwrap();
+    terminal.expect_text("# Document 2", true, 10000).unwrap();
+    let screen = terminal.screen().unwrap();
+    assert!(
+        tree_contains_title(&screen, "Document 2"),
+        "discarding the dirty document did not select the new document in the tree:\n{screen}"
     );
 
     terminal.key("Ctrl+s").unwrap();

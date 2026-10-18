@@ -9300,6 +9300,63 @@ mod tests {
         assert_eq!(new.title, "Document 2");
     }
 
+    #[test]
+    fn requirements_new_document_dirty_guard_preserves_cancel_and_resumes_after_discard() {
+        let (mut app, _project, _store) = requirements_test_app();
+        let original = app.authoring_ui.buffer.as_string();
+        app.authoring_ui.enter_insert_mode();
+        app.authoring_ui.insert_char('x');
+        let edited = app.authoring_ui.buffer.as_string();
+
+        app.handle_action(Action::ReqNewDocument).unwrap();
+        assert!(matches!(
+            app.authoring_ui.overlay,
+            crate::authoring_tab::RequirementsOverlay::Unsaved { .. }
+        ));
+        assert_eq!(
+            app.authoring_ui.selected_document_id.as_deref(),
+            Some("doc-1")
+        );
+        assert_eq!(app.authoring_ui.buffer.as_string(), edited);
+        assert_eq!(
+            app.authoring_ui
+                .artifacts
+                .as_ref()
+                .unwrap()
+                .index
+                .documents
+                .len(),
+            1
+        );
+
+        app.handle_action(Action::OverlayCancel).unwrap();
+        assert_eq!(app.authoring_ui.buffer.as_string(), edited);
+        assert!(app.authoring_ui.buffer_dirty);
+        assert_eq!(
+            app.authoring_ui.selected_document_id.as_deref(),
+            Some("doc-1")
+        );
+
+        app.handle_action(Action::ReqNewDocument).unwrap();
+        app.handle_action(Action::OverlayInsert('d')).unwrap();
+        assert_eq!(
+            app.authoring_ui.selected_document_id.as_deref(),
+            Some("doc-2")
+        );
+        assert_eq!(app.authoring_ui.buffer.as_string(), "# Document 2\n\n");
+        assert_eq!(
+            app.authoring_ui
+                .artifacts
+                .as_ref()
+                .unwrap()
+                .index
+                .documents
+                .len(),
+            2
+        );
+        assert_ne!(app.authoring_ui.buffer.as_string(), original);
+    }
+
     fn slash_test_app() -> (App, tempfile::TempDir, tempfile::TempDir) {
         let project = tempdir().unwrap();
         let store = tempdir().unwrap();
