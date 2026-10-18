@@ -3776,7 +3776,7 @@ impl App {
 
     /// Toggle the Explore-tab diff view on/off.
     pub fn toggle_explore_diff_view(&mut self) {
-        if self.explore_diff_lines.is_some() {
+        if self.active_tab == MainTab::Explore && self.explore_diff_lines.is_some() {
             self.explore_diff_lines = None;
             self.status = "Exited diff view".to_string();
         } else if self.has_agent_change_prompt() {
@@ -11810,6 +11810,46 @@ mod tests {
 
     fn en() -> &'static teshi_core::gherkin_lang::GherkinLanguage {
         GherkinLanguages::global().get("en")
+    }
+
+    #[test]
+    fn agent_diff_opens_cached_changes_from_other_tabs_and_closes_in_explore() {
+        let mut app = editor_test_app();
+        app.queue_agent_change(super::AgentPendingChange {
+            description: "inspect proposed edit".into(),
+            file_path: "diff-fixture.feature".into(),
+            mutation: super::AgentMutation::ReplaceLine {
+                row_0based: 0,
+                new_text: "Feature: proposed".into(),
+            },
+            scenario_name: String::new(),
+            test_point_ids: Vec::new(),
+            tool_call_id: "diff-review".into(),
+            old_buffer_snapshot: "Feature: original".into(),
+            agent_idx: 0,
+        });
+        for tab in [MainTab::MindMap, MainTab::Ai] {
+            app.active_tab = tab;
+            assert!(app.explore_diff_lines.is_some());
+            app.toggle_explore_diff_view();
+            assert_eq!(app.active_tab, MainTab::Explore);
+            assert_eq!(app.explore_focus, ColumnFocus::Step);
+            assert!(app.explore_diff_lines.is_some());
+        }
+        app.toggle_explore_diff_view();
+        assert!(app.explore_diff_lines.is_none());
+        assert_eq!(app.pending_agent_changes.len(), 1);
+        app.toggle_explore_diff_view();
+        assert!(app.explore_diff_lines.is_some());
+        assert_eq!(app.active_tab, MainTab::Explore);
+    }
+
+    #[test]
+    fn agent_diff_without_pending_changes_preserves_active_tab() {
+        let mut app = editor_test_app();
+        app.toggle_explore_diff_view();
+        assert_eq!(app.active_tab, MainTab::MindMap);
+        assert!(app.explore_diff_lines.is_none());
     }
 
     /// Helper: create an app pre-set to editor-active mode (stage 3) for existing editor tests.
