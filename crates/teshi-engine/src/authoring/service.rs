@@ -6,17 +6,18 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use teshi_core::authoring::{
-    normalize_iteration_name, requirement_title, resolve_requirement_store_path,
     InvalidIterationName, InvalidRequirementTitle, RequirementDocumentContent,
     RequirementDocumentIndex, RequirementDocumentMeta, RequirementIterationFilter,
-    RequirementStoreId,
+    RequirementStoreId, normalize_iteration_name, requirement_title,
+    resolve_requirement_store_path,
 };
 
 use super::store::{
-    compute_document_revision as hash_document_revision, read_requirement_index_unlocked,
-    read_requirement_trash_unlocked, recover_requirement_store_unlocked, replace_markdown,
-    with_requirement_store_lock, write_requirement_index_unlocked,
-    write_requirement_markdown_unlocked, write_requirement_trash_unlocked, RequirementTombstone,
+    RequirementTombstone, compute_document_revision as hash_document_revision,
+    read_requirement_index_unlocked, read_requirement_trash_unlocked,
+    recover_requirement_store_unlocked, replace_markdown, with_requirement_store_lock,
+    write_requirement_index_unlocked, write_requirement_markdown_unlocked,
+    write_requirement_trash_unlocked,
 };
 
 /// One candidate returned when a document reference is ambiguous.
@@ -562,9 +563,9 @@ pub fn resolve_requirement_ref_in_store(
 mod tests {
     use super::*;
     use crate::authoring::{
-        initialize_requirement_store, is_requirement_document_id_reserved,
-        load_authoring_artifacts, save_requirement_document_index, save_requirement_markdown,
-        REQUIREMENTS_INDEX_FILE, REQUIREMENTS_TRASH_FILE,
+        REQUIREMENTS_INDEX_FILE, REQUIREMENTS_TRASH_FILE, initialize_requirement_store,
+        is_requirement_document_id_reserved, load_authoring_artifacts,
+        save_requirement_document_index, save_requirement_markdown,
     };
     use teshi_core::authoring::RequirementDocumentMeta;
 
@@ -861,6 +862,37 @@ mod tests {
     }
 
     #[test]
+    fn delete_rejects_revision_from_a_stale_store_instance_after_body_edit() {
+        let store = tempfile::tempdir().unwrap();
+        let index = seed_store(store.path());
+        let stale_revision = index.documents[0].revision.clone();
+        let updated = update_requirement_document_body(
+            store.path(),
+            "doc-12",
+            "# 登录需求\n\nupdated\n",
+            Some(stale_revision.as_str()),
+            false,
+        )
+        .unwrap();
+
+        let error =
+            delete_requirement_document(store.path(), "doc-12", Some(stale_revision.as_str()))
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            RequirementStoreError::RevisionConflict { .. }
+        ));
+        assert_eq!(
+            read_requirement_document(store.path(), "doc-12")
+                .unwrap()
+                .meta
+                .revision,
+            updated.revision
+        );
+        assert!(store.path().join("auth/login.md").is_file());
+    }
+
+    #[test]
     fn delete_rolls_back_body_and_tombstone_when_index_replace_fails() {
         let store = tempfile::tempdir().unwrap();
         let index = seed_store(store.path());
@@ -894,11 +926,13 @@ mod tests {
         )
         .unwrap_err();
         assert!(store.path().join("auth/login.md").exists());
-        assert!(require_initialized_index(store.path())
-            .unwrap()
-            .documents
-            .iter()
-            .any(|doc| doc.id == "doc-12"));
+        assert!(
+            require_initialized_index(store.path())
+                .unwrap()
+                .documents
+                .iter()
+                .any(|doc| doc.id == "doc-12")
+        );
     }
 
     #[test]
@@ -919,12 +953,14 @@ mod tests {
         .unwrap();
 
         let loaded = load_authoring_artifacts(project.path(), store.path()).unwrap();
-        assert!(loaded
-            .artifacts
-            .unwrap()
-            .documents
-            .iter()
-            .any(|doc| doc.meta.id == "doc-12"));
+        assert!(
+            loaded
+                .artifacts
+                .unwrap()
+                .documents
+                .iter()
+                .any(|doc| doc.meta.id == "doc-12")
+        );
         assert_eq!(
             fs::read_to_string(store.path().join("auth/login.md")).unwrap(),
             "# 登录需求\n"

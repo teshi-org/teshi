@@ -6,8 +6,7 @@ use std::path::{Path, PathBuf};
 use teshi_tui_runner::{Launch, Terminal};
 
 fn artifact_path(name: &str) -> Option<PathBuf> {
-    let directory = std::env::var_os("TESHI_REQUIREMENT_DELETION_ARTIFACTS")
-        .map(PathBuf::from)?;
+    let directory = std::env::var_os("TESHI_REQUIREMENT_DELETION_ARTIFACTS").map(PathBuf::from)?;
     fs::create_dir_all(&directory).unwrap();
     Some(directory.join(name))
 }
@@ -67,7 +66,10 @@ fn global_requirement_delete_confirms_cancels_and_updates_viewport() -> anyhow::
     terminal.key("h")?;
     terminal.key("Up")?;
     let before = terminal.screen()?;
-    assert!(before.contains("Document 2"), "middle document was not selected:\n{before}");
+    assert!(
+        before.contains("Document 2"),
+        "middle document was not selected:\n{before}"
+    );
     if let Some(path) = artifact_path("before-delete.txt") {
         fs::write(&path, &before)?;
         terminal.screenshot(&path.with_file_name("before-delete.svg"))?;
@@ -90,7 +92,10 @@ fn global_requirement_delete_confirms_cancels_and_updates_viewport() -> anyhow::
     terminal.expect_text("# Document 3", true, 5000)?;
     terminal.expect_text("Document 2", false, 5000)?;
     let after = terminal.screen()?;
-    assert!(!after.contains("Document 2"), "deleted document stayed visible:\n{after}");
+    assert!(
+        !after.contains("Document 2"),
+        "deleted document stayed visible:\n{after}"
+    );
     if let Some(path) = artifact_path("after-delete.txt") {
         fs::write(&path, &after)?;
         terminal.screenshot(&path.with_file_name("after-delete.svg"))?;
