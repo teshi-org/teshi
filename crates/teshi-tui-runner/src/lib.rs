@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use tui_test::{KeyAction, OpenOptions, Operation, OperationResult, RunOptions, Session};
+use tui_test::{
+    KeyAction, MouseAction, MouseButton, MouseOptions, OpenOptions, Operation, OperationResult,
+    RunOptions, Session,
+};
 
 /// Delay after writing a lone Escape so the application consumes it before the
 /// next key byte can arrive in the same read and be parsed as an Alt prefix.
@@ -236,6 +239,103 @@ impl Terminal {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// Drags the left mouse button over the first viewport occurrence of `text`.
+    ///
+    /// The drag is resolved from the live viewport and emits SGR mouse press,
+    /// motion, and release events. It is intended for text-selection acceptance
+    /// tests; the selected text remains owned by the application under test.
+    ///
+    /// # Errors
+    /// Returns errors for timeouts outside 1–120000ms, empty text, expiry
+    /// without a match, or PTY write failure.
+    pub fn drag_text(&self, text: &str, timeout_ms: u64) -> Result<()> {
+        validate_timeout(timeout_ms)?;
+        if text.is_empty() {
+            bail!("drag target requires nonempty text");
+        }
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            let screen = self.screen()?;
+            if let Some((row, col)) = locate(&screen, text) {
+                let end_col = col + text.chars().count();
+                self.session.execute(Operation::Mouse {
+                    action: MouseAction::Drag {
+                        x1: col.saturating_sub(1) as u16,
+                        y1: row.saturating_sub(1) as u16,
+                        x2: end_col.saturating_sub(1) as u16,
+                        y2: row.saturating_sub(1) as u16,
+                        options: MouseOptions::default(),
+                    },
+                })?;
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                bail!("timed out after {timeout_ms}ms waiting for {text:?} to drag\n{screen}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Right-clicks the first viewport occurrence of `text`.
+    ///
+    /// The coordinate is resolved from the live viewport so the click follows
+    /// the layout across terminal resizes. This is useful for pointer actions
+    /// whose meaning depends on the clicked pane or selection.
+    ///
+    /// # Errors
+    /// Returns errors for timeouts outside 1–120000ms, empty text, expiry
+    /// without a match, or PTY write failure.
+    pub fn right_click_text(&self, text: &str, timeout_ms: u64) -> Result<()> {
+        validate_timeout(timeout_ms)?;
+        if text.is_empty() {
+            bail!("right-click target requires nonempty text");
+        }
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            let screen = self.screen()?;
+            if let Some((row, col)) = locate(&screen, text) {
+                self.session.execute(Operation::Mouse {
+                    action: MouseAction::Click {
+                        x: Some(col.saturating_sub(1) as u16),
+                        y: Some(row.saturating_sub(1) as u16),
+                        on_text: None,
+                        options: MouseOptions::new(MouseButton::Right),
+                        clicks: 1,
+                    },
+                })?;
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "timed out after {timeout_ms}ms waiting for {text:?} to right-click\n{screen}"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Sends a wheel event at a zero-based viewport cell.
+    ///
+    /// `up` selects the wheel-up direction. When `shift` is true, the event
+    /// carries the terminal Shift modifier so applications that support
+    /// horizontal wheel scrolling can distinguish it from vertical scrolling.
+    /// The coordinates are intentionally explicit: unlike the framework's
+    /// generic scroll action, this keeps wheel routing under the pointer
+    /// observable in end-to-end tests.
+    ///
+    /// # Errors
+    /// Returns a PTY input error.
+    pub fn scroll_at(&self, col: u16, row: u16, up: bool, shift: bool) -> Result<()> {
+        let direction = if up { 64 } else { 65 };
+        let modifier = if shift { 4 } else { 0 };
+        self.write(&format!(
+            "\x1b[<{};{};{}M",
+            direction + modifier,
+            u32::from(col) + 1,
+            u32::from(row) + 1
+        ))
     }
 
     /// Waits for the application to exit with the expected code.

@@ -1,4 +1,4 @@
-//! Real PTY acceptance for Native and ACP completed-answer copying.
+//! Real PTY acceptance for ACP chat copying and selection.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -43,7 +43,7 @@ impl Drop for ClipboardRestore {
 
 #[test]
 #[ignore = "requires TESHI_SELF_TEST_BIN pointing to a built CLI, Python, and a desktop clipboard"]
-fn acp_chat_copy_command_round_trip() {
+fn acp_chat_copy_command_and_selection_round_trip() {
     let _serial = CLIPBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let binary = std::fs::canonicalize(std::env::var("TESHI_SELF_TEST_BIN").unwrap()).unwrap();
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -135,6 +135,26 @@ fn acp_chat_copy_command_round_trip() {
         &mut clipboard,
         "WRAPPED_REPLY_01\n\n---\n\nWRAPPED_REPLY_02",
     );
+
+    terminal.drag_text("WRAPPED_REPLY_01", 5000).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let selection_screenshot = root.path().join("chat-selection.svg");
+    terminal.screenshot(&selection_screenshot).unwrap();
+    let screenshot = std::fs::read_to_string(&selection_screenshot).unwrap();
+    assert!(screenshot.contains("WRAPPED_REPLY_01"));
+    save_viewport(&terminal, root.path(), "acp-original-selection");
+    terminal.expect_text("Focus [Enter]", true, 5000).unwrap();
+    clipboard
+        .set_text("CHAT_SELECTION_AFTER_DRAG_SENTINEL")
+        .unwrap();
+    terminal.right_click_text("WRAPPED_REPLY_01", 5000).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !matches!(clipboard.get_text().as_deref(), Ok("WRAPPED_REPLY_01"))
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert_clipboard(&mut clipboard, "WRAPPED_REPLY_01");
 
     terminal.key("Escape").unwrap();
     terminal.key("q").unwrap();
@@ -302,6 +322,17 @@ fn native_chat_copy_command_reads_completed_responses() {
         .unwrap();
     assert_clipboard(&mut clipboard, "NATIVE_REPLY_02");
     save_viewport(&terminal, root.path(), "native-second-copy");
+    terminal.drag_text("NATIVE_REPLY_01", 5000).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    save_viewport(&terminal, root.path(), "native-response-selection");
+    clipboard.set_text("NATIVE_SELECTION_SENTINEL").unwrap();
+    terminal.right_click_text("NATIVE_REPLY_01", 5000).unwrap();
+    assert_clipboard(&mut clipboard, "NATIVE_REPLY_01");
+    terminal
+        .expect_stable_text("NATIVE_REPLY_02", true, 5000, 250)
+        .unwrap();
+    assert_clipboard(&mut clipboard, "NATIVE_REPLY_01");
+
     terminal.key("Escape").unwrap();
     terminal.key("q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
@@ -381,6 +412,203 @@ fn python() -> String {
     })
 }
 
+struct ChatCase {
+    root: tempfile::TempDir,
+    project: PathBuf,
+    name: &'static str,
+}
+
+impl ChatCase {
+    fn new(name: &'static str, messages: &[serde_json::Value]) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(
+            project.join("sample.feature"),
+            "Feature: Chat selection acceptance\n  Scenario: Ready\n    Given a sample step\n",
+        )
+        .unwrap();
+        let sessions = root.path().join("sessions");
+        std::fs::create_dir(&sessions).unwrap();
+        if !messages.is_empty() {
+            let session = serde_json::json!({
+                "id": "chat-projection-fixture",
+                "created_at": "1",
+                "updated_at": "9999999999999",
+                "model_label": null,
+                "message_count": messages.len(),
+                "messages": messages,
+                "project_root": project,
+                "backend_kind": "acp",
+                "acp_agent_id": null
+            });
+            std::fs::write(
+                sessions.join("chat-projection-fixture.json"),
+                serde_json::to_vec_pretty(&session).unwrap(),
+            )
+            .unwrap();
+        }
+        Self {
+            root,
+            project,
+            name,
+        }
+    }
+
+    fn launch(&self, cols: u16, rows: u16) -> Terminal {
+        self.launch_agent(cols, rows, false)
+    }
+
+    fn launch_agent(&self, cols: u16, rows: u16, controlled: bool) -> Terminal {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(if controlled {
+                "tests/fixtures/agent_acceptance_fixture.py"
+            } else {
+                "tests/fixtures/wrapped_chat_acp.py"
+            })
+            .canonicalize()
+            .unwrap();
+        let mut agent_args = vec![fixture.to_string_lossy().into_owned()];
+        if controlled {
+            agent_args.extend([
+                "acp".into(),
+                self.root
+                    .path()
+                    .join("controlled-trace")
+                    .to_string_lossy()
+                    .into_owned(),
+                "p3-chat".into(),
+                "controlled".into(),
+            ]);
+        }
+        let mut env = vec![
+            ("TESHI_AGENT_BACKEND".into(), "acp".into()),
+            ("TESHI_ACP_PROGRAM".into(), python()),
+            (
+                "TESHI_ACP_ARGS_JSON".into(),
+                serde_json::to_string(&agent_args).unwrap(),
+            ),
+            ("NO_COLOR".into(), String::new()),
+            ("TERM".into(), "xterm-256color".into()),
+            ("COLORTERM".into(), "truecolor".into()),
+        ];
+        for (key, subdir) in [
+            ("APPDATA", "appdata"),
+            ("TESHI_APP_DATA_DIR", "appdata"),
+            ("LOCALAPPDATA", "localdata"),
+            ("XDG_CONFIG_HOME", "config"),
+            ("XDG_DATA_HOME", "data"),
+            ("TESHI_SESSION_DIR", "sessions"),
+            ("TESHI_ACP_STORE_DIR", "acp"),
+        ] {
+            env.push((
+                key.into(),
+                self.root.path().join(subdir).to_string_lossy().into_owned(),
+            ));
+        }
+        let terminal = Terminal::launch(Launch {
+            program: std::env::var("TESHI_SELF_TEST_BIN").unwrap(),
+            args: vec![
+                self.project.to_string_lossy().into_owned(),
+                "--requirements-root".into(),
+                self.root
+                    .path()
+                    .join("requirements")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
+            cwd: Some(self.root.path().to_string_lossy().into_owned()),
+            env: {
+                env.push((
+                    "TESHI_DIAG_PATH".into(),
+                    self.root
+                        .path()
+                        .join("input-diag.log")
+                        .to_string_lossy()
+                        .into_owned(),
+                ));
+                env
+            },
+            cols,
+            rows,
+        })
+        .unwrap();
+        terminal.expect_text("Explore", true, 15000).unwrap();
+        terminal.key("3").unwrap();
+        terminal
+            .expect_text("Welcome to AI Chat!", true, 15000)
+            .unwrap();
+        terminal.key("Enter").unwrap();
+        terminal
+    }
+
+    fn save(&self, terminal: &Terminal, stage: &str) {
+        save_viewport(
+            terminal,
+            self.root.path(),
+            &format!("{}-{stage}", self.name),
+        );
+        if let Some(output) = std::env::var_os("TESHI_CHAT_ARTIFACTS") {
+            let diagnostic = self.root.path().join("input-diag.log");
+            let probe = diagnostic.with_extension("clipboard-probe");
+            if probe.exists() {
+                std::fs::copy(
+                    probe,
+                    PathBuf::from(&output)
+                        .join(format!("{}-{stage}-clipboard-probe.txt", self.name)),
+                )
+                .unwrap();
+            }
+            if diagnostic.exists() {
+                std::fs::copy(
+                    diagnostic,
+                    PathBuf::from(&output).join(format!("{}-{stage}-input.log", self.name)),
+                )
+                .unwrap();
+            }
+            let trace = self.root.path().join("controlled-trace/trace.jsonl");
+            if trace.exists() {
+                std::fs::copy(
+                    trace,
+                    PathBuf::from(output).join(format!("{}-trace.jsonl", self.name)),
+                )
+                .unwrap();
+            }
+        }
+    }
+}
+
+fn message(role: &str, content: &str, source: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "role": role,
+        "content": content,
+        "source": source,
+        "reasoning_content": null,
+        "tool_calls": null,
+        "tool_call_id": null
+    })
+}
+
+fn command(terminal: &Terminal, text: &str) {
+    // A bare /copy completes to /copy on the first Enter. A trailing space
+    // dismisses that suggestion so this helper submits the default command.
+    let input = if text == "/copy" {
+        format!("{text} ")
+    } else {
+        text.into()
+    };
+    terminal.write(&input).unwrap();
+    terminal.expect_text(text, true, 5000).unwrap();
+    terminal.key("Enter").unwrap();
+    terminal.expect_text(text, false, 5000).unwrap();
+}
+
+fn close_chat(terminal: &Terminal) {
+    terminal.key("Escape").unwrap();
+    terminal.key("q").unwrap();
+    terminal.expect_exit(0, 10000).unwrap();
+}
+
 fn assert_clipboard(clipboard: &mut ClipboardRestore, expected: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -430,4 +658,483 @@ fn save_viewport(terminal: &Terminal, temporary: &Path, stage: &str) {
         terminal.screen().unwrap(),
     )
     .unwrap();
+}
+
+fn assert_selection_highlight(temporary: &Path, stage: &str, needle: &str) {
+    let output = std::env::var_os("TESHI_CHAT_ARTIFACTS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| temporary.join("screenshots"));
+    let svg = std::fs::read_to_string(output.join(format!("{stage}.svg"))).unwrap();
+    assert!(
+        svg.split("<text ").any(|part| {
+            part.split_once('>').is_some_and(|(attributes, content)| {
+                attributes.contains("fill=\"#303030\"")
+                    && attributes.contains("font-weight=\"bold\"")
+                    && content.split("</text>").next().unwrap().contains(needle)
+            })
+        }),
+        "selected text {needle:?} does not use the highlighted foreground"
+    );
+}
+
+#[test]
+#[ignore = "requires TESHI_SELF_TEST_BIN pointing to a built CLI and a desktop clipboard"]
+fn copy_command_rejects_empty_invalid_and_nonanswer_history_in_real_terminal() {
+    let _serial = CLIPBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut clipboard = ClipboardRestore::new(Clipboard::new().unwrap());
+    let case = ChatCase::new("command-errors", &[]);
+    let terminal = case.launch(120, 35);
+    clipboard.set_text("COPY_ERROR_SENTINEL").unwrap();
+    for (input, status) in [
+        ("/copy", "No completed assistant responses to copy"),
+        ("/copy 0", "Usage: /copy [N] where N is a positive integer"),
+        (
+            "/copy invalid",
+            "Usage: /copy [N] where N is a positive integer",
+        ),
+    ] {
+        command(&terminal, input);
+        terminal.expect_text(status, true, 5000).unwrap();
+        assert_clipboard(&mut clipboard, "COPY_ERROR_SENTINEL");
+    }
+    case.save(&terminal, "invalid-count");
+    close_chat(&terminal);
+
+    let mut activity = message("Assistant", "TOOL_TITLE_ONLY", Some("acp_activity"));
+    activity["reasoning_content"] = "completed".into();
+    let mut reasoning = message("Assistant", "", Some("acp_reasoning"));
+    reasoning["reasoning_content"] = "REASONING_ONLY".into();
+    let case = ChatCase::new(
+        "answer-filter",
+        &[
+            message("Assistant", "FIRST_COMPLETED", None),
+            activity,
+            reasoning,
+            message("Assistant", "PARTIAL_EXCLUDED", Some("agent_progress")),
+            message("Assistant", "SECOND_COMPLETED", None),
+            message("Assistant", "  ", None),
+        ],
+    );
+    let terminal = case.launch(120, 45);
+    command(&terminal, "/resume");
+    terminal
+        .expect_text("SECOND_COMPLETED", true, 5000)
+        .unwrap();
+    command(&terminal, "/copy");
+    assert_clipboard(&mut clipboard, "SECOND_COMPLETED");
+    command(&terminal, "/copy 50");
+    assert_clipboard(&mut clipboard, "FIRST_COMPLETED\n\n---\n\nSECOND_COMPLETED");
+    case.save(&terminal, "completed-only");
+    close_chat(&terminal);
+}
+
+#[test]
+#[ignore = "requires TESHI_SELF_TEST_BIN pointing to a built CLI and a desktop clipboard"]
+fn chat_selection_preserves_wrapped_code_projection_across_resize_and_mindmap() {
+    let _serial = CLIPBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut clipboard = ClipboardRestore::new(Clipboard::new().unwrap());
+    let body = "SOURCE_START a long line of words that must wrap within the narrow chat viewport while retaining its original source newline boundary SOURCE_END\n\n```rust\n    let value = 42;\n    println!(\"done\");\n```\nCODE_END";
+    let case = ChatCase::new("wrapped-source", &[message("Assistant", body, None)]);
+    let terminal = case.launch(70, 36);
+    command(&terminal, "/resume");
+    terminal.expect_text("CODE_END", true, 5000).unwrap();
+    drag_between_text(&terminal, "SOURCE_START", "CODE_END", false);
+    case.save(&terminal, "selected-narrow");
+    assert_selection_highlight(
+        case.root.path(),
+        "wrapped-source-selected-narrow",
+        "SOURCE_START",
+    );
+    terminal.resize(120, 40).unwrap();
+    terminal
+        .expect_stable_text("CODE_END", true, 5000, 100)
+        .unwrap();
+    case.save(&terminal, "selected-wide");
+    assert_selection_highlight(
+        case.root.path(),
+        "wrapped-source-selected-wide",
+        "SOURCE_START",
+    );
+    clipboard.set_text("SOURCE_RESIZE_SENTINEL").unwrap();
+    terminal.right_click_text("CODE_END", 5000).unwrap();
+    assert_clipboard(
+        &mut clipboard,
+        "SOURCE_START a long line of words that must wrap within the narrow chat viewport while retaining its original source newline boundary SOURCE_END\n\n  rust\n      let value = 42;\n      println!(\"done\");\n  \n\nCODE_END",
+    );
+
+    terminal.key("2").unwrap();
+    terminal
+        .expect_stable_text("╭MindMap", true, 5000, 100)
+        .unwrap();
+    terminal.expect_text("CODE_END", true, 5000).unwrap();
+    drag_between_text(&terminal, "SOURCE_START", "CODE_END", true);
+    case.save(&terminal, "mindmap-reverse-selection");
+    assert_selection_highlight(
+        case.root.path(),
+        "wrapped-source-mindmap-reverse-selection",
+        "SOURCE_START",
+    );
+    clipboard.set_text("MINDMAP_SENTINEL").unwrap();
+    terminal.right_click_text("CODE_END", 5000).unwrap();
+    assert_clipboard(
+        &mut clipboard,
+        "SOURCE_START a long line of words that must wrap within the narrow chat viewport while retaining its original source newline boundary SOURCE_END\n\n  rust\n      let value = 42;\n      println!(\"done\");\n  \n\nCODE_END",
+    );
+    // Leave the embedded AI pane before using the MindMap tab shortcuts.
+    terminal.key("Escape").unwrap();
+    terminal.key("3").unwrap();
+    terminal.expect_text("╭ Agents", true, 5000).unwrap();
+    terminal.expect_text("CODE_END", true, 5000).unwrap();
+    terminal.key("Enter").unwrap();
+    close_chat(&terminal);
+}
+
+fn locate_text(terminal: &Terminal, needle: &str) -> (usize, usize) {
+    let screen = terminal.screen().unwrap();
+    screen
+        .lines()
+        .enumerate()
+        .find_map(|(row, line)| {
+            line.find(needle)
+                .map(|byte| (line[..byte].chars().count() + 1, row + 1))
+        })
+        .unwrap_or_else(|| panic!("text {needle:?} not visible\n{screen}"))
+}
+
+fn drag_between_text(terminal: &Terminal, first: &str, last: &str, reverse: bool) {
+    terminal.expect_text(first, true, 5000).unwrap();
+    terminal.expect_text(last, true, 5000).unwrap();
+    let start = locate_text(terminal, first);
+    let (last_col, last_row) = locate_text(terminal, last);
+    let end = (last_col + last.chars().count(), last_row);
+    let (start, end) = if reverse { (end, start) } else { (start, end) };
+    terminal
+        .write(&format!(
+            "\x1b[<0;{};{}M\x1b[<32;{};{}M\x1b[<0;{};{}m",
+            start.0, start.1, end.0, end.1, end.0, end.1
+        ))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(80));
+}
+
+#[cfg(windows)]
+struct LockedClipboard(*mut std::ffi::c_void);
+
+#[cfg(windows)]
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn OpenClipboard(owner: *mut std::ffi::c_void) -> i32;
+    fn CloseClipboard() -> i32;
+    fn CreateWindowExW(
+        ex_style: u32,
+        class: *const u16,
+        name: *const u16,
+        style: u32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        parent: *mut std::ffi::c_void,
+        menu: *mut std::ffi::c_void,
+        instance: *mut std::ffi::c_void,
+        param: *mut std::ffi::c_void,
+    ) -> *mut std::ffi::c_void;
+    fn DestroyWindow(window: *mut std::ffi::c_void) -> i32;
+}
+
+#[cfg(windows)]
+impl LockedClipboard {
+    fn acquire() -> Self {
+        // A real hidden owner window makes clipboard contention observable
+        // across processes; a NULL owner did not reliably hold it in ConPTY.
+        let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+        let window = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(!window.is_null());
+        assert_ne!(unsafe { OpenClipboard(window) }, 0);
+        let guard = Self(window);
+        let probe = Command::new(python()).args(["-c", "import ctypes; u=ctypes.WinDLL('user32'); opened=u.OpenClipboard(None); print(opened); u.CloseClipboard() if opened else None"]).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&probe.stdout).trim(),
+            "0",
+            "clipboard fault was not held across processes"
+        );
+        guard
+    }
+}
+
+#[cfg(windows)]
+impl Drop for LockedClipboard {
+    fn drop(&mut self) {
+        unsafe {
+            CloseClipboard();
+            DestroyWindow(self.0);
+        }
+    }
+}
+
+#[test]
+#[cfg(windows)]
+#[ignore = "requires TESHI_SELF_TEST_BIN pointing to a built CLI and a desktop clipboard"]
+fn clipboard_failure_keeps_chat_selection_and_allows_retry() {
+    let _serial = CLIPBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut clipboard = ClipboardRestore::new(Clipboard::new().unwrap());
+    let case = ChatCase::new(
+        "clipboard-failure",
+        &[message("Assistant", "COPY_RETRY_SELECTION", None)],
+    );
+    let terminal = case.launch(120, 35);
+    command(&terminal, "/resume");
+    terminal
+        .expect_text("COPY_RETRY_SELECTION", true, 5000)
+        .unwrap();
+    terminal.drag_text("COPY_RETRY_SELECTION", 5000).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    case.save(&terminal, "before-failed-write");
+    clipboard.set_text("LOCKED_CLIPBOARD_SENTINEL").unwrap();
+    {
+        let _lock = LockedClipboard::acquire();
+        let (col, row) = locate_text(&terminal, "COPY_RETRY_SELECTION");
+        terminal
+            .write(&format!("\x1b[<2;{col};{row}M\x1b[<2;{col};{row}m"))
+            .unwrap();
+        // ConPTY can postpone repaint while the desktop clipboard is held.
+        // Release the injected fault before observing the error and retry UI.
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    terminal
+        .expect_text("Could not copy to clipboard:", true, 10000)
+        .unwrap();
+    case.save(&terminal, "failed-write");
+    assert_clipboard(&mut clipboard, "LOCKED_CLIPBOARD_SENTINEL");
+    terminal
+        .right_click_text("COPY_RETRY_SELECTION", 5000)
+        .unwrap();
+    assert_clipboard(&mut clipboard, "COPY_RETRY_SELECTION");
+    case.save(&terminal, "retried-selection");
+    terminal.key("Enter").unwrap();
+    terminal.write("/copy ").unwrap();
+    terminal.expect_text("/copy", true, 5000).unwrap();
+    {
+        let _lock = LockedClipboard::acquire();
+        terminal.key("Enter").unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    terminal
+        .expect_text("Could not copy to clipboard:", true, 10000)
+        .unwrap();
+    case.save(&terminal, "command-failed-write");
+    assert_clipboard(&mut clipboard, "COPY_RETRY_SELECTION");
+    clipboard.set_text("COMMAND_RETRY_SENTINEL").unwrap();
+    command(&terminal, "/copy");
+    assert_clipboard(&mut clipboard, "COPY_RETRY_SELECTION");
+    case.save(&terminal, "retried-command");
+    close_chat(&terminal);
+}
+
+#[test]
+#[ignore = "requires TESHI_SELF_TEST_BIN pointing to a built CLI and a desktop clipboard"]
+fn chat_selection_copies_unicode_across_messages_and_completed_tool_title() {
+    let _serial = CLIPBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut clipboard = ClipboardRestore::new(Clipboard::new().unwrap());
+    let mut activity = message("Assistant", "READ_PROJECT_TOOL", Some("acp_activity"));
+    activity["reasoning_content"] = "completed".into();
+    activity["tool_call_id"] = "fixture-read".into();
+    let case = ChatCase::new(
+        "unicode-tool",
+        &[
+            message("Assistant", "UNICODE_START\n中文 e\u{301} 😀", None),
+            message("Assistant", "UNICODE_END", None),
+            activity,
+        ],
+    );
+    let terminal = case.launch(120, 40);
+    command(&terminal, "/resume");
+    terminal
+        .expect_text("READ_PROJECT_TOOL", true, 5000)
+        .unwrap();
+    drag_between_text(&terminal, "UNICODE_START", "UNICODE_END", true);
+    case.save(&terminal, "reverse-cross-message-selection");
+    terminal.right_click_text("UNICODE_END", 5000).unwrap();
+    assert_clipboard(
+        &mut clipboard,
+        "UNICODE_START\n中文 e\u{301} 😀\n\nUNICODE_END",
+    );
+    terminal.drag_text("READ_PROJECT_TOOL", 5000).unwrap();
+    case.save(&terminal, "completed-tool-selection");
+    terminal
+        .right_click_text("READ_PROJECT_TOOL", 5000)
+        .unwrap();
+    assert_clipboard(&mut clipboard, "READ_PROJECT_TOOL");
+    terminal.key("Enter").unwrap();
+    command(&terminal, "/copy 2");
+    assert_clipboard(
+        &mut clipboard,
+        "UNICODE_START\n中文 e\u{301} 😀\n\n---\n\nUNICODE_END",
+    );
+    close_chat(&terminal);
+}
+
+#[test]
+#[ignore = "requires TESHI_SELF_TEST_BIN pointing to a built CLI and a desktop clipboard"]
+fn chat_selection_survives_scrolling_out_of_view_and_new_session_clears_it() {
+    let _serial = CLIPBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut clipboard = ClipboardRestore::new(Clipboard::new().unwrap());
+    let body = (0..80)
+        .map(|index| format!("SCROLL_LINE_{index:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let case = ChatCase::new("scroll-session", &[message("Assistant", &body, None)]);
+    let terminal = case.launch(120, 32);
+    command(&terminal, "/resume");
+    terminal.expect_text("SCROLL_LINE_79", true, 5000).unwrap();
+    terminal.drag_text("SCROLL_LINE_78", 5000).unwrap();
+    case.save(&terminal, "before-scroll");
+    let (col, row) = locate_text(&terminal, "SCROLL_LINE_78");
+    for _ in 0..12 {
+        terminal
+            .scroll_at((col - 1) as u16, (row - 1) as u16, true, false)
+            .unwrap();
+    }
+    terminal.expect_text("SCROLL_LINE_78", false, 5000).unwrap();
+    case.save(&terminal, "selection-out-of-view");
+    terminal
+        .write(&format!("\x1b[<2;{col};{row}M\x1b[<2;{col};{row}m"))
+        .unwrap();
+    assert_clipboard(&mut clipboard, "SCROLL_LINE_78");
+
+    // Restore the lower viewport, select a message, then replace its session.
+    terminal.key("Enter").unwrap();
+    terminal.key("Control+End").unwrap();
+    terminal.expect_text("SCROLL_LINE_79", true, 5000).unwrap();
+    terminal.drag_text("SCROLL_LINE_78", 5000).unwrap();
+    terminal.key("Enter").unwrap();
+    command(&terminal, "/new");
+    terminal
+        .expect_text("Welcome to AI Chat!", true, 5000)
+        .unwrap();
+    clipboard.set_text("SESSION_REPLACEMENT_SENTINEL").unwrap();
+    terminal
+        .right_click_text("Welcome to AI Chat!", 5000)
+        .unwrap();
+    terminal
+        .expect_text("No selection to copy", true, 5000)
+        .unwrap();
+    assert_clipboard(&mut clipboard, "SESSION_REPLACEMENT_SENTINEL");
+    case.save(&terminal, "new-session-cleared-selection");
+    command(&terminal, "/resume");
+    terminal.expect_text("SCROLL_LINE_79", true, 5000).unwrap();
+    terminal.right_click_text("SCROLL_LINE_79", 5000).unwrap();
+    terminal
+        .expect_text("No selection to copy", true, 5000)
+        .unwrap();
+    assert_clipboard(&mut clipboard, "SESSION_REPLACEMENT_SENTINEL");
+    case.save(&terminal, "resume-cleared-selection");
+    close_chat(&terminal);
+    drop(terminal);
+
+    let terminal = case.launch(120, 32);
+    command(&terminal, "/resume");
+    terminal.expect_text("SCROLL_LINE_79", true, 5000).unwrap();
+    terminal.right_click_text("SCROLL_LINE_79", 5000).unwrap();
+    terminal
+        .expect_text("No selection to copy", true, 5000)
+        .unwrap();
+    assert_clipboard(&mut clipboard, "SESSION_REPLACEMENT_SENTINEL");
+    case.save(&terminal, "restart-cleared-selection");
+    close_chat(&terminal);
+}
+
+#[test]
+#[ignore = "requires TESHI_SELF_TEST_BIN pointing to a built CLI, Python, and a desktop clipboard"]
+fn chat_selection_invalidates_changed_stream_and_copy_excludes_live_partial() {
+    let _serial = CLIPBOARD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut clipboard = ClipboardRestore::new(Clipboard::new().unwrap());
+    let case = ChatCase::new("stream-selection", &[]);
+    let terminal = case.launch_agent(120, 40, true);
+    terminal.write("stream selection acceptance").unwrap();
+    terminal.key("Enter").unwrap();
+    let trace = case.root.path().join("controlled-trace");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let turn = loop {
+        let prompt = std::fs::read_to_string(trace.join("trace.jsonl"))
+            .ok()
+            .into_iter()
+            .flat_map(|text| {
+                text.lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .collect::<Vec<_>>()
+            })
+            .find(|value| value["kind"] == "prompt");
+        if let Some(prompt) = prompt {
+            break prompt["turn"].as_str().unwrap().to_owned();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ACP fixture did not receive a prompt"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    write_native_events(&trace, &turn, &[json_event("reply", "STREAM_SELECTED")]);
+    terminal.expect_text("STREAM_SELECTED", true, 5000).unwrap();
+    clipboard.set_text("STREAM_PARTIAL_SENTINEL").unwrap();
+    command(&terminal, "/copy");
+    terminal
+        .expect_text("No completed assistant responses to copy", true, 5000)
+        .unwrap();
+    assert_clipboard(&mut clipboard, "STREAM_PARTIAL_SENTINEL");
+
+    terminal.drag_text("STREAM_SELECTED", 5000).unwrap();
+    case.save(&terminal, "selected-partial");
+    write_native_events(
+        &trace,
+        &turn,
+        &[
+            json_event("reply", "STREAM_SELECTED"),
+            json_event("reply", "_UPDATED"),
+        ],
+    );
+    terminal
+        .expect_text("STREAM_SELECTED_UPDATED", true, 5000)
+        .unwrap();
+    terminal
+        .right_click_text("STREAM_SELECTED_UPDATED", 5000)
+        .unwrap();
+    terminal
+        .expect_text("No selection to copy", true, 5000)
+        .unwrap();
+    assert_clipboard(&mut clipboard, "STREAM_PARTIAL_SENTINEL");
+    case.save(&terminal, "changed-partial-cleared-selection");
+
+    write_native_events(
+        &trace,
+        &turn,
+        &[
+            json_event("reply", "STREAM_SELECTED"),
+            json_event("reply", "_UPDATED"),
+            json_event("done", ""),
+        ],
+    );
+    terminal
+        .expect_stable_text("STREAM_SELECTED_UPDATED", true, 5000, 100)
+        .unwrap();
+    terminal.key("Enter").unwrap();
+    command(&terminal, "/copy");
+    assert_clipboard(&mut clipboard, "STREAM_SELECTED_UPDATED");
+    case.save(&terminal, "completed-stream-copy");
+    close_chat(&terminal);
 }

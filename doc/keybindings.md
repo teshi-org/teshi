@@ -106,6 +106,12 @@ Consecutive ACP tools share a progress group. Compact rows keep their status
 visible and shorten long titles to the available terminal width. `/details`
 toggles full thinking text and ACP tool titles for the current conversation.
 
+Drag over chat text in AI or the MindMap AI panel to select it. `Ctrl+Shift+C`
+or a right click copies the selection. Copy uses the displayed plain text,
+including visible code indentation and language labels, without role rails or
+soft-wrap line breaks. Scrolling and resizing preserve valid selections;
+stream changes to the selected content and session changes clear them.
+
 `/copy` copies the latest completed nonempty assistant answer; `/copy N` copies
 the last N answers in chronological order. Live partial answers, reasoning and
 tool activity are excluded. Invalid counts and an empty answer history produce
