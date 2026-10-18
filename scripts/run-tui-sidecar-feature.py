@@ -335,11 +335,11 @@ def scenario_actions(canonical_name: str, scenario_index: int, root: Path, teshi
         if canonical_name.endswith("allow.feature"):
             actions.extend(
                 [
-                    [expect("PERMISSION_BEFORE")],
-                    [expect("ACP agent requests permission"), expect("Allow once")],
+                    [expect("Allow once"), expect("Allow always")],
                     [key("Down")],
                     [key("Enter")],
                     [expect("PERMISSION_AFTER_allow_always")],
+                    [expect("PERMISSION_BEFORE")],
                     [key("Escape")],
                     [key("q")],
                     [exit_expect()],
@@ -348,8 +348,10 @@ def scenario_actions(canonical_name: str, scenario_index: int, root: Path, teshi
         else:
             actions.extend(
                 [
-                    [expect("ACP agent requests permission")],
-                    [key("Escape")],
+                    [expect("Allow once"), expect("Allow always")],
+                    # First blur the focused input, then reject the request.
+                    [key("Escape"), key("Escape"),
+                     action("expect_text", text="Allow once", visible=False, timeout_ms=5000)],
                     [action("expect_text", text="PERMISSION_AFTER", visible=False, timeout_ms=5000)],
                     [key("Escape")],
                     [key("q")],
