@@ -230,6 +230,7 @@ class World:
             self.open_chat()
             return
         self.command("/agent")
+        self.expect("Select Agent for this session")
         self.expect(name)
         names = ["Fake Alpha", "Fake Beta"]
         index = names.index(name) if name in names else 0
@@ -244,6 +245,7 @@ class World:
     def assert_backend(self, name):
         target = "Teshi Native" if name in {"Native", "Teshi Native"} else name
         self.command("/agent")
+        self.expect("Select Agent for this session")
         self.expect(target)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -387,8 +389,13 @@ class World:
 
     def command(self, text):
         self.focus_input()
-        self.op("write", text)
+        # A trailing space submits a command directly, without selecting a
+        # slash-completion row. Observe consumption before checking its result.
+        typed = text.rstrip() + " "
+        self.op("write", typed)
+        self.expect("│" + typed)
         self.op("key", "Enter")
+        self.absent("│" + typed, timeout=30)
 
     def focus_input(self):
         # The footer advertises Send even while the input is unfocused. Click
@@ -404,7 +411,11 @@ class World:
         assert records, "no persisted conversation to resume"
         latest = max(records, key=lambda record: int(record["updated_at"]))
         self.command("/resume")
-        self.expect(latest["messages"][0]["content"])
+        # A conversation title is not evidence that its transcript has loaded.
+        # Existing text may also remain behind the shutdown-wait modal.
+        self.expect("▌ " + latest["messages"][0]["content"])
+        self.absent("Project sessions", timeout=30)
+        self.absent("Waiting for the previous Agent", timeout=30)
 
     def quit_app(self):
         self.command("/exit")
