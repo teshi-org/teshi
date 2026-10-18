@@ -682,6 +682,8 @@ pub struct App {
     pub step_keyword_picker: Option<StepKeywordPicker>,
     pub pending_char: Option<char>,
     pub clipboard: Option<String>,
+    // Retain the clipboard owner so X11 can serve later requests.
+    system_clipboard: Option<arboard::Clipboard>,
     pub scenario_fold: HashSet<usize>,
     /// Anchor position (row, col) where mouse drag started; `None` means no selection.
     pub selection_anchor: Option<(usize, usize)>,
@@ -833,6 +835,37 @@ fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(i, _)| i)
         .unwrap_or(s.len())
+}
+
+fn set_system_clipboard(text: &str) -> Result<arboard::Clipboard> {
+    let mut clipboard = arboard::Clipboard::new()
+        .map_err(|error| anyhow::anyhow!("failed to open clipboard: {error}"))?;
+    clipboard
+        .set_text(text)
+        .map_err(|error| anyhow::anyhow!("failed to set clipboard: {error}"))?;
+    Ok(clipboard)
+}
+
+fn completed_assistant_responses(messages: &[AiChatMessage], limit: usize) -> Vec<&str> {
+    let mut responses: Vec<&str> = messages
+        .iter()
+        .rev()
+        .filter(|message| {
+            message.role == AiRole::Assistant
+                && message.source.as_deref() != Some("agent_progress")
+                && message.source.as_deref() != Some("acp_activity")
+                && message.source.as_deref() != Some("acp_reasoning")
+                && !message.content.trim().is_empty()
+                && message
+                    .tool_calls
+                    .as_ref()
+                    .is_none_or(|calls| calls.is_empty())
+        })
+        .take(limit)
+        .map(|message| message.content.as_str())
+        .collect();
+    responses.reverse();
+    responses
 }
 
 /// A clickable region registered during rendering for mouse hit-testing.
@@ -1093,6 +1126,7 @@ impl App {
             step_keyword_picker: None,
             pending_char: None,
             clipboard: None,
+            system_clipboard: None,
             scenario_fold: HashSet::new(),
             selection_anchor: None,
             selection_end: None,
@@ -1278,6 +1312,7 @@ impl App {
             step_keyword_picker: None,
             pending_char: None,
             clipboard: None,
+            system_clipboard: None,
             scenario_fold: HashSet::new(),
             selection_anchor: None,
             selection_end: None,
@@ -1443,6 +1478,7 @@ impl App {
             step_keyword_picker: None,
             pending_char: None,
             clipboard: None,
+            system_clipboard: None,
             scenario_fold: HashSet::new(),
             selection_anchor: None,
             selection_end: None,
@@ -7599,19 +7635,35 @@ impl App {
         self.status = "Step pasted".to_string();
     }
 
+    fn try_copy_to_clipboard(&mut self, text: &str) -> bool {
+        match set_system_clipboard(text) {
+            Ok(clipboard) => {
+                // Acquire the new owner before dropping the previous handle.
+                // A failed write must preserve the existing owner and selection.
+                self.system_clipboard = Some(clipboard);
+                true
+            }
+            Err(error) => {
+                self.status = format!("Could not copy to clipboard: {error}");
+                self.set_status_message(self.status.clone());
+                false
+            }
+        }
+    }
+
     fn copy_selection_to_clipboard(&mut self) -> Result<()> {
         let text = self.selection_text();
         if text.is_empty() {
             self.status = "No selection to copy".to_string();
+            self.set_status_message(self.status.clone());
             return Ok(());
         }
-        let mut clipboard = arboard::Clipboard::new()
-            .map_err(|e| anyhow::anyhow!("failed to open clipboard: {e}"))?;
-        clipboard
-            .set_text(&text)
-            .map_err(|e| anyhow::anyhow!("failed to set clipboard: {e}"))?;
+        if !self.try_copy_to_clipboard(&text) {
+            return Ok(());
+        }
         let line_count = text.lines().count();
         self.status = format!("Copied {line_count} line(s)");
+        self.set_status_message(self.status.clone());
         self.selection_anchor = None;
         self.selection_end = None;
         self.clipboard = Some(text);
@@ -8930,12 +8982,11 @@ impl App {
         if command == "resume" {
             return self.cmd_resume();
         }
-        if command == "copy" || command.starts_with("copy ") {
-            let n = command
-                .strip_prefix("copy ")
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(1);
-            return self.cmd_copy(n);
+        if command == "copy" {
+            return self.cmd_copy(None);
+        }
+        if let Some(argument) = command.strip_prefix("copy ") {
+            return self.cmd_copy(Some(argument));
         }
         if command == "models" || command == "model" {
             return self.cmd_models();
@@ -9078,32 +9129,32 @@ impl App {
         Ok(())
     }
 
-    /// Handle `/copy [N]` — copy last N assistant responses to clipboard.
-    fn cmd_copy(&mut self, n: usize) -> Result<()> {
-        let n = n.max(1);
-        let texts: Vec<&str> = self
-            .agent()
-            .messages()
-            .iter()
-            .rev()
-            .filter(|m| m.role == AiRole::Assistant)
-            .take(n)
-            .map(|m| m.content.as_str())
-            .collect();
+    /// Handle `/copy [N]` — copy the last N completed assistant responses.
+    fn cmd_copy(&mut self, argument: Option<&str>) -> Result<()> {
+        let n = match argument.map(str::trim) {
+            None | Some("") => 1,
+            Some(value) => match value.parse::<usize>() {
+                Ok(0) | Err(_) => {
+                    self.status = "Usage: /copy [N] where N is a positive integer".to_string();
+                    self.set_status_message(self.status.clone());
+                    return Ok(());
+                }
+                Ok(n) => n,
+            },
+        };
+        let texts = completed_assistant_responses(self.agent().messages(), n);
         if texts.is_empty() {
-            self.status = "No assistant responses to copy".to_string();
+            self.status = "No completed assistant responses to copy".to_string();
+            self.set_status_message(self.status.clone());
             return Ok(());
         }
         let combined = texts.join("\n\n---\n\n");
-        let mut clipboard = arboard::Clipboard::new()
-            .map_err(|e| anyhow::anyhow!("failed to open clipboard: {e}"))?;
-        clipboard
-            .set_text(&combined)
-            .map_err(|e| anyhow::anyhow!("failed to set clipboard: {e}"))?;
-        self.status = format!(
-            "Copied last {} assistant response(s) to clipboard",
-            texts.len()
-        );
+        let count = texts.len();
+        if !self.try_copy_to_clipboard(&combined) {
+            return Ok(());
+        }
+        self.status = format!("Copied last {} assistant response(s) to clipboard", count);
+        self.set_status_message(self.status.clone());
         Ok(())
     }
 
@@ -9170,6 +9221,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use super::{AiChatMessage, completed_assistant_responses};
     use std::collections::{HashMap, HashSet};
     use std::fs;
     use std::io::{Read, Write};
@@ -9194,6 +9246,73 @@ mod tests {
     use tempfile::tempdir;
     use teshi_core::StepIndex;
     use teshi_core::gherkin_lang::GherkinLanguages;
+
+    #[test]
+    fn copy_candidates_keep_completed_assistant_order_and_exclude_progress() {
+        let messages = vec![
+            AiChatMessage {
+                role: AiRole::User,
+                content: "question".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+            },
+            AiChatMessage {
+                role: AiRole::Assistant,
+                content: "old answer".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+            },
+            AiChatMessage {
+                role: AiRole::Assistant,
+                content: "streaming progress".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: Some("agent_progress".into()),
+            },
+            AiChatMessage {
+                role: AiRole::Assistant,
+                content: "   ".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: Some("thinking only".into()),
+                source: None,
+            },
+            AiChatMessage {
+                role: AiRole::Assistant,
+                content: "new answer".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+            },
+        ];
+
+        assert_eq!(
+            completed_assistant_responses(&messages, 2),
+            vec!["old answer", "new answer"]
+        );
+        assert_eq!(
+            completed_assistant_responses(&messages, 1),
+            vec!["new answer"]
+        );
+    }
+
+    #[test]
+    fn copy_command_rejects_invalid_counts_and_empty_history() {
+        let (mut app, _project, _store) = slash_test_app();
+
+        app.execute_slash_command("copy 0").unwrap();
+        assert_eq!(app.status, "Usage: /copy [N] where N is a positive integer");
+        app.execute_slash_command("copy not-a-number").unwrap();
+        assert_eq!(app.status, "Usage: /copy [N] where N is a positive integer");
+        app.execute_slash_command("copy").unwrap();
+        assert_eq!(app.status, "No completed assistant responses to copy");
+    }
 
     fn requirements_test_app() -> (App, tempfile::TempDir, tempfile::TempDir) {
         let project = tempdir().unwrap();
@@ -12712,6 +12831,7 @@ mod tests {
             step_keyword_picker: None,
             pending_char: None,
             clipboard: None,
+            system_clipboard: None,
             scenario_fold: HashSet::new(),
             selection_anchor: None,
             selection_end: None,
@@ -12889,6 +13009,7 @@ Feature: B
             step_keyword_picker: None,
             pending_char: None,
             clipboard: None,
+            system_clipboard: None,
             scenario_fold: HashSet::new(),
             selection_anchor: None,
             selection_end: None,

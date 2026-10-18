@@ -106,6 +106,11 @@ Consecutive ACP tools share a progress group. Compact rows keep their status
 visible and shorten long titles to the available terminal width. `/details`
 toggles full thinking text and ACP tool titles for the current conversation.
 
+`/copy` copies the latest completed nonempty assistant answer; `/copy N` copies
+the last N answers in chronological order. Live partial answers, reasoning and
+tool activity are excluded. Invalid counts and an empty answer history produce
+feedback. A clipboard write failure keeps the selection available for retry.
+
 Conversations are checkpointed every second while the TUI runs, including partial
 replies, and saved before starting a new conversation, closing an agent, loading
 another session, or exiting normally. Each conversation keeps one stable file in
