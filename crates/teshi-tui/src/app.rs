@@ -74,6 +74,28 @@ pub enum AiStatus {
     Error,
 }
 
+/// A stable position in the plain-text projection of one chat block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatAnchor {
+    /// Message/block key in the active conversation.
+    pub block: usize,
+    /// Character offset within the block's plain-text projection.
+    pub offset: usize,
+    /// Fingerprint captured when the anchor was created.
+    pub fingerprint: u64,
+}
+
+/// A mouse selection in the active agent's chat history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatSelection {
+    /// Agent whose conversation owns the selection.
+    pub agent_id: usize,
+    /// Position where the drag started.
+    pub anchor: ChatAnchor,
+    /// Position where the drag currently ends.
+    pub focus: ChatAnchor,
+}
+
 /// A pending ACP `session/request_permission` prompt for one agent.
 #[derive(Debug, Clone)]
 pub struct AcpPermissionPrompt {
@@ -693,6 +715,12 @@ pub struct App {
     pub mouse_position: Option<(u16, u16)>,
     /// Screen rectangle of the editor panel, updated each render frame.
     pub editor_panel_rect: Option<ratatui::layout::Rect>,
+    /// Body rectangle of the active chat history, updated each render frame.
+    pub chat_history_rect: Option<ratatui::layout::Rect>,
+    /// Current chat text selection, if any.
+    pub chat_selection: Option<ChatSelection>,
+    /// Whether a left-button drag is extending the chat selection.
+    pub chat_selection_dragging: bool,
     /// Clickable regions registered during the last render frame.
     pub clickable_regions: Vec<ClickableRegion>,
     /// Screen rectangle of the tree panel, updated each render frame.
@@ -1132,6 +1160,9 @@ impl App {
             selection_end: None,
             mouse_position: None,
             editor_panel_rect: None,
+            chat_history_rect: None,
+            chat_selection: None,
+            chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
             preview_panel_rect: None,
@@ -1318,6 +1349,9 @@ impl App {
             selection_end: None,
             mouse_position: None,
             editor_panel_rect: None,
+            chat_history_rect: None,
+            chat_selection: None,
+            chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
             preview_panel_rect: None,
@@ -1484,6 +1518,9 @@ impl App {
             selection_end: None,
             mouse_position: None,
             editor_panel_rect: None,
+            chat_history_rect: None,
+            chat_selection: None,
+            chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
             preview_panel_rect: None,
@@ -6792,12 +6829,14 @@ impl App {
                 }
                 self.selection_anchor = None;
                 self.selection_end = None;
+                self.clear_chat_selection();
                 self.quit_pending_confirm = false;
             }
             Action::AiFocusInput => {
                 self.ai_input_focused = true;
             }
             Action::AgentNew => {
+                self.clear_chat_selection();
                 let id = self.next_agent_id;
                 self.next_agent_id += 1;
                 let root = self.agent().selection_root.clone();
@@ -6814,6 +6853,7 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::AgentClose => {
+                self.clear_chat_selection();
                 if self.agents.len() <= 1 {
                     self.status = "Cannot close the last agent".to_string();
                 } else {
@@ -6828,6 +6868,7 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::AgentNext => {
+                self.clear_chat_selection();
                 if self.agents.len() > 1 {
                     self.selected_agent = (self.selected_agent + 1) % self.agents.len();
                     self.status = format!("Switched to {}", self.agent().title);
@@ -6835,6 +6876,7 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::AgentPrev => {
+                self.clear_chat_selection();
                 if self.agents.len() > 1 {
                     self.selected_agent = self.selected_agent.saturating_sub(1);
                     self.status = format!("Switched to {}", self.agent().title);
@@ -6844,6 +6886,7 @@ impl App {
             Action::ExternalChangeReload | Action::ExternalChangeKeepLocal => {}
             Action::CopySelection => self.copy_selection_to_clipboard()?,
             Action::ClearSelection => {
+                self.clear_chat_selection();
                 self.selection_anchor = None;
                 self.selection_end = None;
             }
@@ -6873,6 +6916,7 @@ impl App {
                 }
             }
             Action::ClearInputState => {
+                self.clear_chat_selection();
                 self.selection_anchor = None;
                 self.selection_end = None;
                 self.scenario_dropdown_open = false;
@@ -7085,6 +7129,7 @@ impl App {
         if self.active_tab == tab {
             return;
         }
+        self.clear_chat_selection();
         if self.active_tab == MainTab::Requirements
             && self.authoring_ui.guard_unsaved(
                 crate::authoring_tab::RequirementsPendingAction::Action(Action::SelectTab(tab)),
@@ -7635,6 +7680,11 @@ impl App {
         self.status = "Step pasted".to_string();
     }
 
+    fn clear_chat_selection(&mut self) {
+        self.chat_selection = None;
+        self.chat_selection_dragging = false;
+    }
+
     fn try_copy_to_clipboard(&mut self, text: &str) -> bool {
         match set_system_clipboard(text) {
             Ok(clipboard) => {
@@ -7652,6 +7702,30 @@ impl App {
     }
 
     fn copy_selection_to_clipboard(&mut self) -> Result<()> {
+        if self.chat_selection.is_some()
+            && (self.active_tab == MainTab::Ai
+                || (self.active_tab == MainTab::MindMap
+                    && self.mindmap_focus == MindMapFocus::AiPanel))
+        {
+            let Some(text) = crate::ui::chat::selected_chat_text(self) else {
+                self.status = "Chat selection is no longer available".to_string();
+                self.set_status_message(self.status.clone());
+                self.clear_chat_selection();
+                return Ok(());
+            };
+            if text.is_empty() {
+                self.status = "No chat selection to copy".to_string();
+                self.set_status_message(self.status.clone());
+                return Ok(());
+            }
+            if !self.try_copy_to_clipboard(&text) {
+                return Ok(());
+            }
+            self.status = format!("Copied {} character(s)", text.chars().count());
+            self.set_status_message(self.status.clone());
+            self.clear_chat_selection();
+            return Ok(());
+        }
         let text = self.selection_text();
         if text.is_empty() {
             self.status = "No selection to copy".to_string();
@@ -7698,6 +7772,62 @@ impl App {
         }
         // Update hover tracking
         let pos = ratatui::layout::Position::new(col, row);
+
+        let chat_context = (self.active_tab == MainTab::Ai
+            || (self.active_tab == MainTab::MindMap && self.mindmap_ai_panel_visible))
+            && !self.model_panel_active
+            && !self.session_panel_active
+            && !self.auth_panel_active
+            && !self.approval_panel_active
+            && !self.agent_profile_panel_active
+            && !self.quit_pending_confirm
+            && !self.change_summary_visible
+            && self.generation_scope_prompt.is_none()
+            && !self.scenario_dropdown_open
+            && !self.has_external_change_prompt()
+            && self.step_keyword_picker.is_none()
+            && !self.has_agent_change_prompt()
+            && !self.has_acp_permission_prompt();
+        let in_chat_history = chat_context
+            && self
+                .chat_history_rect
+                .is_some_and(|rect| rect.contains(pos));
+        if chat_context && (in_chat_history || self.chat_selection_dragging) {
+            match kind {
+                MouseEventKind::Down(MouseButton::Left) if in_chat_history => {
+                    self.ai_input_focused = false;
+                    if self.active_tab == MainTab::MindMap {
+                        self.mindmap_focus = MindMapFocus::AiPanel;
+                    }
+                    let anchor = crate::ui::chat::chat_anchor_at(self, col, row);
+                    self.chat_selection = anchor.map(|anchor| ChatSelection {
+                        agent_id: self.selected_agent,
+                        anchor,
+                        focus: anchor,
+                    });
+                    self.chat_selection_dragging = self.chat_selection.is_some();
+                    return Ok(());
+                }
+                MouseEventKind::Drag(MouseButton::Left) if self.chat_selection_dragging => {
+                    let anchor = crate::ui::chat::chat_anchor_at(self, col, row);
+                    if let Some(anchor) = anchor
+                        && let Some(selection) = self.chat_selection.as_mut()
+                    {
+                        selection.focus = anchor;
+                    }
+                    return Ok(());
+                }
+                MouseEventKind::Up(MouseButton::Left) if self.chat_selection_dragging => {
+                    self.chat_selection_dragging = false;
+                    return Ok(());
+                }
+                MouseEventKind::Up(MouseButton::Right) if in_chat_history => {
+                    self.handle_action(Action::CopySelection)?;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
 
         if self.active_tab == MainTab::Requirements {
             use crate::authoring_tab::RequirementsFocus;
@@ -9077,6 +9207,7 @@ impl App {
 
     /// Handle `/new` — start a new session.
     fn cmd_new(&mut self) -> Result<()> {
+        self.clear_chat_selection();
         self.save_sessions(true)?;
         self.cancel_agent_turn();
         self.agent_mut().saved_session = None;
@@ -9200,6 +9331,7 @@ impl App {
     }
 
     fn restore_session(&mut self, session: crate::session::Session) {
+        self.clear_chat_selection();
         self.cancel_agent_turn();
         let kind = session
             .backend_kind
@@ -12877,6 +13009,9 @@ mod tests {
             selection_end: None,
             mouse_position: None,
             editor_panel_rect: None,
+            chat_history_rect: None,
+            chat_selection: None,
+            chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
             preview_panel_rect: None,
@@ -13055,6 +13190,9 @@ Feature: B
             selection_end: None,
             mouse_position: None,
             editor_panel_rect: None,
+            chat_history_rect: None,
+            chat_selection: None,
+            chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
             preview_panel_rect: None,

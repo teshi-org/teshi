@@ -283,7 +283,7 @@ pub enum Action {
     TreeSiblingPrev,
     /// Navigate to the next sibling node in the MindMap tree (Shift+Down).
     TreeSiblingNext,
-    // Mouse-driven selection actions (no key bindings — triggered by mouse events)
+    // Chat/editor selection actions
     /// Copy the current mouse-drag selection to the system clipboard and clear it.
     CopySelection,
     /// Clear the mouse-drag selection without copying.
@@ -903,6 +903,11 @@ impl Action {
                 (KeyCode::Down, KeyModifiers::ALT) => Some(Self::AiScrollDown),
                 (KeyCode::Left, KeyModifiers::ALT) => Some(Self::AiScrollLeft),
                 (KeyCode::Right, KeyModifiers::ALT) => Some(Self::AiScrollRight),
+                (KeyCode::Char('c'), modifiers)
+                    if modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::CopySelection)
+                }
                 (KeyCode::Esc, _) if context.ai_status_waiting => Some(Self::AiCancel),
                 (KeyCode::Enter, _) => Some(Self::AiFocusInput),
                 _ => None,
@@ -951,7 +956,17 @@ impl Action {
                 (KeyCode::Home, _) => Some(Self::AiCursorHome),
                 (KeyCode::End, _) => Some(Self::AiCursorEnd),
                 (KeyCode::Char('v'), KeyModifiers::CONTROL) => Some(Self::AiClipboardPaste),
-                (KeyCode::Char(ch), _) if !ch.is_control() => Some(Self::AiSendChar(ch)),
+                (KeyCode::Char('c'), modifiers)
+                    if modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::CopySelection)
+                }
+                (KeyCode::Char(ch), modifiers)
+                    if !ch.is_control()
+                        && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::AiSendChar(ch))
+                }
                 _ => None,
             };
         }
@@ -985,7 +1000,17 @@ impl Action {
                     (KeyCode::Home, _) => Some(Self::AiCursorHome),
                     (KeyCode::End, _) => Some(Self::AiCursorEnd),
                     (KeyCode::Char('v'), KeyModifiers::CONTROL) => Some(Self::AiClipboardPaste),
-                    (KeyCode::Char(ch), _) if !ch.is_control() => Some(Self::AiSendChar(ch)),
+                    (KeyCode::Char('c'), modifiers)
+                        if modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+                    {
+                        Some(Self::CopySelection)
+                    }
+                    (KeyCode::Char(ch), modifiers)
+                        if !ch.is_control()
+                            && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+                    {
+                        Some(Self::AiSendChar(ch))
+                    }
                     _ => None,
                 };
             } else {
@@ -1000,6 +1025,11 @@ impl Action {
                         Some(Self::ClearInputState)
                     }
                     (KeyCode::Enter, _) => Some(Self::AiFocusInput),
+                    (KeyCode::Char('c'), modifiers)
+                        if modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+                    {
+                        Some(Self::CopySelection)
+                    }
                     (KeyCode::Char('o'), _) => Some(Self::ToggleScenarioDropdown),
                     _ => None,
                 };
@@ -1146,6 +1176,62 @@ mod tests {
     use crate::authoring_tab::RequirementsFocus;
     use crate::test_points_tab::TestPointsFocus;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn chat_context(
+        active_tab: MainTab,
+        mindmap_focus: MindMapFocus,
+        ai_input_focused: bool,
+    ) -> KeyContext {
+        KeyContext {
+            step_keyword_picker_active: false,
+            step_input_active: false,
+            external_change_prompt_active: false,
+            agent_change_prompt_active: false,
+            active_tab,
+            view_stage: ViewStage::TreeOnly,
+            explore_edit_mode: false,
+            pending_char: None,
+            mindmap_focus,
+            mindmap_ai_panel_visible: true,
+            ai_input_focused,
+            slash_suggestion_active: false,
+            auth_panel_active: false,
+            model_panel_active: false,
+            model_panel_adding: false,
+            session_panel_active: false,
+            change_summary_visible: false,
+            ai_status_waiting: false,
+            scenario_dropdown_open: false,
+            approval_panel_active: false,
+            agent_profile_panel_active: false,
+            requirements_focus: RequirementsFocus::Tree,
+            requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
+            test_points_focus: TestPointsFocus::Tree,
+            requirements_overlay_active: false,
+            generation_scope_prompt_active: false,
+            quit_pending_confirm: false,
+            acp_permission_pending: false, // project context covered
+        }
+    }
+
+    #[test]
+    fn chat_copy_shortcut_is_available_in_all_chat_focus_states() {
+        let key = KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        for context in [
+            chat_context(MainTab::Ai, MindMapFocus::Main, false),
+            chat_context(MainTab::Ai, MindMapFocus::Main, true),
+            chat_context(MainTab::MindMap, MindMapFocus::AiPanel, false),
+            chat_context(MainTab::MindMap, MindMapFocus::AiPanel, true),
+        ] {
+            assert_eq!(
+                Action::from_key_event(key, context),
+                Some(Action::CopySelection)
+            );
+        }
+    }
 
     #[test]
     fn test_tab_switch_shortcuts_in_tree_mode() {

@@ -20,7 +20,7 @@ use teshi_core::gherkin_lang::{
     GherkinLanguage, GherkinLanguages, StepKeywordType, StructuralType,
 };
 
-mod chat;
+pub(crate) mod chat;
 
 /// Stage-2 preview: one solid style for the tree-selected line (avoids span-patch gaps that read as bright blocks).
 const MAIN_TABS: &[(MainTab, &str)] = &[
@@ -233,6 +233,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     // project remains permissive; these diagnostics are only an editor aid
     // and never prevent Browse/Insert rendering or input handling.
     app.refresh_buffer_diagnostics();
+    app.chat_history_rect = None;
     app.clickable_regions.clear();
     app.agent_mut().acp_controls_ui.clear_regions();
 

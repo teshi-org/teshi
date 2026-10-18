@@ -15,7 +15,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::token_usage_label;
 use crate::app::{
-    AiChatMessage, AiRole, AiStatus, App, ChangeKind, ClickableRegion, SLASH_COMMANDS,
+    AiChatMessage, AiRole, AiStatus, App, ChangeKind, ChatAnchor, ChatSelection, ClickableRegion,
+    SLASH_COMMANDS,
 };
 use crate::markdown::render_markdown_width;
 use crate::theme;
@@ -34,6 +35,381 @@ pub(super) enum ChatPlacement {
     Tab,
     /// Compact panel embedded in the MindMap tab.
     Embedded,
+}
+
+#[derive(Clone)]
+struct ChatSourceRange {
+    block: usize,
+    start: usize,
+    end: usize,
+    display_start: usize,
+    display_end: usize,
+}
+
+#[derive(Clone)]
+struct ChatProjectedLine {
+    line: Line<'static>,
+    source: Option<ChatSourceRange>,
+}
+
+struct ChatBlock {
+    key: usize,
+    text: String,
+}
+
+struct ChatProjection {
+    lines: Vec<ChatProjectedLine>,
+    blocks: Vec<ChatBlock>,
+}
+
+fn line_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+fn fingerprint(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn plain_markdown_text(text: &str) -> String {
+    render_markdown_width(text, 0)
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn find_char_text(haystack: &str, needle: &str, from: usize) -> Option<(usize, usize)> {
+    let haystack: Vec<char> = haystack.chars().collect();
+    let needle: Vec<char> = needle.chars().collect();
+    if needle.is_empty() || from > haystack.len() || needle.len() > haystack.len() {
+        return None;
+    }
+    let last = haystack.len().saturating_sub(needle.len());
+    (from..=last).find_map(|start| {
+        (haystack[start..start + needle.len()] == needle[..])
+            .then_some((start, start + needle.len()))
+    })
+}
+
+fn find_display_source(
+    block_text: &str,
+    display_text: &str,
+    source_cursor: usize,
+    display_start: usize,
+) -> Option<(usize, usize, usize)> {
+    let display_chars: Vec<char> = display_text.chars().collect();
+    if let Some((start, end)) = find_char_text(block_text, display_text, source_cursor) {
+        return Some((start, end, display_start));
+    }
+    let has_display_prefix = display_chars
+        .first()
+        .is_some_and(|character| character.is_whitespace())
+        || display_text.starts_with("Done")
+        || display_text.starts_with("Failed")
+        || display_text.starts_with("Running")
+        || display_text.starts_with("Pending")
+        || display_text.starts_with("Unconfirmed")
+        || display_text.starts_with('✓')
+        || display_text.starts_with('✗')
+        || display_text.starts_with('○');
+    if !has_display_prefix {
+        return None;
+    }
+    for prefix in 1..display_chars.len() {
+        let candidate: String = display_chars[prefix..].iter().collect();
+        if let Some((start, end)) = find_char_text(block_text, &candidate, source_cursor) {
+            return Some((start, end, display_start + prefix));
+        }
+    }
+    None
+}
+
+fn append_unselectable(out: &mut Vec<ChatProjectedLine>, lines: Vec<Line<'static>>) {
+    out.extend(
+        lines
+            .into_iter()
+            .map(|line| ChatProjectedLine { line, source: None }),
+    );
+}
+
+fn append_blank(out: &mut Vec<ChatProjectedLine>) {
+    out.push(ChatProjectedLine {
+        line: Line::default(),
+        source: None,
+    });
+}
+
+/// Add rendered rows and map visible body text to a width-independent block.
+///
+/// The block is the rendered plain-text projection of a message. Markdown
+/// syntax is intentionally omitted from this projection, so selection copies
+/// what the user can read rather than hidden formatting markers.
+fn append_selectable_chunk(
+    out: &mut Vec<ChatProjectedLine>,
+    blocks: &mut Vec<ChatBlock>,
+    lines: Vec<Line<'static>>,
+    block_key: usize,
+    block_text: String,
+) {
+    if !blocks.iter().any(|block| block.key == block_key) {
+        blocks.push(ChatBlock {
+            key: block_key,
+            text: block_text.clone(),
+        });
+    }
+    let mut source_cursor = 0;
+    for line in lines {
+        let full_text = line_text(&line);
+        let (display_start, selectable) = if let Some(body) = full_text.strip_prefix(RAIL) {
+            (RAIL.chars().count(), body)
+        } else {
+            (0, full_text.as_str())
+        };
+        let candidate = selectable.trim_end_matches(' ');
+        let source = find_display_source(&block_text, candidate, source_cursor, display_start).map(
+            |(start, end, display_start)| ChatSourceRange {
+                block: block_key,
+                start,
+                end,
+                display_start,
+                display_end: display_start + end.saturating_sub(start),
+            },
+        );
+        if let Some(source) = &source {
+            source_cursor = source.end;
+        }
+        out.push(ChatProjectedLine { line, source });
+    }
+}
+
+fn block_text_for_message(msg: &AiChatMessage) -> String {
+    if msg.source.as_deref() == Some("acp_reasoning") {
+        plain_markdown_text(msg.reasoning_content.as_deref().unwrap_or_default())
+    } else {
+        plain_markdown_text(&msg.content)
+    }
+}
+
+fn selected_interval(
+    projection: &ChatProjection,
+    selection: ChatSelection,
+    source: &ChatSourceRange,
+) -> Option<(usize, usize)> {
+    let anchor_block = projection
+        .blocks
+        .iter()
+        .position(|block| block.key == selection.anchor.block)?;
+    let focus_block = projection
+        .blocks
+        .iter()
+        .position(|block| block.key == selection.focus.block)?;
+    let (first_block, first_offset, last_block, last_offset) = if anchor_block < focus_block
+        || (anchor_block == focus_block && selection.anchor.offset <= selection.focus.offset)
+    {
+        (
+            anchor_block,
+            selection.anchor.offset,
+            focus_block,
+            selection.focus.offset,
+        )
+    } else {
+        (
+            focus_block,
+            selection.focus.offset,
+            anchor_block,
+            selection.anchor.offset,
+        )
+    };
+    let source_block = projection
+        .blocks
+        .iter()
+        .position(|block| block.key == source.block)?;
+    if source_block < first_block || source_block > last_block {
+        return None;
+    }
+    let start = if source_block == first_block {
+        first_offset
+    } else {
+        0
+    };
+    let end = if source_block == last_block {
+        last_offset
+    } else {
+        projection.blocks[source_block].text.chars().count()
+    };
+    let start = start.max(source.start).min(source.end);
+    let end = end.max(start).min(source.end);
+    (start < end).then_some((start, end))
+}
+
+fn apply_selection(line: Line<'static>, range: std::ops::Range<usize>) -> Line<'static> {
+    if range.start >= range.end {
+        return line;
+    }
+    let patch = theme::selected_row(true);
+    let line_style = line.style;
+    let mut out = Vec::new();
+    let mut char_index = 0;
+    for span in line.spans {
+        let text = span.content.to_string();
+        let chars: Vec<char> = text.chars().collect();
+        let span_start = char_index;
+        let span_end = span_start + chars.len();
+        let lo = range.start.max(span_start);
+        let hi = range.end.min(span_end);
+        if lo >= hi {
+            out.push(span);
+        } else {
+            let lo = lo - span_start;
+            let hi = hi - span_start;
+            if lo > 0 {
+                out.push(Span::styled(
+                    chars[..lo].iter().collect::<String>(),
+                    span.style,
+                ));
+            }
+            out.push(Span::styled(
+                chars[lo..hi].iter().collect::<String>(),
+                span.style.patch(patch),
+            ));
+            if hi < chars.len() {
+                out.push(Span::styled(
+                    chars[hi..].iter().collect::<String>(),
+                    span.style,
+                ));
+            }
+        }
+        char_index = span_end;
+    }
+    Line::from(out).style(line_style)
+}
+
+impl ChatProjection {
+    fn selection_valid(&self, selection: ChatSelection) -> bool {
+        let Some(anchor) = self.blocks.iter().find(|b| b.key == selection.anchor.block) else {
+            return false;
+        };
+        let Some(focus) = self.blocks.iter().find(|b| b.key == selection.focus.block) else {
+            return false;
+        };
+        anchor.text.chars().count() >= selection.anchor.offset
+            && focus.text.chars().count() >= selection.focus.offset
+            && fingerprint(&anchor.text) == selection.anchor.fingerprint
+            && fingerprint(&focus.text) == selection.focus.fingerprint
+    }
+
+    fn anchor_at(&self, line_index: usize, column: usize) -> Option<ChatAnchor> {
+        let line = self.lines.get(line_index)?;
+        let source = line.source.as_ref()?;
+        let line_text = line_text(&line.line);
+        let display = line_text.chars().collect::<Vec<_>>();
+        let start = source.display_start.min(display.len());
+        let end = source.display_end.min(display.len());
+        let char_column = if column <= start {
+            0
+        } else {
+            let mut cells = 0;
+            let mut index = start;
+            while index < end {
+                let width = display[index].width().unwrap_or(0);
+                if column < cells + width + start {
+                    break;
+                }
+                cells += width;
+                index += 1;
+            }
+            index.saturating_sub(start)
+        };
+        Some(ChatAnchor {
+            block: source.block,
+            offset: (source.start + char_column).min(source.end),
+            fingerprint: self
+                .blocks
+                .iter()
+                .find(|block| block.key == source.block)
+                .map_or(0, |block| fingerprint(&block.text)),
+        })
+    }
+
+    fn selected_text(&self, selection: ChatSelection) -> Option<String> {
+        if !self.selection_valid(selection) {
+            return None;
+        }
+        let anchor_index = self
+            .blocks
+            .iter()
+            .position(|block| block.key == selection.anchor.block)?;
+        let focus_index = self
+            .blocks
+            .iter()
+            .position(|block| block.key == selection.focus.block)?;
+        let (first_index, first_offset, last_index, last_offset) = if anchor_index < focus_index
+            || (anchor_index == focus_index && selection.anchor.offset <= selection.focus.offset)
+        {
+            (
+                anchor_index,
+                selection.anchor.offset,
+                focus_index,
+                selection.focus.offset,
+            )
+        } else {
+            (
+                focus_index,
+                selection.focus.offset,
+                anchor_index,
+                selection.anchor.offset,
+            )
+        };
+        let slice = |text: &str, start: usize, end: usize| {
+            text.chars()
+                .skip(start)
+                .take(end.saturating_sub(start))
+                .collect::<String>()
+        };
+        if first_index == last_index {
+            return Some(slice(
+                &self.blocks[first_index].text,
+                first_offset,
+                last_offset,
+            ));
+        }
+        let mut result = slice(
+            &self.blocks[first_index].text,
+            first_offset,
+            self.blocks[first_index].text.chars().count(),
+        );
+        for block in &self.blocks[first_index + 1..last_index] {
+            result.push_str("\n\n");
+            result.push_str(&block.text);
+        }
+        result.push_str("\n\n");
+        result.push_str(&slice(&self.blocks[last_index].text, 0, last_offset));
+        Some(result)
+    }
+
+    fn highlighted_line(&self, index: usize, selection: Option<ChatSelection>) -> Line<'static> {
+        let line = &self.lines[index];
+        let Some(selection) = selection else {
+            return line.line.clone();
+        };
+        let Some(source) = line.source.as_ref() else {
+            return line.line.clone();
+        };
+        let Some((start, end)) = selected_interval(self, selection, source) else {
+            return line.line.clone();
+        };
+        apply_selection(
+            line.line.clone(),
+            source.display_start + start.saturating_sub(source.start)
+                ..source.display_start + end.saturating_sub(source.start),
+        )
+    }
 }
 
 fn fg(color: ratatui::style::Color) -> Style {
@@ -255,21 +631,34 @@ fn render_approval_badge(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 /// Renders the scrolled chat history plus a thin scrollbar on the right.
-fn render_chat_history(frame: &mut Frame<'_>, app: &App, area: Rect, placement: ChatPlacement) {
+fn render_chat_history(frame: &mut Frame<'_>, app: &mut App, area: Rect, placement: ChatPlacement) {
     if area.width == 0 || area.height == 0 {
         return;
     }
     let [body, scrollbar] =
         Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-    let lines = build_chat_lines(app, body.width as usize, body.height as usize, placement);
+    app.chat_history_rect = Some(body);
+    let projection =
+        build_chat_projection(app, body.width as usize, body.height as usize, placement);
+    let raw_selection = app.chat_selection;
+    let selection_is_valid = raw_selection.is_some_and(|selection| {
+        selection.agent_id == app.selected_agent && projection.selection_valid(selection)
+    });
+    let selection = raw_selection.filter(|_| selection_is_valid);
+    if app.chat_selection.is_some() && selection.is_none() {
+        app.chat_selection = None;
+        app.chat_selection_dragging = false;
+    }
 
     // Lines are already wrapped, so the row count is exact. `scroll_offset`
     // counts rows up from the bottom so new output stays pinned by default.
-    let total = lines.len();
+    let total = projection.lines.len();
     let height = body.height as usize;
     let max_start = total.saturating_sub(height);
     let start = max_start.saturating_sub(app.agent().scroll_offset.min(max_start));
-    let visible: Vec<Line<'static>> = lines.into_iter().skip(start).take(height).collect();
+    let visible: Vec<Line<'static>> = (start..start.saturating_add(height).min(total))
+        .map(|index| projection.highlighted_line(index, selection))
+        .collect();
     frame.render_widget(Paragraph::new(Text::from(visible)), body);
     render_scrollbar(frame, scrollbar, total, height, start);
 }
@@ -285,21 +674,36 @@ fn render_scrollbar(frame: &mut Frame<'_>, area: Rect, total: usize, height: usi
 /// Builds the wrapped chat history for a viewport `width` cells wide.
 ///
 /// `view_height` only bounds how many inline diff rows are shown.
+#[cfg(test)]
 fn build_chat_lines(
     app: &App,
     width: usize,
     view_height: usize,
     placement: ChatPlacement,
 ) -> Vec<Line<'static>> {
-    let mut out: Vec<Line<'static>> = Vec::new();
+    build_chat_projection(app, width, view_height, placement)
+        .lines
+        .into_iter()
+        .map(|line| line.line)
+        .collect()
+}
+
+fn build_chat_projection(
+    app: &App,
+    width: usize,
+    view_height: usize,
+    placement: ChatPlacement,
+) -> ChatProjection {
+    let mut out: Vec<ChatProjectedLine> = Vec::new();
+    let mut blocks = Vec::new();
     let agent = app.agent();
 
     if let Some(warning) = agent.selection_warning() {
-        out.extend(wrap_line_to_width(
-            Line::styled(warning.to_owned(), fg(theme::WARNING)),
-            width,
-        ));
-        out.push(Line::default());
+        append_unselectable(
+            &mut out,
+            wrap_line_to_width(Line::styled(warning.to_owned(), fg(theme::WARNING)), width),
+        );
+        append_blank(&mut out);
     }
 
     if agent.messages().is_empty() {
@@ -307,55 +711,83 @@ fn build_chat_lines(
             ChatPlacement::Tab => "Welcome to AI Chat! Type a message below and press Enter.",
             ChatPlacement::Embedded => "Welcome to AI Chat!",
         };
-        out.extend(wrap_line_to_width(Line::styled(greeting, muted()), width));
-        out.push(Line::default());
+        append_unselectable(
+            &mut out,
+            wrap_line_to_width(Line::styled(greeting, muted()), width),
+        );
+        append_blank(&mut out);
         if !crate::llm::is_configured() {
             let note =
                 "Note: Run 'teshi auth login' or set TESHI_LLM_API_KEY to enable AI responses.";
-            out.extend(wrap_line_to_width(
-                Line::styled(note, fg(theme::WARNING)),
-                width,
-            ));
+            append_unselectable(
+                &mut out,
+                wrap_line_to_width(Line::styled(note, fg(theme::WARNING)), width),
+            );
         }
     }
 
-    let mut messages = agent.messages().iter().peekable();
-    while let Some(msg) = messages.next() {
+    let messages = agent.messages();
+    let mut message_index = 0;
+    while let Some(msg) = messages.get(message_index) {
         if msg.source.as_deref() == Some("acp_activity") {
-            let mut group = vec![msg];
-            while let Some(activity) =
-                messages.next_if(|m| m.source.as_deref() == Some("acp_activity"))
-            {
-                group.push(activity);
-            }
+            let group_end = messages[message_index..]
+                .iter()
+                .take_while(|message| message.source.as_deref() == Some("acp_activity"))
+                .count()
+                + message_index;
+            let group: Vec<&AiChatMessage> = messages[message_index..group_end].iter().collect();
             let active = matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval)
-                && !messages.clone().any(|m| matches!(m.role, AiRole::User));
+                && !messages[group_end..]
+                    .iter()
+                    .any(|message| matches!(message.role, AiRole::User));
+            let mut chunk = Vec::new();
             push_activity_group(
-                &mut out,
+                &mut chunk,
                 &group,
                 width,
                 agent.activity_details_expanded,
                 active,
             );
-            out.push(Line::default());
+            let source = group
+                .iter()
+                .map(|message| plain_markdown_text(&message.content))
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            append_selectable_chunk(&mut out, &mut blocks, chunk, message_index, source);
+            append_blank(&mut out);
+            message_index = group_end;
             continue;
         }
+        let mut chunk = Vec::new();
         match msg.role {
-            AiRole::Tool => push_tool_result(&mut out, msg, width),
-            AiRole::User | AiRole::Assistant => push_message(&mut out, app, msg, width),
+            AiRole::Tool => push_tool_result(&mut chunk, msg, width),
+            AiRole::User | AiRole::Assistant => push_message(&mut chunk, app, msg, width),
         }
-        out.push(Line::default());
+        append_selectable_chunk(
+            &mut out,
+            &mut blocks,
+            chunk,
+            message_index,
+            block_text_for_message(msg),
+        );
+        append_blank(&mut out);
+        message_index += 1;
     }
 
-    push_pending_diff(&mut out, app, width, view_height);
+    let mut pending = Vec::new();
+    push_pending_diff(&mut pending, app, width, view_height);
+    append_unselectable(&mut out, pending);
 
     if !agent.backend.partial_reasoning().is_empty() {
+        let mut reasoning = Vec::new();
         push_thinking(
-            &mut out,
+            &mut reasoning,
             agent.backend.partial_reasoning(),
             width,
             agent.activity_details_expanded,
         );
+        append_unselectable(&mut out, reasoning);
     }
 
     if !agent.partial_response().is_empty() {
@@ -372,12 +804,64 @@ fn build_chat_lines(
             Some(last) => last.spans.push(cursor),
             None => body.push(Line::from(cursor)),
         }
-        push_railed(&mut out, body, theme::MUTED, width);
-        out.push(Line::default());
+        let mut chunk = Vec::new();
+        push_railed(&mut chunk, body, theme::MUTED, width);
+        append_selectable_chunk(
+            &mut out,
+            &mut blocks,
+            chunk,
+            usize::MAX,
+            plain_markdown_text(agent.partial_response()),
+        );
+        append_blank(&mut out);
     }
 
-    push_acp_permission_prompt(&mut out, app, width);
-    out
+    let mut permission = Vec::new();
+    push_acp_permission_prompt(&mut permission, app, width);
+    append_unselectable(&mut out, permission);
+    ChatProjection { lines: out, blocks }
+}
+
+fn active_chat_placement(app: &App) -> Option<ChatPlacement> {
+    match app.active_tab {
+        crate::app::MainTab::Ai => Some(ChatPlacement::Tab),
+        crate::app::MainTab::MindMap if app.mindmap_ai_panel_visible => {
+            Some(ChatPlacement::Embedded)
+        }
+        _ => None,
+    }
+}
+
+/// Map a terminal cell in the active chat history to a stable source anchor.
+pub(crate) fn chat_anchor_at(app: &App, col: u16, row: u16) -> Option<ChatAnchor> {
+    let placement = active_chat_placement(app)?;
+    let rect = app.chat_history_rect?;
+    if !rect.contains(ratatui::layout::Position::new(col, row)) {
+        return None;
+    }
+    let projection =
+        build_chat_projection(app, rect.width as usize, rect.height as usize, placement);
+    let total = projection.lines.len();
+    let height = rect.height as usize;
+    let max_start = total.saturating_sub(height);
+    let start = max_start.saturating_sub(app.agent().scroll_offset.min(max_start));
+    projection.anchor_at(
+        start + row.saturating_sub(rect.y) as usize,
+        col.saturating_sub(rect.x) as usize,
+    )
+}
+
+/// Reconstruct the selected rendered chat text for the active agent.
+pub(crate) fn selected_chat_text(app: &App) -> Option<String> {
+    let selection = app.chat_selection?;
+    if selection.agent_id != app.selected_agent {
+        return None;
+    }
+    let placement = active_chat_placement(app)?;
+    let rect = app.chat_history_rect?;
+    let projection =
+        build_chat_projection(app, rect.width as usize, rect.height as usize, placement);
+    projection.selected_text(selection)
 }
 
 fn rail_body_width(width: usize) -> u16 {
@@ -1052,6 +1536,193 @@ mod tests {
             teshi_agent::backend::AgentBackendKind::Native,
         );
         (app, project, store)
+    }
+
+    #[test]
+    fn chat_selection_uses_plain_message_projection_across_wrap_widths() {
+        let (mut app, _project, _store) = activity_test_app();
+        app.agents[0].messages_mut().push(AiChatMessage {
+            role: AiRole::Assistant,
+            content: "Answer **with** CJK 内容 and a long tail".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            source: None,
+        });
+
+        let narrow = build_chat_projection(&app, 24, 20, ChatPlacement::Tab);
+        let selectable_lines: Vec<_> = narrow
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.source.as_ref().is_some_and(|source| source.block == 0))
+            .collect();
+        let (first_index, first_line) = selectable_lines
+            .first()
+            .expect("assistant body should be selectable");
+        let (last_index, last_line) = selectable_lines
+            .last()
+            .expect("wrapped assistant body should remain selectable");
+        let first_source = first_line.source.as_ref().unwrap();
+        let last_source = last_line.source.as_ref().unwrap();
+        let start = narrow
+            .anchor_at(*first_index, first_source.display_start)
+            .unwrap();
+        let end = narrow
+            .anchor_at(*last_index, last_source.display_end)
+            .unwrap();
+        let selection = ChatSelection {
+            agent_id: 0,
+            anchor: start,
+            focus: end,
+        };
+        assert_eq!(
+            narrow.selected_text(selection).as_deref(),
+            Some("Answer with CJK 内容 and a long tail")
+        );
+        assert!(
+            narrow
+                .highlighted_line(*first_index, Some(selection))
+                .spans
+                .iter()
+                .any(|span| span.style.bg == Some(theme::CURSOR_BG))
+        );
+
+        let wide = build_chat_projection(&app, 80, 20, ChatPlacement::Tab);
+        assert!(wide.selection_valid(selection));
+        assert_eq!(
+            wide.selected_text(selection).as_deref(),
+            Some("Answer with CJK 内容 and a long tail")
+        );
+    }
+
+    #[test]
+    fn chat_selection_reconstructs_source_newlines_and_reverse_drags() {
+        let (mut app, _project, _store) = activity_test_app();
+        app.agents[0].messages_mut().extend([
+            AiChatMessage {
+                role: AiRole::Assistant,
+                content: "first\nsecond".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+            },
+            AiChatMessage {
+                role: AiRole::Assistant,
+                content: "third **answer**".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+            },
+        ]);
+
+        let projection = build_chat_projection(&app, 40, 30, ChatPlacement::Tab);
+        let (first_index, first_line) = projection
+            .lines
+            .iter()
+            .enumerate()
+            .find(|(_, line)| line.source.as_ref().is_some_and(|source| source.block == 0))
+            .expect("first assistant body should be selectable");
+        let (last_index, last_line) = projection
+            .lines
+            .iter()
+            .enumerate()
+            .rfind(|(_, line)| line.source.as_ref().is_some_and(|source| source.block == 1))
+            .expect("last assistant body should be selectable");
+        let first_source = first_line.source.as_ref().unwrap();
+        let last_source = last_line.source.as_ref().unwrap();
+        let start = projection
+            .anchor_at(first_index, first_source.display_start)
+            .unwrap();
+        let end = projection
+            .anchor_at(last_index, last_source.display_end)
+            .unwrap();
+        let selection = ChatSelection {
+            agent_id: 0,
+            anchor: start,
+            focus: end,
+        };
+        assert_eq!(
+            projection.selected_text(selection).as_deref(),
+            Some("first\nsecond\n\nthird answer")
+        );
+        assert_eq!(
+            projection
+                .selected_text(ChatSelection {
+                    agent_id: 0,
+                    anchor: end,
+                    focus: start,
+                })
+                .as_deref(),
+            Some("first\nsecond\n\nthird answer")
+        );
+    }
+
+    #[test]
+    fn chat_selection_mouse_anchor_matches_rendered_cell() {
+        let (mut app, _project, _store) = activity_test_app();
+        app.active_tab = crate::app::MainTab::Ai;
+        app.agents[0].messages_mut().extend([
+            AiChatMessage {
+                role: AiRole::User,
+                content: "first response".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+            },
+            AiChatMessage {
+                role: AiRole::Assistant,
+                content: "WRAPPED_REPLY_01".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+            },
+        ]);
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let marker = "WRAPPED_REPLY_01";
+        let (x, y) = (0..100)
+            .flat_map(|x| (0..30).map(move |y| (x, y)))
+            .find(|&(x, y)| {
+                let row: String = (0..100)
+                    .map(|column| terminal.backend().buffer()[(column, y)].symbol())
+                    .collect();
+                row.get(x as usize..)
+                    .is_some_and(|suffix| suffix.starts_with(marker))
+            })
+            .expect("assistant marker must be rendered");
+        assert!(
+            app.chat_history_rect
+                .expect("chat history rect")
+                .contains(ratatui::layout::Position::new(x, y))
+        );
+        assert!(chat_anchor_at(&app, x, y).is_some());
+        app.model_panel_active = true;
+        app.handle_mouse_event(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            x,
+            y,
+            crossterm::event::KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(app.chat_selection.is_none());
+        app.model_panel_active = false;
+        app.handle_mouse_event(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            x,
+            y,
+            crossterm::event::KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(app.chat_selection.is_some());
     }
 
     fn assert_reply_color(app: &App, text: &str, expected: ratatui::style::Color) {
