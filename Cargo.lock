@@ -7043,6 +7043,7 @@ dependencies = [
  "anyhow",
  "dirs",
  "fd-lock",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
@@ -7080,6 +7081,7 @@ dependencies = [
  "teshi-core",
  "teshi-engine",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

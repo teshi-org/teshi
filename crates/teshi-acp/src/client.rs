@@ -131,6 +131,7 @@ pub struct AcpClient<W> {
     reader_task: Option<JoinHandle<()>>,
     stderr_task: Option<JoinHandle<()>>,
     child: Option<Child>,
+    process_tree: Option<crate::process_tree::ProcessTree>,
 }
 
 impl AcpClient<tokio::process::ChildStdin> {
@@ -141,14 +142,25 @@ impl AcpClient<tokio::process::ChildStdin> {
         permission_policy: PermissionPolicy,
         permission_host: Option<Arc<dyn PermissionHost>>,
     ) -> AcpResult<Self> {
-        let mut child =
-            command
-                .to_tokio_command()
-                .spawn()
-                .map_err(|source| AcpError::SpawnFailed {
+        let mut process_command = command.to_tokio_command();
+        crate::process_tree::ProcessTree::configure(&mut process_command);
+        let mut child = process_command
+            .spawn()
+            .map_err(|source| AcpError::SpawnFailed {
+                program: command.program.display().to_string(),
+                source,
+            })?;
+        let process_tree = match crate::process_tree::ProcessTree::attach(&child) {
+            Ok(tree) => tree,
+            Err(source) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(AcpError::SpawnFailed {
                     program: command.program.display().to_string(),
                     source,
-                })?;
+                });
+            }
+        };
         let stdin = child.stdin.take().ok_or_else(|| AcpError::SpawnFailed {
             program: command.program.display().to_string(),
             source: std::io::Error::other("missing stdin"),
@@ -167,6 +179,7 @@ impl AcpClient<tokio::process::ChildStdin> {
             permission_host,
         );
         client.child = Some(child);
+        client.process_tree = Some(process_tree);
         if let Some(stderr) = stderr {
             client.stderr_task = Some(tokio::spawn(async move {
                 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -206,6 +219,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
             reader_task: Some(reader_task),
             stderr_task: None,
             child: None,
+            process_tree: None,
         }
     }
 
@@ -540,7 +554,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
 
     pub async fn shutdown(&mut self) -> AcpResult<()> {
         let state = self.lifecycle().await;
-        if matches!(state, AcpLifecycle::ShuttingDown | AcpLifecycle::Exited) {
+        if matches!(state, AcpLifecycle::Exited) {
             return Ok(());
         }
         self.set_state(AcpLifecycle::ShuttingDown).await;
@@ -552,6 +566,13 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AcpClient<W> {
                 Ok(Ok(_)) => {}
                 _ => terminate_child(child).await,
             }
+        }
+        // The container outlives the primary process, so a graceful agent exit
+        // cannot leave its tools writing into the old project after a switch.
+        if let Some(tree) = &mut self.process_tree {
+            tree.shutdown()
+                .await
+                .map_err(|error| AcpError::Shutdown(error.to_string()))?;
         }
         if let Some(t) = self.reader_task.take() {
             t.abort();

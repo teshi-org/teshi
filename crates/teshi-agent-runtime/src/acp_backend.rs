@@ -1000,7 +1000,12 @@ async fn run_worker(
         state.ready = false;
         state.pending = false;
     }
-    let _ = client.shutdown().await;
+    // Keep the worker owned until the process container has actually stopped.
+    // The frontend's bounded switch wait can time out without losing this handle.
+    while let Err(error) = client.shutdown().await {
+        tracing::error!(error = %error, "ACP shutdown has not completed");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 fn apply_control_update(update: &AcpEvent, session: &str, controls: &Mutex<AcpControls>) {

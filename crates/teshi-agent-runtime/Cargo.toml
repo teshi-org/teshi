@@ -17,6 +17,7 @@ teshi-agent.workspace = true
 teshi-core.workspace = true
 teshi-engine.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

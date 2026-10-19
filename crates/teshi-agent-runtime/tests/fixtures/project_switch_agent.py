@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -58,6 +59,13 @@ def run_acp():
                 "sessionId": session, "update": {"sessionUpdate": "agent_message_chunk",
                 "content": {"type": "text", "text": reply}}}})
             if project == "project-a":
+                if os.environ.get("TESHI_TEST_AGENT_CHILD") == "1":
+                    subprocess.Popen([sys.executable, __file__, "child", str(root)])
+                    deadline = time.monotonic() + 5
+                    while not (evidence / "child-writes.txt").exists():
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError("child did not publish readiness")
+                        time.sleep(0.01)
                 writer = threading.Thread(target=write_a)
                 writer.start()
                 continue
@@ -141,5 +149,12 @@ if mode == "acp":
     run_acp()
 elif mode == "native":
     run_native()
+elif mode == "child":
+    trace("acp_child_start", cwd=os.getcwd())
+    deadline = time.monotonic() + 30
+    while not (evidence / "cleanup-child").exists() and time.monotonic() < deadline:
+        with (evidence / "child-writes.txt").open("a", encoding="utf-8") as stream:
+            stream.write("child\n")
+        time.sleep(0.02)
 else:
     raise ValueError(mode)

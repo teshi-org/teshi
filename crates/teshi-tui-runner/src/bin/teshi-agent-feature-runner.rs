@@ -84,6 +84,7 @@ fn main() -> Result<()> {
             "Agent对话持久化.feature" => "tui_conversation_history.feature",
             "记住上次选择的Agent.feature" => "tui_agent_selection_memory.feature",
             "ACP模型选择持久化.feature" => "tui_acp_model_persistence.feature",
+            "项目切换失败边界.feature" => "tui_project_switch_failures.feature",
             name => name,
         };
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -127,7 +128,17 @@ fn main() -> Result<()> {
             })
         })
     });
-    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(if model_feature {
+    let project_failure = request["cases"].as_array().is_some_and(|cases| {
+        cases.iter().all(|case| {
+            case["feature_path"].as_str().is_some_and(|path| {
+                path.ends_with("tui_project_switch_failures.feature")
+                    || path.ends_with("项目切换失败边界.feature")
+            })
+        })
+    });
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(if project_failure {
+        "tests/fixtures/project_failure_steps.py"
+    } else if model_feature {
         "tests/fixtures/model_feature_steps.py"
     } else {
         "tests/fixtures/agent_feature_steps.py"

@@ -114,6 +114,56 @@ fn acp_teardown_is_nonblocking_and_joins_delayed_process_exit() {
 }
 
 #[test]
+fn acp_teardown_stops_descendants_after_the_primary_exits_normally() {
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, "stop");
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project-a");
+    std::fs::create_dir(&project).unwrap();
+    let _cleanup = Cleanup(root.path().join("agent-evidence/cleanup-child"));
+    let mut backend = AgentBackendRuntime::new(AgentBackendKind::Acp, 1);
+    let mut config = AcpBackendConfig::new(AcpAgentCommand {
+        program: python().into(),
+        args: vec![
+            fixture().display().to_string(),
+            "acp".into(),
+            root.path().display().to_string(),
+        ],
+        cwd: project,
+        env: HashMap::from([("TESHI_TEST_AGENT_CHILD".into(), "1".into())]),
+    });
+    config.client.shutdown_timeout = Duration::from_secs(3);
+    backend.configure_acp(config).unwrap();
+    backend.start().unwrap();
+    backend
+        .submit_turn(
+            None,
+            vec![ChatMessage::text("user", "A_PROJECT_ONLY_REQUEST")],
+            None,
+        )
+        .unwrap();
+    wait_reply(&mut backend);
+    let path = root.path().join("agent-evidence/child-writes.txt");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(path.exists(), "descendant did not start");
+    stop_and_join(&mut backend);
+    let before = std::fs::read(&path).unwrap();
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        before,
+        "ACP descendant kept writing after acknowledged shutdown"
+    );
+}
+
+#[test]
 fn native_teardown_closes_a_stalled_stream_and_joins_worker() {
     // Keep environment changes in a child test process: local HTTP fixtures
     // must not traverse a user's proxy or race other tests' configuration.
