@@ -1,0 +1,2450 @@
+{
+  "version": 1,
+  "mode": "tui",
+  "steps": [
+    {
+      "line": 7,
+      "text": "Teshi starts with isolated project A and recent project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "launch",
+          "config": {
+            "program": "${TESHI_SELF_TEST_BIN}",
+            "args": [
+              "${FIXTURE_ROOT}/project-a",
+              "--requirements-root",
+              "${FIXTURE_ROOT}/requirements"
+            ],
+            "cwd": "${FIXTURE_ROOT}",
+            "env": [
+              [
+                "APPDATA",
+                "${FIXTURE_ROOT}/appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "${FIXTURE_ROOT}/localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "${FIXTURE_ROOT}/config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "${FIXTURE_ROOT}/data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "${FIXTURE_ROOT}/acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "${FIXTURE_ROOT}/sessions"
+              ],
+              [
+                "TESHI_APP_DATA_DIR",
+                "${FIXTURE_ROOT}/app-data"
+              ]
+            ],
+            "cols": 120,
+            "rows": 35
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 10,
+      "text": "the isolated projects are ready",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 11,
+      "text": "the operator switches to project B with the project command",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/project ${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 12,
+      "text": "the project header shows project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 13,
+      "text": "the active Feature content comes from project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-b step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 16,
+      "text": "the isolated projects are ready",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 17,
+      "text": "the operator opens the project picker",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/project"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 18,
+      "text": "the operator selects recent project B with the pointer",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "project-b",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 19,
+      "text": "the active Feature content comes from project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-b step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 22,
+      "text": "the isolated projects are ready",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 23,
+      "text": "the operator opens the project picker from the project header",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 24,
+      "text": "the operator chooses Open path",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 25,
+      "text": "the operator enters project B's directory",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 26,
+      "text": "the project header shows project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 27,
+      "text": "the active Feature content comes from project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-b step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 30,
+      "text": "the isolated projects are ready",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 31,
+      "text": "the operator opens the project picker from the project header",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 32,
+      "text": "the operator selects the active project",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 33,
+      "text": "the active Feature content remains from project A",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-a step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 36,
+      "text": "the isolated projects are ready",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 37,
+      "text": "the operator opens the project picker from the project header",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 38,
+      "text": "the operator cancels the picker",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 39,
+      "text": "project A remains active",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-a step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 42,
+      "text": "the isolated projects are ready",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 43,
+      "text": "the operator opens Open path",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 44,
+      "text": "the operator enters a missing project directory",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/missing-project"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 45,
+      "text": "the missing project error is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project directory does not exist",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 46,
+      "text": "the active Feature content remains from project A",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-a step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 49,
+      "text": "the isolated projects are ready",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 50,
+      "text": "the operator opens Open path and enters project B's directory",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 51,
+      "text": "project B is active",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 52,
+      "text": "the operator opens Open path from project B and enters project A's directory",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-b",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-a"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 53,
+      "text": "the project header shows project A",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 54,
+      "text": "the active Feature content comes from project A",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-a step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 57,
+      "text": "the isolated projects are ready",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 58,
+      "text": "the operator opens Open path",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 59,
+      "text": "the operator enters a project with invalid settings",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-invalid"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 60,
+      "text": "the project preparation error is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Could not prepare project B",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 61,
+      "text": "the active Feature content remains from project A",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-a step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 64,
+      "text": "the isolated projects are ready",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 65,
+      "text": "the operator narrows the terminal",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "resize",
+          "cols": 64,
+          "rows": 24
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 66,
+      "text": "the operator opens the project picker from the project header",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 67,
+      "text": "recent project B is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 68,
+      "text": "the Open path control is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "[O] Open path",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 69,
+      "text": "the operator chooses Open path",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 70,
+      "text": "the project path input is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 71,
+      "text": "the operator cancels the picker",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 72,
+      "text": "project A remains active",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-a step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 75,
+      "text": "project A contains an unsaved Feature edit",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "e"
+        },
+        {
+          "action": "expect_text",
+          "text": "Edit [Enter]",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "key",
+          "key": "End"
+        },
+        {
+          "action": "write",
+          "text": " unsaved-marker"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-a step unsaved-marker",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 76,
+      "text": "the operator opens Open path",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 77,
+      "text": "the operator enters a project with invalid settings",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-invalid"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 78,
+      "text": "the unsaved changes guard is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Unsaved project state must be resolved first",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 79,
+      "text": "the operator chooses Discard and switch",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "d"
+        }
+      ]
+    },
+    {
+      "line": 80,
+      "text": "the project preparation error is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Could not prepare project B",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 81,
+      "text": "the unsaved Feature edit remains visible in project A",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "project-a step unsaved-marker",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 84,
+      "text": "project A has a running external task",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "r"
+        },
+        {
+          "action": "expect_text",
+          "text": "● Ready",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 85,
+      "text": "the operator opens Open path and enters project B's directory",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 86,
+      "text": "the running task guard is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Stop project tasks",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 87,
+      "text": "the operator chooses Stop tasks and switch",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "s"
+        }
+      ]
+    },
+    {
+      "line": 88,
+      "text": "the project header shows project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 89,
+      "text": "the active Feature content comes from project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-b step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 90,
+      "text": "the operator runs project B's scenario",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "r"
+        }
+      ]
+    },
+    {
+      "line": 91,
+      "text": "project B's scenario passes",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "1/1 passed, 0 failed",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 92,
+      "text": "project A's runner tree has stopped without writing into project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 95,
+      "text": "project A has a running ACP conversation",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "A_PROJECT_ONLY_REQUEST"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "A_AGENT_ACTIVE",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 96,
+      "text": "the operator opens Open path and enters project B's directory",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 97,
+      "text": "the running task guard is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Stop project tasks",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 98,
+      "text": "the operator chooses Stop tasks and switch",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "s"
+        }
+      ]
+    },
+    {
+      "line": 99,
+      "text": "the operator cancels the switch while ACP is stopping",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "expect_text",
+          "text": "Stop project tasks",
+          "visible": false,
+          "timeout_ms": 500
+        }
+      ]
+    },
+    {
+      "line": 100,
+      "text": "project A remains active",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 101,
+      "text": "the operator opens Open path and enters project B's directory",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 102,
+      "text": "the project header shows project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 103,
+      "text": "the operator starts an independent conversation in project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "B_PROJECT_ONLY_REQUEST"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 104,
+      "text": "project B's independent Agent reply is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "B_AGENT_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 105,
+      "text": "project A's late reply is absent",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "A_LATE_REPLY",
+          "visible": false,
+          "timeout_ms": 3000
+        },
+        {
+          "action": "expect_text",
+          "text": "A_AGENT_ACTIVE",
+          "visible": false,
+          "timeout_ms": 3000
+        }
+      ]
+    },
+    {
+      "line": 106,
+      "text": "ACP process and conversation ownership are isolated",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "B_AGENT_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 109,
+      "text": "project A has a stalled native conversation",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "A_PROJECT_ONLY_REQUEST"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "A_AGENT_ACTIVE",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 110,
+      "text": "the operator opens Open path and enters project B's directory",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 111,
+      "text": "the running task guard is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Stop project tasks",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 112,
+      "text": "the operator chooses Stop tasks and switch",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "s"
+        }
+      ]
+    },
+    {
+      "line": 113,
+      "text": "the project header shows project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 114,
+      "text": "the operator starts an independent conversation in project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "B_PROJECT_ONLY_REQUEST"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 115,
+      "text": "project B's independent Agent reply is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "B_AGENT_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 116,
+      "text": "project A's late reply is absent",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "A_LATE_REPLY",
+          "visible": false,
+          "timeout_ms": 3000
+        },
+        {
+          "action": "expect_text",
+          "text": "A_AGENT_ACTIVE",
+          "visible": false,
+          "timeout_ms": 3000
+        }
+      ]
+    },
+    {
+      "line": 117,
+      "text": "the old native stream closed before project B's reply",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "B_AGENT_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 120,
+      "text": "project A and project B have separate saved conversations",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 121,
+      "text": "the operator opens project A's session browser",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/sessions"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 122,
+      "text": "only project A's saved conversation is listed",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "SESSION_A",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "SESSION_B",
+          "visible": false,
+          "timeout_ms": 5000
+        },
+        {
+          "action": "expect_text",
+          "text": "LEGACY_HISTORY",
+          "visible": false,
+          "timeout_ms": 5000
+        },
+        {
+          "action": "key",
+          "key": "Escape"
+        }
+      ]
+    },
+    {
+      "line": 123,
+      "text": "the operator resumes project A's conversation",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "/resume"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 124,
+      "text": "project A's saved reply is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "SESSION_A_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 125,
+      "text": "the operator switches to project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/project ${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 126,
+      "text": "the operator opens project B's session browser",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/sessions"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 127,
+      "text": "only project B's saved conversation is listed",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "SESSION_B",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "SESSION_A",
+          "visible": false,
+          "timeout_ms": 5000
+        },
+        {
+          "action": "expect_text",
+          "text": "LEGACY_HISTORY",
+          "visible": false,
+          "timeout_ms": 5000
+        },
+        {
+          "action": "key",
+          "key": "Escape"
+        }
+      ]
+    },
+    {
+      "line": 128,
+      "text": "the operator resumes project B's conversation",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "/resume"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 129,
+      "text": "only project B's saved reply is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "SESSION_B_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "SESSION_A_REPLY",
+          "visible": false,
+          "timeout_ms": 5000
+        },
+        {
+          "action": "expect_text",
+          "text": "LEGACY_HISTORY_REPLY",
+          "visible": false,
+          "timeout_ms": 5000
+        }
+      ]
+    },
+    {
+      "line": 132,
+      "text": "project A and project B have separate saved conversations",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 133,
+      "text": "the operator switches to project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/project ${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 134,
+      "text": "the operator resumes project B's conversation",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/resume"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "SESSION_B_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 135,
+      "text": "the operator quits and restarts Teshi in project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "q"
+        },
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 10000
+        },
+        {
+          "action": "launch",
+          "config": {
+            "program": "${TESHI_SELF_TEST_BIN}",
+            "args": [
+              "${FIXTURE_ROOT}/project-b",
+              "--requirements-root",
+              "${FIXTURE_ROOT}/requirements"
+            ],
+            "cwd": "${FIXTURE_ROOT}",
+            "env": [
+              [
+                "APPDATA",
+                "${FIXTURE_ROOT}/appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "${FIXTURE_ROOT}/localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "${FIXTURE_ROOT}/config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "${FIXTURE_ROOT}/data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "${FIXTURE_ROOT}/acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "${FIXTURE_ROOT}/sessions"
+              ],
+              [
+                "TESHI_APP_DATA_DIR",
+                "${FIXTURE_ROOT}/app-data"
+              ]
+            ],
+            "cols": 120,
+            "rows": 35
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 136,
+      "text": "the operator resumes the most recent project conversation",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/resume"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 137,
+      "text": "only project B's saved reply is visible",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "SESSION_B_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "SESSION_A_REPLY",
+          "visible": false,
+          "timeout_ms": 5000
+        },
+        {
+          "action": "expect_text",
+          "text": "LEGACY_HISTORY_REPLY",
+          "visible": false,
+          "timeout_ms": 5000
+        }
+      ]
+    },
+    {
+      "line": 140,
+      "text": "unassigned legacy history exists alongside project conversations",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 141,
+      "text": "the operator opens the default session browser",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/sessions"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 142,
+      "text": "legacy history is absent from the project list",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "SESSION_A",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "LEGACY_HISTORY",
+          "visible": false,
+          "timeout_ms": 5000
+        },
+        {
+          "action": "key",
+          "key": "Escape"
+        }
+      ]
+    },
+    {
+      "line": 143,
+      "text": "the operator explicitly opens the legacy session browser",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "/sessions legacy"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 144,
+      "text": "only unassigned legacy history is listed",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "LEGACY_HISTORY",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "SESSION_A",
+          "visible": false,
+          "timeout_ms": 5000
+        },
+        {
+          "action": "expect_text",
+          "text": "SESSION_B",
+          "visible": false,
+          "timeout_ms": 5000
+        }
+      ]
+    },
+    {
+      "line": 145,
+      "text": "the operator loads the selected legacy conversation",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 146,
+      "text": "the legacy reply is visible with an unassigned notice",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "LEGACY_HISTORY_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "history remains unassigned",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 147,
+      "text": "the operator quits to checkpoint the loaded conversation",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "q"
+        },
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 10000
+        }
+      ]
+    },
+    {
+      "line": 148,
+      "text": "the saved legacy conversation still has no project owner",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 10000
+        }
+      ]
+    },
+    {
+      "line": 151,
+      "text": "both projects link different test points to the same global requirement",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 152,
+      "text": "the operator opens the Requirements page in project A",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "4"
+        },
+        {
+          "action": "expect_text",
+          "text": "Shared requirement",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 153,
+      "text": "the shared requirement shows only project A's linked test point",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "POINT_A_ONLY",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "POINT_B_ONLY",
+          "visible": false,
+          "timeout_ms": 5000
+        }
+      ]
+    },
+    {
+      "line": 154,
+      "text": "the operator switches to project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/project ${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 155,
+      "text": "the operator opens the Requirements page in project B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "4"
+        },
+        {
+          "action": "expect_text",
+          "text": "Shared requirement",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 156,
+      "text": "the same requirement shows only project B's linked test point",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "POINT_B_ONLY",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "POINT_A_ONLY",
+          "visible": false,
+          "timeout_ms": 5000
+        }
+      ]
+    },
+    {
+      "line": 157,
+      "text": "the operator switches back to project A",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/project ${FIXTURE_ROOT}/project-a"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 158,
+      "text": "the operator opens the Requirements page in project A",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "4"
+        },
+        {
+          "action": "expect_text",
+          "text": "Shared requirement",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 159,
+      "text": "the shared requirement shows only project A's linked test point",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "POINT_A_ONLY",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "POINT_B_ONLY",
+          "visible": false,
+          "timeout_ms": 5000
+        }
+      ]
+    },
+    {
+      "line": 160,
+      "text": "global requirement and project association files remain unchanged",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Shared requirement",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    }
+  ]
+}

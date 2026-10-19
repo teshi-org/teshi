@@ -1,0 +1,2450 @@
+{
+  "version": 1,
+  "mode": "tui",
+  "steps": [
+    {
+      "line": 7,
+      "text": "Teshi 启动时使用隔离的项目 A，并且最近项目中有项目 B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "launch",
+          "config": {
+            "program": "${TESHI_SELF_TEST_BIN}",
+            "args": [
+              "${FIXTURE_ROOT}/project-a",
+              "--requirements-root",
+              "${FIXTURE_ROOT}/requirements"
+            ],
+            "cwd": "${FIXTURE_ROOT}",
+            "env": [
+              [
+                "APPDATA",
+                "${FIXTURE_ROOT}/appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "${FIXTURE_ROOT}/localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "${FIXTURE_ROOT}/config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "${FIXTURE_ROOT}/data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "${FIXTURE_ROOT}/acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "${FIXTURE_ROOT}/sessions"
+              ],
+              [
+                "TESHI_APP_DATA_DIR",
+                "${FIXTURE_ROOT}/app-data"
+              ]
+            ],
+            "cols": 120,
+            "rows": 35
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 10,
+      "text": "隔离的项目已经准备好",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 11,
+      "text": "操作者使用项目命令切换到项目 B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/project ${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 12,
+      "text": "项目标题显示项目 B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 13,
+      "text": "当前 Feature 内容来自项目 B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-b step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 16,
+      "text": "隔离的项目已经准备好",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 17,
+      "text": "操作者打开项目选择器",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/project"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 18,
+      "text": "操作者使用指针选择最近项目 B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "project-b",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 19,
+      "text": "当前 Feature 内容来自项目 B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-b step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 22,
+      "text": "隔离的项目已经准备好",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 23,
+      "text": "操作者从项目标题打开项目选择器",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 24,
+      "text": "操作者选择 Open path",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 25,
+      "text": "操作者输入项目 B 的目录",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 26,
+      "text": "项目标题显示项目 B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 27,
+      "text": "当前 Feature 内容来自项目 B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-b step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 30,
+      "text": "隔离的项目已经准备好",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 31,
+      "text": "操作者从项目标题打开项目选择器",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 32,
+      "text": "操作者选择当前项目",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 33,
+      "text": "当前 Feature 内容仍来自项目 A",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-a step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 36,
+      "text": "隔离的项目已经准备好",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 37,
+      "text": "操作者从项目标题打开项目选择器",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 38,
+      "text": "操作者取消选择器",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 39,
+      "text": "项目 A 仍处于活动状态",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-a step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 42,
+      "text": "隔离的项目已经准备好",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 43,
+      "text": "操作者打开 Open path",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 44,
+      "text": "操作者输入缺失的项目目录",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/missing-project"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 45,
+      "text": "可以看到缺失项目错误",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project directory does not exist",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 46,
+      "text": "当前 Feature 内容仍来自项目 A",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-a step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 49,
+      "text": "隔离的项目已经准备好",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 50,
+      "text": "操作者打开 Open path 并输入项目 B 的目录",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 51,
+      "text": "项目 B 处于活动状态",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 52,
+      "text": "操作者从项目 B 打开 Open path 并输入项目 A 的目录",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-b",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-a"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 53,
+      "text": "项目标题显示项目 A",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 54,
+      "text": "当前 Feature 内容来自项目 A",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-a step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 57,
+      "text": "隔离的项目已经准备好",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 58,
+      "text": "操作者打开 Open path",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 59,
+      "text": "操作者输入配置损坏的项目目录",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-invalid"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 60,
+      "text": "可以看到项目准备失败的错误",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Could not prepare project B",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 61,
+      "text": "当前 Feature 内容仍来自项目 A",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-a step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 64,
+      "text": "隔离的项目已经准备好",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 65,
+      "text": "操作者缩窄终端",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "resize",
+          "cols": 64,
+          "rows": 24
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 66,
+      "text": "操作者从项目标题打开项目选择器",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 67,
+      "text": "可以看到最近项目 B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 68,
+      "text": "可以看到 Open path 控件",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "[O] Open path",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 69,
+      "text": "操作者选择 Open path",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 70,
+      "text": "可以看到项目路径输入框",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 71,
+      "text": "操作者取消选择器",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 72,
+      "text": "项目 A 仍处于活动状态",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-a step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 75,
+      "text": "项目 A 包含未保存的 Feature 编辑",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "e"
+        },
+        {
+          "action": "expect_text",
+          "text": "Edit [Enter]",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "key",
+          "key": "End"
+        },
+        {
+          "action": "write",
+          "text": " unsaved-marker"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-a step unsaved-marker",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 76,
+      "text": "操作者打开 Open path",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 77,
+      "text": "操作者输入配置损坏的项目目录",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-invalid"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 78,
+      "text": "可以看到未保存修改的保护提示",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Unsaved project state must be resolved first",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 79,
+      "text": "操作者选择放弃并切换",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "d"
+        }
+      ]
+    },
+    {
+      "line": 80,
+      "text": "可以看到项目准备失败的错误",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Could not prepare project B",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 81,
+      "text": "项目 A 中仍可以看到未保存的 Feature 编辑",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "project-a step unsaved-marker",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 84,
+      "text": "项目 A 有正在运行的外部任务",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "r"
+        },
+        {
+          "action": "expect_text",
+          "text": "● Ready",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 85,
+      "text": "操作者打开 Open path 并输入项目 B 的目录",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 86,
+      "text": "可以看到正在运行任务的保护提示",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Stop project tasks",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 87,
+      "text": "操作者选择停止任务并切换",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "s"
+        }
+      ]
+    },
+    {
+      "line": 88,
+      "text": "项目标题显示项目 B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 89,
+      "text": "当前功能内容来自项目 B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "1"
+        },
+        {
+          "action": "expect_text",
+          "text": "project-b step",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 90,
+      "text": "操作者运行项目 B 的场景",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "r"
+        }
+      ]
+    },
+    {
+      "line": 91,
+      "text": "项目 B 的场景通过",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "1/1 passed, 0 failed",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 92,
+      "text": "项目 A 的运行器进程树已停止且未写入项目 B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 95,
+      "text": "项目 A 有正在运行的 ACP 对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "A_PROJECT_ONLY_REQUEST"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "A_AGENT_ACTIVE",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 96,
+      "text": "操作者打开 Open path 并输入项目 B 的目录",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 97,
+      "text": "可以看到正在运行任务的保护提示",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Stop project tasks",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 98,
+      "text": "操作者选择停止任务并切换",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "s"
+        }
+      ]
+    },
+    {
+      "line": 99,
+      "text": "操作者在 ACP 停止期间取消切换",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "expect_text",
+          "text": "Stop project tasks",
+          "visible": false,
+          "timeout_ms": 500
+        }
+      ]
+    },
+    {
+      "line": 100,
+      "text": "项目 A 仍处于活动状态",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 101,
+      "text": "操作者打开 Open path 并输入项目 B 的目录",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 102,
+      "text": "项目标题显示项目 B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 103,
+      "text": "操作者在项目 B 中开始独立对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "B_PROJECT_ONLY_REQUEST"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 104,
+      "text": "可以看到项目 B 的独立 Agent 回复",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "B_AGENT_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 105,
+      "text": "项目 A 的延迟回复不可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "A_LATE_REPLY",
+          "visible": false,
+          "timeout_ms": 3000
+        },
+        {
+          "action": "expect_text",
+          "text": "A_AGENT_ACTIVE",
+          "visible": false,
+          "timeout_ms": 3000
+        }
+      ]
+    },
+    {
+      "line": 106,
+      "text": "ACP 进程和对话归属保持隔离",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "B_AGENT_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 109,
+      "text": "项目 A 有阻塞的原生模型对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "expect_text",
+          "text": "Welcome to AI Chat!",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "A_PROJECT_ONLY_REQUEST"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "A_AGENT_ACTIVE",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 110,
+      "text": "操作者打开 Open path 并输入项目 B 的目录",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "click_text",
+          "text": "Project: project-a",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "click_text",
+          "text": "[O] Open path",
+          "timeout_ms": 10000
+        },
+        {
+          "action": "expect_text",
+          "text": "Open project path",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "write",
+          "text": "${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 111,
+      "text": "可以看到正在运行任务的保护提示",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Stop project tasks",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 112,
+      "text": "操作者选择停止任务并切换",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "s"
+        }
+      ]
+    },
+    {
+      "line": 113,
+      "text": "项目标题显示项目 B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 114,
+      "text": "操作者在项目 B 中开始独立对话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "B_PROJECT_ONLY_REQUEST"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 115,
+      "text": "可以看到项目 B 的独立 Agent 回复",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "B_AGENT_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 116,
+      "text": "项目 A 的延迟回复不可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "A_LATE_REPLY",
+          "visible": false,
+          "timeout_ms": 3000
+        },
+        {
+          "action": "expect_text",
+          "text": "A_AGENT_ACTIVE",
+          "visible": false,
+          "timeout_ms": 3000
+        }
+      ]
+    },
+    {
+      "line": 117,
+      "text": "项目 B 回复前旧原生模型流已经关闭",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "B_AGENT_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 120,
+      "text": "项目 A 和项目 B 各有独立的已保存会话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 121,
+      "text": "操作者打开项目 A 的会话列表",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/sessions"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 122,
+      "text": "列表中只有项目 A 的已保存会话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "SESSION_A",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "SESSION_B",
+          "visible": false,
+          "timeout_ms": 5000
+        },
+        {
+          "action": "expect_text",
+          "text": "LEGACY_HISTORY",
+          "visible": false,
+          "timeout_ms": 5000
+        },
+        {
+          "action": "key",
+          "key": "Escape"
+        }
+      ]
+    },
+    {
+      "line": 123,
+      "text": "操作者恢复项目 A 的会话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "/resume"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 124,
+      "text": "项目 A 的已保存回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "SESSION_A_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 125,
+      "text": "操作者切换到项目 B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/project ${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 126,
+      "text": "操作者打开项目 B 的会话列表",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/sessions"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 127,
+      "text": "列表中只有项目 B 的已保存会话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "SESSION_B",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "SESSION_A",
+          "visible": false,
+          "timeout_ms": 5000
+        },
+        {
+          "action": "expect_text",
+          "text": "LEGACY_HISTORY",
+          "visible": false,
+          "timeout_ms": 5000
+        },
+        {
+          "action": "key",
+          "key": "Escape"
+        }
+      ]
+    },
+    {
+      "line": 128,
+      "text": "操作者恢复项目 B 的会话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "/resume"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 129,
+      "text": "只有项目 B 的已保存回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "SESSION_B_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "SESSION_A_REPLY",
+          "visible": false,
+          "timeout_ms": 5000
+        },
+        {
+          "action": "expect_text",
+          "text": "LEGACY_HISTORY_REPLY",
+          "visible": false,
+          "timeout_ms": 5000
+        }
+      ]
+    },
+    {
+      "line": 132,
+      "text": "项目 A 和项目 B 各有独立的已保存会话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 133,
+      "text": "操作者切换到项目 B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/project ${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 134,
+      "text": "操作者恢复项目 B 的会话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/resume"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "SESSION_B_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 135,
+      "text": "操作者退出并在项目 B 重启 Teshi",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "q"
+        },
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 10000
+        },
+        {
+          "action": "launch",
+          "config": {
+            "program": "${TESHI_SELF_TEST_BIN}",
+            "args": [
+              "${FIXTURE_ROOT}/project-b",
+              "--requirements-root",
+              "${FIXTURE_ROOT}/requirements"
+            ],
+            "cwd": "${FIXTURE_ROOT}",
+            "env": [
+              [
+                "APPDATA",
+                "${FIXTURE_ROOT}/appdata"
+              ],
+              [
+                "LOCALAPPDATA",
+                "${FIXTURE_ROOT}/localdata"
+              ],
+              [
+                "XDG_CONFIG_HOME",
+                "${FIXTURE_ROOT}/config"
+              ],
+              [
+                "XDG_DATA_HOME",
+                "${FIXTURE_ROOT}/data"
+              ],
+              [
+                "TESHI_ACP_STORE_DIR",
+                "${FIXTURE_ROOT}/acp"
+              ],
+              [
+                "TESHI_SESSION_DIR",
+                "${FIXTURE_ROOT}/sessions"
+              ],
+              [
+                "TESHI_APP_DATA_DIR",
+                "${FIXTURE_ROOT}/app-data"
+              ]
+            ],
+            "cols": 120,
+            "rows": 35
+          }
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 136,
+      "text": "操作者恢复当前项目最近的会话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/resume"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 137,
+      "text": "只有项目 B 的已保存回复可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "SESSION_B_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "SESSION_A_REPLY",
+          "visible": false,
+          "timeout_ms": 5000
+        },
+        {
+          "action": "expect_text",
+          "text": "LEGACY_HISTORY_REPLY",
+          "visible": false,
+          "timeout_ms": 5000
+        }
+      ]
+    },
+    {
+      "line": 140,
+      "text": "项目会话之外还存在未归属的旧会话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 141,
+      "text": "操作者打开默认会话列表",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/sessions"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 142,
+      "text": "项目列表中不显示旧会话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "SESSION_A",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "LEGACY_HISTORY",
+          "visible": false,
+          "timeout_ms": 5000
+        },
+        {
+          "action": "key",
+          "key": "Escape"
+        }
+      ]
+    },
+    {
+      "line": 143,
+      "text": "操作者显式打开旧会话列表",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "write",
+          "text": "/sessions legacy"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 144,
+      "text": "列表中只有未归属的旧会话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "LEGACY_HISTORY",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "SESSION_A",
+          "visible": false,
+          "timeout_ms": 5000
+        },
+        {
+          "action": "expect_text",
+          "text": "SESSION_B",
+          "visible": false,
+          "timeout_ms": 5000
+        }
+      ]
+    },
+    {
+      "line": 145,
+      "text": "操作者载入选中的旧会话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Enter"
+        }
+      ]
+    },
+    {
+      "line": 146,
+      "text": "旧会话回复与未归属提示均可见",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "LEGACY_HISTORY_REPLY",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "history remains unassigned",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 147,
+      "text": "操作者退出以保存载入的会话",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "q"
+        },
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 10000
+        }
+      ]
+    },
+    {
+      "line": 148,
+      "text": "保存后的旧会话仍没有项目归属",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_exit",
+          "code": 0,
+          "timeout_ms": 10000
+        }
+      ]
+    },
+    {
+      "line": 151,
+      "text": "两个项目以不同测试点关联同一个全局需求",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 152,
+      "text": "操作者在项目 A 打开需求页面",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "4"
+        },
+        {
+          "action": "expect_text",
+          "text": "Shared requirement",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 153,
+      "text": "共享需求只显示项目 A 关联的测试点",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "POINT_A_ONLY",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "POINT_B_ONLY",
+          "visible": false,
+          "timeout_ms": 5000
+        }
+      ]
+    },
+    {
+      "line": 154,
+      "text": "操作者切换到项目 B",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/project ${FIXTURE_ROOT}/project-b"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-b",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 155,
+      "text": "操作者在项目 B 打开需求页面",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "4"
+        },
+        {
+          "action": "expect_text",
+          "text": "Shared requirement",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 156,
+      "text": "同一需求只显示项目 B 关联的测试点",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "POINT_B_ONLY",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "POINT_A_ONLY",
+          "visible": false,
+          "timeout_ms": 5000
+        }
+      ]
+    },
+    {
+      "line": 157,
+      "text": "操作者切换回项目 A",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "3"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "write",
+          "text": "/project ${FIXTURE_ROOT}/project-a"
+        },
+        {
+          "action": "key",
+          "key": "Enter"
+        },
+        {
+          "action": "expect_text",
+          "text": "Project: project-a",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 158,
+      "text": "操作者在项目 A 打开需求页面",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "key",
+          "key": "Escape"
+        },
+        {
+          "action": "key",
+          "key": "4"
+        },
+        {
+          "action": "expect_text",
+          "text": "Shared requirement",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    },
+    {
+      "line": 159,
+      "text": "共享需求只显示项目 A 关联的测试点",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "POINT_A_ONLY",
+          "visible": true,
+          "timeout_ms": 15000
+        },
+        {
+          "action": "expect_text",
+          "text": "POINT_B_ONLY",
+          "visible": false,
+          "timeout_ms": 5000
+        }
+      ]
+    },
+    {
+      "line": 160,
+      "text": "全局需求和项目关联文件均保持不变",
+      "confirmed": true,
+      "actions": [
+        {
+          "action": "expect_text",
+          "text": "Shared requirement",
+          "visible": true,
+          "timeout_ms": 15000
+        }
+      ]
+    }
+  ]
+}

@@ -14,6 +14,16 @@ This matrix records the interaction contract implemented by the terminal UI. Pan
 
 Labels and explanatory status/footer text are intentionally noninteractive unless listed in the table. Modal panels and ACP pickers replace this matrix temporarily: the modal owns keyboard and pointer input, and the underlying pane is not dispatched.
 
+## Project picker overlay
+
+The project header is a pointer and keyboard control on every tab. `/project`
+opens the recent picker; `↑`/`↓` and `j`/`k` move through recent entries,
+`Enter` commits a selected project, and `Esc` cancels. `[O] Open path` changes
+the modal to a directory input where all printable characters are text, then
+`Enter` resolves the target. Dirty and busy overlays own `S`, `D`, and `Esc`;
+the bounded stop wait keeps the active project unchanged on timeout. The
+overlay's click regions are rebuilt from the rendered rows each frame.
+
 ## Shared keyboard contract
 
 `Ctrl+W` starts a two-key pane prefix in browse/navigation states. `h`/`l` move to the previous/next visible pane and clamp at the edge. `j`/`k` target the nearest pane below/above; the current layouts have no unambiguous vertical focus neighbor, so those actions are consumed as documented no-ops. `Esc` cancels a pending prefix without editing or switching tabs. Windows uppercase `Ctrl+W` events are normalized.
@@ -37,3 +47,10 @@ The same pinned CLI also passes all eight chat-selection and eight Requirements 
 The registry picker uses an owned local HTTP fixture through `TESHI_ACP_REGISTRY_URL`; without this setting the official registry remains the default. The Explore pointer fixture starts in its project and verifies the selected runner case and process cwd. Starting outside a project and switching project context are separate P8 contracts. Session modal checks use the visible Load action rather than a P8-specific title.
 
 P6 priority and the P8 header/picker, lifecycle and session-ownership changes are excluded from this delivery. These checks establish functional Windows behavior at the tested sizes. User aesthetic acceptance, other platforms and the complete Feature/provider matrix remain separate acceptance work. Initial extraction and fixture failures are retained alongside the passing candidate evidence; current completion must use the candidate results, not those initial runs.
+
+
+## Project switching scoped delivery — 2026-10-19
+
+The isolated P8 candidate passes both project-switch Features (17 scenarios per locale), two dedicated real-PTY project-switch tests and five shared interaction tests. The fixtures cover project preparation failure, dirty-editor choices, runner/native/ACP shutdown, cancelled switches, session ownership, restart, legacy history migration and local link preservation. Tests use temporary project, requirement, session and application-data stores; the binary is pinned by SHA256 in `.teshi/artifacts/p8-scoped-20261019/binaries.json`.
+
+Engine/runtime/TUI checks pass 759 unit and integration tests (one ignored) plus two doctests; the sidecar adapter passes 17 Python contract tests. Affected-package formatting and Clippy pass. The initial registry-pointer regression timed out after an empty HTTP fixture request; its original logs and subsequent rechecks are retained. Refer to `.teshi/artifacts/p8-scoped-20261019/summary.md` for final regression results and exact scope. This is Windows scoped evidence; full workspace, other platforms, live providers, aesthetic acceptance and P9 remain separate. P6 priority remains deferred.

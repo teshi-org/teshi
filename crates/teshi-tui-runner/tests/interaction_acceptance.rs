@@ -132,7 +132,7 @@ fn tree_contains(screen: &str, text: &str) -> bool {
 
 #[test]
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
-fn five_tabs_render_and_accept_pointer_at_normal_and_narrow_sizes() {
+fn five_tabs_render_at_normal_and_narrow_sizes_and_modal_owns_pointer() {
     let fixture = Fixture::new();
     let terminal = fixture.launch();
     for (tab, label, body) in [
@@ -164,6 +164,29 @@ fn five_tabs_render_and_accept_pointer_at_normal_and_narrow_sizes() {
     terminal.key("1").unwrap();
     terminal.expect_text("Scenarios (30)", true, 10000).unwrap();
     std::thread::sleep(Duration::from_millis(100));
+    terminal.click_text("Project: project", 10000).unwrap();
+    terminal.expect_text("Open path", true, 10000).unwrap();
+    terminal.click_text("Requirements [4]", 10000).unwrap();
+    terminal.scroll_at(2, 6, false, false).unwrap();
+    terminal.expect_text("Open path", true, 1000).unwrap();
+    capture(&terminal, "project-modal-pointer-owned");
+    terminal.key("Escape").unwrap();
+    terminal.expect_text("Open path", false, 10000).unwrap();
+    terminal.expect_text("Scenario", true, 1000).unwrap();
+    fixture.unchanged();
+    terminal.key("q").unwrap();
+    terminal.expect_exit(0, 10000).unwrap();
+}
+
+#[test]
+#[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
+fn project_header_pointer_opens_picker_on_explore() {
+    let fixture = Fixture::new();
+    let terminal = fixture.launch();
+    terminal.click_text("Project: project", 10000).unwrap();
+    capture(&terminal, "explore-project-header-click");
+    terminal.expect_text("Open path", true, 1000).unwrap();
+    terminal.key("Escape").unwrap();
     fixture.unchanged();
     terminal.key("q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();

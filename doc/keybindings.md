@@ -19,6 +19,20 @@ when the layout has no vertical neighbor. Text entry and modal panels keep
 their own input behavior. A wheel targets the pane under the pointer;
 Shift+wheel scrolls horizontally where supported.
 
+## Project switching
+
+The project header is clickable on every tab. Click it or enter `/project` in
+the AI input to open the recent-project picker. `↑`/`↓` or `j`/`k` select a
+recent entry, `Enter` opens it, and `Esc` cancels. `[O] Open path` accepts a
+directory typed into the path field; printable path characters, including
+`j`/`k`, are inserted there rather than treated as picker navigation.
+
+`/project <directory>` requests a direct switch. A dirty project shows `S`
+save-and-switch, `D` discard-and-switch, and `Esc` cancel. Running project-owned
+tasks show `S` stop-and-switch and a bounded wait; a timeout leaves the current
+project active. A missing or unreadable target reports an error and keeps the
+current project open.
+
 ## Navigation (Explore / MindMap)
 
 | Key | Action |
@@ -132,6 +146,14 @@ Consecutive ACP tools share a progress group. Compact rows keep their status
 visible and shorten long titles to the available terminal width. `/details`
 toggles full thinking text and ACP tool titles for the current conversation.
 
+Conversations are checkpointed every second while the TUI runs, including partial
+replies, and saved before starting a new conversation, closing an agent, loading
+another session, or exiting normally. Each conversation keeps one stable file in
+the user configuration directory under `teshi/sessions`. `/sessions` lists the
+current project's conversations; `/sessions legacy` explicitly lists older
+unassigned conversations. `/resume` loads the most recently updated conversation
+for the current project. Existing session files remain readable.
+
 Drag over chat text in AI or the MindMap AI panel to select it. `Ctrl+Shift+C`
 or a right click copies the selection. Copy uses the displayed plain text,
 including visible code indentation and language labels, without role rails or
@@ -142,13 +164,6 @@ stream changes to the selected content and session changes clear them.
 the last N answers in chronological order. Live partial answers, reasoning and
 tool activity are excluded. Invalid counts and an empty answer history produce
 feedback. A clipboard write failure keeps the selection available for retry.
-
-Conversations are checkpointed every second while the TUI runs, including partial
-replies, and saved before starting a new conversation, closing an agent, loading
-another session, or exiting normally. Each conversation keeps one stable file in
-the user configuration directory under `teshi/sessions`. `/sessions` lists the
-current project's conversations and legacy sessions; `/resume` loads the most
-recently updated one. Existing session files remain readable.
 
 Restoring an ACP conversation retains its installed agent selection. A new ACP
 process receives the saved text history on its first prompt; this does not restore
