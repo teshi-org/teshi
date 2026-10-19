@@ -185,3 +185,71 @@ fn new_requirement_creation_dirty_guard_supports_cancel_and_discard() {
     terminal.key("q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
+
+#[test]
+#[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
+fn requirements_tree_wheel_routes_under_pointer_and_keeps_editor_selection() {
+    let binary = fs::canonicalize(std::env::var("TESHI_SELF_TEST_BIN").unwrap()).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    let store = root.path().join("requirements");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("sample.feature"), "Feature: Sample\n").unwrap();
+
+    let terminal = Terminal::launch(launch_config(&binary, &project, &store, root.path())).unwrap();
+    terminal.expect_text("sample", true, 10000).unwrap();
+    terminal.key("4").unwrap();
+    terminal.expect_text("Requirements", true, 10000).unwrap();
+
+    for number in 1..=18 {
+        terminal.key("Ctrl+n").unwrap();
+        terminal
+            .expect_text(&format!("# Document {number}"), true, 10000)
+            .unwrap();
+        if number == 1 {
+            terminal.key("Right").unwrap();
+        }
+        terminal.key("Ctrl+s").unwrap();
+        terminal
+            .expect_text("Saved requirement document", true, 10000)
+            .unwrap();
+    }
+
+    let before = terminal.screen().unwrap();
+    assert!(tree_contains_title(&before, "Document 18"), "{before}");
+    let tree_row = before
+        .lines()
+        .enumerate()
+        .find_map(|(row, line)| {
+            line.split('│')
+                .nth(1)
+                .filter(|pane| pane.contains("Document 18"))
+                .map(|_| row as u16)
+        })
+        .expect("selected document should be visible in the tree");
+
+    for _ in 0..8 {
+        terminal.scroll_at(2, tree_row, true, false).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let after = terminal.screen().unwrap();
+    assert!(
+        tree_contains_title(&after, "Document 1"),
+        "tree wheel did not scroll the owning pane to the first document:\n{after}"
+    );
+    assert!(
+        after.contains("# Document 18"),
+        "scrolling the tree changed the editor selection:\n{after}"
+    );
+    if let Some(path) = artifact_path("wheel-tree-after.txt") {
+        fs::write(&path, &after).unwrap();
+        terminal
+            .screenshot(&path.with_file_name("wheel-tree-after.svg"))
+            .unwrap();
+        println!("Requirement wheel viewport evidence: {}", path.display());
+    }
+
+    terminal.key("q").unwrap();
+    terminal.expect_exit(0, 10000).unwrap();
+}

@@ -10,6 +10,15 @@
 | `4` | Requirements |
 | `5` | Test Points |
 
+All five tab labels are clickable. Terminals narrower than 85 columns use
+`Explore`, `Map`, `AI`, `Req`, and `Points` labels with the same shortcuts.
+
+`Ctrl+W` then `h`/`l` moves between visible panes on the active tab and stops
+at the edge. `Esc` cancels the prefix. `j`/`k` after the prefix is a no-op
+when the layout has no vertical neighbor. Text entry and modal panels keep
+their own input behavior. A wheel targets the pane under the pointer;
+Shift+wheel scrolls horizontally where supported.
+
 ## Navigation (Explore / MindMap)
 
 | Key | Action |
@@ -22,6 +31,11 @@
 | `PageUp` / `PageDown` | Scroll ~10 nodes or lines |
 
 ## Requirements tab
+
+The footer provides clickable New, Delete, Filter, Group, Iteration, Save,
+and Point actions with their keyboard shortcuts. Dirty-buffer and delete
+confirmations provide clickable choices; their background panes stay blocked.
+Linked test-point rows can be selected with the pointer before navigation.
 
 The Markdown editor starts in **Browse** mode. Press `i` in the editor to enter
 **Insert**, and `Esc` to return to Browse. Browse never inserts ordinary text.
