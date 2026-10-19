@@ -70,7 +70,12 @@ Each `name.feature` has a `name.tui.json` sidecar:
 }
 ```
 
-Actions are `launch`, `write`, `key`, `resize`, `expect_text`, and `expect_exit`.
+Actions are `launch`, `write`, `key`, `resize`, `click_text`, `expect_text`,
+`expect_stable_text`, `expect_file`, and `expect_exit`.
+Use `expect_file` with `path` and `timeout_ms` (1–120000) to wait for a nonempty
+regular fixture file; relative paths resolve from the project root. This lets
+external process fixtures publish readiness before later terminal actions run,
+without assuming that a running indicator proves process startup.
 Keys use tui-test names such as `Enter`, `Escape`, and `q`. Launch accepts optional
 `cwd` and `env` pairs; cwd defaults to the project root. Arguments are passed
 directly. Assertion deadlines must be 1–120000 milliseconds. Each scenario owns

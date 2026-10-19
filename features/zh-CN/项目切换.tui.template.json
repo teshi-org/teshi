@@ -1078,6 +1078,11 @@
           "key": "r"
         },
         {
+          "action": "expect_file",
+          "path": "${FIXTURE_ROOT}/project-a/runner-evidence/project-a.ready",
+          "timeout_ms": 15000
+        },
+        {
           "action": "expect_text",
           "text": "● Ready",
           "visible": true,

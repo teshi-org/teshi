@@ -39,6 +39,8 @@ pub enum Action {
         timeout_ms: u64,
         stable_ms: u64,
     },
+    /// Wait for a nonempty regular file, resolving relative paths in the project.
+    ExpectFile { path: String, timeout_ms: u64 },
     /// Assert the actual process exit code.
     ExpectExit { code: i32, timeout_ms: u64 },
 }
@@ -251,6 +253,11 @@ fn plan(case: &Case, root: &Path) -> Result<Vec<Binding>> {
                 {
                     bail!("invalid TUI exit timeout (1..120000ms)")
                 }
+                Action::ExpectFile { path, timeout_ms }
+                    if path.trim().is_empty() || *timeout_ms == 0 || *timeout_ms > 120_000 =>
+                {
+                    bail!("invalid TUI file assertion or timeout (1..120000ms)")
+                }
                 // execute() must observe this exit before reaching a later
                 // launch; a failed exit assertion aborts the entire scenario.
                 Action::ExpectExit { .. } => exit_asserted = true,
@@ -425,6 +432,11 @@ fn example_plans(case: &Case, root: &Path) -> Result<Vec<ExamplePlan>> {
                     {
                         bail!("empty expanded assertion at Examples line {line}");
                     }
+                    if let Action::ExpectFile { path, .. } = action
+                        && path.trim().is_empty()
+                    {
+                        bail!("empty expanded file path at Examples line {line}");
+                    }
                 }
                 steps.push(binding);
             }
@@ -450,6 +462,27 @@ fn emit(out: &mut impl Write, value: serde_json::Value) -> Result<()> {
     out.write_all(b"\n")?;
     out.flush()?;
     Ok(())
+}
+
+fn expect_file(path: &Path, timeout_ms: u64) -> Result<()> {
+    let deadline = Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() && metadata.len() > 0 => return Ok(()),
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(error)
+                    .with_context(|| format!("inspect fixture file {}", path.display()));
+            }
+            _ => {}
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "timed out after {timeout_ms}ms waiting for nonempty fixture file {}",
+                path.display()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 fn execute(
@@ -504,6 +537,9 @@ fn execute(
                     } => session.expect_stable_text(&text, visible, timeout_ms, stable_ms)?,
                     Action::ExpectExit { code, timeout_ms } => {
                         session.expect_exit(code, timeout_ms)?
+                    }
+                    Action::ExpectFile { path, timeout_ms } => {
+                        expect_file(&root.join(path), timeout_ms)?
                     }
                     Action::Launch { .. } => unreachable!(),
                 }
@@ -874,6 +910,9 @@ mod tests {
             json!([launch(),{"action":"resize","cols":0,"rows":24}]),
             json!([launch(),{"action":"expect_text","text":"ready","visible":true,"timeout_ms":0}]),
             json!([launch(),{"action":"expect_exit","code":0,"timeout_ms":120001}]),
+            json!([launch(),{"action":"expect_file","path":"","timeout_ms":100}]),
+            json!([launch(),{"action":"expect_file","path":"ready","timeout_ms":0}]),
+            json!([launch(),{"action":"expect_file","path":"ready","timeout_ms":120001}]),
             json!([launch(), launch()]),
         ] {
             record(
@@ -881,6 +920,38 @@ mod tests {
                 json!({"version":1,"mode":"tui","steps":[{"line":3,"text":"ready","confirmed":true,"actions":actions}]}),
             );
             assert!(plan(&case, directory.path()).is_err());
+        }
+    }
+
+    #[test]
+    fn file_readiness_waits_for_nonempty_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ready");
+        std::fs::write(&path, "").unwrap();
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::fs::write(writer_path, "ready").unwrap();
+        });
+        expect_file(&path, 2000).unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "ready");
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn missing_and_empty_readiness_files_time_out() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["missing", "empty"] {
+            let path = directory.path().join(name);
+            if name == "empty" {
+                std::fs::write(&path, "").unwrap();
+            }
+            assert!(
+                expect_file(&path, 30)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("timed out")
+            );
         }
     }
 

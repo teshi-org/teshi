@@ -38,7 +38,17 @@ def main():
             return
         # Inherited pipes expose a parent-only kill: the child keeps the runner
         # reader alive and continues writing even after its parent is gone.
-        subprocess.Popen([sys.executable, __file__, "child", project_name, str(evidence)])
+        child = subprocess.Popen([sys.executable, __file__, "child", project_name, str(evidence)])
+        child_prefix = evidence / f"{project_name}-child"
+        ready_deadline = time.monotonic() + 10
+        while not all(child_prefix.with_suffix(suffix).exists() for suffix in (".json", ".writes")):
+            if child.poll() is not None or time.monotonic() >= ready_deadline:
+                raise RuntimeError("runner child did not publish its process and write evidence")
+            time.sleep(0.01)
+        prefix.with_suffix(".writes").write_text("ready\n", encoding="utf-8")
+        # The UI's running indicator precedes actual process startup. Publish
+        # readiness only after both processes have verifiable write evidence.
+        (evidence / f"{project_name}.ready").write_text("ready\n", encoding="utf-8")
     deadline = time.monotonic() + 45
     counter = 0
     while time.monotonic() < deadline and not (evidence / "cleanup").exists():

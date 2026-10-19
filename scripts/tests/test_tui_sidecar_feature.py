@@ -19,6 +19,20 @@ spec.loader.exec_module(adapter)
 
 
 class ProjectSwitchTemplateTests(unittest.TestCase):
+    def test_localized_project_switch_templates_keep_the_same_actions(self):
+        templates = [
+            adapter.ROOT / "features/en-US/tui_project_switch.tui.template.json",
+            adapter.ROOT / "features/zh-CN/项目切换.tui.template.json",
+        ]
+        actions = [
+            {step["line"]: step["actions"] for step in json.loads(path.read_text(encoding="utf-8"))["steps"]}
+            for path in templates
+        ]
+        self.assertEqual(actions[0].keys(), actions[1].keys())
+        for line in actions[0]:
+            with self.subTest(line=line):
+                self.assertEqual(actions[0][line], actions[1][line])
+
     def test_session_evidence_rejects_legacy_assignment_and_context_leaks(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

@@ -28,10 +28,13 @@ impl Fixture {
             .join("tests/fixtures/explore_pointer_runner.py")
             .canonicalize()
             .unwrap();
+        let python = std::env::var("TESHI_TEST_PYTHON")
+            .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into());
         fs::write(
             project.join("teshi.toml"),
             format!(
-                "[runner]\ncmd = \"python\"\nargs = {}\ncwd = \".\"\n",
+                "[runner]\ncmd = {}\nargs = {}\ncwd = \".\"\n",
+                serde_json::to_string(&python).unwrap(),
                 serde_json::to_string(&[runner, trace.clone()]).unwrap()
             ),
         )

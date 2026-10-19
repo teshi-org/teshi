@@ -4633,7 +4633,13 @@ mod tests {
         config.max_websocket_connections = 1;
         let runtime = BrokerRuntime::start(config).await.unwrap();
         let endpoint = runtime.endpoint_record();
-        let client = reqwest::Client::new();
+        // These probes exercise independent limits. An early oversized-body
+        // rejection can close its transport while the client is still writing;
+        // do not reuse that connection for the following header-limit probe.
+        let client = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap();
         let origin = format!("chrome-extension://{EXTENSION_ID}");
         let response = client
             .post(format!(
