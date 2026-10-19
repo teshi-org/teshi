@@ -191,6 +191,34 @@ class World(TerminalWorld):
             assert not (self.other / "dispatch-writes.txt").exists()
             self.evidence.append(dict(event="dispatch_completed_before_switch"))
             return
+        if text == "recent project history is empty":
+            self.launch_project()
+            path = self.root / "app-data/recent.json"
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(json.dumps(dict(paths=[], projects=[])), encoding="utf-8")
+            return
+        if text == "the operator opens the project picker from the header":
+            self.op("click", "Project: project-a")
+            self.expect("Open project")
+            return
+        if text == "the empty history notice and Open path control are visible":
+            self.expect("No recent projects")
+            self.expect("[O] Open path")
+            self.evidence.append(dict(event="empty_recent_picker", screen=self.screen()))
+            return
+        if text == "the operator chooses Open path":
+            self.op("click", "[O] Open path")
+            self.expect("Open project path")
+            return
+        if text == "the operator enters project B's directory":
+            self.op("write", str(self.other))
+            self.op("key", "Enter")
+            return
+        if text == "project B becomes active through the path picker":
+            self.expect("Project: project-b")
+            self.op("key", "1")
+            self.expect("project-b step")
+            return
         raise AssertionError("Unbound step: " + text)
 
     def close(self):

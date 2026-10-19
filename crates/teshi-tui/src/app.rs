@@ -10505,10 +10505,6 @@ impl App {
             return self.request_project_switch(PathBuf::from(argument));
         }
         let recent = teshi_engine::load_recent_project_entries().unwrap_or_default();
-        if recent.is_empty() {
-            self.status = "No recent projects. Use /project <directory>".to_string();
-            return Ok(());
-        }
         self.project_switch.begin_picker(recent);
         self.status = "Project picker: ↑/↓ select · Enter open · Esc cancel".to_string();
         Ok(())

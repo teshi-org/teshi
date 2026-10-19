@@ -33,3 +33,12 @@ Feature: Project switching failure boundaries
     And the operator requests project B
     Then project B becomes active after the dispatch exits
     And project B's source files remain unchanged
+
+  Scenario: Open a project path when recent history is empty
+    Given recent project history is empty
+    When the operator opens the project picker from the header
+    Then the empty history notice and Open path control are visible
+    When the operator chooses Open path
+    And the operator enters project B's directory
+    Then project B becomes active through the path picker
+    And project B's source files remain unchanged
