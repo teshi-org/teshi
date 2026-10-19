@@ -17,12 +17,32 @@ Feature: Project switching failure boundaries
     Then project B becomes active and A's edit is saved
     And project B's source files remain unchanged
 
+  Scenario: Reject pending tool permission before switching projects
+    Given project A is waiting for ACP tool permission
+    When the operator clicks the project header behind the permission prompt
+    Then the permission prompt retains project A without approving the tool
+    When the operator rejects the permission request
+    And the operator requests project B
+    And the operator chooses Stop tasks and switch
+    Then project B has no stale permission request or old reply
+    And project B's source files remain unchanged
+
   Scenario: Stop ACP tools after the agent exits normally
     Given project A has an ACP turn with an active tool process
     When the operator requests project B
     And the operator chooses Stop tasks and switch
     Then project B becomes active after the old tool stops
     And no old tool writes appear in project B
+
+  Scenario: Switching projects does not approve a pending test-point review
+    Given project A has proposed test points awaiting human review
+    When the operator requests project B through the path picker
+    And the operator cancels the busy project switch
+    Then project A retains its unapproved test points
+    When the operator requests project B through the path picker
+    And the operator chooses Stop tasks and switch
+    Then project B becomes active without accepting A's review
+    And project B's source files remain unchanged
 
   Scenario: A stalled synchronous dispatch times out without changing projects
     Given project A has a stalled synchronous dispatch

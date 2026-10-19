@@ -11340,6 +11340,116 @@ mod tests {
     }
 
     #[test]
+    fn project_switch_during_human_review_never_approves_or_loses_test_points() {
+        let (mut app, project_a, project_b, _store) = project_switch_app();
+        start_mcp_fixture(&mut app, "mcp_review");
+        wait_mcp_fixture(&mut app, |app| {
+            app.agents[0].backend.status() == teshi_agent::backend::AgentBackendStatus::Completed
+        });
+        assert_eq!(
+            app.generation_stage,
+            teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
+        );
+        let points_path = project_a.path().join("testpoints/testpoints.json");
+        let proposed = fs::read(&points_path).unwrap();
+        let before = app.current_project_stamp();
+        app.request_project_switch(project_b.path()).unwrap();
+        assert!(matches!(
+            app.project_switch.overlay,
+            crate::project_context::SwitchOverlay::Busy { .. }
+        ));
+        app.project_switch_action(Action::OverlayCancel).unwrap();
+        assert_eq!(app.current_project_stamp(), before);
+        assert_eq!(
+            app.generation_stage,
+            teshi_agent::pipeline::GenerationStage::ReviewingTestPoints
+        );
+        assert_eq!(fs::read(&points_path).unwrap(), proposed);
+
+        app.request_project_switch(project_b.path()).unwrap();
+        app.project_switch_action(Action::OverlayInsert('s'))
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.project.root_dir != project_b.path() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "review switch did not finish"
+            );
+            app.poll_llm_events();
+            app.poll_project_switch();
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(fs::read(&points_path).unwrap(), proposed);
+        assert!(!project_b.path().join("testpoints/testpoints.json").exists());
+        assert!(!project_a.path().join("blocked.feature").exists());
+        app.request_project_switch(project_a.path()).unwrap();
+        let points = &app
+            .authoring_ui
+            .artifacts
+            .as_ref()
+            .unwrap()
+            .test_points
+            .test_points;
+        assert_eq!(points.len(), 1);
+        assert_eq!(
+            points[0].review_state,
+            teshi_core::authoring::ReviewState::Proposed
+        );
+        assert_eq!(fs::read(&points_path).unwrap(), proposed);
+        stop_fixture_agents(&mut app);
+    }
+
+    #[test]
+    fn project_switch_with_pending_permission_cancels_without_approval() {
+        let (mut app, project_a, project_b, _store) = project_switch_app();
+        app.approval_mode = teshi_agent::approval::ApprovalMode::Manual;
+        start_mcp_fixture(&mut app, "permission_then_exit");
+        wait_mcp_fixture(&mut app, App::has_acp_permission_prompt);
+        let request_id = app
+            .agent()
+            .pending_acp_permission
+            .as_ref()
+            .unwrap()
+            .request_id;
+        let before = app.current_project_stamp();
+        app.request_project_switch(project_b.path()).unwrap();
+        assert!(matches!(
+            app.project_switch.overlay,
+            crate::project_context::SwitchOverlay::Busy { .. }
+        ));
+        app.project_switch_action(Action::OverlayCancel).unwrap();
+        assert_eq!(app.current_project_stamp(), before);
+        assert_eq!(app.project.root_dir, project_a.path());
+        assert_eq!(
+            app.agent()
+                .pending_acp_permission
+                .as_ref()
+                .unwrap()
+                .request_id,
+            request_id
+        );
+
+        app.request_project_switch(project_b.path()).unwrap();
+        app.project_switch_action(Action::OverlayInsert('s'))
+            .unwrap();
+        assert!(!app.has_acp_permission_prompt());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.project.root_dir != project_b.path() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "permission switch did not finish"
+            );
+            app.poll_llm_events();
+            app.poll_project_switch();
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!app.has_acp_permission_prompt());
+        assert!(app.agent().messages().is_empty());
+        assert!(!app.current_project_stamp().eq(&before));
+        stop_fixture_agents(&mut app);
+    }
+
+    #[test]
     fn project_switch_timeout_keeps_runner_owned_and_dirty_edits_visible() {
         let (mut app, project_a, project_b, _store) = project_switch_app();
         let before = app.current_project_stamp();
@@ -12066,6 +12176,7 @@ mod tests {
         };
         let mut config = AcpBackendConfig::new(command);
         config.client.shutdown_timeout = Duration::from_millis(100);
+        config.permission_host = Some(teshi_agent_runtime::ChannelPermissionHost::new());
         config.tool_bridge = Some(ToolBridgeConfig {
             executable: std::env::current_exe().unwrap(),
             tools: app.agent_tools(0),

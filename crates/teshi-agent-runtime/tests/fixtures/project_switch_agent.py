@@ -42,6 +42,10 @@ def run_acp():
     for line in sys.stdin:
         message = json.loads(line)
         method = message.get("method")
+        if message.get("id") == 91 and method is None:
+            outcome = message.get("result", {}).get("outcome", {})
+            trace("permission_decision", outcome=outcome)
+            continue
         result = {}
         if method == "initialize":
             result = {"protocolVersion": 1, "agentInfo": {"name": "Project fixture"}}
@@ -59,6 +63,14 @@ def run_acp():
                 "sessionId": session, "update": {"sessionUpdate": "agent_message_chunk",
                 "content": {"type": "text", "text": reply}}}})
             if project == "project-a":
+                if os.environ.get("TESHI_TEST_AGENT_PERMISSION") == "1":
+                    send({"jsonrpc": "2.0", "id": 91,
+                          "method": "session/request_permission", "params": {
+                              "sessionId": session, "options": [
+                                  {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+                                  {"optionId": "reject", "name": "Reject", "kind": "reject_once"}]}})
+                    trace("permission_requested")
+                    continue
                 if os.environ.get("TESHI_TEST_AGENT_CHILD") == "1":
                     subprocess.Popen([sys.executable, __file__, "child", str(root)])
                     deadline = time.monotonic() + 5

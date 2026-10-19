@@ -58,13 +58,18 @@ class World(TerminalWorld):
             assert time.monotonic() < deadline, f"missing fixture file: {name}"
             time.sleep(.01)
 
-    def launch_project(self, acp=False):
+    def launch_project(self, acp=False, permission=False, review=False):
         env = self._env(None)
         if acp:
             fixture = Path(__file__).resolve().parents[3] / "teshi-agent-runtime/tests/fixtures/project_switch_agent.py"
             env += [("TESHI_AGENT_BACKEND", "acp"), ("TESHI_ACP_PROGRAM", sys.executable),
                     ("TESHI_ACP_ARGS_JSON", json.dumps([str(fixture), "acp", str(self.root)])),
                     ("TESHI_TEST_AGENT_CHILD", "1")]
+            if permission:
+                env += [("TESHI_TEST_AGENT_PERMISSION", "1")]
+            if review:
+                fixture = fixture.with_name("fake_acp_agent.py")
+                env += [("TESHI_ACP_ARGS_JSON", json.dumps([str(fixture), "mcp_review"]))]
         self.op("launch", config=dict(program=os.environ["TESHI_SELF_TEST_BIN"],
                 args=[str(self.project), "--requirements-root", str(self.requirements)],
                 cwd=str(self.root), env=env, cols=140, rows=36))
@@ -73,6 +78,92 @@ class World(TerminalWorld):
         self.expect("controlled service" if self.dispatch is not None else "project-a step")
 
     def step(self, text, table=None):
+        if text == "project A has proposed test points awaiting human review":
+            self.launch_project(acp=True, review=True)
+            self.op("key", "3")
+            self.expect("Welcome to AI Chat!")
+            self.op("key", "Enter")
+            self.op("write", "Propose a login test point")
+            self.op("key", "Enter")
+            self.wait_file("project-a/testpoints/testpoints.json")
+            self.expect("Pipeline paused for human review")
+            self.op("key", "Escape")
+            self.op("key", "5")
+            self.expect("Valid login")
+            self.review_snapshot = (self.project / "testpoints/testpoints.json").read_bytes()
+            points = json.loads(self.review_snapshot)["test_points"]
+            assert len(points) == 1 and points[0]["review_state"] == "proposed", points
+            self.evidence.append(dict(event="human_review_pending", screen=self.screen()))
+            return
+        if text == "the operator requests project B through the path picker":
+            self.op("click", "Project: project-a")
+            self.expect("Open project")
+            self.op("key", "o")
+            self.expect("Open project path")
+            self.op("write", str(self.other))
+            self.op("key", "Enter")
+            return
+        if text == "the operator cancels the busy project switch":
+            self.expect("Stop tasks and switch")
+            self.op("key", "Escape")
+            return
+        if text == "project A retains its unapproved test points":
+            self.expect("Project: project-a")
+            self.expect("Valid login")
+            assert (self.project / "testpoints/testpoints.json").read_bytes() == self.review_snapshot
+            self.evidence.append(dict(event="review_switch_cancelled", screen=self.screen()))
+            return
+        if text == "project B becomes active without accepting A's review":
+            self.expect("Project: project-b")
+            assert (self.project / "testpoints/testpoints.json").read_bytes() == self.review_snapshot
+            assert not (self.other / "testpoints/testpoints.json").exists()
+            assert not (self.project / "blocked.feature").exists()
+            assert not (self.project / "approved.feature").exists()
+            self.evidence.append(dict(event="review_switch_completed", screen=self.screen(),
+                                      proposed=json.loads(self.review_snapshot)))
+            return
+        if text == "project A is waiting for ACP tool permission":
+            self.launch_project(acp=True, permission=True)
+            self.op("key", "3")
+            self.expect("Welcome to AI Chat!")
+            self.op("key", "Enter")
+            self.op("write", "A_PROJECT_ONLY_REQUEST")
+            self.op("key", "Enter")
+            self.expect("Allow once")
+            self.evidence.append(dict(event="permission_pending", screen=self.screen()))
+            return
+        if text == "the operator clicks the project header behind the permission prompt":
+            self.op("click", "Project: project-a")
+            return
+        if text == "the permission prompt retains project A without approving the tool":
+            screen = self.expect("Allow once")
+            assert "Open project" not in screen, screen
+            assert "Project: project-a" in screen, screen
+            trace = (self.root / "agent-evidence/trace.jsonl").read_text(encoding="utf-8")
+            assert '"kind": "permission_decision"' not in trace, trace
+            self.evidence.append(dict(event="permission_owns_input", screen=screen))
+            return
+        if text == "the operator rejects the permission request":
+            self.op("key", "Escape")
+            deadline = time.monotonic() + 5
+            while True:
+                events = [json.loads(line) for line in (self.root / "agent-evidence/trace.jsonl").read_text(encoding="utf-8").splitlines()]
+                decisions = [event for event in events if event["kind"] == "permission_decision"]
+                if decisions:
+                    assert decisions[-1]["outcome"]["outcome"] == "cancelled", decisions
+                    break
+                assert time.monotonic() < deadline, "permission rejection was not delivered"
+                time.sleep(.01)
+            self.evidence.append(dict(event="permission_rejected", decisions=decisions))
+            return
+        if text == "project B has no stale permission request or old reply":
+            screen = self.expect("Project: project-b")
+            assert "Allow once" not in screen and "A_LATE_REPLY" not in screen, screen
+            events = [json.loads(line) for line in (self.root / "agent-evidence/trace.jsonl").read_text(encoding="utf-8").splitlines()]
+            exits = [event for event in events if event["kind"] == "acp_exit" and event.get("project") == "project-a"]
+            assert exits and process_exited(exits[-1]["pid"]), events
+            self.evidence.append(dict(event="permission_switch_completed", trace=events, screen=screen))
+            return
         if text == "isolated projects A and B are open for failure testing":
             return
         if text == "project A has an unsaved Feature edit":
