@@ -192,6 +192,29 @@ impl ToolBridge {
             request.respond(Err("ACP turn cancelled".into()));
         }
     }
+
+    /// Reject calls and stop accepting connections without joining on the UI thread.
+    pub(crate) fn request_shutdown(&mut self) {
+        self.cancel_pending();
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+    }
+
+    /// Confirm that all bridge connection tasks and the owned runtime exited.
+    pub(crate) fn poll_shutdown(&mut self) -> bool {
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            return false;
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        true
+    }
 }
 
 impl Drop for ToolBridge {

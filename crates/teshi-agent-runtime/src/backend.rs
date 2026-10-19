@@ -159,6 +159,11 @@ impl AgentBackendRuntime {
     pub fn configure_acp(&mut self, config: AcpBackendConfig) -> anyhow::Result<()> {
         match self {
             Self::Acp(backend) => {
+                backend.poll_shutdown();
+                anyhow::ensure!(
+                    !backend.shutdown_pending(),
+                    "ACP backend is still stopping; retry after exit"
+                );
                 backend.configure(config);
                 Ok(())
             }
@@ -229,6 +234,31 @@ impl AgentBackendRuntime {
         match self {
             Self::Native(backend) => backend.runtime.cancel(),
             Self::Acp(backend) => backend.cancel(),
+        }
+    }
+
+    /// Request complete teardown of the current project's model/ACP resources.
+    /// The frontend must poll shutdown before replacing project-owned state.
+    pub fn request_shutdown(&mut self) {
+        match self {
+            Self::Native(backend) => backend.runtime.cancel(),
+            Self::Acp(backend) => backend.request_shutdown(),
+        }
+    }
+
+    /// Whether stopped or replaced backend resources still need exit acknowledgement.
+    pub fn shutdown_pending(&self) -> bool {
+        match self {
+            Self::Native(backend) => backend.runtime.shutdown_pending(),
+            Self::Acp(backend) => backend.shutdown_pending(),
+        }
+    }
+
+    /// Reap exited workers without waiting synchronously for live work.
+    pub fn poll_shutdown(&mut self) {
+        match self {
+            Self::Native(backend) => backend.runtime.poll_shutdown(),
+            Self::Acp(backend) => backend.poll_shutdown(),
         }
     }
 

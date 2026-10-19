@@ -1,20 +1,19 @@
 //! Load and save authoring artifacts from the user-level requirement store
 //! and project-local test points.
 
-use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use teshi_core::authoring::{
-    AuthoringArtifacts, AuthoringDiagnostic, AuthoringSeverity, DocumentRevision,
-    RequirementDocumentContent, RequirementDocumentIndex, TestPointsFile,
     legacy_project_requirements_dir, mark_document_links_missing, re_resolve_document_links,
     requirement_title, resolve_requirement_store_path, testpoints_file, validate_loaded_artifacts,
-    validate_requirement_path,
+    validate_requirement_path, AuthoringArtifacts, AuthoringDiagnostic, AuthoringSeverity,
+    DocumentRevision, RequirementDocumentContent, RequirementDocumentIndex, TestPointsFile,
 };
 
 use crate::fs_util::{with_exclusive_lock, write_atomic, write_json_unlocked};
@@ -825,12 +824,10 @@ mod tests {
         let loaded = load_authoring_artifacts(project.path(), store.path()).unwrap();
         let artifacts = loaded.artifacts.expect("artifacts");
         assert!(artifacts.has_errors());
-        assert!(
-            artifacts
-                .diagnostics
-                .iter()
-                .any(|d| d.message.contains("duplicate test point"))
-        );
+        assert!(artifacts
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("duplicate test point")));
     }
 
     #[test]
@@ -843,12 +840,10 @@ mod tests {
         let loaded = load_authoring_artifacts(project.path(), store.path()).unwrap();
         let artifacts = loaded.artifacts.expect("artifacts");
         assert!(artifacts.has_errors());
-        assert!(
-            artifacts
-                .diagnostics
-                .iter()
-                .any(|d| d.message.contains("missing"))
-        );
+        assert!(artifacts
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("missing")));
     }
 
     #[test]
@@ -1034,12 +1029,10 @@ mod tests {
         let loaded = load_authoring_artifacts(project.path(), store.path()).unwrap();
         let artifacts = loaded.artifacts.expect("artifacts");
         assert!(artifacts.has_errors());
-        assert!(
-            artifacts
-                .diagnostics
-                .iter()
-                .any(|d| d.message.contains("not empty"))
-        );
+        assert!(artifacts
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("not empty")));
         assert!(artifacts.index.store_id.is_none());
         assert!(artifacts.documents.is_empty());
     }
@@ -1056,12 +1049,10 @@ mod tests {
         let loaded = load_authoring_artifacts(project.path(), store.path()).unwrap();
         let artifacts = loaded.artifacts.expect("artifacts");
         assert!(artifacts.has_errors());
-        assert!(
-            artifacts
-                .diagnostics
-                .iter()
-                .any(|d| d.message.contains("store_id"))
-        );
+        assert!(artifacts
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("store_id")));
     }
 
     #[test]
@@ -1079,12 +1070,10 @@ mod tests {
         let loaded = load_authoring_artifacts(project.path(), store.path()).unwrap();
         let artifacts = loaded.artifacts.expect("artifacts");
         assert!(artifacts.has_errors());
-        assert!(
-            artifacts
-                .diagnostics
-                .iter()
-                .any(|d| d.message.contains("does not match"))
-        );
+        assert!(artifacts
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("does not match")));
     }
 
     #[test]
@@ -1103,12 +1092,10 @@ mod tests {
         let loaded = load_authoring_artifacts(project.path(), store.path()).unwrap();
         let artifacts = loaded.artifacts.expect("artifacts");
         assert!(artifacts.documents.is_empty());
-        assert!(
-            artifacts
-                .diagnostics
-                .iter()
-                .any(|d| d.message.contains("import-project"))
-        );
+        assert!(artifacts
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("import-project")));
     }
 
     #[test]
@@ -1165,19 +1152,15 @@ mod tests {
 
         let loaded = load_authoring_artifacts(project.path(), store.path()).unwrap();
         let artifacts = loaded.artifacts.expect("artifacts");
-        assert!(
-            artifacts
-                .documents
-                .iter()
-                .all(|d| !d.body.contains("TOP SECRET"))
-        );
+        assert!(artifacts
+            .documents
+            .iter()
+            .all(|d| !d.body.contains("TOP SECRET")));
         assert!(artifacts.has_errors());
-        assert!(
-            artifacts
-                .diagnostics
-                .iter()
-                .any(|d| { d.message.contains("..") || d.message.contains("must not contain") })
-        );
+        assert!(artifacts
+            .diagnostics
+            .iter()
+            .any(|d| { d.message.contains("..") || d.message.contains("must not contain") }));
         let _ = fs::remove_file(&secret);
     }
 

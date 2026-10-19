@@ -328,11 +328,18 @@ pub enum LlmEvent {
 pub struct LlmHandle {
     tx: Sender<LlmRequest>,
     cancel: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+    wake: Arc<tokio::sync::Notify>,
+    worker: Option<thread::JoinHandle<()>>,
 }
 
 impl LlmHandle {
     /// Send a request to the LLM background thread.
     pub fn send(&self, request: LlmRequest) -> Result<()> {
+        anyhow::ensure!(
+            !self.shutdown.load(Ordering::SeqCst),
+            "LLM worker is stopping"
+        );
         self.tx
             .send(request)
             .context("LLM background thread has exited")
@@ -341,6 +348,30 @@ impl LlmHandle {
     /// Request cancellation of the currently in-progress request.
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
+
+    /// Stop accepting requests and wake a blocked model transport or idle worker.
+    /// Retain this handle until [`Self::poll_shutdown`] confirms thread exit.
+    pub fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        self.cancel();
+    }
+
+    /// Join an exited worker without blocking the caller on an active request.
+    /// Returns false while the worker still owns its transport or queued work.
+    pub fn poll_shutdown(&mut self) -> bool {
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            return false;
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        true
     }
 }
 
@@ -357,13 +388,35 @@ pub fn spawn_llm(config: LlmConfig) -> (LlmHandle, Receiver<LlmEvent>) {
     let (evt_tx, evt_rx) = mpsc::channel::<LlmEvent>();
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_clone = cancel.clone();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = Arc::clone(&shutdown);
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let wake_clone = Arc::clone(&wake);
 
-    thread::Builder::new()
+    let worker = thread::Builder::new()
         .name("teshi-llm".into())
-        .spawn(move || run_llm_worker(config, req_rx, evt_tx, cancel_clone))
+        .spawn(move || {
+            run_llm_worker(
+                config,
+                req_rx,
+                evt_tx,
+                cancel_clone,
+                shutdown_clone,
+                wake_clone,
+            )
+        })
         .expect("failed to spawn LLM worker thread");
 
-    (LlmHandle { tx: req_tx, cancel }, evt_rx)
+    (
+        LlmHandle {
+            tx: req_tx,
+            cancel,
+            shutdown,
+            wake,
+            worker: Some(worker),
+        },
+        evt_rx,
+    )
 }
 
 // ── Background worker ────────────────────────────────────────────────────────
@@ -373,6 +426,8 @@ fn run_llm_worker(
     req_rx: Receiver<LlmRequest>,
     evt_tx: Sender<LlmEvent>,
     cancel: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+    wake: Arc<tokio::sync::Notify>,
 ) {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -387,7 +442,17 @@ fn run_llm_worker(
         }
     };
 
-    while let Ok(request) = req_rx.recv() {
+    while !shutdown.load(Ordering::SeqCst) {
+        let request = match req_rx.recv_timeout(std::time::Duration::from_millis(25)) {
+            Ok(request) => request,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        // A shutdown is permanent; do not reset it when a queued turn races
+        // with the UI's cancellation request.
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
         // Reset cancel flag for new request
         cancel.store(false, Ordering::SeqCst);
         match request {
@@ -396,9 +461,26 @@ fn run_llm_worker(
                 messages,
                 tools,
             } => {
-                rt.block_on(process_chat_request(
-                    &config, system, messages, tools, &evt_tx, &cancel,
-                ));
+                rt.block_on(async {
+                    tokio::select! {
+                        _ = process_chat_request(&config, system, messages, tools, &evt_tx, &cancel) => {},
+                        _ = async {
+                            loop {
+                                let notified = wake.notified();
+                                if cancel.load(Ordering::SeqCst) || shutdown.load(Ordering::SeqCst) {
+                                    break;
+                                }
+                                notified.await;
+                            }
+                        } => {
+                            // Dropping the request future closes stalled HTTP
+                            // reads as well as backoff timers before thread exit.
+                            let _ = evt_tx.send(LlmEvent::Error {
+                                message: "Request cancelled by user".into(),
+                            });
+                        }
+                    }
+                });
             }
         }
     }
@@ -1174,6 +1256,24 @@ mod tests {
             http_headers: HashMap::new(),
             chat_options: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn idle_worker_shutdown_acknowledges_without_dropping_handle() {
+        let (mut handle, _events) = spawn_llm(base_config());
+        handle.request_shutdown();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !handle.poll_shutdown() && std::time::Instant::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(handle.poll_shutdown());
+        assert!(handle
+            .send(LlmRequest::Chat {
+                system: None,
+                messages: Vec::new(),
+                tools: None
+            })
+            .is_err());
     }
 
     #[test]

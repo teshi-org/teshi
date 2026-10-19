@@ -6,18 +6,17 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use teshi_core::authoring::{
+    normalize_iteration_name, requirement_title, resolve_requirement_store_path,
     InvalidIterationName, InvalidRequirementTitle, RequirementDocumentContent,
     RequirementDocumentIndex, RequirementDocumentMeta, RequirementIterationFilter,
-    RequirementStoreId, normalize_iteration_name, requirement_title,
-    resolve_requirement_store_path,
+    RequirementStoreId,
 };
 
 use super::store::{
-    RequirementTombstone, compute_document_revision as hash_document_revision,
-    read_requirement_index_unlocked, read_requirement_trash_unlocked,
-    recover_requirement_store_unlocked, replace_markdown, with_requirement_store_lock,
-    write_requirement_index_unlocked, write_requirement_markdown_unlocked,
-    write_requirement_trash_unlocked,
+    compute_document_revision as hash_document_revision, read_requirement_index_unlocked,
+    read_requirement_trash_unlocked, recover_requirement_store_unlocked, replace_markdown,
+    with_requirement_store_lock, write_requirement_index_unlocked,
+    write_requirement_markdown_unlocked, write_requirement_trash_unlocked, RequirementTombstone,
 };
 
 /// One candidate returned when a document reference is ambiguous.
@@ -563,9 +562,9 @@ pub fn resolve_requirement_ref_in_store(
 mod tests {
     use super::*;
     use crate::authoring::{
-        REQUIREMENTS_INDEX_FILE, REQUIREMENTS_TRASH_FILE, initialize_requirement_store,
-        is_requirement_document_id_reserved, load_authoring_artifacts,
-        save_requirement_document_index, save_requirement_markdown,
+        initialize_requirement_store, is_requirement_document_id_reserved,
+        load_authoring_artifacts, save_requirement_document_index, save_requirement_markdown,
+        REQUIREMENTS_INDEX_FILE, REQUIREMENTS_TRASH_FILE,
     };
     use teshi_core::authoring::RequirementDocumentMeta;
 
@@ -926,13 +925,11 @@ mod tests {
         )
         .unwrap_err();
         assert!(store.path().join("auth/login.md").exists());
-        assert!(
-            require_initialized_index(store.path())
-                .unwrap()
-                .documents
-                .iter()
-                .any(|doc| doc.id == "doc-12")
-        );
+        assert!(require_initialized_index(store.path())
+            .unwrap()
+            .documents
+            .iter()
+            .any(|doc| doc.id == "doc-12"));
     }
 
     #[test]
@@ -953,14 +950,12 @@ mod tests {
         .unwrap();
 
         let loaded = load_authoring_artifacts(project.path(), store.path()).unwrap();
-        assert!(
-            loaded
-                .artifacts
-                .unwrap()
-                .documents
-                .iter()
-                .any(|doc| doc.meta.id == "doc-12")
-        );
+        assert!(loaded
+            .artifacts
+            .unwrap()
+            .documents
+            .iter()
+            .any(|doc| doc.meta.id == "doc-12"));
         assert_eq!(
             fs::read_to_string(store.path().join("auth/login.md")).unwrap(),
             "# 登录需求\n"

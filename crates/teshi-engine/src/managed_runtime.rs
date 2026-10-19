@@ -369,9 +369,7 @@ fn valid_sha256(value: &str) -> bool {
 mod tests {
     use super::*;
     use std::io::{Cursor, Write};
-    use std::sync::Mutex;
     use tempfile::tempdir;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
     use zip::write::FileOptions;
 
     fn req() -> RuntimeRequirement {
@@ -526,7 +524,7 @@ mod tests {
 
     #[test]
     fn missing_runtime_installs_transactionally_from_verified_archive() {
-        let _env = ENV_LOCK.lock().unwrap();
+        let _env = crate::app_data::test_env_lock();
         let dir = tempdir().unwrap();
         let archive = dir.path().join("runtime.zip");
         let bytes = runtime_zip();
@@ -547,7 +545,7 @@ mod tests {
 
     #[test]
     fn existing_compatible_runtime_is_reused_without_download() {
-        let _env = ENV_LOCK.lock().unwrap();
+        let _env = crate::app_data::test_env_lock();
         let dir = tempdir().unwrap();
         let final_dir = winapp_runtime_dir_in(dir.path());
         write_runtime(&final_dir, good_manifest());

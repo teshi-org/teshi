@@ -394,7 +394,24 @@ fn separate_backends_keep_configuration_isolated() {
         "a"
     );
     first.cancel();
-    first.connect_acp().unwrap();
+    // Reconnection must not join a live shutdown on the calling thread.
+    // Retry only after the owned resources acknowledge teardown.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        first.poll_shutdown();
+        if first.connect_acp().is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cancelled ACP backend did not exit"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        !first.shutdown_pending(),
+        "a reconnected worker must not retain shutdown ownership"
+    );
     let fresh = wait_controls(&first, |s| s.ready);
     assert_eq!(fresh.config.options[0].current, "a");
     assert!(

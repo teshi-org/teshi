@@ -101,6 +101,7 @@ pub struct NativeAgentRuntime {
     pub partial_reasoning: String,
     pub llm_handle: Option<LlmHandle>,
     pub llm_rx: Option<Receiver<LlmEvent>>,
+    retiring_models: Vec<LlmHandle>,
     model_config: Option<LlmConfig>,
     state: NativeTurnState,
     loops: u32,
@@ -111,7 +112,10 @@ pub struct NativeAgentRuntime {
 impl Drop for NativeAgentRuntime {
     fn drop(&mut self) {
         if let Some(handle) = &self.llm_handle {
-            handle.cancel();
+            handle.request_shutdown();
+        }
+        for handle in &self.retiring_models {
+            handle.request_shutdown();
         }
     }
 }
@@ -124,6 +128,7 @@ impl NativeAgentRuntime {
             partial_reasoning: String::new(),
             llm_handle: None,
             llm_rx: None,
+            retiring_models: Vec::new(),
             model_config: None,
             state: NativeTurnState::Idle,
             loops: 0,
@@ -148,7 +153,8 @@ impl NativeAgentRuntime {
             self.partial_reasoning.clear();
         }
         if let Some(handle) = self.llm_handle.take() {
-            handle.cancel();
+            handle.request_shutdown();
+            self.retiring_models.push(handle);
         }
         self.llm_rx = None;
         self.model_config = Some(config.clone());
@@ -405,14 +411,25 @@ impl NativeAgentRuntime {
     }
 
     pub fn cancel(&mut self) {
-        if let Some(handle) = &self.llm_handle {
-            handle.cancel();
+        if let Some(handle) = self.llm_handle.take() {
+            handle.request_shutdown();
+            self.retiring_models.push(handle);
         }
-        self.llm_handle = None;
         self.llm_rx = None;
         self.partial_response.clear();
         self.partial_reasoning.clear();
         self.state = NativeTurnState::Cancelled;
+    }
+
+    /// Whether cancelled/replaced model workers still need exit acknowledgement.
+    pub fn shutdown_pending(&self) -> bool {
+        !self.retiring_models.is_empty()
+    }
+
+    /// Reap stopped model workers while preserving ownership of live transports.
+    pub fn poll_shutdown(&mut self) {
+        self.retiring_models
+            .retain_mut(|handle| !handle.poll_shutdown());
     }
 
     pub fn after_tools(

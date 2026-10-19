@@ -199,6 +199,7 @@ pub struct AcpAgentBackend {
     worker: Option<thread::JoinHandle<()>>,
     state: AgentBackendStatus,
     submitted_prompt: bool,
+    shutting_down: bool,
     /// Shared with the ACP client inside the worker; delivers and answers
     /// `session/request_permission` prompts while the turn stays parked.
     permission_host: Option<Arc<ChannelPermissionHost>>,
@@ -226,6 +227,7 @@ impl Default for AcpAgentBackend {
             worker: None,
             state: AgentBackendStatus::Unavailable,
             submitted_prompt: false,
+            shutting_down: false,
             permission_host: None,
         }
     }
@@ -257,6 +259,13 @@ impl AcpAgentBackend {
     /// # Errors
     /// Returns an error if no command is configured or the worker cannot start.
     pub fn connect(&mut self) -> anyhow::Result<()> {
+        if self.shutting_down {
+            self.poll_shutdown();
+            anyhow::ensure!(
+                !self.shutdown_pending(),
+                "ACP backend is still stopping; retry after exit"
+            );
+        }
         let config = self.config.clone().ok_or_else(|| {
             anyhow::anyhow!("ACP backend is not configured; supply an AcpAgentCommand")
         })?;
@@ -272,7 +281,14 @@ impl AcpAgentBackend {
                 .as_ref()
                 .is_some_and(thread::JoinHandle::is_finished)
         {
-            self.stop();
+            // A failed transport may still be unwinding an RPC. Keep its
+            // handle until acknowledgement instead of joining on the UI path.
+            self.request_shutdown();
+            self.poll_shutdown();
+            anyhow::ensure!(
+                !self.shutdown_pending(),
+                "ACP backend is still stopping; retry after exit"
+            );
         }
         if self.worker.is_none() {
             self.tool_bridge = config
@@ -328,8 +344,14 @@ impl AcpAgentBackend {
     /// # Errors
     /// Fails when connecting fails or a setting change is pending.
     pub fn start(&mut self) -> anyhow::Result<()> {
-        if self.controls().pending {
+        let controls = self.controls();
+        if controls.pending {
             anyhow::bail!("ACP settings change is pending");
+        }
+        if !controls.ready
+            && let Some(error) = controls.error
+        {
+            anyhow::bail!("ACP connection unavailable: {error}; reselect the Agent to reconnect");
         }
         self.connect()?;
         self.partial_response.clear();
@@ -456,6 +478,53 @@ impl AcpAgentBackend {
         self.partial_response.clear();
     }
 
+    /// Stop this project's process and MCP bridge without blocking the frontend.
+    pub fn request_shutdown(&mut self) {
+        self.shutting_down = true;
+        if let Some(bridge) = &mut self.tool_bridge {
+            bridge.request_shutdown();
+        }
+        if let Some(commands) = self.commands.take() {
+            let _ = commands.send(WorkerCommand::Shutdown);
+        }
+        // Old updates and permission requests cannot mutate the retained A
+        // context or any later B context while shutdown is in progress.
+        self.events = None;
+        self.permission_host = None;
+        self.state = AgentBackendStatus::Cancelled;
+        self.partial_response.clear();
+    }
+
+    /// Whether owned resources still need shutdown acknowledgement.
+    pub fn shutdown_pending(&self) -> bool {
+        self.shutting_down && (self.worker.is_some() || self.tool_bridge.is_some())
+    }
+
+    /// Reap only resources that have already exited; retain live handles on timeout.
+    pub fn poll_shutdown(&mut self) {
+        if !self.shutting_down {
+            return;
+        }
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(thread::JoinHandle::is_finished)
+            && let Some(worker) = self.worker.take()
+        {
+            let _ = worker.join();
+        }
+        if self
+            .tool_bridge
+            .as_mut()
+            .is_some_and(|bridge| bridge.poll_shutdown())
+        {
+            self.tool_bridge = None;
+        }
+        if self.worker.is_none() && self.tool_bridge.is_none() {
+            self.shutting_down = false;
+        }
+    }
+
     pub fn try_next_event(&mut self) -> Result<Option<AgentBackendEvent>, mpsc::TryRecvError> {
         // Permission prompts are delivered ahead of the turn's own events so a
         // frontend can answer while the worker stays parked on the turn future.
@@ -580,6 +649,7 @@ impl AcpAgentBackend {
             let _ = worker.join();
         }
         self.events = None;
+        self.shutting_down = false;
     }
 
     pub(crate) fn host_tool_request(&self) -> Option<crate::tool_bridge::HostToolRequest> {

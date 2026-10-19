@@ -17,6 +17,7 @@ mod locator;
 mod managed_runtime;
 pub mod model_profile;
 mod project;
+pub mod project_identity;
 mod project_settings;
 mod screen;
 mod sidecar;
@@ -41,11 +42,11 @@ pub use api_dispatch::{
     DispatchCase, RunnableScenario,
 };
 pub use app_data::{
-    app_data_dir, ensure_migrated_from_teshi_desktop_at,
-    get_recent_projects as load_recent_projects, load_settings, open_dialog_default_dir,
-    requirements_data_dir, save_settings, validated_window_size, AppSettings,
-    RequirementsViewPrefs, DEFAULT_REQUIREMENTS_STORE_DIR, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH,
-    TESHI_REQUIREMENTS_DIR_ENV,
+    add_recent_project, app_data_dir, ensure_migrated_from_teshi_desktop_at,
+    get_recent_projects as load_recent_projects, load_recent_project_entries, load_settings,
+    open_dialog_default_dir, requirements_data_dir, save_settings, validated_window_size,
+    AppSettings, RecentProjectEntry, RequirementsViewPrefs, DEFAULT_REQUIREMENTS_STORE_DIR,
+    MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, TESHI_REQUIREMENTS_DIR_ENV,
 };
 pub use authoring::{
     compute_document_revision, delete_requirement_document, import_project_requirements,
@@ -117,6 +118,7 @@ pub use project::{
     open_project, set_browser_active, set_terminal_active, teardown_runtime, DirEntry,
     ProjectState,
 };
+pub use project_identity::{ProjectGeneration, ProjectIdentity, ProjectStamp};
 pub use project_settings::{
     load_project_settings, ProjectSettings, DEFAULT_LOCATOR_AUTO_CONFIRM_SEC,
     DEFAULT_PLAYWRIGHT_TEST_ID_ATTRIBUTE,

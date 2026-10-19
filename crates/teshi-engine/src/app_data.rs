@@ -4,9 +4,15 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use std::sync::{Mutex, MutexGuard};
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use teshi_core::authoring::{RequirementGroupMode, RequirementIterationFilter};
+
+use crate::fs_util::{with_exclusive_lock, write_json_unlocked};
+use crate::project_identity::ProjectIdentity;
 
 const RECENT_MAX: usize = 10;
 const DESKTOP_MIGRATION_MARKER: &str = ".migrated-from-teshi-desktop";
@@ -23,6 +29,19 @@ pub const DEFAULT_REQUIREMENTS_STORE_DIR: &str = "requirements";
 pub const MIN_WINDOW_WIDTH: u32 = 1280;
 /// Minimum window height for desktop shells.
 pub const MIN_WINDOW_HEIGHT: u32 = 720;
+
+/// Environment-mutating unit tests in this crate must share one lock.
+///
+/// `TESHI_APP_DATA_DIR` and the runtime-artifact overrides are process-global;
+/// separate per-module locks still allow parallel tests to restore one
+/// another's values.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> MutexGuard<'static, ()> {
+    TEST_ENV_LOCK.lock().unwrap()
+}
 
 /// Returns `(width, height)` only when both dimensions meet the configured minimum.
 pub fn validated_window_size(width: u32, height: u32) -> Option<(u32, u32)> {
@@ -59,9 +78,25 @@ pub struct RequirementsViewPrefs {
     pub group: RequirementGroupMode,
 }
 
+/// A normalized recent project and its last successful activation timestamp.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecentProjectEntry {
+    /// Normalized project root.
+    pub root: String,
+    /// Last path component, used as the picker label.
+    pub display_name: String,
+    /// Unix milliseconds when the project was activated.
+    pub last_opened_ms: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct RecentFile {
+    /// Legacy path-only representation. Kept for one-way migration.
+    #[serde(default)]
     paths: Vec<String>,
+    /// Current normalized representation.
+    #[serde(default)]
+    projects: Vec<RecentProjectEntry>,
 }
 
 /// Returns the Teshi app data directory.
@@ -271,29 +306,145 @@ fn settings_path() -> Result<PathBuf> {
 
 /// Reads the recent project list, pruning missing paths.
 pub fn get_recent_projects() -> Result<Vec<String>> {
+    Ok(load_recent_project_entries()?
+        .into_iter()
+        .map(|entry| entry.root)
+        .collect())
+}
+
+/// Read normalized recent projects and attempt a locked legacy migration.
+/// Missing paths are pruned from the returned view; concurrent writes are preserved.
+pub fn load_recent_project_entries() -> Result<Vec<RecentProjectEntry>> {
     let path = recent_path()?;
     if !path.exists() {
         return Ok(Vec::new());
     }
     let content = fs::read_to_string(&path)?;
-    let mut file: RecentFile = serde_json::from_str(&content).unwrap_or_default();
-    file.paths.retain(|p| Path::new(p).exists());
-    Ok(file.paths)
+    let file: RecentFile = match serde_json::from_str(&content) {
+        Ok(file) => file,
+        Err(_) => {
+            // A corrupt history must never make startup fail. Leave the file
+            // intact so the user can recover it, and expose an empty picker.
+            return Ok(Vec::new());
+        }
+    };
+    let legacy = file.projects.is_empty() && !file.paths.is_empty();
+    let mut entries = if legacy {
+        file.paths
+            .into_iter()
+            .map(|root| RecentProjectEntry {
+                display_name: Path::new(&root)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| root.clone()),
+                root,
+                last_opened_ms: 0,
+            })
+            .collect()
+    } else {
+        file.projects
+    };
+    entries = entries
+        .into_iter()
+        .filter_map(normalize_recent_entry)
+        .collect();
+    if legacy {
+        let _ = migrate_recent_snapshot(&path, &content, &entries);
+    }
+    Ok(entries)
+}
+
+// A lookup may race another process after reading the old representation.
+// Migrate only the snapshot still present when this writer owns the lock.
+fn migrate_recent_snapshot(
+    path: &Path,
+    observed: &str,
+    entries: &[RecentProjectEntry],
+) -> Result<()> {
+    with_exclusive_lock(path, || {
+        if fs::read_to_string(path)? != observed {
+            return Ok(());
+        }
+        write_json_unlocked(
+            path,
+            &RecentFile {
+                paths: Vec::new(),
+                projects: entries.to_vec(),
+            },
+        )
+    })
+}
+
+fn normalize_recent_entry(entry: RecentProjectEntry) -> Option<RecentProjectEntry> {
+    let identity = ProjectIdentity::new(&entry.root).ok()?;
+    if !identity.root().is_dir() {
+        return None;
+    }
+    Some(RecentProjectEntry {
+        root: identity.root().to_string_lossy().into_owned(),
+        display_name: identity.display_name(),
+        last_opened_ms: entry.last_opened_ms,
+    })
 }
 
 /// Adds a project path to the recent list (LRU, max 10).
 pub fn add_recent_project(path: &Path) -> Result<Vec<String>> {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let entry = canonical.to_string_lossy().into_owned();
-    let mut paths = get_recent_projects()?;
-    paths.retain(|p| p != &entry);
-    paths.insert(0, entry);
-    paths.truncate(RECENT_MAX);
-    let file = RecentFile {
-        paths: paths.clone(),
+    let identity = ProjectIdentity::new(path)?;
+    let root = identity.root().to_string_lossy().into_owned();
+    let entry = RecentProjectEntry {
+        display_name: identity.display_name(),
+        root: root.clone(),
+        last_opened_ms: now_millis(),
     };
-    fs::write(recent_path()?, serde_json::to_string_pretty(&file)?)?;
-    Ok(paths)
+    let recent = recent_path()?;
+    with_exclusive_lock(&recent, || {
+        let entries = if recent.exists() {
+            let content = fs::read_to_string(&recent).unwrap_or_default();
+            let file: RecentFile = serde_json::from_str(&content).unwrap_or_default();
+            if file.projects.is_empty() {
+                file.paths
+                    .into_iter()
+                    .map(|legacy| RecentProjectEntry {
+                        display_name: Path::new(&legacy)
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| legacy.clone()),
+                        root: legacy,
+                        last_opened_ms: 0,
+                    })
+                    .collect()
+            } else {
+                file.projects
+            }
+        } else {
+            Vec::new()
+        };
+        let mut entries = entries
+            .into_iter()
+            .filter_map(normalize_recent_entry)
+            .collect::<Vec<_>>();
+        entries.retain(|existing| existing.root != root);
+        entries.insert(0, entry);
+        entries.truncate(RECENT_MAX);
+        write_json_unlocked(
+            &recent,
+            &RecentFile {
+                paths: Vec::new(),
+                projects: entries.clone(),
+            },
+        )?;
+        Ok(entries
+            .into_iter()
+            .map(|existing| existing.root)
+            .collect::<Vec<_>>())
+    })
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// Loads settings from disk.
@@ -488,9 +639,7 @@ mod tests {
     }
 
     fn with_isolated_env<T>(f: impl FnOnce() -> T) -> T {
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let prev_app = std::env::var("TESHI_APP_DATA_DIR").ok();
         let prev_req = std::env::var(TESHI_REQUIREMENTS_DIR_ENV).ok();
         let result = f();
@@ -572,5 +721,94 @@ mod tests {
             let resolved = requirements_data_dir(None).unwrap();
             assert_eq!(resolved, app.join(DEFAULT_REQUIREMENTS_STORE_DIR));
         });
+    }
+
+    #[test]
+    fn recent_projects_migrate_legacy_paths_and_keep_picker_metadata() {
+        with_isolated_env(|| {
+            let tmp = TempDir::new().unwrap();
+            let app = tmp.path().join("app");
+            let first = tmp.path().join("first");
+            fs::create_dir_all(&first).unwrap();
+            unsafe { std::env::set_var("TESHI_APP_DATA_DIR", &app) };
+            fs::create_dir_all(&app).unwrap();
+            fs::write(
+                app.join("recent.json"),
+                serde_json::json!({"paths": [first.to_string_lossy()]}).to_string(),
+            )
+            .unwrap();
+
+            let migrated = load_recent_project_entries().unwrap();
+            assert_eq!(migrated.len(), 1);
+            assert_eq!(migrated[0].root, first.to_string_lossy());
+            let persisted_migration: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(app.join("recent.json")).unwrap())
+                    .unwrap();
+            assert!(persisted_migration["projects"].is_array());
+            assert!(persisted_migration["paths"].as_array().unwrap().is_empty());
+
+            let second = tmp.path().join("second");
+            fs::create_dir_all(&second).unwrap();
+            let roots = add_recent_project(&second).unwrap();
+            assert_eq!(roots[0], second.to_string_lossy());
+            let persisted: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(app.join("recent.json")).unwrap())
+                    .unwrap();
+            assert!(persisted.get("projects").is_some());
+            assert!(persisted.get("paths").is_some());
+        });
+    }
+
+    #[test]
+    fn corrupt_recent_history_is_ignored_without_startup_failure() {
+        with_isolated_env(|| {
+            let tmp = TempDir::new().unwrap();
+            let app = tmp.path().join("app");
+            unsafe { std::env::set_var("TESHI_APP_DATA_DIR", &app) };
+            fs::create_dir_all(&app).unwrap();
+            fs::write(app.join("recent.json"), b"{not-json").unwrap();
+            assert!(load_recent_project_entries().unwrap().is_empty());
+            assert_eq!(
+                fs::read_to_string(app.join("recent.json")).unwrap(),
+                "{not-json"
+            );
+        });
+    }
+
+    #[test]
+    fn recent_projects_deduplicate_aliases_and_bound_history() {
+        with_isolated_env(|| {
+            let tmp = TempDir::new().unwrap();
+            let app = tmp.path().join("app");
+            unsafe { std::env::set_var("TESHI_APP_DATA_DIR", &app) };
+            let project = tmp.path().join("project");
+            fs::create_dir_all(&project).unwrap();
+            let alias = project.join(".");
+            add_recent_project(&project).unwrap();
+            add_recent_project(&alias).unwrap();
+            assert_eq!(get_recent_projects().unwrap().len(), 1);
+
+            for index in 0..(RECENT_MAX + 2) {
+                fs::create_dir_all(tmp.path().join(format!("project-{index}"))).unwrap();
+                add_recent_project(&tmp.path().join(format!("project-{index}"))).unwrap();
+            }
+            assert_eq!(get_recent_projects().unwrap().len(), RECENT_MAX);
+        });
+    }
+    #[test]
+    fn recent_migration_preserves_a_newer_concurrent_history() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("recent.json");
+        let observed = r#"{"paths":["project-a"]}"#;
+        let newer = r#"{"projects":[{"root":"project-b","display_name":"B","last_opened_ms":7}]}"#;
+        fs::write(&path, newer).unwrap();
+        migrate_recent_snapshot(&path, observed, &[]).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), newer);
+        fs::write(&path, observed).unwrap();
+        migrate_recent_snapshot(&path, observed, &[]).unwrap();
+        let migrated: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(migrated["projects"], serde_json::json!([]));
+        assert_eq!(migrated["paths"], serde_json::json!([]));
     }
 }
