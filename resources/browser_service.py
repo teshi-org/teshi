@@ -826,14 +826,46 @@ class EmbeddedSession:
                 elif action == "assert_visible":
                     pass
                 elif action == "assert_text":
-                    text = await locator.inner_text(timeout=timeout_ms)
-                    if (value or "") not in text:
-                        return {
-                            "ok": False,
-                            "error": "text assertion failed",
-                            "code": "assert_text_failed",
-                            "actual": text,
-                        }
+                    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+                    # Async UI projections may trail the action that changed them.
+                    # Wait on the read-only condition without repeating that action.
+                    deadline = time.monotonic() + timeout_ms / 1000
+                    text = None
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0 and text is not None:
+                            return {
+                                "ok": False,
+                                "error": "text assertion failed",
+                                "code": "assert_text_failed",
+                                "actual": text,
+                            }
+                        try:
+                            text = await locator.inner_text(timeout=max(1, remaining * 1000))
+                        except PlaywrightTimeoutError:
+                            # A final read can exhaust the deadline after an
+                            # earlier successful read. Preserve the observed
+                            # mismatch rather than losing it to a timing race.
+                            if text is None:
+                                raise
+                            return {
+                                "ok": False,
+                                "error": "text assertion failed",
+                                "code": "assert_text_failed",
+                                "actual": text,
+                            }
+                        if (value or "") in text:
+                            break
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            return {
+                                "ok": False,
+                                "error": "text assertion failed",
+                                "code": "assert_text_failed",
+                                "actual": text,
+                            }
+                        await asyncio.sleep(min(0.05, remaining))
                 elif action == "assert_text_count":
                     text = await locator.inner_text(timeout=timeout_ms)
                     actual_count = text.count(value or "")
@@ -1960,6 +1992,11 @@ async def run_embedded(
                             page_url=session.current_url(),
                             cdp_http_url=cdp_meta.get("http_url"),
                         )
+        except websockets.exceptions.ConnectionClosed:
+            # CLI clients may close their transport after receiving a reply.
+            # A traceback per disconnect can fill the parent's stderr pipe and
+            # synchronously block every command on this event loop.
+            debug_log(project_root, "embedded_client_disconnected", {})
         finally:
             clients.discard(websocket)
 

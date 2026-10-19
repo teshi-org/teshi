@@ -15,7 +15,7 @@
         "action": "navigate",
         "value_arg": "http://127.0.0.1:20253/?e2e=1"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:34.405938800+00:00"
     },
     {
       "step_line": 11,
@@ -29,7 +29,7 @@
         "value": "[data-testid=\"e2e-root\"]",
         "action": "assert_visible"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:34.507755400+00:00"
     },
     {
       "step_line": 12,
@@ -39,12 +39,12 @@
       "source": "binding",
       "status": "confirmed",
       "primary": {
-        "strategy": "css",
-        "value": "[data-testid='e2e-surface']",
+        "strategy": "testid",
+        "value": "[data-testid=e2e-surface]",
         "action": "assert_text",
         "value_arg": "browser"
       },
-      "confirmed_at": "2026-09-09T15:21:48.894057400+00:00"
+      "confirmed_at": "2026-10-19T08:35:34.608220100+00:00"
     },
     {
       "step_line": 15,
@@ -58,7 +58,7 @@
         "value": "[data-testid=open-api-run]",
         "action": "click"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:34.712176100+00:00"
     },
     {
       "step_line": 16,
@@ -68,12 +68,11 @@
       "source": "binding",
       "status": "confirmed",
       "primary": {
-        "strategy": "css",
-        "value": "[data-testid='e2e-surface']",
-        "action": "assert_text",
-        "value_arg": "run"
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
       },
-      "confirmed_at": "2026-09-09T15:22:14.846267+00:00"
+      "confirmed_at": "2026-10-19T08:35:34.812752900+00:00"
     },
     {
       "step_line": 17,
@@ -88,25 +87,38 @@
         "action": "assert_text",
         "value_arg": "none"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:34.916406100+00:00"
     },
     {
       "step_line": 20,
-      "step_keyword": "假如",
+      "step_keyword": "当",
+      "step_text": "用户打开运行界面",
+      "step_text_normalized": "用户打开运行界面",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-10-19T08:35:35.020359800+00:00"
+    },
+    {
+      "step_line": 21,
+      "step_keyword": "那么",
       "step_text": "运行检查界面已显示",
       "step_text_normalized": "运行检查界面已显示",
       "source": "binding",
       "status": "confirmed",
       "primary": {
-        "strategy": "css",
-        "value": "[data-testid='e2e-surface']",
-        "action": "assert_text",
-        "value_arg": "run"
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
       },
-      "confirmed_at": "2026-09-09T15:22:43.271032100+00:00"
+      "confirmed_at": "2026-10-19T08:35:35.122347100+00:00"
     },
     {
-      "step_line": 21,
+      "step_line": 22,
       "step_keyword": "当",
       "step_text": "用户查看场景列表",
       "step_text_normalized": "用户查看场景列表",
@@ -117,25 +129,53 @@
         "value": "[data-testid=run-reload]",
         "action": "click"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:35.226893700+00:00"
     },
     {
-      "step_line": 22,
+      "step_line": 23,
       "step_keyword": "那么",
       "step_text": "teshi web 列出当前项目中的 Gherkin 场景",
       "step_text_normalized": "teshi web 列出当前项目中的 gherkin 场景",
       "source": "binding",
       "status": "confirmed",
       "primary": {
-        "strategy": "css",
-        "value": "[data-testid='e2e-scenarios']",
+        "strategy": "testid",
+        "value": "[data-testid=e2e-scenarios]",
         "action": "assert_text",
         "value_arg": "[api] Create a user then fetch by extracted id"
       },
-      "confirmed_at": "2026-09-09T15:23:37.077167500+00:00"
+      "confirmed_at": "2026-10-19T08:35:35.330976700+00:00"
     },
     {
       "step_line": 26,
+      "step_keyword": "当",
+      "step_text": "用户打开运行界面",
+      "step_text_normalized": "用户打开运行界面",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-10-19T08:35:35.434188100+00:00"
+    },
+    {
+      "step_line": 27,
+      "step_keyword": "那么",
+      "step_text": "运行检查界面已显示",
+      "step_text_normalized": "运行检查界面已显示",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-10-19T08:35:35.539411400+00:00"
+    },
+    {
+      "step_line": 28,
       "step_keyword": "当",
       "step_text": "用户刷新场景列表",
       "step_text_normalized": "用户刷新场景列表",
@@ -146,10 +186,10 @@
         "value": "[data-testid=run-reload]",
         "action": "click"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:35.643313+00:00"
     },
     {
-      "step_line": 27,
+      "step_line": 29,
       "step_keyword": "那么",
       "step_text": "teshi web 列出当前项目中的 Gherkin 场景",
       "step_text_normalized": "teshi web 列出当前项目中的 gherkin 场景",
@@ -161,10 +201,38 @@
         "action": "assert_text",
         "value_arg": "[api] Create a user then fetch by extracted id"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:35.747552200+00:00"
     },
     {
-      "step_line": 31,
+      "step_line": 32,
+      "step_keyword": "当",
+      "step_text": "用户打开运行界面",
+      "step_text_normalized": "用户打开运行界面",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-10-19T08:35:35.854100600+00:00"
+    },
+    {
+      "step_line": 33,
+      "step_keyword": "那么",
+      "step_text": "运行检查界面已显示",
+      "step_text_normalized": "运行检查界面已显示",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-10-19T08:35:35.958867100+00:00"
+    },
+    {
+      "step_line": 34,
       "step_keyword": "并且",
       "step_text": "已选中一个 Gherkin 场景",
       "step_text_normalized": "已选中一个 gherkin 场景",
@@ -175,10 +243,10 @@
         "value": "[data-testid=e2e-scenarios]",
         "action": "assert_visible"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:36.063817500+00:00"
     },
     {
-      "step_line": 32,
+      "step_line": 35,
       "step_keyword": "当",
       "step_text": "用户启动该场景",
       "step_text_normalized": "用户启动该场景",
@@ -189,10 +257,10 @@
         "value": "[data-testid=run-start]",
         "action": "click"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:36.166844300+00:00"
     },
     {
-      "step_line": 33,
+      "step_line": 36,
       "step_keyword": "那么",
       "step_text": "本次运行显示事件日志",
       "step_text_normalized": "本次运行显示事件日志",
@@ -204,10 +272,38 @@
         "action": "assert_text",
         "value_arg": "Run finished"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:36.269129+00:00"
     },
     {
-      "step_line": 37,
+      "step_line": 39,
+      "step_keyword": "当",
+      "step_text": "用户打开运行界面",
+      "step_text_normalized": "用户打开运行界面",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-10-19T08:35:36.373313800+00:00"
+    },
+    {
+      "step_line": 40,
+      "step_keyword": "那么",
+      "step_text": "运行检查界面已显示",
+      "step_text_normalized": "运行检查界面已显示",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-10-19T08:35:36.478080400+00:00"
+    },
+    {
+      "step_line": 41,
       "step_keyword": "当",
       "step_text": "用户检查运行事件",
       "step_text_normalized": "用户检查运行事件",
@@ -218,10 +314,10 @@
         "value": "[data-testid=e2e-events]",
         "action": "assert_visible"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:36.587120900+00:00"
     },
     {
-      "step_line": 38,
+      "step_line": 42,
       "step_keyword": "那么",
       "step_text": "teshi web 不提供 Gherkin 编辑器",
       "step_text_normalized": "teshi web 不提供 gherkin 编辑器",
@@ -233,11 +329,39 @@
         "action": "assert_text",
         "value_arg": "none"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:36.693984300+00:00"
     },
     {
-      "step_line": 41,
-      "step_keyword": "假如",
+      "step_line": 45,
+      "step_keyword": "当",
+      "step_text": "用户打开运行界面",
+      "step_text_normalized": "用户打开运行界面",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-10-19T08:35:36.799346400+00:00"
+    },
+    {
+      "step_line": 46,
+      "step_keyword": "并且",
+      "step_text": "用户启动该场景",
+      "step_text_normalized": "用户启动该场景",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=run-start]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-10-19T08:35:36.907076500+00:00"
+    },
+    {
+      "step_line": 47,
+      "step_keyword": "那么",
       "step_text": "已显示一次含脱敏 HTTP 值的完成运行",
       "step_text_normalized": "已显示一次含脱敏 http 值的完成运行",
       "source": "binding",
@@ -247,10 +371,10 @@
         "value": "[data-testid=e2e-run-status]",
         "action": "assert_visible"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:37.010789900+00:00"
     },
     {
-      "step_line": 42,
+      "step_line": 48,
       "step_keyword": "当",
       "step_text": "用户展开机密",
       "step_text_normalized": "用户展开机密",
@@ -261,10 +385,10 @@
         "value": "[data-testid=run-expand]",
         "action": "click"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:37.115251800+00:00"
     },
     {
-      "step_line": 43,
+      "step_line": 49,
       "step_keyword": "那么",
       "step_text": "teshi web 揭示先前脱敏的值",
       "step_text_normalized": "teshi web 揭示先前脱敏的值",
@@ -275,11 +399,25 @@
         "value": "[data-testid=e2e-run-status]",
         "action": "assert_visible"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:37.220452700+00:00"
     },
     {
-      "step_line": 46,
-      "step_keyword": "假如",
+      "step_line": 52,
+      "step_keyword": "当",
+      "step_text": "用户打开运行界面",
+      "step_text_normalized": "用户打开运行界面",
+      "source": "binding",
+      "status": "confirmed",
+      "primary": {
+        "strategy": "testid",
+        "value": "[data-testid=open-api-run]",
+        "action": "click"
+      },
+      "confirmed_at": "2026-10-19T08:35:37.326580700+00:00"
+    },
+    {
+      "step_line": 53,
+      "step_keyword": "那么",
       "step_text": "运行检查界面已显示",
       "step_text_normalized": "运行检查界面已显示",
       "source": "binding",
@@ -289,10 +427,10 @@
         "value": "[data-testid=open-api-run]",
         "action": "click"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:37.431085500+00:00"
     },
     {
-      "step_line": 47,
+      "step_line": 54,
       "step_keyword": "当",
       "step_text": "用户打开浏览器配置表面",
       "step_text_normalized": "用户打开浏览器配置表面",
@@ -303,10 +441,10 @@
         "value": "[data-testid=open-browser-sessions]",
         "action": "click"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:37.536545800+00:00"
     },
     {
-      "step_line": 48,
+      "step_line": 55,
       "step_keyword": "那么",
       "step_text": "浏览器配置表面已显示",
       "step_text_normalized": "浏览器配置表面已显示",
@@ -318,7 +456,7 @@
         "action": "assert_text",
         "value_arg": "browser"
       },
-      "confirmed_at": "2026-08-28T12:00:00+00:00"
+      "confirmed_at": "2026-10-19T08:35:37.641672800+00:00"
     }
   ]
 }
