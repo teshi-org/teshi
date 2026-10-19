@@ -15,6 +15,10 @@ import subprocess
 import sys
 import tempfile
 import time
+import xml.etree.ElementTree as ET
+
+
+SYNTHETIC_CREDENTIAL = "P7-SYNTHETIC-CREDENTIAL"
 
 
 def emit(kind, **values):
@@ -73,6 +77,9 @@ class World:
                     break
         self.turn = None
         self.input_focused = False
+        self.checkpoint_id = None
+        self.persistence_evidence = []
+        self.style_evidence = []
         self.acp_fixture = Path(__file__).with_name("agent_acceptance_fixture.py").resolve()
 
     def op(self, operation, text="", **values):
@@ -118,6 +125,10 @@ class World:
 
     def _env(self, backend):
         env = [
+            ("NO_COLOR", ""),
+            ("TERM", "xterm-256color"),
+            ("COLORTERM", "truecolor"),
+            ("NO_PROXY", "127.0.0.1,localhost,::1"),
             ("APPDATA", str(self.root / "appdata")),
             ("LOCALAPPDATA", str(self.root / "localappdata")),
             ("XDG_CONFIG_HOME", str(self.root / "config")),
@@ -147,7 +158,7 @@ class World:
                                 name,
                                 "controlled",
                             ],
-                            "env": {},
+                            "env": {"TESHI_ACCEPTANCE_CREDENTIAL": SYNTHETIC_CREDENTIAL},
                             "env_from": {},
                         }
                         for name in profile_names
@@ -177,7 +188,7 @@ class World:
                 raise AssertionError("native fixture did not publish a port")
             env.extend(
                 [
-                    ("TESHI_LLM_API_KEY", "feature-test-key"),
+                    ("TESHI_LLM_API_KEY", SYNTHETIC_CREDENTIAL),
                     ("TESHI_LLM_BASE_URL", "http://127.0.0.1:" + port_file.read_text().strip() + "/v1"),
                     ("TESHI_LLM_MODEL", "acceptance"),
                     ("TESHI_AGENT_BACKEND", "native"),
@@ -334,20 +345,51 @@ class World:
                     time.sleep(.01)
         return records
 
-    def _visible_session(self, title):
+    def _visible_session(self, title, legacy=False):
         project = self.project.resolve()
         for record in self._session_records():
             root = record.get("project_root")
-            if root is None or Path(root).resolve() == project:
+            if (legacy and root is None) or (not legacy and root is not None and Path(root).resolve() == project):
                 if record.get("model_label") == title:
                     return record
         return None
 
-    def _open_session_browser(self):
+    def _open_session_browser(self, legacy=False):
         if self.process is None:
             self.open_chat()
-        self.command("/sessions")
-        self.expect("Sessions")
+        if "Project sessions" in self.screen() or "Legacy / Unassigned" in self.screen():
+            self.op("key", "Escape")
+        self.command("/sessions legacy" if legacy else "/sessions")
+        self.expect("Legacy / Unassigned" if legacy else "Project sessions")
+
+    def assert_reply_style(self, reply, green):
+        """Measure the actual reply's header and rail in the rendered SVG."""
+        self.expect(reply)
+        expected = "#5fff87" if green else "#949494"
+        path = self.root / "reply-style.svg"
+        deadline = time.monotonic() + 8
+        observed = {}
+        while time.monotonic() < deadline:
+            self.op("screenshot", str(path))
+            nodes = list(ET.parse(path).getroot().iter("{http://www.w3.org/2000/svg}text"))
+            rows = {}
+            for node in nodes:
+                rows.setdefault(float(node.attrib.get("y", 0)), []).append(node)
+            matching = [y for y, row in rows.items() if reply in "".join("".join(n.itertext()) for n in row)]
+            if matching:
+                reply_y = matching[0]
+                headers = [n for n in nodes if float(n.attrib.get("y", 0)) < reply_y
+                           and "".join(n.itertext()).strip() == "Teshi"]
+                if headers:
+                    header = max(headers, key=lambda n: float(n.attrib["y"]))
+                    rails = [n.attrib.get("fill") for n in rows[reply_y]
+                             if "▌" in "".join(n.itertext())]
+                    observed = dict(reply=reply, expected=expected, header_fill=header.attrib.get("fill"), rail_fills=rails)
+                    if observed["header_fill"] == expected and expected in rails:
+                        self.style_evidence.append(observed)
+                        return
+            time.sleep(.05)
+        raise AssertionError(f"reply header/rail style mismatch: {observed}")
 
     def send(self, message="Inspect the project"):
         self.focus_input()
@@ -429,6 +471,8 @@ class World:
         with path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(event, ensure_ascii=False) + "\n")
             stream.flush()
+        if event.get("kind") == "reply":
+            self.last_streamed_reply = event["text"]
 
     def finish(self, text=None, error=False):
         if text is not None:
@@ -518,16 +562,53 @@ class World:
             return
         if text.startswith("the turn ends through "):
             if quoted[0] == "cancellation":
+                if getattr(self, "last_streamed_reply", None):
+                    self.expect(self.last_streamed_reply)
+                # Escape first blurs a focused input, then cancels the turn.
+                if "Type your message..." in self.screen():
+                    self.op("key", "Escape")
+                    self.absent("Type your message...")
                 self.op("key", "Escape")
+                self.expect("│ ○ ")
             else:
                 self.finish(error=True)
             return
+        if text == "conversation storage is unavailable":
+            path = self.root / "sessions"
+            assert not path.exists(), "failure fixture requires fresh storage"
+            path.write_text("owned-p7-storage-failure", encoding="utf-8")
+            return
+        if text == "a conversation checkpoint failure is visible":
+            screen = self.expect("Failed to save conversations")
+            self.persistence_evidence.append(dict(event="visible_save_failure", screen=screen))
+            return
+        if text == "I restore writable conversation storage":
+            path = self.root / "sessions"
+            assert path.is_file() and path.read_text(encoding="utf-8") == "owned-p7-storage-failure"
+            path.unlink()
+            path.mkdir()
+            return
+        if text == "the controlled agent uses a synthetic credential":
+            return
+        if text == "the synthetic credential is absent from saved conversation data":
+            records = self._session_records()
+            assert records, "credential isolation must inspect an actual checkpoint"
+            serialized = json.dumps(records, ensure_ascii=False)
+            assert SYNTHETIC_CREDENTIAL not in serialized, "synthetic credential leaked into conversation"
+            assert any(record.get("synthetic_credential_received") for record in self._trace_records()), "provider did not receive the synthetic credential"
+            self.persistence_evidence.append(dict(event="synthetic_credential_excluded", session_ids=[record["id"] for record in records]))
+            return
         if text.startswith("conversation storage contains the message "):
-            self.saved(quoted[0])
+            record = self.saved(quoted[0])
+            self.checkpoint_id = self.checkpoint_id or record["id"]
             return
         if text.startswith("the saved conversation contains") or text.startswith("the same saved conversation contains"):
             if quoted:
-                self.saved(*quoted)
+                record = self.saved(*quoted)
+                if text.startswith("the same"):
+                    assert self.checkpoint_id is not None and record["id"] == self.checkpoint_id, "checkpoint identity changed"
+                self.checkpoint_id = record["id"]
+                self.persistence_evidence.append(dict(event="checkpoint", session_id=record["id"], messages=record["messages"]))
             return
         if text.startswith("conversation storage contains exactly one conversation"):
             records = self._session_records()
@@ -618,8 +699,11 @@ class World:
         if text.startswith("I open the session browser"):
             self._open_session_browser()
             return
+        if text.startswith("I open the legacy session browser"):
+            self._open_session_browser(legacy=True)
+            return
         if text.startswith("I load the legacy conversation"):
-            self.expect("Sessions")
+            self.expect("Legacy / Unassigned")
             self.op("key", "Enter")
             self.expect(self.legacy_context[0])
             return
@@ -729,12 +813,21 @@ class World:
             self.input_focused = True
             return
         if text.startswith("the legacy conversation is listed"):
-            assert self._visible_session("Legacy conversation") is not None
+            assert self._visible_session("Legacy conversation", legacy=True) is not None
             self.expect("Model: Legacy conversation")
+            return
+        if text == "the legacy conversation is not listed":
+            self.absent("Model: Legacy conversation")
+            return
+        if text == "the legacy conversation remains unassigned":
+            record = self._visible_session("Legacy conversation", legacy=True)
+            assert record is not None and record.get("project_root") is None
+            self.persistence_evidence.append(dict(event="legacy_unassigned", session_id=record["id"]))
             return
         if text.startswith("the conversation") and "is not listed" in text:
             title = quoted[0]
             assert self._visible_session(title) is None
+            self.absent(f"Model: {title}")
             return
         if text.startswith("the conversation") and "is listed" in text:
             title = quoted[0]
@@ -782,7 +875,11 @@ class World:
             assert positions == sorted(positions), screen
             return
         if text.startswith("no reply in this turn"):
-            assert "green final-answer" not in self.screen()
+            path = self.root / "reply-style.svg"
+            self.op("screenshot", str(path))
+            headers = [n for n in ET.parse(path).getroot().iter("{http://www.w3.org/2000/svg}text")
+                       if "".join(n.itertext()).strip() == "Teshi"]
+            assert headers and all(n.attrib.get("fill") != "#5fff87" for n in headers)
             return
         if text.startswith("reply ") and "is visible" in text:
             self.expect(quoted[0])
@@ -798,7 +895,7 @@ class World:
                 self.expect_any(("Read project", "get_feature_content"))
             return
         if text.startswith("reply ") and ("styling" in text or "header" in text or "rail" in text):
-            self.expect(quoted[0])
+            self.assert_reply_style(quoted[0], green="has a green" in text)
             return
         if text.startswith("the conversation contains"):
             self.expect("Read project")
@@ -849,6 +946,8 @@ def main():
                 pass
             (artifacts / "sessions.json").write_text(json.dumps(world._session_records(), ensure_ascii=False, indent=2), encoding="utf-8")
             (artifacts / "trace.json").write_text(json.dumps(world._trace_records(), ensure_ascii=False, indent=2), encoding="utf-8")
+            (artifacts / "persistence-evidence.json").write_text(json.dumps(world.persistence_evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+            (artifacts / "style-evidence.json").write_text(json.dumps(world.style_evidence, ensure_ascii=False, indent=2), encoding="utf-8")
             world.close()
         duration = int((time.monotonic() - started) * 1000)
         if errors:

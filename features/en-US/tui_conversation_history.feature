@@ -80,11 +80,14 @@ Feature: Durable agent conversations
   Scenario: Restore a legacy conversation without backend or project metadata
     Given conversation storage contains a legacy conversation with the message "Legacy question" and answer "Legacy answer"
     When I open the session browser
+    Then the legacy conversation is not listed
+    When I open the legacy session browser
     Then the legacy conversation is listed
     When I load the legacy conversation
     Then "Legacy question" is visible in AI chat
     And "Legacy answer" is visible in AI chat
     And the selected backend is "Native"
+    And the legacy conversation remains unassigned
 
   Scenario: Keep newly saved conversations isolated by project
     Given a completed conversation "Cedar discussion" is saved for project "Cedar"
@@ -93,3 +96,73 @@ Feature: Durable agent conversations
     And I open the session browser
     Then the conversation "Cedar discussion" is listed
     And the conversation "Birch discussion" is not listed
+
+  Scenario: Reopen a cancelled conversation without promoting its partial reply (Native)
+    Given the selected backend is "Native" with a controlled agent
+    When I send the message "Cancel this inspection"
+    And the agent streams reasoning "Inspecting before cancellation" and reply "Cancelled partial result" without finishing
+    And the turn ends through "cancellation"
+    Then the saved conversation contains reasoning "Inspecting before cancellation" and reply "Cancelled partial result"
+    When I quit Teshi
+    And I reopen Teshi for the same project with the same conversation storage
+    And I resume the most recently updated conversation
+    Then reply "Cancelled partial result" has neutral styling without a green final-answer header or rail
+    And conversation storage contains exactly one conversation
+
+  Scenario: Reopen a cancelled conversation without promoting its partial reply (ACP)
+    Given the selected backend is "ACP" with a controlled agent
+    When I send the message "Cancel this inspection"
+    And the agent streams reasoning "Inspecting before cancellation" and reply "Cancelled partial result" without finishing
+    And the turn ends through "cancellation"
+    Then the saved conversation contains reasoning "Inspecting before cancellation" and reply "Cancelled partial result"
+    When I quit Teshi
+    And I reopen Teshi for the same project with the same conversation storage
+    And I resume the most recently updated conversation
+    Then reply "Cancelled partial result" has neutral styling without a green final-answer header or rail
+    And conversation storage contains exactly one conversation
+
+  Scenario: Report a checkpoint failure and recover without losing the conversation (Native)
+    Given the selected backend is "Native" with a controlled agent
+    And conversation storage is unavailable
+    When I send the message "Recover this inspection"
+    And the agent streams reasoning "Inspecting during a storage failure" and reply "Recoverable partial result" without finishing
+    Then a conversation checkpoint failure is visible
+    And "Recoverable partial result" is visible in AI chat
+    When I restore writable conversation storage
+    Then conversation storage contains the message "Recover this inspection"
+    And the saved conversation contains reply "Recoverable partial result"
+    When the agent extends its reply to "Recovery confirmed"
+    Then the same saved conversation contains reply "Recovery confirmed"
+    And conversation storage contains exactly one conversation
+
+  Scenario: Report a checkpoint failure and recover without losing the conversation (ACP)
+    Given the selected backend is "ACP" with a controlled agent
+    And conversation storage is unavailable
+    When I send the message "Recover this inspection"
+    And the agent streams reasoning "Inspecting during a storage failure" and reply "Recoverable partial result" without finishing
+    Then a conversation checkpoint failure is visible
+    And "Recoverable partial result" is visible in AI chat
+    When I restore writable conversation storage
+    Then conversation storage contains the message "Recover this inspection"
+    And the saved conversation contains reply "Recoverable partial result"
+    When the agent extends its reply to "Recovery confirmed"
+    Then the same saved conversation contains reply "Recovery confirmed"
+    And conversation storage contains exactly one conversation
+
+  Scenario: Keep native credentials out of saved conversations
+    Given the selected backend is "Native" with a controlled agent
+    And the controlled agent uses a synthetic credential
+    When I send the message "Credential isolation probe"
+    And the agent finishes the turn with the answer "Credential isolation complete"
+    Then conversation storage contains the message "Credential isolation probe"
+    And the saved conversation contains reply "Credential isolation complete"
+    And the synthetic credential is absent from saved conversation data
+
+  Scenario: Keep ACP credentials out of saved conversations
+    Given the selected backend is "ACP" with a controlled agent
+    And the controlled agent uses a synthetic credential
+    When I send the message "Credential isolation probe"
+    And the agent finishes the turn with the answer "Credential isolation complete"
+    Then conversation storage contains the message "Credential isolation probe"
+    And the saved conversation contains reply "Credential isolation complete"
+    And the synthetic credential is absent from saved conversation data

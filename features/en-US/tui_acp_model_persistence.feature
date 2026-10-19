@@ -78,8 +78,10 @@ Feature: Remember the selected ACP model
     Then the ACP settings report a model restoration timeout
     When I attempt to send "do not send with an uncertain model"
     Then the ACP trace contains no prompt for the uncertain session
+    And the rejected message remains available in the input for retry
     Given "Fake Alpha" successfully accepts model changes again
     When I reconnect the current ACP conversation
     Then the confirmed ACP model is "Beta"
     When I send "verify reconciled model"
     Then a reply from "Fake Alpha" is visible
+    And the reconciled ACP prompt excludes the rejected message

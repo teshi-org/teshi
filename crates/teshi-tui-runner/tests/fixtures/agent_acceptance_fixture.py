@@ -57,7 +57,8 @@ if sys.argv[1] == "acp":
         if method == "initialize":
             result = {"protocolVersion": 1, "agentInfo": {"name": name}}
         elif method == "session/new":
-            trace({"kind": "session", "session": session, "agent": name})
+            trace({"kind": "session", "session": session, "agent": name,
+                   "synthetic_credential_received": os.environ.get("TESHI_ACCEPTANCE_CREDENTIAL") == "P7-SYNTHETIC-CREDENTIAL"})
             result = {"sessionId": session}
             if (root / "model-settings").exists():
                 result["configOptions"] = settings()
@@ -111,7 +112,8 @@ else:
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             turn = str(uuid.uuid4())
-            trace({"kind": "native", "turn": turn, "body": body})
+            trace({"kind": "native", "turn": turn, "body": body,
+                   "synthetic_credential_received": self.headers.get("Authorization") == "Bearer P7-SYNTHETIC-CREDENTIAL"})
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Connection", "close")

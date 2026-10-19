@@ -35,6 +35,7 @@ class World:
         self.binary = os.environ["TESHI_SELF_TEST_BIN"]
         self.selected = None
         self.input = False
+        self.rejected_message = None
 
     def op(self, op, text="", **values):
         self.host.stdin.write(json.dumps(dict(op=op, text=text, **values)) + "\n")
@@ -93,12 +94,18 @@ class World:
     def focus(self):
         if "Focus [Enter]" in self.op("screen"):
             self.op("key", "Enter")
-            self.expect("Type your message...")
-        self.op("click", "Type your message...")
+        screen = self.op("screen")
+        target = self.rejected_message if self.rejected_message and self.rejected_message in screen else "Type your message..."
+        self.op("click", target)
         self.input = True
 
     def select(self, agent):
         self.focus()
+        if self.rejected_message:
+            self.expect(self.rejected_message)
+            self.op("key", "End")
+            for _ in self.rejected_message:
+                self.op("key", "Backspace")
         self.op("write", "/agent")
         self.expect("/agent")
         self.op("key", "Enter")
@@ -182,6 +189,8 @@ class World:
             self.op("key", "Escape"); self.op("key", "k"); self.input = False
         elif text.startswith("I send ") or text.startswith("I attempt to send "):
             self.focus(); self.op("write", quoted[0]); self.op("key", "Enter")
+            if text.startswith("I attempt"):
+                self.rejected_message = quoted[0]
         elif text.startswith("a reply from"):
             self.expect(quoted[0] + " response")
         elif text.startswith("the ACP trace confirms model"):
@@ -207,6 +216,13 @@ class World:
         elif text == "the ACP trace contains no prompt for the uncertain session":
             time.sleep(.3)
             assert not [r for r in self.records() if r["kind"] == "prompt"]
+        elif text == "the rejected message remains available in the input for retry":
+            self.expect(self.rejected_message)
+            lines = self.op("screen").splitlines()
+            assert any(self.rejected_message in line for line in lines[-6:]), "rejected text is not retained in the input"
+        elif text == "the reconciled ACP prompt excludes the rejected message":
+            prompts = [r for r in self.records() if r["kind"] == "prompt"]
+            assert prompts and self.rejected_message not in json.dumps(prompts[-1]["params"], ensure_ascii=False), prompts
         elif "successfully accepts model changes again" in text:
             self.rules()
         elif text == "I reconnect the current ACP conversation":

@@ -1125,6 +1125,14 @@ async fn read_chat_completions_sse(
                 let v: serde_json::Value =
                     serde_json::from_str(data).context("malformed chat-completions SSE JSON")?;
 
+                if let Some(error) = v.get("error").filter(|error| !error.is_null()) {
+                    let message = error
+                        .get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("provider reported an error");
+                    anyhow::bail!("chat-completions streaming error: {message}");
+                }
+
                 if model_name.is_empty() {
                     if let Some(m) = v["model"].as_str() {
                         model_name = m.to_string();
@@ -1600,6 +1608,45 @@ mod tests {
         );
         let events: Vec<_> = rx.try_iter().collect();
         assert!(events.iter().any(|e| matches!(e, LlmEvent::Done { .. })));
+    }
+
+    #[tokio::test]
+    async fn provider_sse_error_preserves_partial_chunks_without_completing() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"Partial result\"}}]}\n\n",
+                "data: {\"error\":{\"message\":\"controlled failure\"}}\n\n"
+            );
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+        let (tx, rx) = mpsc::channel();
+        let error = read_chat_completions_sse(response, &tx, &Arc::new(AtomicBool::new(false)))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("controlled failure"));
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(events.iter().any(
+            |event| matches!(event, LlmEvent::Chunk { content } if content == "Partial result")
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, LlmEvent::Done { .. })));
+        server.await.unwrap();
     }
 
     #[tokio::test]
