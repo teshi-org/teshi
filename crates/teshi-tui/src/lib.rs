@@ -19,6 +19,7 @@ mod llm;
 pub mod markdown;
 mod mindmap;
 mod profiles;
+mod project_context;
 mod runner;
 mod session;
 mod test_points_tab;
@@ -37,7 +38,9 @@ use std::time::Duration;
 use anyhow::Result;
 use crossterm::Command;
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -302,6 +305,7 @@ pub fn run() -> Result<()> {
         app.poll_llm_events();
         if let Err(error) = app.save_sessions(false) {
             app.status = format!("Failed to save conversations: {error}");
+            app.set_status_message(app.status.clone());
         }
         app.poll_git_status();
         app.poll_external_feature_changes();
@@ -329,6 +333,24 @@ pub fn run() -> Result<()> {
                         continue;
                     }
                     if app.handle_acp_controls_key(key_event) {
+                        continue;
+                    }
+                    // The project picker reserves j/k for recent-entry
+                    // navigation. In the Open path field they are ordinary
+                    // path characters, so route them directly before the
+                    // shared picker keymap consumes them as movement.
+                    if app.project_switch.path_input().is_some()
+                        && matches!(
+                            (key_event.code, key_event.modifiers),
+                            (
+                                KeyCode::Char('j' | 'k' | 'J' | 'K'),
+                                KeyModifiers::NONE | KeyModifiers::SHIFT
+                            )
+                        )
+                    {
+                        if let KeyCode::Char(ch) = key_event.code {
+                            app.project_switch.append_path_input(ch);
+                        }
                         continue;
                     }
                     if let Some(action) = Action::from_key_event(
@@ -367,6 +389,10 @@ pub fn run() -> Result<()> {
                             generation_scope_prompt_active: app.generation_scope_prompt.is_some(),
                             quit_pending_confirm: app.quit_pending_confirm,
                             acp_permission_pending: app.has_acp_permission_prompt(),
+                            project_switch_active: !matches!(
+                                app.project_switch.overlay,
+                                crate::project_context::SwitchOverlay::None
+                            ),
                         },
                     ) {
                         app.handle_action(action)?;

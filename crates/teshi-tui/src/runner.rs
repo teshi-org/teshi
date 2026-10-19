@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -141,9 +142,23 @@ pub enum RunEvent {
     },
 }
 
+#[allow(dead_code)]
 pub fn load_runner_config(cli: Option<RunnerCliOverride>) -> Result<RunnerConfig> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let config_path = cwd.join("teshi.toml");
+    load_runner_config_for_project(&cwd, cli)
+}
+
+/// Load runner settings relative to an explicit project root.
+///
+/// TUI project switching must not depend on the process current directory:
+/// each candidate project gets its own `teshi.toml`, and a relative runner
+/// `cwd` is resolved below that project root.
+pub fn load_runner_config_for_project(
+    project_root: &Path,
+    cli: Option<RunnerCliOverride>,
+) -> Result<RunnerConfig> {
+    let project_root = project_root.to_path_buf();
+    let config_path = project_root.join("teshi.toml");
     let mut base = RunnerConfigPartial::default();
     if config_path.exists() {
         let raw = std::fs::read_to_string(&config_path)
@@ -186,12 +201,35 @@ pub fn load_runner_config(cli: Option<RunnerCliOverride>) -> Result<RunnerConfig
         .filter(|s| !s.trim().is_empty())
         .ok_or(RunnerNotConfigured)?;
 
+    let cwd = merged.cwd.map(PathBuf::from).map(|cwd| {
+        if cwd.is_absolute() {
+            cwd
+        } else {
+            project_root.join(cwd)
+        }
+    });
+
     Ok(RunnerConfig {
         cmd,
         args: merged.args.unwrap_or_default(),
-        cwd: merged.cwd.map(PathBuf::from),
+        cwd,
         env: merged.env.unwrap_or_default(),
     })
+}
+
+/// Load an optional project runner configuration while preserving real
+/// configuration errors. A project without a runner command is valid; a
+/// malformed or unreadable `teshi.toml` must remain visible to callers that
+/// are preparing a project switch.
+pub fn load_optional_runner_config_for_project(
+    project_root: &Path,
+    cli: Option<RunnerCliOverride>,
+) -> Result<Option<RunnerConfig>> {
+    match load_runner_config_for_project(project_root, cli) {
+        Ok(config) => Ok(Some(config)),
+        Err(error) if error.downcast_ref::<RunnerNotConfigured>().is_some() => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn merge_config(
@@ -215,15 +253,27 @@ fn merge_config(
 }
 
 pub fn spawn_runner(config: RunnerConfig, request: RunRequest) -> Result<Receiver<RunEvent>> {
+    let (rx, _cancel) = spawn_runner_with_control(config, request)?;
+    Ok(rx)
+}
+
+/// Spawn an external runner and return both its event stream and an owned
+/// cancellation handle. Dropping the event receiver alone never stops the
+/// child process.
+pub fn spawn_runner_with_control(
+    config: RunnerConfig,
+    request: RunRequest,
+) -> Result<(Receiver<RunEvent>, Sender<()>)> {
     let (tx, rx) = mpsc::channel();
+    let (cancel_tx, cancel_rx) = mpsc::channel();
     thread::spawn(move || {
-        if let Err(err) = run_child(config, request, tx.clone()) {
+        if let Err(err) = run_child(config, request, tx.clone(), cancel_rx) {
             let _ = tx.send(RunEvent::RunnerError {
                 message: err.to_string(),
             });
         }
     });
-    Ok(rx)
+    Ok((rx, cancel_tx))
 }
 
 /// Returns whether every selected case has a terminal binding sidecar.
@@ -256,13 +306,27 @@ pub fn tui_runner_config(command: Option<String>) -> RunnerConfig {
     }
 }
 
+/// Resolve a run's project root without walking from a relative feature path
+/// into an unrelated ancestor project. Relative CLI paths are rooted at the
+/// caller's working directory; absolute paths still honor an existing
+/// `.teshi` marker in their own ancestor chain.
+fn run_project_root(input_path: &Path, resolved_path: &Path) -> Result<PathBuf> {
+    if !input_path.is_absolute() {
+        return std::env::current_dir().context("resolve run working directory");
+    }
+    Ok(teshi_engine::find_project_root(Some(resolved_path))
+        .or_else(|| resolved_path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from(".")))
+}
+
 /// Runs TUI scenarios with raw NDJSON output and a failing exit on case failure.
 ///
 /// # Errors
 /// Returns source validation, selection, spawn, protocol write or runner exit errors.
 pub fn run_tui(path: &Path, scenario: Option<&str>, command: Option<String>) -> Result<()> {
+    let input_path = path.to_path_buf();
     let path = std::fs::canonicalize(path)?;
-    let root = teshi_engine::find_project_root(Some(&path)).unwrap_or(std::env::current_dir()?);
+    let root = run_project_root(&input_path, &path)?;
     let validation = teshi_engine::validate_feature_scope(&root, Some(&path))?;
     if validation.has_errors() {
         anyhow::bail!(
@@ -316,8 +380,21 @@ pub fn spawn_teshi_dispatch(
     project_root: PathBuf,
     cases: Vec<RunCase>,
 ) -> Result<Receiver<RunEvent>> {
+    let (rx, _cancel) = spawn_teshi_dispatch_with_control(project_root, cases)?;
+    Ok(rx)
+}
+
+/// Spawn the in-process dispatch path with a best-effort cancellation handle.
+/// The dispatch API is synchronous, so cancellation takes effect at the next
+/// emitted event and prevents a successful terminal event from being reported.
+pub fn spawn_teshi_dispatch_with_control(
+    project_root: PathBuf,
+    cases: Vec<RunCase>,
+) -> Result<(Receiver<RunEvent>, Sender<()>)> {
     let (tx, rx) = mpsc::channel();
+    let (cancel_tx, cancel_rx) = mpsc::channel();
     thread::spawn(move || {
+        let mut cancelled = false;
         let dispatch: Vec<teshi_engine::DispatchCase> = cases
             .iter()
             .map(|case| teshi_engine::DispatchCase {
@@ -328,6 +405,14 @@ pub fn spawn_teshi_dispatch(
             .collect();
         let script = teshi_engine::default_api_service_script();
         let emit = |value: serde_json::Value| {
+            // The compatibility wrapper intentionally drops its sender after
+            // spawning.  A disconnected receiver therefore means "no
+            // controller", while an explicit unit value is the cancellation
+            // request for the controlled path.
+            if matches!(cancel_rx.try_recv(), Ok(())) {
+                cancelled = true;
+                return;
+            }
             if let Some(event) = parse_event_line(&value.to_string()) {
                 let _ = tx.send(event);
             }
@@ -339,13 +424,18 @@ pub fn spawn_teshi_dispatch(
         }
         let _ = tx.send(RunEvent::RunnerExit {
             code: Some(0),
-            success: true,
+            success: !cancelled,
         });
     });
-    Ok(rx)
+    Ok((rx, cancel_tx))
 }
 
-fn run_child(config: RunnerConfig, request: RunRequest, tx: Sender<RunEvent>) -> Result<()> {
+fn run_child(
+    config: RunnerConfig,
+    request: RunRequest,
+    tx: Sender<RunEvent>,
+    cancel_rx: Receiver<()>,
+) -> Result<()> {
     let mut cmd = Command::new(&config.cmd);
     cmd.args(&config.args)
         .stdin(Stdio::piped())
@@ -358,6 +448,14 @@ fn run_child(config: RunnerConfig, request: RunRequest, tx: Sender<RunEvent>) ->
         cmd.env(k, v);
     }
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // A dedicated group lets cancellation stop only this runner and the
+        // subprocesses that inherit its group, including pipe-owning workers.
+        cmd.process_group(0);
+    }
+
     let mut child = cmd.spawn().context("failed to spawn runner")?;
 
     if let Some(mut stdin) = child.stdin.take() {
@@ -366,9 +464,9 @@ fn run_child(config: RunnerConfig, request: RunRequest, tx: Sender<RunEvent>) ->
         let _ = stdin.write_all(b"\n");
     }
 
-    if let Some(stderr) = child.stderr.take() {
+    let stderr_thread = if let Some(stderr) = child.stderr.take() {
         let tx_err = tx.clone();
-        thread::spawn(move || {
+        Some(thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
                 let _ = tx_err.send(RunEvent::Log {
@@ -376,22 +474,87 @@ fn run_child(config: RunnerConfig, request: RunRequest, tx: Sender<RunEvent>) ->
                     message: line,
                 });
             }
-        });
-    }
+        }))
+    } else {
+        None
+    };
 
-    if let Some(stdout) = child.stdout.take() {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines().map_while(Result::ok) {
-            if let Some(event) = parse_event_line(&line) {
-                let _ = tx.send(event);
+    let stdout_thread = if let Some(stdout) = child.stdout.take() {
+        let tx_out = tx.clone();
+        Some(thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().map_while(Result::ok) {
+                if let Some(event) = parse_event_line(&line) {
+                    let _ = tx_out.send(event);
+                }
             }
-        }
-    }
+        }))
+    } else {
+        None
+    };
 
-    let status = child.wait()?;
+    let status = loop {
+        match cancel_rx.try_recv() {
+            Ok(()) => {
+                match stop_runner_tree(&mut child) {
+                    Ok(()) => break child.wait()?,
+                    Err(error) => {
+                        // Keep ownership and the receiver alive on failure.
+                        // The switcher must time out in A, rather than treating
+                        // a failed stop request as proof of quiescence.
+                        let _ = tx.send(RunEvent::Log {
+                            case_id: None,
+                            message: format!("Could not stop runner process tree: {error}"),
+                        });
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {}
+        }
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    if let Some(handle) = stdout_thread {
+        let _ = handle.join();
+    }
+    if let Some(handle) = stderr_thread {
+        let _ = handle.join();
+    }
     let code = status.code();
     let success = status.success();
     let _ = tx.send(RunEvent::RunnerExit { code, success });
+    Ok(())
+}
+
+fn stop_runner_tree(child: &mut std::process::Child) -> Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // This PID belongs to the Child we still own. Never select processes
+        // by executable name: unrelated runners may use the same interpreter.
+        let status = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("stop owned runner tree")?;
+        anyhow::ensure!(status.success(), "taskkill exited with {status}");
+    }
+    #[cfg(unix)]
+    {
+        let status = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", child.id())])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("stop owned runner process group")?;
+        anyhow::ensure!(status.success(), "process-group kill exited with {status}");
+    }
+    #[cfg(not(any(windows, unix)))]
+    child.kill()?;
     Ok(())
 }
 
@@ -824,16 +987,20 @@ fn unix_timestamp_ms() -> u64 {
 
 /// Runs BDD scenarios headlessly using the configured NDJSON runner.
 pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
-    let feature_path = opts
+    let uses_default_scope = opts.path.is_none();
+    let input_path = opts
         .path
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let feature_path = std::fs::canonicalize(&feature_path)
-        .with_context(|| format!("resolve feature scope {}", feature_path.display()))?;
+    let feature_path = std::fs::canonicalize(&input_path)
+        .with_context(|| format!("resolve feature scope {}", input_path.display()))?;
 
     // Resolve project root once and reuse
-    let project_root = teshi_engine::find_project_root(Some(&feature_path))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let project_root = if uses_default_scope {
+        std::env::current_dir().context("resolve run working directory")?
+    } else {
+        run_project_root(&input_path, &feature_path)?
+    };
 
     let validation = teshi_engine::validate_feature_scope(&project_root, Some(&feature_path))?;
     if !validation.diagnostics.is_empty() {
@@ -843,11 +1010,14 @@ pub fn run_with_options(opts: RunCliOptions) -> Result<()> {
         anyhow::bail!("Feature validation failed; runner was not started");
     }
 
-    let runner_config = load_runner_config(Some(RunnerCliOverride {
-        cmd: opts.runner_cmd.clone(),
-        args: opts.runner_args.clone(),
-        cwd: opts.runner_cwd.clone(),
-    }));
+    let runner_config = load_runner_config_for_project(
+        &project_root,
+        Some(RunnerCliOverride {
+            cmd: opts.runner_cmd.clone(),
+            args: opts.runner_args.clone(),
+            cwd: opts.runner_cwd.clone(),
+        }),
+    );
     let runner_config = match runner_config {
         Err(error) if !error.is::<RunnerNotConfigured>() => return Err(error),
         result => result,
@@ -1204,6 +1374,51 @@ mod tests {
         .expect("cli runner override");
         assert_eq!(cfg.cmd, "teshi-requirement-cli-runner");
         assert_eq!(cfg.args, vec!["--quiet"]);
+    }
+
+    #[test]
+    fn project_runner_config_is_loaded_from_the_explicit_root() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::write(
+            project.path().join("teshi.toml"),
+            "[runner]\ncmd = \"project-runner\"\ncwd = \".teshi\"\n",
+        )
+        .expect("write project config");
+        let config =
+            load_runner_config_for_project(project.path(), None).expect("project runner config");
+        assert_eq!(config.cmd, "project-runner");
+        assert_eq!(config.cwd, Some(project.path().join(".teshi")));
+    }
+
+    #[test]
+    fn controlled_runner_can_be_cancelled_while_child_is_quiet() {
+        let config = if cfg!(windows) {
+            RunnerConfig {
+                cmd: "cmd".into(),
+                args: vec!["/C".into(), "ping -n 30 127.0.0.1 > NUL".into()],
+                cwd: None,
+                env: HashMap::new(),
+            }
+        } else {
+            RunnerConfig {
+                cmd: "sh".into(),
+                args: vec!["-c".into(), "sleep 30".into()],
+                cwd: None,
+                env: HashMap::new(),
+            }
+        };
+        let request = RunRequest {
+            command: "run".into(),
+            cases: Vec::new(),
+            meta: HashMap::new(),
+        };
+        let (rx, cancel) = spawn_runner_with_control(config, request).expect("spawn runner");
+        std::thread::sleep(Duration::from_millis(100));
+        cancel.send(()).expect("send cancellation");
+        let event = rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("quiet child should acknowledge cancellation");
+        assert!(matches!(event, RunEvent::RunnerExit { success: false, .. }));
     }
 
     #[test]

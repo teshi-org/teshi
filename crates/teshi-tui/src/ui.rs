@@ -318,6 +318,24 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             Rect::new(rect.x, chunks[1].y, rect.width, 1),
         );
     }
+    let project_label = format!(
+        " Project: {} ",
+        app.project_switch.active.identity.display_name()
+    );
+    let project_width = (project_label.width() as u16).min(
+        chunks[1]
+            .width
+            .saturating_sub(version_width.saturating_add(1)),
+    );
+    if project_width > 0 && chunks[1].height > 0 {
+        frame.render_widget(
+            Paragraph::new(project_label).style(theme::muted().add_modifier(Modifier::BOLD)),
+            Rect::new(chunks[1].x, chunks[1].y, project_width, 1),
+        );
+        app.clickable_regions.push(ClickableRegion::ProjectControl {
+            rect: Rect::new(chunks[1].x, chunks[1].y, project_width, 1),
+        });
+    }
     if !app.version.is_empty() && version_width > 0 && chunks[1].height > 0 {
         frame.render_widget(
             Paragraph::new(version_text)
@@ -462,6 +480,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         || app.has_acp_permission_prompt()
         || app.authoring_ui.overlay_active()
         || app.generation_scope_prompt.is_some()
+        || !matches!(
+            app.project_switch.overlay,
+            crate::project_context::SwitchOverlay::None
+        )
     {
         // Modal rendering replaces the interactive layer, not just its pixels.
         app.clickable_regions.clear();
@@ -508,6 +530,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         app.authoring_ui.overlay,
         crate::authoring_tab::RequirementsOverlay::None
     ) || app.generation_scope_prompt.is_some()
+        || !matches!(
+            app.project_switch.overlay,
+            crate::project_context::SwitchOverlay::None
+        )
     {
         render_requirements_overlay(frame, app, frame.area());
     }
@@ -3172,7 +3198,11 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     // Dim background
     frame.render_widget(Clear, panel_area);
 
-    let block = theme::popup_block(" Sessions ");
+    let block = theme::popup_block(if app.session_panel_legacy {
+        " Legacy / Unassigned "
+    } else {
+        " Project sessions "
+    });
     let [inner, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
         .areas(block.inner(panel_area));
     frame.render_widget(block, panel_area);
@@ -3182,6 +3212,14 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if app.session_panel_legacy {
+        lines.push(Line::raw(" Loading keeps history unassigned."));
+    } else {
+        lines.push(Line::raw(
+            " Active project only. /sessions legacy for old history.",
+        ));
+    }
 
     if app.session_list.is_empty() {
         lines.push(Line::raw("  No saved sessions."));
@@ -4374,6 +4412,11 @@ fn render_requirements_linked(
 }
 
 fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    use crate::project_context::SwitchOverlay;
+    if !matches!(app.project_switch.overlay, SwitchOverlay::None) {
+        render_project_switch_overlay(frame, app, area);
+        return;
+    }
     use crate::authoring_tab::RequirementsOverlay;
     match &app.authoring_ui.overlay {
         RequirementsOverlay::None => {}
@@ -4611,6 +4654,168 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             true,
         );
     }
+}
+
+fn render_project_picker(frame: &mut Frame<'_>, app: &mut App, area: Rect, selection: usize) {
+    let width = area.width.min(100);
+    let inner_width = width.saturating_sub(2) as usize;
+    if inner_width == 0 || area.height < 4 {
+        return;
+    }
+    let footer = chat::wrap_line_to_width(
+        theme::action_line("[O] Open path · ↑/↓ select · Enter open · Esc cancel"),
+        inner_width,
+    );
+    let mut rows = Vec::new();
+    let mut selected_start = 0;
+    let mut selected_end = 0;
+    for (index, entry) in app.project_switch.recent.iter().enumerate() {
+        let label = Line::styled(
+            format!(
+                "{}{}  {}",
+                if index == selection { "> " } else { "  " },
+                entry.display_name,
+                entry.root
+            ),
+            if index == selection {
+                theme::selected_row(true)
+            } else {
+                Style::default()
+            },
+        );
+        if index == selection {
+            selected_start = rows.len();
+        }
+        rows.extend(
+            chat::wrap_line_to_width(label, inner_width)
+                .into_iter()
+                .map(|line| (Some(index), line)),
+        );
+        if index == selection {
+            selected_end = rows.len();
+        }
+    }
+    if rows.is_empty() {
+        rows.push((None, Line::raw("No recent projects")));
+    }
+    // Reserve the controls before allocating path rows. Wrapping and hit tests
+    // share these physical rows, including continuation lines of long paths.
+    let reserved = footer.len() + 3;
+    let list_height = rows
+        .len()
+        .min((area.height as usize).saturating_sub(reserved));
+    let start = selected_end
+        .saturating_sub(list_height)
+        .min(selected_start)
+        .min(rows.len().saturating_sub(list_height));
+    let height = (list_height + reserved).min(area.height as usize) as u16;
+    let panel = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let mut lines = Vec::new();
+    for (offset, (index, line)) in rows.iter().skip(start).take(list_height).enumerate() {
+        lines.push(line.clone());
+        if let Some(index) = index {
+            app.clickable_regions
+                .push(crate::app::ClickableRegion::ProjectRecent {
+                    index: *index,
+                    rect: Rect::new(
+                        panel.x + 1,
+                        panel.y + 1 + offset as u16,
+                        inner_width as u16,
+                        1,
+                    ),
+                });
+        }
+    }
+    lines.push(Line::raw(""));
+    let open_y = panel.y + 2 + list_height as u16;
+    lines.extend(footer);
+    frame.render_widget(Clear, panel);
+    frame.render_widget(
+        Paragraph::new(lines).block(theme::popup_block(" Open project ")),
+        panel,
+    );
+    if open_y < panel.bottom().saturating_sub(1) {
+        app.clickable_regions
+            .push(crate::app::ClickableRegion::ProjectOpenPath {
+                rect: Rect::new(panel.x + 1, open_y, inner_width as u16, 1),
+            });
+    }
+}
+
+fn render_project_switch_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    use crate::project_context::SwitchOverlay;
+    let overlay = app.project_switch.overlay.clone();
+    let (title, lines, width, height) = match overlay {
+        SwitchOverlay::None => return,
+        SwitchOverlay::Picker { selection } => {
+            render_project_picker(frame, app, area, selection);
+            return;
+        }
+        SwitchOverlay::OpenPath { input } => (
+            " Open project path ",
+            vec![
+                Line::raw("Type a project directory and press Enter:"),
+                Line::styled(format!("> {input}"), Style::default().fg(theme::FG)),
+                Line::raw(""),
+                theme::action_line("Enter open · Backspace edit · Esc cancel"),
+            ],
+            area.width.min(100),
+            6.min(area.height),
+        ),
+        SwitchOverlay::Dirty { target } => {
+            let mut rows = vec![
+                Line::raw(format!("Switch to {}", target.root().display())),
+                Line::raw("Unsaved project state must be resolved first."),
+            ];
+            if let Some(request) = &app.project_switch.pending {
+                rows.extend(request.dirty.iter().map(|item| {
+                    Line::styled(
+                        format!("  • {}", item.label()),
+                        Style::default().fg(theme::WARNING),
+                    )
+                }));
+            }
+            rows.push(Line::raw(""));
+            rows.push(theme::action_line(
+                "[S] Save and switch   [D] Discard and switch   [Esc] Cancel",
+            ));
+            (
+                " Resolve project state ",
+                rows,
+                area.width.min(86),
+                10.min(area.height),
+            )
+        }
+        SwitchOverlay::Busy { target } => (
+            " Stop project tasks ",
+            vec![
+                Line::raw(format!("Switch to {}", target.root().display())),
+                Line::raw("A project-owned task is still running."),
+                Line::raw("[S] Stop tasks and switch   [Esc] Cancel"),
+                Line::raw("Wait for owned tasks to exit before switching."),
+            ],
+            area.width.min(86),
+            8.min(area.height),
+        ),
+    };
+    let panel = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, panel);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(theme::popup_block(title)),
+        panel,
+    );
 }
 
 fn render_test_points_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {

@@ -173,6 +173,10 @@ pub(super) fn render_pending_review(frame: &mut Frame<'_>, app: &mut App, area: 
         || app.has_external_change_prompt()
         || app.step_keyword_picker.is_some()
         || app.scenario_dropdown_open
+        || !matches!(
+            app.project_switch.overlay,
+            crate::project_context::SwitchOverlay::None
+        )
     {
         return;
     }

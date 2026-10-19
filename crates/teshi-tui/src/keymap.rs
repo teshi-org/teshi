@@ -55,6 +55,8 @@ pub struct KeyContext {
 
     /// Whether an external ACP agent has a pending permission prompt.
     pub acp_permission_pending: bool,
+    /// Whether the project switcher owns keyboard input.
+    pub project_switch_active: bool,
 }
 
 /// High-level editor command derived from keyboard input.
@@ -386,6 +388,26 @@ pub enum Action {
 
 impl Action {
     pub fn from_key_event(event: KeyEvent, context: KeyContext) -> Option<Self> {
+        if context.project_switch_active {
+            return match (event.code, event.modifiers) {
+                (KeyCode::Esc, _) => Some(Self::ClearInputState),
+                (KeyCode::Enter, _) => Some(Self::OverlayConfirm),
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                    Some(Self::OverlayMoveUp)
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    Some(Self::OverlayMoveDown)
+                }
+                (KeyCode::Backspace, _) => Some(Self::OverlayBackspace),
+                (KeyCode::Char(ch), modifiers)
+                    if !ch.is_control()
+                        && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::OverlayInsert(ch))
+                }
+                _ => None,
+            };
+        }
         if let Some(pending_char) = context.pending_char {
             if pending_char == 'w' && pane_navigation_allowed(context) {
                 // Some terminal/input paths retain CONTROL (or add SHIFT for
@@ -1380,6 +1402,7 @@ mod tests {
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         }
     }
 
@@ -1434,6 +1457,7 @@ mod tests {
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -1474,6 +1498,7 @@ mod tests {
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -1514,6 +1539,7 @@ mod tests {
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
             acp_permission_pending: true,
+            project_switch_active: false,
         };
         let keys = [
             (KeyCode::Up, KeyModifiers::NONE, Action::AcpPermissionUp),
@@ -1593,6 +1619,7 @@ mod tests {
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -1643,6 +1670,7 @@ mod tests {
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -1693,6 +1721,7 @@ mod tests {
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
@@ -1751,6 +1780,7 @@ mod tests {
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
@@ -1791,6 +1821,7 @@ mod tests {
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
@@ -1831,6 +1862,7 @@ mod tests {
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), context),
@@ -1895,6 +1927,7 @@ mod tests {
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         let copy_context = KeyContext {
             pending_char: Some('y'),
@@ -1952,6 +1985,7 @@ mod tests {
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
@@ -2109,6 +2143,7 @@ mod tests {
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
+            project_switch_active: false,
         }
     }
 

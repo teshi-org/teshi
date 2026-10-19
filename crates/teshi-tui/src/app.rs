@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
@@ -26,6 +26,7 @@ use teshi_core::gherkin::{self, BddProject};
 use teshi_core::gherkin_lang::StructuralType;
 
 const GIT_STATUS_REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
+const PROJECT_SWITCH_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Available slash commands: (name, description)
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -36,6 +37,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("details", "Expand or collapse thinking and tool details"),
     ("models", "Open model settings"),
     ("sessions", "Browse saved sessions"),
+    ("project", "Open or switch the active project"),
     ("approval", "Switch approval mode (Manual/Auto/Bypass)"),
     ("agent", "Select session Agent (Native or installed ACP)"),
     ("acp", "Manage installed ACP Agents"),
@@ -119,6 +121,7 @@ pub struct AgentThread {
     /// Whether supporting reasoning and tool titles are expanded in this conversation.
     pub activity_details_expanded: bool,
     pub(crate) backend: teshi_agent_runtime::backend::AgentBackendRuntime,
+    retiring_backends: Vec<teshi_agent_runtime::backend::AgentBackendRuntime>,
     /// Conversation-local ACP picker and hit regions.
     pub(crate) acp_controls_ui: crate::acp_controls::ControlsUi,
     /// Cumulative input tokens across all requests for this agent.
@@ -147,6 +150,37 @@ pub struct AgentThread {
 }
 
 impl AgentThread {
+    fn replace_backend(&mut self, kind: teshi_agent::backend::AgentBackendKind) {
+        let mut previous = std::mem::replace(
+            &mut self.backend,
+            teshi_agent_runtime::backend::AgentBackendRuntime::new(
+                kind,
+                teshi_agent_runtime::max_agent_iterations(),
+            ),
+        );
+        previous.request_shutdown();
+        previous.poll_shutdown();
+        if previous.shutdown_pending() {
+            self.retiring_backends.push(previous);
+        }
+    }
+
+    fn shutdown_pending(&self) -> bool {
+        self.backend.shutdown_pending()
+            || self
+                .retiring_backends
+                .iter()
+                .any(|backend| backend.shutdown_pending())
+    }
+
+    fn poll_shutdown(&mut self) {
+        self.backend.poll_shutdown();
+        self.retiring_backends.retain_mut(|backend| {
+            backend.poll_shutdown();
+            backend.shutdown_pending()
+        });
+    }
+
     /// Startup backend fallback notice, retained until an explicit selection.
     pub fn selection_warning(&self) -> Option<&str> {
         self.selection_warning.as_deref()
@@ -235,6 +269,7 @@ impl AgentThread {
                 kind,
                 teshi_agent_runtime::max_agent_iterations(),
             ),
+            retiring_backends: Vec::new(),
             total_input_tokens: 0,
             total_output_tokens: 0,
             last_input_tokens: None,
@@ -263,6 +298,17 @@ impl AgentThread {
     ) -> Result<()> {
         if self.messages().is_empty() {
             return Ok(());
+        }
+        if let Some(owner) = self
+            .saved_session
+            .as_ref()
+            .and_then(|s| s.project_root.as_ref())
+        {
+            anyhow::ensure!(
+                teshi_engine::ProjectIdentity::new(owner)?
+                    == teshi_engine::ProjectIdentity::new(project)?,
+                "Cannot checkpoint a session owned by another project"
+            );
         }
         let mut messages = self.messages().to_vec();
         if !self.partial_response().is_empty() || !self.backend.partial_reasoning().is_empty() {
@@ -293,7 +339,11 @@ impl AgentThread {
         session.messages = messages;
         session.message_count = session.messages.len();
         session.model_label = model;
-        session.project_root = Some(project.to_path_buf());
+        // Loading legacy history is not an assignment to the active project.
+        // New conversations acquire an owner; existing snapshots keep theirs.
+        if self.saved_session.is_none() {
+            session.project_root = Some(project.to_path_buf());
+        }
         session.backend_kind = Some(self.backend_kind());
         session.acp_agent_id = self.selected_acp_id.clone();
         session.updated_at = std::time::SystemTime::now()
@@ -528,6 +578,7 @@ struct ExternalChangePrompt {
 
 struct GitStatusRefreshResult {
     revision: u64,
+    project_stamp: teshi_engine::ProjectStamp,
     model: teshi_core::git::FeatureGitStatusModel,
 }
 
@@ -716,8 +767,6 @@ pub struct App {
     pub step_keyword_picker: Option<StepKeywordPicker>,
     pub pending_char: Option<char>,
     pub clipboard: Option<String>,
-    // Retain the clipboard owner so X11 can serve later requests.
-    system_clipboard: Option<arboard::Clipboard>,
     pub scenario_fold: HashSet<usize>,
     /// Anchor position (row, col) where mouse drag started; `None` means no selection.
     pub selection_anchor: Option<(usize, usize)>,
@@ -731,6 +780,9 @@ pub struct App {
     pub chat_history_rect: Option<ratatui::layout::Rect>,
     /// Current chat text selection, if any.
     pub chat_selection: Option<ChatSelection>,
+    // X11 serves selection data from the owning process. Retain the handle
+    // after a successful copy so another process can request that data.
+    system_clipboard: Option<arboard::Clipboard>,
     /// Whether a left-button drag is extending the chat selection.
     pub chat_selection_dragging: bool,
     /// Clickable regions registered during the last render frame.
@@ -743,6 +795,7 @@ pub struct App {
     redo_stack: Vec<(EditorBuffer, usize, usize)>,
     pub runner_config: Option<RunnerConfig>,
     runner_rx: Option<Receiver<RunEvent>>,
+    runner_cancel: Option<Sender<()>>,
     last_external_check: Instant,
     external_change_prompt: Option<ExternalChangePrompt>,
     /// Pending text modifications requested by AI agent tools, awaiting user confirmation.
@@ -838,6 +891,14 @@ pub struct App {
     pub model_form_temperature: String,
     // ── Session browser state ──────────────────────────
     pub session_panel_active: bool,
+    /// Whether the browser explicitly displays unassigned legacy history.
+    pub session_panel_legacy: bool,
+    pending_session_restore: Option<(
+        usize,
+        teshi_engine::ProjectStamp,
+        crate::session::Session,
+        bool,
+    )>,
     pub session_panel_selection: usize,
     pub session_list: Vec<crate::session::Session>,
     // ── Agent state ─────────────────────────────────
@@ -868,6 +929,27 @@ pub struct App {
     pub test_points_ui: crate::test_points_tab::TestPointsUiState,
     /// Resolved user-level requirement store root for this process.
     pub requirements_root: PathBuf,
+    /// Project identity and switch lifecycle state. Project-scoped async
+    /// results must carry the stamp returned by `project_stamp`.
+    pub project_switch: crate::project_context::ProjectSwitchState,
+}
+
+struct PreparedProjectContext {
+    project: BddProject,
+    git_status: teshi_core::git::FeatureGitStatusModel,
+    step_index: StepIndex,
+    mindmap_index: mindmap::MindMapIndex,
+    buffers: Vec<EditorBuffer>,
+    buffer_dirty: Vec<bool>,
+    disk_stamps: Vec<Option<FileStamp>>,
+    active_buffer_idx: Option<usize>,
+    tree_state: tui_tree_widget::TreeState<String>,
+    buffer: EditorBuffer,
+    file_path: Option<PathBuf>,
+    authoring_ui: crate::authoring_tab::AuthoringUiState,
+    test_points_ui: crate::test_points_tab::TestPointsUiState,
+    runner_config: Option<RunnerConfig>,
+    agent_registry: teshi_agent::registry::AgentRegistry,
 }
 
 /// Convert a character index to the corresponding byte offset in a UTF-8 string.
@@ -1043,6 +1125,19 @@ pub enum ClickableRegion {
         pane: usize,
         rect: ratatui::layout::Rect,
     },
+    /// A row in the recent-project picker.
+    ProjectRecent {
+        index: usize,
+        rect: ratatui::layout::Rect,
+    },
+    /// The picker action that opens a typed project path.
+    ProjectOpenPath {
+        rect: ratatui::layout::Rect,
+    },
+    /// The current project control in the header.
+    ProjectControl {
+        rect: ratatui::layout::Rect,
+    },
     /// Quit confirmation "Yes" button.
     QuitConfirmYes {
         row_y: u16,
@@ -1069,6 +1164,564 @@ fn directory_scan_recursive(path: &Path, cli_recursive: bool) -> bool {
 }
 
 impl App {
+    pub fn current_project_stamp(&self) -> teshi_engine::ProjectStamp {
+        self.project_switch.current_stamp()
+    }
+
+    /// Returns whether a result produced for `stamp` may mutate this App.
+    pub fn accepts_project_event(&self, stamp: &teshi_engine::ProjectStamp) -> bool {
+        self.project_switch.accepts(stamp)
+    }
+
+    fn project_dirty_objects(&self) -> Vec<crate::project_context::DirtyProjectObject> {
+        let mut dirty = self
+            .buffer_dirty
+            .iter()
+            .enumerate()
+            .filter(|(_, is_dirty)| **is_dirty)
+            .filter_map(|(index, _)| {
+                self.project.features.get(index).map(|feature| {
+                    crate::project_context::DirtyProjectObject::Feature(feature.file_path.clone())
+                })
+            })
+            .collect::<Vec<_>>();
+        if self.authoring_ui.buffer_dirty
+            && let Some(id) = self.authoring_ui.selected_document_id.clone()
+        {
+            dirty.push(crate::project_context::DirtyProjectObject::Requirement(id));
+        }
+        if self.test_points_ui.field_dirty
+            && let Some(id) = self.test_points_ui.selected_test_point_id.clone()
+        {
+            dirty.push(crate::project_context::DirtyProjectObject::TestPoint(id));
+        }
+        if !self.pending_agent_changes.is_empty() {
+            dirty.push(crate::project_context::DirtyProjectObject::AgentProposal);
+        }
+        dirty
+    }
+
+    fn project_tasks_busy(&self) -> bool {
+        self.runner_rx.is_some()
+            || self.explore_state.is_some()
+            || self.generation_stage != teshi_agent::pipeline::GenerationStage::Idle
+            || self.agents.iter().any(|agent| {
+                agent.shutdown_pending()
+                    || matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval)
+                    || matches!(
+                        agent.backend.status(),
+                        teshi_agent::backend::AgentBackendStatus::Running
+                            | teshi_agent::backend::AgentBackendStatus::WaitingForPermission
+                            | teshi_agent::backend::AgentBackendStatus::WaitingForHumanReview
+                    )
+            })
+    }
+
+    /// Start a safe project switch. Preparation is detached from the active
+    /// fields; failures leave the current project and its edits untouched.
+    pub fn request_project_switch(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        if !self.project_switch.is_active()
+            && matches!(
+                self.project_switch.overlay,
+                crate::project_context::SwitchOverlay::None
+            )
+            && self.project_switch.pending.is_some()
+        {
+            self.status = "A project switch is already being prepared".to_string();
+            self.set_status_message(self.status.clone());
+            return Ok(());
+        }
+        let target =
+            match crate::project_context::resolve_project_target(path.as_ref().to_path_buf()) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    self.status = format!("Could not resolve project: {error}");
+                    self.set_status_message(self.status.clone());
+                    return Ok(());
+                }
+            };
+        if !target.root().is_dir() {
+            self.status = format!(
+                "Project directory does not exist: {}",
+                target.root().display()
+            );
+            self.set_status_message(self.status.clone());
+            return Ok(());
+        }
+        let dirty = self.project_dirty_objects();
+        let busy = self.project_tasks_busy();
+        let decision = self.project_switch.begin(target.clone(), dirty, busy);
+        match decision {
+            crate::project_context::SwitchDecision::Noop => {
+                self.status = "Already on that project; active work was preserved".to_string();
+            }
+            crate::project_context::SwitchDecision::NeedsConfirmation => {
+                let labels = self
+                    .project_switch
+                    .pending
+                    .as_ref()
+                    .map(|request| {
+                        request
+                            .dirty
+                            .iter()
+                            .map(crate::project_context::DirtyProjectObject::label)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                self.status = if labels.is_empty() {
+                    "Project switch needs running tasks stopped: S stop · Esc cancel".to_string()
+                } else {
+                    format!(
+                        "Unsaved project state: {} · S save & switch · D discard & switch · Esc cancel",
+                        labels.join(", ")
+                    )
+                };
+            }
+            crate::project_context::SwitchDecision::Ready => {
+                self.commit_project_switch(target)?;
+            }
+        }
+        self.set_status_message(self.status.clone());
+        Ok(())
+    }
+
+    fn commit_project_switch(&mut self, target: teshi_engine::ProjectIdentity) -> Result<()> {
+        // Dirty-state resolution can take time. Recheck ownership at the final
+        // boundary even if no tasks were busy when the request first began.
+        if self.project_tasks_busy() {
+            self.project_switch.overlay = crate::project_context::SwitchOverlay::Busy { target };
+            self.status = "Project-owned tasks must stop before switching".to_string();
+            return Ok(());
+        }
+        // Completed ACP sessions and idle native transports are project-owned
+        // too. Shut them down before preparation, without a blocking Drop/join.
+        for agent in &mut self.agents {
+            agent.backend.request_shutdown();
+            agent.backend.poll_shutdown();
+        }
+        if self.project_tasks_busy() {
+            self.project_switch.overlay = crate::project_context::SwitchOverlay::Busy { target };
+            self.project_switch
+                .start_quiesce_wait(PROJECT_SWITCH_STOP_TIMEOUT);
+            self.status = "Waiting for project-owned Agent backends to exit".to_string();
+            return Ok(());
+        }
+        if let Err(error) = self.save_sessions(true) {
+            self.project_switch.cancel();
+            self.status = format!("Could not checkpoint project A: {error}");
+            return Ok(());
+        }
+        self.project_switch.mark_preparing();
+        let prepared = match self.prepare_project_context(&target) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.project_switch.cancel();
+                self.status = format!("Could not prepare project B: {error}");
+                return Ok(());
+            }
+        };
+
+        self.project = prepared.project;
+        self.git_status = prepared.git_status;
+        self.git_status_rx = None;
+        self.git_status_refresh_requested = false;
+        self.git_status_deadline_clear();
+        self.git_status_revision = 0;
+        self.step_index = prepared.step_index;
+        self.mindmap_index = prepared.mindmap_index;
+        self.mindmap_location_selection.clear();
+        self.buffers = prepared.buffers;
+        self.buffer_dirty = prepared.buffer_dirty;
+        self.disk_stamps = prepared.disk_stamps;
+        self.active_buffer_idx = prepared.active_buffer_idx;
+        self.view_stage = ViewStage::TreeOnly;
+        self.tree_state = prepared.tree_state;
+        self.buffer = prepared.buffer;
+        self.file_path = prepared.file_path;
+        self.buffer_diagnostics.clear();
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+        self.desired_col = 0;
+        self.scroll_row = 0;
+        self.focus_slot = BddFocusSlot::Body;
+        self.preview_buffer = None;
+        self.preview_title.clear();
+        self.preview_cursor_row = 0;
+        self.preview_scroll_row = 0;
+        self.dirty = false;
+        self.runner_config = prepared.runner_config;
+        self.runner_rx = None;
+        self.pending_agent_changes.clear();
+        self.pending_change_diffs.clear();
+        self.pending_change_summary.clear();
+        self.explore_diff_lines = None;
+        self.change_summary_visible = false;
+        self.explore_selected_feature = 0;
+        self.explore_selected_deleted_feature = None;
+        self.explore_selected_scenario = 0;
+        self.explore_selected_step = 0;
+        self.explore_viewports = Default::default();
+        self.explore_feature_scenario_memory.clear();
+        self.explore_scenario_step_memory.clear();
+        self.explore_case_map.clear();
+        self.explore_case_status.clear();
+        self.explore_case_details.clear();
+        self.explore_detail_open = false;
+        self.explore_detail_case = None;
+        self.explore_run_summary = None;
+        self.explore_state = None;
+        self.generation_stage = teshi_agent::pipeline::GenerationStage::Idle;
+        self.pipeline_requirement = None;
+        self.pipeline_plan = None;
+        self.generation_scope = None;
+        self.generation_scope_prompt = None;
+        self.generation_paused_reason = None;
+        self.authoring_ui = prepared.authoring_ui;
+        self.test_points_ui = prepared.test_points_ui;
+        self.agent_registry = prepared.agent_registry;
+        self.project_switch.mark_committing();
+        self.project_switch.mark_committed(target.clone());
+        self.session_panel_legacy = false;
+        self.session_panel_active = false;
+        self.pending_session_restore = None;
+        self.session_list = self.project_sessions();
+        self.session_panel_selection = 0;
+        self.clear_chat_selection();
+        self.reset_agents_for_project(target.root());
+        if let Err(error) = teshi_engine::add_recent_project(target.root()) {
+            self.status = format!("Switched project, but recent history was not saved: {error}");
+        } else {
+            self.status = format!("Switched project: {}", target.root().display());
+        }
+        self.restore_generation_session_from_disk();
+        self.show_selection_warning();
+        Ok(())
+    }
+
+    fn git_status_deadline_clear(&mut self) {
+        self.git_status_refresh_deadline = None;
+    }
+
+    fn prepare_project_context(
+        &self,
+        target: &teshi_engine::ProjectIdentity,
+    ) -> Result<PreparedProjectContext> {
+        let root = target.root();
+        let project = gherkin::parse_project(root);
+        let git_status = teshi_core::git::FeatureGitStatusModel::empty_for_project(
+            &project,
+            teshi_core::git::GitProjectScope::Recursive,
+        );
+        let step_index = StepIndex::build(&project);
+        let mut mindmap_index = mindmap::build_index(&project);
+        let buffers = project
+            .features
+            .iter()
+            .map(|feature| {
+                fs::read_to_string(&feature.file_path)
+                    .map(EditorBuffer::from_string)
+                    .with_context(|| format!("read {}", feature.file_path.display()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let buffer_dirty = vec![false; buffers.len()];
+        let tree_state = mindmap::init_tree_state(&mut mindmap_index);
+        let active_buffer_idx = (!buffers.is_empty()).then_some(0);
+        let buffer = buffers
+            .first()
+            .cloned()
+            .unwrap_or_else(|| EditorBuffer::from_string(String::new()));
+        let file_path = project
+            .features
+            .first()
+            .map(|feature| feature.file_path.clone());
+        let authoring_ui = crate::authoring_tab::AuthoringUiState::load_from_project(
+            root,
+            &self.requirements_root,
+        );
+        let mut test_points_ui = crate::test_points_tab::TestPointsUiState::empty();
+        test_points_ui.rebuild_tree(authoring_ui.artifacts.as_ref());
+        let runner_config = runner::load_optional_runner_config_for_project(root, None)
+            .with_context(|| format!("load runner configuration for {}", root.display()))?;
+        Ok(PreparedProjectContext {
+            disk_stamps: Self::capture_disk_stamps(&project),
+            project,
+            git_status,
+            step_index,
+            mindmap_index,
+            buffers,
+            buffer_dirty,
+            active_buffer_idx,
+            tree_state,
+            buffer,
+            file_path,
+            authoring_ui,
+            test_points_ui,
+            runner_config,
+            agent_registry: teshi_agent::registry::AgentRegistry::load(Some(root)),
+        })
+    }
+
+    fn reset_agents_for_project(&mut self, root: &Path) {
+        let descriptions = self
+            .agents
+            .iter()
+            .map(|agent| (agent.id, agent.title.clone(), agent.profile_id.clone()))
+            .collect::<Vec<_>>();
+        self.agents = descriptions
+            .into_iter()
+            .map(|(id, title, profile_id)| {
+                let mut agent =
+                    AgentThread::new_with_selection(id, &title, Some(root.to_path_buf()));
+                agent.profile_id = profile_id;
+                agent
+            })
+            .collect();
+        if self.agents.is_empty() {
+            self.agents.push(AgentThread::new_with_selection(
+                0,
+                "Agent 1",
+                Some(root.to_path_buf()),
+            ));
+        }
+        self.selected_agent = self.selected_agent.min(self.agents.len() - 1);
+        self.active_model_label = None;
+        self.ai_input_focused = true;
+    }
+
+    fn project_switch_action(&mut self, action: Action) -> Result<()> {
+        use crate::project_context::SwitchOverlay;
+        match self.project_switch.overlay.clone() {
+            SwitchOverlay::Picker { .. } => match action {
+                Action::MoveUp | Action::OverlayMoveUp | Action::AiScrollUp => {
+                    self.project_switch.move_picker(-1)
+                }
+                Action::MoveDown | Action::OverlayMoveDown | Action::AiScrollDown => {
+                    self.project_switch.move_picker(1)
+                }
+                Action::OverlayConfirm | Action::Enter | Action::AiSendMessage => {
+                    if let Some(target) = self.project_switch.picker_target() {
+                        self.request_project_switch(target.root())?;
+                    } else {
+                        self.status = "No recent project is available".to_string();
+                        self.project_switch.cancel();
+                    }
+                }
+                Action::ClearInputState | Action::OverlayCancel => {
+                    self.project_switch.cancel();
+                    self.status = "Project switch canceled".to_string();
+                }
+                Action::OverlayInsert('o' | 'O') => {
+                    self.project_switch.begin_open_path();
+                    self.status =
+                        "Type a project directory and press Enter to open it; Esc cancels"
+                            .to_string();
+                }
+                _ => {}
+            },
+            SwitchOverlay::OpenPath { .. } => match action {
+                Action::OverlayInsert(ch) => self.project_switch.append_path_input(ch),
+                Action::OverlayBackspace | Action::Backspace => {
+                    self.project_switch.backspace_path_input()
+                }
+                Action::OverlayConfirm | Action::Enter | Action::AiSendMessage => {
+                    let input = self
+                        .project_switch
+                        .path_input()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    if input.is_empty() {
+                        self.status =
+                            "Enter a project directory or press Esc to cancel".to_string();
+                    } else {
+                        self.request_project_switch(PathBuf::from(input))?;
+                    }
+                }
+                Action::ClearInputState | Action::OverlayCancel => {
+                    self.project_switch.cancel();
+                    self.status = "Project switch canceled".to_string();
+                }
+                _ => {}
+            },
+            SwitchOverlay::Dirty { .. } => match action {
+                Action::Save | Action::OverlayInsert('s' | 'S') => {
+                    if let Err(error) = self.save_project_state_for_switch() {
+                        self.status = format!("Cannot save before switching: {error}");
+                        self.set_status_message(self.status.clone());
+                        return Ok(());
+                    }
+                    self.switch_after_resolution()?;
+                }
+                Action::PendingChar('d') | Action::OverlayInsert('d' | 'D') => {
+                    // Keep A's in-memory edits intact until B has been
+                    // prepared. A failed B load must leave the discardable
+                    // state recoverable while A remains active.
+                    self.switch_after_resolution()?;
+                }
+                Action::ClearInputState | Action::OverlayCancel => {
+                    self.project_switch.cancel();
+                    self.status = "Project switch canceled".to_string();
+                }
+                _ => {}
+            },
+            SwitchOverlay::Busy { .. } => match action {
+                Action::ClearInputState | Action::OverlayCancel => {
+                    self.project_switch.cancel();
+                    self.status = "Project switch canceled".to_string();
+                }
+                Action::Save | Action::OverlayInsert('s' | 'S') => {
+                    self.cancel_project_tasks();
+                    self.project_switch
+                        .start_quiesce_wait(PROJECT_SWITCH_STOP_TIMEOUT);
+                    if let Some(cancel) = self.runner_cancel.as_ref() {
+                        let _ = cancel.send(());
+                        self.status =
+                            "Stop requested for the project-owned runner; waiting for exit"
+                                .to_string();
+                    } else if self.runner_rx.is_some() {
+                        self.status = "Runner is still active; wait for its owned process to exit"
+                            .to_string();
+                    } else {
+                        self.generation_stage = teshi_agent::pipeline::GenerationStage::Idle;
+                        self.explore_state = None;
+                        self.advance_project_switch_after_tasks()?;
+                    }
+                }
+                _ => {}
+            },
+            SwitchOverlay::None => {}
+        }
+        // Editor footers show editing controls rather than `status`; publish
+        // switch failures through the visible status message as well.
+        self.set_status_message(self.status.clone());
+        Ok(())
+    }
+
+    fn cancel_project_tasks(&mut self) {
+        for agent in &mut self.agents {
+            agent.retain_partial_response();
+            agent.backend.request_shutdown();
+            agent.status = AiStatus::Idle;
+            agent.tool_status = None;
+            agent.pending_acp_permission = None;
+        }
+        self.generation_stage = teshi_agent::pipeline::GenerationStage::Idle;
+        self.explore_state = None;
+        // Stopping work does not accept or discard an unapplied proposal. The
+        // existing dirty-state guard must resolve it explicitly before commit.
+    }
+
+    /// Progress or time out the quiesce phase without touching unrelated
+    /// processes. A timeout returns control to project A and leaves the owned
+    /// task handles available for their normal completion path.
+    pub fn poll_project_switch(&mut self) {
+        for agent in &mut self.agents {
+            agent.poll_shutdown();
+        }
+        if !self.agent().shutdown_pending()
+            && let Some((agent_id, stamp, session, legacy)) = self.pending_session_restore.take()
+            && self.agent().id == agent_id
+            && self.project_switch.accepts(&stamp)
+        {
+            self.restore_session(session, legacy);
+        }
+        if !matches!(
+            self.project_switch.overlay,
+            crate::project_context::SwitchOverlay::Busy { .. }
+        ) {
+            return;
+        }
+        if !self.project_tasks_busy() {
+            if let Err(error) = self.advance_project_switch_after_tasks() {
+                self.project_switch.cancel();
+                self.status = format!("Project switch could not continue: {error}");
+            }
+            self.set_status_message(self.status.clone());
+        } else if self.project_switch.quiesce_timed_out() {
+            self.project_switch.cancel();
+            self.status = format!(
+                "Project switch stopped: owned task did not exit within {}s; project A remains active",
+                PROJECT_SWITCH_STOP_TIMEOUT.as_secs()
+            );
+            self.set_status_message(self.status.clone());
+        }
+    }
+
+    fn advance_project_switch_after_tasks(&mut self) -> Result<()> {
+        use crate::project_context::SwitchOverlay;
+        if !matches!(self.project_switch.overlay, SwitchOverlay::Busy { .. })
+            || self.project_tasks_busy()
+        {
+            return Ok(());
+        }
+        self.project_switch.phase = crate::project_context::SwitchPhase::ResolveDirty;
+        if self.project_dirty_objects().is_empty() {
+            self.project_switch.overlay = SwitchOverlay::None;
+            self.switch_after_resolution()?;
+        } else {
+            let Some(target) = self
+                .project_switch
+                .pending
+                .as_ref()
+                .map(|request| request.target.clone())
+            else {
+                self.project_switch.cancel();
+                return Ok(());
+            };
+            self.project_switch.overlay = SwitchOverlay::Dirty { target };
+            self.status = "Tasks stopped; resolve unsaved state before switching".to_string();
+        }
+        Ok(())
+    }
+
+    fn switch_after_resolution(&mut self) -> Result<()> {
+        let Some(request) = self.project_switch.pending.clone() else {
+            self.project_switch.cancel();
+            return Ok(());
+        };
+        self.commit_project_switch(request.target)
+    }
+
+    fn save_project_state_for_switch(&mut self) -> Result<()> {
+        if !self.pending_agent_changes.is_empty() {
+            anyhow::bail!("an unapplied Agent proposal must be accepted or rejected first")
+        }
+        if let Some(active) = self.active_buffer_idx
+            && self.buffer_dirty.get(active).copied().unwrap_or(false)
+        {
+            self.buffers[active] = self.buffer.clone();
+        }
+        for (index, dirty) in self.buffer_dirty.iter_mut().enumerate() {
+            if *dirty {
+                let path = self
+                    .project
+                    .features
+                    .get(index)
+                    .map(|feature| feature.file_path.clone())
+                    .context("dirty Feature buffer has no source path")?;
+                fs::write(&path, self.buffers[index].as_string())
+                    .with_context(|| format!("write {}", path.display()))?;
+                *dirty = false;
+            }
+        }
+        if self.authoring_ui.buffer_dirty {
+            self.authoring_ui
+                .save_current_document(&self.project.root_dir)
+                .context("save requirement draft")?;
+        }
+        if self.test_points_ui.field_dirty {
+            self.commit_test_point_field_edit()?;
+            if let Some(artifacts) = self.authoring_ui.artifacts.as_ref() {
+                crate::test_points_tab::TestPointsUiState::save_test_points(
+                    &self.project.root_dir,
+                    artifacts,
+                )?;
+            }
+        }
+        self.sync_dirty_flag_with_active_buffer();
+        Ok(())
+    }
+
     fn capture_disk_stamps(project: &BddProject) -> Vec<Option<FileStamp>> {
         project
             .features
@@ -1188,6 +1841,8 @@ impl App {
         let buffer_dirty = vec![false; buffers.len()];
         let tree_state = mindmap::init_tree_state(&mut mindmap_index);
         let project_root = project.root_dir.clone();
+        let project_identity = teshi_engine::ProjectIdentity::new(&project_root)
+            .context("resolve project identity")?;
         let (buffer, file_path, active_idx) = if buffers.is_empty() {
             (EditorBuffer::from_string(String::new()), None, None)
         } else {
@@ -1240,7 +1895,6 @@ impl App {
             step_keyword_picker: None,
             pending_char: None,
             clipboard: None,
-            system_clipboard: None,
             scenario_fold: HashSet::new(),
             selection_anchor: None,
             selection_end: None,
@@ -1248,14 +1902,16 @@ impl App {
             editor_panel_rect: None,
             chat_history_rect: None,
             chat_selection: None,
+            system_clipboard: None,
             chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
             preview_panel_rect: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            runner_config: runner::load_runner_config(None).ok(),
+            runner_config: runner::load_runner_config_for_project(&project_root, None).ok(),
             runner_rx: None,
+            runner_cancel: None,
             last_external_check: Instant::now(),
             external_change_prompt: None,
             pending_agent_changes: Vec::new(),
@@ -1270,7 +1926,7 @@ impl App {
             explore_selected_scenario: 0,
             explore_selected_step: 0,
             explore_horizontal_scroll: [0; 3],
-            explore_viewports: [ExploreColumnViewport::default(); 3],
+            explore_viewports: Default::default(),
             explore_horizontal_scroll_drag: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
@@ -1319,6 +1975,8 @@ impl App {
             model_form_temperature: String::from("0.7"),
             active_model_label: None,
             session_panel_active: false,
+            session_panel_legacy: false,
+            pending_session_restore: None,
             session_panel_selection: 0,
             session_list: Vec::new(),
             agent_registry: teshi_agent::registry::AgentRegistry::load(Some(dir)),
@@ -1341,6 +1999,7 @@ impl App {
             ),
             test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
             requirements_root,
+            project_switch: crate::project_context::ProjectSwitchState::new(project_identity),
         };
         app.refresh_git_status();
         app.restore_generation_session_from_disk();
@@ -1382,6 +2041,8 @@ impl App {
         let disk_stamps = Self::capture_disk_stamps(&project);
         let tree_state = mindmap::init_tree_state(&mut mindmap_index);
         let project_root = project.root_dir.clone();
+        let project_identity = teshi_engine::ProjectIdentity::new(&project_root)
+            .context("resolve project identity")?;
         let mut app = Self {
             project,
             git_status,
@@ -1430,7 +2091,6 @@ impl App {
             step_keyword_picker: None,
             pending_char: None,
             clipboard: None,
-            system_clipboard: None,
             scenario_fold: HashSet::new(),
             selection_anchor: None,
             selection_end: None,
@@ -1438,14 +2098,16 @@ impl App {
             editor_panel_rect: None,
             chat_history_rect: None,
             chat_selection: None,
+            system_clipboard: None,
             chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
             preview_panel_rect: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            runner_config: runner::load_runner_config(None).ok(),
+            runner_config: runner::load_runner_config_for_project(&project_root, None).ok(),
             runner_rx: None,
+            runner_cancel: None,
             last_external_check: Instant::now(),
             external_change_prompt: None,
             pending_agent_changes: Vec::new(),
@@ -1460,7 +2122,7 @@ impl App {
             explore_selected_scenario: 0,
             explore_selected_step: 0,
             explore_horizontal_scroll: [0; 3],
-            explore_viewports: [ExploreColumnViewport::default(); 3],
+            explore_viewports: Default::default(),
             explore_horizontal_scroll_drag: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
@@ -1499,6 +2161,8 @@ impl App {
             model_form_temperature: String::from("0.7"),
             active_model_label: None,
             session_panel_active: false,
+            session_panel_legacy: false,
+            pending_session_restore: None,
             session_panel_selection: 0,
             session_list: Vec::new(),
             agent_registry: {
@@ -1524,6 +2188,7 @@ impl App {
             ),
             test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
             requirements_root,
+            project_switch: crate::project_context::ProjectSwitchState::new(project_identity),
         };
         app.refresh_git_status();
         app.restore_generation_session_from_disk();
@@ -1549,6 +2214,8 @@ impl App {
             features: Vec::new(),
         };
         let project_root = project.root_dir.clone();
+        let project_identity = teshi_engine::ProjectIdentity::new(&project_root)
+            .unwrap_or_else(|_| teshi_engine::ProjectIdentity::from_root(&project_root));
         let step_index = StepIndex::build(&project);
         let mut mindmap_index = mindmap::build_index(&project);
         let tree_state = mindmap::init_tree_state(&mut mindmap_index);
@@ -1600,7 +2267,6 @@ impl App {
             step_keyword_picker: None,
             pending_char: None,
             clipboard: None,
-            system_clipboard: None,
             scenario_fold: HashSet::new(),
             selection_anchor: None,
             selection_end: None,
@@ -1608,14 +2274,16 @@ impl App {
             editor_panel_rect: None,
             chat_history_rect: None,
             chat_selection: None,
+            system_clipboard: None,
             chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
             preview_panel_rect: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            runner_config: runner::load_runner_config(None).ok(),
+            runner_config: runner::load_runner_config_for_project(&project_root, None).ok(),
             runner_rx: None,
+            runner_cancel: None,
             last_external_check: Instant::now(),
             external_change_prompt: None,
             pending_agent_changes: Vec::new(),
@@ -1630,7 +2298,7 @@ impl App {
             explore_selected_scenario: 0,
             explore_selected_step: 0,
             explore_horizontal_scroll: [0; 3],
-            explore_viewports: [ExploreColumnViewport::default(); 3],
+            explore_viewports: Default::default(),
             explore_horizontal_scroll_drag: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
@@ -1669,6 +2337,8 @@ impl App {
             model_form_temperature: String::from("0.7"),
             active_model_label: None,
             session_panel_active: false,
+            session_panel_legacy: false,
+            pending_session_restore: None,
             session_panel_selection: 0,
             session_list: Vec::new(),
             agent_registry: teshi_agent::registry::AgentRegistry::load(None),
@@ -1693,6 +2363,7 @@ impl App {
             ),
             test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
             requirements_root,
+            project_switch: crate::project_context::ProjectSwitchState::new(project_identity),
         };
         app.spawn_llm_if_configured();
         app.activate_active_profile();
@@ -1903,6 +2574,7 @@ impl App {
 
     pub fn poll_runner_events(&mut self) {
         let Some(rx) = self.runner_rx.take() else {
+            self.poll_project_switch();
             return;
         };
         let mut keep_rx = true;
@@ -1927,7 +2599,14 @@ impl App {
         }
         if keep_rx {
             self.runner_rx = Some(rx);
+        } else {
+            self.runner_cancel = None;
+            if let Err(error) = self.advance_project_switch_after_tasks() {
+                self.project_switch.cancel();
+                self.status = format!("Project switch could not continue: {error}");
+            }
         }
+        self.poll_project_switch();
     }
 
     /// Spawn the LLM worker when the shared profile store or `TESHI_LLM_*` is usable.
@@ -2127,6 +2806,7 @@ impl App {
             Err(error) => {
                 self.agents[agent_idx].status = AiStatus::Error;
                 self.status = format!("AI backend unavailable: {error}");
+                self.set_status_message(self.status.clone());
                 false
             }
         }
@@ -2367,6 +3047,7 @@ impl App {
                         self.agents[i].pending_acp_permission = None;
                         if i == self.selected_agent {
                             self.status = format!("AI: {message}");
+                            self.set_status_message(self.status.clone());
                         }
                     }
                     Ok(Some(AgentBackendEvent::ExternalToolActivity { title, status, .. })) => {
@@ -2769,6 +3450,13 @@ impl App {
     }
 
     fn dispatch_user_message(&mut self, user_msg: String) -> Result<()> {
+        if !self.start_agent_backend(self.selected_agent) {
+            // A rejected send must not reappear in a later restored provider
+            // context. Keep it as an editable draft for an explicit retry.
+            self.agent_mut().input_cursor = user_msg.chars().count();
+            self.agent_mut().input = user_msg;
+            return Ok(());
+        }
         self.agent_mut().scroll_offset = 0;
         self.agent_mut().messages_mut().push(AiChatMessage {
             role: AiRole::User,
@@ -2792,9 +3480,6 @@ impl App {
         self.agent_mut().status = AiStatus::Waiting;
         self.agent_mut().partial_response_mut().clear();
         self.agent_mut().pending_acp_permission = None;
-        if !self.start_agent_backend(self.selected_agent) {
-            return Ok(());
-        }
         self.status = "Sending message to AI...".to_string();
 
         if !self.agent().backend.is_connected() {
@@ -3418,7 +4103,8 @@ impl App {
     }
 
     /// Set a temporary status message that auto-clears after 3 seconds.
-    fn set_status_message(&mut self, msg: String) {
+    /// Publishes a visible, expiring status message across terminal views.
+    pub(crate) fn set_status_message(&mut self, msg: String) {
         self.status_message = Some(msg);
         self.status_message_deadline = Some(Instant::now() + Duration::from_secs(3));
     }
@@ -3660,6 +4346,7 @@ impl App {
         self.git_status_refresh_requested = false;
         self.git_status_refresh_deadline = None;
         let revision = self.git_status_revision;
+        let project_stamp = self.current_project_stamp();
         let project = self.project.clone();
         let scope = self.git_status.scope;
         let content_overrides = self.git_content_overrides();
@@ -3672,7 +4359,11 @@ impl App {
                 scope,
                 &content_overrides,
             );
-            let _ = tx.send(GitStatusRefreshResult { revision, model });
+            let _ = tx.send(GitStatusRefreshResult {
+                revision,
+                project_stamp,
+                model,
+            });
         });
     }
 
@@ -3696,7 +4387,9 @@ impl App {
             }
         }
         if let Some(refresh) = result {
-            if refresh.revision == self.git_status_revision {
+            if self.accepts_project_event(&refresh.project_stamp)
+                && refresh.revision == self.git_status_revision
+            {
                 self.git_status = refresh.model;
                 self.git_status_refresh_requested = false;
                 self.normalize_explore_selection();
@@ -4559,7 +5252,7 @@ impl App {
         }
         let needs_dispatch = self.explore_cases_need_dispatch(&cases);
         let started = if needs_dispatch {
-            runner::spawn_teshi_dispatch(self.project.root_dir.clone(), cases)
+            runner::spawn_teshi_dispatch_with_control(self.project.root_dir.clone(), cases)
         } else {
             let Some(config) = self
                 .runner_config
@@ -4577,11 +5270,12 @@ impl App {
                     self.project.root_dir.to_string_lossy().into_owned(),
                 )]),
             };
-            runner::spawn_runner(config, request)
+            runner::spawn_runner_with_control(config, request)
         };
         match started {
-            Ok(rx) => {
+            Ok((rx, cancel)) => {
                 self.runner_rx = Some(rx);
+                self.runner_cancel = Some(cancel);
                 self.status = if needs_dispatch {
                     "API/mixed run started".to_string()
                 } else {
@@ -5375,6 +6069,12 @@ impl App {
     // ── Action handler ──────────────────────────────────────────────
 
     pub fn handle_action(&mut self, action: Action) -> Result<()> {
+        if !matches!(
+            self.project_switch.overlay,
+            crate::project_context::SwitchOverlay::None
+        ) {
+            return self.project_switch_action(action);
+        }
         if let crate::authoring_tab::RequirementsOverlay::Unsaved { pending } =
             self.authoring_ui.overlay.clone()
         {
@@ -6076,10 +6776,11 @@ impl App {
             }
             // ── Session browser panel actions ─────────────────
             Action::SessionPanelOpen => {
-                return self.cmd_sessions();
+                return self.cmd_sessions(false);
             }
             Action::SessionPanelClose => {
                 self.session_panel_active = false;
+                self.pending_session_restore = None;
                 self.quit_pending_confirm = false;
             }
             Action::SessionPanelUp => {
@@ -6098,17 +6799,9 @@ impl App {
                 if let Some(session) = self.session_list.get(self.session_panel_selection).cloned()
                 {
                     self.save_sessions(true)?;
-                    self.restore_session(session);
-                    self.agent_mut().partial_response_mut().clear();
-                    self.agent_mut().input.clear();
-                    self.agent_mut().input_cursor = 0;
-                    self.agent_mut().status = AiStatus::Idle;
-                    self.agent_mut().scroll_offset = 0;
-                    self.session_panel_active = false;
-                    self.status = format!(
-                        "Loaded session with {} messages",
-                        self.agent().messages().len()
-                    );
+                    if !self.restore_session(session, self.session_panel_legacy) {
+                        return Ok(());
+                    }
                 }
                 self.quit_pending_confirm = false;
             }
@@ -6119,7 +6812,11 @@ impl App {
                     if let Err(e) = crate::session::Session::delete(&id) {
                         self.status = format!("Failed to delete session: {e}");
                     } else {
-                        self.session_list = self.project_sessions();
+                        self.session_list = if self.session_panel_legacy {
+                            self.legacy_sessions()
+                        } else {
+                            self.project_sessions()
+                        };
                         if self.session_panel_selection >= self.session_list.len() {
                             self.session_panel_selection =
                                 self.session_list.len().saturating_sub(1);
@@ -8034,6 +8731,26 @@ impl App {
         row: u16,
         modifiers: KeyModifiers,
     ) -> Result<()> {
+        if !matches!(
+            self.project_switch.overlay,
+            crate::project_context::SwitchOverlay::None
+        ) {
+            let pos = ratatui::layout::Position::new(col, row);
+            if matches!(kind, MouseEventKind::Down(MouseButton::Left))
+                && let Some(region) = self.hit_test(&pos).cloned()
+                && matches!(
+                    self.project_switch.overlay,
+                    crate::project_context::SwitchOverlay::Picker { .. }
+                )
+                && matches!(
+                    region,
+                    ClickableRegion::ProjectRecent { .. } | ClickableRegion::ProjectOpenPath { .. }
+                )
+            {
+                self.handle_region_click(&region, &pos)?;
+            }
+            return Ok(());
+        }
         if self.authoring_ui.overlay_active() {
             let pos = ratatui::layout::Position::new(col, row);
             if matches!(kind, MouseEventKind::Down(MouseButton::Left))
@@ -8686,6 +9403,13 @@ impl App {
                         return Some(region);
                     }
                 }
+                ClickableRegion::ProjectRecent { rect, .. }
+                | ClickableRegion::ProjectOpenPath { rect }
+                | ClickableRegion::ProjectControl { rect } => {
+                    if rect.contains(*pos) {
+                        return Some(region);
+                    }
+                }
                 ClickableRegion::QuitConfirmYes {
                     row_y,
                     col_x,
@@ -8887,6 +9611,24 @@ impl App {
                         self.test_points_ui.select_test_point(&id);
                     }
                 }
+            }
+            ClickableRegion::ProjectRecent { index, .. } => {
+                if let crate::project_context::SwitchOverlay::Picker { selection } =
+                    &mut self.project_switch.overlay
+                {
+                    *selection = (*index).min(self.project_switch.recent.len().saturating_sub(1));
+                    if let Some(target) = self.project_switch.picker_target() {
+                        self.request_project_switch(target.root())?;
+                    }
+                }
+            }
+            ClickableRegion::ProjectOpenPath { .. } => {
+                self.project_switch.begin_open_path();
+                self.status =
+                    "Type a project directory and press Enter to open it; Esc cancels".to_string();
+            }
+            ClickableRegion::ProjectControl { .. } => {
+                self.cmd_project(None)?;
             }
             ClickableRegion::QuitConfirmYes { .. } => {
                 self.should_quit = true;
@@ -9516,10 +10258,7 @@ impl App {
         } else {
             teshi_agent::backend::AgentBackendKind::Native
         };
-        thread.backend = teshi_agent_runtime::backend::AgentBackendRuntime::new(
-            kind,
-            teshi_agent_runtime::max_agent_iterations(),
-        );
+        thread.replace_backend(kind);
         *thread.messages_mut() = messages;
         thread.selected_acp_id = selected_id;
         thread.selection_warning = None;
@@ -9671,7 +10410,16 @@ impl App {
             return self.cmd_models();
         }
         if command == "sessions" || command == "session" {
-            return self.cmd_sessions();
+            return self.cmd_sessions(false);
+        }
+        if command == "sessions legacy" || command == "session legacy" {
+            return self.cmd_sessions(true);
+        }
+        if command == "project" || command == "projects" {
+            return self.cmd_project(None);
+        }
+        if let Some(argument) = command.strip_prefix("project ") {
+            return self.cmd_project(Some(argument));
         }
         if command == "approval" || command == "approve" || command == "app" {
             self.approval_panel_active = true;
@@ -9720,9 +10468,7 @@ impl App {
                         || (self.agent().profile_id.is_none() && p.id == "default")
                 })
                 .unwrap_or(0);
-            self.status =
-                "Agent profiles: a add · e edit · d delete · ↑↓ select · Enter apply · Esc close"
-                    .to_string();
+            self.status = "Agent profiles: ↑↓ select · Enter apply · Esc close".to_string();
             return Ok(());
         }
         if command == "generate" || command.starts_with("generate ") {
@@ -9750,7 +10496,21 @@ impl App {
         if command == "continue" || command == "continue-generation" {
             return self.continue_test_point_generation();
         }
-        self.status = "Unknown slash command. Try /new, /exit, /resume, /copy, /models, /sessions, /approval, /agent, /generate, /continue".to_string();
+        self.status = "Unknown slash command. Try /new, /exit, /resume, /copy, /models, /sessions, /project, /approval, /agent, /generate, /continue".to_string();
+        Ok(())
+    }
+
+    fn cmd_project(&mut self, argument: Option<&str>) -> Result<()> {
+        if let Some(argument) = argument.map(str::trim).filter(|value| !value.is_empty()) {
+            return self.request_project_switch(PathBuf::from(argument));
+        }
+        let recent = teshi_engine::load_recent_project_entries().unwrap_or_default();
+        if recent.is_empty() {
+            self.status = "No recent projects. Use /project <directory>".to_string();
+            return Ok(());
+        }
+        self.project_switch.begin_picker(recent);
+        self.status = "Project picker: ↑/↓ select · Enter open · Esc cancel".to_string();
         Ok(())
     }
 
@@ -9790,10 +10550,11 @@ impl App {
     /// Handle `/resume` — load the most recent session.
     fn cmd_resume(&mut self) -> Result<()> {
         self.save_sessions(true)?;
-        self.cancel_agent_turn();
         let sessions = self.project_sessions();
         if let Some(s) = sessions.into_iter().next() {
-            self.restore_session(s);
+            if !self.restore_session(s, false) {
+                return Ok(());
+            }
             self.agent_mut().partial_response_mut().clear();
             self.agent_mut().input.clear();
             self.agent_mut().input_cursor = 0;
@@ -9860,28 +10621,103 @@ impl App {
     }
 
     /// Handle `/sessions` — open the session browser panel.
-    fn cmd_sessions(&mut self) -> Result<()> {
+    fn cmd_sessions(&mut self, legacy: bool) -> Result<()> {
+        self.pending_session_restore = None;
         self.session_panel_active = true;
+        self.session_panel_legacy = legacy;
         self.session_panel_selection = 0;
-        self.session_list = self.project_sessions();
-        self.status = "Sessions. ↑↓ select · Enter load · d delete · Esc close".to_string();
+        self.session_list = if legacy {
+            self.legacy_sessions()
+        } else {
+            self.project_sessions()
+        };
+        self.status = if legacy {
+            "Legacy / Unassigned. Loading keeps history unassigned. Enter load · Esc close"
+                .to_string()
+        } else {
+            "Sessions for the active project. /sessions legacy shows unassigned history".to_string()
+        };
         Ok(())
     }
 
     fn project_sessions(&self) -> Vec<crate::session::Session> {
+        let active = self.project_switch.active.identity.clone();
         crate::session::Session::load_all()
             .into_iter()
             .filter(|s| {
-                s.project_root
-                    .as_ref()
-                    .is_none_or(|root| root == &self.project.root_dir)
+                s.project_root.as_ref().is_some_and(|root| {
+                    teshi_engine::ProjectIdentity::new(root)
+                        .ok()
+                        .is_some_and(|identity| identity == active)
+                })
             })
             .collect()
     }
 
-    fn restore_session(&mut self, session: crate::session::Session) {
+    fn legacy_sessions(&self) -> Vec<crate::session::Session> {
+        crate::session::Session::load_all()
+            .into_iter()
+            .filter(|session| session.project_root.is_none())
+            .collect()
+    }
+
+    fn restore_session(&mut self, session: crate::session::Session, legacy: bool) -> bool {
+        self.pending_session_restore = None;
+        if session.project_root.is_none() && !legacy {
+            self.status = "Unassigned session: use /sessions legacy to load it explicitly".into();
+            self.set_status_message(self.status.clone());
+            return false;
+        }
+        if session.project_root.is_some() && legacy {
+            self.status = "Project-owned sessions cannot be loaded from the Legacy view".into();
+            self.set_status_message(self.status.clone());
+            return false;
+        }
+        if let Some(root) = session.project_root.as_ref() {
+            let identity = match teshi_engine::ProjectIdentity::new(root) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    self.status = format!("Cannot resolve session project: {error}");
+                    self.set_status_message(self.status.clone());
+                    return false;
+                }
+            };
+            if identity != self.project_switch.active.identity {
+                self.status = format!(
+                    "Session belongs to another project: {}",
+                    identity.root().display()
+                );
+                self.set_status_message(self.status.clone());
+                return false;
+            }
+        }
+        // Keep owned handles until shutdown is acknowledged. Replacing a live
+        // ACP backend would synchronously join its worker on the UI thread.
+        let agent = self.agent_mut();
+        agent.retain_partial_response();
+        agent.backend.request_shutdown();
+        agent.poll_shutdown();
+        agent.status = AiStatus::Idle;
+        agent.tool_status = None;
+        agent.pending_acp_permission = None;
+        if self.agent().shutdown_pending() {
+            self.pending_session_restore = Some((
+                self.agent().id,
+                self.current_project_stamp(),
+                session,
+                legacy,
+            ));
+            self.session_panel_active = true;
+            self.session_panel_legacy = legacy;
+            self.status =
+                "Waiting for the previous Agent to exit before loading history; Esc cancels".into();
+            self.set_status_message(self.status.clone());
+            return false;
+        }
+        // A restored session replaces the source blocks behind any rendered
+        // chat anchors.  Do not let a selection from the previous session be
+        // copied against the newly loaded message list.
         self.clear_chat_selection();
-        self.cancel_agent_turn();
         let kind = session
             .backend_kind
             .unwrap_or(teshi_agent::backend::AgentBackendKind::Native);
@@ -9897,12 +10733,29 @@ impl App {
         agent.saved_session = Some(session);
         agent.last_session_snapshot.clear();
         agent.tool_status = None;
+        agent.pending_acp_permission = None;
+        agent.latest_visual_observation = None;
+        agent.last_finish_reason = None;
+        agent.input.clear();
+        agent.input_cursor = 0;
+        agent.status = AiStatus::Idle;
+        agent.scroll_offset = 0;
+        self.session_panel_active = false;
+        self.status = if legacy {
+            "Loaded legacy session; history remains unassigned".into()
+        } else {
+            format!(
+                "Loaded session with {} messages",
+                self.agent().messages().len()
+            )
+        };
+        self.set_status_message(self.status.clone());
+        true
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AiChatMessage, completed_assistant_responses};
     use std::collections::{HashMap, HashSet};
     use std::fs;
     use std::io::{Read, Write};
@@ -9912,12 +10765,12 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    use super::ExploreColumnViewport;
     use anyhow::Context;
 
     use super::{
-        AgentPanelMode, AgentThread, AiRole, AiStatus, App, BddFocusSlot, ClickableRegion,
-        ColumnFocus, GitStatusRefreshResult, MainTab, MindMapFocus, ModelPanelMode, ViewStage,
+        AgentPanelMode, AgentThread, AiChatMessage, AiRole, AiStatus, App, BddFocusSlot,
+        ChatAnchor, ChatSelection, ClickableRegion, ColumnFocus, GitStatusRefreshResult, MainTab,
+        MindMapFocus, ModelPanelMode, ViewStage, completed_assistant_responses,
         current_step_keyword_index, replace_step_keyword_line,
     };
     use crate::bdd_nav::step_edit_start_col;
@@ -9928,6 +10781,27 @@ mod tests {
     use tempfile::tempdir;
     use teshi_core::StepIndex;
     use teshi_core::gherkin_lang::GherkinLanguages;
+
+    fn requirements_test_app() -> (App, tempfile::TempDir, tempfile::TempDir) {
+        let project = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        let feature = project.path().join("sample.feature");
+        fs::write(&feature, "Feature: Sample\n").unwrap();
+        let mut app = App::from_file(
+            &feature,
+            crate::config::load_config().unwrap(),
+            store.path().to_path_buf(),
+        )
+        .unwrap();
+        app.active_tab = MainTab::Requirements;
+        app.authoring_ui.create_document("req.md", "Req").unwrap();
+        app.authoring_ui
+            .save_current_document(project.path())
+            .unwrap();
+        app.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Editor;
+        (app, project, store)
+    }
 
     #[test]
     fn copy_candidates_keep_completed_assistant_order_and_exclude_progress() {
@@ -9994,27 +10868,6 @@ mod tests {
         assert_eq!(app.status, "Usage: /copy [N] where N is a positive integer");
         app.execute_slash_command("copy").unwrap();
         assert_eq!(app.status, "No completed assistant responses to copy");
-    }
-
-    fn requirements_test_app() -> (App, tempfile::TempDir, tempfile::TempDir) {
-        let project = tempdir().unwrap();
-        let store = tempdir().unwrap();
-        teshi_engine::initialize_requirement_store(store.path()).unwrap();
-        let feature = project.path().join("sample.feature");
-        fs::write(&feature, "Feature: Sample\n").unwrap();
-        let mut app = App::from_file(
-            &feature,
-            crate::config::load_config().unwrap(),
-            store.path().to_path_buf(),
-        )
-        .unwrap();
-        app.active_tab = MainTab::Requirements;
-        app.authoring_ui.create_document("req.md", "Req").unwrap();
-        app.authoring_ui
-            .save_current_document(project.path())
-            .unwrap();
-        app.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Editor;
-        (app, project, store)
     }
 
     #[test]
@@ -10173,6 +11026,548 @@ mod tests {
         (app, project, store)
     }
 
+    fn stop_fixture_agents(app: &mut App) {
+        // Constructors may attach an idle model from inherited configuration.
+        // These state tests drive their own event loop; quiesce those owned
+        // workers so the tested precondition is a clean, idle project A.
+        for agent in &mut app.agents {
+            agent.backend.request_shutdown();
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while app
+            .agents
+            .iter()
+            .any(|agent| agent.backend.shutdown_pending())
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "idle fixture backend did not stop"
+            );
+            for agent in &mut app.agents {
+                agent.backend.poll_shutdown();
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn project_switch_app() -> (App, tempfile::TempDir, tempfile::TempDir, tempfile::TempDir) {
+        let project_a = tempdir().unwrap();
+        let project_b = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        fs::write(
+            project_a.path().join("a.feature"),
+            "Feature: Project A\n\n  Scenario: A\n    Given project A\n",
+        )
+        .unwrap();
+        fs::write(
+            project_b.path().join("b.feature"),
+            "Feature: Project B\n\n  Scenario: B\n    Given project B\n",
+        )
+        .unwrap();
+        fs::write(
+            project_a.path().join("teshi.toml"),
+            "[runner]\ncmd = \"project-a-runner\"\n",
+        )
+        .unwrap();
+        fs::write(
+            project_b.path().join("teshi.toml"),
+            "[runner]\ncmd = \"project-b-runner\"\n",
+        )
+        .unwrap();
+        let mut app = App::from_file(
+            &project_a.path().join("a.feature"),
+            crate::config::load_config().unwrap(),
+            store.path().to_path_buf(),
+        )
+        .unwrap();
+        stop_fixture_agents(&mut app);
+        (app, project_a, project_b, store)
+    }
+
+    #[test]
+    fn session_restore_enforces_ownership_and_explicit_legacy_access() {
+        let (mut app, project_a, project_b, _store) = project_switch_app();
+        let mut session = crate::session::Session::from_messages(
+            vec![AiChatMessage {
+                role: AiRole::User,
+                content: "owned history".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+            }],
+            None,
+        );
+        session.project_root = Some(project_b.path().to_path_buf());
+        assert!(!app.restore_session(session.clone(), false));
+        assert!(app.status.contains("another project"));
+        assert!(app.agent().messages().is_empty());
+        assert!(app.agent().saved_session.is_none());
+
+        session.project_root = None;
+        assert!(!app.restore_session(session.clone(), false));
+        assert!(app.status.contains("/sessions legacy"));
+        assert!(app.agent().messages().is_empty());
+        assert!(app.restore_session(session.clone(), true));
+        let checkpoints = tempdir().unwrap();
+        app.agent_mut()
+            .save_session_to(checkpoints.path(), project_a.path(), None)
+            .unwrap();
+        let saved = crate::session::Session::load_from_file(
+            &checkpoints.path().join(format!("{}.json", session.id)),
+        )
+        .unwrap();
+        assert!(
+            saved.project_root.is_none(),
+            "legacy history must stay unassigned"
+        );
+
+        session.project_root = Some(project_a.path().join("."));
+        assert!(!app.restore_session(session.clone(), true));
+        assert!(app.restore_session(session, false));
+        assert_eq!(app.agent().messages()[0].content, "owned history");
+        assert!(
+            app.agent_mut()
+                .save_session_to(checkpoints.path(), project_b.path(), None)
+                .is_err(),
+            "checkpoint must enforce ownership independently of restore"
+        );
+    }
+
+    #[test]
+    fn deferred_history_restore_is_bound_to_agent_project_and_cancel() {
+        let (mut app, project_a, _project_b, _store) = project_switch_app();
+        let mut session = crate::session::Session::from_messages(Vec::new(), None);
+        session.project_root = Some(project_a.path().to_path_buf());
+        let stamp = app.current_project_stamp();
+        app.pending_session_restore =
+            Some((app.agent().id + 1, stamp.clone(), session.clone(), false));
+        app.poll_project_switch();
+        assert!(app.agent().saved_session.is_none());
+
+        let mut stale = stamp.clone();
+        stale.generation = stale.generation.next();
+        app.pending_session_restore = Some((app.agent().id, stale, session.clone(), false));
+        app.poll_project_switch();
+        assert!(app.agent().saved_session.is_none());
+
+        app.pending_session_restore = Some((app.agent().id, stamp.clone(), session.clone(), false));
+        app.handle_action(Action::SessionPanelClose).unwrap();
+        app.poll_project_switch();
+        assert!(app.agent().saved_session.is_none());
+
+        app.pending_session_restore = Some((app.agent().id, stamp, session, false));
+        app.poll_project_switch();
+        assert!(app.agent().saved_session.is_some());
+        assert!(app.pending_session_restore.is_none());
+    }
+
+    #[test]
+    fn project_switch_reloads_links_to_the_same_global_requirement() {
+        let (mut app, project_a, project_b, store) = project_switch_app();
+        let body = "# Shared requirement\n\nGlobal verification intent.\n";
+        let mut index: teshi_core::authoring::RequirementDocumentIndex =
+            serde_json::from_slice(&fs::read(store.path().join("_teshi.json")).unwrap()).unwrap();
+        index
+            .documents
+            .push(teshi_core::authoring::RequirementDocumentMeta::new(
+                "shared",
+                "shared.md",
+                "Shared requirement",
+                teshi_engine::compute_document_revision(body),
+            ));
+        fs::write(store.path().join("shared.md"), body).unwrap();
+        teshi_engine::save_requirement_document_index(store.path(), &index).unwrap();
+        let mut originals = Vec::new();
+        for (project, point) in [(project_a.path(), "A-only"), (project_b.path(), "B-only")] {
+            let path = project.join("testpoints/testpoints.json");
+            let points = serde_json::json!({"version": 1, "test_points": [{
+                "id": point, "title": point, "objective": "Verify intent",
+                "hierarchy_path": ["Shared"], "review_state": "proposed",
+                "requirement_links": [{
+                    "store_id": index.store_id, "document_id": "shared",
+                    "document_revision": index.documents[0].revision,
+                    "position": {"start": 2, "end": 20},
+                    "quote": {"quote": "Shared requirement"}, "resolution": "resolved"
+                }]
+            }]});
+            teshi_engine::write_atomic(&path, &points).unwrap();
+            originals.push((path.clone(), fs::read(&path).unwrap()));
+        }
+        let index_bytes = fs::read(store.path().join("_teshi.json")).unwrap();
+        app.authoring_ui = crate::authoring_tab::AuthoringUiState::load_from_project(
+            project_a.path(),
+            store.path(),
+        );
+        app.authoring_ui.select_document_by_id("shared");
+        app.authoring_ui.highlight_test_point_id = Some("A-only".into());
+        app.authoring_ui.selected_linked_index = 9;
+        assert_eq!(
+            app.authoring_ui.linked_test_points_for_document()[0].id,
+            "A-only"
+        );
+
+        app.request_project_switch(project_b.path()).unwrap();
+        assert_eq!(app.requirements_root, store.path());
+        assert_eq!(
+            app.authoring_ui.selected_document_id.as_deref(),
+            Some("shared")
+        );
+        assert_eq!(
+            app.authoring_ui.linked_test_points_for_document()[0].id,
+            "B-only"
+        );
+        assert!(app.authoring_ui.highlight_test_point_id.is_none());
+        assert_eq!(app.authoring_ui.selected_linked_index, 0);
+        stop_fixture_agents(&mut app);
+        app.request_project_switch(project_a.path()).unwrap();
+        assert_eq!(
+            app.authoring_ui.linked_test_points_for_document()[0].id,
+            "A-only"
+        );
+        for (path, bytes) in originals {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+        assert_eq!(
+            fs::read(store.path().join("_teshi.json")).unwrap(),
+            index_bytes
+        );
+        assert_eq!(
+            fs::read_to_string(store.path().join("shared.md")).unwrap(),
+            body
+        );
+    }
+
+    #[test]
+    fn project_switch_commits_new_project_and_preserves_global_requirement_root() {
+        let (mut app, _project_a, project_b, store) = project_switch_app();
+        app.active_model_label = Some("Project A session model".into());
+        let before = app.current_project_stamp();
+
+        app.request_project_switch(project_b.path()).unwrap();
+
+        assert_eq!(app.project.root_dir, project_b.path());
+        assert_eq!(
+            app.project.features[0].file_path,
+            project_b.path().join("b.feature")
+        );
+        assert_eq!(app.requirements_root, store.path());
+        assert_eq!(
+            app.runner_config.as_ref().map(|config| config.cmd.as_str()),
+            Some("project-b-runner")
+        );
+        assert_eq!(
+            app.project_switch.active.identity,
+            teshi_engine::ProjectIdentity::new(project_b.path()).unwrap()
+        );
+        assert_eq!(
+            app.project_switch.active.generation,
+            before.generation.next()
+        );
+        assert!(app.project_switch.is_active());
+        assert!(app.active_model_label.is_none());
+        assert!(!app.project_switch.accepts(&before));
+    }
+
+    #[test]
+    fn project_switch_cancel_keeps_dirty_project_a_and_missing_target_is_non_destructive() {
+        let (mut app, project_a, project_b, _store) = project_switch_app();
+        let before = app.current_project_stamp();
+        app.buffer_dirty[0] = true;
+        app.buffer = EditorBuffer::from_string("Feature: unsaved A\n".to_string());
+
+        app.request_project_switch(project_b.path()).unwrap();
+        assert!(matches!(
+            app.project_switch.overlay,
+            crate::project_context::SwitchOverlay::Dirty { .. }
+        ));
+        app.project_switch_action(Action::OverlayCancel).unwrap();
+        assert_eq!(app.current_project_stamp(), before);
+        assert_eq!(app.project.root_dir, project_a.path());
+        assert!(app.buffer_dirty[0]);
+        assert!(app.project_switch.is_active());
+
+        let missing = project_b.path().join("does-not-exist");
+        app.request_project_switch(missing).unwrap();
+        assert_eq!(app.current_project_stamp(), before);
+        assert_eq!(app.project.root_dir, project_a.path());
+        assert!(app.status.contains("does not exist"));
+    }
+
+    #[test]
+    fn project_switch_discard_does_not_destroy_a_before_b_preparation_succeeds() {
+        let (mut app, project_a, _project_b, _store) = project_switch_app();
+        let broken_project = tempdir().unwrap();
+        fs::write(broken_project.path().join("teshi.toml"), "[runner\n").unwrap();
+        let draft = "Feature: unsaved A\n  Scenario: Draft\n    Given local edits\n";
+        app.buffer = EditorBuffer::from_string(draft.to_string());
+        app.buffer_dirty[0] = true;
+        app.dirty = true;
+
+        app.request_project_switch(broken_project.path()).unwrap();
+        assert!(matches!(
+            app.project_switch.overlay,
+            crate::project_context::SwitchOverlay::Dirty { .. }
+        ));
+        app.project_switch_action(Action::OverlayInsert('D'))
+            .unwrap();
+
+        assert_eq!(app.project.root_dir, project_a.path());
+        assert_eq!(app.buffer.as_string(), draft);
+        assert!(app.buffer_dirty[0]);
+        assert!(app.dirty);
+        assert!(app.project_switch.is_active());
+        assert!(app.status.contains("Could not prepare project B"));
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|message| { message.contains("Could not prepare project B") })
+        );
+    }
+
+    #[test]
+    fn project_switch_busy_cancel_preserves_runner_and_project() {
+        let (mut app, project_a, project_b, _store) = project_switch_app();
+        let before = app.current_project_stamp();
+        let (_events, rx) = std::sync::mpsc::channel();
+        let (cancel, cancellation) = std::sync::mpsc::channel();
+        app.runner_rx = Some(rx);
+        app.runner_cancel = Some(cancel);
+        app.request_project_switch(project_b.path()).unwrap();
+        app.project_switch_action(Action::OverlayCancel).unwrap();
+
+        assert_eq!(app.current_project_stamp(), before);
+        assert_eq!(app.project.root_dir, project_a.path());
+        assert!(app.runner_rx.is_some());
+        assert!(cancellation.try_recv().is_err());
+    }
+
+    #[test]
+    fn project_switch_timeout_keeps_runner_owned_and_dirty_edits_visible() {
+        let (mut app, project_a, project_b, _store) = project_switch_app();
+        let before = app.current_project_stamp();
+        let (_events, rx) = std::sync::mpsc::channel();
+        let (cancel, cancellation) = std::sync::mpsc::channel();
+        app.runner_rx = Some(rx);
+        app.runner_cancel = Some(cancel);
+        app.buffer_dirty[0] = true;
+        app.buffer = EditorBuffer::from_string("Feature: recoverable draft\n".to_string());
+        app.request_project_switch(project_b.path()).unwrap();
+        app.project_switch_action(Action::OverlayInsert('s'))
+            .unwrap();
+        assert_eq!(cancellation.try_recv(), Ok(()));
+        assert_eq!(app.current_project_stamp(), before);
+        app.project_switch.start_quiesce_wait(Duration::ZERO);
+        app.poll_project_switch();
+
+        assert_eq!(app.project.root_dir, project_a.path());
+        assert!(app.project_switch.is_active());
+        assert!(app.runner_rx.is_some());
+        assert!(app.runner_cancel.is_some());
+        assert!(app.buffer_dirty[0]);
+        assert!(app.buffer.as_string().contains("recoverable draft"));
+        assert!(
+            app.status_message
+                .as_deref()
+                .unwrap()
+                .contains("did not exit")
+        );
+    }
+
+    #[test]
+    fn project_switch_waits_for_runner_exit_acknowledgement() {
+        let (mut app, project_a, project_b, _store) = project_switch_app();
+        let before = app.current_project_stamp();
+        let (events, rx) = std::sync::mpsc::channel();
+        let (cancel, cancellation) = std::sync::mpsc::channel();
+        app.runner_rx = Some(rx);
+        app.runner_cancel = Some(cancel);
+        app.request_project_switch(project_b.path()).unwrap();
+        app.project_switch_action(Action::OverlayInsert('s'))
+            .unwrap();
+        assert_eq!(cancellation.try_recv(), Ok(()));
+        app.poll_runner_events();
+        assert_eq!(app.current_project_stamp(), before);
+        assert_eq!(app.project.root_dir, project_a.path());
+
+        events
+            .send(crate::runner::RunEvent::RunnerExit {
+                code: Some(1),
+                success: false,
+            })
+            .unwrap();
+        app.poll_runner_events();
+        assert_eq!(app.project.root_dir, project_b.path());
+        assert_eq!(
+            app.current_project_stamp().generation,
+            before.generation.next()
+        );
+        assert!(app.runner_rx.is_none());
+        assert!(app.runner_cancel.is_none());
+        assert_eq!(app.runner_config.as_ref().unwrap().cmd, "project-b-runner");
+    }
+
+    #[test]
+    fn project_switch_rechecks_busy_tasks_after_dirty_resolution() {
+        let (mut app, project_a, project_b, _store) = project_switch_app();
+        app.buffer_dirty[0] = true;
+        app.request_project_switch(project_b.path()).unwrap();
+        let (_events, rx) = std::sync::mpsc::channel();
+        app.runner_rx = Some(rx);
+        app.project_switch_action(Action::OverlayInsert('d'))
+            .unwrap();
+
+        assert_eq!(app.project.root_dir, project_a.path());
+        assert!(app.buffer_dirty[0]);
+        assert!(matches!(
+            app.project_switch.overlay,
+            crate::project_context::SwitchOverlay::Busy { .. }
+        ));
+    }
+
+    #[test]
+    fn stopping_project_tasks_preserves_unapplied_agent_proposal() {
+        let (mut app, project_a, project_b, _store) = project_switch_app();
+        app.queue_agent_change(super::AgentPendingChange {
+            description: "retain proposed edit".into(),
+            file_path: project_a.path().join("a.feature").display().to_string(),
+            mutation: super::AgentMutation::ReplaceLine {
+                row_0based: 0,
+                new_text: "Feature: proposed A".into(),
+            },
+            scenario_name: String::new(),
+            test_point_ids: Vec::new(),
+            tool_call_id: "pending".into(),
+            old_buffer_snapshot: app.buffer.as_string(),
+            agent_idx: 0,
+        });
+        let (_events, rx) = std::sync::mpsc::channel();
+        app.runner_rx = Some(rx);
+        app.request_project_switch(project_b.path()).unwrap();
+        app.project_switch_action(Action::OverlayInsert('s'))
+            .unwrap();
+        assert_eq!(app.pending_agent_changes.len(), 1);
+        assert_eq!(app.pending_agent_changes[0].tool_call_id, "pending");
+        assert_eq!(app.project.root_dir, project_a.path());
+    }
+
+    #[test]
+    fn project_picker_mouse_row_switches_and_open_path_enters_path_mode() {
+        let (mut app, _project_a, project_b, _store) = project_switch_app();
+        app.project_switch
+            .begin_picker(vec![teshi_engine::RecentProjectEntry {
+                root: project_b.path().to_string_lossy().into_owned(),
+                display_name: "Project B".to_string(),
+                last_opened_ms: 1,
+            }]);
+        render_test_app(&mut app, 120);
+        let recent = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::ProjectRecent { rect, .. } => Some(rect.to_owned()),
+                _ => None,
+            })
+            .expect("recent project row should be clickable");
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            recent.x + 1,
+            recent.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(app.project.root_dir, project_b.path());
+
+        app.project_switch.begin_picker(Vec::new());
+        render_test_app(&mut app, 120);
+        let open_path = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::ProjectOpenPath { rect } => Some(rect.to_owned()),
+                _ => None,
+            })
+            .expect("open path row should be clickable");
+        app.handle_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            open_path.x + 1,
+            open_path.y,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert!(matches!(
+            app.project_switch.overlay,
+            crate::project_context::SwitchOverlay::OpenPath { .. }
+        ));
+    }
+
+    #[test]
+    fn project_picker_keeps_controls_and_pointer_rows_aligned_with_wrapped_paths() {
+        for width in [120, 64] {
+            let (mut app, _project_a, _project_b, _store) = project_switch_app();
+            app.project_switch.begin_picker(
+                (0..10)
+                    .map(|index| teshi_engine::RecentProjectEntry {
+                        root: format!("/{}-{index}/shared", "long-directory/".repeat(10)),
+                        display_name: format!("Project {index}"),
+                        last_opened_ms: index,
+                    })
+                    .collect(),
+            );
+            app.project_switch.move_picker(9);
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+            terminal
+                .draw(|frame| crate::ui::render(frame, &mut app))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let row_text = |row: u16| -> String {
+                (0..width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect()
+            };
+            let open = app
+                .clickable_regions
+                .iter()
+                .find_map(|region| match region {
+                    ClickableRegion::ProjectOpenPath { rect } => Some(*rect),
+                    _ => None,
+                })
+                .expect("Open path must remain visible after wrapping recent project paths");
+            assert!(row_text(open.y).contains("[O] Open path"));
+            let selected_rows = app
+                .clickable_regions
+                .iter()
+                .filter_map(|region| match region {
+                    ClickableRegion::ProjectRecent { index: 9, rect } => Some(*rect),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                selected_rows.len() > 1,
+                "the selected path should wrap at width {width}"
+            );
+            assert!(
+                selected_rows
+                    .iter()
+                    .any(|rect| row_text(rect.y).contains("Project 9"))
+            );
+            assert!(selected_rows.iter().all(|rect| rect.y < open.y));
+            app.handle_mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                open.x + 1,
+                open.y,
+                KeyModifiers::NONE,
+            )
+            .unwrap();
+            assert!(matches!(
+                app.project_switch.overlay,
+                crate::project_context::SwitchOverlay::OpenPath { .. }
+            ));
+        }
+    }
+
     #[test]
     fn session_checkpoints_keep_identity_partial_reply_and_backend() {
         let root = tempdir().unwrap();
@@ -10213,8 +11608,32 @@ mod tests {
             "checkpoint must not mutate model history"
         );
 
-        let (mut app, _project, _store) = slash_test_app();
-        app.restore_session(second);
+        let store = tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        let feature = project.path().join("sample.feature");
+        fs::write(&feature, "Feature: Sample\n").unwrap();
+        let mut app = App::from_file(
+            &feature,
+            crate::config::load_config().unwrap(),
+            store.path().to_path_buf(),
+        )
+        .unwrap();
+        app.chat_selection = Some(ChatSelection {
+            agent_id: 0,
+            anchor: ChatAnchor {
+                block: 0,
+                offset: 0,
+                fingerprint: 1,
+            },
+            focus: ChatAnchor {
+                block: 0,
+                offset: 1,
+                fingerprint: 1,
+            },
+        });
+        stop_fixture_agents(&mut app);
+        assert!(app.restore_session(second, false));
+        assert!(app.chat_selection.is_none());
         assert_eq!(
             app.agent().backend_kind(),
             teshi_agent::backend::AgentBackendKind::Acp
@@ -10281,7 +11700,8 @@ mod tests {
             let saved =
                 crate::session::Session::load_from_file(&storage.path().join(format!("{id}.json")))
                     .unwrap();
-            app.restore_session(saved);
+            stop_fixture_agents(&mut app);
+            assert!(app.restore_session(saved, false));
             assert_eq!(app.agent().backend_kind(), kind);
             let reply = app.agent().messages().last().unwrap();
             assert_eq!(reply.content, "Partial result completed");
@@ -10434,7 +11854,9 @@ mod tests {
         let mut session = crate::session::Session::from_messages(Vec::new(), None);
         session.backend_kind = Some(teshi_agent::backend::AgentBackendKind::Acp);
         session.acp_agent_id = Some("alpha".into());
-        app.restore_session(session);
+        session.project_root = Some(app.project.root_dir.clone());
+        stop_fixture_agents(&mut app);
+        assert!(app.restore_session(session, false));
         assert_eq!(app.agent().selected_acp_id.as_deref(), Some("alpha"));
         assert_eq!(
             crate::agent_selection::load(root.path()).unwrap(),
@@ -12498,6 +13920,14 @@ mod tests {
         GherkinLanguages::global().get("en")
     }
 
+    /// Helper: create an app pre-set to editor-active mode (stage 3) for existing editor tests.
+    fn editor_test_app() -> App {
+        let mut app = App::from_args().expect("app init should work");
+        app.active_tab = MainTab::MindMap;
+        app.view_stage = ViewStage::EditorAndPanel;
+        app
+    }
+
     #[test]
     fn agent_diff_opens_cached_changes_from_other_tabs_and_closes_in_explore() {
         let mut app = editor_test_app();
@@ -12536,14 +13966,6 @@ mod tests {
         app.toggle_explore_diff_view();
         assert_eq!(app.active_tab, MainTab::MindMap);
         assert!(app.explore_diff_lines.is_none());
-    }
-
-    /// Helper: create an app pre-set to editor-active mode (stage 3) for existing editor tests.
-    fn editor_test_app() -> App {
-        let mut app = App::from_args().expect("app init should work");
-        app.active_tab = MainTab::MindMap;
-        app.view_stage = ViewStage::EditorAndPanel;
-        app
     }
 
     fn render_test_app(app: &mut App, width: u16) {
@@ -12950,6 +14372,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(regions.len(), 5);
+        let project_control = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::ProjectControl { rect } => Some(*rect),
+                _ => None,
+            });
         for (tab, rect) in regions {
             app.handle_mouse_event(
                 MouseEventKind::Down(MouseButton::Left),
@@ -12964,6 +14393,11 @@ mod tests {
                 .unwrap();
             let buffer = terminal.backend().buffer();
             for x in 0..83 {
+                if project_control
+                    .is_some_and(|control| control.contains(ratatui::layout::Position::new(x, 1)))
+                {
+                    continue;
+                }
                 assert_eq!(
                     buffer[(x, 1)].symbol(),
                     if (rect.x..rect.right()).contains(&x) {
@@ -13380,6 +14814,7 @@ mod tests {
         sender
             .send(GitStatusRefreshResult {
                 revision: 6,
+                project_stamp: app.current_project_stamp(),
                 model: teshi_core::git::FeatureGitStatusModel::default(),
             })
             .expect("stale refresh should be delivered");
@@ -13565,7 +15000,6 @@ mod tests {
             step_keyword_picker: None,
             pending_char: None,
             clipboard: None,
-            system_clipboard: None,
             scenario_fold: HashSet::new(),
             selection_anchor: None,
             selection_end: None,
@@ -13573,6 +15007,7 @@ mod tests {
             editor_panel_rect: None,
             chat_history_rect: None,
             chat_selection: None,
+            system_clipboard: None,
             chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
@@ -13581,6 +15016,7 @@ mod tests {
             redo_stack: Vec::new(),
             runner_config: None,
             runner_rx: None,
+            runner_cancel: None,
             last_external_check: Instant::now(),
             external_change_prompt: None,
             pending_agent_changes: Vec::new(),
@@ -13595,7 +15031,7 @@ mod tests {
             explore_selected_scenario: 0,
             explore_selected_step: 0,
             explore_horizontal_scroll: [0; 3],
-            explore_viewports: [ExploreColumnViewport::default(); 3],
+            explore_viewports: Default::default(),
             explore_horizontal_scroll_drag: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
@@ -13644,6 +15080,8 @@ mod tests {
             model_form_max_tokens: String::from("4096"),
             model_form_temperature: String::from("0.7"),
             session_panel_active: false,
+            session_panel_legacy: false,
+            pending_session_restore: None,
             session_panel_selection: 0,
             session_list: Vec::new(),
             agent_registry: teshi_agent::registry::AgentRegistry::load(None),
@@ -13663,6 +15101,9 @@ mod tests {
             authoring_ui: crate::authoring_tab::AuthoringUiState::empty(),
             test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
             requirements_root: teshi_engine::requirements_data_dir(None).unwrap_or_default(),
+            project_switch: crate::project_context::ProjectSwitchState::new(
+                teshi_engine::ProjectIdentity::from_root("."),
+            ),
         };
 
         app.handle_action(Action::ExploreRight)
@@ -13747,7 +15188,6 @@ Feature: B
             step_keyword_picker: None,
             pending_char: None,
             clipboard: None,
-            system_clipboard: None,
             scenario_fold: HashSet::new(),
             selection_anchor: None,
             selection_end: None,
@@ -13755,6 +15195,7 @@ Feature: B
             editor_panel_rect: None,
             chat_history_rect: None,
             chat_selection: None,
+            system_clipboard: None,
             chat_selection_dragging: false,
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
@@ -13763,6 +15204,7 @@ Feature: B
             redo_stack: Vec::new(),
             runner_config: None,
             runner_rx: None,
+            runner_cancel: None,
             last_external_check: Instant::now(),
             external_change_prompt: None,
             pending_agent_changes: Vec::new(),
@@ -13777,7 +15219,7 @@ Feature: B
             explore_selected_scenario: 0,
             explore_selected_step: 0,
             explore_horizontal_scroll: [0; 3],
-            explore_viewports: [ExploreColumnViewport::default(); 3],
+            explore_viewports: Default::default(),
             explore_horizontal_scroll_drag: None,
             explore_edit_mode: false,
             editor_focus_scenario_row: None,
@@ -13826,6 +15268,8 @@ Feature: B
             model_form_max_tokens: String::from("4096"),
             model_form_temperature: String::from("0.7"),
             session_panel_active: false,
+            session_panel_legacy: false,
+            pending_session_restore: None,
             session_panel_selection: 0,
             session_list: Vec::new(),
             agent_registry: teshi_agent::registry::AgentRegistry::load(None),
@@ -13845,6 +15289,9 @@ Feature: B
             authoring_ui: crate::authoring_tab::AuthoringUiState::empty(),
             test_points_ui: crate::test_points_tab::TestPointsUiState::empty(),
             requirements_root: teshi_engine::requirements_data_dir(None).unwrap_or_default(),
+            project_switch: crate::project_context::ProjectSwitchState::new(
+                teshi_engine::ProjectIdentity::from_root("."),
+            ),
         };
 
         app.explore_selected_feature = 0;
