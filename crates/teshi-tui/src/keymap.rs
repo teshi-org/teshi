@@ -45,6 +45,8 @@ pub struct KeyContext {
     pub test_points_focus: TestPointsFocus,
     /// Whether a Requirements filter/iteration overlay is open.
     pub requirements_overlay_active: bool,
+    /// The Requirements overlay accepts text rather than list-navigation keys.
+    pub requirements_text_overlay: bool,
     /// Whether the AI generation source-scope confirmation overlay is open.
     pub generation_scope_prompt_active: bool,
 
@@ -163,10 +165,16 @@ pub enum Action {
     Quit,
     SelectTab(MainTab),
     ActivateStepInput,
+    /// Cancel only the pending pane-navigation chord, preserving pane state.
+    CancelPaneNavigation,
     ClearInputState,
     // Explore navigation
     FocusNextColumn,
     FocusPrevColumn,
+    /// Move to the nearest visible pane below the current pane.
+    FocusPaneDown,
+    /// Move to the nearest visible pane above the current pane.
+    FocusPaneUp,
     ExploreRight,
     RunScenario,
     AiSuggest,
@@ -233,11 +241,15 @@ pub enum Action {
     AgentClose,
     AgentNext,
     AgentPrev,
+    /// Select the visible conversation at this index without creating a turn.
+    AgentSelect(usize),
     // ── Slash command suggestion popup ───────────────
     AiSlashPrev,
     AiSlashNext,
     AiSlashSelect,
     AiSlashDismiss,
+    /// Highlight a visible slash suggestion without executing it.
+    AiSlashChoose(usize),
     // ── ACP agent permission prompt ───────────────────
     /// Move the ACP permission prompt selection up.
     AcpPermissionUp,
@@ -247,6 +259,8 @@ pub enum Action {
     AcpPermissionConfirm,
     /// Reject the ACP permission request.
     AcpPermissionReject,
+    /// Highlight a permission choice without approving the pending request.
+    AcpPermissionChoose(usize),
     /// Send the selected MindMap node context as a user message to the AI.
     MindMapSendToAi,
     /// Toggle the AI preview panel visibility (global `Ctrl+\`).
@@ -373,7 +387,7 @@ pub enum Action {
 impl Action {
     pub fn from_key_event(event: KeyEvent, context: KeyContext) -> Option<Self> {
         if let Some(pending_char) = context.pending_char {
-            if context.active_tab == MainTab::Requirements && pending_char == 'w' {
+            if pending_char == 'w' && pane_navigation_allowed(context) {
                 // Some terminal/input paths retain CONTROL (or add SHIFT for
                 // an uppercase character) on the second key of the chord.
                 // Treat h/H and l/L equivalently so Ctrl-W h/l works across
@@ -386,10 +400,13 @@ impl Action {
                     return match event.code {
                         KeyCode::Char('h') | KeyCode::Char('H') => Some(Self::FocusPrevColumn),
                         KeyCode::Char('l') | KeyCode::Char('L') => Some(Self::FocusNextColumn),
-                        _ => None,
+                        KeyCode::Char('j') | KeyCode::Char('J') => Some(Self::FocusPaneDown),
+                        KeyCode::Char('k') | KeyCode::Char('K') => Some(Self::FocusPaneUp),
+                        KeyCode::Esc => Some(Self::CancelPaneNavigation),
+                        _ => Some(Self::CancelPaneNavigation),
                     };
                 }
-                return None;
+                return Some(Self::CancelPaneNavigation);
             }
             if context.active_tab == MainTab::Requirements
                 && context.requirements_focus == RequirementsFocus::Editor
@@ -630,6 +647,12 @@ impl Action {
         // Requirements overlay intercepts keys while open (including from generation scope).
         if context.requirements_overlay_active {
             return match (event.code, event.modifiers) {
+                (KeyCode::Char(ch), modifiers)
+                    if context.requirements_text_overlay
+                        && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::OverlayInsert(ch))
+                }
                 (KeyCode::Esc, _) => Some(Self::OverlayCancel),
                 (KeyCode::Enter, _) => Some(Self::OverlayConfirm),
                 (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
@@ -701,17 +724,22 @@ impl Action {
             };
         }
 
+        // Ctrl-W starts the pane-navigation chord after all modal and text
+        // input handlers have had precedence.  In particular, it must not
+        // steal an editor insertion or AI prompt keystroke, and it must not
+        // fall through to the legacy Ctrl-W keyword switch.
+        let ctrl_w = matches!(event.code, KeyCode::Char('w') | KeyCode::Char('W'))
+            && event.modifiers.contains(KeyModifiers::CONTROL)
+            || event.code == KeyCode::Char('\u{17}');
+        if pane_navigation_allowed(context) && ctrl_w {
+            return Some(Self::PendingChar('w'));
+        }
+
         // Requirements tab: three-pane navigation and plain-text editing
         if context.active_tab == MainTab::Requirements {
             // Windows console input can normalize Ctrl+W to an uppercase
             // character while retaining CONTROL. Normalize both spellings
             // before entering the two-key pane-navigation chord.
-            let requirements_ctrl_w = matches!(event.code, KeyCode::Char('w') | KeyCode::Char('W'))
-                && event.modifiers.contains(KeyModifiers::CONTROL);
-            if requirements_ctrl_w {
-                return Some(Self::PendingChar('w'));
-            }
-
             if context.requirements_focus == RequirementsFocus::Editor {
                 if context.requirements_editor_mode == RequirementsEditorMode::Insert {
                     return match (event.code, event.modifiers) {
@@ -1284,6 +1312,31 @@ impl Action {
     }
 }
 
+/// Whether the global two-key pane-navigation prefix may consume this key.
+/// Modal branches return earlier in [`Action::from_key_event`]; these checks
+/// cover the remaining text editors whose input must win over pane movement.
+fn pane_navigation_allowed(context: KeyContext) -> bool {
+    let ai_prompt_active = context.ai_input_focused
+        && (context.active_tab == MainTab::Ai
+            || (context.active_tab == MainTab::MindMap
+                && context.mindmap_focus == MindMapFocus::AiPanel));
+    if context.step_input_active || ai_prompt_active {
+        return false;
+    }
+    if context.active_tab == MainTab::Requirements
+        && matches!(
+            context.requirements_editor_mode,
+            RequirementsEditorMode::Insert
+                | RequirementsEditorMode::VisualChar
+                | RequirementsEditorMode::VisualLine
+        )
+    {
+        return false;
+    }
+    !(context.active_tab == MainTab::TestPoints
+        && context.test_points_focus == TestPointsFocus::Details)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Action, KeyContext};
@@ -1323,6 +1376,7 @@ mod tests {
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
@@ -1376,9 +1430,10 @@ mod tests {
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
-            acp_permission_pending: false,
+            acp_permission_pending: false, // project context covered
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -1415,9 +1470,10 @@ mod tests {
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
-            acp_permission_pending: false,
+            acp_permission_pending: false, // project context covered
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
@@ -1454,6 +1510,7 @@ mod tests {
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
             acp_permission_pending: true,
@@ -1532,9 +1589,10 @@ mod tests {
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
-            acp_permission_pending: false,
+            acp_permission_pending: false, // project context covered
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -1581,9 +1639,10 @@ mod tests {
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
-            acp_permission_pending: false,
+            acp_permission_pending: false, // project context covered
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), context),
@@ -1630,9 +1689,10 @@ mod tests {
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
-            acp_permission_pending: false,
+            acp_permission_pending: false, // project context covered
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), context),
@@ -1687,9 +1747,10 @@ mod tests {
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
-            acp_permission_pending: false,
+            acp_permission_pending: false, // project context covered
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
@@ -1726,9 +1787,10 @@ mod tests {
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
-            acp_permission_pending: false,
+            acp_permission_pending: false, // project context covered
         };
         let action = Action::from_key_event(
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
@@ -1765,9 +1827,10 @@ mod tests {
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
-            acp_permission_pending: false,
+            acp_permission_pending: false, // project context covered
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL), context),
@@ -1828,9 +1891,10 @@ mod tests {
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
-            acp_permission_pending: false,
+            acp_permission_pending: false, // project context covered
         };
         let copy_context = KeyContext {
             pending_char: Some('y'),
@@ -1884,9 +1948,10 @@ mod tests {
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
-            acp_permission_pending: false,
+            acp_permission_pending: false, // project context covered
         };
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), context),
@@ -1950,16 +2015,8 @@ mod tests {
             ),
             (KeyCode::Tab, KeyModifiers::NONE, Some(Action::Insert('\t'))),
             (KeyCode::BackTab, KeyModifiers::SHIFT, None),
-            (
-                KeyCode::Char('w'),
-                KeyModifiers::CONTROL,
-                Some(Action::PendingChar('w')),
-            ),
-            (
-                KeyCode::Char('W'),
-                KeyModifiers::CONTROL,
-                Some(Action::PendingChar('w')),
-            ),
+            (KeyCode::Char('w'), KeyModifiers::CONTROL, None),
+            (KeyCode::Char('W'), KeyModifiers::CONTROL, None),
             (KeyCode::Home, KeyModifiers::NONE, Some(Action::MoveHome)),
             (KeyCode::End, KeyModifiers::NONE, Some(Action::MoveEnd)),
         ] {
@@ -1972,6 +2029,7 @@ mod tests {
             Action::from_key_event(
                 KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
                 KeyContext {
+                    requirements_editor_mode: RequirementsEditorMode::Browse,
                     pending_char: Some('w'),
                     ..context
                 }
@@ -1982,6 +2040,7 @@ mod tests {
             Action::from_key_event(
                 KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
                 KeyContext {
+                    requirements_editor_mode: RequirementsEditorMode::Browse,
                     pending_char: Some('w'),
                     ..context
                 }
@@ -2009,6 +2068,7 @@ mod tests {
                 Action::from_key_event(
                     KeyEvent::new(key, modifiers),
                     KeyContext {
+                        requirements_editor_mode: RequirementsEditorMode::Browse,
                         pending_char: Some('w'),
                         ..context
                     }
@@ -2045,9 +2105,42 @@ mod tests {
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
-            acp_permission_pending: false,
+            acp_permission_pending: false, // project context covered
+        }
+    }
+
+    #[test]
+    fn requirements_line_operators_use_prefixes_but_visual_operators_are_immediate() {
+        use crate::authoring_tab::RequirementsEditorMode;
+        let mut context = requirements_tree_context();
+        context.requirements_focus = RequirementsFocus::Editor;
+        for (ch, line, visual) in [
+            ('d', Action::ReqVimDeleteLine, Action::ReqVimVisualDelete),
+            ('y', Action::ReqVimYankLine, Action::ReqVimVisualYank),
+        ] {
+            let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
+            assert_eq!(
+                Action::from_key_event(key, context),
+                Some(Action::PendingChar(ch))
+            );
+            let repeated = KeyContext {
+                pending_char: Some(ch),
+                ..context
+            };
+            assert_eq!(Action::from_key_event(key, repeated), Some(line));
+            for mode in [
+                RequirementsEditorMode::VisualChar,
+                RequirementsEditorMode::VisualLine,
+            ] {
+                let selecting = KeyContext {
+                    requirements_editor_mode: mode,
+                    ..context
+                };
+                assert_eq!(Action::from_key_event(key, selecting), Some(visual.clone()));
+            }
         }
     }
 
@@ -2121,6 +2214,98 @@ mod tests {
     }
 
     #[test]
+    fn pane_prefix_is_global_but_text_modes_keep_precedence() {
+        let base = requirements_tree_context();
+        for active_tab in [
+            MainTab::Explore,
+            MainTab::MindMap,
+            MainTab::Ai,
+            MainTab::Requirements,
+            MainTab::TestPoints,
+        ] {
+            let context = KeyContext {
+                active_tab,
+                mindmap_ai_panel_visible: active_tab == MainTab::MindMap,
+                ..base
+            };
+            for key in ['w', 'W'] {
+                assert_eq!(
+                    Action::from_key_event(
+                        KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL),
+                        context,
+                    ),
+                    Some(Action::PendingChar('w')),
+                    "tab {active_tab:?}"
+                );
+            }
+        }
+
+        let browse = KeyContext {
+            active_tab: MainTab::Explore,
+            mindmap_ai_panel_visible: false,
+            pending_char: Some('w'),
+            ..base
+        };
+        for (key, expected) in [
+            ('h', Action::FocusPrevColumn),
+            ('l', Action::FocusNextColumn),
+            ('j', Action::FocusPaneDown),
+            ('k', Action::FocusPaneUp),
+        ] {
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                    browse,
+                ),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            Action::from_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), browse,),
+            Some(Action::CancelPaneNavigation)
+        );
+
+        for context in [
+            KeyContext {
+                active_tab: MainTab::Requirements,
+                requirements_focus: RequirementsFocus::Editor,
+                requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Insert,
+                ..base
+            },
+            KeyContext {
+                active_tab: MainTab::Ai,
+                ai_input_focused: true,
+                ..base
+            },
+            KeyContext {
+                active_tab: MainTab::TestPoints,
+                test_points_focus: TestPointsFocus::Details,
+                ..base
+            },
+            KeyContext {
+                active_tab: MainTab::MindMap,
+                mindmap_focus: MindMapFocus::AiPanel,
+                mindmap_ai_panel_visible: true,
+                ai_input_focused: true,
+                ..base
+            },
+            KeyContext {
+                active_tab: MainTab::Explore,
+                step_input_active: true,
+                ..base
+            },
+        ] {
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+                    context,
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn requirements_overlay_intercepts_confirm_and_insert() {
         let mut context = requirements_tree_context();
         context.requirements_overlay_active = true;
@@ -2139,36 +2324,27 @@ mod tests {
             ),
             Some(Action::OverlayInsert('a'))
         );
-    }
-    #[test]
-    fn requirements_line_operators_use_prefixes_but_visual_operators_are_immediate() {
-        use crate::authoring_tab::RequirementsEditorMode;
-        let mut context = requirements_tree_context();
-        context.requirements_focus = RequirementsFocus::Editor;
-        for (ch, line, visual) in [
-            ('d', Action::ReqVimDeleteLine, Action::ReqVimVisualDelete),
-            ('y', Action::ReqVimYankLine, Action::ReqVimVisualYank),
-        ] {
-            let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
+        for ch in ['j', 'k'] {
+            context.requirements_text_overlay = true;
             assert_eq!(
-                Action::from_key_event(key, context),
-                Some(Action::PendingChar(ch))
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                    context
+                ),
+                Some(Action::OverlayInsert(ch))
             );
-            let repeated = KeyContext {
-                pending_char: Some(ch),
-                ..context
-            };
-            assert_eq!(Action::from_key_event(key, repeated), Some(line));
-            for mode in [
-                RequirementsEditorMode::VisualChar,
-                RequirementsEditorMode::VisualLine,
-            ] {
-                let selecting = KeyContext {
-                    requirements_editor_mode: mode,
-                    ..context
-                };
-                assert_eq!(Action::from_key_event(key, selecting), Some(visual.clone()));
-            }
+            context.requirements_text_overlay = false;
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                    context
+                ),
+                Some(if ch == 'j' {
+                    Action::OverlayMoveDown
+                } else {
+                    Action::OverlayMoveUp
+                })
+            );
         }
     }
 }

@@ -15,12 +15,14 @@ use crate::highlight::{
     StepHighlightState, highlight_line_with_state, leading_whitespace_chars,
     step_keyword_gutter_pad, step_keyword_gutter_styled_span,
 };
+use crate::keymap::Action;
 use teshi_core::gherkin::{BddScenario, ScenarioKind};
 use teshi_core::gherkin_lang::{
     GherkinLanguage, GherkinLanguages, StepKeywordType, StructuralType,
 };
 
 pub(crate) mod chat;
+mod pointer_controls;
 
 /// Stage-2 preview: one solid style for the tree-selected line (avoids span-patch gaps that read as bright blocks).
 const MAIN_TABS: &[(MainTab, &str)] = &[
@@ -30,6 +32,17 @@ const MAIN_TABS: &[(MainTab, &str)] = &[
     (MainTab::Requirements, " Requirements [4] "),
     (MainTab::TestPoints, " Test Points [5] "),
 ];
+const COMPACT_TABS: &[(MainTab, &str)] = &[
+    (MainTab::Explore, "Explore [1]"),
+    (MainTab::MindMap, "Map [2]"),
+    (MainTab::Ai, "AI [3]"),
+    (MainTab::Requirements, "Req [4]"),
+    (MainTab::TestPoints, "Points [5]"),
+];
+
+fn main_tabs(width: u16) -> &'static [(MainTab, &'static str)] {
+    if width < 85 { COMPACT_TABS } else { MAIN_TABS }
+}
 const TAB_PADDING_LEFT: &str = " ";
 const TAB_PADDING_RIGHT: &str = " ";
 const TAB_DIVIDER: &str = " ";
@@ -49,7 +62,7 @@ fn register_tab_regions(app: &mut App, area: Rect) {
     let padding_right_width = TAB_PADDING_RIGHT.width() as u16;
     let divider_width = TAB_DIVIDER.width() as u16;
 
-    for (index, &(tab, title)) in MAIN_TABS.iter().enumerate() {
+    for (index, &(tab, title)) in main_tabs(area.width).iter().enumerate() {
         x = x.saturating_add(padding_left_width.min(right.saturating_sub(x)));
         if x >= right {
             break;
@@ -233,9 +246,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     // project remains permissive; these diagnostics are only an editor aid
     // and never prevent Browse/Insert rendering or input handling.
     app.refresh_buffer_diagnostics();
-    app.chat_history_rect = None;
     app.clickable_regions.clear();
     app.agent_mut().acp_controls_ui.clear_regions();
+    app.chat_history_rect = None;
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -248,7 +261,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         .split(frame.area());
 
     let top_tabs = Tabs::new(
-        MAIN_TABS
+        main_tabs(chunks[0].width)
             .iter()
             .map(|&(_, title)| Line::from(title))
             .collect::<Vec<_>>(),
@@ -296,6 +309,15 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             .style(Style::default().fg(theme::BORDER)),
         chunks[1],
     );
+    if let Some(rect) = active_tab_rect
+        && chunks[1].height > 0
+    {
+        frame.render_widget(
+            Paragraph::new("━".repeat(rect.width as usize))
+                .style(Style::default().fg(theme::PRIMARY)),
+            Rect::new(rect.x, chunks[1].y, rect.width, 1),
+        );
+    }
     if !app.version.is_empty() && version_width > 0 && chunks[1].height > 0 {
         frame.render_widget(
             Paragraph::new(version_text)
@@ -309,16 +331,6 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             ),
         );
     }
-    if let Some(rect) = active_tab_rect
-        && chunks[1].height > 0
-    {
-        frame.render_widget(
-            Paragraph::new("━".repeat(rect.width as usize))
-                .style(Style::default().fg(theme::PRIMARY)),
-            Rect::new(rect.x, chunks[1].y, rect.width, 1),
-        );
-    }
-
     frame.render_widget(
         Paragraph::new("").style(Style::default().bg(theme::FOOTER_BG).fg(theme::FOOTER_DESC)),
         chunks[3],
@@ -341,91 +353,128 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     } else if app.active_tab == MainTab::Ai {
         render_ai_footer(frame, app, chunks[3]);
     } else if app.active_tab == MainTab::Requirements {
-        frame.render_widget(
-            if app.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor {
-                {
-                    let (label, hints, color): (&str, &[(&str, &str)], _) =
-                        match app.authoring_ui.editor_mode {
-                            crate::authoring_tab::RequirementsEditorMode::Browse => (
-                                "[BROWSE]",
-                                &[
-                                    ("hjkl/arrows", " Move  "),
-                                    ("i", " Insert  "),
-                                    ("s", " Save  "),
-                                    ("n", " Test point  "),
-                                    ("I", " Iteration"),
-                                ],
-                                theme::PRIMARY,
-                            ),
-                            crate::authoring_tab::RequirementsEditorMode::Insert => (
-                                "[INSERT]",
-                                &[
-                                    ("Esc", " Browse  "),
-                                    ("Ctrl+S", " Save  "),
-                                    ("Tab", " Indent  "),
-                                    ("Arrows/Home/End", " Move"),
-                                ],
-                                theme::ACCENT,
-                            ),
-                            crate::authoring_tab::RequirementsEditorMode::VisualChar
-                            | crate::authoring_tab::RequirementsEditorMode::VisualLine => (
-                                if app.authoring_ui.editor_mode
-                                    == crate::authoring_tab::RequirementsEditorMode::VisualLine
-                                {
-                                    "[V-LINE]"
-                                } else {
-                                    "[VISUAL]"
-                                },
-                                &[
-                                    ("hjkl", " Move  "),
-                                    ("y", " Yank  "),
-                                    ("d", " Delete  "),
-                                    ("Esc", " Browse"),
-                                ],
-                                theme::WARNING,
-                            ),
-                        };
-                    let footer = theme::footer_line(
-                        hints
-                            .iter()
-                            .flat_map(|&(key, desc)| theme::key_hint(key, desc)),
-                    );
-                    let mut spans = vec![Span::raw(" "), theme::chip(label, color), Span::raw(" ")];
-                    spans.extend(footer.spans);
-                    Line::from(spans).style(footer.style)
-                }
-            } else {
-                let footer = crate::authoring_tab::requirements_footer_line(
+        use crate::authoring_tab::RequirementsEditorMode;
+        let mode = match app.authoring_ui.editor_mode {
+            RequirementsEditorMode::Browse => "[BROWSE]",
+            RequirementsEditorMode::Insert => "[INSERT]",
+            RequirementsEditorMode::VisualChar => "[VISUAL]",
+            RequirementsEditorMode::VisualLine => "[V-LINE]",
+        };
+        if chunks[3].width < 55 {
+            frame.render_widget(
+                crate::authoring_tab::requirements_footer_line(
                     &app.requirements_root,
                     &app.authoring_ui.iteration_filter,
-                );
-                let delete_label_width = " Delete [d/Delete] ".width() as u16;
-                if delete_label_width > 0 && chunks[3].width > 0 {
-                    app.clickable_regions
-                        .push(ClickableRegion::RequirementsDelete {
-                            rect: Rect::new(
-                                chunks[3].x,
-                                chunks[3].y,
-                                delete_label_width.min(chunks[3].width),
-                                1,
-                            ),
-                        });
-                }
-                footer
-            },
-            chunks[3],
-        );
+                ),
+                chunks[3],
+            );
+        } else {
+            let compact = chunks[3].width < 100;
+            let controls = vec![
+                (
+                    if compact { " New" } else { " New doc [Ctrl+n]" },
+                    Action::ReqNewDocument,
+                ),
+                (
+                    if compact {
+                        " Delete"
+                    } else {
+                        " Delete [d/Delete]"
+                    },
+                    Action::ReqDeleteDocument,
+                ),
+                (
+                    if compact { " Filter" } else { " Filter [i]" },
+                    Action::ReqFilterOverlay,
+                ),
+                (
+                    if compact { " Group" } else { " Group [g]" },
+                    Action::ReqGroupToggle,
+                ),
+                (
+                    if compact {
+                        " Iteration"
+                    } else {
+                        " Iteration [I]"
+                    },
+                    Action::ReqEditIteration,
+                ),
+                (
+                    if compact { " Save" } else { " Save [Ctrl+s]" },
+                    Action::Save,
+                ),
+                (
+                    if compact { " Point" } else { " Point [n]" },
+                    Action::ReqNewTestPoint,
+                ),
+            ];
+            render_action_bar(frame, app, chunks[3], mode, &controls, false);
+        }
     } else if app.active_tab == MainTab::TestPoints {
-        frame.render_widget(crate::test_points_tab::test_points_footer_line(), chunks[3]);
+        if chunks[3].width < 40 {
+            frame.render_widget(crate::test_points_tab::test_points_footer_line(), chunks[3]);
+        } else {
+            let compact = chunks[3].width < 100;
+            let controls = [
+                (
+                    if compact { " Approve" } else { " Approve [a]" },
+                    Action::TpApprove,
+                ),
+                (
+                    if compact { " Reject" } else { " Reject [r]" },
+                    Action::TpReject,
+                ),
+                (
+                    if compact { " Batch" } else { " Batch [A]" },
+                    Action::TpBatchApprove,
+                ),
+                (
+                    if compact {
+                        " Continue"
+                    } else {
+                        " Continue [c]"
+                    },
+                    Action::TpContinueGeneration,
+                ),
+                (
+                    if compact { " Filter" } else { " Filter [f]" },
+                    Action::TpReviewFilter,
+                ),
+                (if compact { " Save" } else { " Save [s]" }, Action::Save),
+            ];
+            render_action_bar(frame, app, chunks[3], "", &controls, false);
+        }
     } else {
         let key_hints = theme::footer_line(footer_hints(app).spans);
         frame.render_widget(Paragraph::new(key_hints), chunks[3]);
     }
 
+    if app.auth_panel_active
+        || app.model_panel_active
+        || app.session_panel_active
+        || app.quit_pending_confirm
+        || app.approval_panel_active
+        || app.agent_profile_panel_active
+        || app.change_summary_visible
+        || app.has_external_change_prompt()
+        || app.step_keyword_picker.is_some()
+        || app.has_agent_change_prompt()
+        || app.has_acp_permission_prompt()
+        || app.authoring_ui.overlay_active()
+        || app.generation_scope_prompt.is_some()
+    {
+        // Modal rendering replaces the interactive layer, not just its pixels.
+        app.clickable_regions.clear();
+    }
     render_external_change_prompt(frame, app, chunks[2]);
 
     // Change Summary overlay (MindMap tab)
     render_change_summary_panel(frame, app, chunks[2]);
+    if let Some(editor_area) = app.editor_panel_rect
+        && app.step_keyword_picker.is_some()
+    {
+        render_step_keyword_picker(frame, app, editor_area);
+    }
 
     if app.auth_panel_active {
         render_auth_panel(frame, app, frame.area());
@@ -463,6 +512,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         render_requirements_overlay(frame, app, frame.area());
     }
     crate::acp_controls::render_picker(frame, app);
+    pointer_controls::render_pending_review(frame, app, chunks[2]);
 }
 
 fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -490,36 +540,8 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 /// Renders the footer bar for the AI tab.
-fn render_ai_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let send_label = if app.ai_input_focused {
-        " Send [Enter] "
-    } else {
-        " Focus [Enter] "
-    };
-    let mut hint_spans = vec![
-        footer_pill(send_label),
-        Span::raw(" "),
-        footer_pill(" Clear [Esc] "),
-        Span::raw(" "),
-        footer_pill(" Model [m] "),
-    ];
-    if !app.ai_input_focused {
-        hint_spans.push(Span::raw(" "));
-        hint_spans.push(footer_pill(" Quit [q] "));
-    }
-    // Show tool execution status in the footer when the agent is acting
-    if let Some(ref tool_status) = app.agent().tool_status {
-        hint_spans.push(Span::raw("  "));
-        hint_spans.push(Span::styled(
-            tool_status.clone(),
-            Style::default().fg(crate::theme::WARNING),
-        ));
-    }
-    let hints = theme::footer_line(hint_spans);
-    frame.render_widget(Paragraph::new(hints), area);
+fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    pointer_controls::render_ai_footer(frame, app, area);
 }
 
 /// Renders the MindMap layout: tree (55%) + right panel (45%) split vertically into
@@ -569,6 +591,25 @@ fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     render_explore_features(frame, app, cols[0]);
     render_explore_scenarios(frame, app, cols[1]);
     render_explore_steps(frame, app, cols[2]);
+    // Row bindings use logical list rows. Translate them through the same
+    // offsets used to draw the columns, and discard rows outside the viewport.
+    let views = app.explore_viewports;
+    app.clickable_regions.retain_mut(|region| {
+        let (column, row) = match region {
+            ClickableRegion::ExploreFeature { row_y, .. }
+            | ClickableRegion::ExploreDeletedFeature { row_y, .. } => (0, row_y),
+            ClickableRegion::ExploreScenario { row_y, .. } => (1, row_y),
+            ClickableRegion::ExploreStep { row_y, .. } => (2, row_y),
+            _ => return true,
+        };
+        let view = views[column];
+        let logical_row = row.saturating_sub(view.rect.y) as usize;
+        if logical_row < view.offset || logical_row >= view.offset + view.rect.height as usize {
+            return false;
+        }
+        *row = view.rect.y + (logical_row - view.offset) as u16;
+        true
+    });
     render_failure_detail(frame, app, area);
 }
 
@@ -605,24 +646,62 @@ fn render_explore_lines<'a>(
     let max_scroll = content_width.saturating_sub(viewport_width);
     let offset = app.explore_horizontal_scroll[column.index()].min(max_scroll);
     app.explore_horizontal_scroll[column.index()] = offset;
+    let selected = match column {
+        ColumnFocus::Feature => app
+            .explore_selected_deleted_feature
+            .map_or(app.explore_selected_feature, |i| {
+                app.project.features.len() + i
+            }),
+        ColumnFocus::Scenario => app.explore_selected_scenario,
+        ColumnFocus::Step => app.explore_selected_step,
+    };
+    let view = &mut app.explore_viewports[column.index()];
+    let owner = match column {
+        ColumnFocus::Feature => (0, None, None),
+        ColumnFocus::Scenario => (
+            app.explore_selected_feature,
+            app.explore_selected_deleted_feature,
+            None,
+        ),
+        ColumnFocus::Step => (
+            app.explore_selected_feature,
+            app.explore_selected_deleted_feature,
+            Some(app.explore_selected_scenario),
+        ),
+    };
+    if view.last_owner != Some(owner) {
+        view.offset = 0;
+        view.last_selected = None;
+        view.last_owner = Some(owner);
+    }
+    view.rect = content_area;
+    view.max_vertical = lines.len().saturating_sub(content_area.height as usize);
+    view.max_horizontal = max_scroll;
+    view.offset = view.offset.min(view.max_vertical);
+    if view.last_selected != Some(selected) {
+        if selected < view.offset {
+            view.offset = selected;
+        } else if selected >= view.offset + content_area.height as usize {
+            view.offset = selected
+                .saturating_add(1)
+                .saturating_sub(content_area.height as usize)
+                .min(view.max_vertical);
+        }
+        view.last_selected = Some(selected);
+    }
+    let vertical_offset = view.offset.min(u16::MAX as usize) as u16;
     frame.render_widget(
         Paragraph::new(Text::from(theme::popup_rows(
             lines,
             content_width.max(viewport_width).min(u16::MAX as usize) as u16,
         )))
-        .scroll((0, offset.min(u16::MAX as usize) as u16)),
+        .scroll((vertical_offset, offset.min(u16::MAX as usize) as u16)),
         content_area,
     );
 
     if overflow {
         let scrollbar = Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 2);
-        let cells = theme::scrollbar_lines(content_width, viewport_width, offset);
-        let scrollbar_line = Line::from(
-            cells
-                .into_iter()
-                .flat_map(|line| line.spans)
-                .collect::<Vec<_>>(),
-        );
+        let scrollbar_line = theme::horizontal_scrollbar(content_width, viewport_width, offset);
         frame.render_widget(
             Paragraph::new(vec![scrollbar_line.clone(), scrollbar_line]),
             scrollbar,
@@ -1549,7 +1628,7 @@ fn render_failure_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Text::from(out_lines)), inner);
 }
 
-fn render_external_change_prompt(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_external_change_prompt(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if !app.has_external_change_prompt() {
         return;
     }
@@ -1578,17 +1657,28 @@ fn render_external_change_prompt(frame: &mut Frame<'_>, app: &App, area: Rect) {
         return;
     }
 
+    let [content, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
     let lines = vec![
         Line::raw(format!("Detected external updates for {file_name}.")),
         Line::raw(""),
-        theme::action_line("Reload latest input: [Enter] / [r]"),
-        theme::action_line("Keep local buffer: [Esc] / [k]"),
     ];
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    frame.render_widget(Paragraph::new(Text::from(lines)), content);
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[
+            ("Reload [Enter] ", Action::ExternalChangeReload),
+            ("Keep [Esc]", Action::ExternalChangeKeepLocal),
+        ],
+        true,
+    );
 }
 
 /// Renders the Change Summary overlay with pending added/modified/deleted nodes.
-fn render_change_summary_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_change_summary_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if !app.change_summary_visible || app.pending_change_summary.is_empty() {
         return;
     }
@@ -1606,13 +1696,23 @@ fn render_change_summary_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     frame.render_widget(Clear, popup);
     let block = theme::popup_block("Change Summary");
-    let inner = block.inner(popup);
+    let [inner, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(block.inner(popup));
     frame.render_widget(block, popup);
     if inner.width < 10 || inner.height < 3 {
         return;
     }
 
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let scroll = app
+        .change_summary_selection
+        .saturating_add(3)
+        .saturating_sub(inner.height as usize);
+    app.clickable_regions.push(ClickableRegion::ModalList {
+        rect: inner,
+        up: Action::ChangeSummaryUp,
+        down: Action::ChangeSummaryDown,
+    });
 
     // Header
     let header = format!(
@@ -1635,6 +1735,10 @@ fn render_change_summary_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
             crate::app::ChangeKind::Deleted => ("[-]", theme::ERROR),
             crate::app::ChangeKind::Unchanged => continue,
         };
+        if let Some(rect) = visible_content_rows(inner, lines.len(), 1, scroll) {
+            app.clickable_regions
+                .push(ClickableRegion::ChangeSummaryRow { rect, index: i });
+        }
         let label_span = Span::styled(
             format!("{}{} ", marker, label),
             Style::default()
@@ -1657,8 +1761,20 @@ fn render_change_summary_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 
     frame.render_widget(
-        Paragraph::new(Text::from(theme::popup_rows(lines, inner.width))),
+        Paragraph::new(Text::from(theme::popup_rows(lines, inner.width)))
+            .scroll((scroll as u16, 0)),
         inner,
+    );
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[
+            ("Jump [Enter] ", Action::ChangeSummaryJump),
+            ("Close [Esc]", Action::ClearInputState),
+        ],
+        true,
     );
 }
 
@@ -1713,6 +1829,10 @@ fn render_mindmap_scenario_preview(
     area: Rect,
     focused: bool,
 ) {
+    app.preview_panel_rect = Some(area.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    }));
     if area.width < 10 || area.height < 3 {
         return;
     }
@@ -1760,7 +1880,8 @@ fn render_mindmap_scenario_preview(
         && let Some(locations) = app.mindmap_index.locations_for(id)
         && !locations.is_empty()
     {
-        render_scenario_dropdown(frame, app, inner, locations);
+        let locations = locations.to_vec();
+        render_scenario_dropdown(frame, app, inner, &locations);
         return; // dropdown replaces preview content
     }
 
@@ -1821,7 +1942,7 @@ fn render_mindmap_scenario_preview(
 /// Renders the scenario location dropdown inside the preview panel.
 fn render_scenario_dropdown(
     frame: &mut Frame<'_>,
-    app: &App,
+    app: &mut App,
     area: Rect,
     locations: &[crate::mindmap::NodeLocation],
 ) {
@@ -1829,8 +1950,8 @@ fn render_scenario_dropdown(
 
     let count = locations.len();
     let selection = app.scenario_dropdown_selection.min(count.saturating_sub(1));
-    let max_items = (area.height as usize).saturating_sub(2).min(count);
-    let list_height = (max_items + 2).min(area.height as usize) as u16; // +2 for borders
+    let max_items = (area.height as usize).saturating_sub(3).min(count);
+    let list_height = (max_items + 2).min(area.height.saturating_sub(1) as usize) as u16;
 
     let dropdown_area = Rect::new(area.x, area.y, area.width, list_height.min(area.height));
     if dropdown_area.height < 3 {
@@ -1879,6 +2000,11 @@ fn render_scenario_dropdown(
 
     for (i, item) in items[scroll_start..scroll_end].iter().enumerate() {
         let idx = scroll_start + i;
+        app.clickable_regions
+            .push(ClickableRegion::MindMapLocation {
+                rect: Rect::new(inner.x, inner.y + i as u16, inner.width, 1),
+                index: idx,
+            });
         let is_selected = idx == selection;
         let prefix = if is_selected { "▸ " } else { "  " };
         let style = if is_selected {
@@ -1898,13 +2024,30 @@ fn render_scenario_dropdown(
     // Hint line at the bottom of the dropdown area
     if dropdown_area.y + dropdown_area.height < area.y + area.height {
         let hint_y = dropdown_area.y + dropdown_area.height;
-        let hint_line = Line::styled(
-            " j/k navigate · Enter select · Esc close ",
-            Style::default().fg(theme::MUTED),
-        );
-        frame.render_widget(
-            Paragraph::new(hint_line),
+        render_action_bar(
+            frame,
+            app,
             Rect::new(area.x, hint_y, area.width, 1),
+            "",
+            &[
+                (
+                    if area.width < 25 {
+                        "Open "
+                    } else {
+                        "Open [Enter] "
+                    },
+                    Action::ScenarioDropdownSelect,
+                ),
+                (
+                    if area.width < 25 {
+                        "Close"
+                    } else {
+                        "Close [Esc]"
+                    },
+                    Action::ScenarioDropdownClose,
+                ),
+            ],
+            true,
         );
     }
 }
@@ -2241,9 +2384,6 @@ fn render_editor_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, preview
         app.editor_panel_rect = Some(editor_area);
         render_buffer_diagnostics(frame, app, diagnostics_area);
     }
-    if !preview {
-        render_step_keyword_picker(frame, app, editor_area);
-    }
 }
 
 /// Render source-aware diagnostics without replacing the permissive editor
@@ -2297,7 +2437,7 @@ fn render_buffer_diagnostics(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 /// Draws the step-keyword overlay when [`App::step_keyword_picker`] is active.
-fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rect) {
+fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &mut App, editor_area: Rect) {
     let Some(picker) = app.step_keyword_picker else {
         return;
     };
@@ -2313,9 +2453,9 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rec
     // Use max display width for popup width, but ensure at least title width
     let title_width = TITLE.width();
     let inner_w_ch = max_kw_w.max(title_width).saturating_add(2);
-    let list_w = (inner_w_ch as u16).saturating_add(2);
+    let list_w = (inner_w_ch as u16).saturating_add(2).max(34);
     let n_items = keywords.len();
-    let list_h = (n_items as u16).saturating_add(2);
+    let list_h = (n_items as u16).saturating_add(3);
 
     let visible_lines = editor_area.height as usize;
     let row_in_view = picker.buffer_row.saturating_sub(app.scroll_row);
@@ -2341,7 +2481,8 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rec
     frame.render_widget(Clear, area);
 
     let block = theme::popup_block(TITLE);
-    let inner = block.inner(area);
+    let [inner, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(block.inner(area));
     if inner.width == 0 || inner.height == 0 {
         return;
     }
@@ -2353,7 +2494,17 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rec
     let normal = Style::default();
 
     let mut lines: Vec<Line> = Vec::with_capacity(max_rows.min(n_items));
-    for (i, kw) in keywords.iter().enumerate().take(max_rows) {
+    let start = picker.selected.saturating_add(1).saturating_sub(max_rows);
+    app.clickable_regions.push(ClickableRegion::ModalList {
+        rect: inner,
+        up: Action::StepKeywordPickerUp,
+        down: Action::StepKeywordPickerDown,
+    });
+    for (i, kw) in keywords.iter().enumerate().skip(start).take(max_rows) {
+        app.clickable_regions.push(ClickableRegion::StepKeywordRow {
+            rect: Rect::new(inner.x, inner.y + (i - start) as u16, inner.width, 1),
+            index: i,
+        });
         let style = if i == picker.selected {
             selected_row_style
         } else {
@@ -2369,6 +2520,17 @@ fn render_step_keyword_picker(frame: &mut Frame<'_>, app: &App, editor_area: Rec
 
     frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[
+            ("Confirm [Enter] ", Action::StepKeywordPickerConfirm),
+            ("Cancel [Esc]", Action::StepKeywordPickerCancel),
+        ],
+        true,
+    );
 }
 
 /// Renders the reserved panel placeholder (stage 3, right side).
@@ -2518,7 +2680,7 @@ fn status_label(status: RunStatus) -> &'static str {
     }
 }
 
-fn render_explore_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_explore_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -2552,12 +2714,35 @@ fn render_explore_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         format!("0/{total} 通过")
     };
 
-    let width = area.width as usize;
+    let compact = area.width < 100;
+    let controls = [
+        (
+            if compact { " Run" } else { " Run [r]" },
+            Action::RunScenario,
+        ),
+        (
+            if compact {
+                " Detail"
+            } else {
+                " Detail [Enter]"
+            },
+            Action::ToggleFailureDetail,
+        ),
+        (
+            if compact { " Edit" } else { " Edit [e]" },
+            Action::EnterEdit,
+        ),
+    ];
+    let used = controls
+        .iter()
+        .map(|(label, _)| label.width() as u16)
+        .sum::<u16>();
+    let width = area.width.saturating_sub(used + 1) as usize;
     let left_w = UnicodeWidthStr::width(left.as_str());
     let right_w = UnicodeWidthStr::width(right.as_str());
 
     let text = if right_w >= width {
-        truncate_string_to_cols(right.as_str(), area.width)
+        truncate_string_to_cols(right.as_str(), width as u16)
     } else {
         let mut out = String::new();
         let mut left_trimmed = left;
@@ -2573,7 +2758,13 @@ fn render_explore_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         out
     };
 
-    frame.render_widget(Paragraph::new(theme::footer_line([Span::raw(text)])), area);
+    render_action_bar(frame, app, area, "", &controls, false);
+    if area.width > used + 1 {
+        frame.render_widget(
+            Paragraph::new(theme::footer_line([Span::raw(text)])),
+            Rect::new(area.x + used + 1, area.y, area.width - used - 1, 1),
+        );
+    }
 }
 
 fn footer_pill(label: &'static str) -> Span<'static> {
@@ -2684,7 +2875,7 @@ fn footer_hints(app: &App) -> Line<'static> {
 }
 
 /// Renders the auth management overlay panel over the entire screen.
-fn render_auth_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_auth_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel_w = area.width.min(60);
     let panel_h = area.height.min(20);
     let panel_x = (area.width.saturating_sub(panel_w)) / 2;
@@ -2778,17 +2969,24 @@ fn render_auth_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         }
     }
 
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "Esc to close",
-        Style::default().fg(theme::MUTED),
-    ));
-
-    frame.render_widget(Paragraph::new(theme::popup_rows(lines, inner.width)), inner);
+    let [content, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    frame.render_widget(
+        Paragraph::new(theme::popup_rows(lines, content.width)),
+        content,
+    );
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[("Close [Esc]", Action::AuthPanelClose)],
+        true,
+    );
 }
 
 /// Renders the model profile management overlay panel.
-fn render_model_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_model_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel_w = area.width.min(60);
     let panel_h = area.height.min(22);
     let panel_x = (area.width.saturating_sub(panel_w)) / 2;
@@ -2809,10 +3007,15 @@ fn render_model_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 /// Renders the list of model profiles.
-fn render_model_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_model_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let block = theme::popup_block(" Model Profiles ");
-    let inner = block.inner(area);
+    let [inner, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(block.inner(area));
     frame.render_widget(block, area);
+    let scroll = app
+        .model_panel_selection
+        .saturating_add(2)
+        .saturating_sub(inner.height as usize);
 
     let mut lines: Vec<Line<'_>> = Vec::new();
     lines.push(Line::raw(""));
@@ -2830,6 +3033,10 @@ fn render_model_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
         )]));
     } else {
         for (i, profile) in app.model_profiles.iter().enumerate() {
+            if let Some(rect) = visible_content_rows(inner, lines.len(), 1, scroll) {
+                app.clickable_regions
+                    .push(ClickableRegion::ModelProfileRow { rect, index: i });
+            }
             let is_active = app.model_active_id.as_deref() == Some(&profile.id);
             let prefix = if i == app.model_panel_selection {
                 " ▸ "
@@ -2859,19 +3066,31 @@ fn render_model_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
         }
     }
 
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "a add · e edit · d delete · ↑↓ select · Enter activate · Esc close",
-        Style::default().fg(theme::MUTED),
-    ));
-
-    frame.render_widget(Paragraph::new(theme::popup_rows(lines, inner.width)), inner);
+    frame.render_widget(
+        Paragraph::new(theme::popup_rows(lines, inner.width)).scroll((scroll as u16, 0)),
+        inner,
+    );
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[
+            ("Add [a] ", Action::ModelPanelAdd),
+            ("Edit [e] ", Action::ModelPanelEdit),
+            ("Del [d] ", Action::ModelPanelDelete),
+            ("Use [Enter] ", Action::ModelPanelActivate),
+            ("Close [Esc]", Action::ModelPanelClose),
+        ],
+        true,
+    );
 }
 
 /// Renders the model profile form (add or edit).
-fn render_model_form(frame: &mut Frame<'_>, app: &App, title: &str, area: Rect) {
+fn render_model_form(frame: &mut Frame<'_>, app: &mut App, title: &str, area: Rect) {
     let block = theme::popup_block(title);
-    let inner = block.inner(area);
+    let [inner, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(block.inner(area));
     frame.render_widget(block, area);
 
     // 7 form fields
@@ -2889,6 +3108,10 @@ fn render_model_form(frame: &mut Frame<'_>, app: &App, title: &str, area: Rect) 
     lines.push(Line::raw(""));
 
     for (i, (label, value)) in fields.iter().enumerate() {
+        if let Some(rect) = visible_content_rows(inner, lines.len(), 1, 0) {
+            app.clickable_regions
+                .push(ClickableRegion::ModelFormField { rect, index: i });
+        }
         let focused = i == app.model_form_focus;
         let indicator = if focused { " ▸ " } else { "   " };
         let label_style = if focused {
@@ -2924,14 +3147,22 @@ fn render_model_form(frame: &mut Frame<'_>, app: &App, title: &str, area: Rect) 
         ]));
     }
 
-    let footer = theme::action_line("Save [Enter]  Cancel [Esc]").alignment(Alignment::Center);
-    lines.push(footer);
-
     frame.render_widget(Paragraph::new(theme::popup_rows(lines, inner.width)), inner);
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[
+            ("Save [Enter] ", Action::ModelPanelFormSubmit),
+            ("Cancel [Esc]", Action::ModelPanelFormCancel),
+        ],
+        true,
+    );
 }
 
 /// Renders the session browser overlay panel.
-fn render_session_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel_w = area.width.min(60);
     let panel_h = area.height.min(20);
     let x = area.x + (area.width.saturating_sub(panel_w)) / 2;
@@ -2942,7 +3173,8 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(Clear, panel_area);
 
     let block = theme::popup_block(" Sessions ");
-    let inner = block.inner(panel_area);
+    let [inner, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
+        .areas(block.inner(panel_area));
     frame.render_widget(block, panel_area);
 
     if inner.width < 10 || inner.height < 2 {
@@ -2959,6 +3191,15 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ));
     } else {
         for (i, session) in app.session_list.iter().enumerate() {
+            if let Some(rect) = visible_content_rows(
+                inner,
+                lines.len(),
+                if session.model_label.is_some() { 2 } else { 1 },
+                0,
+            ) {
+                app.clickable_regions
+                    .push(ClickableRegion::SessionRow { rect, index: i });
+            }
             let is_selected = i == app.session_panel_selection;
             let prefix = if is_selected { " ▸ " } else { "   " };
             // Show created_at as readable date
@@ -2978,16 +3219,22 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         }
     }
 
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        " ↑↓ select · Enter load · d delete · Esc close ",
-        Style::default().fg(theme::MUTED),
-    ));
-
     let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
     frame.render_widget(
         Paragraph::new(Text::from(theme::popup_rows(visible, inner.width))),
         inner,
+    );
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[
+            ("Load [Enter] ", Action::SessionPanelActivate),
+            ("Delete [d] ", Action::SessionPanelDelete),
+            ("Close [Esc]", Action::SessionPanelClose),
+        ],
+        true,
     );
 }
 
@@ -3093,7 +3340,7 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel_w = area.width.min(56);
     // Layout: top border + 3 items × (title + desc) + separator line + bottom border
     let item_rows: u16 = (modes.len() * 2 + 1) as u16; // +1 for separator
-    let panel_h = item_rows + 3; // +3 for borders + padding
+    let panel_h = (item_rows + 4).min(area.height);
     let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
     let panel_y = area.y + (area.height.saturating_sub(panel_h)) / 2;
     let panel_area = Rect::new(panel_x, panel_y, panel_w, panel_h);
@@ -3107,7 +3354,8 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         " Approval Mode "
     });
-    let inner = block.inner(panel_area);
+    let [inner, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
+        .areas(block.inner(panel_area));
     frame.render_widget(block, panel_area);
 
     // Track which rows are rendered so we can register clickable regions
@@ -3177,35 +3425,34 @@ fn render_approval_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Paragraph::new(Text::from(theme::popup_rows(visible, inner.width))),
         inner,
     );
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[("Close [Esc]", Action::ClearInputState)],
+        true,
+    );
 }
 
 /// Sidebar width for the agent configuration modal (matches AI agent sidebar).
 const AGENT_PROFILE_SIDEBAR_WIDTH: u16 = 28;
 const AGENT_PROFILE_PANEL_MIN_WIDTH: u16 = 60;
 
-fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel = agent_profile_panel_rect(area);
     frame.render_widget(Clear, panel);
-    let (title, hint) = match app.agent_panel_mode {
-        crate::app::AgentPanelMode::SelectBackend => (
-            " Select Agent for this session ".to_string(),
-            "↑↓ move · Enter select · Esc close",
+    let title = match app.agent_panel_mode {
+        crate::app::AgentPanelMode::SelectBackend => " Select Agent for this session ".to_string(),
+        crate::app::AgentPanelMode::InstalledAcp => format!(
+            " Installed ACP Agents ({}) ",
+            app.installed_acp_agents.len()
         ),
-        crate::app::AgentPanelMode::InstalledAcp => (
-            format!(
-                " Installed ACP Agents ({}) ",
-                app.installed_acp_agents.len()
-            ),
-            "↑↓ move · Enter select · i Registry · Esc close",
+        crate::app::AgentPanelMode::Registry => format!(
+            " Official ACP Registry ({} agents) ",
+            app.acp_registry_agents.len()
         ),
-        crate::app::AgentPanelMode::Registry => (
-            format!(
-                " Official ACP Registry ({} agents) ",
-                app.acp_registry_agents.len()
-            ),
-            "↑↓ move · Enter install · Esc close",
-        ),
-        _ => (" Agents ".to_string(), "Esc close"),
+        _ => " Agents ".to_string(),
     };
     let block = theme::popup_block(title);
     let inner = block.inner(panel);
@@ -3214,10 +3461,19 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .areas(inner);
-    frame.render_widget(
-        Paragraph::new(Line::styled(hint, Style::default().fg(theme::MUTED))),
-        footer_area,
-    );
+    let mut controls = vec![(
+        if app.agent_panel_mode == crate::app::AgentPanelMode::Registry {
+            "Install [Enter] "
+        } else {
+            "Use [Enter] "
+        },
+        Action::AgentPanelSelect,
+    )];
+    if app.agent_panel_mode == crate::app::AgentPanelMode::InstalledAcp {
+        controls.push(("Registry [i] ", Action::AgentPanelAdd));
+    }
+    controls.push(("Close [Esc]", Action::AgentPanelClose));
+    render_action_bar(frame, app, footer_area, "", &controls, true);
 
     let muted = Style::default().fg(theme::MUTED);
     let id_style = Style::default().fg(theme::PRIMARY);
@@ -3338,6 +3594,18 @@ fn render_acp_agent_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let scroll = selected_line
         .saturating_add(per_row)
         .saturating_sub(list_area.height as usize);
+    let count = match app.agent_panel_mode {
+        crate::app::AgentPanelMode::SelectBackend => app.installed_acp_agents.len() + 1,
+        crate::app::AgentPanelMode::InstalledAcp => app.installed_acp_agents.len(),
+        crate::app::AgentPanelMode::Registry => app.acp_registry_agents.len(),
+        crate::app::AgentPanelMode::List => 0,
+    };
+    for index in 0..count {
+        if let Some(rect) = visible_content_rows(list_area, index * per_row, per_row, scroll) {
+            app.clickable_regions
+                .push(ClickableRegion::AgentProfileRow { rect, index });
+        }
+    }
     frame.render_widget(
         Paragraph::new(theme::popup_rows(lines, inner.width)).scroll((scroll as u16, 0)),
         list_area,
@@ -3359,17 +3627,36 @@ fn agent_profile_panel_rect(area: Rect) -> Rect {
     ) as u16;
     let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
     let panel_y = area.y + (area.height.saturating_sub(panel_h)) / 2;
-    Rect::new(panel_x, panel_y, panel_w, panel_h)
+    Rect::new(
+        panel_x,
+        panel_y,
+        panel_w.min(area.width),
+        panel_h.min(area.height),
+    )
 }
 
 /// Render the agent profile configuration overlay (chrys-style layout).
-fn render_agent_profile_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_agent_profile_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panel_area = agent_profile_panel_rect(area);
     frame.render_widget(Clear, panel_area);
 
     let block = theme::popup_block(" Agent Configuration ");
     let inner = block.inner(panel_area);
     frame.render_widget(block, panel_area);
+
+    let [inner, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[
+            ("Apply [Enter] ", Action::AgentPanelSelect),
+            ("Close [Esc]", Action::AgentPanelClose),
+        ],
+        true,
+    );
 
     let [sidebar_area, main_area] = Layout::default()
         .direction(Direction::Horizontal)
@@ -3384,15 +3671,24 @@ fn render_agent_profile_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 /// Left sidebar: profile list with two-line entries (name + description).
-fn render_agent_profile_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_agent_profile_sidebar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::RIGHT)
         .border_style(Style::default().fg(theme::MUTED));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let scroll = app
+        .agent_profile_panel_selection
+        .saturating_mul(3)
+        .saturating_add(2)
+        .saturating_sub(inner.height as usize);
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (i, profile) in app.agent_registry.iter().enumerate() {
+        if let Some(rect) = visible_content_rows(inner, lines.len(), 2, scroll) {
+            app.clickable_regions
+                .push(ClickableRegion::AgentProfileRow { rect, index: i });
+        }
         let is_active = app
             .agent()
             .profile_id
@@ -3453,9 +3749,9 @@ fn render_agent_profile_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ));
     }
 
-    let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
     frame.render_widget(
-        Paragraph::new(Text::from(theme::popup_rows(visible, inner.width))),
+        Paragraph::new(Text::from(theme::popup_rows(lines, inner.width)))
+            .scroll((scroll as u16, 0)),
         inner,
     );
 }
@@ -3549,7 +3845,7 @@ fn render_agent_profile_summary(frame: &mut Frame<'_>, app: &App, area: Rect) {
     ]));
 
     lines.push(Line::raw(""));
-    lines.push(Line::styled("Enter apply · Esc close", muted));
+    lines.push(theme::action_line("Enter apply · Esc close"));
 
     let visible: Vec<Line<'static>> = lines.into_iter().take(area.height as usize).collect();
     frame.render_widget(Paragraph::new(Text::from(visible)), area);
@@ -3614,13 +3910,7 @@ fn render_requirement_scrollbars(
         height.saturating_sub(inner.height as usize),
     ];
     if width > inner.width as usize && inner.width > 0 {
-        let lines = theme::scrollbar_lines(width, inner.width as usize, offset.0);
-        let line = Line::from(
-            lines
-                .into_iter()
-                .flat_map(|line| line.spans)
-                .collect::<Vec<_>>(),
-        );
+        let line = theme::horizontal_scrollbar(width, inner.width as usize, offset.0);
         frame.render_widget(
             Paragraph::new(line),
             Rect::new(inner.x, area.bottom().saturating_sub(1), inner.width, 1),
@@ -3714,28 +4004,24 @@ fn render_requirements_tree(
         .iter()
         .map(|node| {
             let id = node.item.identifier();
-            let label = if let Some(doc_id) = id.strip_prefix(crate::authoring_tab::TREE_DOC_PREFIX)
-            {
-                ui.artifacts
-                    .as_ref()
-                    .and_then(|a| a.index.documents.iter().find(|d| d.id == doc_id))
-                    .map(|d| {
-                        if d.title.trim().is_empty() {
-                            d.path.as_str()
-                        } else {
-                            d.title.as_str()
-                        }
-                    })
-                    .unwrap_or("")
-            } else if let Some(name) = id.strip_prefix(crate::authoring_tab::TREE_ITER_PREFIX) {
-                name
-            } else {
-                id.rsplit('/')
-                    .next()
-                    .unwrap_or(id)
-                    .trim_start_matches(crate::authoring_tab::TREE_DIR_PREFIX)
-            };
-            node.depth() * 2 + 2 + UnicodeWidthStr::width(label)
+            let label_width =
+                if let Some(doc_id) = id.strip_prefix(crate::authoring_tab::TREE_DOC_PREFIX) {
+                    ui.artifacts
+                        .as_ref()
+                        .and_then(|a| a.index.documents.iter().find(|d| d.id == doc_id))
+                        .map(|d| UnicodeWidthStr::width(d.title.as_str()))
+                        .unwrap_or(0)
+                } else if let Some(name) = id.strip_prefix(crate::authoring_tab::TREE_ITER_PREFIX) {
+                    UnicodeWidthStr::width(name)
+                } else {
+                    UnicodeWidthStr::width(
+                        id.rsplit('/')
+                            .next()
+                            .unwrap_or(id)
+                            .trim_start_matches(crate::authoring_tab::TREE_DIR_PREFIX),
+                    )
+                };
+            node.depth() * 2 + 2 + label_width
         })
         .max()
         .unwrap_or(0)
@@ -3819,13 +4105,9 @@ fn render_requirements_editor(
         crate::authoring_tab::RequirementsEditorMode::VisualChar => ("[VISUAL]", theme::WARNING),
         crate::authoring_tab::RequirementsEditorMode::VisualLine => ("[V-LINE]", theme::WARNING),
     };
-    let block = theme::panel_block(
-        Line::from(vec![
-            Span::raw(format!("{display_title} ")),
-            theme::chip(mode, mode_color),
-        ]),
-        focused,
-    );
+    let mut heading = vec![Span::raw(format!("{display_title} "))];
+    heading.push(theme::chip(mode, mode_color));
+    let block = theme::panel_block(Line::from(heading), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -4042,6 +4324,14 @@ fn render_requirements_linked(
                 Style::default()
             };
             lines.push(Line::from(vec![
+                Span::styled(
+                    if i == ui.selected_linked_index {
+                        "› "
+                    } else {
+                        "  "
+                    },
+                    style,
+                ),
                 theme::chip(
                     format!("[{badge}] "),
                     badge_style.fg.unwrap_or(theme::MUTED),
@@ -4056,11 +4346,14 @@ fn render_requirements_linked(
     ui.linked_scroll = ui
         .linked_scroll
         .min(height.saturating_sub(inner.height as usize));
-    if ui.selected_linked_index < ui.linked_scroll {
-        ui.linked_scroll = ui.selected_linked_index;
-    } else if ui.selected_linked_index >= ui.linked_scroll + inner.height as usize {
-        ui.linked_scroll = ui.selected_linked_index + 1 - inner.height as usize;
+    if ui.rendered_linked_selection != Some(ui.selected_linked_index) {
+        if ui.selected_linked_index < ui.linked_scroll {
+            ui.linked_scroll = ui.selected_linked_index;
+        } else if ui.selected_linked_index >= ui.linked_scroll + inner.height as usize {
+            ui.linked_scroll = ui.selected_linked_index + 1 - inner.height as usize;
+        }
     }
+    ui.rendered_linked_selection = Some(ui.selected_linked_index);
     ui.horizontal_scroll[2] =
         ui.horizontal_scroll[2].min(width.saturating_sub(inner.width as usize));
     frame.render_widget(
@@ -4080,7 +4373,7 @@ fn render_requirements_linked(
     );
 }
 
-fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     use crate::authoring_tab::RequirementsOverlay;
     match &app.authoring_ui.overlay {
         RequirementsOverlay::None => {}
@@ -4103,11 +4396,28 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Paragraph::new(vec![
                     Line::raw(format!("{title} has unsaved changes.")),
                     Line::raw(""),
-                    theme::action_line("[S] Save   [D] Discard   [Esc] Cancel"),
+                    Line::raw(""),
                 ])
                 .wrap(ratatui::widgets::Wrap { trim: false })
                 .block(theme::popup_block(" Unsaved requirement ")),
                 panel,
+            );
+            render_action_bar(
+                frame,
+                app,
+                Rect::new(
+                    panel.x + 1,
+                    panel.bottom().saturating_sub(2),
+                    panel.width.saturating_sub(2),
+                    1,
+                ),
+                "",
+                &[
+                    (" [S] Save", Action::OverlayInsert('s')),
+                    (" [D] Discard", Action::OverlayInsert('d')),
+                    (" [Esc] Cancel", Action::OverlayCancel),
+                ],
+                true,
             );
         }
         RequirementsOverlay::FilterPicker { selection } => {
@@ -4121,10 +4431,24 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 panel_h,
             );
             frame.render_widget(Clear, panel_area);
+            let visible = panel_area.height.saturating_sub(4) as usize;
+            let start = selection.saturating_sub(visible.saturating_sub(1));
             let lines: Vec<Line> = options
                 .iter()
                 .enumerate()
+                .skip(start)
+                .take(visible)
                 .map(|(i, filter)| {
+                    app.clickable_regions
+                        .push(ClickableRegion::RequirementFilterOption {
+                            rect: Rect::new(
+                                panel_area.x + 1,
+                                panel_area.y + 1 + (i - start) as u16,
+                                panel_area.width.saturating_sub(2),
+                                1,
+                            ),
+                            index: i,
+                        });
                     let label = match filter {
                         teshi_core::authoring::RequirementIterationFilter::All => "All".to_string(),
                         teshi_core::authoring::RequirementIterationFilter::Unassigned => {
@@ -4147,6 +4471,19 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     .block(theme::popup_block(" Filter iteration ")),
                 panel_area,
             );
+            render_action_bar(
+                frame,
+                app,
+                Rect::new(
+                    panel_area.x + 1,
+                    panel_area.bottom().saturating_sub(2),
+                    panel_area.width.saturating_sub(2),
+                    1,
+                ),
+                "",
+                &[(" Cancel [Esc]", Action::OverlayCancel)],
+                true,
+            );
         }
         RequirementsOverlay::IterationEdit { buffer } => {
             let panel_w = area.width.min(56);
@@ -4162,6 +4499,22 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Paragraph::new(format!("Iteration: {buffer}"))
                     .block(theme::popup_block(" Set iteration (empty = Unassigned) ")),
                 panel_area,
+            );
+            render_action_bar(
+                frame,
+                app,
+                Rect::new(
+                    panel_area.x + 1,
+                    panel_area.bottom().saturating_sub(2),
+                    panel_area.width.saturating_sub(2),
+                    1,
+                ),
+                "",
+                &[
+                    (" Confirm [Enter]", Action::OverlayConfirm),
+                    (" Cancel [Esc]", Action::OverlayCancel),
+                ],
+                true,
             );
         }
         RequirementsOverlay::DeleteConfirmation { document_id, title } => {
@@ -4179,16 +4532,35 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     Line::raw(format!("Delete requirement '{title}' ({document_id})?")),
                     Line::raw("This removes it from the global requirement library."),
                     Line::raw("Linked test points stay and become missing-source links."),
-                    theme::action_line("[Enter] Confirm   [Esc] Cancel"),
+                    Line::raw(""),
                 ])
                 .wrap(ratatui::widgets::Wrap { trim: false })
                 .block(theme::popup_block(" Delete requirement ")),
                 panel_area,
             );
+            render_action_bar(
+                frame,
+                app,
+                Rect::new(
+                    panel_area.x + 1,
+                    panel_area.bottom().saturating_sub(2),
+                    panel_area.width.saturating_sub(2),
+                    1,
+                ),
+                "",
+                &[
+                    (" Confirm [Enter]", Action::OverlayConfirm),
+                    (" Cancel [Esc]", Action::OverlayCancel),
+                ],
+                true,
+            );
         }
     }
 
-    if let Some(prompt) = &app.generation_scope_prompt {
+    // The iteration picker owns input while open; keep its parent beneath it.
+    if let Some(prompt) = &app.generation_scope_prompt
+        && !app.authoring_ui.overlay_active()
+    {
         let panel_w = area.width.min(72);
         let panel_h = 10.min(area.height);
         let panel_area = Rect::new(
@@ -4220,11 +4592,23 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Line::raw(format!("Store ID: {store_id}")),
             Line::raw(format!("Iteration scope: {filter}")),
             Line::raw(""),
-            Line::raw("Enter confirm · Esc cancel · i change iteration"),
         ];
-        frame.render_widget(
-            Paragraph::new(lines).block(theme::popup_block(" Confirm generation source scope ")),
-            panel_area,
+        let block = theme::popup_block(" Confirm generation source scope ");
+        let [content, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
+            .areas(block.inner(panel_area));
+        frame.render_widget(block, panel_area);
+        frame.render_widget(Paragraph::new(lines), content);
+        render_action_bar(
+            frame,
+            app,
+            footer,
+            "",
+            &[
+                ("Confirm [Enter] ", Action::GenerationScopeConfirm),
+                ("Iteration [i] ", Action::GenerationScopeChangeIteration),
+                ("Cancel [Esc]", Action::GenerationScopeCancel),
+            ],
+            true,
         );
     }
 }
@@ -4251,20 +4635,98 @@ fn render_test_points_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .split(area)
     };
 
+    // Register the exact pane rectangles used by the render pass.  The
+    // pointer path uses these regions to focus the same pane as Tab/arrow
+    // navigation, and the list is rebuilt every frame so resize and tab
+    // switches cannot leave stale hit targets behind.
+    for (pane, rect) in layout.iter().copied().enumerate() {
+        app.clickable_regions
+            .push(ClickableRegion::TestPointsPane { pane, rect });
+    }
+
     let ui = &mut app.test_points_ui;
     let artifacts = app.authoring_ui.artifacts.as_ref();
     let tree_focused = ui.focus == crate::test_points_tab::TestPointsFocus::Tree;
     render_test_points_tree(frame, ui, artifacts, layout[0], tree_focused);
 
     if layout.len() == 2 {
-        render_test_points_details(frame, ui, artifacts, layout[1], true);
+        render_test_points_details(
+            frame,
+            ui,
+            artifacts,
+            layout[1],
+            true,
+            &mut app.clickable_regions,
+        );
         return;
     }
 
     let details_focused = ui.focus == crate::test_points_tab::TestPointsFocus::Details;
     let excerpts_focused = ui.focus == crate::test_points_tab::TestPointsFocus::Excerpts;
-    render_test_points_details(frame, ui, artifacts, layout[1], details_focused);
-    render_test_points_excerpts(frame, ui, artifacts, layout[2], excerpts_focused);
+    render_test_points_details(
+        frame,
+        ui,
+        artifacts,
+        layout[1],
+        details_focused,
+        &mut app.clickable_regions,
+    );
+    render_test_points_excerpts(
+        frame,
+        ui,
+        artifacts,
+        layout[2],
+        excerpts_focused,
+        &mut app.clickable_regions,
+    );
+}
+
+fn render_action_bar(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    prefix: &str,
+    controls: &[(&str, Action)],
+    modal: bool,
+) {
+    let mut spans = vec![Span::raw(prefix.to_string())];
+    let mut used = prefix.width() as u16;
+    for (label, action) in controls {
+        let width = label.width() as u16;
+        // A clipped label is not an actionable control. The compact variants
+        // fit the supported narrow width without invisible hit targets.
+        if used + width > area.width {
+            break;
+        }
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect: Rect::new(area.x + used, area.y, width, 1),
+            action: action.clone(),
+            modal,
+        });
+        spans.push(Span::styled(
+            label.to_string(),
+            Style::default()
+                .fg(theme::PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ));
+        used += width;
+    }
+    frame.render_widget(Paragraph::new(theme::footer_line(spans)), area);
+}
+
+fn visible_content_rows(inner: Rect, row: usize, count: usize, offset: usize) -> Option<Rect> {
+    let start = row.max(offset);
+    let end = row
+        .saturating_add(count)
+        .min(offset + inner.height as usize);
+    (start < end).then(|| {
+        Rect::new(
+            inner.x,
+            inner.y + (start - offset) as u16,
+            inner.width,
+            (end - start) as u16,
+        )
+    })
 }
 
 fn render_test_points_tree(
@@ -4311,6 +4773,7 @@ fn render_test_points_details(
     artifacts: Option<&teshi_core::authoring::AuthoringArtifacts>,
     area: Rect,
     focused: bool,
+    regions: &mut Vec<ClickableRegion>,
 ) {
     let block = theme::panel_block("Intent & review", focused);
     let inner = block.inner(area);
@@ -4405,7 +4868,10 @@ fn render_test_points_details(
         Span::raw(format!("  id: {}", tp.id)),
     ]));
 
+    let mut field_rows = Vec::new();
+    let mut scenario_rows = Vec::new();
     for (field, label, value) in fields {
+        field_rows.push((lines.len(), field));
         let active = ui.detail_field == field;
         let label_style = if active {
             theme::selected_row(focused)
@@ -4432,6 +4898,7 @@ fn render_test_points_details(
             Style::default().fg(theme::MUTED),
         ));
         for (i, sc_ref) in tp.scenario_refs.iter().enumerate() {
+            scenario_rows.push((lines.len(), i));
             let label = sc_ref
                 .scenario_name
                 .clone()
@@ -4449,7 +4916,23 @@ fn render_test_points_details(
         }
     }
 
-    frame.render_widget(Paragraph::new(theme::popup_rows(lines, inner.width)), inner);
+    let rows = theme::popup_rows(lines, inner.width);
+    let max_scroll = rows.len().saturating_sub(inner.height as usize);
+    ui.scroll_offsets[1] = ui.scroll_offsets[1].min(max_scroll);
+    for (row, field) in field_rows {
+        if let Some(rect) = visible_content_rows(inner, row, 1, ui.scroll_offsets[1]) {
+            regions.push(ClickableRegion::TestPointField { rect, field });
+        }
+    }
+    for (row, index) in scenario_rows {
+        if let Some(rect) = visible_content_rows(inner, row, 1, ui.scroll_offsets[1]) {
+            regions.push(ClickableRegion::TestPointScenario { rect, index });
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(rows).scroll((ui.scroll_offsets[1] as u16, 0)),
+        inner,
+    );
 }
 
 fn render_test_points_excerpts(
@@ -4458,6 +4941,7 @@ fn render_test_points_excerpts(
     artifacts: Option<&teshi_core::authoring::AuthoringArtifacts>,
     area: Rect,
     focused: bool,
+    regions: &mut Vec<ClickableRegion>,
 ) {
     let block = theme::panel_block("Requirement excerpts", focused);
     let inner = block.inner(area);
@@ -4478,6 +4962,7 @@ fn render_test_points_excerpts(
     };
 
     let mut lines: Vec<Line> = Vec::new();
+    let mut excerpt_rows = Vec::new();
     if excerpts.is_empty() {
         lines.push(Line::styled(
             " (no linked excerpts)",
@@ -4485,6 +4970,7 @@ fn render_test_points_excerpts(
         ));
     } else {
         for (i, excerpt) in excerpts.iter().enumerate() {
+            excerpt_rows.push((lines.len(), i));
             let res_label = match excerpt.resolution {
                 teshi_core::authoring::ResolutionState::Resolved => "ok",
                 teshi_core::authoring::ResolutionState::Stale => "stale",
@@ -4509,7 +4995,18 @@ fn render_test_points_excerpts(
         }
     }
 
-    frame.render_widget(Paragraph::new(theme::popup_rows(lines, inner.width)), inner);
+    let rows = theme::popup_rows(lines, inner.width);
+    let max_scroll = rows.len().saturating_sub(inner.height as usize);
+    ui.scroll_offsets[2] = ui.scroll_offsets[2].min(max_scroll);
+    for (row, index) in excerpt_rows {
+        if let Some(rect) = visible_content_rows(inner, row, 2, ui.scroll_offsets[2]) {
+            regions.push(ClickableRegion::TestPointExcerpt { rect, index });
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(rows).scroll((ui.scroll_offsets[2] as u16, 0)),
+        inner,
+    );
 }
 
 #[cfg(test)]
@@ -4560,13 +5057,13 @@ mod truncate_tests {
         for (mode, expected, first_key) in [
             (
                 RequirementsEditorMode::Browse,
-                " [BROWSE] hjkl/arrows Move  i Insert  s Save  n Test point  I Iteration",
-                "hjkl/arrows",
+                "[BROWSE] New doc [Ctrl+n] Delete [d/Delete] Filter [i] Group [g] Iteration [I] Save [Ctrl+s] Point [n]",
+                "[Ctrl+n]",
             ),
             (
                 RequirementsEditorMode::Insert,
-                " [INSERT] Esc Browse  Ctrl+S Save  Tab Indent  Arrows/Home/End Move",
-                "Esc",
+                "[INSERT] New doc [Ctrl+n] Delete [d/Delete] Filter [i] Group [g] Iteration [I] Save [Ctrl+s] Point [n]",
+                "[Ctrl+n]",
             ),
         ] {
             let mut app = App::from_args().expect("app init");
@@ -4581,7 +5078,7 @@ mod truncate_tests {
                 .map(|x| buffer[(x, 23)].symbol())
                 .collect::<String>();
             assert_eq!(text.trim_end(), expected);
-            for x in 10..10 + first_key.len() as u16 {
+            for x in 17..17 + first_key.len() as u16 {
                 assert_eq!(buffer[(x, 23)].fg, crate::theme::PRIMARY);
                 assert!(
                     buffer[(x, 23)]

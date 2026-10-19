@@ -360,6 +360,10 @@ pub fn run() -> Result<()> {
                             requirements_editor_mode: app.authoring_ui.editor_mode,
                             test_points_focus: app.test_points_ui.focus,
                             requirements_overlay_active: app.authoring_ui.overlay_active(),
+                            requirements_text_overlay: matches!(
+                                app.authoring_ui.overlay,
+                                authoring_tab::RequirementsOverlay::IterationEdit { .. }
+                            ),
                             generation_scope_prompt_active: app.generation_scope_prompt.is_some(),
                             quit_pending_confirm: app.quit_pending_confirm,
                             acp_permission_pending: app.has_acp_permission_prompt(),

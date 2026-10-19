@@ -3021,6 +3021,7 @@ mod pipeline_gate_tests {
             requirements_editor_mode: crate::authoring_tab::RequirementsEditorMode::Browse,
             test_points_focus: TestPointsFocus::Tree,
             requirements_overlay_active: false,
+            requirements_text_overlay: false,
             generation_scope_prompt_active: false,
             quit_pending_confirm: false,
             acp_permission_pending: false,

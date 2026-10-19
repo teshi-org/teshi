@@ -451,51 +451,8 @@ fn shrink_left(area: Rect, cols: u16) -> Rect {
 }
 
 /// Renders the agent sidebar: one row per agent with a status dot.
-pub(super) fn render_agent_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    if area.width < 5 || area.height < 3 {
-        return;
-    }
-    let block = theme::panel_block(" Agents ", false);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for (i, agent) in app.agents.iter().enumerate() {
-        let (dot, dot_color) = match agent.status {
-            AiStatus::Waiting => ("●", theme::WARNING),
-            AiStatus::AwaitingApproval => ("◆", theme::PRIMARY),
-            AiStatus::Error => ("●", theme::ERROR),
-            AiStatus::Idle => ("○", theme::SUCCESS),
-        };
-        let title = truncate_chars(&agent.title, 12);
-        let line = if i == app.selected_agent {
-            Line::from(format!(" {dot} {title}")).style(selected_row())
-        } else {
-            Line::from(vec![
-                Span::raw(" "),
-                Span::styled(dot, fg(dot_color)),
-                Span::styled(format!(" {title}"), fg(theme::FG)),
-            ])
-        };
-        lines.extend(wrap_line_to_width(line, inner.width as usize));
-    }
-
-    lines.push(Line::default());
-    lines.push(Line::styled(" a new · x close", muted()));
-    lines.push(Line::styled(" j/k switch", muted()));
-
-    let visible: Vec<Line<'static>> = lines.into_iter().take(inner.height as usize).collect();
-    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
-}
-
-/// Truncates to `max` characters, marking the cut with an ellipsis.
-fn truncate_chars(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let mut out: String = text.chars().take(max).collect();
-    out.push('…');
-    out
+pub(super) fn render_agent_sidebar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    super::pointer_controls::render_agent_sidebar(frame, app, area);
 }
 
 /// Renders the full chat panel: history, status row, optional slash-command
@@ -1294,35 +1251,14 @@ fn filtered_slash_commands(filter: &str) -> Vec<&'static (&'static str, &'static
         .collect()
 }
 
-fn render_slash_suggestions(frame: &mut Frame<'_>, app: &App, area: Rect, filter: &str) {
+fn render_slash_suggestions(frame: &mut Frame<'_>, app: &mut App, area: Rect, filter: &str) {
     let filtered = filtered_slash_commands(filter);
-    let selection = app
-        .slash_suggestion_selection
-        .min(filtered.len().saturating_sub(1));
-    let width = area.width as usize;
-
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(filtered.len() + 1);
-    for (i, (name, desc)) in filtered.iter().enumerate() {
-        let line = if i == selection {
-            Line::from(format!(" /{name}  {desc}")).style(selected_row())
-        } else {
-            Line::from(vec![
-                Span::styled(format!(" /{name}"), fg(theme::PRIMARY)),
-                Span::styled(format!("  {desc}"), muted()),
-            ])
-        };
-        lines.extend(wrap_line_to_width(line, width).into_iter().take(1));
-    }
-    lines.push(Line::styled(
-        " ↑↓ navigate · Enter/Tab select · Esc close",
-        muted(),
-    ));
-
-    let visible: Vec<Line<'static>> = lines.into_iter().take(area.height as usize).collect();
-    frame.render_widget(Paragraph::new(Text::from(visible)), area);
+    super::pointer_controls::render_slash_suggestions(frame, app, area, &filtered);
 }
 
-fn render_chat_input(frame: &mut Frame<'_>, app: &App, area: Rect, active: bool) {
+fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: bool) {
+    app.clickable_regions
+        .push(crate::app::ClickableRegion::ChatInput { rect: area });
     let border_color = if active { theme::ACCENT } else { theme::BORDER };
     let agent = app.agent();
     let label = token_usage_label(agent.total_input_tokens, agent.total_output_tokens);

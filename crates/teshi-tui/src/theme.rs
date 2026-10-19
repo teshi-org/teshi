@@ -257,6 +257,19 @@ pub(crate) fn scrollbar_lines(total: usize, height: usize, start: usize) -> Vec<
         .collect()
 }
 
+/// Horizontal track using the same bounded geometry as the vertical bar.
+pub(crate) fn horizontal_scrollbar(total: usize, width: usize, start: usize) -> Line<'static> {
+    Line::from(
+        scrollbar_lines(total, width, start)
+            .into_iter()
+            .map(|line| {
+                let thumb = line.spans[0].content == "┃";
+                Span::styled(if thumb { "━" } else { "─" }, line.style)
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

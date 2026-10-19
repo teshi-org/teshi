@@ -130,6 +130,8 @@ pub struct AuthoringUiState {
     pub rendered_cursor: Option<(usize, usize)>,
     /// Linked test point viewport start.
     pub linked_scroll: usize,
+    /// Last rendered linked selection; wheel scrolling must not follow it again.
+    pub rendered_linked_selection: Option<usize>,
     /// Last rendered overflow limits, indexed by pane and axis (horizontal, vertical).
     pub scroll_limits: [[usize; 2]; 3],
     /// Scrollbar being dragged (pane, axis).
@@ -468,6 +470,7 @@ impl AuthoringUiState {
             horizontal_scroll: [0; 3],
             rendered_cursor: None,
             linked_scroll: 0,
+            rendered_linked_selection: None,
             scroll_limits: [[0; 2]; 3],
             scrollbar_drag: None,
             selection_anchor: None,
@@ -618,6 +621,7 @@ impl AuthoringUiState {
             self.tree_state.open(path[..depth].to_vec());
         }
         self.tree_state.select(path);
+        self.tree_state.scroll_selected_into_view();
     }
 
     /// Iteration names currently present in the loaded index.
@@ -1698,7 +1702,11 @@ fn visible_document_ids(
         .collect()
 }
 
-fn find_tree_path(items: &[TreeItem<'static, String>], target: &str) -> Option<Vec<String>> {
+/// Finds the complete ancestor path for a stable tree row identity.
+pub(crate) fn find_tree_path(
+    items: &[TreeItem<'static, String>],
+    target: &str,
+) -> Option<Vec<String>> {
     for item in items {
         let mut path = vec![item.identifier().clone()];
         if item.identifier() == target {

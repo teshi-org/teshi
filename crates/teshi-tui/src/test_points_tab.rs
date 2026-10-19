@@ -65,6 +65,10 @@ pub struct TestPointsUiState {
     /// Scratch buffer while editing a detail field.
     pub field_buffer: String,
     pub field_dirty: bool,
+    /// Vertical offsets for the rendered details and excerpt panes. The tree
+    /// keeps its own offset in `TreeState`; index 1 and 2 correspond to these
+    /// two text panes.
+    pub scroll_offsets: [usize; 3],
 }
 
 impl TestPointsUiState {
@@ -82,6 +86,19 @@ impl TestPointsUiState {
             review_filter: ReviewFilter::All,
             field_buffer: String::new(),
             field_dirty: false,
+            scroll_offsets: [0; 3],
+        }
+    }
+
+    /// Move one text pane viewport without changing the selected test point.
+    pub fn scroll_pane(&mut self, pane: usize, delta: isize) {
+        let Some(offset) = self.scroll_offsets.get_mut(pane) else {
+            return;
+        };
+        if delta.is_negative() {
+            *offset = offset.saturating_sub(delta.unsigned_abs());
+        } else {
+            *offset = offset.saturating_add(delta as usize);
         }
     }
 
@@ -110,8 +127,7 @@ impl TestPointsUiState {
                     self.field_dirty = false;
                 }
             } else {
-                self.tree_state
-                    .select(vec![format!("{TREE_TP_PREFIX}{id}")]);
+                self.select_tree_leaf(&id);
             }
         }
     }
@@ -121,9 +137,23 @@ impl TestPointsUiState {
         self.selected_test_point_id = Some(tp_id.to_string());
         self.selected_excerpt_index = 0;
         self.selected_scenario_ref_index = 0;
-        self.tree_state
-            .select(vec![format!("{TREE_TP_PREFIX}{tp_id}")]);
+        self.scroll_offsets[1] = 0;
+        self.scroll_offsets[2] = 0;
+        self.select_tree_leaf(tp_id);
         self.load_field_buffer();
+    }
+
+    fn select_tree_leaf(&mut self, tp_id: &str) {
+        if let Some(path) = crate::authoring_tab::find_tree_path(
+            &self.tree_items,
+            &format!("{TREE_TP_PREFIX}{tp_id}"),
+        ) {
+            for depth in 1..path.len() {
+                self.tree_state.open(path[..depth].to_vec());
+            }
+            self.tree_state.select(path);
+            self.tree_state.scroll_selected_into_view();
+        }
     }
 
     /// Selects a test point from a tree node id.
@@ -586,6 +616,33 @@ mod tests {
             ReviewFilter::All,
         );
         assert!(!items.is_empty());
+    }
+
+    #[test]
+    fn selecting_nested_test_point_retains_visible_ancestor_path() {
+        let mut ui = TestPointsUiState::empty();
+        ui.tree_items = build_test_point_tree(
+            &[sample_tp(
+                "tp-1",
+                ReviewState::Proposed,
+                vec!["Auth", "Login"],
+            )],
+            ReviewFilter::All,
+        );
+        ui.select_test_point("tp-1");
+        assert_eq!(
+            ui.tree_state.selected(),
+            &["tp-dir:Auth", "tp-dir:Auth/Login", "tp-leaf:tp-1"]
+        );
+        assert!(
+            ui.tree_state
+                .opened()
+                .contains(&vec!["tp-dir:Auth".to_string()])
+        );
+        assert!(ui.tree_state.opened().contains(&vec![
+            "tp-dir:Auth".to_string(),
+            "tp-dir:Auth/Login".to_string()
+        ]));
     }
 
     #[test]
