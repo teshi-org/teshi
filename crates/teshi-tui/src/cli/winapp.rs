@@ -24,7 +24,10 @@ use super::{
 /// Handles `teshi winapp ...` subcommands.
 pub fn handle_winapp_command(action: &WinAppCommand) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
-    let project_root = find_project_root(Some(&cwd)).unwrap_or(cwd);
+    let project_root = match action {
+        WinAppCommand::Replay(args) => replay_project_root(&cwd, args.feature.as_deref()),
+        _ => find_project_root(Some(&cwd)).unwrap_or(cwd),
+    };
     std::fs::create_dir_all(project_root.join(".teshi")).ok();
     let visual = match action {
         WinAppCommand::Screenshot(args) => Some(json!({
@@ -60,6 +63,19 @@ pub fn handle_winapp_command(action: &WinAppCommand) -> Result<()> {
         WinAppCommand::Replay(args) => replay(&project_root, args),
         WinAppCommand::Screenshot(_) | WinAppCommand::AssertScreenshot(_) => unreachable!(),
     }
+}
+
+fn replay_project_root(cwd: &Path, feature: Option<&str>) -> std::path::PathBuf {
+    let Some(feature) = feature else {
+        return cwd.to_path_buf();
+    };
+    let path = Path::new(feature);
+    if !path.is_absolute() {
+        return cwd.to_path_buf();
+    }
+    find_project_root(Some(path))
+        .or_else(|| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| cwd.to_path_buf())
 }
 
 fn list_windows(project_root: &Path) -> Result<()> {

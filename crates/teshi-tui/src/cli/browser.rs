@@ -49,7 +49,10 @@ pub fn handle_browser_command(action: &BrowserCommand) -> Result<()> {
         return pairing(action);
     }
     let cwd = std::env::current_dir().context("resolve current directory")?;
-    let project_root = resolve_browser_project_root(&cwd).unwrap_or(cwd);
+    let project_root = match action {
+        BrowserCommand::Replay(args) => replay_project_root(&cwd, args.feature.as_deref()),
+        _ => resolve_browser_project_root(&cwd).unwrap_or(cwd),
+    };
     match action {
         BrowserCommand::Pairing { action } => pairing(action),
         BrowserCommand::Sessions => {
@@ -108,6 +111,19 @@ pub fn handle_browser_command(action: &BrowserCommand) -> Result<()> {
         BrowserCommand::Network { action } => network(&project_root, action),
         BrowserCommand::ArtifactCleanup(args) => artifact_cleanup(&project_root, args),
     }
+}
+
+fn replay_project_root(cwd: &Path, feature: Option<&str>) -> PathBuf {
+    let Some(feature) = feature else {
+        return resolve_browser_project_root(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    };
+    let path = Path::new(feature);
+    if !path.is_absolute() {
+        return cwd.to_path_buf();
+    }
+    teshi_engine::find_project_root(Some(path))
+        .or_else(|| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| cwd.to_path_buf())
 }
 
 fn pairing(action: &BrowserPairingCommand) -> Result<()> {

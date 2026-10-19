@@ -49,18 +49,17 @@ pub fn handle_check_command(args: &CheckArgs) -> Result<()> {
 }
 
 fn project_root_for(feature: Option<&Path>) -> PathBuf {
-    let start = feature.map(|path| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(path)
-        }
-    });
-    teshi_engine::find_project_root(start.as_deref())
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match feature {
+        // A relative scope is explicitly rooted at the caller's working
+        // directory. Walking past it can mistake an unrelated ancestor such
+        // as the user's home-level `.teshi` directory for this fixture.
+        Some(path) if !path.is_absolute() => cwd,
+        Some(path) => teshi_engine::find_project_root(Some(path))
+            .or_else(|| path.parent().map(Path::to_path_buf))
+            .unwrap_or(cwd),
+        None => cwd,
+    }
 }
 
 fn print_human_report(report: &ValidationReport) {
