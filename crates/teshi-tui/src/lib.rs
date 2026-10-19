@@ -384,9 +384,9 @@ pub fn run() -> Result<()> {
                     {
                         for ch in text.replace("\r\n", "\n").replace('\r', "\n").chars() {
                             match ch {
-                                '\n' => app.handle_action(Action::Enter)?,
-                                '\t' => app.handle_action(Action::Insert('\t'))?,
-                                ch if !ch.is_control() => app.handle_action(Action::Insert(ch))?,
+                                '\n' => app.authoring_ui.insert_newline(),
+                                '\t' => app.authoring_ui.insert_char('\t'),
+                                ch if !ch.is_control() => app.authoring_ui.insert_char(ch),
                                 _ => {}
                             }
                         }

@@ -35,6 +35,19 @@ pub enum RequirementsEditorMode {
     #[default]
     Browse,
     Insert,
+    VisualChar,
+    VisualLine,
+}
+
+#[derive(Debug, Clone)]
+struct RequirementsEditSnapshot {
+    buffer: EditorBuffer,
+    cursor_row: usize,
+    cursor_col: usize,
+    desired_col: usize,
+    selection_anchor: Option<(usize, usize)>,
+    selection_end: Option<(usize, usize)>,
+    mode: RequirementsEditorMode,
 }
 
 /// Deferred navigation resumed after resolving unsaved Markdown.
@@ -126,6 +139,11 @@ pub struct AuthoringUiState {
     pub iteration_filter: RequirementIterationFilter,
     pub group_mode: RequirementGroupMode,
     pub overlay: RequirementsOverlay,
+    undo_stack: Vec<RequirementsEditSnapshot>,
+    redo_stack: Vec<RequirementsEditSnapshot>,
+    yank_register: String,
+    insert_session_undo: bool,
+    vertical_motion: Option<(usize, usize, usize, usize)>,
 }
 
 impl AuthoringUiState {
@@ -201,13 +219,198 @@ impl AuthoringUiState {
     /// Enters text input when a document is selected.
     pub fn enter_insert_mode(&mut self) {
         if self.selected_document_id.is_some() {
+            if !self.insert_session_undo {
+                self.push_edit_undo();
+                self.insert_session_undo = true;
+            }
             self.editor_mode = RequirementsEditorMode::Insert;
         }
     }
 
     /// Returns to command navigation.
     pub fn exit_insert_mode(&mut self) {
+        self.insert_session_undo = false;
         self.editor_mode = RequirementsEditorMode::Browse;
+    }
+
+    fn snapshot(&self) -> RequirementsEditSnapshot {
+        RequirementsEditSnapshot {
+            buffer: self.buffer.clone(),
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+            desired_col: self.desired_col,
+            selection_anchor: self.selection_anchor,
+            selection_end: self.selection_end,
+            mode: self.editor_mode,
+        }
+    }
+
+    fn restore_snapshot(&mut self, snapshot: RequirementsEditSnapshot) {
+        self.vertical_motion = None;
+        self.buffer = snapshot.buffer;
+        self.cursor_row = snapshot.cursor_row;
+        self.cursor_col = snapshot.cursor_col;
+        self.desired_col = snapshot.desired_col;
+        self.selection_anchor = snapshot.selection_anchor;
+        self.selection_end = snapshot.selection_end;
+        self.editor_mode = snapshot.mode;
+        // A save can occur after the snapshot was taken. Its old dirty bit is
+        // no longer evidence that this restored body matches persisted text.
+        self.buffer_dirty = self.draft_document_id.is_some()
+            || self.selected_document_id.as_ref().is_none_or(|id| {
+                self.artifacts
+                    .as_ref()
+                    .and_then(|artifacts| artifacts.documents.iter().find(|doc| doc.meta.id == *id))
+                    .is_none_or(|doc| doc.body != self.buffer.as_string())
+            });
+        self.insert_session_undo = false;
+        self.clamp_cursor();
+    }
+
+    /// Record a document-local edit boundary and invalidate redo history.
+    pub fn push_edit_undo(&mut self) {
+        self.undo_stack.push(self.snapshot());
+        self.redo_stack.clear();
+    }
+
+    /// Restore the previous document snapshot and recompute its saved-state difference.
+    pub fn undo_edit(&mut self) {
+        let Some(snapshot) = self.undo_stack.pop() else {
+            return;
+        };
+        let current = self.snapshot();
+        self.redo_stack.push(current);
+        self.restore_snapshot(snapshot);
+    }
+
+    /// Restore the next document-local snapshot after an undo.
+    pub fn redo_edit(&mut self) {
+        let Some(snapshot) = self.redo_stack.pop() else {
+            return;
+        };
+        let current = self.snapshot();
+        self.undo_stack.push(current);
+        self.restore_snapshot(snapshot);
+    }
+
+    /// Start an inclusive character selection at the source cursor.
+    pub fn enter_visual_char(&mut self) {
+        self.exit_insert_mode();
+        self.selection_anchor = Some((self.cursor_row, self.cursor_col));
+        let end = self
+            .cursor_col
+            .saturating_add(1)
+            .min(self.buffer.line_len_chars(self.cursor_row));
+        self.selection_end = Some((self.cursor_row, end));
+        self.editor_mode = RequirementsEditorMode::VisualChar;
+    }
+
+    /// Start a selection of complete logical source lines.
+    pub fn enter_visual_line(&mut self) {
+        self.exit_insert_mode();
+        self.selection_anchor = Some((self.cursor_row, 0));
+        self.selection_end = Some((self.cursor_row, 0));
+        self.editor_mode = RequirementsEditorMode::VisualLine;
+    }
+
+    /// Clear the visual selection and return to Browse mode.
+    pub fn exit_visual_mode(&mut self) {
+        self.selection_anchor = None;
+        self.selection_end = None;
+        self.editor_mode = RequirementsEditorMode::Browse;
+    }
+
+    /// Extend the active visual selection after a cursor motion.
+    pub fn extend_visual_selection(&mut self) {
+        if matches!(
+            self.editor_mode,
+            RequirementsEditorMode::VisualChar | RequirementsEditorMode::VisualLine
+        ) {
+            let col = if self.editor_mode == RequirementsEditorMode::VisualLine {
+                0
+            } else {
+                self.cursor_col
+                    .saturating_add(1)
+                    .min(self.buffer.line_len_chars(self.cursor_row))
+            };
+            self.selection_end = Some((self.cursor_row, col));
+        }
+    }
+
+    /// Copy the selected source characters or lines into the local register.
+    pub fn yank_visual_selection(&mut self) -> bool {
+        let Some((start, end)) = self.selection_anchor.zip(self.selection_end) else {
+            return false;
+        };
+        self.yank_register = if self.editor_mode == RequirementsEditorMode::VisualLine {
+            let lo = start.0.min(end.0);
+            let hi = start.0.max(end.0);
+            (lo..=hi)
+                .map(|row| self.buffer.line(row))
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n"
+        } else {
+            self.buffer.text_range(start, end)
+        };
+        true
+    }
+
+    /// Delete the selected source range as one undoable edit.
+    pub fn delete_visual_selection(&mut self) -> bool {
+        let Some((start, end)) = self.selection_anchor.zip(self.selection_end) else {
+            return false;
+        };
+        self.push_edit_undo();
+        if self.editor_mode == RequirementsEditorMode::VisualLine {
+            let lo = start.0.min(end.0);
+            let hi = start.0.max(end.0);
+            for row in (lo..=hi).rev() {
+                self.buffer.delete_line(row);
+            }
+            self.cursor_row = lo.min(self.buffer.line_count().saturating_sub(1));
+            self.cursor_col = 0;
+        } else {
+            let (lo, hi) = if start <= end {
+                (start, end)
+            } else {
+                (end, start)
+            };
+            self.buffer.replace_range(lo, hi, "");
+            self.cursor_row = lo.0;
+            self.cursor_col = lo.1;
+        }
+        self.desired_col = self.cursor_col;
+        self.buffer_dirty = true;
+        self.exit_visual_mode();
+        true
+    }
+
+    /// Paste the local register as logical lines before or after the cursor line.
+    pub fn paste_register(&mut self, before: bool) -> bool {
+        if self.yank_register.is_empty() {
+            return false;
+        }
+        let register = self.yank_register.clone();
+        self.push_edit_undo();
+        let content = register.trim_end_matches('\n');
+        if before {
+            if self.cursor_row == 0 {
+                self.buffer.insert_str(0, 0, &format!("{content}\n"));
+            } else {
+                self.buffer.insert_line(self.cursor_row - 1, content);
+            }
+        } else {
+            self.buffer.insert_line(self.cursor_row, content);
+            self.cursor_row = self.cursor_row.saturating_add(1);
+        }
+        self.cursor_row = self
+            .cursor_row
+            .min(self.buffer.line_count().saturating_sub(1));
+        self.cursor_col = 0;
+        self.desired_col = 0;
+        self.buffer_dirty = true;
+        true
     }
 
     /// Restores saved Markdown, or removes a document that was never saved.
@@ -272,6 +475,11 @@ impl AuthoringUiState {
             iteration_filter: RequirementIterationFilter::All,
             group_mode: RequirementGroupMode::Path,
             overlay: RequirementsOverlay::None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            yank_register: String::new(),
+            insert_session_undo: false,
+            vertical_motion: None,
         }
     }
 
@@ -756,6 +964,11 @@ impl AuthoringUiState {
     }
 
     fn load_document_state(&mut self, doc_id: &str) {
+        self.vertical_motion = None;
+        // Undo snapshots belong to one document. Reopening or switching a
+        // document must never apply another document's text to this buffer.
+        self.undo_stack.clear();
+        self.redo_stack.clear();
         self.exit_insert_mode();
         self.selected_document_id = Some(doc_id.to_string());
         self.selected_linked_index = 0;
@@ -1131,6 +1344,9 @@ impl AuthoringUiState {
     }
 
     pub fn insert_char(&mut self, ch: char) {
+        if !self.insert_session_undo {
+            self.push_edit_undo();
+        }
         self.buffer
             .insert_char(self.cursor_row, self.cursor_col, ch);
         self.cursor_col += 1;
@@ -1139,6 +1355,9 @@ impl AuthoringUiState {
     }
 
     pub fn insert_newline(&mut self) {
+        if !self.insert_session_undo {
+            self.push_edit_undo();
+        }
         self.buffer
             .insert_char(self.cursor_row, self.cursor_col, '\n');
         self.cursor_row += 1;
@@ -1148,6 +1367,9 @@ impl AuthoringUiState {
     }
 
     pub fn backspace(&mut self) {
+        if !self.insert_session_undo {
+            self.push_edit_undo();
+        }
         let (row, col, changed) = self.buffer.backspace(self.cursor_row, self.cursor_col);
         if changed {
             self.cursor_row = row;
@@ -1158,6 +1380,9 @@ impl AuthoringUiState {
     }
 
     pub fn delete_forward(&mut self) {
+        if !self.insert_session_undo {
+            self.push_edit_undo();
+        }
         if self.buffer.delete(self.cursor_row, self.cursor_col) {
             self.buffer_dirty = true;
         }
@@ -1185,6 +1410,55 @@ impl AuthoringUiState {
     }
 
     pub fn move_cursor_vertical(&mut self, delta: isize) {
+        if let Some(current) = self
+            .editor_display_rows
+            .iter()
+            .position(|&(row, start, end)| {
+                row == self.cursor_row && self.cursor_col >= start && self.cursor_col < end
+            })
+        {
+            let (_, start, _) = self.editor_display_rows[current];
+            let cells = self
+                .vertical_motion
+                .filter(|&(row, col, width, _)| {
+                    row == self.cursor_row
+                        && col == self.cursor_col
+                        && width == self.editor_wrap_width
+                })
+                .map(|(_, _, _, cells)| cells)
+                .unwrap_or_else(|| {
+                    self.buffer
+                        .line(self.cursor_row)
+                        .chars()
+                        .skip(start)
+                        .take(self.cursor_col - start)
+                        .map(|ch| unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0))
+                        .sum()
+                });
+            let target = if delta < 0 {
+                current.saturating_sub(1)
+            } else {
+                current
+                    .saturating_add(1)
+                    .min(self.editor_display_rows.len().saturating_sub(1))
+            };
+            let (row, start, end) = self.editor_display_rows[target];
+            let mut column = start;
+            let mut consumed = 0;
+            for ch in self.buffer.line(row).chars().skip(start).take(end - start) {
+                let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if consumed + width > cells {
+                    break;
+                }
+                consumed += width;
+                column += 1;
+            }
+            self.cursor_row = row;
+            self.cursor_col = column.min(self.buffer.line_len_chars(row));
+            self.desired_col = self.cursor_col;
+            self.vertical_motion = Some((row, self.cursor_col, self.editor_wrap_width, cells));
+            return;
+        }
         let target = if delta < 0 {
             self.cursor_row.saturating_sub(1)
         } else {
@@ -1194,6 +1468,175 @@ impl AuthoringUiState {
         };
         self.cursor_row = target;
         self.cursor_col = self.buffer.clamp_col(self.cursor_row, self.desired_col);
+    }
+
+    fn source_positions(&self) -> Vec<((usize, usize), char)> {
+        let mut positions = Vec::new();
+        for row in 0..self.buffer.line_count() {
+            let line = self.buffer.line(row);
+            for (col, ch) in line.chars().enumerate() {
+                positions.push(((row, col), ch));
+            }
+            if row + 1 < self.buffer.line_count() {
+                positions.push(((row, line.chars().count()), '\n'));
+            }
+        }
+        positions
+    }
+
+    fn position_index(&self) -> usize {
+        let positions = self.source_positions();
+        positions
+            .iter()
+            .position(|(position, _)| *position == (self.cursor_row, self.cursor_col))
+            .unwrap_or_else(|| positions.len().saturating_sub(1))
+    }
+
+    fn set_position_index(&mut self, index: usize) {
+        if let Some(((row, col), _)) = self.source_positions().get(index).copied() {
+            self.cursor_row = row;
+            self.cursor_col = col;
+            self.desired_col = col;
+        }
+    }
+
+    /// Move to the next word or punctuation run in logical source text.
+    pub fn vim_word_forward(&mut self) {
+        let positions = self.source_positions();
+        if positions.is_empty() {
+            return;
+        }
+        let mut index = self.position_index();
+        // Words and punctuation runs are separate tokens; whitespace only
+        // separates them. Starting within a token must skip that whole run.
+        let current = vim_word_class(positions[index].1);
+        if current != 0 {
+            while index < positions.len() && vim_word_class(positions[index].1) == current {
+                index += 1;
+            }
+        }
+        while index < positions.len() && positions[index].1.is_whitespace() {
+            index += 1;
+        }
+        self.set_position_index(index.min(positions.len().saturating_sub(1)));
+        self.extend_visual_selection();
+    }
+
+    /// Move to the preceding word or punctuation run in logical source text.
+    pub fn vim_word_backward(&mut self) {
+        let positions = self.source_positions();
+        if positions.is_empty() {
+            return;
+        }
+        let mut index = self.position_index().saturating_sub(1);
+        while index > 0 && positions[index].1.is_whitespace() {
+            index -= 1;
+        }
+        let class = vim_word_class(positions[index].1);
+        while index > 0 && vim_word_class(positions[index - 1].1) == class {
+            index -= 1;
+        }
+        self.set_position_index(index);
+        self.extend_visual_selection();
+    }
+
+    /// Move to the end of the next word or punctuation run.
+    pub fn vim_word_end(&mut self) {
+        let positions = self.source_positions();
+        if positions.is_empty() {
+            return;
+        }
+        let mut index = self.position_index().saturating_add(1);
+        while index < positions.len() && positions[index].1.is_whitespace() {
+            index += 1;
+        }
+        let class = positions.get(index).map(|(_, ch)| vim_word_class(*ch));
+        while index + 1 < positions.len() && Some(vim_word_class(positions[index + 1].1)) == class {
+            index += 1;
+        }
+        self.set_position_index(index.min(positions.len().saturating_sub(1)));
+        self.extend_visual_selection();
+    }
+
+    /// Move to the first character of the logical source line.
+    pub fn vim_line_start(&mut self) {
+        self.cursor_col = 0;
+        self.desired_col = 0;
+        self.extend_visual_selection();
+    }
+
+    /// Move to the first nonblank source character on the current line.
+    pub fn vim_first_nonblank(&mut self) {
+        let line = self.buffer.line(self.cursor_row);
+        self.cursor_col = line.chars().position(|ch| !ch.is_whitespace()).unwrap_or(0);
+        self.desired_col = self.cursor_col;
+        self.extend_visual_selection();
+    }
+
+    /// Move to the insertion position at the logical source line end.
+    pub fn vim_line_end(&mut self) {
+        self.cursor_col = self.buffer.line_len_chars(self.cursor_row);
+        self.desired_col = self.cursor_col;
+        self.extend_visual_selection();
+    }
+
+    /// Move to the first nonblank character of the first source line.
+    pub fn vim_go_top(&mut self) {
+        self.cursor_row = 0;
+        self.vim_first_nonblank();
+    }
+
+    /// Move to the first nonblank character of the last source line.
+    pub fn vim_go_bottom(&mut self) {
+        self.cursor_row = self.buffer.line_count().saturating_sub(1);
+        self.vim_first_nonblank();
+    }
+
+    /// Delete the source character under the cursor as one undoable edit.
+    pub fn vim_delete_char(&mut self) -> bool {
+        if self.cursor_col >= self.buffer.line_len_chars(self.cursor_row) {
+            return false;
+        }
+        self.push_edit_undo();
+        let changed = self.buffer.delete(self.cursor_row, self.cursor_col);
+        if changed {
+            self.buffer_dirty = true;
+            self.clamp_cursor();
+        }
+        changed
+    }
+
+    /// Delete the logical source line as one undoable edit.
+    pub fn vim_delete_line(&mut self) -> bool {
+        self.push_edit_undo();
+        let changed = self.buffer.delete_line(self.cursor_row);
+        if changed {
+            self.buffer_dirty = true;
+            self.clamp_cursor();
+        }
+        changed
+    }
+
+    /// Copy the logical source line into the local line register.
+    pub fn vim_yank_line(&mut self) {
+        self.yank_register = format!("{}\n", self.buffer.line(self.cursor_row));
+    }
+
+    /// Open a logical source line and group its insertion into one undo operation.
+    pub fn vim_open_line(&mut self, above: bool) {
+        self.push_edit_undo();
+        if above {
+            self.buffer.insert_str(self.cursor_row, 0, "\n");
+        } else {
+            let line_len = self.buffer.line_len_chars(self.cursor_row);
+            self.buffer.insert_str(self.cursor_row, line_len, "\n");
+            self.cursor_row = self.cursor_row.saturating_add(1);
+        }
+        self.cursor_col = 0;
+        self.desired_col = 0;
+        self.buffer_dirty = true;
+        self.editor_mode = RequirementsEditorMode::Insert;
+        self.insert_session_undo = true;
     }
 
     pub fn clamp_cursor(&mut self) {
@@ -1211,6 +1654,20 @@ impl AuthoringUiState {
             .as_ref()
             .map(|a| a.diagnostics.iter().collect())
             .unwrap_or_default()
+    }
+}
+
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+fn vim_word_class(ch: char) -> u8 {
+    if ch.is_whitespace() {
+        0
+    } else if is_word_char(ch) {
+        1
+    } else {
+        2
     }
 }
 
@@ -2107,5 +2564,113 @@ mod tests {
         state.overlay_backspace();
         state.cancel_overlay();
         assert_eq!(state.overlay, RequirementsOverlay::None);
+    }
+    #[test]
+    fn vim_word_motions_cross_tokens_and_extend_visual_selection() {
+        let mut state = AuthoringUiState::empty();
+        state.buffer = EditorBuffer::from_string("alpha, beta\n甲乙 🙂 尾".into());
+        state.cursor_col = 1;
+        state.vim_word_forward();
+        assert_eq!((state.cursor_row, state.cursor_col), (0, 5));
+        state.vim_word_forward();
+        assert_eq!((state.cursor_row, state.cursor_col), (0, 7));
+        state.vim_word_backward();
+        assert_eq!(state.cursor_col, 5);
+        state.vim_word_backward();
+        assert_eq!(state.cursor_col, 0);
+        state.vim_word_end();
+        assert_eq!(state.cursor_col, 4);
+        state.vim_word_end();
+        assert_eq!(state.cursor_col, 5);
+        state.vim_word_forward();
+        state.vim_word_forward();
+        assert_eq!((state.cursor_row, state.cursor_col), (1, 0));
+        state.enter_visual_char();
+        state.vim_word_forward();
+        assert_eq!(state.cursor_col, 3);
+        assert_eq!(state.selection_end, Some((1, 4)));
+    }
+
+    #[test]
+    fn undo_after_save_is_dirty_and_cannot_cross_documents() {
+        let project = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        initialize_requirement_store(store.path()).unwrap();
+        let mut state = AuthoringUiState::load_from_project(project.path(), store.path());
+        let a = state.create_document("a.md", "A").unwrap();
+        state.save_current_document(project.path()).unwrap();
+        let original = state.buffer.as_string();
+        state.cursor_col = state.buffer.line_len_chars(0);
+        state.enter_insert_mode();
+        state.insert_char('X');
+        state.exit_insert_mode();
+        let changed = state.buffer.as_string();
+        state.save_current_document(project.path()).unwrap();
+        state.undo_edit();
+        assert_eq!(state.buffer.as_string(), original);
+        assert!(
+            state.buffer_dirty,
+            "undo must compare against the latest saved body"
+        );
+        state.save_current_document(project.path()).unwrap();
+        assert_eq!(
+            fs::read_to_string(store.path().join("a.md")).unwrap(),
+            original
+        );
+        state.redo_edit();
+        assert_eq!(state.buffer.as_string(), changed);
+        assert!(state.buffer_dirty);
+        state.save_current_document(project.path()).unwrap();
+        let b = state.create_document("b.md", "B").unwrap();
+        state.save_current_document(project.path()).unwrap();
+        let body_b = state.buffer.as_string();
+        state.undo_edit();
+        assert_eq!(state.selected_document_id.as_deref(), Some(b.as_str()));
+        assert_eq!(state.buffer.as_string(), body_b);
+        assert!(!state.buffer_dirty);
+        state.select_document_by_id(&a);
+        state.undo_edit();
+        assert_eq!(state.buffer.as_string(), changed);
+        assert!(!state.buffer_dirty);
+    }
+
+    #[test]
+    fn bounded_vim_editing_keeps_unicode_and_local_undo() {
+        let mut state = AuthoringUiState::empty();
+        state.selected_document_id = Some("doc-local".into());
+        state.buffer = EditorBuffer::from_string("# 标题\n第二行 🙂".into());
+        state.enter_insert_mode();
+        state.cursor_row = 0;
+        state.cursor_col = 3;
+        state.insert_char('X');
+        state.exit_insert_mode();
+        assert_eq!(state.buffer.line(0), "# 标X题");
+        state.undo_edit();
+        assert_eq!(state.buffer.line(0), "# 标题");
+        state.redo_edit();
+        assert_eq!(state.buffer.line(0), "# 标X题");
+
+        state.cursor_row = 1;
+        state.cursor_col = 0;
+        state.enter_visual_char();
+        state.move_cursor_right();
+        state.extend_visual_selection();
+        assert!(state.yank_visual_selection());
+        assert_eq!(state.yank_register, "第二");
+        assert!(state.delete_visual_selection());
+        assert_eq!(state.buffer.line(1), "行 🙂");
+    }
+
+    #[test]
+    fn vim_paste_before_and_after_have_bounded_line_semantics() {
+        let mut state = AuthoringUiState::empty();
+        state.buffer = EditorBuffer::from_string("a\nb".into());
+        state.yank_register = "x\n".into();
+        state.cursor_row = 1;
+        assert!(state.paste_register(true));
+        assert_eq!(state.buffer.as_string(), "a\nx\nb");
+        state.cursor_row = 0;
+        assert!(state.paste_register(false));
+        assert_eq!(state.buffer.as_string(), "a\nx\nx\nb");
     }
 }

@@ -367,6 +367,23 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                                 ],
                                 theme::ACCENT,
                             ),
+                            crate::authoring_tab::RequirementsEditorMode::VisualChar
+                            | crate::authoring_tab::RequirementsEditorMode::VisualLine => (
+                                if app.authoring_ui.editor_mode
+                                    == crate::authoring_tab::RequirementsEditorMode::VisualLine
+                                {
+                                    "[V-LINE]"
+                                } else {
+                                    "[VISUAL]"
+                                },
+                                &[
+                                    ("hjkl", " Move  "),
+                                    ("y", " Yank  "),
+                                    ("d", " Delete  "),
+                                    ("Esc", " Browse"),
+                                ],
+                                theme::WARNING,
+                            ),
                         };
                     let footer = theme::footer_line(
                         hints
@@ -3799,6 +3816,8 @@ fn render_requirements_editor(
     let (mode, mode_color) = match ui.editor_mode {
         crate::authoring_tab::RequirementsEditorMode::Browse => ("[BROWSE]", theme::PRIMARY),
         crate::authoring_tab::RequirementsEditorMode::Insert => ("[INSERT]", theme::ACCENT),
+        crate::authoring_tab::RequirementsEditorMode::VisualChar => ("[VISUAL]", theme::WARNING),
+        crate::authoring_tab::RequirementsEditorMode::VisualLine => ("[V-LINE]", theme::WARNING),
     };
     let block = theme::panel_block(
         Line::from(vec![
@@ -3880,17 +3899,20 @@ fn render_requirements_editor(
             let sel_hi = anchor.0.max(end.0);
             if row >= sel_lo && row <= sel_hi {
                 let line_len = line_text.chars().count();
-                let (lo_col, hi_col) = if sel_lo == sel_hi {
-                    (anchor.1.min(end.1), anchor.1.max(end.1).min(line_len))
-                } else if row == sel_lo {
-                    let col = if anchor.0 < end.0 { anchor.1 } else { end.1 };
-                    (col, line_len)
-                } else if row == sel_hi {
-                    let col = if anchor.0 > end.0 { anchor.1 } else { end.1 }.min(line_len);
-                    (0, col)
-                } else {
-                    (0, line_len)
-                };
+                let (lo_col, hi_col) =
+                    if ui.editor_mode == crate::authoring_tab::RequirementsEditorMode::VisualLine {
+                        (0, line_len)
+                    } else if sel_lo == sel_hi {
+                        (anchor.1.min(end.1), anchor.1.max(end.1).min(line_len))
+                    } else if row == sel_lo {
+                        let col = if anchor.0 < end.0 { anchor.1 } else { end.1 };
+                        (col, line_len)
+                    } else if row == sel_hi {
+                        let col = if anchor.0 > end.0 { anchor.1 } else { end.1 }.min(line_len);
+                        (0, col)
+                    } else {
+                        (0, line_len)
+                    };
                 if lo_col < hi_col {
                     styled = apply_col_range_highlight(
                         styled,
@@ -5224,6 +5246,37 @@ Feature: Rule only
                 );
             } else {
                 prev_body_start = Some(body_start);
+            }
+        }
+    }
+    #[test]
+    fn requirements_visual_line_highlights_every_selected_source_line() {
+        let mut ui = crate::authoring_tab::AuthoringUiState::empty();
+        ui.buffer = crate::editor_buffer::EditorBuffer::from_string("alpha\nbeta\ngamma".into());
+        ui.cursor_row = 1;
+        ui.editor_mode = crate::authoring_tab::RequirementsEditorMode::VisualLine;
+        ui.selection_anchor = Some((0, 0));
+        ui.selection_end = Some((1, 0));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 12)).unwrap();
+        terminal
+            .draw(|frame| super::render_requirements_editor(frame, &mut ui, frame.area(), true))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for (text, selected) in [("alpha", true), ("beta", true), ("gamma", false)] {
+            let (x, y) = (0..12)
+                .find_map(|y| {
+                    let row = (0..50).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+                    row.find(text)
+                        .map(|offset| (row[..offset].chars().count() as u16, y))
+                })
+                .expect("source line must render");
+            for offset in 0..text.len() as u16 {
+                assert_eq!(
+                    buffer[(x + offset, y)].bg == super::theme::EDITOR_SELECTION_BG,
+                    selected,
+                    "{text}"
+                );
             }
         }
     }

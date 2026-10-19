@@ -6092,6 +6092,7 @@ impl App {
                         }
                         crate::authoring_tab::RequirementsFocus::Editor => {
                             self.authoring_ui.move_cursor_vertical(-1);
+                            self.authoring_ui.extend_visual_selection();
                         }
                     }
                     self.quit_pending_confirm = false;
@@ -6130,6 +6131,7 @@ impl App {
                         }
                         crate::authoring_tab::RequirementsFocus::Editor => {
                             self.authoring_ui.move_cursor_vertical(1);
+                            self.authoring_ui.extend_visual_selection();
                         }
                     }
                     self.quit_pending_confirm = false;
@@ -6175,6 +6177,7 @@ impl App {
                 if self.active_tab == MainTab::Requirements {
                     if self.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor {
                         self.authoring_ui.move_cursor_left();
+                        self.authoring_ui.extend_visual_selection();
                     }
                 } else if self.active_tab == MainTab::TestPoints {
                     if self.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Details
@@ -6191,6 +6194,7 @@ impl App {
                 if self.active_tab == MainTab::Requirements {
                     if self.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor {
                         self.authoring_ui.move_cursor_right();
+                        self.authoring_ui.extend_visual_selection();
                     }
                 } else if self.active_tab == MainTab::TestPoints {
                     if self.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Details
@@ -6207,6 +6211,7 @@ impl App {
                 if self.is_requirements_editor_active() {
                     self.authoring_ui.cursor_col = 0;
                     self.authoring_ui.desired_col = 0;
+                    self.authoring_ui.extend_visual_selection();
                 } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     self.explore_move_home();
                     self.quit_pending_confirm = false;
@@ -6222,6 +6227,7 @@ impl App {
                         .line_len_chars(self.authoring_ui.cursor_row);
                     self.authoring_ui.cursor_col = col;
                     self.authoring_ui.desired_col = col;
+                    self.authoring_ui.extend_visual_selection();
                 } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     self.explore_move_end();
                     self.quit_pending_confirm = false;
@@ -6243,14 +6249,41 @@ impl App {
             Action::ToggleScenarioFold => self.toggle_current_scenario_fold(),
             Action::FoldAllScenarios => self.fold_all_scenarios(),
             Action::RunBackground => self.run_background(),
-            Action::Undo => self.undo(),
-            Action::Redo => self.redo(),
+            Action::Undo => {
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.undo_edit();
+                } else {
+                    self.undo();
+                }
+            }
+            Action::Redo => {
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.redo_edit();
+                } else {
+                    self.redo();
+                }
+            }
             Action::PendingChar(ch) => {
                 self.pending_char = Some(ch);
-                self.status = match ch {
-                    'd' => "`dd` to delete".to_string(),
-                    'y' => "`yy` to copy".to_string(),
-                    _ => "Pending command".to_string(),
+                self.status = if self.is_requirements_editor_active()
+                    && matches!(
+                        self.authoring_ui.editor_mode,
+                        crate::authoring_tab::RequirementsEditorMode::Browse
+                            | crate::authoring_tab::RequirementsEditorMode::VisualChar
+                            | crate::authoring_tab::RequirementsEditorMode::VisualLine
+                    ) {
+                    match ch {
+                        'd' => "Vim pending: dd delete".to_string(),
+                        'y' => "Vim pending: yy yank".to_string(),
+                        'g' => "Vim pending: gg top".to_string(),
+                        _ => "Vim pending command".to_string(),
+                    }
+                } else {
+                    match ch {
+                        'd' => "`dd` to delete".to_string(),
+                        'y' => "`yy` to copy".to_string(),
+                        _ => "Pending command".to_string(),
+                    }
                 };
                 self.quit_pending_confirm = false;
             }
@@ -6398,7 +6431,86 @@ impl App {
                     self.authoring_ui.enter_insert_mode();
                 }
             }
-            Action::ReqExitInsert => self.authoring_ui.exit_insert_mode(),
+            Action::ReqExitInsert => {
+                if matches!(
+                    self.authoring_ui.editor_mode,
+                    crate::authoring_tab::RequirementsEditorMode::VisualChar
+                        | crate::authoring_tab::RequirementsEditorMode::VisualLine
+                ) {
+                    self.authoring_ui.exit_visual_mode();
+                } else {
+                    self.authoring_ui.exit_insert_mode();
+                }
+                self.pending_char = None;
+            }
+            Action::ReqVimAppend => {
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.move_cursor_right();
+                    self.authoring_ui.enter_insert_mode();
+                }
+            }
+            Action::ReqVimOpenBelow => {
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.vim_open_line(false);
+                }
+            }
+            Action::ReqVimOpenAbove => {
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.vim_open_line(true);
+                }
+            }
+            Action::ReqVimDeleteChar => {
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.vim_delete_char();
+                }
+            }
+            Action::ReqVimDeleteLine => {
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.vim_delete_line();
+                    self.pending_char = None;
+                }
+            }
+            Action::ReqVimYankLine => {
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.vim_yank_line();
+                    self.pending_char = None;
+                    self.status = "Yanked requirement line".to_string();
+                }
+            }
+            Action::ReqVimPasteAfter => {
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.paste_register(false);
+                }
+            }
+            Action::ReqVimPasteBefore => {
+                if self.is_requirements_editor_active() {
+                    self.authoring_ui.paste_register(true);
+                }
+            }
+            Action::ReqVimWordForward => self.authoring_ui.vim_word_forward(),
+            Action::ReqVimWordBackward => self.authoring_ui.vim_word_backward(),
+            Action::ReqVimWordEnd => self.authoring_ui.vim_word_end(),
+            Action::ReqVimLineStart => self.authoring_ui.vim_line_start(),
+            Action::ReqVimFirstNonBlank => self.authoring_ui.vim_first_nonblank(),
+            Action::ReqVimLineEnd => self.authoring_ui.vim_line_end(),
+            Action::ReqVimGoTop => {
+                self.authoring_ui.vim_go_top();
+                self.pending_char = None;
+            }
+            Action::ReqVimGoBottom => self.authoring_ui.vim_go_bottom(),
+            Action::ReqVimVisualChar => self.authoring_ui.enter_visual_char(),
+            Action::ReqVimVisualLine => self.authoring_ui.enter_visual_line(),
+            Action::ReqVimVisualYank => {
+                if self.authoring_ui.yank_visual_selection() {
+                    self.status = "Yanked requirement selection".to_string();
+                }
+                self.authoring_ui.exit_visual_mode();
+                self.pending_char = None;
+            }
+            Action::ReqVimVisualDelete => {
+                self.authoring_ui.delete_visual_selection();
+                self.pending_char = None;
+            }
             Action::ReqFilterOverlay => {
                 if self.active_tab == MainTab::Requirements {
                     self.authoring_ui.open_filter_picker();

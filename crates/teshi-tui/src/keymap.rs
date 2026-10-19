@@ -109,6 +109,27 @@ pub enum Action {
     ReqGroupToggle,
     /// Edit the selected document's iteration (`I` on the Requirements tree).
     ReqEditIteration,
+    /// Bounded Vim append/open/delete/yank operations for Requirements.
+    ReqVimAppend,
+    ReqVimOpenBelow,
+    ReqVimOpenAbove,
+    ReqVimDeleteChar,
+    ReqVimDeleteLine,
+    ReqVimYankLine,
+    ReqVimPasteAfter,
+    ReqVimPasteBefore,
+    ReqVimWordForward,
+    ReqVimWordBackward,
+    ReqVimWordEnd,
+    ReqVimLineStart,
+    ReqVimFirstNonBlank,
+    ReqVimLineEnd,
+    ReqVimGoTop,
+    ReqVimGoBottom,
+    ReqVimVisualChar,
+    ReqVimVisualLine,
+    ReqVimVisualYank,
+    ReqVimVisualDelete,
     /// Confirm the active Requirements overlay.
     OverlayConfirm,
     /// Cancel the active Requirements overlay.
@@ -369,6 +390,40 @@ impl Action {
                     };
                 }
                 return None;
+            }
+            if context.active_tab == MainTab::Requirements
+                && context.requirements_focus == RequirementsFocus::Editor
+                && matches!(
+                    context.requirements_editor_mode,
+                    RequirementsEditorMode::Browse
+                        | RequirementsEditorMode::VisualChar
+                        | RequirementsEditorMode::VisualLine
+                )
+            {
+                match (pending_char, event.code, event.modifiers) {
+                    ('d', KeyCode::Char('d'), KeyModifiers::NONE) => {
+                        return Some(
+                            if context.requirements_editor_mode == RequirementsEditorMode::Browse {
+                                Self::ReqVimDeleteLine
+                            } else {
+                                Self::ReqVimVisualDelete
+                            },
+                        );
+                    }
+                    ('y', KeyCode::Char('y'), KeyModifiers::NONE) => {
+                        return Some(
+                            if context.requirements_editor_mode == RequirementsEditorMode::Browse {
+                                Self::ReqVimYankLine
+                            } else {
+                                Self::ReqVimVisualYank
+                            },
+                        );
+                    }
+                    ('g', KeyCode::Char('g'), KeyModifiers::NONE) => {
+                        return Some(Self::ReqVimGoTop);
+                    }
+                    _ => {}
+                }
             }
             match (pending_char, event.code, event.modifiers) {
                 ('d', KeyCode::Char('d'), KeyModifiers::NONE) => return Some(Self::DeleteNode),
@@ -681,6 +736,40 @@ impl Action {
                         _ => None,
                     };
                 }
+                if matches!(
+                    context.requirements_editor_mode,
+                    RequirementsEditorMode::VisualChar | RequirementsEditorMode::VisualLine
+                ) {
+                    return match (event.code, event.modifiers) {
+                        (KeyCode::Esc, _) => Some(Self::ReqExitInsert),
+                        (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                            Some(Self::MoveLeft)
+                        }
+                        (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                            Some(Self::MoveRight)
+                        }
+                        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                            Some(Self::MoveUp)
+                        }
+                        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                            Some(Self::MoveDown)
+                        }
+                        (KeyCode::Char('w'), KeyModifiers::NONE) => Some(Self::ReqVimWordForward),
+                        (KeyCode::Char('b'), KeyModifiers::NONE) => Some(Self::ReqVimWordBackward),
+                        (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Self::ReqVimWordEnd),
+                        (KeyCode::Char('0'), KeyModifiers::NONE) => Some(Self::ReqVimLineStart),
+                        (KeyCode::Char('^'), KeyModifiers::SHIFT)
+                        | (KeyCode::Char('^'), KeyModifiers::NONE) => {
+                            Some(Self::ReqVimFirstNonBlank)
+                        }
+                        (KeyCode::Char('$'), KeyModifiers::SHIFT)
+                        | (KeyCode::Char('$'), KeyModifiers::NONE)
+                        | (KeyCode::End, _) => Some(Self::ReqVimLineEnd),
+                        (KeyCode::Char('y'), KeyModifiers::NONE) => Some(Self::ReqVimVisualYank),
+                        (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Self::ReqVimVisualDelete),
+                        _ => None,
+                    };
+                }
                 return match (event.code, event.modifiers) {
                     (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
                         Some(Self::MoveLeft)
@@ -695,6 +784,32 @@ impl Action {
                         Some(Self::MoveDown)
                     }
                     (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Self::ReqEnterInsert),
+                    (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::ReqVimAppend),
+                    (KeyCode::Char('o'), KeyModifiers::NONE) => Some(Self::ReqVimOpenBelow),
+                    (KeyCode::Char('O'), KeyModifiers::SHIFT)
+                    | (KeyCode::Char('O'), KeyModifiers::NONE) => Some(Self::ReqVimOpenAbove),
+                    (KeyCode::Char('x'), KeyModifiers::NONE) => Some(Self::ReqVimDeleteChar),
+                    (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Self::PendingChar('d')),
+                    (KeyCode::Char('y'), KeyModifiers::NONE) => Some(Self::PendingChar('y')),
+                    (KeyCode::Char('p'), KeyModifiers::NONE) => Some(Self::ReqVimPasteAfter),
+                    (KeyCode::Char('P'), KeyModifiers::SHIFT)
+                    | (KeyCode::Char('P'), KeyModifiers::NONE) => Some(Self::ReqVimPasteBefore),
+                    (KeyCode::Char('v'), KeyModifiers::NONE) => Some(Self::ReqVimVisualChar),
+                    (KeyCode::Char('V'), KeyModifiers::SHIFT)
+                    | (KeyCode::Char('V'), KeyModifiers::NONE) => Some(Self::ReqVimVisualLine),
+                    (KeyCode::Char('w'), KeyModifiers::NONE) => Some(Self::ReqVimWordForward),
+                    (KeyCode::Char('b'), KeyModifiers::NONE) => Some(Self::ReqVimWordBackward),
+                    (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Self::ReqVimWordEnd),
+                    (KeyCode::Char('0'), KeyModifiers::NONE) => Some(Self::ReqVimLineStart),
+                    (KeyCode::Char('^'), KeyModifiers::SHIFT)
+                    | (KeyCode::Char('^'), KeyModifiers::NONE) => Some(Self::ReqVimFirstNonBlank),
+                    (KeyCode::Char('$'), KeyModifiers::SHIFT)
+                    | (KeyCode::Char('$'), KeyModifiers::NONE) => Some(Self::ReqVimLineEnd),
+                    (KeyCode::Char('G'), KeyModifiers::SHIFT)
+                    | (KeyCode::Char('G'), KeyModifiers::NONE) => Some(Self::ReqVimGoBottom),
+                    (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Self::PendingChar('g')),
+                    (KeyCode::Char('u'), KeyModifiers::NONE) => Some(Self::Undo),
+                    (KeyCode::Char('r'), KeyModifiers::CONTROL) => Some(Self::Redo),
                     (KeyCode::Char('I'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
                         Some(Self::ReqEditIteration)
                     }
@@ -2024,5 +2139,36 @@ mod tests {
             ),
             Some(Action::OverlayInsert('a'))
         );
+    }
+    #[test]
+    fn requirements_line_operators_use_prefixes_but_visual_operators_are_immediate() {
+        use crate::authoring_tab::RequirementsEditorMode;
+        let mut context = requirements_tree_context();
+        context.requirements_focus = RequirementsFocus::Editor;
+        for (ch, line, visual) in [
+            ('d', Action::ReqVimDeleteLine, Action::ReqVimVisualDelete),
+            ('y', Action::ReqVimYankLine, Action::ReqVimVisualYank),
+        ] {
+            let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
+            assert_eq!(
+                Action::from_key_event(key, context),
+                Some(Action::PendingChar(ch))
+            );
+            let repeated = KeyContext {
+                pending_char: Some(ch),
+                ..context
+            };
+            assert_eq!(Action::from_key_event(key, repeated), Some(line));
+            for mode in [
+                RequirementsEditorMode::VisualChar,
+                RequirementsEditorMode::VisualLine,
+            ] {
+                let selecting = KeyContext {
+                    requirements_editor_mode: mode,
+                    ..context
+                };
+                assert_eq!(Action::from_key_event(key, selecting), Some(visual.clone()));
+            }
+        }
     }
 }
