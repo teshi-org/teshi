@@ -23,14 +23,14 @@
 //! Pure DTOs (`ChatMessage`, `ToolDefinition`, `ToolCall`) live in `teshi-core::llm`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
 use std::thread;
 
 use anyhow::{Context, Result};
 use base64::Engine;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 pub use teshi_core::llm::{
     ChatMessage, ContentBlock, ImageSource, MessageContent, ToolCall, ToolDefinition,
@@ -818,7 +818,9 @@ fn serialize_chat_content(
                     }
                     ContentBlock::Image { source } => {
                         if role != "user" {
-                            anyhow::bail!("DeepSeek Chat Completions only supports image content in user messages");
+                            anyhow::bail!(
+                                "DeepSeek Chat Completions only supports image content in user messages"
+                            );
                         }
                         let url = match source {
                             ImageSource::Url(url)
@@ -1275,13 +1277,15 @@ mod tests {
             thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(handle.poll_shutdown());
-        assert!(handle
-            .send(LlmRequest::Chat {
-                system: None,
-                messages: Vec::new(),
-                tools: None
-            })
-            .is_err());
+        assert!(
+            handle
+                .send(LlmRequest::Chat {
+                    system: None,
+                    messages: Vec::new(),
+                    tools: None
+                })
+                .is_err()
+        );
     }
 
     #[test]
@@ -1382,10 +1386,12 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
         };
-        assert!(build_request_body(&config, None, &[message], None)
-            .unwrap_err()
-            .to_string()
-            .contains("MIME"));
+        assert!(
+            build_request_body(&config, None, &[message], None)
+                .unwrap_err()
+                .to_string()
+                .contains("MIME")
+        );
     }
 
     #[test]
@@ -1623,7 +1629,10 @@ mod tests {
                 "data: {\"choices\":[{\"delta\":{\"content\":\"Partial result\"}}]}\n\n",
                 "data: {\"error\":{\"message\":\"controlled failure\"}}\n\n"
             );
-            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
             socket.write_all(response.as_bytes()).await.unwrap();
         });
         let response = reqwest::Client::builder()
@@ -1643,9 +1652,11 @@ mod tests {
         assert!(events.iter().any(
             |event| matches!(event, LlmEvent::Chunk { content } if content == "Partial result")
         ));
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, LlmEvent::Done { .. })));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, LlmEvent::Done { .. }))
+        );
         server.await.unwrap();
     }
 
@@ -1769,7 +1780,11 @@ mod tests {
             );
             assert_eq!(body["thinking"]["type"], "enabled");
             let response = r#"{"model":"deepseek-flash","choices":[{"message":{"content":"recognized"},"finish_reason":"stop"}]}"#;
-            let http = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response);
+            let http = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            );
             socket.write_all(http.as_bytes()).await.unwrap();
         });
 
