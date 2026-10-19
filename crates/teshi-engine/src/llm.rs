@@ -23,14 +23,14 @@
 //! Pure DTOs (`ChatMessage`, `ToolDefinition`, `ToolCall`) live in `teshi-core::llm`.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 
 use anyhow::{Context, Result};
 use base64::Engine;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 pub use teshi_core::llm::{
     ChatMessage, ContentBlock, ImageSource, MessageContent, ToolCall, ToolDefinition,
@@ -1277,15 +1277,13 @@ mod tests {
             thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(handle.poll_shutdown());
-        assert!(
-            handle
-                .send(LlmRequest::Chat {
-                    system: None,
-                    messages: Vec::new(),
-                    tools: None
-                })
-                .is_err()
-        );
+        assert!(handle
+            .send(LlmRequest::Chat {
+                system: None,
+                messages: Vec::new(),
+                tools: None
+            })
+            .is_err());
     }
 
     #[test]
@@ -1386,12 +1384,10 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
         };
-        assert!(
-            build_request_body(&config, None, &[message], None)
-                .unwrap_err()
-                .to_string()
-                .contains("MIME")
-        );
+        assert!(build_request_body(&config, None, &[message], None)
+            .unwrap_err()
+            .to_string()
+            .contains("MIME"));
     }
 
     #[test]
@@ -1652,11 +1648,9 @@ mod tests {
         assert!(events.iter().any(
             |event| matches!(event, LlmEvent::Chunk { content } if content == "Partial result")
         ));
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, LlmEvent::Done { .. }))
-        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, LlmEvent::Done { .. })));
         server.await.unwrap();
     }
 
