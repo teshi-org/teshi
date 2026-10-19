@@ -2,7 +2,53 @@
 
 Planning date: 2026-10-16. Intended implementer: a subsequent agent, including Luna Max.
 Baseline checkout: `D:/Dev/Rust/teshi/dev`, initial HEAD `ec830c4`, with substantial existing uncommitted changes.
-Status (2026-10-19, delivery closeout): browser fixes committed as `796cb0f`; Linux readiness/fixture fixes committed as `94c1e37`. A fresh single complete deterministic Linux replay passes 36 Features / 238 scenarios with zero failures against the previously pinned binary set, recorded separately in `.teshi/artifacts/linux-clean-replay-20261019/`. Two live CodeBuddy Features remain blocked without explicit opt-in. User confirmed aesthetic acceptance should remain pending while automation and commits finish. P6 remains deferred. No push; unrelated working-tree changes remain outside these commits. Historical sections below retain their original status and evidence.
+Status (2026-10-19, P7/P8 scoped delivery): P7 deterministic session/provider-error work is committed as `0ba2032`; ACP process-container ownership and paired failure Features are committed as `c8ae768`; CLI validation/replay root isolation is committed as `6a7d8dc`. The isolated candidate excludes deferred P6 and later WinApp features. Windows and Linux native fmt/check/test/Clippy/doc pass; Windows independent runner gates pass. Windows tests/doctests: 1,285 passed / 4 ignored; Linux: 1,280 passed / 4 ignored under the recorded capability constraint. The 45-Feature catalog passes. Each OS now has one complete immutable replay of 38 deterministic Features / 244 scenarios, with unchanged source fingerprints. A subsequent empty-history picker correction (`1798507`) passes eight scoped PTY cases plus affected units/fmt/Clippy on each OS; it is not relabeled as a complete 246-case replay. Two live CodeBuddy Features remain blocked without opt-in, user aesthetic acceptance remains pending, and P6 remains deferred. P8 still has the explicit boundaries below. No push; unrelated working-tree changes remain preserved.
+
+
+## Authoritative scoped delivery inventory — 2026-10-19
+
+This section supersedes every older “current”, “remaining”, “next work” and unchecked list in this temporary plan. Original checklists retain their execution contract; do not infer missing implementation from an unchecked historical box. The plan is not fully complete or ready for archival.
+
+| Package | Current result | Remaining boundary |
+| --- | --- | --- |
+| P0 | Isolated candidate and exact source/binary records; live source doc-2 revision `8b413fffee3e58df` and doc-6 revision `dd7dab4d004f9b93` reconfirmed read-only | Keep final replay identity separate from the remaining dirty checkout |
+| P1/P2 | Creation/title/restart/deletion regressions retained in the earlier scoped PTYs and current native suites | No new implementation gap identified in this continuation |
+| P3 | Windows clipboard/selection and Linux X11 acceptance retained | No Wayland or post-exit clipboard durability claim |
+| P4 | Scoped pointer/modal acceptance retained | User aesthetic acceptance remains pending |
+| P5 | Documented bounded Vim subset retained | Full Vim grammar and unclaimed platform/input paths remain outside the delivered subset |
+| P6 | Deferred by the user | No design approval or delivery claim; priority changes remain outside the candidate and commits |
+| P7 | Deterministic work committed; six paired Features / 64 scenarios pass; native and runner acceptance retained | Two real CodeBuddy Features remain blocked without explicit opt-in |
+| P8 | Original project-switch Features pass 34/34; the final paired failure Features pass 8/8 on each OS, including empty recent history | Permission/human-review switching, deliberate Unix process-group escape, and remaining original checklist evidence reconciliation are not closed |
+| P9 | Both native workspace gate sets pass on the isolated candidate; catalog now has 45 Features; Windows independent runner gates pass | Complete 38-Feature / 244-scenario snapshots pass on each OS; the later empty-history correction has separate focused evidence; external-target evidence remains scoped/historical; no whole-dirty-tree claim |
+
+### P7/P8 continuation evidence and corrections
+
+Evidence root: `.teshi/artifacts/p7-p8-delivery-20261019/`. The candidate under `review/` contains the committed baseline plus exactly the delivered changes, without P6 priority or later WinApp shell/tray work. Its source-bound runners retain that source path. Main-checkout output executables and unrelated worktrees/processes were preserved.
+
+- P7: `p7-matrix/matrix.json` passes six Features / 64 scenarios. `p7-affected-tests.log` passes 762 unit/integration/doctests with one ignored; `p7-gates.json` records build, Python contracts, catalog and affected Clippy. The initial extraction mistakenly included a P6-only `priority: None`; it was excluded before acceptance. The initial main-target binary build failed because that output executable was in use; `p7-build-locked-exe.log` is retained. The isolated output build passed without stopping that process. Formatting was corrected using each crate's declared edition; final workspace formatting passes.
+- ACP ownership: the old implementation fails `p8-descendant-before.log` because shutdown is not acknowledged within four seconds while an ordinary descendant holds the inherited transport. It is not evidence of a successful old acknowledgement followed by writes. Windows now spawns suspended, assigns a non-breakaway Job before resuming, terminates descendants even after primary exit, and waits for an empty Job. Unix uses a dedicated process group. Shutdown errors retain worker ownership and remain retryable. Both OSes pass all three runtime shutdown integrations and standalone ACP tests/Clippy (`p8-final-gates.json`, `p8-linux-gates.json`). Deliberate Unix `setsid`/group escape is not covered by that mechanism.
+- New paired failure Features exercise actual file-save failure and recovery, normal ACP exit with a surviving tool child, and synchronous dispatch stop timeout followed by safe retry. `p8-final-matrix/matrix.json` passes four Features / 40 scenarios on Windows; final fixture-only process-exit/stdlib-transport refinements pass the new six cases in `p8-owned-process-final/` and `p8-linux-pty/`. Evidence includes viewport/SVG, saved A bytes, unchanged B sources, child PID exit, stable writes and a visible five-second timeout while A remains active. The controlled dispatch completes against A before B becomes active.
+- Earlier new-Feature attempts remain in `p8-matrix/`, `p8-failure-final/` and `p8-failure-dispatch/`. One save fixture first failed to acknowledge the actual external-change prompt; one controlled API transport initially omitted the required typed response. The original busy-ACP header click also failed to open the picker. A later controlled comparison (`busy-header-pointer.json`) confirms that an empty recent list prevents opening, while seeding a recent B entry opens it on the same binary. `1798507` removes the four-line empty-list early return and retains the existing empty-list rendering/Open path control. The new paired scenario verifies header click, visible empty notice, pointer Open path, actual B activation and unchanged B source. Both OSes pass all eight failure cases plus affected TUI units/fmt/Clippy; see `windows-picker-*` and `linux-picker-*`. The earlier ACP stop scenario remains accepted through the keyboard project command; it is not retroactively counted as the empty-history pointer regression.
+- The broader candidate gate exposed pre-existing CLI root drift. `check-root-before.json` reproduces it inside an owned ancestor `.teshi` directory. `integrated-test-root-failure.log` retains the three failing check tests and the two scanning tests terminated through the recorded owned process tree. `integrated-final-test.log` retains the separate replay preflight failure. `6a7d8dc` scopes relative check/steps/browser-replay/WinApp-replay inputs to the caller's project and adds a deterministic ancestor regression. Only the replay-root portion of WinApp was staged; other WinApp edits remain untouched.
+- Final Windows gates: `integrated-rootfix-gates.json`; Linux: `linux-integrated-gates.json`. Native tests/doctests pass 1,285/1,280 with four ignored on each OS. Linux tests remove only `CAP_DAC_OVERRIDE` and `CAP_DAC_READ_SEARCH` from the root subprocess bounding set so the permission assertions actually execute. No failing gate is waived. Documentation exits zero with recorded warnings. Ignored product PTYs are represented only by explicitly executed reports, not by the normal Cargo test counts.
+
+
+### Complete replay identity and subsequent narrow correction
+
+`windows-final-integrated-matrix/matrix.json` and `linux-final-integrated-matrix/matrix.json` each pass 38 Features / 244 scenarios in one run. Their `*-final-matrix-execution.json` files record exit zero and unchanged source fingerprints; the associated binary/source JSON files retain exact hashes. `candidate-vs-commits.json` verifies all 26 changed candidate files against committed source at `c8ae768` (line endings normalized for Git blob comparison). These runs are distinct from the earlier source-changing preliminary matrices and from historical external-target replays.
+
+The later empty-history correction changes only `app.rs`, its paired failure Feature text and that Feature's fixture; `picker-changed-files.json` records those four paths. `picker-source-before.json` and `picker-source-after.json` match. Both OSes pass the eight scoped cases, TUI units and affected formatting/Clippy. The complete workspace/38-Feature snapshot predates this four-line behavioral correction. `verified-summary.json` and `summary.md` preserve that distinction rather than synthesizing a new full replay. P6 and later WinApp changes remain excluded from all these candidate claims.
+
+The source-bound review worktree is retained within the artifact directory so the pinned semantic runners can resolve their exact fixtures. No unrelated worktree was removed. `source-requirements.json` retains the read-only stable-ID/revision refresh; no user-library data was edited.
+
+### Work still open after this scoped delivery
+
+1. P6 design/implementation remains deferred by the user.
+2. P7's two real CodeBuddy Features remain blocked without explicit opt-in; deterministic fixtures do not replace them.
+3. P4 user aesthetic acceptance remains pending by the user's explicit choice.
+4. P8 permission/human-review switch cancellation, deliberate Unix task escape beyond the owned process group, and unaccounted original checklist cases still need scoped review/evidence. The new timeout/save/ordinary-child evidence does not close those different paths.
+5. P9 complete replay records now exist for the accepted snapshot. Requirement-to-evidence reconciliation and the explicit P8 boundaries must finish before archival. No acceptance is claimed for the later WinApp features, every byte of the dirty main checkout, Linux Desktop/Web rendering, Wayland or macOS.
+6. Delivery remains local; nothing has been pushed. Deferred priority, later WinApp, documentation and OpenSpec-removal changes remain outside these commits.
 
 ## Delivery commits and fresh Linux replay — 2026-10-19
 
@@ -58,7 +104,7 @@ Evidence: `.teshi/artifacts/p9-current-20261019/execution.json` and `summary.md`
 
 Next work: the AI fixture correction above supersedes this refresh's undiagnosed-fixture status. Provision isolated browser/WinApp targets; obtain live-provider opt-in before provider execution; and run the remaining platform acceptance. User aesthetic acceptance and P6 remain separate. Historical unchecked lists and older platform-pending notes below must be read against the current inventory and evidence, not counted as a fresh implementation backlog.
 
-## Current closeout inventory — 2026-10-19
+## Historical closeout inventory — superseded by authoritative inventory above
 
 This inventory supersedes historical status, next-step instructions, and unchecked implementation lists below. Those lists retain the original execution contract; an unchecked box alone is not proof that implementation is missing. Scoped evidence is not a full-workspace or cross-platform pass.
 
@@ -783,7 +829,7 @@ The plan provides recommended defaults so routine implementation can proceed. Th
 
 ## 16. Copyable next-agent instruction
 
-> Read the current closeout inventory at the top of `docs/requirement-implementation-handoff-2026-10-16.md`, `.teshi/artifacts/p9-current-20261019/`, the scoped P4/P5/P8 summaries, current `AGENTS.md` and `CLAUDE.md`. Continue P9 from the recorded current-source results; do not restart completed scoped implementation or substitute historical gates for current evidence. P6 is explicitly deferred by the user. Preserve existing dirty files and OpenSpec deletions, use isolated fixture stores, and address one remaining boundary at a time. Do not implement P6 priority semantics without explicit design approval. Record failed, blocked and not-run results separately, with exact evidence paths and platform limits. Do not commit or push unless separately requested.
+> Read the authoritative scoped delivery inventory at the top of `docs/requirement-implementation-handoff-2026-10-16.md`, `.teshi/artifacts/p9-current-20261019/`, the scoped P4/P5/P8 summaries, current `AGENTS.md` and `CLAUDE.md`. Continue from the explicit open boundaries and latest p7-p8-delivery-20261019 evidence; do not restart completed scoped implementation or substitute historical gates for current evidence. P6 is explicitly deferred by the user. Preserve existing dirty files and OpenSpec deletions, use isolated fixture stores, and address one remaining boundary at a time. Do not implement P6 priority semantics without explicit design approval. Record failed, blocked and not-run results separately, with exact evidence paths and platform limits. Do not commit or push unless separately requested.
 
 For later turns, replace `P0 and P1` with exactly one package or P8 subpackage. Require the implementer to reread its dependencies and the latest handoff before editing.
 
