@@ -15,6 +15,15 @@ use teshi_tui_runner::{Launch, Terminal};
 
 const ORIGINAL: &str = "Feature: AI pointer fixture\n  Scenario: Ready\n    Given a sample step\n";
 
+fn trace_event(path: &std::path::Path, event: serde_json::Value) {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    writeln!(file, "{event}").unwrap();
+}
+
 fn expect_wrapped_marker(terminal: &Terminal, marker: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -141,6 +150,10 @@ impl Fixture {
     }
 
     fn capture(&self, terminal: &Terminal, name: &str) {
+        trace_event(
+            &self.artifacts.join("input-trace.jsonl"),
+            serde_json::json!({"capture": name, "time": format!("{:?}", std::time::SystemTime::now())}),
+        );
         std::thread::sleep(Duration::from_millis(100));
         fs::write(
             self.artifacts.join(format!("{name}.txt")),
@@ -180,24 +193,44 @@ struct OwnedProvider {
 }
 
 impl OwnedProvider {
-    fn new(source: Option<PathBuf>) -> Self {
+    fn new(source: Option<PathBuf>, trace: PathBuf) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_worker = Arc::clone(&stop);
         let worker = std::thread::spawn(move || {
+            let started = Instant::now();
             let mut turn = 0;
+            let mut connection_id = 0;
             while !stop_worker.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((mut connection, _)) => {
+                        connection_id += 1;
+                        trace_event(
+                            &trace,
+                            serde_json::json!({"event":"accepted", "connection":connection_id, "elapsed_ms":started.elapsed().as_millis()}),
+                        );
+                        // Accepted sockets can inherit the nonblocking listener mode on
+                        // Windows. A temporary lack of bytes is not an HTTP request end.
+                        connection.set_nonblocking(false).unwrap();
                         connection
                             .set_read_timeout(Some(Duration::from_secs(2)))
                             .unwrap();
                         let mut bytes = Vec::new();
                         let mut buffer = [0u8; 4096];
+                        let mut complete = false;
                         loop {
-                            let count = connection.read(&mut buffer).unwrap_or(0);
+                            let count = match connection.read(&mut buffer) {
+                                Ok(count) => count,
+                                Err(error) => {
+                                    trace_event(
+                                        &trace,
+                                        serde_json::json!({"event":"read_error", "connection":connection_id, "received_bytes":bytes.len(), "kind":format!("{:?}", error.kind()), "os_error":error.raw_os_error(), "elapsed_ms":started.elapsed().as_millis()}),
+                                    );
+                                    break;
+                                }
+                            };
                             if count == 0 {
                                 break;
                             }
@@ -215,11 +248,23 @@ impl OwnedProvider {
                                     })
                                     .unwrap_or(0);
                                 if bytes.len() >= end + 4 + length {
+                                    complete = true;
                                     break;
                                 }
                             }
                         }
+                        if !complete {
+                            trace_event(
+                                &trace,
+                                serde_json::json!({"event":"incomplete_request", "connection":connection_id, "received_bytes":bytes.len(), "elapsed_ms":started.elapsed().as_millis()}),
+                            );
+                            continue;
+                        }
                         turn += 1;
+                        trace_event(
+                            &trace,
+                            serde_json::json!({"event":"response", "connection":connection_id, "turn":turn, "request_bytes":bytes.len(), "tool_call":turn == 1 && source.is_some(), "elapsed_ms":started.elapsed().as_millis()}),
+                        );
                         let (delta, finish) = if turn == 1
                             && let Some(source) = source.as_ref()
                         {
@@ -245,7 +290,11 @@ impl OwnedProvider {
                             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                             body.len()
                         );
-                        let _ = connection.write_all(response.as_bytes());
+                        let result = connection.write_all(response.as_bytes());
+                        trace_event(
+                            &trace,
+                            serde_json::json!({"event":"write_result", "connection":connection_id, "error":result.err().map(|error| format!("{error:?}")), "elapsed_ms":started.elapsed().as_millis()}),
+                        );
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(10))
@@ -269,9 +318,92 @@ impl Drop for OwnedProvider {
     }
 }
 
+#[test]
+fn provider_waits_for_complete_request_before_responding() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = OwnedProvider::new(
+        Some(root.path().join("sample.feature")),
+        root.path().join("provider.jsonl"),
+    );
+    let mut connection = std::net::TcpStream::connect(provider.address).unwrap();
+    connection
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    connection
+        .write_all(b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 2\r\n\r\n{")
+        .unwrap();
+    let mut byte = [0];
+    let result = connection.read(&mut byte);
+    assert!(
+        matches!(&result, Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)),
+        "provider responded before the request body was complete: {result:?}"
+    );
+    connection.write_all(b"}").unwrap();
+    connection
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut response = String::new();
+    connection.read_to_string(&mut response).unwrap();
+    assert!(response.contains("pointer-change"), "{response}");
+}
+
+#[test]
+fn provider_does_not_consume_a_turn_for_a_closed_connection() {
+    let root = tempfile::tempdir().unwrap();
+    let trace = root.path().join("provider.jsonl");
+    let provider = OwnedProvider::new(Some(root.path().join("sample.feature")), trace.clone());
+    drop(std::net::TcpStream::connect(provider.address).unwrap());
+    let mut connection = std::net::TcpStream::connect(provider.address).unwrap();
+    connection
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    connection
+        .write_all(b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}")
+        .unwrap();
+    let mut response = String::new();
+    connection.read_to_string(&mut response).unwrap();
+    assert!(
+        response.contains("pointer-change"),
+        "an empty connection consumed the first tool-call response: {response}; {}",
+        fs::read_to_string(trace).unwrap()
+    );
+}
+
+#[test]
+fn provider_does_not_respond_to_a_truncated_body() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = OwnedProvider::new(
+        Some(root.path().join("sample.feature")),
+        root.path().join("provider.jsonl"),
+    );
+    let mut connection = std::net::TcpStream::connect(provider.address).unwrap();
+    connection
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    connection
+        .write_all(b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 2\r\n\r\n{")
+        .unwrap();
+    connection.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut response = String::new();
+    connection.read_to_string(&mut response).unwrap();
+    assert!(
+        response.is_empty(),
+        "responded to a truncated body: {response}"
+    );
+    let mut connection = std::net::TcpStream::connect(provider.address).unwrap();
+    connection
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    connection
+        .write_all(b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}")
+        .unwrap();
+    connection.read_to_string(&mut response).unwrap();
+    assert!(response.contains("pointer-change"), "{response}");
+}
+
 fn footer_and_threads(narrow: bool) {
     let fixture = Fixture::new("threads-footer", narrow);
-    let provider = OwnedProvider::new(None);
+    let provider = OwnedProvider::new(None, fixture.artifacts.join("provider-trace.jsonl"));
     let terminal = fixture.launch(Some(&provider), false);
     fixture.click(&terminal, "Focus", "focus");
     terminal.write("THREAD_ORIGINAL").unwrap();
@@ -337,7 +469,7 @@ fn footer_and_threads(narrow: bool) {
 
 fn slash_rows(narrow: bool) {
     let fixture = Fixture::new("slash", narrow);
-    let provider = OwnedProvider::new(None);
+    let provider = OwnedProvider::new(None, fixture.artifacts.join("provider-trace.jsonl"));
     let terminal = fixture.launch(Some(&provider), false);
     fixture.click(&terminal, "Focus", "focus");
     terminal.write("/model").unwrap();
@@ -422,14 +554,23 @@ fn pending_change(narrow: bool, accept: bool, inspect_diff: bool) {
         },
         narrow,
     );
-    let provider = OwnedProvider::new(Some(fixture.source.clone()));
+    let provider = OwnedProvider::new(
+        Some(fixture.source.clone()),
+        fixture.artifacts.join("provider-trace.jsonl"),
+    );
     let terminal = fixture.launch(Some(&provider), false);
     fixture.click(&terminal, "Focus", "focus");
     terminal
         .write("Change the step in the owned project")
         .unwrap();
     fixture.click(&terminal, "Send", "send");
-    terminal.expect_text("Change Summary", true, 10000).unwrap();
+    if let Err(error) = terminal.expect_text("Change Summary", true, 10000) {
+        fixture.capture(&terminal, "summary-timeout");
+        panic!(
+            "{error}; provider trace: {}",
+            fixture.artifacts.join("provider-trace.jsonl").display()
+        );
+    }
     fixture.capture(&terminal, "summary-before-review");
     fixture.click(&terminal, "Close", "close-summary");
     terminal
