@@ -2,10 +2,12 @@
 
 Planning date: 2026-10-16. Intended implementer: a subsequent agent, including Luna Max.
 Baseline checkout: `D:/Dev/Rust/teshi/dev`, initial HEAD `ec830c4`, with substantial existing uncommitted changes.
+
+Latest continuation (2026-10-20): `62b14a4` adds permission/human-review project-switch acceptance. Both OSes pass the paired failure Features (12 scenarios each), affected TUI units, formatting and Clippy. This test-only continuation does not replace the complete native/replay snapshot below. P8 remains pending for deliberate Unix task escape and original checklist reconciliation; P6, real CodeBuddy and aesthetic decisions retain their recorded status. No push.
 Status (2026-10-19, P7/P8 scoped delivery): P7 deterministic session/provider-error work is committed as `0ba2032`; ACP process-container ownership and paired failure Features are committed as `c8ae768`; CLI validation/replay root isolation is committed as `6a7d8dc`. The isolated candidate excludes deferred P6 and later WinApp features. Windows and Linux native fmt/check/test/Clippy/doc pass; Windows independent runner gates pass. Windows tests/doctests: 1,285 passed / 4 ignored; Linux: 1,280 passed / 4 ignored under the recorded capability constraint. The 45-Feature catalog passes. Each OS now has one complete immutable replay of 38 deterministic Features / 244 scenarios, with unchanged source fingerprints. A subsequent empty-history picker correction (`1798507`) passes eight scoped PTY cases plus affected units/fmt/Clippy on each OS; it is not relabeled as a complete 246-case replay. Two live CodeBuddy Features remain blocked without opt-in, user aesthetic acceptance remains pending, and P6 remains deferred. P8 still has the explicit boundaries below. No push; unrelated working-tree changes remain preserved.
 
 
-## Authoritative scoped delivery inventory — 2026-10-19
+## Authoritative scoped delivery inventory — 2026-10-20
 
 This section supersedes every older “current”, “remaining”, “next work” and unchecked list in this temporary plan. Original checklists retain their execution contract; do not infer missing implementation from an unchecked historical box. The plan is not fully complete or ready for archival.
 
@@ -18,8 +20,8 @@ This section supersedes every older “current”, “remaining”, “next work
 | P5 | Documented bounded Vim subset retained | Full Vim grammar and unclaimed platform/input paths remain outside the delivered subset |
 | P6 | Deferred by the user | No design approval or delivery claim; priority changes remain outside the candidate and commits |
 | P7 | Deterministic work committed; six paired Features / 64 scenarios pass; native and runner acceptance retained | Two real CodeBuddy Features remain blocked without explicit opt-in |
-| P8 | Original project-switch Features pass 34/34; the final paired failure Features pass 8/8 on each OS, including empty recent history | Permission/human-review switching, deliberate Unix process-group escape, and remaining original checklist evidence reconciliation are not closed |
-| P9 | Both native workspace gate sets pass on the isolated candidate; catalog now has 45 Features; Windows independent runner gates pass | Complete 38-Feature / 244-scenario snapshots pass on each OS; the later empty-history correction has separate focused evidence; external-target evidence remains scoped/historical; no whole-dirty-tree claim |
+| P8 | Original project-switch Features retain 34/34; the latest paired failure Features pass 12/12 on each OS, including permission rejection and human-review cancellation/switching | Deliberate Unix process-group escape and remaining original checklist evidence reconciliation are not closed |
+| P9 | Both native workspace gate sets pass on the isolated candidate; catalog now has 45 Features; Windows independent runner gates pass | Complete 38-Feature / 244-scenario snapshots pass on each OS; later picker and permission/review acceptance have separate focused evidence; external-target evidence remains scoped/historical; no whole-dirty-tree claim |
 
 ### P7/P8 continuation evidence and corrections
 
@@ -46,9 +48,21 @@ The source-bound review worktree is retained within the artifact directory so th
 1. P6 design/implementation remains deferred by the user.
 2. P7's two real CodeBuddy Features remain blocked without explicit opt-in; deterministic fixtures do not replace them.
 3. P4 user aesthetic acceptance remains pending by the user's explicit choice.
-4. P8 permission/human-review switch cancellation, deliberate Unix task escape beyond the owned process group, and unaccounted original checklist cases still need scoped review/evidence. The new timeout/save/ordinary-child evidence does not close those different paths.
+4. P8 deliberate Unix task escape beyond the owned process group and unaccounted original checklist cases still need scoped review/evidence. Permission/human-review switch cancellation now has the scoped evidence below; it does not prove containment of deliberately detached Unix tasks.
 5. P9 complete replay records now exist for the accepted snapshot. Requirement-to-evidence reconciliation and the explicit P8 boundaries must finish before archival. No acceptance is claimed for the later WinApp features, every byte of the dirty main checkout, Linux Desktop/Web rendering, Wayland or macOS.
 6. Delivery remains local; nothing has been pushed. Deferred priority, later WinApp, documentation and OpenSpec-removal changes remain outside these commits.
+
+## P8 permission and human-review acceptance — 2026-10-20
+
+Evidence: `.teshi/artifacts/p8-review-20261020/`. Commit: `62b14a4`. The detached `review/` candidate starts at `3b63e7e` and excludes deferred P6 and later WinApp work. This continuation changes tests and fixtures only; the immutable CLI is copied from the previously accepted picker snapshot, with its SHA256 recorded in `windows-binaries.json` / `linux-binaries.json`. The semantic runner is rebuilt from this candidate. Do not infer source identity from the older version caption embedded in that CLI. `staged-vs-tested.json` verifies all five delivered source blobs against the tested candidate while excluding the existing priority dispatch arm.
+
+- Both locale failure Features pass six scenarios each on Windows and Linux (`windows-final-v2-matrix/matrix.json`, `linux-final-v2-matrix/matrix.json`). The final source fingerprints match before/after each replay. This is a scoped 12-case replay per OS, not a new complete 38-Feature replay.
+- Permission: a real pending ACP permission modal owns pointer input; clicking the project header neither switches nor approves the tool. Explicit Escape delivers a cancelled permission outcome. Stop-and-switch waits for the old ACP process exit; B has no stale permission prompt, old reply, or source mutation. A separate App regression exercises requesting a switch while permission is pending: cancel retains A and the same request; stop clears the request and waits before replacing context.
+- Human review: the fixture invokes real authoring tools to persist a Proposed test point, and the actual Test Points viewport shows it. Cancelling the busy switch preserves A and its unapproved bytes. Stop-and-switch leaves those bytes unchanged, creates no B test-point file, and generates neither blocked nor approved Feature files. The App regression also returns to A and verifies its Proposed state. No review continuation or approval is simulated.
+- Final affected gates (`*-final-gates.json`, excluding its recorded replay-directory preflight): Windows TUI units 469 passed / 1 ignored; Linux 466 passed / 1 ignored; workspace formatting and affected all-targets/all-features Clippy pass on both OSes. Syntax and final replay commands pass separately in `*-final-v2-execution.json` with `source_unchanged: true`. No production Rust change required another full native workspace gate set.
+- Failed attempts remain recorded: `*-permission-policy-before-*` and `*-permission-host-before-*` expose the new test helper's missing interactive permission host. Setting Manual alone was insufficient; the corrected helper installs `ChannelPermissionHost`, matching the product path. The `*-final-replay.log` directory collision is a fail-closed harness preflight, not a product failure; the successful replay uses fresh `*-final-v2-matrix/` directories.
+
+P8 remains acceptance pending for deliberate Unix group escape and the original checklist reconciliation. P6 remains deferred, real CodeBuddy remains blocked without opt-in, and aesthetic acceptance stays pending. No real requirement-store mutation or push occurred; unrelated dirty changes remain preserved.
 
 ## Delivery commits and fresh Linux replay — 2026-10-19
 
@@ -829,7 +843,7 @@ The plan provides recommended defaults so routine implementation can proceed. Th
 
 ## 16. Copyable next-agent instruction
 
-> Read the authoritative scoped delivery inventory at the top of `docs/requirement-implementation-handoff-2026-10-16.md`, `.teshi/artifacts/p9-current-20261019/`, the scoped P4/P5/P8 summaries, current `AGENTS.md` and `CLAUDE.md`. Continue from the explicit open boundaries and latest p7-p8-delivery-20261019 evidence; do not restart completed scoped implementation or substitute historical gates for current evidence. P6 is explicitly deferred by the user. Preserve existing dirty files and OpenSpec deletions, use isolated fixture stores, and address one remaining boundary at a time. Do not implement P6 priority semantics without explicit design approval. Record failed, blocked and not-run results separately, with exact evidence paths and platform limits. Do not commit or push unless separately requested.
+> Read the authoritative scoped delivery inventory at the top of `docs/requirement-implementation-handoff-2026-10-16.md`, `.teshi/artifacts/p9-current-20261019/`, the scoped P4/P5/P8 summaries, current `AGENTS.md` and `CLAUDE.md`. Continue from the explicit open boundaries and latest p8-review-20261020 evidence; do not restart completed scoped implementation or substitute historical gates for current evidence. P6 is explicitly deferred by the user. Preserve existing dirty files and OpenSpec deletions, use isolated fixture stores, and address one remaining boundary at a time. Do not implement P6 priority semantics without explicit design approval. Record failed, blocked and not-run results separately, with exact evidence paths and platform limits. Do not commit or push unless separately requested.
 
 For later turns, replace `P0 and P1` with exactly one package or P8 subpackage. Require the implementer to reread its dependencies and the latest handoff before editing.
 
