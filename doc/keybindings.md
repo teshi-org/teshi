@@ -55,6 +55,18 @@ main-tab navigation, new-document creation, or quit opens an unsaved-changes
 prompt: `S` saves and continues, `D` discards and continues, and `Esc` cancels.
 A failed save keeps the buffer and prompt open so the operation can be retried.
 
+### Requirements Vim subset
+
+Requirements Browse mode supports `i`, `a`, `o`, and `O` for entering or opening
+lines; `Esc` returns to Browse. Movement includes `h/j/k/l`, `w/b/e`, `0`, `^`,
+`$`, `gg`, and `G`. `x`, `dd`, `yy`, `p`, `P`, `u`, and `Ctrl+R` provide local
+editing, yank, paste, and undo/redo. `v` and `V` select characters or lines;
+`y` and `d` operate on the visual selection. `Ctrl+S` saves.
+
+Counts, macros, named registers, search/replace, Ex commands, and full Vim
+operator-motion grammar are outside this subset. Uppercase `I` remains the
+existing iteration editor.
+
 ## Test Points tab
 
 | Key | Action |
