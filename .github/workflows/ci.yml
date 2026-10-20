@@ -118,11 +118,13 @@ jobs:
         if: runner.os != 'Windows'
         env:
           TESHI_SELF_TEST_BIN: ${{ github.workspace }}/target/debug/teshi
+          TESHI_AI_POINTER_ARTIFACTS: ${{ runner.temp }}/ai-pointer-artifacts
         run: cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked -- --ignored
       - name: Run actual Teshi terminal regressions (Windows)
         if: runner.os == 'Windows'
         env:
           TESHI_SELF_TEST_BIN: ${{ github.workspace }}/target/debug/teshi.exe
+          TESHI_AI_POINTER_ARTIFACTS: ${{ runner.temp }}/ai-pointer-artifacts
         run: |
           $env:TESHI_VT_INPUT_TEST_BIN = & ./scripts/prepare-windows-vt-test.ps1
           cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked -- --ignored
