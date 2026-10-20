@@ -33,6 +33,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("new", "Start a new session"),
     ("exit", "Exit Teshi"),
     ("resume", "Resume the most recent session"),
+    ("retry", "Continue an interrupted ACP task"),
     ("copy", "Copy last N assistant responses to clipboard"),
     ("details", "Expand or collapse thinking and tool details"),
     ("models", "Open model settings"),
@@ -359,6 +360,15 @@ impl AgentThread {
     pub fn backend_kind(&self) -> teshi_agent::backend::AgentBackendKind {
         self.backend.kind()
     }
+    /// Whether the last ACP turn ended before normal completion.
+    pub fn task_interrupted(&self) -> bool {
+        matches!(
+            self.last_finish_reason.as_deref(),
+            Some("refusal" | "max_tokens" | "max_turn_requests")
+        ) && self.backend_kind() == teshi_agent::backend::AgentBackendKind::Acp
+            && self.status == AiStatus::Idle
+    }
+
     pub fn messages(&self) -> &[AiChatMessage] {
         self.backend.messages()
     }
@@ -2902,6 +2912,28 @@ impl App {
                         finish_reason,
                     })) => {
                         self.agents[i].last_finish_reason = finish_reason;
+                        let interrupted = matches!(
+                            self.agents[i].last_finish_reason.as_deref(),
+                            Some("refusal" | "max_tokens" | "max_turn_requests")
+                        ) && self.agents[i].backend_kind()
+                            == teshi_agent::backend::AgentBackendKind::Acp;
+                        if interrupted {
+                            let reason = self.agents[i]
+                                .last_finish_reason
+                                .as_deref()
+                                .unwrap_or("unknown");
+                            let content = format!(
+                                "Task interrupted: agent returned {reason}. The task may be incomplete. Use /retry or Continue task to continue from the last checkpoint."
+                            );
+                            self.agents[i].messages_mut().push(AiChatMessage {
+                                role: AiRole::Assistant,
+                                content,
+                                tool_calls: None,
+                                tool_call_id: None,
+                                reasoning_content: None,
+                                source: Some("agent_progress".into()),
+                            });
+                        }
                         self.agents[i].status = AiStatus::Idle;
                         self.agents[i].tool_status = None;
                         // The agent finished without waiting for an answer.
@@ -2910,7 +2942,11 @@ impl App {
                         self.agents[i].last_input_tokens = input_tokens;
                         self.agents[i].total_output_tokens += output_tokens.unwrap_or(0) as u64;
                         if i == self.selected_agent {
-                            self.status = format!("AI response received ({model})");
+                            self.status = if interrupted {
+                                "Task interrupted — /retry to continue".into()
+                            } else {
+                                format!("AI response received ({model})")
+                            };
                         }
                     }
                     Ok(Some(AgentBackendEvent::ToolActivity {
@@ -3457,6 +3493,7 @@ impl App {
             self.agent_mut().input = user_msg;
             return Ok(());
         }
+        self.agent_mut().last_finish_reason = None;
         self.agent_mut().scroll_offset = 0;
         self.agent_mut().messages_mut().push(AiChatMessage {
             role: AiRole::User,
@@ -7533,6 +7570,9 @@ impl App {
                     self.slash_suggestion_selection = 0;
                 }
             }
+            Action::AiContinueTask => {
+                self.continue_interrupted_task()?;
+            }
             Action::AiSendMessage => {
                 if self.agent().input.trim().is_empty() {
                     self.ai_input_focused = false;
@@ -10397,6 +10437,9 @@ impl App {
         if command == "exit" || command == "quit" {
             return self.cmd_exit();
         }
+        if command == "retry" {
+            return self.continue_interrupted_task();
+        }
         if command == "resume" {
             return self.cmd_resume();
         }
@@ -10496,8 +10539,17 @@ impl App {
         if command == "continue" || command == "continue-generation" {
             return self.continue_test_point_generation();
         }
-        self.status = "Unknown slash command. Try /new, /exit, /resume, /copy, /models, /sessions, /project, /approval, /agent, /generate, /continue".to_string();
+        self.status = "Unknown slash command. Try /new, /exit, /resume, /retry, /copy, /models, /sessions, /project, /approval, /agent, /generate, /continue".to_string();
         Ok(())
+    }
+
+    fn continue_interrupted_task(&mut self) -> Result<()> {
+        if !self.agent().task_interrupted() {
+            self.status = "No interrupted ACP task to continue".into();
+            return Ok(());
+        }
+        // Dispatch through the existing backend without replacing its ACP session.
+        self.dispatch_user_message("Continue the interrupted task from the last checkpoint. First verify which operations have already completed; do not repeat completed tool actions. If you cannot safely continue, explain what is blocking progress.".into())
     }
 
     fn cmd_project(&mut self, argument: Option<&str>) -> Result<()> {
@@ -12212,6 +12264,72 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn interrupted_acp_task_continues_in_same_session() {
+        let (mut app, _project, _store) = slash_test_app();
+        start_mcp_fixture(&mut app, "refusal_once");
+        wait_mcp_fixture(&mut app, |app| app.agent().task_interrupted());
+        assert!(app.status.contains("Task interrupted"));
+        assert!(
+            app.agent()
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("agent returned refusal"))
+        );
+        let session = app.agent().backend.acp_controls().unwrap().session_id;
+        app.active_tab = MainTab::Ai;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        assert!(app.clickable_regions.iter().any(|region| matches!(
+            region,
+            ClickableRegion::ActionButton {
+                action: Action::AiContinueTask,
+                ..
+            }
+        )));
+        for reason in ["end_turn", "cancelled"] {
+            app.agent_mut().last_finish_reason = Some(reason.into());
+            assert!(!app.agent().task_interrupted());
+        }
+        for reason in ["max_tokens", "max_turn_requests", "refusal"] {
+            app.agent_mut().last_finish_reason = Some(reason.into());
+            assert!(app.agent().task_interrupted());
+        }
+        app.agent_mut().input = "keep this draft".into();
+        app.handle_action(Action::AiContinueTask).unwrap();
+        // A second click cannot enqueue another turn while one is running.
+        app.handle_action(Action::AiContinueTask).unwrap();
+        wait_mcp_fixture(&mut app, |app| {
+            app.agent().last_finish_reason.as_deref() == Some("end_turn")
+        });
+        assert!(!app.agent().task_interrupted());
+        assert_eq!(
+            app.agent().backend.acp_controls().unwrap().session_id,
+            session
+        );
+        assert_eq!(app.agent().input, "keep this draft");
+        assert_eq!(
+            app.agent()
+                .messages()
+                .iter()
+                .filter(|m| m.role == AiRole::User)
+                .count(),
+            1
+        );
+        assert!(
+            app.agent()
+                .messages()
+                .iter()
+                .any(|m| m.content == "Continued in original session")
+        );
+        app.execute_slash_command("retry").unwrap();
+        assert_eq!(app.status, "No interrupted ACP task to continue");
+        stop_fixture_agents(&mut app);
     }
 
     #[test]

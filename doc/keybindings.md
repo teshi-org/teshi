@@ -177,3 +177,12 @@ the previous external process, its tool state, or transient session settings.
 | `Ctrl+Y` | Redo |
 | `s` | Save current file |
 | `q` | Quit (press twice if buffer is dirty) |
+
+### Interrupted ACP tasks
+
+When an ACP agent ends with `refusal`, `max_tokens`, or `max_turn_requests`,
+chat retains an interruption notice and shows a **Continue task** button.
+Click it or submit `/retry` to continue in the current session, asking the agent
+to verify completed operations before proceeding. This is an explicit new turn;
+Teshi does not automatically replay tools or infer authentication failure from
+`refusal`. `/continue` retains its test-point generation review behavior.

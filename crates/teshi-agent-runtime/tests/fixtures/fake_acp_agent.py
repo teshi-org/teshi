@@ -72,6 +72,16 @@ for line in sys.stdin:
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"configOptions": config_options()}})
     elif method == "session/prompt":
         prompt_count += 1
+        if mode == "refusal_once":
+            assert message["params"]["sessionId"] == "fake-session"
+            if prompt_count == 1:
+                reason = "refusal"
+            else:
+                assert "do not repeat completed tool actions" in message["params"]["prompt"][0]["text"]
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "fake-session", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Continued in original session"}}}})
+                reason = "end_turn"
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": reason}})
+            continue
         if mode.startswith("mcp_"):
             address = mcp_server["args"][-1]
             host, port = address.rsplit(":", 1)

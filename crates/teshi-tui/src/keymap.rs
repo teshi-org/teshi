@@ -208,6 +208,8 @@ pub enum Action {
     // AI tab input
     AiSendChar(char),
     AiSendMessage,
+    /// Continue an interrupted ACP task in the current session.
+    AiContinueTask,
     AiBackspace,
     /// Scroll chat history up (Alt+Up).
     AiScrollUp,

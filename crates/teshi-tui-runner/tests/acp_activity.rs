@@ -303,3 +303,123 @@ fn fake_acp_activity_compact_expanded_and_narrow() {
     terminal.expect_exit(0, 10000).unwrap();
     println!("Screenshots: {}", output.display());
 }
+
+#[test]
+#[ignore = "requires TESHI_SELF_TEST_BIN pointing to a built CLI and Python"]
+fn interrupted_acp_task_can_continue_in_real_terminal() {
+    for use_button in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let gate = root.path().join("gate");
+        let output = std::env::var_os("TESHI_ACTIVITY_ARTIFACTS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| root.path().join("screenshots"));
+        let output = output.join(if use_button { "button" } else { "slash" });
+        std::fs::create_dir_all(&output).unwrap();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../teshi-agent-runtime/tests/fixtures/fake_acp_agent.py")
+            .canonicalize()
+            .unwrap();
+        let launch = Launch {
+            program: std::env::var("TESHI_SELF_TEST_BIN").unwrap(),
+            args: vec![
+                project.to_string_lossy().into_owned(),
+                "--requirements-root".into(),
+                root.path()
+                    .join("requirements")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
+            cwd: Some(root.path().to_string_lossy().into_owned()),
+            env: vec![
+                // The host agent shell disables color; this regression measures it.
+                ("NO_COLOR".into(), String::new()),
+                ("TERM".into(), "xterm-256color".into()),
+                ("COLORTERM".into(), "truecolor".into()),
+                (
+                    "APPDATA".into(),
+                    root.path().join("appdata").to_string_lossy().into_owned(),
+                ),
+                (
+                    "LOCALAPPDATA".into(),
+                    root.path().join("localdata").to_string_lossy().into_owned(),
+                ),
+                (
+                    "XDG_CONFIG_HOME".into(),
+                    root.path().join("config").to_string_lossy().into_owned(),
+                ),
+                (
+                    "XDG_DATA_HOME".into(),
+                    root.path().join("data").to_string_lossy().into_owned(),
+                ),
+                (
+                    "TESHI_SESSION_DIR".into(),
+                    root.path().join("sessions").to_string_lossy().into_owned(),
+                ),
+                (
+                    "TESHI_ACP_STORE_DIR".into(),
+                    root.path().join("acp").to_string_lossy().into_owned(),
+                ),
+                ("TESHI_AGENT_BACKEND".into(), "acp".into()),
+                (
+                    "TESHI_ACP_PROGRAM".into(),
+                    if cfg!(windows) { "python" } else { "python3" }.into(),
+                ),
+                (
+                    "TESHI_ACP_ARGS_JSON".into(),
+                    serde_json::to_string(&[fixture.to_string_lossy().as_ref(), "refusal_once"])
+                        .unwrap(),
+                ),
+                (
+                    "TESHI_ACTIVITY_GATE".into(),
+                    gate.to_string_lossy().into_owned(),
+                ),
+            ],
+            cols: 120,
+            rows: 40,
+        };
+        let terminal = Terminal::launch(launch).unwrap();
+        terminal.expect_text("Explore", true, 15000).unwrap();
+        terminal.key("3").unwrap();
+        terminal
+            .expect_text("Welcome to AI Chat!", true, 15000)
+            .unwrap();
+        terminal.key("Enter").unwrap();
+        terminal.write("Inspect the project").unwrap();
+        terminal.key("Enter").unwrap();
+        terminal
+            .expect_text("Task interrupted", true, 15000)
+            .unwrap();
+        terminal
+            .expect_text("[Continue task]", true, 15000)
+            .unwrap();
+        terminal
+            .screenshot(&output.join("interrupted.svg"))
+            .unwrap();
+        std::fs::write(output.join("interrupted.txt"), terminal.screen().unwrap()).unwrap();
+        if use_button {
+            terminal.click_text("[Continue task]", 15000).unwrap();
+        } else {
+            terminal.write("/retry").unwrap();
+            terminal.key("Enter").unwrap();
+        }
+        terminal
+            .expect_text("Continued in original session", true, 15000)
+            .unwrap();
+        terminal
+            .expect_text("[Continue task]", false, 2000)
+            .unwrap();
+        terminal.screenshot(&output.join("continued.svg")).unwrap();
+        terminal.key("Escape").unwrap();
+        terminal.key("q").unwrap();
+        terminal.expect_exit(0, 10000).unwrap();
+        let sessions = std::fs::read_dir(root.path().join("sessions")).unwrap();
+        let transcript = sessions
+            .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(transcript.contains("agent returned refusal"));
+        assert!(transcript.contains("Continued in original session"));
+    }
+}

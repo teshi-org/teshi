@@ -1148,8 +1148,43 @@ fn push_acp_permission_prompt(out: &mut Vec<Line<'static>>, app: &App, width: us
 }
 
 /// Renders the one-row status line: activity on the left, model tag on the right.
-fn render_chat_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_chat_status(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if area.width == 0 || area.height == 0 {
+        return;
+    }
+    if app.agent().task_interrupted() {
+        let label = "[Continue task]";
+        let button_width = (label.len() as u16).min(area.width);
+        let button = Rect::new(area.right() - button_width, area.y, button_width, 1);
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                label,
+                fg(theme::WARNING).add_modifier(Modifier::BOLD),
+            )),
+            button,
+        );
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect: button,
+            action: crate::keymap::Action::AiContinueTask,
+            modal: false,
+        });
+        let reason = app
+            .agent()
+            .last_finish_reason
+            .as_deref()
+            .unwrap_or("unknown");
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                format!("Task interrupted ({reason}) · /retry"),
+                fg(theme::WARNING),
+            )),
+            Rect::new(
+                area.x,
+                area.y,
+                area.width.saturating_sub(button_width + 1),
+                1,
+            ),
+        );
         return;
     }
     let agent = app.agent();
