@@ -1,5 +1,8 @@
 # Module Reference
 
+The current project ownership, activation reset and supported process-shutdown
+rules are defined in [TUI project switching contract](project-switch-contract.md).
+
 ## `app.rs` — Application orchestrator (~4300 lines)
 
 The core of the application. `App` holds ~60 fields including:
@@ -23,6 +26,64 @@ The core of the application. `App` holds ~60 fields including:
 | `feed_agent_tool_result()` | Sends tool execution result back to LLM, continues agent loop |
 | Explorer methods | `build_explore_cases()`, `start_explore_run()`, `apply_run_event()`, persist/restore explore memory |
 | Editor operations | `insert_step()`, `insert_scenario()`, `delete_current_node()`, `copy_current_step()`, `paste_step()`, `undo()`/`redo()` |
+
+### Project switch lifecycle
+
+`ProjectSwitchState` owns the active `ProjectStamp` (`ProjectIdentity` plus a
+monotonic `ProjectGeneration`), the pending target, recent entries, and the
+switch overlay. `App::request_project_switch()` resolves the target and checks
+dirty objects before `prepare_project_context()` builds a detached candidate.
+`commit_project_switch()` replaces the project-scoped buffers, indexes,
+runner configuration, agent roots, and test-point state only after preparation
+succeeds. Project stamps expose identity/generation checks; they do not replace
+task shutdown. External runner events belong to the active runner receiver,
+which must finish before the new project can replace that state.
+
+`spawn_runner_with_control()` returns an event receiver and cancellation sender.
+Stopping a running external runner targets its owned PID and descendants with
+`taskkill /PID /T /F` on Windows, or its dedicated process group on Unix. It never
+selects processes by executable name. `RunnerExit` follows process wait and both
+output-reader joins. A stop failure retains ownership while the switcher waits;
+the five-second timeout leaves project A and its edits active. The commit path
+also rechecks busy tasks after dirty-state resolution. Detached descendants that
+leave the owned tree/group are outside this cancellation mechanism. Synchronous
+dispatch has timeout/retry acceptance with A retained until completion; see the
+current [project-switch contract](project-switch-contract.md) for ownership,
+activation resets and the explicitly accepted Unix containment boundary.
+
+Agent backends expose `request_shutdown()`, `shutdown_pending()`, and
+`poll_shutdown()`. The TUI polls them even after canceling a switch, and it keeps
+the old context until model/ACP workers and the MCP bridge acknowledge exit.
+Idle connected backends also stop before detached preparation. Native workers
+retain their thread handles and wake stalled HTTP reads when canceled; their
+shutdown flag cannot be reset by a queued request. ACP shutdown rejects queued
+host calls and stops delivering old events before joining exited resources.
+Starting/configuring a still-stopping ACP backend returns a retryable error
+instead of blocking on its old worker. Stopping tasks preserves unapplied Agent
+proposals for the existing explicit dirty-state decision.
+
+Global requirement storage, model profiles, credentials, and recent-project
+history remain outside the project context. A switch preserves the configured
+global requirement root while reloading project-local associations and session
+history for the new normalized identity. The TUI picker accepts keyboard and
+pointer input; `Open path` owns printable path characters, including `j` and
+`k`, until it commits or cancels.
+
+The default session browser and `/resume` filter by normalized project identity;
+restoration and checkpointing also enforce ownership. `/sessions legacy` is an
+explicit `Legacy / Unassigned` view. Loading or checkpointing old history keeps
+its missing owner, while newly created conversations acquire the active project
+root. Deleting in the legacy view refreshes that same view. Restoration waits
+asynchronously for the previous backend to exit, with the pending request bound
+to its agent and project generation; Escape cancels it. A project commit clears
+pending restoration and the old session's model caption. Requirement state is
+loaded afresh from the shared store and the target project's test points, so
+old link selections/highlights cannot refer to the previous project's points.
+
+Recent-project labels and full paths are wrapped into physical display rows.
+The picker reserves space for its controls, scrolls the selected entry into
+view, and derives pointer targets from those same rows. Long paths therefore
+cannot hide `Open path` or shift a click onto another project.
 
 ---
 
@@ -126,6 +187,7 @@ Pure functions operating on `EditorBuffer` for BDD-aware editing:
 ### Execution
 
 - `spawn_runner(config, request)` — spawns subprocess, writes request to stdin, parses NDJSON events from stdout on a dedicated thread
+- `spawn_runner_with_control(config, request)` — retains the owned process tree until cancellation/completion and output readers have finished; returns events plus a cancellation sender
 - `run_cli(config, request)` — non-TUI mode for `teshi run` CLI command
 - Stderr output is forwarded as `Log` events
 
@@ -280,7 +342,7 @@ Used primarily for AI chat message rendering.
 
 ## LLM profiles (shared via `teshi-engine`)
 
-Runtime LLM settings live in `<app_data>/teshi/model-profiles/` (JSON), shared by TUI, CLI, Desktop, and daemon. See `doc/cli-usage.md` and `openspec/specs/llm-model-profiles/spec.md`.
+Runtime LLM settings live in `<app_data>/teshi/model-profiles/` (JSON), shared by TUI, CLI, Desktop, and daemon. See `doc/cli-usage.md` and the model-profile unit/integration tests in `crates/teshi-engine/src/model_profile.rs`.
 
 TUI helpers: `profiles/` wraps engine CRUD; `llm.rs` calls `effective_llm_config()`.
 

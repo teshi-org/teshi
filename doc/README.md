@@ -11,4 +11,5 @@ Terminal-first BDD editor with AI assistance, mind-map navigation, and external 
 - [Architecture](architecture.md) — System overview, data flow, and module dependency graph
 - [Module Reference](modules.md) — Detailed breakdown of every source module
 - [Development Guide](development.md) — Building, testing, contributing, and code conventions
+- [Test Strategy](test-strategy.md) — Feature E2E, unit, integration, and contract-test ownership
 - [Browser Modes](browser-modes.md) — Connect Chrome vs Embedded for BDD locator recording

@@ -1,10 +1,12 @@
 # Chrome Browser Broker Rust Migration: Baseline Review
 
 Baseline source: `dev` at `6728bfef746679d2f1d825152d0ffb8e0f9e19a2` (2026-09-24).
-The implementation plan and module-level migration table are in
-[`openspec/changes/migrate-chrome-browser-broker-to-rust/design.md`](../openspec/changes/migrate-chrome-browser-broker-to-rust/design.md).
-This report records the pre-Rust behavior boundary and the checks run before changing
-which implementation is selected at runtime.
+The current executable behavior is carried by the browser broker unit and
+integration tests, the Python broker contract tests, the extension Node tests,
+and the CLI/browser Feature workflows described in
+[`doc/test-strategy.md`](test-strategy.md). This report records the pre-Rust
+behavior boundary and the checks run before changing which implementation is
+selected at runtime.
 
 ## Current ownership
 
@@ -85,7 +87,7 @@ Executed on the current Python implementation before changing runtime selection:
 | `python -m unittest discover -s resources/tests -p 'test_browser_p2_privileged.py' -k setup_failure -q` | 1 setup-cleanup regression test passed |
 | `node --test extension/teshi-bridge/tests/protocol.test.mjs extension/teshi-bridge/tests/network-capture.test.mjs` | 25 tests passed |
 | `cargo test -p teshi-engine shared_contract_fixture_preserves_legacy_and_versioned_messages --locked` | 1 Rust fixture-consumer test passed |
-| `cargo fmt --all --check`, `git diff --check`, `openspec validate migrate-chrome-browser-broker-to-rust --strict` | All passed |
+| `cargo fmt --all --check`, `git diff --check`, `openspec validate migrate-chrome-browser-broker-to-rust --strict` | All passed at the historical baseline; OpenSpec validation is retired |
 
 The existing Python suite asserts target isolation, ambiguous-target rejection, leases,
 request races/duplicate dispatch/disconnect cleanup, stale element references, locator

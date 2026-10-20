@@ -1,5 +1,6 @@
 # Rust build artifacts
 target/
+/target-e2e/
 
 # Local Cargo cache (e.g. sandboxed CARGO_HOME under the repo)
 .cargo-local/
@@ -19,7 +20,7 @@ Thumbs.db
 # Cursor: ignore local workspace state, keep shared rules
 .cursor/*
 
-# OpenSpec change tracking (separate BDD project artifacts)
+# Local agent state (separate from project test artifacts)
 .agents/
 
 # Miscellaneous working-tree artifacts

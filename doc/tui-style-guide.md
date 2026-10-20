@@ -13,7 +13,7 @@ is the source of truth. GPUI desktop and web shells are outside this guide.
 6. Footer keys use PRIMARY bold and descriptions FOOTER_DESC on a full-width FOOTER_BG strip.
 7. Inactive tabs use TAB_INACTIVE. Active tabs use TAB_ACTIVE_BG and bold text, with a PRIMARY underline derived from the registered click region.
 8. Use the documented glyph vocabulary below; document additions before use.
-9. Preserve geometry; retain one-cell horizontal panel padding and blank lines between groups where the existing layout allows them. Retain hatched empty states.
+9. Preserve geometry; retain one-cell horizontal panel padding and blank lines between groups where the existing layout allows them. Retain hatched empty states. Horizontal scrollbars use `─` tracks and `━` thumbs; vertical scrollbars use `│` and `┃`, with the existing theme colors.
 10. Clear popups first, then draw rounded PRIMARY borders, PRIMARY bold titles, and action chips.
 
 Never paint the terminal background globally. Fill only selections, chips, active
@@ -112,7 +112,7 @@ whole panels, or calculate tab underline widths independently of click regions.
 - Phase 2: Explore panels, status/diffs, scrollbars, editor, shared Gherkin mapping; highlight cap zero; lower ui cap.
 - Phase 3: MindMap panels, category mapping, preview; mindmap cap zero; lower ui cap.
 - Phase 4: Requirements/Test Points panels, footer and chips; all page caps zero.
-- Close-out: unchanged text and runner tests, tab samples, OpenSpec validation; archive after merge.
+- Close-out: unchanged text and runner tests, tab samples, the Feature catalog, and unit/integration gates; archive after merge.
 
 For every phase run formatting, workspace clippy and workspace tests excluding
 the wasm-only teshi-web crate. Install with the dev-profile local install script

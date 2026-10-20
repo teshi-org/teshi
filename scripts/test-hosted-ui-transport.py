@@ -25,9 +25,6 @@ WEB_INDEX = (ROOT / "apps" / "teshi-web" / "web" / "index.html").read_text(
 SERVER_SOURCE = (ROOT / "apps" / "teshi-daemon" / "src" / "server.rs").read_text(
     encoding="utf-8"
 )
-INVENTORY = (ROOT / "openspec" / "changes" / "archive" / "2026-09-10-decouple-nightly-cli-and-hosted-web-ui" / "operation-inventory.md").read_text(
-    encoding="utf-8"
-)
 SESSION_SOURCE = (ROOT / "apps" / "teshi-daemon" / "src" / "session.rs").read_text(
     encoding="utf-8"
 )
@@ -90,6 +87,8 @@ HOSTED_CONTROL_INVENTORY = {
     "terminal.write",
     "runtime.shutdown",
 }
+# This executable set is the hosted UI contract. Keep it in the test rather
+# than duplicating it in a generated requirements document.
 
 
 def main() -> int:
@@ -143,17 +142,6 @@ def main() -> int:
             "hosted UI methods are not registered by daemon control dispatch: "
             + ", ".join(missing_server_methods)
         )
-    inventory_methods = set(re.findall(r'`([a-z][a-z0-9_.]+)`', INVENTORY))
-    missing_inventory_documentation = sorted(
-        method for method in HOSTED_CONTROL_INVENTORY if method not in inventory_methods
-    )
-    # The inventory intentionally uses `locator.*`/`steps.*` in its compact
-    # table; every concrete dispatcher method must still be represented by a
-    # concrete method in the implementation contract.
-    for method in missing_inventory_documentation:
-        prefix = method.split(".", 1)[0]
-        if f"{prefix}.*" not in INVENTORY:
-            raise SystemExit("operation inventory is missing " + method)
     missing_inventory_methods = sorted(HOSTED_CONTROL_INVENTORY - server_methods)
     if missing_inventory_methods:
         raise SystemExit(

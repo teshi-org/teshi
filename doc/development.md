@@ -29,7 +29,9 @@ Windows and Linux. The self-tests launch the actual Teshi TUI with isolated data
 directories, replay the English and Chinese `@tui` Features, and verify saved file
 contents after navigation, running a scenario from Explore, editing, saving and
 exit. These regressions have also been verified locally on Windows and Linux
-(WSL). The CI matrix keeps both platforms covered independently.
+(WSL). The CI matrix keeps both platforms covered independently. WSL is an
+optional development environment for Linux shell scripts, not a prerequisite
+for the Windows Rust build or the TUI runner.
 
 For another application, install the runner with
 `cargo install --path crates/teshi-tui-runner --profile dev --locked`, record a
@@ -124,8 +126,8 @@ cargo fmt --all --check                                           # check format
 ### Test layout
 
 - Unit tests live at the bottom of each source file (in `#[cfg(test)]` modules)
-- Product Gherkin: `features/en-US/`, `features/zh-CN/`, and `features/winapp/`; every Feature has an explicit verification route and runner tag (`@web-ui`, `@cli`, `@validation-e2e`, `@api`, or `@winapp`)
-- Feature catalog ownership is checked by `python scripts/check-feature-e2e-catalog.py`; Core, architecture, CI packaging, and protocol-internal contracts belong in OpenSpec or Rust/workflow tests
+- Product Gherkin: `features/en-US/`, `features/zh-CN/`, and `features/winapp/`; every Feature has an explicit verification route and runner tag (`@tui`, `@web-ui`, `@cli`, `@validation-e2e`, `@api`, or `@winapp`)
+- Feature catalog ownership is checked by `python scripts/check-feature-e2e-catalog.py`; Core, architecture, CI packaging, and protocol-internal contracts belong in Rust unit/integration tests, workflow contract tests, or documentation. See [Test Strategy](test-strategy.md)
 - Requirement CLI E2E is executed by `teshi run` and `teshi-requirement-cli-runner` (`tests/steps/requirement-cli`) against requirement-tagged CLI files (English `requirement_*.feature`, Chinese titles such as `需求列表.feature` and `需求标签页.feature`)
 - Validation self-bootstrap E2E is executed by `validation_cli_bdd.rs` with `teshi-validation-cli-runner` (`tests/steps/validation-cli`). It creates malformed source as isolated fixture data, then starts the exact built Teshi binary as a child process; it does not use the target validator API for assertions.
 - Key test areas:
