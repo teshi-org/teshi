@@ -579,6 +579,9 @@ def get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
 @contextmanager
 def physical_coordinates():
     """Scope DPI awareness to visual commands without changing legacy UIA actions."""
+    if user32 is None:
+        yield
+        return
     previous = user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
     if not previous:
         raise RuntimeError("cannot establish physical screen coordinate context")
