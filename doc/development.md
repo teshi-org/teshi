@@ -24,7 +24,9 @@ TESHI_SELF_TEST_BIN="$PWD/target/debug/teshi" cargo test --manifest-path crates/
 ```
 
 On Windows, set `$env:TESHI_SELF_TEST_BIN = (Resolve-Path target/debug/teshi.exe).Path`
-before the final command. CI runs the real PTY backend and self-regressions on
+and `$env:TESHI_VT_INPUT_TEST_BIN = & ./scripts/prepare-windows-vt-test.ps1`
+before the final command. The latter selects Cargo's exact unit-test executable
+for the console lifecycle fixture. CI runs the real PTY backend and self-regressions on
 Windows and Linux. The self-tests launch the actual Teshi TUI with isolated data
 directories, replay the English and Chinese `@tui` Features, and verify saved file
 contents after navigation, running a scenario from Explore, editing, saving and

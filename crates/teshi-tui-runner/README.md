@@ -37,6 +37,7 @@ cargo build --manifest-path crates/teshi-tui-runner/Cargo.toml --locked
 cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked
 cargo build -p teshi-cli --locked
 $env:TESHI_SELF_TEST_BIN = (Resolve-Path target/debug/teshi.exe).Path
+$env:TESHI_VT_INPUT_TEST_BIN = & ./scripts/prepare-windows-vt-test.ps1
 cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked -- --ignored
 ```
 

@@ -123,7 +123,9 @@ jobs:
         if: runner.os == 'Windows'
         env:
           TESHI_SELF_TEST_BIN: ${{ github.workspace }}/target/debug/teshi.exe
-        run: cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked -- --ignored
+        run: |
+          $env:TESHI_VT_INPUT_TEST_BIN = & ./scripts/prepare-windows-vt-test.ps1
+          cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked -- --ignored
 
   desktop:
     name: teshi-desktop build (GPUI)
