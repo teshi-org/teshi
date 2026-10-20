@@ -2,6 +2,8 @@
 //!
 //! ACP shutdown must also stop tool processes, including when the agent has
 //! already closed its own transport. PID-only termination loses that ownership.
+//! Unix ownership covers ordinary descendants in the dedicated process group;
+//! deliberate session/group escape is unsupported and is not a sandbox boundary.
 
 use std::io;
 use tokio::process::{Child, Command};

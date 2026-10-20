@@ -94,6 +94,8 @@ def tui_runner(teshi: Path, feature: Path) -> tuple[str | None, str]:
         "记住上次选择的Agent.feature",
         "tui_project_switch_failures.feature",
         "项目切换失败边界.feature",
+        "tui_project_switch_boundaries.feature",
+        "项目切换持久化边界.feature",
     }:
         return str(resolve_runner(teshi, "TESHI_RUNNER_AGENT_FEATURE", "teshi-agent-feature-runner")), "confirmed-semantic"
     # The generic runner is still an executable binding: it will fail closed

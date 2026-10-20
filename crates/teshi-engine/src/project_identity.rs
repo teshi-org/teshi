@@ -137,6 +137,39 @@ mod tests {
     }
 
     #[test]
+    fn actual_relative_and_trailing_separator_aliases_share_identity() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = tempfile::tempdir_in(&cwd).unwrap();
+        let relative = root.path().strip_prefix(&cwd).unwrap();
+        let identity = ProjectIdentity::new(root.path()).unwrap();
+        assert_eq!(ProjectIdentity::new(relative).unwrap(), identity);
+        assert_eq!(
+            ProjectIdentity::new(root.path().join(".")).unwrap(),
+            identity
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn directory_symlinks_resolve_but_distinct_case_sensitive_roots_do_not_merge() {
+        let root = tempdir().unwrap();
+        let upper = root.path().join("Case");
+        let lower = root.path().join("case");
+        std::fs::create_dir(&upper).unwrap();
+        std::fs::create_dir(&lower).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&upper, &alias).unwrap();
+        assert_eq!(
+            ProjectIdentity::new(&alias).unwrap(),
+            ProjectIdentity::new(&upper).unwrap()
+        );
+        assert_ne!(
+            ProjectIdentity::new(&lower).unwrap(),
+            ProjectIdentity::new(&upper).unwrap()
+        );
+    }
+
+    #[test]
     fn generations_are_monotonic() {
         let initial = ProjectGeneration::INITIAL;
         assert_eq!(initial.next().value(), 1);

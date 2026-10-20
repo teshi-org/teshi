@@ -724,7 +724,14 @@ impl Action {
                 (KeyCode::Esc, _) => Some(Self::ClearInputState),
                 (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
                 (KeyCode::Char('/'), KeyModifiers::CONTROL)
+                | (KeyCode::Char('7'), KeyModifiers::CONTROL)
                 | (KeyCode::Char('_'), KeyModifiers::CONTROL) => Some(Self::Undo),
+                // ConPTY decodes the same legacy 0x1f byte as Ctrl+Shift+-.
+                (KeyCode::Char('-' | '_'), modifiers)
+                    if modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+                {
+                    Some(Self::Undo)
+                }
                 (KeyCode::Char('y'), KeyModifiers::CONTROL)
                 | (KeyCode::Char('Y'), KeyModifiers::CONTROL) => Some(Self::Redo),
                 (KeyCode::Up, _) => Some(Self::MoveUp),
@@ -1276,7 +1283,13 @@ impl Action {
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => Some(Self::SwitchKeyword("Then")),
             (KeyCode::Char('a'), KeyModifiers::CONTROL) => Some(Self::SwitchKeyword("And")),
             (KeyCode::Char('/'), KeyModifiers::CONTROL)
+            | (KeyCode::Char('7'), KeyModifiers::CONTROL)
             | (KeyCode::Char('_'), KeyModifiers::CONTROL) => Some(Self::Undo),
+            (KeyCode::Char('-' | '_'), modifiers)
+                if modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+            {
+                Some(Self::Undo)
+            }
             (KeyCode::Char('y'), KeyModifiers::CONTROL)
             | (KeyCode::Char('Y'), KeyModifiers::CONTROL) => Some(Self::Redo),
             (KeyCode::Char(' '), KeyModifiers::NONE)
@@ -1405,6 +1418,35 @@ mod tests {
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
+        }
+    }
+
+    #[test]
+    fn undo_accepts_legacy_pty_control_seven_in_editor_contexts() {
+        let mut context = chat_context(MainTab::Explore, MindMapFocus::Main, false);
+        context.view_stage = ViewStage::EditorAndPanel;
+        context.explore_edit_mode = true;
+        for step_input in [false, true] {
+            context.step_input_active = step_input;
+            for ch in ['/', '_', '7'] {
+                assert_eq!(
+                    Action::from_key_event(
+                        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL),
+                        context,
+                    ),
+                    Some(Action::Undo),
+                );
+            }
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(
+                        KeyCode::Char('-'),
+                        KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                    ),
+                    context,
+                ),
+                Some(Action::Undo),
+            );
         }
     }
 

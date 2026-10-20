@@ -85,6 +85,7 @@ fn main() -> Result<()> {
             "记住上次选择的Agent.feature" => "tui_agent_selection_memory.feature",
             "ACP模型选择持久化.feature" => "tui_acp_model_persistence.feature",
             "项目切换失败边界.feature" => "tui_project_switch_failures.feature",
+            "项目切换持久化边界.feature" => "tui_project_switch_boundaries.feature",
             name => name,
         };
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -133,6 +134,8 @@ fn main() -> Result<()> {
             case["feature_path"].as_str().is_some_and(|path| {
                 path.ends_with("tui_project_switch_failures.feature")
                     || path.ends_with("项目切换失败边界.feature")
+                    || path.ends_with("tui_project_switch_boundaries.feature")
+                    || path.ends_with("项目切换持久化边界.feature")
             })
         })
     });

@@ -51,6 +51,31 @@ class World(TerminalWorld):
         self.blocked = None
         self.chat_active = False
         self.dispatch = None
+        self.read_handle = None
+        self.read_protected = None
+        self.alias = None
+        self.persistence_block = None
+
+    def restore_read_access(self):
+        if self.read_handle is not None:
+            import ctypes
+            ctypes.windll.kernel32.CloseHandle(self.read_handle)
+            self.read_handle = None
+        if self.read_protected is not None:
+            self.read_protected.chmod(0o755)
+            self.read_protected = None
+
+    def restore_persistence(self):
+        if self.persistence_block is not None:
+            path, source = self.persistence_block
+            path.rmdir()
+            path.write_bytes(source)
+            self.persistence_block = None
+
+    def block_persistence(self, path):
+        self.persistence_block = (path, path.read_bytes())
+        path.unlink()
+        path.mkdir()
 
     def wait_file(self, name, timeout=10):
         deadline = time.monotonic() + timeout
@@ -70,14 +95,224 @@ class World(TerminalWorld):
             if review:
                 fixture = fixture.with_name("fake_acp_agent.py")
                 env += [("TESHI_ACP_ARGS_JSON", json.dumps([str(fixture), "mcp_review"]))]
-        self.op("launch", config=dict(program=os.environ["TESHI_SELF_TEST_BIN"],
-                args=[str(self.project), "--requirements-root", str(self.requirements)],
+        program = os.environ["TESHI_SELF_TEST_BIN"]
+        args = [str(self.project), "--requirements-root", str(self.requirements)]
+        if os.name != "nt" and os.geteuid() == 0:
+            args = ["--bounding-set=-dac_override,-dac_read_search", program] + args
+            program = "/usr/bin/setpriv"
+        self.op("launch", config=dict(program=program, args=args,
                 cwd=str(self.root), env=env, cols=140, rows=36))
         self.process = True
         self.expect("Project: project-a")
         self.expect("controlled service" if self.dispatch is not None else "project-a step")
 
     def step(self, text, table=None):
+        if text == "project B contains a Feature with invalid encoding":
+            (self.other / "bad.feature").write_bytes(b"\xff\xfe")
+            self.read_error_path = "bad.feature"
+            return
+        if text == "a nested Feature in project B cannot be read":
+            nested = self.other / "restricted"
+            nested.mkdir()
+            path = nested / "hidden.feature"
+            path.write_text("Feature: Hidden\n", encoding="utf-8")
+            self.read_error_path = "restricted"
+            if os.name == "nt":
+                import ctypes
+                from ctypes import wintypes
+                kernel = ctypes.windll.kernel32
+                kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                              wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+                kernel.CreateFileW.restype = wintypes.HANDLE
+                kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+                self.read_handle = kernel.CreateFileW(str(path), 0x80000000, 0, None, 3, 128, None)
+                assert self.read_handle != ctypes.c_void_p(-1).value, "cannot lock owned fixture"
+            else:
+                nested.chmod(0)
+                self.read_protected = nested
+            return
+        if text == "the target read restriction is removed":
+            self.restore_read_access()
+            return
+        if text == "the operator chooses Discard and switch":
+            self.expect("Unsaved project state must be resolved first")
+            self.op("key", "d")
+            return
+        if text == "the target read error is visible and A's edit remains available":
+            screen = self.expect("Could not prepare project B")
+            assert self.read_error_path in screen, screen
+            self.expect("Project: project-a")
+            self.expect("project-a step unsaved-marker")
+            assert "unsaved-marker" not in (self.project / "sample.feature").read_text()
+            self.evidence.append(dict(event="target_read_failed_kept_a", path=self.read_error_path, screen=screen))
+            return
+        if text == "both projects are ready without unsaved edits":
+            self.launch_project()
+            return
+        if text == "recent project history cannot be saved":
+            path = self.root / "app-data/recent.json"
+            path.parent.mkdir(exist_ok=True)
+            path.unlink(missing_ok=True)
+            path.mkdir()
+            return
+        if text == "project B is active with a recent-history persistence warning":
+            screen = self.expect("recent history was not saved")
+            assert "Project: project-b" in screen, screen
+            self.expect("project-b step")
+            self.evidence.append(dict(event="history_failure_did_not_undo_activation", screen=screen))
+            return
+        if text == "recent projects have the same display name and different paths":
+            parent = self.root / "other-parent"
+            parent.mkdir()
+            self.other.rename(parent / "project-a")
+            self.other = parent / "project-a"
+            self.launch_project()
+            history = self.root / "app-data/recent.json"
+            history.parent.mkdir(exist_ok=True)
+            history.write_text(json.dumps(dict(projects=[dict(root=str(p), display_name="project-a", last_opened_ms=1)
+                                                        for p in (self.project, self.other)])), encoding="utf-8")
+            return
+        if text == "the operator selects the other project's path in the recent picker":
+            self.op("click", "Project: project-a")
+            screen = self.expect("other-parent")
+            compact = re.sub(r"[\s│┃║]", "", screen)
+            assert str(self.project) in compact and str(self.other) in compact, screen
+            self.evidence.append(dict(event="equal_names_distinct_paths", screen=screen))
+            self.op("click", "other")
+            return
+        if text == "the other project's Feature is active despite the shared name":
+            screen = self.expect("project-b step")
+            assert "Project: project-a" in screen and "project-a step" not in screen, screen
+            self.evidence.append(dict(event="equal_name_pointer_selected_b", screen=screen))
+            return
+        if text == "both projects' source files remain unchanged":
+            for path, name in [(self.project, "project-a"), (self.other, "project-b")]:
+                assert (path / "sample.feature").read_text(encoding="utf-8") == self.sources[name]
+            return
+        if text == "project A has a filesystem directory alias":
+            self.alias = self.root / "project-alias"
+            if os.name == "nt":
+                subprocess.run(["cmd", "/c", "mklink", "/J", str(self.alias), str(self.project)],
+                               check=True, capture_output=True)
+            else:
+                self.alias.symlink_to(self.project, target_is_directory=True)
+            return
+        if text == "the operator requests project A through its path aliases":
+            aliases = [str(self.alias), str(self.project) + os.sep + "." + os.sep, "project-a"]
+            if os.name == "nt":
+                aliases.append(str(self.project.with_name("PROJECT-A")))
+            for alias in aliases:
+                self.op("click", "Project: project-a")
+                self.expect("Open project")
+                self.op("key", "o")
+                self.expect("Open project path")
+                self.op("write", alias)
+                self.op("key", "Enter")
+                self.expect("Already on that project")
+                self.evidence.append(dict(event="alias_noop", alias=alias, screen=self.screen()))
+            return
+        if text == "the same-project notice preserves A's unsaved edit without confirmation":
+            screen = self.expect("project-a step unsaved-marker")
+            assert "Unsaved project state must be resolved first" not in screen, screen
+            return
+        if text == "project A has an unsaved requirement draft":
+            body = "# Boundary requirement\n\nbody\n"
+            (self.requirements / "req.md").write_text(body, encoding="utf-8")
+            (self.requirements / "_teshi.json").write_text(json.dumps(dict(version=2, store_id="reqstore-boundary",
+                documents=[dict(id="boundary", path="req.md", title="Boundary requirement", revision="fixture")])), encoding="utf-8")
+            self.launch_project()
+            self.op("key", "4")
+            self.expect("body")
+            self.op("click", "body")
+            self.op("key", "i")
+            self.op("key", "End")
+            self.op("write", " draft-marker")
+            self.op("key", "Escape")
+            self.expect("body draft-marker")
+            return
+        if text == "the requirement save destination is unavailable":
+            self.block_persistence(self.requirements / "req.md")
+            return
+        if text == "the operator cancels the failed switch":
+            self.op("key", "Escape")
+            self.expect("Project: project-a")
+            return
+        if text == "project A still displays its unsaved requirement draft":
+            screen = self.expect("body draft-marker")
+            assert self.persistence_block is not None
+            self.evidence.append(dict(event="draft_save_failure_retained", screen=screen))
+            return
+        if text in {"the requirement save destination is restored", "the test-point save destination is restored"}:
+            self.restore_persistence()
+            return
+        if text == "B is active and the requirement draft is saved in the shared store":
+            self.expect("Project: project-b")
+            source = (self.requirements / "req.md").read_text(encoding="utf-8")
+            assert "body draft-marker" in source, source
+            assert not (self.other / "req.md").exists()
+            self.evidence.append(dict(event="draft_retry_saved_shared_store", source=source))
+            return
+        if text == "project A has an unsaved test-point field edit":
+            path = self.project / "testpoints/testpoints.json"
+            path.parent.mkdir()
+            path.write_text(json.dumps(dict(version=1, test_points=[dict(id="tp-boundary", title="Boundary point",
+                objective="Check persistence", hierarchy_path=["Boundary"], review_state="approved",
+                requirement_links=[], scenario_refs=[])])), encoding="utf-8")
+            self.launch_project()
+            self.op("key", "5")
+            self.expect("Boundary point")
+            self.op("click", "Title:")
+            self.op("write", "界")
+            self.expect("Boundary point界")
+            return
+        if text == "the test-point save destination is unavailable":
+            self.block_persistence(self.project / "testpoints/testpoints.json")
+            return
+        if text == "project A still displays its unsaved test-point edit":
+            screen = self.expect("Boundary point界")
+            assert self.persistence_block is not None
+            self.evidence.append(dict(event="point_save_failure_retained", screen=screen))
+            return
+        if text == "B is active and A's changed test point still requires human review":
+            self.expect("Project: project-b")
+            saved = json.loads((self.project / "testpoints/testpoints.json").read_text())
+            point = saved["test_points"][0]
+            assert point["title"] == "Boundary point界" and point["review_state"] == "proposed", point
+            assert not (self.other / "testpoints/testpoints.json").exists()
+            self.evidence.append(dict(event="point_retry_saved_without_approval", point=point))
+            return
+        if text == "the operator undoes and redoes in project B's editor":
+            self.op("key", "Escape")
+            self.op("key", "1")
+            self.expect("project-b step")
+            self.op("key", "e")
+            self.op("key", "Enter")
+            self.op("key", "Ctrl+_")
+            time.sleep(.15)
+            screen = self.expect("project-b step")
+            assert "project-a step" not in screen and "unsaved-marker" not in screen, screen
+            self.op("key", "Ctrl+y")
+            time.sleep(.15)
+            self.expect("project-b step")
+            # A positive control proves both shortcuts reached the editor.
+            self.op("key", "End")
+            self.op("write", "Q")
+            self.expect("project-b stepQ")
+            self.op("key", "Ctrl+_")
+            deadline = time.monotonic() + 5
+            while "project-b stepQ" in self.screen():
+                assert time.monotonic() < deadline, self.screen()
+                time.sleep(.01)
+            self.op("key", "Ctrl+y")
+            self.expect("project-b stepQ")
+            self.op("key", "Ctrl+_")
+            time.sleep(.15)
+            return
+        if text == "project B's editor still contains only project B's content":
+            screen = self.expect("project-b step")
+            assert "project-a step" not in screen and "unsaved-marker" not in screen, screen
+            self.evidence.append(dict(event="editor_history_isolated", screen=screen))
+            return
         if text == "project A has proposed test points awaiting human review":
             self.launch_project(acp=True, review=True)
             self.op("key", "3")
@@ -313,6 +548,14 @@ class World(TerminalWorld):
         raise AssertionError("Unbound step: " + text)
 
     def close(self):
+        self.restore_read_access()
+        self.restore_persistence()
+        if self.alias is not None:
+            if os.name == "nt":
+                self.alias.rmdir()
+            else:
+                self.alias.unlink()
+            self.alias = None
         # Cooperatively reap the owned fixture even when the old product fails.
         evidence = self.root / "agent-evidence"
         if evidence.exists():

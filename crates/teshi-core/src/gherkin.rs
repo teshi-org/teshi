@@ -363,6 +363,61 @@ pub fn parse_project(root_dir: &std::path::Path) -> BddProject {
     parse_project_with_depth(root_dir, true)
 }
 
+/// Read every Feature in a directory tree, rejecting incomplete filesystem reads.
+///
+/// Syntax remains permissive so unfinished Gherkin can be edited. Unlike
+/// [`parse_project`], unreadable directories/files and invalid UTF-8 are errors;
+/// callers preparing a replacement project must not activate a partial snapshot.
+/// Directory aliases are visited once to avoid symlink cycles.
+///
+/// # Errors
+/// Returns a filesystem error with the affected path when traversal or reading
+/// fails. No partially loaded project is returned.
+pub fn try_parse_project(root_dir: &std::path::Path) -> std::io::Result<BddProject> {
+    fn at(path: &std::path::Path, error: std::io::Error) -> std::io::Error {
+        std::io::Error::new(error.kind(), format!("read {}: {error}", path.display()))
+    }
+    fn collect(
+        dir: &std::path::Path,
+        visited: &mut std::collections::HashSet<PathBuf>,
+        paths: &mut Vec<PathBuf>,
+    ) -> std::io::Result<()> {
+        let identity = std::fs::canonicalize(dir).map_err(|error| at(dir, error))?;
+        if !visited.insert(identity) {
+            return Ok(());
+        }
+        let mut entries = std::fs::read_dir(dir)
+            .map_err(|error| at(dir, error))?
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(|error| at(dir, error))?;
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries {
+            let path = entry.path();
+            let metadata = std::fs::metadata(&path).map_err(|error| at(&path, error))?;
+            if metadata.is_dir() {
+                collect(&path, visited, paths)?;
+            } else if path.extension().is_some_and(|ext| ext == "feature") {
+                paths.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut paths = Vec::new();
+    collect(root_dir, &mut std::collections::HashSet::new(), &mut paths)?;
+    paths.sort();
+    let features = paths
+        .into_iter()
+        .map(|path| {
+            let source = std::fs::read_to_string(&path).map_err(|error| at(&path, error))?;
+            Ok(parse_feature(&source, path))
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    Ok(BddProject {
+        root_dir: root_dir.to_path_buf(),
+        features,
+    })
+}
+
 /// Parses only direct `.feature` files in `root_dir` (non-recursive scan).
 pub fn parse_project_shallow(root_dir: &std::path::Path) -> BddProject {
     parse_project_with_depth(root_dir, false)
@@ -631,6 +686,43 @@ fn parse_table_row(line: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checked_project_load_rejects_unreadable_input_without_a_partial_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let good = root.path().join("a.feature");
+        std::fs::write(&good, "Feature: Editable\n  Scenario:\n").unwrap();
+        assert_eq!(
+            super::try_parse_project(root.path())
+                .unwrap()
+                .features
+                .len(),
+            1
+        );
+        let bad = root.path().join("b.feature");
+        std::fs::write(&bad, [0xff, 0xfe]).unwrap();
+        let error = super::try_parse_project(root.path()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("b.feature"));
+        assert!(super::try_parse_project(&root.path().join("missing")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_project_load_follows_directory_aliases_without_cycles() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("sample.feature"), "Feature: Once\n").unwrap();
+        std::os::unix::fs::symlink(root.path(), nested.join("loop")).unwrap();
+        assert_eq!(
+            super::try_parse_project(root.path())
+                .unwrap()
+                .features
+                .len(),
+            1
+        );
+    }
+
     use super::*;
     use crate::gherkin_lang::StepKeywordType;
 

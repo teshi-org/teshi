@@ -1358,18 +1358,46 @@ impl App {
         self.preview_title.clear();
         self.preview_cursor_row = 0;
         self.preview_scroll_row = 0;
+        // These snapshots and source coordinates belong to A. Retain them
+        // until preparation succeeds, then prevent any edit/undo from using
+        // them against B's newly installed buffer.
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.step_input_active = false;
+        self.step_input_row = 0;
+        self.step_input_min_col = 0;
+        self.step_keyword_picker = None;
+        self.pending_char = None;
+        self.scenario_fold.clear();
+        self.selection_anchor = None;
+        self.selection_end = None;
+        self.external_change_prompt = None;
+        self.last_external_check = Instant::now();
+        self.clickable_regions.clear();
+        self.editor_panel_rect = None;
+        self.tree_panel_rect = None;
+        self.preview_panel_rect = None;
         self.dirty = false;
         self.runner_config = prepared.runner_config;
         self.runner_rx = None;
+        self.runner_cancel = None;
         self.pending_agent_changes.clear();
         self.pending_change_diffs.clear();
         self.pending_change_summary.clear();
         self.explore_diff_lines = None;
         self.change_summary_visible = false;
+        self.change_summary_selection = 0;
+        self.explore_focus = ColumnFocus::Feature;
         self.explore_selected_feature = 0;
         self.explore_selected_deleted_feature = None;
         self.explore_selected_scenario = 0;
         self.explore_selected_step = 0;
+        self.explore_horizontal_scroll = [0; 3];
+        self.explore_horizontal_scroll_drag = None;
+        self.explore_edit_mode = false;
+        self.editor_focus_scenario_row = None;
+        self.scenario_dropdown_open = false;
+        self.scenario_dropdown_selection = 0;
         self.explore_viewports = Default::default();
         self.explore_feature_scenario_memory.clear();
         self.explore_scenario_step_memory.clear();
@@ -1417,7 +1445,7 @@ impl App {
         target: &teshi_engine::ProjectIdentity,
     ) -> Result<PreparedProjectContext> {
         let root = target.root();
-        let project = gherkin::parse_project(root);
+        let project = gherkin::try_parse_project(root)?;
         let git_status = teshi_core::git::FeatureGitStatusModel::empty_for_project(
             &project,
             teshi_core::git::GitProjectScope::Recursive,
@@ -11316,6 +11344,101 @@ mod tests {
         assert!(app.project_switch.is_active());
         assert!(app.active_model_label.is_none());
         assert!(!app.project_switch.accepts(&before));
+    }
+
+    #[test]
+    fn project_switch_clears_editor_history_and_source_bound_view_state() {
+        let (mut app, _project_a, project_b, _store) = project_switch_app();
+        let old = EditorBuffer::from_string("Feature: old project A history\n".to_string());
+        app.undo_stack.push((old.clone(), 0, 0));
+        app.redo_stack.push((old, 0, 0));
+        app.scenario_fold.insert(99);
+        app.selection_anchor = Some((99, 4));
+        app.selection_end = Some((100, 8));
+        app.step_input_active = true;
+        app.step_keyword_picker = Some(super::StepKeywordPicker {
+            buffer_row: 99,
+            selected: 1,
+        });
+        app.pending_char = Some('d');
+        app.explore_horizontal_scroll = [80, 90, 100];
+        app.explore_horizontal_scroll_drag = Some(ColumnFocus::Step);
+        app.explore_edit_mode = true;
+        app.editor_focus_scenario_row = Some(99);
+        app.scenario_dropdown_open = true;
+        app.scenario_dropdown_selection = 99;
+        let b_bytes = fs::read(project_b.path().join("b.feature")).unwrap();
+
+        app.request_project_switch(project_b.path()).unwrap();
+
+        assert!(app.undo_stack.is_empty(), "A's undo history survived in B");
+        assert!(app.redo_stack.is_empty(), "A's redo history survived in B");
+        assert!(app.scenario_fold.is_empty());
+        assert!(app.selection_anchor.is_none());
+        assert!(app.selection_end.is_none());
+        assert!(!app.step_input_active);
+        assert!(app.step_keyword_picker.is_none());
+        assert!(app.pending_char.is_none());
+        assert_eq!(app.explore_horizontal_scroll, [0; 3]);
+        assert!(app.explore_horizontal_scroll_drag.is_none());
+        assert!(!app.explore_edit_mode);
+        assert!(app.editor_focus_scenario_row.is_none());
+        assert!(!app.scenario_dropdown_open);
+        assert_eq!(app.scenario_dropdown_selection, 0);
+        let b_buffer = app.buffer.as_string();
+        app.undo();
+        app.redo();
+        assert_eq!(app.buffer.as_string(), b_buffer);
+        assert!(!app.dirty);
+        assert_eq!(
+            fs::read(project_b.path().join("b.feature")).unwrap(),
+            b_bytes
+        );
+    }
+
+    #[test]
+    fn failed_project_preparation_keeps_editor_history_and_selection() {
+        let (mut app, project_a, project_b, _store) = project_switch_app();
+        fs::write(project_b.path().join("teshi.toml"), "[runner\n").unwrap();
+        let old = "Feature: prior A edit\n";
+        app.undo_stack
+            .push((EditorBuffer::from_string(old.to_string()), 0, 0));
+        app.redo_stack.push((app.buffer.clone(), 0, 0));
+        app.selection_anchor = Some((0, 1));
+        app.selection_end = Some((0, 3));
+        app.scenario_fold.insert(2);
+        app.request_project_switch(project_b.path()).unwrap();
+        assert_eq!(app.project.root_dir, project_a.path());
+        assert!(app.status.contains("Could not prepare project B"));
+        assert_eq!(app.undo_stack.len(), 1);
+        assert_eq!(app.redo_stack.len(), 1);
+        assert_eq!(app.selection_anchor, Some((0, 1)));
+        assert_eq!(app.selection_end, Some((0, 3)));
+        assert!(app.scenario_fold.contains(&2));
+        app.undo();
+        assert_eq!(app.buffer.as_string(), old);
+    }
+
+    #[test]
+    fn unreadable_target_source_preserves_a_edits_history_and_generation() {
+        let (mut app, project_a, project_b, _store) = project_switch_app();
+        fs::write(project_b.path().join("bad.feature"), [0xff]).unwrap();
+        let draft = "Feature: Unsaved A\n";
+        app.buffer = EditorBuffer::from_string(draft.to_string());
+        app.buffer_dirty[0] = true;
+        app.dirty = true;
+        app.undo_stack.push((app.buffer.clone(), 0, 0));
+        let stamp = app.current_project_stamp();
+        app.request_project_switch(project_b.path()).unwrap();
+        app.project_switch_action(Action::OverlayInsert('D'))
+            .unwrap();
+        assert_eq!(app.project.root_dir, project_a.path());
+        assert_eq!(app.current_project_stamp(), stamp);
+        assert_eq!(app.buffer.as_string(), draft);
+        assert!(app.buffer_dirty[0]);
+        assert_eq!(app.undo_stack.len(), 1);
+        assert!(app.status.contains("bad.feature"), "{}", app.status);
+        assert!(app.status.contains("Could not prepare project B"));
     }
 
     #[test]

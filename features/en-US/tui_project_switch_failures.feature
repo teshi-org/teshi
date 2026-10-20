@@ -6,6 +6,15 @@ Feature: Project switching failure boundaries
   Background:
     Given isolated projects A and B are open for failure testing
 
+  Scenario: Undo and redo cannot restore the previous project's content
+    Given project A has an unsaved Feature edit
+    When the operator requests project B
+    And the operator chooses Save and switch
+    Then project B becomes active and A's edit is saved
+    When the operator undoes and redoes in project B's editor
+    Then project B's editor still contains only project B's content
+    And project B's source files remain unchanged
+
   Scenario: Recover a failed Feature save before switching
     Given project A has an unsaved Feature edit
     And the Feature save destination is unavailable
