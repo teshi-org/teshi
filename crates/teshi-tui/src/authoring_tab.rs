@@ -2123,11 +2123,34 @@ mod tests {
             test_point.requirement_links[0].resolution,
             ResolutionState::Resolved
         );
-        let reloaded = AuthoringUiState::load_from_project(project.path(), store.path());
+        let mut reloaded = AuthoringUiState::load_from_project(project.path(), store.path());
         assert_eq!(
             reloaded.artifacts.as_ref().unwrap().test_points.test_points[0],
             *test_point
         );
+
+        reloaded.open_delete_confirmation().unwrap();
+        reloaded.delete_current_document(project.path()).unwrap();
+        assert!(reloaded.selected_document_id.is_none());
+        assert!(teshi_engine::is_requirement_document_id_reserved(store.path(), &id).unwrap());
+        assert!(matches!(
+            teshi_engine::read_requirement_document(store.path(), &id),
+            Err(teshi_engine::RequirementStoreError::NotFound { .. })
+        ));
+        let after_delete = AuthoringUiState::load_from_project(project.path(), store.path());
+        let deleted_point = &after_delete
+            .artifacts
+            .as_ref()
+            .unwrap()
+            .test_points
+            .test_points[0];
+        assert_eq!(deleted_point.id, original.id);
+        assert_eq!(deleted_point.requirement_links[0].document_id, id);
+        assert_eq!(
+            deleted_point.requirement_links[0].resolution,
+            ResolutionState::Stale
+        );
+        assert_eq!(deleted_point.review_state, ReviewState::NeedsReview);
     }
 
     #[test]
