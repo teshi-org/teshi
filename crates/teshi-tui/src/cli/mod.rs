@@ -1480,6 +1480,10 @@ pub enum WinAppCommand {
     Execute(WinAppExecuteArgs),
     /// Replay confirmed UIA step bindings
     Replay(WinAppReplayArgs),
+    /// Windows shell automation (taskbar notification area)
+    Shell(WinAppShellArgs),
+    /// Wait for a process window to become visible or hidden
+    WaitWindow(WinAppWaitWindowArgs),
 }
 
 /// HTTP API BDD sidecar (`teshi api`).
@@ -1611,6 +1615,80 @@ pub struct WinAppExecuteArgs {
         value_parser = ["auto", "background", "foreground"]
     )]
     pub mode: String,
+}
+
+/// `teshi winapp shell ...` arguments.
+#[derive(Debug, Args)]
+pub struct WinAppShellArgs {
+    #[command(subcommand)]
+    pub command: ShellCommand,
+}
+
+/// Shell automation surfaces outside the attached application.
+#[derive(Debug, Subcommand)]
+pub enum ShellCommand {
+    /// Notification area (system tray) operations
+    Tray(WinAppTrayArgs),
+}
+
+/// `teshi winapp shell tray ...` arguments.
+#[derive(Debug, Args)]
+pub struct WinAppTrayArgs {
+    #[command(subcommand)]
+    pub command: TrayCommand,
+}
+
+/// Notification area operations.
+#[derive(Debug, Subcommand)]
+pub enum TrayCommand {
+    /// List notification area icons with tooltip name, area, and bounds
+    List,
+    /// Click a notification area icon by tooltip name
+    Click(WinAppTrayClickArgs),
+}
+
+/// `teshi winapp shell tray click` arguments.
+#[derive(Debug, Args)]
+pub struct WinAppTrayClickArgs {
+    /// Icon tooltip name (exact, case-insensitive)
+    #[arg(long)]
+    pub name: String,
+    /// Disambiguate same-named icons by owning process id
+    #[arg(long)]
+    pub pid: Option<u32>,
+    /// Mouse button to inject
+    #[arg(long, default_value = "left", value_parser = ["left", "right"])]
+    pub button: String,
+    /// Number of clicks to inject (2 = double click)
+    #[arg(long, default_value_t = 1)]
+    pub count: u32,
+    /// Input policy: auto (default), background (rejects physical input), or foreground
+    #[arg(
+        long,
+        default_value = "auto",
+        value_parser = ["auto", "background", "foreground"]
+    )]
+    pub mode: String,
+    /// Timeout in milliseconds for icon resolution and overflow opening
+    #[arg(long, default_value_t = 10000)]
+    pub timeout_ms: u64,
+}
+
+/// `teshi winapp wait-window` arguments.
+#[derive(Debug, Args)]
+pub struct WinAppWaitWindowArgs {
+    /// Process identifier that owns the window
+    #[arg(long)]
+    pub pid: u32,
+    /// Wait until a visible window exists (default)
+    #[arg(long, conflicts_with = "hidden")]
+    pub visible: bool,
+    /// Wait until no visible window exists
+    #[arg(long, conflicts_with = "visible")]
+    pub hidden: bool,
+    /// Timeout in milliseconds
+    #[arg(long, default_value_t = 10000)]
+    pub timeout_ms: u64,
 }
 
 #[derive(Debug, Args)]
@@ -2459,6 +2537,133 @@ mod tests {
             panic!("expected winapp attach subcommand");
         };
         assert_eq!(args.title.as_deref(), Some("My App"));
+    }
+
+    #[test]
+    fn winapp_shell_tray_list_parses() {
+        let cli = Cli::try_parse_from(["teshi", "winapp", "shell", "tray", "list"])
+            .expect("parse winapp shell tray list");
+        let Some(Command::WinApp {
+            action: WinAppCommand::Shell(args),
+        }) = cli.command
+        else {
+            panic!("expected winapp shell subcommand");
+        };
+        assert!(matches!(
+            args.command,
+            ShellCommand::Tray(ref tray) if matches!(tray.command, TrayCommand::List)
+        ));
+    }
+
+    #[test]
+    fn winapp_shell_tray_click_parses_name_pid_and_policy() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "winapp",
+            "shell",
+            "tray",
+            "click",
+            "--name",
+            "Enhook",
+            "--pid",
+            "36788",
+            "--button",
+            "left",
+            "--count",
+            "2",
+            "--mode",
+            "auto",
+            "--timeout-ms",
+            "8000",
+        ])
+        .expect("parse winapp shell tray click");
+        let Some(Command::WinApp {
+            action: WinAppCommand::Shell(args),
+        }) = cli.command
+        else {
+            panic!("expected winapp shell subcommand");
+        };
+        let ShellCommand::Tray(tray) = args.command;
+        let TrayCommand::Click(click) = tray.command else {
+            panic!("expected tray click subcommand");
+        };
+        assert_eq!(click.name, "Enhook");
+        assert_eq!(click.pid, Some(36788));
+        assert_eq!(click.button, "left");
+        assert_eq!(click.count, 2);
+        assert_eq!(click.mode, "auto");
+        assert_eq!(click.timeout_ms, 8000);
+    }
+
+    #[test]
+    fn winapp_shell_tray_click_rejects_unknown_button_and_mode() {
+        assert!(
+            Cli::try_parse_from([
+                "teshi", "winapp", "shell", "tray", "click", "--name", "Enhook", "--button",
+                "middle",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "teshi", "winapp", "shell", "tray", "click", "--name", "Enhook", "--mode",
+                "physical",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn winapp_wait_window_parses_pid_and_state() {
+        let cli = Cli::try_parse_from([
+            "teshi",
+            "winapp",
+            "wait-window",
+            "--pid",
+            "36788",
+            "--visible",
+            "--timeout-ms",
+            "10000",
+        ])
+        .expect("parse winapp wait-window");
+        let Some(Command::WinApp {
+            action: WinAppCommand::WaitWindow(args),
+        }) = cli.command
+        else {
+            panic!("expected winapp wait-window subcommand");
+        };
+        assert_eq!(args.pid, 36788);
+        assert!(args.visible);
+        assert!(!args.hidden);
+        assert_eq!(args.timeout_ms, 10000);
+    }
+
+    #[test]
+    fn winapp_wait_window_defaults_to_visible_and_rejects_conflicting_state() {
+        let cli = Cli::try_parse_from(["teshi", "winapp", "wait-window", "--pid", "1"])
+            .expect("parse winapp wait-window defaults");
+        let Some(Command::WinApp {
+            action: WinAppCommand::WaitWindow(args),
+        }) = cli.command
+        else {
+            panic!("expected winapp wait-window subcommand");
+        };
+        assert!(!args.visible);
+        assert!(!args.hidden);
+        assert_eq!(args.timeout_ms, 10000);
+
+        assert!(
+            Cli::try_parse_from([
+                "teshi",
+                "winapp",
+                "wait-window",
+                "--pid",
+                "1",
+                "--visible",
+                "--hidden",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

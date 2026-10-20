@@ -17,8 +17,9 @@ use super::replay_screenshots::{
     ReplayScreenshotEntry, capture_and_save_screenshot, iso_now, load_or_create_index, save_index,
 };
 use super::{
-    WinAppAttachArgs, WinAppCommand, WinAppExecuteArgs, WinAppLaunchArgs, WinAppReplayArgs,
-    WinAppSelectorArgs, WinAppSnapshotArgs,
+    ShellCommand, TrayCommand, WinAppAttachArgs, WinAppCommand, WinAppExecuteArgs,
+    WinAppLaunchArgs, WinAppReplayArgs, WinAppSelectorArgs, WinAppShellArgs, WinAppSnapshotArgs,
+    WinAppTrayClickArgs, WinAppWaitWindowArgs,
 };
 
 /// Handles `teshi winapp ...` subcommands.
@@ -26,7 +27,7 @@ pub fn handle_winapp_command(action: &WinAppCommand) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let project_root = match action {
         WinAppCommand::Replay(args) => replay_project_root(&cwd, args.feature.as_deref()),
-        _ => find_project_root(Some(&cwd)).unwrap_or(cwd),
+        _ => cwd.clone(),
     };
     std::fs::create_dir_all(project_root.join(".teshi")).ok();
     let visual = match action {
@@ -61,6 +62,8 @@ pub fn handle_winapp_command(action: &WinAppCommand) -> Result<()> {
         WinAppCommand::ClearHighlight => clear_highlight(&project_root),
         WinAppCommand::Execute(args) => execute(&project_root, args),
         WinAppCommand::Replay(args) => replay(&project_root, args),
+        WinAppCommand::Shell(args) => shell(&project_root, args),
+        WinAppCommand::WaitWindow(args) => wait_window(&project_root, args),
         WinAppCommand::Screenshot(_) | WinAppCommand::AssertScreenshot(_) => unreachable!(),
     }
 }
@@ -178,6 +181,60 @@ fn execute(project_root: &Path, args: &WinAppExecuteArgs) -> Result<()> {
         print_json_response(response.clone())?;
         return ensure_ok(&response);
     }
+    ensure_ok(&response)?;
+    print_json_response(response)
+}
+
+fn shell(project_root: &Path, args: &WinAppShellArgs) -> Result<()> {
+    match &args.command {
+        ShellCommand::Tray(tray) => match &tray.command {
+            TrayCommand::List => {
+                let response = send_winapp_command(
+                    project_root,
+                    json!({ "cmd": "shell_tray_list", "request_id": "winapp-shell-tray-list" }),
+                    Duration::from_secs(15),
+                )?;
+                print_json_response(response)
+            }
+            TrayCommand::Click(click) => {
+                let response = shell_tray_click(project_root, click)?;
+                ensure_ok(&response)?;
+                print_json_response(response)
+            }
+        },
+    }
+}
+
+fn shell_tray_click(project_root: &Path, args: &WinAppTrayClickArgs) -> Result<serde_json::Value> {
+    send_winapp_command(
+        project_root,
+        json!({
+            "cmd": "shell_tray_click",
+            "request_id": "winapp-shell-tray-click",
+            "name": args.name,
+            "pid": args.pid,
+            "button": args.button,
+            "count": args.count,
+            "mode": args.mode,
+            "timeout_ms": args.timeout_ms,
+        }),
+        command_timeout_for_ms(args.timeout_ms),
+    )
+}
+
+fn wait_window(project_root: &Path, args: &WinAppWaitWindowArgs) -> Result<()> {
+    let state = if args.hidden { "hidden" } else { "visible" };
+    let response = send_winapp_command(
+        project_root,
+        json!({
+            "cmd": "wait_window",
+            "request_id": "winapp-wait-window",
+            "pid": args.pid,
+            "state": state,
+            "timeout_ms": args.timeout_ms,
+        }),
+        command_timeout_for_ms(args.timeout_ms),
+    )?;
     ensure_ok(&response)?;
     print_json_response(response)
 }

@@ -26,6 +26,8 @@ class InputPolicyTests(unittest.TestCase):
     @staticmethod
     def user32_mock(**overrides):
         values = {
+            "IsWindowVisible": Mock(return_value=True),
+            "IsIconic": Mock(return_value=False),
             "SetForegroundWindow": Mock(return_value=True),
             "SetThreadDpiAwarenessContext": Mock(return_value=1),
             "ScreenToClient": Mock(return_value=True),
@@ -41,6 +43,7 @@ class InputPolicyTests(unittest.TestCase):
         value_pattern = SimpleNamespace(Value="Ready")
         control = SimpleNamespace(
             BoundingRectangle=(10, 20, 30, 40),
+            IsOffscreen=False,
             GetValuePattern=lambda: value_pattern,
         )
         fake_user32 = self.user32_mock()
@@ -343,7 +346,7 @@ class InputPolicyTests(unittest.TestCase):
         fake_user32.SetForegroundWindow.assert_not_called()
 
     def test_replay_style_sequence_activates_only_pointer_step(self):
-        control = SimpleNamespace(BoundingRectangle=(0, 0, 10, 10))
+        control = SimpleNamespace(BoundingRectangle=(0, 0, 10, 10), IsOffscreen=False)
         fake_user32 = self.user32_mock()
         session = self.session(control)
         session.find_visible_interactive_control = Mock(

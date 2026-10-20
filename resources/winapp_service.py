@@ -263,6 +263,8 @@ MOUSE_INPUT = 0
 MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
 MOUSEEVENTF_ABSOLUTE = 0x8000
 MOUSEEVENTF_VIRTUALDESK = 0x4000
 SM_XVIRTUALSCREEN = 76
@@ -617,24 +619,36 @@ def mouse_input(dx: int, dy: int, flags: int) -> Input:
     return event
 
 
-def send_pointer_click(x: int, y: int) -> None:
-    """Move the system pointer and inject a complete left-button click."""
+def send_pointer_click(x: int, y: int, count: int = 1, button: str = "left") -> None:
+    """Move the system pointer and inject complete button clicks.
+
+    ``count`` > 1 produces a multi-click sequence (2 = double click), which
+    some shell surfaces such as notification-area icons require.
+    """
     if user32 is None:
         raise RuntimeError("pointer_click requires Windows SendInput")
+    if button not in ("left", "right"):
+        raise RuntimeError(f"unsupported pointer button: {button!r}")
+    if count < 1:
+        raise RuntimeError("pointer click count must be >= 1")
+    down_flag = MOUSEEVENTF_LEFTDOWN if button == "left" else MOUSEEVENTF_RIGHTDOWN
+    up_flag = MOUSEEVENTF_LEFTUP if button == "left" else MOUSEEVENTF_RIGHTUP
     absolute_x, absolute_y = virtual_desktop_coordinate(x, y)
-    inputs = (Input * 3)(
+    events = [
         mouse_input(
             absolute_x,
             absolute_y,
             MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-        ),
-        mouse_input(0, 0, MOUSEEVENTF_LEFTDOWN),
-        mouse_input(0, 0, MOUSEEVENTF_LEFTUP),
-    )
-    injected = int(user32.SendInput(3, inputs, ctypes.sizeof(Input)))
-    if injected != 3:
+        )
+    ]
+    for _ in range(count):
+        events.append(mouse_input(0, 0, down_flag))
+        events.append(mouse_input(0, 0, up_flag))
+    inputs = (Input * len(events))(*events)
+    injected = int(user32.SendInput(len(events), inputs, ctypes.sizeof(Input)))
+    if injected != len(events):
         raise RuntimeError(
-            f"SendInput failed: injected {injected} of 3 pointer events"
+            f"SendInput failed: injected {injected} of {len(events)} pointer events"
         )
 
 
@@ -943,6 +957,378 @@ def find_window(
     return None
 
 
+# --- Windows shell (taskbar notification area) automation ---
+#
+# WHY: notification-area icons belong to Explorer's shell surface, not to any
+# attached application window, so they are discovered through the shell's own
+# UIA tree instead of the attached session's root_control(). Shell operations
+# never mutate the attach session.
+
+TASKBAR_WINDOW_CLASS = "Shell_TrayWnd"
+TRAY_BRIDGE_CLASS_FRAGMENT = "DesktopWindowContentBridge"
+TRAY_ICON_AUTOMATION_ID = "NotifyItemIcon"
+OVERFLOW_WINDOW_CLASS = "TopLevelWindowForOverflowXamlIsland"
+NOTIFY_ICON_UID_PROBE_LIMIT = 8
+MAX_SHELL_TREE_DEPTH = 16
+WAIT_WINDOW_POLL_INTERVAL_SEC = 0.25
+
+
+class NotifyIconIdentifier(ctypes.Structure):
+    """NOTIFYICONIDENTIFIER for Shell_NotifyIconGetRect."""
+
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("hWnd", wintypes.HWND),
+        ("uID", wintypes.UINT),
+        ("guidItem", ctypes.c_byte * 16),
+    ]
+
+
+def shell_notify_icon_rect(hwnd: int, uid: int) -> tuple[int, int, int, int] | None:
+    """Return the physical screen rectangle of one notification icon.
+
+    WHY: Shell_NotifyIconGetRect is the supported shell API that maps a
+    (window, icon id) pair to its on-screen tray position. It reports failure
+    as E_FAIL, which ctypes surfaces as OSError, when the pair owns no icon.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        get_rect = ctypes.windll.shell32.Shell_NotifyIconGetRect
+    except AttributeError:
+        return None
+    get_rect.restype = ctypes.HRESULT
+    get_rect.argtypes = [ctypes.POINTER(NotifyIconIdentifier), ctypes.POINTER(Rect)]
+    identifier = NotifyIconIdentifier(
+        cbSize=ctypes.sizeof(NotifyIconIdentifier), hWnd=hwnd, uID=uid
+    )
+    rect = Rect()
+    try:
+        hr = get_rect(ctypes.byref(identifier), ctypes.byref(rect))
+    except OSError:
+        return None
+    if hr != 0 or rect.right <= rect.left or rect.bottom <= rect.top:
+        return None
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def notify_icon_rect_for_pid(pid: int) -> tuple[int, int, int, int] | None:
+    """Find the tray icon rectangle owned by any window of ``pid``.
+
+    WHY: apps register tray icons against a hidden message window, so every
+    top-level window of the process is probed with the small uID range apps
+    conventionally use. A wrong pair fails cheaply with E_FAIL.
+    """
+    for hwnd in windows_of_pid(pid):
+        for uid in range(NOTIFY_ICON_UID_PROBE_LIMIT):
+            rect = shell_notify_icon_rect(hwnd, uid)
+            if rect is not None:
+                return rect
+    return None
+
+
+def windows_of_pid(pid: int) -> list[int]:
+    """All top-level window handles owned by ``pid``, visible or not."""
+    if user32 is None:
+        return []
+    found: list[int] = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    def callback(hwnd: int, _lparam: int) -> bool:
+        window_pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(window_pid))
+        if window_pid.value == pid:
+            found.append(hwnd)
+        return True
+
+    user32.EnumWindows(callback, 0)
+    return found
+
+
+def find_taskbar_bridge_hwnd() -> int | None:
+    """Locate the taskbar XAML content bridge window.
+
+    WHY: Windows 11 renders the taskbar as a XAML island and exposes
+    notification-area icons as UIA ButtonControls (AutomationId
+    ``NotifyItemIcon``) under a ``DesktopWindowContentBridge`` child of
+    ``Shell_TrayWnd``. The legacy TrayNotifyWnd/ToolbarWindow32 chain no
+    longer carries UIA children, so the bridge is the discovery path.
+    """
+    if user32 is None:
+        return None
+    taskbar = user32.FindWindowW(TASKBAR_WINDOW_CLASS, None)
+    if not taskbar:
+        return None
+    found: list[int] = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    def callback(hwnd: int, _lparam: int) -> bool:
+        class_name = ctypes.create_unicode_buffer(512)
+        user32.GetClassNameW(hwnd, class_name, 512)
+        if TRAY_BRIDGE_CLASS_FRAGMENT in class_name.value:
+            found.append(hwnd)
+            return False
+        return True
+
+    user32.EnumChildWindows(taskbar, callback, 0)
+    return found[0] if found else None
+
+
+def find_overflow_window() -> int | None:
+    """Return the visible hidden-icons overflow flyout window, if open."""
+    if user32 is None:
+        return None
+    found: list[int] = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    def callback(hwnd: int, _lparam: int) -> bool:
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        class_name = ctypes.create_unicode_buffer(512)
+        user32.GetClassNameW(hwnd, class_name, 512)
+        if class_name.value == OVERFLOW_WINDOW_CLASS:
+            found.append(hwnd)
+        return True
+
+    user32.EnumWindows(callback, 0)
+    return found[0] if found else None
+
+
+def _tray_icon_buttons(root: Any) -> list[dict[str, Any]]:
+    """Collect NotifyItemIcon buttons from one UIA subtree."""
+    icons: list[dict[str, Any]] = []
+
+    def walk(control: Any, depth: int) -> None:
+        if depth > MAX_SHELL_TREE_DEPTH:
+            return
+        try:
+            if (
+                get_control_property(control, "ControlTypeName") == "ButtonControl"
+                and get_control_property(control, "AutomationId")
+                == TRAY_ICON_AUTOMATION_ID
+            ):
+                rect = rect_to_dict(get_control_property(control, "BoundingRectangle"))
+                icons.append(
+                    {
+                        "name": get_control_property(control, "Name") or "",
+                        "class_name": get_control_property(control, "ClassName") or "",
+                        "rect": (
+                            (rect["left"], rect["top"], rect["right"], rect["bottom"])
+                            if rect
+                            else None
+                        ),
+                    }
+                )
+        except Exception:
+            return
+        try:
+            children = control.GetChildren()
+        except Exception:
+            return
+        for child in children:
+            walk(child, depth + 1)
+
+    walk(root, 0)
+    return icons
+
+
+@physical_coordinates()
+def shell_tray_icons() -> dict[str, Any]:
+    """Enumerate notification-area icons from the taskbar and open overflow.
+
+    The response lists every icon with its tooltip name, UIA class, physical
+    rectangle, and area (``notification`` or ``overflow``). Icons inside an
+    already-open overflow flyout are included; the flyout is never opened
+    here because that requires physical pointer input.
+    """
+    if auto is None:
+        return {
+            "ok": False,
+            "error": "uiautomation is not installed; run `pip install -r python/requirements.txt`",
+        }
+    bridge = find_taskbar_bridge_hwnd()
+    if bridge is None:
+        return {
+            "ok": False,
+            "error": (
+                "taskbar XAML bridge window not found; the Windows shell taskbar "
+                "is unavailable or its UIA surface changed"
+            ),
+        }
+    icons: list[dict[str, Any]] = []
+    try:
+        root = auto.ControlFromHandle(bridge)
+        for icon in _tray_icon_buttons(root):
+            icons.append({**icon, "area": "notification"})
+    except Exception as exc:
+        return {"ok": False, "error": f"UIA traversal of the taskbar failed: {exc}"}
+    overflow = find_overflow_window()
+    overflow_open = overflow is not None
+    if overflow_open:
+        try:
+            overflow_root = auto.ControlFromHandle(overflow)
+            for icon in _tray_icon_buttons(overflow_root):
+                icons.append({**icon, "area": "overflow"})
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"UIA traversal of the overflow flyout failed: {exc}",
+                "icons": icons,
+            }
+    return {"ok": True, "icons": icons, "overflow_open": overflow_open}
+
+
+@physical_coordinates()
+def reveal_autohidden_taskbar() -> None:
+    """Move to the taskbar's exposed edge before resolving its icon bounds."""
+    taskbar = user32.FindWindowW(TASKBAR_WINDOW_CLASS, None)
+    rect = Rect()
+    if not taskbar or not user32.GetWindowRect(taskbar, ctypes.byref(rect)):
+        return
+    left = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+    top = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+    right = left + user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+    bottom = top + user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+    if rect.left >= left and rect.top >= top and rect.right <= right and rect.bottom <= bottom:
+        return
+    x = max(left, min(right - 1, (rect.left + rect.right) // 2))
+    y = max(top, min(bottom - 1, (rect.top + rect.bottom) // 2))
+    absolute_x, absolute_y = virtual_desktop_coordinate(x, y)
+    event = mouse_input(absolute_x, absolute_y,
+                        MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)
+    if user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(Input)) != 1:
+        raise RuntimeError("SendInput failed while revealing the taskbar")
+    time.sleep(0.5)
+
+
+@physical_coordinates()
+def _open_tray_overflow(timeout_s: float) -> int | None:
+    """Best-effort: click the show-hidden-icons chevron and wait for the flyout.
+
+    WHY: the chevron only exists in the UIA tree while icons are actually
+    hidden, and its label is localized, so it is matched by the shell's
+    language-independent class pattern instead of a display name. Returns the
+    overflow window handle once it opens, or None when the chevron cannot be
+    identified or the flyout does not appear.
+    """
+    if auto is None:
+        return None
+    bridge = find_taskbar_bridge_hwnd()
+    if bridge is None:
+        return None
+    try:
+        root = auto.ControlFromHandle(bridge)
+    except Exception:
+        return None
+    chevron: Any = None
+
+    def walk(control: Any, depth: int) -> None:
+        nonlocal chevron
+        if depth > MAX_SHELL_TREE_DEPTH or chevron is not None:
+            return
+        try:
+            if (
+                get_control_property(control, "ControlTypeName") == "ButtonControl"
+                and (
+                    "chevron" in (get_control_property(control, "ClassName") or "").casefold()
+                    or (
+                        get_control_property(control, "AutomationId") == "SystemTrayIcon"
+                        and any(get_control_property(child, "Name") == "\ue971"
+                                for child in control.GetChildren())
+                    )
+                )
+            ):
+                chevron = control
+                return
+        except Exception:
+            return
+        try:
+            children = control.GetChildren()
+        except Exception:
+            return
+        for child in children:
+            walk(child, depth + 1)
+
+    walk(root, 0)
+    if chevron is None:
+        return None
+    rect = rect_to_dict(get_control_property(chevron, "BoundingRectangle"))
+    if not rect or rect["width"] <= 0 or rect["height"] <= 0:
+        return None
+    try:
+        with physical_coordinates():
+            send_pointer_click(
+                rect["left"] + rect["width"] // 2,
+                rect["top"] + rect["height"] // 2,
+            )
+    except Exception:
+        return None
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        overflow = find_overflow_window()
+        if overflow is not None:
+            return overflow
+        time.sleep(WAIT_WINDOW_POLL_INTERVAL_SEC)
+    return None
+
+
+def process_window_state(pid: int) -> dict[str, Any]:
+    """Summarize the visibility state of a process's top-level windows.
+
+    A window counts as visible only when Win32 reports it visible and not
+    minimized; hidden-to-tray windows report visible=False. The first
+    visible window handle is returned so callers can detect HWND changes
+    after a window is destroyed and recreated.
+    """
+    if user32 is None:
+        return {"visible": False, "hwnd": None, "title": None, "windows": []}
+    windows: list[dict[str, Any]] = []
+    visible_hwnd: int | None = None
+    for hwnd in windows_of_pid(pid):
+        entry = {
+            "hwnd": hwnd,
+            "title": get_window_title(hwnd),
+            "visible": bool(user32.IsWindowVisible(hwnd)),
+            "minimized": bool(user32.IsIconic(hwnd)),
+        }
+        windows.append(entry)
+        if entry["visible"] and not entry["minimized"] and visible_hwnd is None:
+            visible_hwnd = hwnd
+    return {
+        "visible": visible_hwnd is not None,
+        "hwnd": visible_hwnd,
+        "title": get_window_title(visible_hwnd) if visible_hwnd else None,
+        "windows": windows,
+    }
+
+
+def element_visibility_error(control: Any, owner_hwnd: int | None = None) -> str | None:
+    """Return why a UIA element is not genuinely visible, or None when visible.
+
+    WHY: a hidden or minimized window can still expose non-zero UIA
+    BoundingRectangle values, so rectangle checks alone produce false
+    positives. IsOffscreen is the UIA visibility contract; the owning window
+    is additionally verified against Win32 IsWindowVisible/IsIconic. When the
+    UIA provider cannot answer, the check fails instead of guessing.
+    """
+    offscreen = get_control_property(control, "IsOffscreen")
+    if offscreen is None:
+        return "UIA provider cannot determine IsOffscreen for this element"
+    if offscreen is True:
+        return "element is offscreen per UIA IsOffscreen"
+    rect = rect_to_dict(get_control_property(control, "BoundingRectangle"))
+    if not rect or rect["width"] <= 0 or rect["height"] <= 0:
+        return "element has no visible UIA bounds"
+    hwnd = owner_hwnd or get_control_property(control, "NativeWindowHandle")
+    if hwnd and user32 is not None:
+        hwnd = int(hwnd)
+        if not user32.IsWindowVisible(hwnd):
+            return "owning window is hidden (IsWindowVisible is false)"
+        if user32.IsIconic(hwnd):
+            return "owning window is minimized"
+    return None
+
+
 def rect_to_dict(rect: Any) -> dict[str, int] | None:
     """Normalize UIA rectangle-like values."""
     if rect is None:
@@ -1081,6 +1467,7 @@ class WinAppSession:
     def __init__(self, project_root: Path | None) -> None:
         self.project_root = project_root
         self.hwnd: int | None = None
+        self.target_pid: int | None = None
         self.title = ""
         self.process: subprocess.Popen[str] | None = None
         self.clients: set[Any] = set()
@@ -1116,6 +1503,7 @@ class WinAppSession:
         with self._capture_switch_lock:
             self._stop_capture_backend()
             self.hwnd = int(window["hwnd"])
+            self.target_pid = int(window.get("pid") or 0) or None
             self.title = str(window["title"])
             self._capture_fallback_reason = ""
             try:
@@ -1561,6 +1949,191 @@ class WinAppSession:
         self.overlay.clear()
         return {"ok": True}
 
+    def shell_tray_list(self) -> dict[str, Any]:
+        """List notification-area icons without touching the attach session."""
+        return shell_tray_icons()
+
+    @physical_coordinates()
+    def shell_tray_click(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Click one notification-area icon identified by its tooltip name.
+
+        The icon must resolve to exactly one UIA NotifyItemIcon button. When
+        several icons share the name, ``pid`` disambiguates through
+        Shell_NotifyIconGetRect; without it the command fails with the
+        candidate list instead of clicking an arbitrary icon. Physical
+        pointer input follows the auto/foreground/background policy and is
+        rejected in background mode.
+        """
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return {"ok": False, "error": "tray click requires a non-empty name"}
+        button = str(payload.get("button") or "left").casefold()
+        if button not in ("left", "right"):
+            return {"ok": False, "error": f"unsupported button: {button!r}; use left or right"}
+        try:
+            count = int(payload.get("count") or 1)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "count must be an integer"}
+        if count < 1:
+            return {"ok": False, "error": "count must be >= 1"}
+        mode = str(payload.get("mode") or "auto").casefold()
+        if mode not in ("auto", "foreground", "background"):
+            return {
+                "ok": False,
+                "error": f"invalid mode: {mode!r}; use auto, foreground, or background",
+            }
+        if mode == "background":
+            return {
+                "ok": False,
+                "error": (
+                    "tray click injects physical pointer input into the shell and is "
+                    "forbidden in background mode"
+                ),
+            }
+        timeout_s = float(payload.get("timeout_ms") or 10000) / 1000.0
+
+        reveal_autohidden_taskbar()
+        listing = shell_tray_icons()
+        if not listing.get("ok"):
+            return listing
+        icons = listing["icons"]
+        matches = [icon for icon in icons if icon["name"].casefold() == name.casefold()]
+
+        if not matches:
+            # The icon may live in the hidden-icons overflow flyout. Opening it
+            # needs one physical click on the chevron, which the mode policy
+            # above already authorized.
+            overflow = _open_tray_overflow(min(timeout_s, 5.0))
+            if overflow is not None:
+                listing = shell_tray_icons()
+                icons = listing.get("icons", [])
+                matches = [icon for icon in icons if icon["name"].casefold() == name.casefold()]
+
+        if not matches:
+            return {
+                "ok": False,
+                "error": f"tray icon not found: {name!r}",
+                "available_icons": sorted({icon["name"] for icon in icons}),
+            }
+
+        def candidate(icon: dict[str, Any]) -> dict[str, Any]:
+            rect = icon.get("rect")
+            return {
+                "name": icon["name"],
+                "area": icon.get("area"),
+                "rect": (
+                    {"left": rect[0], "top": rect[1], "right": rect[2], "bottom": rect[3]}
+                    if rect
+                    else None
+                ),
+            }
+
+        target: dict[str, Any] | None = None
+        pid = payload.get("pid")
+        if pid is not None:
+            try:
+                pid_i = int(pid)
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "pid must be an integer"}
+            want = notify_icon_rect_for_pid(pid_i)
+            if want is None:
+                return {
+                    "ok": False,
+                    "error": f"no notification icon is owned by pid {pid_i}",
+                }
+            # Shell and UIA round scaled overflow bounds independently. A tiny
+            # edge tolerance preserves unique ownership without rejecting the
+            # same icon for a one-pixel provider difference.
+            exact = [icon for icon in matches if icon.get("rect") is not None
+                     and all(abs(a - b) <= 2 for a, b in zip(icon["rect"], want))]
+            if len(exact) != 1:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"tray icon {name!r} matches {len(matches)} button(s) but "
+                        f"{len(exact)} belong to pid {pid_i}"
+                    ),
+                    "candidates": [candidate(icon) for icon in matches],
+                }
+            target = exact[0]
+        elif len(matches) > 1:
+            return {
+                "ok": False,
+                "error": (
+                    f"multiple tray icons named {name!r}; pass --pid to disambiguate"
+                ),
+                "candidates": [candidate(icon) for icon in matches],
+            }
+        else:
+            target = matches[0]
+
+        rect = target.get("rect")
+        if rect is None:
+            return {"ok": False, "error": "tray icon has no UIA bounds"}
+        center_x = (rect[0] + rect[2]) // 2
+        center_y = (rect[1] + rect[3]) // 2
+        try:
+            with physical_coordinates():
+                send_pointer_click(center_x, center_y, count=count, button=button)
+        except Exception as exc:
+            return {"ok": False, "error": f"tray click failed: {exc}"}
+        return {
+            "ok": True,
+            "name": target["name"],
+            "area": target.get("area"),
+            "button": button,
+            "count": count,
+            "rect": {"left": rect[0], "top": rect[1], "right": rect[2], "bottom": rect[3]},
+        }
+
+    def wait_window(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Wait for a process window to reach a visibility state.
+
+        Polls by pid so a destroyed and recreated window (new HWND) is still
+        found, and distinguishes hidden, minimized, and absent windows. When
+        the session is attached to the same pid and the live window carries a
+        different HWND, the session is refreshed to it so later UIA and
+        screenshot commands target the restored window.
+        """
+        try:
+            pid = int(payload.get("pid"))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "pid must be an integer"}
+        want_visible = str(payload.get("state") or "visible").casefold() != "hidden"
+        timeout_s = float(payload.get("timeout_ms") or 10000) / 1000.0
+        deadline = time.monotonic() + timeout_s
+        while True:
+            state = process_window_state(pid)
+            if state["visible"] == want_visible:
+                if (
+                    want_visible
+                    and self.target_pid == pid
+                    and state["hwnd"] is not None
+                    and state["hwnd"] != self.hwnd
+                ):
+                    window = find_window(hwnd=state["hwnd"])
+                    if window:
+                        self._attach_target(window)
+                return {
+                    "ok": True,
+                    "pid": pid,
+                    "state": "visible" if want_visible else "hidden",
+                    "hwnd": state["hwnd"],
+                    "title": state["title"],
+                }
+            if time.monotonic() >= deadline:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"pid {pid} did not reach state "
+                        f"{'visible' if want_visible else 'hidden'} "
+                        f"within {timeout_s:.1f}s"
+                    ),
+                    "pid": pid,
+                    "last_state": state,
+                }
+            time.sleep(WAIT_WINDOW_POLL_INTERVAL_SEC)
+
     def execute(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Run one action against a selected UIA control, or exec a system command.
 
@@ -1656,9 +2229,14 @@ class WinAppSession:
                     return {"ok": False, "error": "fill requires value"}
                 self._fill(control, str(value), mode)
             elif action == "assert_visible":
-                rect = rect_to_dict(get_control_property(control, "BoundingRectangle"))
-                if not rect or rect["width"] <= 0 or rect["height"] <= 0:
-                    return {"ok": False, "error": "element is not visible"}
+                error = element_visibility_error(control, self.hwnd)
+                if error is not None:
+                    return {
+                        "ok": False,
+                        "selector": selector,
+                        "action": action,
+                        "error": error,
+                    }
             elif action == "assert_text":
                 expected = str(value or "")
                 actual = self._control_text(control)
@@ -2358,6 +2936,12 @@ async def handle_command(session: WinAppSession, payload: dict[str, Any]) -> dic
             return session.clear_highlight()
         if cmd == "execute_locator":
             return session.execute(payload)
+        if cmd == "shell_tray_list":
+            return session.shell_tray_list()
+        if cmd == "shell_tray_click":
+            return session.shell_tray_click(payload)
+        if cmd == "wait_window":
+            return session.wait_window(payload)
         if cmd == "screenshot":
             if error := session.integrity_guard("screenshot"):
                 return error
