@@ -256,7 +256,11 @@ fn merge_requirement_indexes(
             .iter_mut()
             .find(|existing| existing.id == doc.id)
         {
+            let persisted_priority = slot.priority;
             *slot = doc.clone();
+            // Priority has its own compare-and-set API. Generic index saves
+            // must not clear or overwrite a value from a stale caller.
+            slot.priority = persisted_priority;
         } else {
             merged.documents.push(doc.clone());
         }
@@ -290,7 +294,11 @@ fn upsert_saved_document(
             .iter_mut()
             .find(|existing| existing.id == meta.id)
         {
+            let persisted_priority = slot.priority;
             *slot = meta.clone();
+            // Body saves carry an in-memory snapshot and therefore cannot
+            // safely author metadata from that snapshot.
+            slot.priority = persisted_priority;
         } else {
             merged.documents.push(meta.clone());
         }
@@ -642,7 +650,7 @@ pub(crate) fn write_requirement_markdown_unlocked(
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
-            return Err(error).with_context(|| format!("read {}", markdown_path.display()));
+            return Err(error).with_context(|| format!("read {}", markdown_path.display()))
         }
     };
     replace_markdown(&markdown_path, body.as_bytes())?;
@@ -747,8 +755,8 @@ fn refresh_link_resolutions(artifacts: &mut AuthoringArtifacts) {
 mod tests {
     use super::*;
     use teshi_core::authoring::{
-        HierarchyPath, QuoteSelector, RequirementDocumentMeta, RequirementLink, ResolutionState,
-        ReviewState, TestPoint, TextRange,
+        HierarchyPath, QuoteSelector, RequirementDocumentMeta, RequirementLink,
+        RequirementPriority, ResolutionState, ReviewState, TestPoint, TextRange,
     };
 
     fn write_sample_store(store_root: &Path, project_root: &Path) {
@@ -1241,6 +1249,43 @@ mod tests {
             fs::read_to_string(store.path().join("a.md")).unwrap(),
             "# A-updated"
         );
+    }
+
+    #[test]
+    fn generic_index_and_markdown_saves_preserve_persisted_priority() {
+        let store = tempfile::tempdir().unwrap();
+        let mut index = initialize_requirement_store(store.path()).unwrap();
+        index.documents = vec![RequirementDocumentMeta::new(
+            "doc-a",
+            "a.md",
+            "A",
+            compute_document_revision("# A\n"),
+        )];
+        fs::write(store.path().join("a.md"), "# A\n").unwrap();
+        save_requirement_document_index(store.path(), &index).unwrap();
+        super::super::service::update_requirement_document_priority(
+            store.path(),
+            "doc-a",
+            Some(RequirementPriority::P1),
+            Some(None),
+        )
+        .unwrap();
+
+        let mut stale = index.clone();
+        stale.documents[0].priority = None;
+        stale.documents[0].iteration = Some("Sprint 13".into());
+        save_requirement_document_index(store.path(), &stale).unwrap();
+
+        let mut body_snapshot = stale.clone();
+        save_requirement_markdown(store.path(), &mut body_snapshot, "a.md", "# Renamed\n").unwrap();
+        let reloaded: RequirementDocumentIndex = serde_json::from_str(
+            &fs::read_to_string(store.path().join(REQUIREMENTS_INDEX_FILE)).unwrap(),
+        )
+        .unwrap();
+        let meta = &reloaded.documents[0];
+        assert_eq!(meta.priority, Some(RequirementPriority::P1));
+        assert_eq!(meta.iteration.as_deref(), Some("Sprint 13"));
+        assert_eq!(meta.title, "Renamed");
     }
 
     #[test]

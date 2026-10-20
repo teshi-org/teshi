@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use teshi_core::authoring::{
     normalize_iteration_name, requirement_title, resolve_requirement_store_path,
-    InvalidIterationName, InvalidRequirementTitle, RequirementDocumentContent,
-    RequirementDocumentIndex, RequirementDocumentMeta, RequirementIterationFilter,
-    RequirementStoreId,
+    InvalidIterationName, InvalidRequirementPriority, InvalidRequirementTitle,
+    RequirementDocumentContent, RequirementDocumentIndex, RequirementDocumentMeta,
+    RequirementIterationFilter, RequirementPriority, RequirementStoreId,
 };
 
 use super::store::{
@@ -87,8 +87,19 @@ pub enum RequirementStoreError {
     },
     /// Iteration name failed validation.
     InvalidIterationName(InvalidIterationName),
+    /// Priority label failed validation.
+    InvalidPriority(InvalidRequirementPriority),
     /// Markdown lacks a non-empty first-line H1 title.
     InvalidTitle(InvalidRequirementTitle),
+    /// The priority value changed after the caller read the document.
+    PriorityConflict {
+        /// Document that could not be updated.
+        document_id: String,
+        /// Priority observed by the caller, where `Some(None)` means unset.
+        expected: Option<Option<RequirementPriority>>,
+        /// Priority currently stored in the index.
+        actual: Option<RequirementPriority>,
+    },
     /// Batch update was called with no document ids.
     EmptyDocumentIdList,
     /// I/O or path-safety failure while reading or writing the store.
@@ -106,7 +117,9 @@ impl RequirementStoreError {
             Self::Ambiguous { .. } => "ambiguous_requirement_ref",
             Self::RevisionConflict { .. } => "revision_conflict",
             Self::InvalidIterationName(_) => "invalid_iteration_name",
+            Self::InvalidPriority(_) => "invalid_requirement_priority",
             Self::InvalidTitle(_) => "invalid_requirement_title",
+            Self::PriorityConflict { .. } => "priority_conflict",
             Self::EmptyDocumentIdList => "empty_document_id_list",
             Self::Io(_) => "requirement_store_io",
         }
@@ -154,7 +167,18 @@ impl fmt::Display for RequirementStoreError {
                 "requirement document '{document_id}' changed on disk (expected revision {expected}, found {actual})"
             ),
             Self::InvalidIterationName(err) => write!(f, "{err}"),
+            Self::InvalidPriority(err) => write!(f, "{err}"),
             Self::InvalidTitle(err) => write!(f, "{err}"),
+            Self::PriorityConflict {
+                document_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "requirement document '{document_id}' changed priority on disk (expected {}, found {})",
+                format_priority_expectation(*expected),
+                format_priority(*actual),
+            ),
             Self::EmptyDocumentIdList => {
                 f.write_str("at least one requirement document id is required")
             }
@@ -167,6 +191,7 @@ impl std::error::Error for RequirementStoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidIterationName(err) => Some(err),
+            Self::InvalidPriority(err) => Some(err),
             Self::InvalidTitle(err) => Some(err),
             Self::Io(err) => Some(err.as_ref()),
             _ => None,
@@ -182,6 +207,17 @@ impl From<anyhow::Error> for RequirementStoreError {
 
 fn io_err(context: impl Into<String>, err: impl Into<anyhow::Error>) -> RequirementStoreError {
     RequirementStoreError::Io(err.into().context(context.into()))
+}
+
+fn format_priority(priority: Option<RequirementPriority>) -> String {
+    priority.map_or_else(|| "unset".to_string(), |value| value.to_string())
+}
+
+fn format_priority_expectation(expected: Option<Option<RequirementPriority>>) -> String {
+    match expected {
+        None => "any".to_string(),
+        Some(priority) => format_priority(priority),
+    }
 }
 
 fn with_store_lock<T>(
@@ -499,6 +535,54 @@ pub fn update_requirement_document_body(
     })
 }
 
+/// Atomically sets or clears a document's optional scheduling priority.
+///
+/// The update reloads the index while holding the requirement-store lock. When
+/// `expected_priority` is `Some`, the inner value must match the current value;
+/// `Some(None)` therefore provides an explicit compare-against-unset check while
+/// an outer `None` opts out of the compare-and-set guard. Body, title, path,
+/// iteration, and revision are preserved.
+///
+/// # Errors
+///
+/// Returns a store, not-found, priority-conflict, or I/O error. The operation
+/// does not partially update the index when persistence fails.
+pub fn update_requirement_document_priority(
+    requirements_root: &Path,
+    document_id: &str,
+    priority: Option<RequirementPriority>,
+    expected_priority: Option<Option<RequirementPriority>>,
+) -> Result<RequirementDocumentMeta, RequirementStoreError> {
+    with_store_lock(requirements_root, || {
+        let mut index = require_initialized_index(requirements_root)?;
+        let document_index = index
+            .documents
+            .iter()
+            .position(|doc| doc.id == document_id)
+            .ok_or_else(|| RequirementStoreError::NotFound {
+                query: document_id.to_string(),
+            })?;
+        let current_priority = index.documents[document_index].priority;
+
+        if expected_priority.is_some() && expected_priority != Some(current_priority) {
+            return Err(RequirementStoreError::PriorityConflict {
+                document_id: document_id.to_string(),
+                expected: expected_priority,
+                actual: current_priority,
+            });
+        }
+
+        if current_priority == priority {
+            return Ok(index.documents[document_index].clone());
+        }
+        index.documents[document_index].priority = priority;
+        let updated = index.documents[document_index].clone();
+        write_requirement_index_unlocked(requirements_root, &index)
+            .map_err(RequirementStoreError::from)?;
+        Ok(updated)
+    })
+}
+
 /// Atomically sets or clears iteration on every listed document.
 ///
 /// All ids are validated before any mutation. Path, body, and revision are
@@ -566,7 +650,7 @@ mod tests {
         load_authoring_artifacts, save_requirement_document_index, save_requirement_markdown,
         REQUIREMENTS_INDEX_FILE, REQUIREMENTS_TRASH_FILE,
     };
-    use teshi_core::authoring::RequirementDocumentMeta;
+    use teshi_core::authoring::{RequirementDocumentMeta, RequirementPriority};
 
     fn seed_store(root: &Path) -> RequirementDocumentIndex {
         let mut index = initialize_requirement_store(root).unwrap();
@@ -810,6 +894,150 @@ mod tests {
                 original
             );
         }
+    }
+
+    #[test]
+    fn priority_update_persists_and_preserves_document_metadata() {
+        let store = tempfile::tempdir().unwrap();
+        let index = seed_store(store.path());
+        let original = index.documents[0].clone();
+
+        let updated = update_requirement_document_priority(
+            store.path(),
+            &original.id,
+            Some(RequirementPriority::P1),
+            Some(None),
+        )
+        .unwrap();
+        assert_eq!(updated.priority, Some(RequirementPriority::P1));
+        assert_eq!(updated.id, original.id);
+        assert_eq!(updated.path, original.path);
+        assert_eq!(updated.title, original.title);
+        assert_eq!(updated.revision, original.revision);
+        assert_eq!(updated.iteration, original.iteration);
+
+        let reloaded = read_requirement_document(store.path(), &original.id).unwrap();
+        assert_eq!(reloaded.meta.priority, Some(RequirementPriority::P1));
+        assert_eq!(reloaded.body, "# 登录需求\n");
+
+        let body_updated = update_requirement_document_body(
+            store.path(),
+            &original.id,
+            "# Renamed\n\nBody\n",
+            Some(original.revision.as_str()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(body_updated.priority, Some(RequirementPriority::P1));
+
+        let iteration_updated = set_requirement_documents_iteration(
+            store.path(),
+            &[original.id.as_str()],
+            Some("Sprint 13"),
+        )
+        .unwrap();
+        let final_meta = iteration_updated
+            .documents
+            .iter()
+            .find(|doc| doc.id == original.id)
+            .unwrap();
+        assert_eq!(final_meta.priority, Some(RequirementPriority::P1));
+        assert_eq!(final_meta.iteration.as_deref(), Some("Sprint 13"));
+    }
+
+    #[test]
+    fn priority_update_rejects_stale_expected_value_and_can_clear() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        update_requirement_document_priority(
+            store.path(),
+            "doc-9",
+            Some(RequirementPriority::P2),
+            Some(None),
+        )
+        .unwrap();
+
+        let conflict = update_requirement_document_priority(
+            store.path(),
+            "doc-9",
+            Some(RequirementPriority::P3),
+            Some(None),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            conflict,
+            RequirementStoreError::PriorityConflict {
+                expected: Some(None),
+                actual: Some(RequirementPriority::P2),
+                ..
+            }
+        ));
+        assert_eq!(conflict.code(), "priority_conflict");
+
+        let cleared = update_requirement_document_priority(
+            store.path(),
+            "doc-9",
+            None,
+            Some(Some(RequirementPriority::P2)),
+        )
+        .unwrap();
+        assert_eq!(cleared.priority, None);
+    }
+
+    #[test]
+    fn concurrent_priority_writers_cannot_both_overwrite_unset() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        let barrier = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|scope| {
+            let writers: Vec<_> = [RequirementPriority::P1, RequirementPriority::P2]
+                .into_iter()
+                .map(|priority| {
+                    let barrier = &barrier;
+                    let root = store.path();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        update_requirement_document_priority(
+                            root,
+                            "doc-9",
+                            Some(priority),
+                            Some(None),
+                        )
+                    })
+                })
+                .collect();
+            writers
+                .into_iter()
+                .map(|writer| writer.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(results
+            .iter()
+            .any(|result| matches!(result, Err(RequirementStoreError::PriorityConflict { .. }))));
+    }
+
+    #[test]
+    fn priority_update_failure_leaves_metadata_unchanged() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        fs::create_dir(store.path().join("_teshi.tmp")).unwrap();
+
+        let error = update_requirement_document_priority(
+            store.path(),
+            "doc-12",
+            Some(RequirementPriority::P0),
+            Some(None),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "requirement_store_io");
+        assert_eq!(
+            read_requirement_document(store.path(), "doc-12")
+                .unwrap()
+                .meta
+                .priority,
+            None
+        );
     }
 
     #[test]

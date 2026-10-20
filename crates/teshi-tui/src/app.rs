@@ -1010,7 +1010,7 @@ pub enum ClickableRegion {
         action: Action,
         modal: bool,
     },
-    /// An iteration filter row in the Requirements modal.
+    /// A filter or priority picker row in the Requirements modal.
     RequirementFilterOption {
         rect: ratatui::layout::Rect,
         index: usize,
@@ -7388,6 +7388,16 @@ impl App {
                     self.quit_pending_confirm = false;
                 }
             }
+            Action::ReqEditPriority => {
+                if self.active_tab == MainTab::Requirements {
+                    if self.authoring_ui.selected_document_id.is_some() {
+                        self.authoring_ui.open_priority_editor();
+                    } else {
+                        self.status = "Select a requirement document to set its priority".into();
+                    }
+                    self.quit_pending_confirm = false;
+                }
+            }
             Action::OverlayConfirm
             | Action::OverlayCancel
             | Action::OverlayMoveUp
@@ -8933,6 +8943,14 @@ impl App {
         }
 
         if self.active_tab == MainTab::Requirements {
+            // Header metadata controls share a pane's border; dispatch them
+            // before pane focus/scroll handling consumes the pointer event.
+            if matches!(kind, MouseEventKind::Down(MouseButton::Left))
+                && let Some(region @ ClickableRegion::ActionButton { .. }) =
+                    self.hit_test(&pos).cloned()
+            {
+                return self.handle_region_click(&region, &pos);
+            }
             use crate::authoring_tab::RequirementsFocus;
             let ui = &mut self.authoring_ui;
             let pane = ui.pane_areas.iter().position(|area| area.contains(pos));
@@ -9512,8 +9530,10 @@ impl App {
                 self.handle_action(action.clone())?;
             }
             ClickableRegion::RequirementFilterOption { index, .. } => {
-                if let crate::authoring_tab::RequirementsOverlay::FilterPicker { selection } =
-                    &mut self.authoring_ui.overlay
+                if let crate::authoring_tab::RequirementsOverlay::FilterPicker { selection }
+                | crate::authoring_tab::RequirementsOverlay::PriorityEdit {
+                    selection, ..
+                } = &mut self.authoring_ui.overlay
                 {
                     *selection = *index;
                     self.handle_action(Action::OverlayConfirm)?;

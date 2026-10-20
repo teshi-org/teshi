@@ -442,6 +442,99 @@ fn selected_linked(screen: &str, title: &str) -> bool {
     })
 }
 
+fn priority_roundtrip(narrow: bool) {
+    use teshi_core::authoring::RequirementPriority;
+    let fixture = Fixture::new("priority-roundtrip", narrow);
+    let terminal = fixture.launch();
+    fixture.click(&terminal, "Priority: Unset", "priority-open");
+    terminal
+        .expect_text("Requirement priority", true, 1500)
+        .unwrap();
+    terminal.key("Down").unwrap();
+    fixture.click(&terminal, "Cancel", "priority-cancel");
+    assert_eq!(fixture.index().documents[0].priority, None);
+    // Metadata edits must neither save nor discard the dirty Markdown buffer.
+    terminal.click_text("alpha first", 1500).unwrap();
+    terminal.key("i").unwrap();
+    terminal.write("draft ").unwrap();
+    terminal.key("Escape").unwrap();
+    fixture.click(&terminal, "Priority: Unset", "priority-dirty-open");
+    terminal.write("\x1b[<0;5;1M\x1b[<0;5;1m").unwrap();
+    terminal
+        .expect_text("Requirement priority", true, 1500)
+        .unwrap();
+    fixture.click(&terminal, "P1", "priority-p1");
+    wait_until(|| fixture.index().documents[0].priority == Some(RequirementPriority::P1));
+    terminal.expect_text("Priority: P1", true, 1500).unwrap();
+    terminal
+        .expect_text("draft alpha first", true, 1500)
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(fixture.store.join("alpha.md")).unwrap(),
+        ALPHA
+    );
+    fixture.click(&terminal, "Save", "priority-save-body");
+    wait_until(|| {
+        fs::read_to_string(fixture.store.join("alpha.md"))
+            .unwrap()
+            .contains("draft ")
+    });
+    assert_eq!(
+        fixture.index().documents[0].priority,
+        Some(RequirementPriority::P1)
+    );
+    let before = fixture.index();
+    fixture.finish(terminal);
+    let terminal = fixture.launch();
+    terminal.expect_text("Priority: P1", true, 1500).unwrap();
+    assert_eq!(fixture.index(), before);
+    // The keyboard entry remains on the tree, independent of the editor's Vim keys.
+    terminal.key("p").unwrap();
+    terminal
+        .expect_text("Requirement priority", true, 1500)
+        .unwrap();
+    terminal.key("Up").unwrap();
+    terminal.key("Up").unwrap();
+    terminal.key("Enter").unwrap();
+    wait_until(|| fixture.index().documents[0].priority.is_none());
+    terminal.expect_text("Priority: Unset", true, 1500).unwrap();
+    fixture.capture(&terminal, "priority-cleared");
+    assert_eq!(fixture.index().documents[0].id, "alpha");
+    assert_eq!(
+        fixture.index().documents[0].iteration.as_deref(),
+        Some("Sprint A")
+    );
+    assert_eq!(fixture.index().documents[1], before.documents[1]);
+    fixture.finish(terminal);
+}
+
+fn priority_write_failure(narrow: bool) {
+    use teshi_core::authoring::RequirementPriority;
+    let fixture = Fixture::new("priority-write-failure", narrow);
+    let terminal = fixture.launch();
+    let original = fs::read(fixture.store.join("_teshi.json")).unwrap();
+    fs::create_dir(fixture.store.join("_teshi.tmp")).unwrap();
+    fixture.click(&terminal, "Priority: Unset", "priority-failure-open");
+    fixture.click(&terminal, "P0", "priority-failed-save");
+    terminal
+        .expect_text("Requirement priority", true, 1500)
+        .unwrap();
+    assert_eq!(
+        fs::read(fixture.store.join("_teshi.json")).unwrap(),
+        original
+    );
+    fs::remove_dir(fixture.store.join("_teshi.tmp")).unwrap();
+    terminal.key("Enter").unwrap();
+    wait_until(|| fixture.index().documents[0].priority == Some(RequirementPriority::P0));
+    terminal.expect_text("Priority: P0", true, 1500).unwrap();
+    assert_eq!(
+        fs::read_to_string(fixture.store.join("alpha.md")).unwrap(),
+        ALPHA
+    );
+    fixture.capture(&terminal, "priority-retry-persisted");
+    fixture.finish(terminal);
+}
+
 #[test]
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn linked_point_pointer_selection_matches_keyboard_after_resize() {
@@ -500,6 +593,10 @@ macro_rules! acceptance {
 }
 
 acceptance!(new_and_save_normal, new_document, false);
+acceptance!(priority_roundtrip_normal, priority_roundtrip, false);
+acceptance!(priority_roundtrip_narrow, priority_roundtrip, true);
+acceptance!(priority_write_failure_normal, priority_write_failure, false);
+acceptance!(priority_write_failure_narrow, priority_write_failure, true);
 acceptance!(new_and_save_narrow, new_document, true);
 acceptance!(filter_group_normal, filter_and_group, false);
 acceptance!(filter_group_narrow, filter_and_group, true);

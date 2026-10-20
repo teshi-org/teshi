@@ -46,7 +46,7 @@ current project open.
 
 ## Requirements tab
 
-The footer provides clickable New, Delete, Filter, Group, Iteration, Save,
+The footer provides clickable New, Delete, Filter, Group, Iteration, Priority, Save,
 and Point actions with their keyboard shortcuts. Dirty-buffer and delete
 confirmations provide clickable choices; their background panes stay blocked.
 Linked test-point rows can be selected with the pointer before navigation.
@@ -66,12 +66,20 @@ bare `h`/`l` do not switch panes.
 | `i` | Filter by iteration in the tree; enter Insert in the editor |
 | `g` | Toggle grouping: path hierarchy vs iteration → path |
 | `I` | Edit iteration from the tree or Browse editor (empty = Unassigned) |
+| `p` | Choose or clear requirement priority from the tree |
 | `s` | Save the current requirement document in Browse |
 
 In Insert, all printable ASCII and Unicode characters are text, including
 `s`, `q`, `hjkl`, and `1`–`5`. Arrows, Home/End, Enter, Backspace, and Delete edit
 the document; `Tab` inserts four spaces. `Ctrl+S` saves and stays in Insert.
 Bracketed paste accepts text in Insert.
+Priority is optional scheduling metadata: P0 needs immediate attention, P1 is next
+planned work, P2 is normal backlog, and P3 is a deferred improvement. In the
+priority picker, use arrows and Enter or click a value; Unset clears it and Esc
+cancels. Existing documents stay unset. Badges use explicit P0–P3 labels and do
+not depend on color. Changing priority preserves document order and Markdown,
+including unsaved edits. `requirements list --json` and `show --json` expose the
+optional `priority` field.
 Mouse dragging selects Markdown text for creating a test point in Browse.
 The Markdown editor soft-wraps long lines and shows a vertical scrollbar when
 content overflows. The tree and linked test points support both scrollbar axes. Click or drag a scrollbar to scroll that pane. The mouse

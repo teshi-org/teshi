@@ -113,6 +113,8 @@ pub enum Action {
     ReqGroupToggle,
     /// Edit the selected document's iteration (`I` on the Requirements tree).
     ReqEditIteration,
+    /// Edit the selected document's optional priority (`p` on the Requirements tree).
+    ReqEditPriority,
     /// Bounded Vim append/open/delete/yank operations for Requirements.
     ReqVimAppend,
     ReqVimOpenBelow,
@@ -911,6 +913,7 @@ impl Action {
                 (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Self::ReqFilterOverlay),
                 (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Self::ReqGroupToggle),
                 (KeyCode::Char('I'), KeyModifiers::SHIFT) => Some(Self::ReqEditIteration),
+                (KeyCode::Char('p'), KeyModifiers::NONE) => Some(Self::ReqEditPriority),
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
                 (KeyCode::Char('2'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::MindMap)),
                 (KeyCode::Char('3'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Ai)),

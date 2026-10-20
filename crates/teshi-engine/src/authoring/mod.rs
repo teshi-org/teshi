@@ -10,8 +10,8 @@ pub use import::{
 pub use service::{
     delete_requirement_document, list_requirement_documents, read_requirement_document,
     resolve_requirement_ref, resolve_requirement_ref_in_store, set_requirement_documents_iteration,
-    update_requirement_document_body, RequirementDocumentList, RequirementRefMatch,
-    RequirementStoreError,
+    update_requirement_document_body, update_requirement_document_priority,
+    RequirementDocumentList, RequirementRefMatch, RequirementStoreError,
 };
 pub use store::{
     compute_document_revision, initialize_requirement_store, is_requirement_document_id_reserved,

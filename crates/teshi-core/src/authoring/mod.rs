@@ -18,12 +18,12 @@ pub use positions::{
     slice_by_char_range,
 };
 pub use requirements::{
-    DocumentRevision, InvalidIterationName, InvalidRequirementPath, InvalidRequirementStoreId,
-    InvalidRequirementTitle, REQUIREMENT_INDEX_FILE, REQUIREMENT_INDEX_VERSION,
-    RequirementDocumentIndex, RequirementDocumentMeta, RequirementGroupMode,
-    RequirementIterationFilter, RequirementStoreId, UNASSIGNED_ITERATION_LABEL,
-    is_safe_requirement_path, normalize_iteration_name, requirement_title,
-    resolve_requirement_store_path, validate_requirement_path,
+    DocumentRevision, InvalidIterationName, InvalidRequirementPath, InvalidRequirementPriority,
+    InvalidRequirementStoreId, InvalidRequirementTitle, REQUIREMENT_INDEX_FILE,
+    REQUIREMENT_INDEX_VERSION, RequirementDocumentIndex, RequirementDocumentMeta,
+    RequirementGroupMode, RequirementIterationFilter, RequirementPriority, RequirementStoreId,
+    UNASSIGNED_ITERATION_LABEL, is_safe_requirement_path, normalize_iteration_name,
+    requirement_title, resolve_requirement_store_path, validate_requirement_path,
 };
 pub use resolve::{
     ANCHOR_CONTEXT_CHARS, create_requirement_link, mark_document_links_missing,

@@ -2576,6 +2576,7 @@ mod pipeline_gate_tests {
         let document = RequirementDocumentContent {
             meta: RequirementDocumentMeta {
                 iteration: None,
+                priority: None,
                 id: "doc-1".into(),
                 path: "auth.md".into(),
                 title: "Auth".into(),

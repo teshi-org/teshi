@@ -492,6 +492,7 @@ fn apply_import(
                     title: meta.title.clone(),
                     revision: compute_document_revision(body),
                     iteration: meta.iteration.clone(),
+                    priority: meta.priority,
                 });
             }
             continue;
@@ -512,6 +513,7 @@ fn apply_import(
                 title: meta.title.clone(),
                 revision: compute_document_revision(body),
                 iteration: meta.iteration.clone(),
+                priority: meta.priority,
             });
             continue;
         }
@@ -527,6 +529,7 @@ fn apply_import(
             title: meta.title.clone(),
             revision: compute_document_revision(body),
             iteration: meta.iteration.clone(),
+            priority: meta.priority,
         });
     }
 
@@ -663,6 +666,49 @@ mod tests {
         assert!(legacy_project_requirements_dir(project.path())
             .join("auth.md")
             .is_file());
+    }
+
+    #[test]
+    fn imported_priority_is_preserved_and_reuse_keeps_target_priority() {
+        use teshi_core::authoring::RequirementPriority;
+        let project = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        write_legacy_project(project.path(), &[("doc-1", "auth.md", "User can log in")]);
+        let source = legacy_project_requirements_dir(project.path());
+        let mut index = load_legacy_index(&source).unwrap();
+        index.documents[0].priority = Some(RequirementPriority::P1);
+        fs::write(
+            source.join(REQUIREMENTS_INDEX_FILE),
+            serde_json::to_vec_pretty(&index).unwrap(),
+        )
+        .unwrap();
+        let options = || ImportProjectOptions {
+            dry_run: false,
+            apply: true,
+        };
+        import_project_requirements(project.path(), store.path(), options()).unwrap();
+        assert_eq!(
+            super::super::service::read_requirement_document(store.path(), "doc-1")
+                .unwrap()
+                .meta
+                .priority,
+            Some(RequirementPriority::P1)
+        );
+        super::super::service::update_requirement_document_priority(
+            store.path(),
+            "doc-1",
+            Some(RequirementPriority::P3),
+            Some(Some(RequirementPriority::P1)),
+        )
+        .unwrap();
+        import_project_requirements(project.path(), store.path(), options()).unwrap();
+        assert_eq!(
+            super::super::service::read_requirement_document(store.path(), "doc-1")
+                .unwrap()
+                .meta
+                .priority,
+            Some(RequirementPriority::P3)
+        );
     }
 
     #[test]

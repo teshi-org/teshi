@@ -9,9 +9,10 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use teshi_core::authoring::{
     AuthoringArtifacts, AuthoringDiagnostic, HierarchyPath, RequirementDocumentMeta,
-    RequirementGroupMode, RequirementIterationFilter, ResolutionState, ReviewState, TestPoint,
-    TextRange, UNASSIGNED_ITERATION_LABEL, create_requirement_link, line_col_range_to_char_range,
-    mark_document_links_missing, re_resolve_document_links, requirement_title,
+    RequirementGroupMode, RequirementIterationFilter, RequirementPriority, ResolutionState,
+    ReviewState, TestPoint, TextRange, UNASSIGNED_ITERATION_LABEL, create_requirement_link,
+    line_col_range_to_char_range, mark_document_links_missing, re_resolve_document_links,
+    requirement_title,
 };
 use teshi_engine::{
     compute_document_revision, delete_requirement_document, initialize_requirement_store,
@@ -76,6 +77,15 @@ pub enum RequirementsOverlay {
     IterationEdit {
         /// Current input buffer.
         buffer: String,
+    },
+    /// Choose an optional P0-P3 scheduling priority.
+    PriorityEdit {
+        /// Stable target captured before any external reload can change selection.
+        document_id: String,
+        /// Highlighted option: 0 = unset, 1-4 = P0-P3.
+        selection: usize,
+        /// Persisted value observed when the picker opened, retained across reloads.
+        expected: Option<RequirementPriority>,
     },
     /// Confirm removal of the selected document from the global library.
     DeleteConfirmation {
@@ -660,6 +670,20 @@ impl AuthoringUiState {
         self.overlay = RequirementsOverlay::IterationEdit { buffer: current };
     }
 
+    /// Opens the optional priority picker for the selected document.
+    pub fn open_priority_editor(&mut self) {
+        let Some(document_id) = self.selected_document_id.clone() else {
+            return;
+        };
+        let expected = self.current_document_meta().and_then(|meta| meta.priority);
+        let selection = expected.map(|priority| priority as usize + 1).unwrap_or(0);
+        self.overlay = RequirementsOverlay::PriorityEdit {
+            document_id,
+            selection,
+            expected,
+        };
+    }
+
     /// Opens the explicit global-library deletion confirmation.
     pub fn open_delete_confirmation(&mut self) -> Result<(), String> {
         let document_id = self
@@ -803,11 +827,11 @@ impl AuthoringUiState {
         self.persist_view_prefs();
     }
 
-    /// Confirms the active overlay (filter pick or iteration edit).
+    /// Confirms the active filter or metadata overlay.
     ///
     /// # Errors
     ///
-    /// Returns an error when saving iteration metadata fails.
+    /// Returns an error when saving metadata fails or its expected value changed.
     pub fn confirm_overlay(&mut self) -> Result<(), String> {
         match self.overlay.clone() {
             RequirementsOverlay::Unsaved { .. } => Ok(()),
@@ -821,6 +845,11 @@ impl AuthoringUiState {
                 self.try_set_iteration_filter(filter)
             }
             RequirementsOverlay::IterationEdit { buffer } => self.save_current_iteration(&buffer),
+            RequirementsOverlay::PriorityEdit {
+                document_id,
+                selection,
+                expected,
+            } => self.save_current_priority(&document_id, selection, expected),
             RequirementsOverlay::DeleteConfirmation { .. } => Ok(()),
         }
     }
@@ -832,13 +861,18 @@ impl AuthoringUiState {
 
     /// Moves the filter-picker highlight.
     pub fn overlay_move_selection(&mut self, delta: isize) {
-        let len = self.filter_picker_options().len();
-        if len == 0 {
-            return;
-        }
-        if let RequirementsOverlay::FilterPicker { selection } = &mut self.overlay {
-            let next = (*selection as isize + delta).rem_euclid(len as isize) as usize;
-            *selection = next;
+        let filter_len = self.filter_picker_options().len();
+        match &mut self.overlay {
+            RequirementsOverlay::FilterPicker { selection } => {
+                if filter_len > 0 {
+                    *selection =
+                        (*selection as isize + delta).rem_euclid(filter_len as isize) as usize;
+                }
+            }
+            RequirementsOverlay::PriorityEdit { selection, .. } => {
+                *selection = (*selection as isize + delta).rem_euclid(5) as usize;
+            }
+            _ => {}
         }
     }
 
@@ -908,6 +942,48 @@ impl AuthoringUiState {
         Ok(())
     }
 
+    fn save_current_priority(
+        &mut self,
+        doc_id: &str,
+        selection: usize,
+        expected: Option<RequirementPriority>,
+    ) -> Result<(), String> {
+        let priority = match selection {
+            1 => Some(RequirementPriority::P0),
+            2 => Some(RequirementPriority::P1),
+            3 => Some(RequirementPriority::P2),
+            4 => Some(RequirementPriority::P3),
+            _ => None,
+        };
+        let updated = teshi_engine::update_requirement_document_priority(
+            &self.requirements_root,
+            doc_id,
+            priority,
+            Some(expected),
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(artifacts) = self.artifacts.as_mut() {
+            if let Some(index_meta) = artifacts
+                .index
+                .documents
+                .iter_mut()
+                .find(|meta| meta.id == doc_id)
+            {
+                index_meta.priority = updated.priority;
+            }
+            if let Some(doc) = artifacts
+                .documents
+                .iter_mut()
+                .find(|doc| doc.meta.id == doc_id)
+            {
+                doc.meta.priority = updated.priority;
+            }
+        }
+        self.overlay = RequirementsOverlay::None;
+        self.rebuild_tree();
+        Ok(())
+    }
+
     fn restore_view_prefs(&mut self) {
         let Some(store_id) = self
             .artifacts
@@ -955,7 +1031,7 @@ impl AuthoringUiState {
         let _ = teshi_engine::save_settings(&settings);
     }
 
-    /// Selects a document by stable id and loads its Markdown into the editor buffer.
+    /// Selects a document by stable id, synchronizing its tree row and editor buffer.
     pub fn select_document_by_id(&mut self, doc_id: &str) {
         if self.buffer_dirty {
             if self.selected_document_id.as_deref() != Some(doc_id) {
@@ -1702,7 +1778,7 @@ fn visible_document_ids(
         .collect()
 }
 
-/// Finds the complete ancestor path for a stable tree row identity.
+/// Finds a complete hierarchy path for a stable tree node identity.
 pub(crate) fn find_tree_path(
     items: &[TreeItem<'static, String>],
     target: &str,
@@ -1779,11 +1855,7 @@ fn build_path_tree(
             items.push(TreeItem::new(id, name.clone(), child_items).unwrap());
         }
         for doc in &node.documents {
-            let label = if doc.title.trim().is_empty() {
-                doc.path.clone()
-            } else {
-                doc.title.clone()
-            };
+            let label = requirement_document_tree_label(doc);
             let id = format!("{TREE_DOC_PREFIX}{}", doc.id);
             items.push(TreeItem::new(id, label, Vec::new()).unwrap());
         }
@@ -1839,6 +1911,19 @@ pub fn build_requirement_tree(
     }
 }
 
+/// Display label for a requirement document, including an optional priority badge.
+pub fn requirement_document_tree_label(doc: &RequirementDocumentMeta) -> String {
+    let title = if doc.title.trim().is_empty() {
+        doc.path.as_str()
+    } else {
+        doc.title.as_str()
+    };
+    match doc.priority {
+        Some(priority) => format!("[{priority}] {title}"),
+        None => title.to_string(),
+    }
+}
+
 /// Status indicator for a test point row.
 pub fn review_state_label(state: ReviewState) -> &'static str {
     match state {
@@ -1888,6 +1973,8 @@ pub fn requirements_footer_line(
         Span::styled(" Group [g] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
         Span::styled(" Iteration [I] ", Style::default().fg(theme::FOOTER_DESC)),
+        Span::raw(" "),
+        Span::styled(" Priority [p] ", Style::default().fg(theme::FOOTER_DESC)),
         Span::raw(" "),
         Span::styled(
             " New doc [Ctrl+n] ",
@@ -2596,6 +2683,111 @@ mod tests {
         state.cancel_overlay();
         assert_eq!(state.overlay, RequirementsOverlay::None);
     }
+
+    #[test]
+    fn priority_picker_keeps_its_target_when_external_deletion_changes_selection() {
+        let store = tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        let project = tempdir().unwrap();
+        let mut state = AuthoringUiState::load_from_project(project.path(), store.path());
+        let first = state.create_document("first.md", "First").unwrap();
+        state.save_current_document(project.path()).unwrap();
+        let second = state.create_document("second.md", "Second").unwrap();
+        state.save_current_document(project.path()).unwrap();
+        state.select_document_by_id(&first);
+        state.open_priority_editor();
+        state.overlay_move_selection(2);
+        teshi_engine::delete_requirement_document(store.path(), &first, None).unwrap();
+        state.reload_from_disk().unwrap();
+        assert_eq!(state.selected_document_id.as_deref(), Some(second.as_str()));
+        assert!(state.confirm_overlay().is_err());
+        assert!(state.overlay_active());
+        assert_eq!(
+            teshi_engine::read_requirement_document(store.path(), &second)
+                .unwrap()
+                .meta
+                .priority,
+            None
+        );
+    }
+
+    #[test]
+    fn priority_picker_rejects_external_change_even_after_reload() {
+        let store = tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        let project = tempdir().unwrap();
+        let mut state = AuthoringUiState::load_from_project(project.path(), store.path());
+        let id = state.create_document("priority.md", "Priority").unwrap();
+        state.save_current_document(project.path()).unwrap();
+        state.open_priority_editor();
+        state.overlay_move_selection(2);
+        teshi_engine::update_requirement_document_priority(
+            store.path(),
+            &id,
+            Some(RequirementPriority::P3),
+            Some(None),
+        )
+        .unwrap();
+        state.reload_from_disk().unwrap();
+        assert!(
+            state
+                .confirm_overlay()
+                .unwrap_err()
+                .contains("changed priority")
+        );
+        assert!(state.overlay_active());
+        assert_eq!(
+            teshi_engine::read_requirement_document(store.path(), &id)
+                .unwrap()
+                .meta
+                .priority,
+            Some(RequirementPriority::P3)
+        );
+        state.cancel_overlay();
+        state.open_priority_editor();
+        state.overlay_move_selection(1);
+        state.confirm_overlay().unwrap();
+        assert_eq!(
+            teshi_engine::read_requirement_document(store.path(), &id)
+                .unwrap()
+                .meta
+                .priority,
+            None
+        );
+    }
+
+    #[test]
+    fn priority_picker_updates_metadata_and_tree_label() {
+        let store = tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        let project = tempdir().unwrap();
+        let mut state = AuthoringUiState::load_from_project(project.path(), store.path());
+        let id = state.create_document("priority.md", "Priority").unwrap();
+        state.save_current_document(project.path()).unwrap();
+        state.open_priority_editor();
+        state.overlay_move_selection(2);
+        state.confirm_overlay().unwrap();
+
+        let meta = state
+            .artifacts
+            .as_ref()
+            .unwrap()
+            .index
+            .documents
+            .iter()
+            .find(|doc| doc.id == id)
+            .unwrap();
+        assert_eq!(meta.priority, Some(RequirementPriority::P1));
+        assert!(format!("{:?}", state.tree_items).contains("[P1] Priority"));
+        assert_eq!(
+            teshi_engine::read_requirement_document(store.path(), &id)
+                .unwrap()
+                .meta
+                .priority,
+            Some(RequirementPriority::P1)
+        );
+    }
+
     #[test]
     fn vim_word_motions_cross_tokens_and_extend_visual_selection() {
         let mut state = AuthoringUiState::empty();

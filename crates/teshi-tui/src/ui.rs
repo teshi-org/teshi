@@ -388,7 +388,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             );
         } else {
             let compact = chunks[3].width < 100;
-            let controls = vec![
+            let mut controls = vec![
                 (
                     if compact { " New" } else { " New doc [Ctrl+n]" },
                     Action::ReqNewDocument,
@@ -426,6 +426,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                     Action::ReqNewTestPoint,
                 ),
             ];
+            if !compact {
+                controls.push((" Priority [p]", Action::ReqEditPriority));
+            }
             render_action_bar(frame, app, chunks[3], mode, &controls, false);
         }
     } else if app.active_tab == MainTab::TestPoints {
@@ -4009,6 +4012,15 @@ fn render_requirements_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             render_requirements_linked(frame, ui, layout[2], linked_focused);
         }
     }
+    if app.authoring_ui.current_document_meta().is_some() {
+        let pane = layout[1];
+        let width = 17.min(pane.width.saturating_sub(2));
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect: Rect::new(pane.right().saturating_sub(width + 1), pane.y, width, 1),
+            action: Action::ReqEditPriority,
+            modal: false,
+        });
+    }
 }
 
 fn render_requirements_tree(
@@ -4047,7 +4059,11 @@ fn render_requirements_tree(
                     ui.artifacts
                         .as_ref()
                         .and_then(|a| a.index.documents.iter().find(|d| d.id == doc_id))
-                        .map(|d| UnicodeWidthStr::width(d.title.as_str()))
+                        .map(|d| {
+                            UnicodeWidthStr::width(
+                                crate::authoring_tab::requirement_document_tree_label(d).as_str(),
+                            )
+                        })
                         .unwrap_or(0)
                 } else if let Some(name) = id.strip_prefix(crate::authoring_tab::TREE_ITER_PREFIX) {
                     UnicodeWidthStr::width(name)
@@ -4129,6 +4145,7 @@ fn render_requirements_editor(
         .current_document_meta()
         .map(|m| m.title.clone())
         .unwrap_or_else(|| "Source".to_string());
+    let priority = ui.current_document_meta().and_then(|meta| meta.priority);
     let missing = ui.current_document_missing();
     let display_title = if missing {
         format!("{title} (missing file)")
@@ -4144,8 +4161,33 @@ fn render_requirements_editor(
         crate::authoring_tab::RequirementsEditorMode::VisualLine => ("[V-LINE]", theme::WARNING),
     };
     let mut heading = vec![Span::raw(format!("{display_title} "))];
+    if let Some(priority) = priority {
+        let priority_color = match priority {
+            teshi_core::authoring::RequirementPriority::P0 => theme::ERROR,
+            teshi_core::authoring::RequirementPriority::P1 => theme::WARNING,
+            teshi_core::authoring::RequirementPriority::P2 => theme::ACCENT,
+            teshi_core::authoring::RequirementPriority::P3 => theme::MUTED,
+        };
+        heading.push(theme::chip(format!("[{priority}]"), priority_color));
+        heading.push(Span::raw(" "));
+    }
     heading.push(theme::chip(mode, mode_color));
-    let block = theme::panel_block(Line::from(heading), focused);
+    let priority_title = ui.current_document_meta().map(|_| {
+        let label = priority.map_or_else(|| "Unset".to_string(), |value| value.to_string());
+        format!(" Priority: {label} ")
+    });
+    let heading_width = area.width.saturating_sub(2).saturating_sub(
+        priority_title
+            .as_ref()
+            .map_or(0, |title| title.len() as u16),
+    );
+    let mut block = theme::panel_block(
+        truncate_line_to_cols(Line::from(heading), heading_width),
+        focused,
+    );
+    if let Some(title) = priority_title {
+        block = block.title_top(Line::from(title).right_aligned());
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -4557,6 +4599,64 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                     (" Confirm [Enter]", Action::OverlayConfirm),
                     (" Cancel [Esc]", Action::OverlayCancel),
                 ],
+                true,
+            );
+        }
+        RequirementsOverlay::PriorityEdit { selection, .. } => {
+            let options = [
+                "Unset".to_string(),
+                "P0".to_string(),
+                "P1".to_string(),
+                "P2".to_string(),
+                "P3".to_string(),
+            ];
+            let panel_w = area.width.min(36);
+            let panel_h = (options.len() as u16 + 4).min(area.height);
+            let panel_area = Rect::new(
+                (area.width.saturating_sub(panel_w)) / 2,
+                (area.height.saturating_sub(panel_h)) / 2,
+                panel_w,
+                panel_h,
+            );
+            frame.render_widget(Clear, panel_area);
+            let lines = options
+                .iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    app.clickable_regions
+                        .push(ClickableRegion::RequirementFilterOption {
+                            rect: Rect::new(
+                                panel_area.x + 1,
+                                panel_area.y + 1 + index as u16,
+                                panel_area.width.saturating_sub(2),
+                                1,
+                            ),
+                            index,
+                        });
+                    let style = if index == *selection {
+                        theme::selected_row(true)
+                    } else {
+                        Style::default()
+                    };
+                    Line::styled(format!("  {label}"), style)
+                })
+                .collect::<Vec<_>>();
+            frame.render_widget(
+                Paragraph::new(theme::popup_rows(lines, panel_area.width.saturating_sub(2)))
+                    .block(theme::popup_block(" Requirement priority ")),
+                panel_area,
+            );
+            render_action_bar(
+                frame,
+                app,
+                Rect::new(
+                    panel_area.x + 1,
+                    panel_area.bottom().saturating_sub(2),
+                    panel_area.width.saturating_sub(2),
+                    1,
+                ),
+                "",
+                &[(" Cancel [Esc]", Action::OverlayCancel)],
                 true,
             );
         }
@@ -5262,12 +5362,12 @@ mod truncate_tests {
         for (mode, expected, first_key) in [
             (
                 RequirementsEditorMode::Browse,
-                "[BROWSE] New doc [Ctrl+n] Delete [d/Delete] Filter [i] Group [g] Iteration [I] Save [Ctrl+s] Point [n]",
+                "[BROWSE] New doc [Ctrl+n] Delete [d/Delete] Filter [i] Group [g] Iteration [I] Save [Ctrl+s] Point [n] Priority [p]",
                 "[Ctrl+n]",
             ),
             (
                 RequirementsEditorMode::Insert,
-                "[INSERT] New doc [Ctrl+n] Delete [d/Delete] Filter [i] Group [g] Iteration [I] Save [Ctrl+s] Point [n]",
+                "[INSERT] New doc [Ctrl+n] Delete [d/Delete] Filter [i] Group [g] Iteration [I] Save [Ctrl+s] Point [n] Priority [p]",
                 "[Ctrl+n]",
             ),
         ] {

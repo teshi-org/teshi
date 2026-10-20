@@ -2,7 +2,7 @@
 
 Closed: 2026-10-20. Original planning date: 2026-10-16.
 
-The engineering handoff is closed for the accepted scoped candidate. P0–P5 and deterministic P7–P9 delivery are recorded below; P6, live-provider acceptance, and user aesthetic acceptance are carried forward explicitly. This is not a claim that every original requirement or the combined dirty checkout has passed acceptance.
+The original engineering handoff is closed for the accepted scoped candidate. P0–P5 and deterministic P7–P9 delivery are recorded below. On 2026-10-20 the user resumed P6 and explicitly approved its priority design; its separate implementation and validation are recorded below. Live-provider acceptance and user aesthetic acceptance remain open. This is not a claim that every original requirement or the combined dirty checkout has passed acceptance.
 
 This document is the final status record. The [historical handoff records](requirement-implementation-handoff-2026-10-16-history.md) preserve the previous document in full, including original task contracts, failed attempts, intermediate results, and old checklists. Those historical instructions do not reopen completed work.
 
@@ -33,18 +33,17 @@ Primary evidence:
 | P3 | Windows clipboard/selection and Linux X11 acceptance retained | No Wayland or post-exit clipboard durability claim |
 | P4 | Scoped pointer/modal acceptance retained | User aesthetic acceptance remains pending |
 | P5 | Documented bounded Vim subset retained | Full Vim grammar and unclaimed platform/input paths remain outside the delivered subset |
-| P6 | Deferred by the user | No design approval or delivery claim; priority changes remain outside the candidate and commits |
+| P6 | Implemented after explicit design approval on 2026-10-20; Windows native gates and real PTY acceptance pass | Separate local delivery; Linux/macOS and Desktop/Web rendering were not replayed; no automatic real-library assignments |
 | P7 | Deterministic work committed; six paired Features / 64 scenarios pass; native and runner acceptance retained | Two real CodeBuddy Features remain blocked without explicit opt-in |
 | P8 | All 36 original task bullets have scoped evidence; original switching 34, prior failure boundaries 14 and new persistence/identity boundaries 14 all pass on each OS | Scoped implementation and acceptance complete. Deliberate Unix group escape remains explicitly unsupported by user decision; no universal filesystem/platform claim |
 | P9 | Both native workspace gate sets, independent terminal-runner gates, 47-Feature catalog and complete 40-Feature / 266-scenario deterministic replays pass on the final candidate | Deterministic engineering validation complete. Real-provider/user acceptance and excluded external/rendering targets retain their separate status; no whole-dirty-tree claim |
 
 ## Carried-forward items
 
-These three items remain open independently of the closed engineering handoff. None is marked as passed or waived.
+These two items remain open independently of the closed engineering handoff and the resumed P6 work. Neither is marked as passed or waived.
 
 | Item | Status | Next action and completion condition |
 | --- | --- | --- |
-| P6 requirement priority | Deferred by the user | Resume only after explicit priority design approval; implement and validate as a separate change. Existing priority edits remain outside the accepted candidate. |
 | Two real CodeBuddy Features | Blocked pending explicit live-provider opt-in | After authorization, run the two real-provider Features with isolated stores and record provider/runtime identity, actual results, and evidence. Deterministic ACP fixtures do not substitute for this acceptance. |
 | P4 appearance | User aesthetic acceptance pending | Present the recorded normal/narrow rendered views for user review. Record the user's judgment; any requested visual changes receive their own implementation and validation. Pointer/modal test success does not imply aesthetic approval. |
 
@@ -56,7 +55,34 @@ Earlier scoped commits remain identified in the historical records. The accepted
 
 Code delivery remains a separate operation: reconcile the accepted candidate against the intended staged diff, preserve unrelated changes, and obtain separate commit/push authorization. Do not certify the entire dirty checkout from isolated-candidate evidence.
 
-Future work starts from one of the three carried-forward items or a separately requested delivery action. Do not restart the five completed P8 boundary categories or rerun the full accepted matrix solely because historical checkboxes remain unchecked. Rerun affected validation when a subsequent code change invalidates its evidence.
+Future work starts from a carried-forward item or a separately requested delivery action. Do not restart the five completed P8 boundary categories or rerun the full accepted matrix solely because historical checkboxes remain unchecked. Rerun affected validation when a subsequent code change invalidates its evidence.
+
+## P6 resumed — 2026-10-20
+
+The user explicitly resumed P6 and confirmed optional P0–P3 scheduling priority,
+unset legacy values, textual tree badges, keyboard/mouse controls, unchanged
+ordering, engine persistence with conflict detection, and CLI JSON exposure.
+The former deferral is superseded; no priorities were assigned automatically.
+
+The separate [P6 implementation and acceptance record](requirement-priority-acceptance-2026-10-20.md)
+contains the behavior contract, current validation, pinned executable identity,
+failed attempts and platform limits. This local continuation does not alter the
+original candidate's historical evidence or authorize a commit/push. The two
+live CodeBuddy Features and P4 user aesthetic acceptance remain open.
+
+Final integration starts from HEAD `fc0687b`, including local commits `0e97adf`
+(WinApp tray/window automation), `8f417dd` (owned/cancellable Windows VT input)
+and `fc0687b` (requirement rename/deletion reload regression), plus the P6 diff.
+On this exact final source, all eight native/runner quality gates pass: native
+tests/doctests 1,313 passed / 5 ignored; runner regular tests 23 passed / 118
+ignored; affected real Windows PTY regression 32/32 passed. Source and pinned
+executable hashes remain unchanged throughout final validation. These checks
+integrate the three commits without recertifying earlier external WinApp/live
+provider snapshots. `Cargo.toml` still has its pre-existing status-only change
+with no content diff; all five `TODO.md` follow-up items remain intact. No new
+commit or push was made during validation. After explicit user authorization,
+the P6 implementation, regression tests and closeout documentation are delivered
+as one local commit. No push was performed.
 
 ## Five P8 boundaries and complete deterministic replay — 2026-10-20
 

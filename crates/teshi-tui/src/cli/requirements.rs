@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use teshi_core::authoring::RequirementIterationFilter;
+use teshi_core::authoring::{RequirementIterationFilter, RequirementPriority};
 use teshi_engine::{
     ImportProjectOptions, ImportProjectPlan, RequirementStoreError, import_project_requirements,
     list_requirement_documents, read_requirement_document, requirements_data_dir,
@@ -121,6 +121,7 @@ struct DocumentMetaJson {
     title: String,
     path: String,
     iteration: Option<String>,
+    priority: Option<RequirementPriority>,
     revision: String,
 }
 
@@ -139,6 +140,7 @@ struct ShowEnvelopeJson {
     title: String,
     path: String,
     iteration: Option<String>,
+    priority: Option<RequirementPriority>,
     revision: String,
     body: String,
 }
@@ -352,6 +354,7 @@ fn list_documents(
                     title: doc.title.clone(),
                     path: doc.path.clone(),
                     iteration: doc.iteration.clone(),
+                    priority: doc.priority,
                     revision: doc.revision.as_str().to_string(),
                 })
                 .collect(),
@@ -393,6 +396,7 @@ fn show_document(
             title: document.meta.title,
             path: document.meta.path,
             iteration: document.meta.iteration,
+            priority: document.meta.priority,
             revision: document.meta.revision.as_str().to_string(),
             body: document.body,
         };
@@ -692,7 +696,7 @@ fn confirm_import() -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use teshi_core::authoring::RequirementDocumentMeta;
+    use teshi_core::authoring::{RequirementDocumentMeta, RequirementPriority};
     use teshi_engine::{
         compute_document_revision, initialize_requirement_store, save_requirement_document_index,
         save_requirement_markdown,
@@ -723,6 +727,8 @@ mod tests {
                 compute_document_revision(checkout),
             ),
         ];
+        index.documents[0].priority = Some(RequirementPriority::P1);
+        index.documents[2].priority = Some(RequirementPriority::P3);
         fs::create_dir_all(root.join("auth")).unwrap();
         fs::create_dir_all(root.join("mobile")).unwrap();
         fs::create_dir_all(root.join("shop")).unwrap();
@@ -761,6 +767,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
         assert_eq!(value["documents"].as_array().unwrap().len(), 1);
         assert_eq!(value["documents"][0]["id"], "doc-12");
+        assert_eq!(value["documents"][0]["priority"], "P1");
 
         let empty = run(
             store.path(),
@@ -773,6 +780,29 @@ mod tests {
         assert_eq!(empty.exit_code, 0);
         let empty_value: serde_json::Value = serde_json::from_str(&empty.stdout).unwrap();
         assert!(empty_value["documents"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_json_exposes_unset_priority_as_null() {
+        let store = tempfile::tempdir().unwrap();
+        seed_store(store.path());
+        let output = run(
+            store.path(),
+            RequirementsCommand::List {
+                iteration: None,
+                unassigned: false,
+                json: true,
+            },
+        );
+        assert_eq!(output.exit_code, 0);
+        let value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+        let unset = value["documents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|doc| doc["id"] == "doc-37")
+            .expect("unset document");
+        assert!(unset["priority"].is_null());
     }
 
     #[test]
@@ -817,6 +847,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
         assert_eq!(value["id"], "doc-9");
         assert_eq!(value["body"], "# Checkout\n");
+        assert_eq!(value["priority"], "P3");
         assert!(value.get("store_id").is_some());
     }
 
@@ -1004,6 +1035,7 @@ mod tests {
         assert_eq!(renamed.exit_code, 0, "{}", renamed.stdout);
         let saved = read_requirement_document(store.path(), "doc-12").unwrap();
         assert_eq!(saved.meta.title, "Renamed login");
+        assert_eq!(saved.meta.priority, Some(RequirementPriority::P1));
         assert_eq!(saved.meta.id, original.meta.id);
         assert_eq!(saved.meta.path, original.meta.path);
         for body in ["#\n", "Missing H1\n"] {

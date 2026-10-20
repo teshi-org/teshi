@@ -218,6 +218,83 @@ pub fn normalize_iteration_name(raw: &str) -> Result<String, InvalidIterationNam
     Ok(trimmed.to_string())
 }
 
+/// Scheduling priority for a requirement document.
+///
+/// Priority is optional document metadata. It expresses planning urgency and
+/// is intentionally separate from incident severity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RequirementPriority {
+    /// Immediate attention.
+    #[serde(rename = "P0")]
+    P0,
+    /// Next planned work.
+    #[serde(rename = "P1")]
+    P1,
+    /// Normal backlog work.
+    #[serde(rename = "P2")]
+    P2,
+    /// Deferred improvement.
+    #[serde(rename = "P3")]
+    P3,
+}
+
+impl RequirementPriority {
+    /// Parses a priority label after trimming surrounding whitespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRequirementPriority`] for values other than `P0` through
+    /// `P3`.
+    pub fn parse(raw: &str) -> Result<Self, InvalidRequirementPriority> {
+        match raw.trim() {
+            "P0" => Ok(Self::P0),
+            "P1" => Ok(Self::P1),
+            "P2" => Ok(Self::P2),
+            "P3" => Ok(Self::P3),
+            _ => Err(InvalidRequirementPriority(raw.trim().to_string())),
+        }
+    }
+
+    /// Returns the canonical serialized priority label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::P0 => "P0",
+            Self::P1 => "P1",
+            Self::P2 => "P2",
+            Self::P3 => "P3",
+        }
+    }
+}
+
+impl fmt::Display for RequirementPriority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Why a requirement priority label was rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidRequirementPriority(String);
+
+impl InvalidRequirementPriority {
+    /// Returns the rejected input after trimming surrounding whitespace.
+    pub fn value(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for InvalidRequirementPriority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid requirement priority '{}'; expected P0, P1, P2, or P3",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for InvalidRequirementPriority {}
+
 /// Error raised when a requirement Markdown path is not a safe store-relative path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvalidRequirementPath {
@@ -363,6 +440,9 @@ pub struct RequirementDocumentMeta {
     /// Optional user-defined iteration name. `None` means Unassigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iteration: Option<String>,
+    /// Optional scheduling priority. `None` means no priority is assigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<RequirementPriority>,
 }
 
 impl RequirementDocumentMeta {
@@ -379,6 +459,7 @@ impl RequirementDocumentMeta {
             title: title.into(),
             revision,
             iteration: None,
+            priority: None,
         }
     }
 
@@ -540,6 +621,40 @@ mod tests {
     }
 
     #[test]
+    fn priority_is_optional_and_backward_compatible() {
+        let legacy = r#"{
+            "id": "doc-1",
+            "path": "a.md",
+            "title": "A",
+            "revision": "r"
+        }"#;
+        let meta: RequirementDocumentMeta = serde_json::from_str(legacy).expect("deserialize");
+        assert_eq!(meta.priority, None);
+
+        let mut prioritized = meta;
+        prioritized.priority = Some(RequirementPriority::P1);
+        let json = serde_json::to_value(&prioritized).expect("serialize");
+        assert_eq!(json["priority"], "P1");
+        assert_eq!(
+            serde_json::from_value::<RequirementDocumentMeta>(json)
+                .expect("deserialize")
+                .priority,
+            Some(RequirementPriority::P1)
+        );
+    }
+
+    #[test]
+    fn priority_validation_accepts_only_p0_through_p3() {
+        assert_eq!(
+            RequirementPriority::parse(" P0 ").unwrap(),
+            RequirementPriority::P0
+        );
+        assert_eq!(RequirementPriority::parse("P3").unwrap().as_str(), "P3");
+        assert_eq!(RequirementPriority::parse("P4").unwrap_err().value(), "P4");
+        assert!(serde_json::from_str::<RequirementPriority>(r#""P4""#).is_err());
+    }
+
+    #[test]
     fn iteration_name_rejects_blank_and_control_chars() {
         assert_eq!(
             normalize_iteration_name("  ").unwrap_err(),
@@ -631,5 +746,6 @@ mod tests {
         let meta = RequirementDocumentMeta::new("d", "d.md", "D", DocumentRevision::new("r"));
         let json = serde_json::to_string(&meta).expect("serialize");
         assert!(!json.contains("iteration"));
+        assert!(!json.contains("priority"));
     }
 }
