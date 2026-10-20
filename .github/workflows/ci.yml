@@ -114,17 +114,30 @@ jobs:
         run: cargo clippy --manifest-path crates/teshi-tui-runner/Cargo.toml --locked --all-targets -- -D warnings
       - name: Build Teshi CLI
         run: cargo build -p teshi-cli --locked
+      - name: Install Linux clipboard display
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb xauth
       - name: Run actual Teshi terminal regressions (Linux)
         if: runner.os != 'Windows'
         env:
           TESHI_SELF_TEST_BIN: ${{ github.workspace }}/target/debug/teshi
-          TESHI_AI_POINTER_ARTIFACTS: ${{ runner.temp }}/ai-pointer-artifacts
-        run: cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked -- --ignored
+          TESHI_AI_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/ai-pointer
+          TESHI_EXPLORE_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/explore-pointer
+          TESHI_MANAGEMENT_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/management-pointer
+          TESHI_NAVIGATION_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/navigation
+          TESHI_OVERLAY_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/overlay
+          TESHI_REQUIREMENTS_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/requirements-pointer
+        run: xvfb-run -a cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked -- --ignored
       - name: Run actual Teshi terminal regressions (Windows)
         if: runner.os == 'Windows'
         env:
           TESHI_SELF_TEST_BIN: ${{ github.workspace }}/target/debug/teshi.exe
-          TESHI_AI_POINTER_ARTIFACTS: ${{ runner.temp }}/ai-pointer-artifacts
+          TESHI_AI_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/ai-pointer
+          TESHI_EXPLORE_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/explore-pointer
+          TESHI_MANAGEMENT_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/management-pointer
+          TESHI_NAVIGATION_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/navigation
+          TESHI_OVERLAY_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/overlay
+          TESHI_REQUIREMENTS_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/requirements-pointer
         run: |
           $env:TESHI_VT_INPUT_TEST_BIN = & ./scripts/prepare-windows-vt-test.ps1
           cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked -- --ignored
