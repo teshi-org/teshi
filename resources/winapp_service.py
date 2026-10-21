@@ -378,6 +378,8 @@ if os.name == "nt":
     user32.GetWindowRect.restype = ctypes.c_bool
     user32.SetForegroundWindow.argtypes = [wintypes.HWND]
     user32.SetForegroundWindow.restype = ctypes.c_bool
+    user32.GetForegroundWindow.argtypes = []
+    user32.GetForegroundWindow.restype = wintypes.HWND
     user32.GetSystemMetrics.argtypes = [ctypes.c_int]
     user32.GetSystemMetrics.restype = ctypes.c_int
     user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(Input), ctypes.c_int]
@@ -1464,6 +1466,59 @@ class HighlightOverlay:
         self._proc = None
 
 
+class RequiresInteractiveInput(RuntimeError):
+    """The requested action needs explicit permission to disturb the desktop."""
+
+
+class ActionResultUncertain(Exception):
+    """An action was dispatched; retrying could duplicate its effects."""
+
+
+def interactive_input_error(action: str) -> dict[str, Any]:
+    """Describe the request-scoped permission required for physical input."""
+    return {"ok": False, "code": "requires_interactive_input", "action": action,
+            "error": f"{action} requires --mode foreground --allow-interactive-input; "
+                     "physical input is forbidden in background mode and auto mode",
+            "required_mode": "foreground", "required_permission": "allow_interactive_input"}
+
+
+def interactive_input_allowed(payload: dict[str, Any]) -> bool:
+    """Never coerce strings or replay confirmation into input permission."""
+    return (str(payload.get("mode") or "auto").casefold() == "foreground"
+            and payload.get("allow_interactive_input") is True)
+
+
+def configure_nonintrusive_uia_client(backend: Any, create_object: Any) -> Any:
+    """Disable UIA's implicit focus on the client that resolves our elements."""
+    shared = backend._AutomationClient.instance()
+    interface = shared.UIAutomationCore.IUIAutomation2
+    try:
+        client = shared.IUIAutomation.QueryInterface(interface)
+    except Exception:
+        # The legacy CUIAutomation class cannot expose the Windows 8 focus policy.
+        client = create_object("{e22ad333-b25f-460c-83d0-0581107395c9}", interface=interface)
+    client.AutoSetFocus = False
+    if bool(client.AutoSetFocus):
+        raise RuntimeError("UIA AutoSetFocus remained enabled")
+    walker = client.RawViewWalker
+    shared.IUIAutomation = client
+    shared.ViewWalker = walker
+    return client
+
+
+def ensure_nonintrusive_uia() -> None:
+    """Fail before mutation when implicit UIA focus cannot be disabled."""
+    try:
+        import comtypes.client
+        from uiautomation import uiautomation as backend
+
+        configure_nonintrusive_uia_client(backend, comtypes.client.CreateObject)
+    except Exception as exc:
+        raise RequiresInteractiveInput(
+            f"cannot disable implicit UIA focus before mutation: {exc}"
+        ) from exc
+
+
 class WinAppSession:
     """State for one attached native application window."""
 
@@ -1964,8 +2019,7 @@ class WinAppSession:
         several icons share the name, ``pid`` disambiguates through
         Shell_NotifyIconGetRect; without it the command fails with the
         candidate list instead of clicking an arbitrary icon. Physical
-        pointer input follows the auto/foreground/background policy and is
-        rejected in background mode.
+        pointer input requires foreground mode and explicit request permission.
         """
         name = str(payload.get("name") or "").strip()
         if not name:
@@ -1985,14 +2039,8 @@ class WinAppSession:
                 "ok": False,
                 "error": f"invalid mode: {mode!r}; use auto, foreground, or background",
             }
-        if mode == "background":
-            return {
-                "ok": False,
-                "error": (
-                    "tray click injects physical pointer input into the shell and is "
-                    "forbidden in background mode"
-                ),
-            }
+        if not interactive_input_allowed(payload):
+            return interactive_input_error("shell_tray_click")
         timeout_s = float(payload.get("timeout_ms") or 10000) / 1000.0
 
         reveal_autohidden_taskbar()
@@ -2082,6 +2130,8 @@ class WinAppSession:
             return {"ok": False, "error": f"tray click failed: {exc}"}
         return {
             "ok": True,
+            "action_outcome": "input_injected",
+            "business_result": "unverified",
             "name": target["name"],
             "area": target.get("area"),
             "button": button,
@@ -2144,8 +2194,8 @@ class WinAppSession:
               "background" (strictly forbid focus and physical input)
               "foreground" (allow focused keyboard fallbacks when required)
 
-        ``pointer_click`` explicitly requests physical pointer semantics, so
-        it may activate the window in auto or foreground mode. Ordinary
+        ``pointer_click`` requires foreground mode and request-scoped permission.
+        Ordinary
         ``click`` never injects physical pointer input.
 
         exec actions (no selector needed):
@@ -2169,6 +2219,10 @@ class WinAppSession:
                         f"invalid mode: {mode!r}; use auto, foreground, or background"
                     ),
                 }
+            if (action == "pointer_click" or
+                    (mode == "foreground" and action in ("click", "fill", "select", "press_key"))):
+                if not interactive_input_allowed(payload):
+                    return interactive_input_error(action)
             # --- exec actions (no UIA control needed) ---
             if action == "assert_screenshot":
                 return self.visual_command({**payload, "baseline": value})
@@ -2179,6 +2233,8 @@ class WinAppSession:
             if action in UIA_ACTIONS:
                 if error := self.integrity_guard(action):
                     return {**error, "selector": selector}
+            if action in ("click", "fill", "select"):
+                ensure_nonintrusive_uia()
             if action == "assert_not_exists":
                 try:
                     exists = self.control_exists(selector)
@@ -2205,14 +2261,6 @@ class WinAppSession:
                 }
 
             if action == "pointer_click":
-                if mode == "background":
-                    return {
-                        "ok": False,
-                        "error": (
-                            "pointer_click is forbidden in background mode because it "
-                            "requires foreground activation and physical pointer input"
-                        ),
-                    }
                 try:
                     self._activate_foreground("pointer_click")
                     with physical_coordinates():
@@ -2222,15 +2270,19 @@ class WinAppSession:
                         send_pointer_click(center_x, center_y)
                 except Exception as exc:
                     return {"ok": False, "error": str(exc)}
-                return {"ok": True, "selector": selector, "action": action}
+                return {"ok": True, "selector": selector, "action": action,
+                        "action_outcome": "input_injected", "business_result": "unverified"}
 
             control = self.find_control(selector)
+            uia_method = None
             if action == "click":
-                self._click(control, mode)
+                uia_method = self._click(control, mode)
             elif action == "fill":
                 if value is None:
                     return {"ok": False, "error": "fill requires value"}
                 self._fill(control, str(value), mode)
+                if self._control_text(control) != str(value):
+                    raise ActionResultUncertain("fill was dispatched but value readback did not match")
             elif action == "assert_visible":
                 error = element_visibility_error(control, self.hwnd)
                 if error is not None:
@@ -2249,16 +2301,26 @@ class WinAppSession:
                         "error": f"expected text {expected!r}, got {actual!r}",
                     }
             elif action == "select":
-                self._select(control, mode)
+                uia_method = self._select(control, mode)
             elif action == "press_key":
                 if value is None:
                     return {"ok": False, "error": "press_key requires value"}
                 self._press_key(control, str(value), mode)
             else:
                 return {"ok": False, "error": f"unsupported_action: {action}"}
+        except RequiresInteractiveInput as exc:
+            return {**interactive_input_error(action), "detail": str(exc)}
+        except ActionResultUncertain as exc:
+            return {"ok": False, "code": "action_result_uncertain", "error": str(exc),
+                    "action": action, "action_outcome": "dispatched", "business_result": "unverified"}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
-        return {"ok": True, "selector": selector, "action": action}
+        result = {"ok": True, "selector": selector, "action": action}
+        if action in ("click", "select", "press_key"):
+            result.update(action_outcome="provider_completed", business_result="unverified")
+        if uia_method is not None:
+            result["input_method"] = uia_method
+        return result
 
     def _handle_exec(self, sub_action: str, value_arg: str) -> dict[str, Any]:
         """Handle exec commands: launch, close, assert_process, assert_no_process."""
@@ -2282,7 +2344,16 @@ class WinAppSession:
                 error_code = int(get_last_error())
                 detail = f" (Win32 error {error_code})" if error_code else ""
                 return {"ok": False, "error": f"close failed{detail}"}
-            return {"ok": True, "exec": "close", "hwnd": self.hwnd}
+            closing_hwnd = self.hwnd
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                if not is_window(closing_hwnd):
+                    return {"ok": True, "exec": "close", "hwnd": closing_hwnd,
+                            "action_outcome": "window_closed", "business_result": "verified"}
+                time.sleep(0.05)
+            return {"ok": False, "code": "action_result_uncertain", "exec": "close",
+                    "hwnd": self.hwnd, "action_outcome": "dispatched",
+                    "business_result": "unverified", "error": "WM_CLOSE queued; window closure is unverified"}
 
         if sub_action == "kill":
             if not value_arg:
@@ -2309,32 +2380,49 @@ class WinAppSession:
         """Activate the attached window only for an explicit intrusive path."""
         if self.hwnd is None or user32 is None:
             raise RuntimeError(f"{action} requires an attached Windows window")
-        if not user32.SetForegroundWindow(self.hwnd):
-            raise RuntimeError(f"SetForegroundWindow failed for {action}")
+        if user32.GetForegroundWindow() == self.hwnd:
+            return
+        user32.SetForegroundWindow(self.hwnd)
+        # Windows can reject activation or report failure for an already-active
+        # target. Never inject keys/pointer input based only on its return value.
+        if user32.GetForegroundWindow() != self.hwnd:
+            raise RuntimeError(f"SetForegroundWindow failed for {action}; target is not foreground")
 
     @staticmethod
-    def _uia_click(control: Any) -> None:
+    def _uia_click(control: Any) -> str:
         """Activate a control through UIA without focus or pointer injection."""
-        attempts = (
-            lambda: control.GetInvokePattern().Invoke(),
-            lambda: control.GetLegacyIAccessiblePattern().DoDefaultAction(),
-            lambda: control.GetTogglePattern().Toggle(),
-            lambda: control.GetSelectionItemPattern().Select(),
+        patterns = (
+            ("GetInvokePattern", "Invoke"),
+            ("GetSelectionItemPattern", "Select"),
+            ("GetTogglePattern", "Toggle"),
+            ("GetLegacyIAccessiblePattern", "DoDefaultAction"),
         )
-        for attempt in attempts:
+        for getter, method in patterns:
             try:
-                # uiautomation's pattern wrappers return False for a COM call
-                # that did not complete; raw/fake providers may return None.
-                if attempt() is not False:
-                    return
+                pattern = getattr(control, getter)()
             except Exception:
-                pass
+                continue
+            if pattern is None:
+                continue
+            try:
+                previous = pattern.ToggleState if method == "Toggle" else None
+                completed = getattr(pattern, method)()
+                if method == "Select" and not bool(pattern.IsSelected):
+                    raise ActionResultUncertain("UIA Select completed but selection was not confirmed")
+                if method == "Toggle" and pattern.ToggleState == previous:
+                    raise ActionResultUncertain("UIA Toggle completed but state did not change")
+            except ActionResultUncertain:
+                raise
+            except Exception as exc:
+                raise ActionResultUncertain(f"UIA {method} may have executed: {exc}") from exc
+            if completed is not True:
+                raise ActionResultUncertain(f"UIA {method} did not confirm completion")
+            return f"{getter.removeprefix('Get')}.{method}"
         raise RuntimeError("no supported non-intrusive UIA activation pattern")
 
-    def _click(self, control: Any, mode: str) -> None:
+    def _click(self, control: Any, mode: str) -> str:
         try:
-            self._uia_click(control)
-            return
+            return self._uia_click(control)
         except RuntimeError as uia_error:
             try:
                 self._background_click(control)
@@ -2346,52 +2434,56 @@ class WinAppSession:
                         if mode == "background"
                         else "auto mode does not implicitly grant foreground input"
                     )
-                    raise RuntimeError(
+                    raise RequiresInteractiveInput(
                         f"click could not be completed non-intrusively: {uia_error}; "
                         f"{background_error}; {restriction}"
                     ) from background_error
 
-        self._activate_foreground("click keyboard fallback")
-        if auto is None:
-            raise RuntimeError("uiautomation is not installed")
-        control.SetFocus()
-        auto.SendKeys("{Enter}", waitTime=0.05)
+        self._focused_keys(control, "click", "{Enter}")
+        return "focused_keyboard"
 
     def _fill(self, control: Any, value: str, mode: str) -> None:
         try:
-            if control.GetValuePattern().SetValue(value) is not False:
-                return
-            raise RuntimeError("ValuePattern.SetValue reported failure")
-        except Exception as value_error:
-            try:
-                self._background_fill(control, value)
-                return
-            except RuntimeError as background_error:
-                if mode != "foreground":
-                    restriction = (
-                        "background mode forbids focus and keyboard injection"
-                        if mode == "background"
-                        else "auto mode does not implicitly grant foreground input"
-                    )
-                    raise RuntimeError(
-                        "fill could not be completed with ValuePattern or background "
-                        f"messages: {value_error}; {background_error}; {restriction}"
-                    ) from background_error
-
-        self._activate_foreground("fill keyboard fallback")
-        if auto is None:
-            raise RuntimeError("uiautomation is not installed")
-        control.SetFocus()
-        auto.SendKeys("{Ctrl}a", waitTime=0.05)
-        auto.SendKeys(value, waitTime=0.05)
-
-    def _select(self, control: Any, mode: str) -> None:
-        try:
-            if control.GetSelectionItemPattern().Select() is not False:
-                return
-            raise RuntimeError("SelectionItemPattern.Select reported failure")
+            pattern = control.GetValuePattern()
         except Exception:
-            self._click(control, mode)
+            pattern = None
+        if pattern is not None:
+            try:
+                completed = pattern.SetValue(value)
+            except Exception as exc:
+                raise ActionResultUncertain(f"ValuePattern.SetValue may have executed: {exc}") from exc
+            if completed is not True:
+                raise ActionResultUncertain("ValuePattern.SetValue did not confirm completion")
+            return
+        try:
+            self._background_fill(control, value)
+            return
+        except RuntimeError as background_error:
+            if mode != "foreground":
+                raise RequiresInteractiveInput(
+                    f"fill could not complete non-intrusively: {background_error}"
+                ) from background_error
+
+        self._focused_keys(control, "fill", "{Ctrl}a", value)
+
+    def _select(self, control: Any, mode: str) -> str:
+        try:
+            pattern = control.GetSelectionItemPattern()
+        except Exception:
+            pattern = None
+        if pattern is None:
+            return self._click(control, mode)
+        try:
+            completed = pattern.Select()
+            if not bool(pattern.IsSelected):
+                raise ActionResultUncertain("SelectionItemPattern.Select did not select the item")
+        except ActionResultUncertain:
+            raise
+        except Exception as exc:
+            raise ActionResultUncertain(f"SelectionItemPattern.Select may have executed: {exc}") from exc
+        if completed is not True:
+            raise ActionResultUncertain("SelectionItemPattern.Select did not confirm completion")
+        return "SelectionItemPattern.Select"
 
     def _press_key(self, control: Any, value: str, mode: str) -> None:
         try:
@@ -2404,21 +2496,32 @@ class WinAppSession:
                     if mode == "background"
                     else "auto mode does not implicitly grant foreground input"
                 )
-                raise RuntimeError(
+                raise RequiresInteractiveInput(
                     f"press_key could not use background messages: {background_error}; "
                     f"{restriction}"
                 ) from background_error
 
-        self._activate_foreground("press_key keyboard fallback")
+        self._focused_keys(control, "press_key", value)
+
+    def _focused_keys(self, control: Any, action: str, *keys: str) -> None:
+        """Send authorized keyboard input only after the provider confirms focus."""
+        self._activate_foreground(f"{action} keyboard fallback")
         if auto is None:
             raise RuntimeError("uiautomation is not installed")
-        control.SetFocus()
-        auto.SendKeys(value, waitTime=0.05)
+        try:
+            if control.SetFocus() is not True:
+                raise ActionResultUncertain("SetFocus did not confirm focus; keyboard input was not sent")
+            for key in keys:
+                auto.SendKeys(key, waitTime=0.05)
+        except ActionResultUncertain:
+            raise
+        except Exception as exc:
+            raise ActionResultUncertain(f"focused input completion is unknown: {exc}") from exc
 
     def _control_text(self, control: Any) -> str:
         try:
             value = control.GetValuePattern().Value
-            if value:
+            if value is not None:
                 return str(value)
         except Exception:
             pass
@@ -2496,7 +2599,8 @@ class WinAppSession:
         down = user32.PostMessageW(hwnd, WM_LBUTTONDOWN, 0x0001, lparam)  # MK_LBUTTON
         up = user32.PostMessageW(hwnd, WM_LBUTTONUP, 0, lparam)
         if not down or not up:
-            raise RuntimeError("background click message could not be queued")
+            raise ActionResultUncertain("background click messages may have been partially queued")
+        raise ActionResultUncertain("background click queued; business result is unverified")
 
     def _background_fill(self, control: Any, value: str) -> None:
         """Set text through messages, without foreground activation."""
@@ -2515,23 +2619,8 @@ class WinAppSession:
         if result != 0:
             return
 
-        # Fall back to PostMessage key sequence: Ctrl+A, then type the value.
-        # Select-all via Ctrl+A
-        ctrl_lparam = self._make_lparam(
-            scan_code=user32.MapVirtualKeyW(VK_CONTROL, MAPVK_VK_TO_VSC))
-        a_vk = ord("A")
-        a_lparam = self._make_lparam(
-            scan_code=user32.MapVirtualKeyW(a_vk, MAPVK_VK_TO_VSC))
-        self._post_message(target, WM_KEYDOWN, VK_CONTROL, ctrl_lparam)
-        self._post_message(target, WM_KEYDOWN, a_vk, a_lparam)
-        self._post_message(
-            target, WM_KEYUP, a_vk, a_lparam | (1 << 31) | (1 << 30)
-        )
-        self._post_message(
-            target, WM_KEYUP, VK_CONTROL, ctrl_lparam | (1 << 31) | (1 << 30)
-        )
-        # Type the value character by character.
-        self._post_text(target, value)
+        # A timeout may occur after WM_SETTEXT was processed. Never type again.
+        raise ActionResultUncertain("WM_SETTEXT completion is unknown; verify the value before retrying")
 
     def _background_select(self, control: Any) -> None:
         """Select a list item via UIA SelectionItemPattern or background click."""
@@ -2553,6 +2642,7 @@ class WinAppSession:
         if user32 is None:
             raise RuntimeError("background press_key requires win32 messaging")
         self._post_key_string(hwnd, key_str)
+        raise ActionResultUncertain("background keys queued; business result is unverified")
 
     # ── key string parsing and PostMessage helpers ──────────────────
 
@@ -2656,7 +2746,7 @@ class WinAppSession:
         if user32 is None:
             raise RuntimeError("background input requires win32 messaging")
         if not user32.PostMessageW(hwnd, message, wparam, lparam):
-            raise RuntimeError(f"PostMessageW failed for message 0x{message:04X}")
+            raise ActionResultUncertain(f"PostMessageW failed for message 0x{message:04X}; partial dispatch cannot be excluded")
 
     def _post_key_string(self, hwnd: int, key_str: str) -> None:
         """Parse key_str as SendKeys syntax and post to hwnd."""

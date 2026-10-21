@@ -195,7 +195,8 @@ class ShellTrayClickTests(unittest.TestCase):
             "name": "Enhook",
             "button": "left",
             "count": 2,
-            "mode": "auto",
+            "mode": "foreground",
+            "allow_interactive_input": True,
             "timeout_ms": 10000,
         }
         base.update(payload)
@@ -261,7 +262,8 @@ class ShellTrayClickTests(unittest.TestCase):
             "pid": 36788,
             "button": "left",
             "count": 2,
-            "mode": "auto",
+            "mode": "foreground",
+            "allow_interactive_input": True,
             "timeout_ms": 10000,
         }
         with patch.object(service, "auto", FakeAuto(trees)), patch.object(
@@ -290,7 +292,8 @@ class ShellTrayClickTests(unittest.TestCase):
             "pid": 999999,
             "button": "left",
             "count": 1,
-            "mode": "auto",
+            "mode": "foreground",
+            "allow_interactive_input": True,
             "timeout_ms": 10000,
         }
         with patch.object(service, "auto", FakeAuto(trees)), patch.object(
@@ -363,7 +366,8 @@ class ShellTrayClickTests(unittest.TestCase):
             "name": "Enhook",
             "button": "left",
             "count": 2,
-            "mode": "auto",
+            "mode": "foreground",
+            "allow_interactive_input": True,
             "timeout_ms": 10000,
         }
         overflow_calls = {"n": 0}

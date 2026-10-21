@@ -36,6 +36,10 @@ class VisualCliTests(unittest.TestCase):
                 response = {"ok": True, "target": {"attached": True}}
             elif command["cmd"] == "screenshot":
                 response = {"ok": True, "screenshot": "AA=="}
+            elif (command.get("action") == "pointer_click" or command["cmd"] == "shell_tray_click") and not (
+                command.get("mode") == "foreground" and command.get("allow_interactive_input") is True
+            ):
+                response = {"ok": False, "code": "requires_interactive_input", "error": "Explicit input permission required"}
             elif command.get("action") in (
                 "click", "pointer_click", "fill", "assert_visible", "assert_not_exists", "assert_text"
             ):
@@ -131,6 +135,12 @@ class VisualCliTests(unittest.TestCase):
         replay = self.cli(
             "winapp", "replay", "--feature", "pointer.feature", "--non-interactive"
         )
+        self.assertNotEqual(replay.returncode, 0)
+        self.assertIn("requires_interactive_input", replay.stdout)
+        self.assertNotIn("replay_complete", replay.stdout)
+        self.assertFalse(any(c.get("action") == "pointer_click" for c in self.commands))
+        replay = self.cli("winapp", "replay", "--feature", "pointer.feature", "--yes",
+                          "--mode", "foreground", "--allow-interactive-input")
         self.assertEqual(replay.returncode, 0, replay.stderr)
         pointer_commands = [
             command for command in self.commands
@@ -138,13 +148,29 @@ class VisualCliTests(unittest.TestCase):
         ]
         self.assertTrue(pointer_commands)
         self.assertEqual(pointer_commands[-1]["action"], "pointer_click")
-        self.assertEqual(pointer_commands[-1]["mode"], "auto")
+        self.assertEqual(pointer_commands[-1]["mode"], "foreground")
+        self.assertIs(pointer_commands[-1]["allow_interactive_input"], True)
         assertion_commands = [
             command for command in self.commands
             if command.get("action") == "assert_visible"
         ]
         self.assertTrue(assertion_commands)
-        self.assertEqual(assertion_commands[-1]["mode"], "auto")
+        self.assertEqual(assertion_commands[-1]["mode"], "foreground")
+
+    def test_input_permission_execute_and_tray_json_contract(self):
+        for arguments in (
+            ("execute", "--selector", "uia:name=Close", "--action", "pointer_click"),
+            ("shell", "tray", "click", "--name", "Fixture"),
+        ):
+            self.commands.clear()
+            denied = self.cli("winapp", *arguments)
+            self.assertNotEqual(denied.returncode, 0)
+            self.assertEqual(json.loads(denied.stdout)["code"], "requires_interactive_input")
+            self.assertFalse(self.commands or [], "CLI must reject before contacting a sidecar")
+            self.commands.clear()
+            granted = self.cli("winapp", *arguments, "--mode", "foreground", "--allow-interactive-input")
+            self.assertEqual(granted.returncode, 0, granted.stderr)
+            self.assertIs(self.commands[-1]["allow_interactive_input"], True)
 
     def test_replay_visual_failure_and_legacy_actions(self):
         (self.root / "visual.feature").write_text(

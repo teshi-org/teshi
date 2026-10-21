@@ -135,24 +135,24 @@ use `--mode auto` unless a mode is supplied:
 
 | Mode | Policy |
 |------|--------|
-| `auto` | Prefer UIA and background messages. Do not grant foreground fallbacks implicitly. An explicit `pointer_click` action may activate the target and inject physical pointer input. |
+| `auto` | Prefer UIA and background messages. Do not grant foreground fallbacks implicitly. `pointer_click` and tray clicks return `requires_interactive_input`; the action name grants no permission. |
 | `background` | Strictly forbid `SetForegroundWindow`, focus-dependent `SendKeys`, `SendInput`, and real pointer movement. Fail when UIA/background messages cannot complete the action. |
-| `foreground` | Still try UIA/background behavior first, but allow target activation, focus, and keyboard fallback when an action cannot otherwise complete. Pure reads never activate the window. |
+| `foreground` | Mutations require `--allow-interactive-input`. Only this combination permits target activation, focus, and keyboard fallback. Pure reads never activate the window. |
 
 The mode is evaluated per action. A replay containing one `pointer_click` does
 not activate the window for its earlier or later assertion/UIA steps.
 
 | Action | Execution policy |
 |--------|------------------|
-| `click` | Prefer `InvokePattern`, then other non-intrusive UIA activation patterns, then background window messages. It never moves the real pointer. A foreground-only focused keyboard fallback is available when explicitly allowed. |
-| `pointer_click` | Explicit physical capability: activate the window, move the real pointer to the element center, and issue a Win32 `SendInput` left-click. Allowed in `auto`/`foreground`; rejected in `background`. |
-| `fill` | Prefer `ValuePattern.SetValue`, then background messages. Only explicit `foreground` permits focus + keyboard fallback. |
+| `click` | Prefer `InvokePattern`, then SelectionItem/Toggle, then LegacyIAccessible, then background window messages. It never moves the real pointer. A foreground-only focused keyboard fallback is available when explicitly allowed. |
+| `pointer_click` | Explicit physical capability: activate the window, move the real pointer to the element center, and issue a Win32 `SendInput` left-click. Requires `--mode foreground --allow-interactive-input`; rejected in auto/background even with the permission flag. |
+| `fill` | Prefer `ValuePattern.SetValue`, then background messages. Only `foreground` plus `--allow-interactive-input` permits focus + keyboard fallback. |
 | `assert_visible` | Check that the resolved element has visible bounds |
 | `assert_not_exists` | Pass only when the UIA selector matches no element, including hidden elements |
 | `assert_text` | Compare expected text against `ValuePattern` or `Name` |
 | `assert_screenshot` | Compare lossless RGB pixels of one visible interactive UIA element with a PNG baseline |
 | `select` | Prefer `SelectionItemPattern.Select`, then the same least-intrusive activation chain as `click` |
-| `press_key` | Prefer background window messages. Only explicit `foreground` permits focus + `SendKeys` fallback. |
+| `press_key` | Prefer background window messages. Only `foreground` plus `--allow-interactive-input` permits focus + `SendKeys` fallback. |
 
 `snapshot`, `screenshot`, `highlight`, and all assertion actions are always
 non-intrusive, including when `--mode foreground` is supplied. They never call
@@ -170,14 +170,42 @@ custom title bar, caption island, non-client surface, or another control whose
 contract truly depends on physical pointer messages.
 
 ```powershell
-teshi winapp execute --selector "uia:control_type=ButtonControl;name=Close" --action pointer_click
+teshi winapp execute --selector "uia:control_type=ButtonControl;name=Close" --action pointer_click --mode foreground --allow-interactive-input
 ```
 
-Existing scripts that pass `--mode foreground` or `--mode background` remain
-valid. Scripts that omitted `--mode` now receive the safer `auto` policy rather
-than unconditional foreground activation; this is an intentional behavioral
-default change. Use explicit `--mode foreground` only when a focus/keyboard
-fallback is required.
+Compatibility change: scripts using default pointer/tray clicks or foreground
+mutations must explicitly add `--mode foreground --allow-interactive-input`.
+`--yes`, `--non-interactive`, a recorded binding, and per-step Enter prompts do
+not authorize desktop interference. Permission is request-scoped, never saved
+in bindings or inherited by another sidecar request. Sidecar JSON uses the
+literal boolean `"allow_interactive_input": true` together with `"mode": "foreground"`.
+Failures preserve JSON with `code: "requires_interactive_input"` and a nonzero CLI exit.
+
+Before resolving a click/fill/select target, Teshi configures the actual shared
+UIAutomation client with `IUIAutomation2.AutoSetFocus = false` and reads the
+property back. Legacy clients are replaced with CUIAutomation8. If this policy
+cannot be established, mutation fails before dispatch; there is no message or
+foreground fallback. This closes UIA's implicit focus path, which is separate
+from explicit SetFocus/SetForegroundWindow calls.
+
+UIA provider completion is reported as `action_outcome: "provider_completed"`
+with `business_result: "unverified"`; input injection likewise does not prove a
+business action. Follow it with an application-specific assertion. Provider
+errors after invocation and queued/partially queued click/key messages return
+`ok: false`, `code: "action_result_uncertain"`. Replay stops; inspect state before
+retrying. No foreground fallback follows uncertain dispatch. Selection/Toggle verify their exposed state; their supported patterns precede
+Legacy default action. Responses expose `input_method` for click/select. Fill succeeds only
+after value readback matches; WM_SETTEXT transport success alone is insufficient.
+UIA providers and target applications execute their own code: a target can open
+or focus its own window in response to a semantic action; Teshi does not call
+focus or physical-input APIs in auto/background mode.
+
+Custom title bars, WinUI3 caption islands and HWND-less controls do not necessarily
+consume PostMessage mouse/key input. An enqueued message is not proof of a click.
+Inspect supported patterns and use authorized physical input only when the action
+requires it. Tray enumeration is read-only. Revealing an auto-hidden taskbar,
+opening overflow, and tray clicking require permission; follow restore actions
+with `winapp wait-window --pid <pid> --visible` and a business assertion.
 
 ## Element screenshots and visual assertions
 
@@ -245,3 +273,9 @@ WinApp mode requires `websockets` to start. UI inspection/actions require `uiaut
 - WGC cannot capture protected content. ImageGrab fallback is additionally affected by occlusion and minimized windows.
 - Independent top-level popup windows are not merged into the attached main HWND's WGC stream.
 - Attach only to the app under test. Agents should not guess between multiple plausible native app windows.
+
+Authorized keyboard input checks the observed foreground HWND before injection,
+rather than trusting the SetForegroundWindow return value. An already-active
+target needs no activation. A target that remains in the background is rejected.
+`exec close` sends WM_CLOSE once and waits up to one second for the HWND to
+vanish; disappearance verifies closure, otherwise the result is uncertain.

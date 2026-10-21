@@ -8,7 +8,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 RESOURCES = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RESOURCES))
@@ -17,6 +17,35 @@ import winapp_service as service  # noqa: E402
 
 
 class WinAppIntegrityTests(unittest.TestCase):
+    def setUp(self):
+        # Native COM policy is tested separately; these tests isolate dispatch.
+        policy = patch.object(service, "ensure_nonintrusive_uia")
+        policy.start()
+        self.addCleanup(policy.stop)
+
+    def test_close_requires_window_disappearance_after_queueing(self):
+        session = service.WinAppSession(None)
+        session.hwnd = 123
+        sender = Mock(return_value=True)
+        with patch.object(service, "user32", SimpleNamespace(PostMessageW=sender)), patch.object(
+            service, "is_window", side_effect=[True, False]
+        ), patch.object(service.time, "sleep"):
+            response = session._handle_exec("close", "")
+        self.assertTrue(response["ok"], response)
+        self.assertEqual(response["business_result"], "verified")
+        sender.assert_called_once()
+
+    def test_close_timeout_is_uncertain_without_reposting(self):
+        session = service.WinAppSession(None)
+        session.hwnd = 123
+        sender = Mock(return_value=True)
+        with patch.object(service, "user32", SimpleNamespace(PostMessageW=sender)), patch.object(
+            service, "is_window", return_value=True
+        ), patch.object(service.time, "monotonic", side_effect=[0, 0.5, 2]), patch.object(service.time, "sleep"):
+            response = session._handle_exec("close", "")
+        self.assertEqual(response["code"], "action_result_uncertain", response)
+        sender.assert_called_once()
+
     def test_integrity_levels_require_exact_known_match(self) -> None:
         self.assertIsNone(
             service.integrity_mismatch_message(

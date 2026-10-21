@@ -47,7 +47,28 @@ pub fn handle_winapp_command(action: &WinAppCommand) -> Result<()> {
         print_json_response(response.clone())?;
         return ensure_ok(&response);
     }
-    // Replay validates the Feature before contacting the Windows-only sidecar.
+    let permission_error = match action {
+        WinAppCommand::Execute(args) => {
+            input_permission_error(&args.action, &args.mode, args.allow_interactive_input)
+        }
+        WinAppCommand::Shell(args) => {
+            let ShellCommand::Tray(tray) = &args.command;
+            match &tray.command {
+                TrayCommand::Click(args) => input_permission_error(
+                    "shell_tray_click",
+                    &args.mode,
+                    args.allow_interactive_input,
+                ),
+                TrayCommand::List => None,
+            }
+        }
+        _ => None,
+    };
+    if let Some(error) = permission_error {
+        print_json_response(error.clone())?;
+        return ensure_ok(&error);
+    }
+    // Reject input permission failures before starting a sidecar or target.
     let elevated = matches!(&action, WinAppCommand::Launch(args) if args.elevated);
     if !matches!(action, WinAppCommand::Replay(_)) {
         ensure_winapp_sidecar(&project_root, elevated)?;
@@ -176,13 +197,14 @@ fn execute(project_root: &Path, args: &WinAppExecuteArgs) -> Result<()> {
         timeout,
         "winapp-execute",
         &args.mode,
+        args.allow_interactive_input,
     )?;
     if args.action == "assert_screenshot" {
         print_json_response(response.clone())?;
         return ensure_ok(&response);
     }
-    ensure_ok(&response)?;
-    print_json_response(response)
+    print_json_response(response.clone())?;
+    ensure_ok(&response)
 }
 
 fn shell(project_root: &Path, args: &WinAppShellArgs) -> Result<()> {
@@ -198,14 +220,19 @@ fn shell(project_root: &Path, args: &WinAppShellArgs) -> Result<()> {
             }
             TrayCommand::Click(click) => {
                 let response = shell_tray_click(project_root, click)?;
-                ensure_ok(&response)?;
-                print_json_response(response)
+                print_json_response(response.clone())?;
+                ensure_ok(&response)
             }
         },
     }
 }
 
 fn shell_tray_click(project_root: &Path, args: &WinAppTrayClickArgs) -> Result<serde_json::Value> {
+    if let Some(error) =
+        input_permission_error("shell_tray_click", &args.mode, args.allow_interactive_input)
+    {
+        return Ok(error);
+    }
     send_winapp_command(
         project_root,
         json!({
@@ -216,6 +243,7 @@ fn shell_tray_click(project_root: &Path, args: &WinAppTrayClickArgs) -> Result<s
             "button": args.button,
             "count": args.count,
             "mode": args.mode,
+            "allow_interactive_input": args.allow_interactive_input,
             "timeout_ms": args.timeout_ms,
         }),
         command_timeout_for_ms(args.timeout_ms),
@@ -250,15 +278,23 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
     };
     preflight_feature(project_root, &feature)?;
 
-    if let Some(path) = args.launch.as_deref() {
-        ensure_winapp_attached(project_root, Some(path))?;
-    } else {
-        ensure_winapp_attached(project_root, None)?;
-    }
-
     let steps = resolve_step_bindings(project_root, &feature, args.until_line)?;
     if steps.is_empty() {
         return Err(anyhow!("no confirmed bindings found for {feature}"));
+    }
+    if !args.dry_run {
+        for step in &steps {
+            if let Some(mut error) = input_permission_error(
+                &step.primary.action,
+                &args.mode,
+                args.allow_interactive_input,
+            ) {
+                error["step_line"] = json!(step.step_line);
+                print_json_response(error.clone())?;
+                return ensure_ok(&error);
+            }
+        }
+        ensure_winapp_attached(project_root, args.launch.as_deref())?;
     }
 
     let mut screenshot_entries: Vec<ReplayScreenshotEntry> = Vec::new();
@@ -306,6 +342,7 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
                 format!("winapp-replay-{}", idx + 1)
             },
             &args.mode,
+            args.allow_interactive_input,
         )?;
         // Capture screenshot after each step (before ensure_ok so we capture even on failure)
         if !args.dry_run {
@@ -333,9 +370,7 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
                 ),
             }
         }
-        if step.primary.action == "assert_screenshot" {
-            print_json_response(response.clone())?;
-        }
+        print_json_response(response.clone())?;
         ensure_ok(&response).with_context(|| {
             format!(
                 "replay failed at line {}: {} {}",
@@ -391,7 +426,11 @@ fn execute_locator(
     sidecar_timeout: Duration,
     request_id: &str,
     mode: &str,
+    allow_interactive_input: bool,
 ) -> Result<serde_json::Value> {
+    if let Some(error) = input_permission_error(action, mode, allow_interactive_input) {
+        return Ok(error);
+    }
     let mut command = json!({
         "cmd": "execute_locator",
         "request_id": request_id,
@@ -400,6 +439,7 @@ fn execute_locator(
         "value": value,
         "timeout_ms": timeout_ms,
         "mode": mode,
+        "allow_interactive_input": allow_interactive_input,
     });
     if action == "assert_screenshot" {
         command["pixel_tolerance"] = json!(8);
@@ -558,6 +598,21 @@ fn ensure_daemon_for_project(project_root: &Path) -> Result<u16> {
     }
 }
 
+fn input_permission_error(action: &str, mode: &str, allowed: bool) -> Option<serde_json::Value> {
+    let needs_permission = matches!(action, "pointer_click" | "shell_tray_click")
+        || (mode == "foreground" && matches!(action, "click" | "fill" | "select" | "press_key"));
+    (needs_permission && !(mode == "foreground" && allowed)).then(|| {
+        json!({
+            "ok": false,
+            "code": "requires_interactive_input",
+            "action": action,
+            "required_mode": "foreground",
+            "required_permission": "allow_interactive_input",
+            "error": format!("{action} requires --mode foreground --allow-interactive-input"),
+        })
+    })
+}
+
 fn ensure_ok(response: &serde_json::Value) -> Result<()> {
     if response.get("ok").and_then(|v| v.as_bool()) == Some(true) {
         return Ok(());
@@ -572,4 +627,30 @@ fn ensure_ok(response: &serde_json::Value) -> Result<()> {
 fn print_json_response(response: serde_json::Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn winapp_permission_matrix_never_promotes_auto_or_background() {
+        for mode in ["auto", "background", "foreground"] {
+            for allowed in [false, true] {
+                for action in ["pointer_click", "shell_tray_click"] {
+                    assert_eq!(
+                        input_permission_error(action, mode, allowed).is_none(),
+                        mode == "foreground" && allowed
+                    );
+                }
+                for action in ["click", "fill", "select", "press_key"] {
+                    assert_eq!(
+                        input_permission_error(action, mode, allowed).is_none(),
+                        mode != "foreground" || allowed
+                    );
+                }
+                assert!(input_permission_error("assert_visible", mode, allowed).is_none());
+            }
+        }
+    }
 }

@@ -52,16 +52,22 @@ Use only the actual discovered selector and the action/value supplied by the ste
 ## Choose the click action deliberately
 
 - `click` prefers non-intrusive UIA activation (`InvokePattern`, then other
-  supported UIA patterns). It never silently becomes a real system-pointer
+  SelectionItem/Toggle before Legacy default actions). It never silently becomes a real system-pointer
   click. Use it for ordinary stable automation.
 - `pointer_click` moves the real system pointer to the unique visible
   interactive element and sends a foreground left-button click. Use it for
   hover, pressed state, WinUI3 custom title bars, caption islands, non-client
   area interaction, and controls that depend on real mouse messages.
-- `pointer_click` is allowed in the default `--mode auto` because the action
-  itself explicitly requests physical input. It is also allowed with
-  `--mode foreground`, and is rejected by `--mode background`. It must not be
-  downgraded to background `PostMessage` input.
+- `pointer_click` requires `--mode foreground --allow-interactive-input`.
+  Auto/background reject physical input even when the flag is present. Never
+  downgrade it to PostMessage or restore mouse coordinates to conceal movement.
+- Foreground mutations and shell tray clicks require the same explicit permission.
+  `--yes`, bindings, and replay prompts are not permission. Only pass the flag
+  when the user has authorized desktop interference.
+- `requires_interactive_input` means stop the intrusive action. An
+  `action_result_uncertain` response means input may have executed: inspect the
+  business result before retrying. UIA completion/input injection reports
+  `business_result: unverified`; verify with a separate assertion.
 
 Do not use `pointer_click` merely because `click` failed once. First inspect
 the control and determine whether it actually requires physical pointer
@@ -72,7 +78,7 @@ real pointer input is required.
 For example:
 
 ```text
-teshi winapp execute --selector "uia:control_type=ButtonControl;name=Close" --action pointer_click
+teshi winapp execute --selector "uia:control_type=ButtonControl;name=Close" --action pointer_click --mode foreground --allow-interactive-input
 ```
 
 ## Propose and confirm
@@ -113,3 +119,10 @@ The behave exporter currently does not support the native `pointer_click`
 action. A feature using that action must use native `winapp replay`, or provide
 a custom behave step definition; export otherwise fails with
 `unsupported export action: pointer_click`.
+
+UIA mutations require the actual shared client's AutoSetFocus policy to be off;
+Teshi fails closed if it cannot disable/read back this setting. A direct API guard
+alone does not cover UIA's internal automatic focus. For navigation, inspect
+`input_method` and verify the destination: a Legacy default-action return is not
+proof of navigation. Authorized keyboard/pointer input may still be rejected by
+Windows foreground rules; do not use focus hacks to force it.

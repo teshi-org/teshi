@@ -12,6 +12,12 @@ from PIL import Image, PngImagePlugin
 
 
 class VisualTests(unittest.TestCase):
+    def setUp(self):
+        # Native COM policy is tested separately; these tests isolate dispatch.
+        policy = patch.object(service, "ensure_nonintrusive_uia")
+        policy.start()
+        self.addCleanup(policy.stop)
+
     @staticmethod
     def allow_known_integrity(session):
         session.integrity_status = Mock(
@@ -162,7 +168,7 @@ class VisualTests(unittest.TestCase):
             dict(selector="uia:name=Close", action="pointer_click", mode="background")
         )
         self.assertFalse(result["ok"])
-        self.assertIn("pointer_click is forbidden in background mode", result["error"])
+        self.assertEqual(result["code"], "requires_interactive_input")
 
     def test_assert_not_exists_passes_only_when_uia_selector_is_absent(self):
         session = service.WinAppSession(None)
@@ -239,6 +245,7 @@ class VisualTests(unittest.TestCase):
         )
         fake_user32 = SimpleNamespace(
             SetForegroundWindow=Mock(return_value=True),
+            GetForegroundWindow=Mock(side_effect=[0, 123]),
             SetThreadDpiAwarenessContext=Mock(return_value=1),
         )
         with patch.object(service, "user32", fake_user32), patch.object(
@@ -247,7 +254,7 @@ class VisualTests(unittest.TestCase):
             result = session.execute(
                 dict(
                     selector="uia:control_type=ButtonControl;name=Close",
-                    action="pointer_click",
+                    action="pointer_click", mode="foreground", allow_interactive_input=True,
                 )
             )
 
@@ -257,7 +264,7 @@ class VisualTests(unittest.TestCase):
         legacy_click.assert_not_called()
 
     def test_click_keeps_invoke_pattern_first(self):
-        invoke = Mock()
+        invoke = Mock(return_value=True)
         legacy_click = Mock()
         control = SimpleNamespace(
             GetInvokePattern=lambda: SimpleNamespace(Invoke=invoke),

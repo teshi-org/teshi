@@ -1598,7 +1598,7 @@ pub struct WinAppExecuteArgs {
     #[arg(long)]
     pub selector: String,
     /// Action to execute; `click` uses UIA activation, while `pointer_click`
-    /// moves the real foreground pointer before sending a left-click
+    /// moves the real pointer and requires --mode foreground --allow-interactive-input
     #[arg(long, default_value = "click")]
     pub action: String,
     /// Optional input value for fill/assert_text/select/press_key
@@ -1608,13 +1608,16 @@ pub struct WinAppExecuteArgs {
     #[arg(long, default_value_t = 5000)]
     pub timeout_ms: u64,
     /// Input policy: auto (default), background (strictly non-intrusive), or foreground
-    /// (allows focused input fallbacks); `pointer_click` is physical in auto/foreground
+    /// (requires --allow-interactive-input); auto/background never inject physical input
     #[arg(
         long,
         default_value = "auto",
         value_parser = ["auto", "background", "foreground"]
     )]
     pub mode: String,
+    /// Explicitly permit physical input and focus changes in foreground mode
+    #[arg(long)]
+    pub allow_interactive_input: bool,
 }
 
 /// `teshi winapp shell ...` arguments.
@@ -1662,13 +1665,16 @@ pub struct WinAppTrayClickArgs {
     /// Number of clicks to inject (2 = double click)
     #[arg(long, default_value_t = 1)]
     pub count: u32,
-    /// Input policy: auto (default), background (rejects physical input), or foreground
+    /// Input policy: auto (default), background (rejects physical input), or foreground (requires permission)
     #[arg(
         long,
         default_value = "auto",
         value_parser = ["auto", "background", "foreground"]
     )]
     pub mode: String,
+    /// Explicitly permit physical input and focus changes in foreground mode
+    #[arg(long)]
+    pub allow_interactive_input: bool,
     /// Timeout in milliseconds for icon resolution and overflow opening
     #[arg(long, default_value_t = 10000)]
     pub timeout_ms: u64,
@@ -1718,6 +1724,9 @@ pub struct WinAppReplayArgs {
         value_parser = ["auto", "background", "foreground"]
     )]
     pub mode: String,
+    /// Explicitly permit physical input and focus changes in foreground mode
+    #[arg(long)]
+    pub allow_interactive_input: bool,
 }
 
 #[derive(Debug, Subcommand)]

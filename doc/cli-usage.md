@@ -491,7 +491,7 @@ teshi winapp attach --process-name MyApp.exe
 teshi winapp snapshot
 teshi winapp highlight 'uia:automation_id=LoginButton'
 teshi winapp execute --selector 'uia:automation_id=LoginButton' --action click
-teshi winapp execute --selector 'uia:control_type=ButtonControl;name=Close' --action pointer_click
+teshi winapp execute --selector 'uia:control_type=ButtonControl;name=Close' --action pointer_click --mode foreground --allow-interactive-input
 teshi winapp launch --elevated 'C:\path\to\Enhook.exe'
 teshi winapp replay --feature test/feature/login.feature [--until-line N] [--yes] [--dry-run] \
   [--launch 'C:\path\to\App.exe']
@@ -546,3 +546,9 @@ Typical fields: `id`, `name`, `provider`, `api_style`, `model_id`, `base_url`, `
 - Desktop Settings, TUI model panel (`m`), `teshi auth`, and daemon `/api/v1/llm/profiles` all read/write this store.
 - Public listings mask API keys; empty key on save preserves the previously stored key.
 - When no active profile has a key, runtime falls back to `TESHI_LLM_*`.
+
+WinApp physical pointer and shell tray actions require both `--mode foreground`
+and `--allow-interactive-input`. Foreground mutations require the same permission.
+Auto/background never grant physical input, including when `--yes` is used.
+Inspect `requires_interactive_input` and `action_result_uncertain` JSON codes;
+see [WinApp input and result contracts](winapp-modes.md#supported-actions).

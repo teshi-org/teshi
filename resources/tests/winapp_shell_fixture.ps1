@@ -9,6 +9,16 @@ $label = New-Object System.Windows.Forms.Label
 $label.Text = 'Teshi visibility marker'
 $label.AutoSize = $true
 $form.Controls.Add($label)
+$edit = New-Object System.Windows.Forms.TextBox
+$edit.AccessibleName = 'Acceptance input'
+$edit.Top = 40
+$form.Controls.Add($edit)
+$button = New-Object System.Windows.Forms.Button
+$button.Text = 'Acceptance pointer'
+$button.Width = 180
+$button.Top = 80
+$button.add_Click({ Set-Content -LiteralPath (Join-Path $StateDir 'pointer.txt') -Value 'clicked' })
+$form.Controls.Add($button)
 $trayIcon = New-Object System.Windows.Forms.NotifyIcon
 $trayIcon.Icon = [System.Drawing.SystemIcons]::Application
 $trayIcon.Text = 'Teshi Shell Acceptance'
