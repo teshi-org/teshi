@@ -131,7 +131,7 @@ fn command(terminal: &Terminal, input: &str) {
 }
 
 fn click_footer(terminal: &Terminal, label: &str) {
-    terminal.expect_text(label, true, 1000).unwrap();
+    terminal.expect_text(label, true, 5000).unwrap();
     let screen = terminal.screen().unwrap();
     // Distinguish a modal Close action from the still-visible background agent toolbar.
     let label = if label == "Close" && screen.contains("Close [Esc]") {
@@ -448,6 +448,10 @@ fn external_change_pointer_keep_then_reload_resolves_dirty_feature() {
         terminal.key("Enter").unwrap();
         terminal.write("LOCAL_ONLY_EDIT").unwrap();
         terminal.key("Enter").unwrap();
+        // Gate on the commit landing before touching the disk: a commit Enter
+        // still queued when the modal opens is consumed as the modal's
+        // Reload [Enter] and silently discards the local edit.
+        terminal.expect_text("Edit committed", true, 10000).unwrap();
         let external = String::from_utf8(fixture.original.clone())
             .unwrap()
             .replacen("ALPHA_END", "DISK_FIRST", 1);

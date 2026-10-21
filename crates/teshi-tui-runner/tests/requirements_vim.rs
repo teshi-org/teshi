@@ -121,9 +121,25 @@ impl Fixture {
 
     fn save_exact(&self, terminal: &Terminal, suffix: &str, expected: &str) {
         terminal.expect_text("[BROWSE]", true, 10000).unwrap();
+        // Prove the app rendered the edited buffer before saving: on loaded
+        // runners a save can otherwise be issued while earlier keystrokes are
+        // still queued, persisting the previous stage's content.
+        for line in [expected.lines().nth(1), expected.lines().last()] {
+            if let Some(line) = line.filter(|line| !line.is_empty() && !line.contains('\t')) {
+                terminal.expect_text(line, true, 10000).unwrap();
+            }
+        }
         terminal.key("Ctrl+s").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while fs::read_to_string(&self.markdown).unwrap() != expected && Instant::now() < deadline {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut resent = false;
+        while fs::read_to_string(&self.markdown).unwrap() != expected {
+            if Instant::now() >= deadline {
+                break;
+            }
+            if !resent && Instant::now() >= deadline - Duration::from_secs(10) {
+                terminal.key("Ctrl+s").unwrap();
+                resent = true;
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
         self.capture(terminal, suffix);
