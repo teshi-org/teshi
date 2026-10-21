@@ -379,11 +379,11 @@ fn verify_permission_prompt(source: &str, allow: bool) {
     if allow {
         actions.extend([
             send_turn(),
-            vec![text("PERMISSION_BEFORE")],
-            vec![text("ACP agent requests permission"), text("Allow once")],
+            vec![text("Allow once"), text("Allow always")],
             vec![key("Down")],
             vec![key("Enter")],
             vec![text("PERMISSION_AFTER_allow_always")],
+            vec![text("PERMISSION_BEFORE")],
             vec![key("Escape")],
             vec![key("q")],
             vec![json!({"action":"expect_exit","code":0,"timeout_ms":10000})],
@@ -391,11 +391,9 @@ fn verify_permission_prompt(source: &str, allow: bool) {
     } else {
         actions.extend([
             send_turn(),
-            vec![
-                text("PERMISSION_BEFORE"),
-                text("ACP agent requests permission"),
-            ],
-            vec![key("Escape")],
+            vec![text("Allow once"), text("Allow always")],
+            // First blur the focused input, then reject the request.
+            vec![key("Escape"), key("Escape"), absent("Allow once")],
             vec![absent("PERMISSION_AFTER")],
             vec![key("Escape")],
             vec![key("q")],
