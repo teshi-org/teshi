@@ -217,9 +217,12 @@ class World(TerminalWorld):
             return
         if text == "project A has an unsaved requirement draft":
             body = "# Boundary requirement\n\nbody\n"
+            project_id = "1cc0f9ac-8b8a-4a64-b7a0-4033eb63c670"
+            (self.project / ".teshi").mkdir(exist_ok=True)
+            (self.project / ".teshi/project.json").write_text(json.dumps(dict(id=project_id)), encoding="utf-8")
             (self.requirements / "req.md").write_text(body, encoding="utf-8")
             (self.requirements / "_teshi.json").write_text(json.dumps(dict(version=2, store_id="reqstore-boundary",
-                documents=[dict(id="boundary", path="req.md", title="Boundary requirement", revision="fixture")])), encoding="utf-8")
+                documents=[dict(id="boundary", path="req.md", title="Boundary requirement", revision="fixture", projects={project_id: "planned"})])), encoding="utf-8")
             self.launch_project()
             self.op("key", "4")
             self.expect("body")

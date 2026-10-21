@@ -8,7 +8,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use teshi_core::authoring::{RequirementIterationFilter, RequirementPriority};
+use teshi_core::authoring::{
+    RequirementIterationFilter, RequirementPriority, RequirementProjectFilter,
+    RequirementProjectStatus,
+};
 use teshi_engine::{
     ImportProjectOptions, ImportProjectPlan, RequirementStoreError, import_project_requirements,
     list_requirement_documents, read_requirement_document, requirements_data_dir,
@@ -122,6 +125,7 @@ struct DocumentMetaJson {
     path: String,
     iteration: Option<String>,
     priority: Option<RequirementPriority>,
+    projects: std::collections::BTreeMap<String, RequirementProjectStatus>,
     revision: String,
 }
 
@@ -141,6 +145,7 @@ struct ShowEnvelopeJson {
     path: String,
     iteration: Option<String>,
     priority: Option<RequirementPriority>,
+    projects: std::collections::BTreeMap<String, RequirementProjectStatus>,
     revision: String,
     body: String,
 }
@@ -291,10 +296,22 @@ fn run_store_command(
         requirements_data_dir(cli_override).map_err(|err| (false, CliError::Io(err)))?;
     match action {
         RequirementsCommand::List {
+            project,
+            all_projects,
+            unassigned_project,
             iteration,
             unassigned,
             json,
-        } => list_documents(&requirements_root, iteration.as_deref(), *unassigned, *json)
+        } => project_list_filter(project.as_deref(), *all_projects, *unassigned_project)
+            .and_then(|scope| {
+                list_documents(
+                    &requirements_root,
+                    iteration.as_deref(),
+                    *unassigned,
+                    *json,
+                    &scope,
+                )
+            })
             .map_err(|err| (*json, err)),
         RequirementsCommand::Show { reference, json } => {
             show_document(&requirements_root, reference, *json).map_err(|err| (*json, err))
@@ -322,10 +339,134 @@ fn run_store_command(
         RequirementsCommand::ClearIteration { refs, json } => {
             mutate_iteration(&requirements_root, refs, None, *json).map_err(|err| (*json, err))
         }
+        RequirementsCommand::LinkProject {
+            refs,
+            project,
+            json,
+        } => mutate_project(
+            &requirements_root,
+            refs,
+            project.as_deref(),
+            true,
+            None,
+            *json,
+        )
+        .map_err(|err| (*json, err)),
+        RequirementsCommand::UnlinkProject {
+            refs,
+            project,
+            json,
+        } => mutate_project(
+            &requirements_root,
+            refs,
+            project.as_deref(),
+            false,
+            None,
+            *json,
+        )
+        .map_err(|err| (*json, err)),
+        RequirementsCommand::SetProjectStatus {
+            refs,
+            project,
+            status,
+            json,
+        } => {
+            let status = match status.as_str() {
+                "planned" => RequirementProjectStatus::Planned,
+                "implemented" => RequirementProjectStatus::Implemented,
+                "verified" => RequirementProjectStatus::Verified,
+                _ => {
+                    return Err((
+                        *json,
+                        CliError::Io(anyhow::anyhow!("invalid project status")),
+                    ));
+                }
+            };
+            mutate_project(
+                &requirements_root,
+                refs,
+                project.as_deref(),
+                true,
+                Some(status),
+                *json,
+            )
+            .map_err(|err| (*json, err))
+        }
+        RequirementsCommand::ExportProject { project, output } => {
+            export_project(&requirements_root, project.as_deref(), output)
+                .map_err(|err| (false, err))
+        }
         RequirementsCommand::Path | RequirementsCommand::ImportProject { .. } => {
             unreachable!("path/import-project are handled before store commands")
         }
     }
+}
+
+fn project_list_filter(
+    project: Option<&Path>,
+    all: bool,
+    unassigned: bool,
+) -> Result<RequirementProjectFilter, CliError> {
+    if all {
+        return Ok(RequirementProjectFilter::All);
+    }
+    if unassigned {
+        return Ok(RequirementProjectFilter::Unassigned);
+    }
+    teshi_engine::requirement_project_filter(project.unwrap_or_else(|| Path::new(".")))
+        .map_err(CliError::Io)
+}
+
+fn mutate_project(
+    root: &Path,
+    refs: &[String],
+    project: Option<&Path>,
+    linked: bool,
+    status: Option<RequirementProjectStatus>,
+    json: bool,
+) -> Result<String, CliError> {
+    let ids: Vec<String> = refs
+        .iter()
+        .map(|reference| resolve_requirement_ref_in_store(root, reference).map_err(CliError::store))
+        .collect::<Result<_, _>>()?;
+    let borrowed: Vec<&str> = ids.iter().map(String::as_str).collect();
+    teshi_engine::update_requirement_projects(
+        root,
+        project.unwrap_or_else(|| Path::new(".")),
+        &borrowed,
+        linked,
+        status,
+    )
+    .map_err(CliError::Io)?;
+    if json {
+        Ok(serde_json::json!({"ok": true, "ids": ids}).to_string())
+    } else {
+        Ok(format!(
+            "Updated project associations for {} requirement(s)\n",
+            ids.len()
+        ))
+    }
+}
+
+fn export_project(root: &Path, project: Option<&Path>, output: &Path) -> Result<String, CliError> {
+    let snapshot =
+        teshi_engine::snapshot_requirement_project(root, project.unwrap_or_else(|| Path::new(".")))
+            .map_err(CliError::Io)?;
+    let bytes = serde_json::to_vec_pretty(&snapshot).map_err(|err| CliError::Io(err.into()))?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)
+        .with_context(|| format!("create snapshot {}", output.display()))
+        .map_err(CliError::Io)?;
+    file.write_all(&bytes)
+        .context("write requirement snapshot")
+        .map_err(CliError::Io)?;
+    Ok(format!(
+        "Exported {} requirement(s) to {}\n",
+        snapshot.documents.len(),
+        output.display()
+    ))
 }
 
 fn list_documents(
@@ -333,6 +474,7 @@ fn list_documents(
     iteration: Option<&str>,
     unassigned: bool,
     json: bool,
+    scope: &RequirementProjectFilter,
 ) -> Result<String, CliError> {
     let filter = if unassigned {
         RequirementIterationFilter::Unassigned
@@ -341,7 +483,11 @@ fn list_documents(
     } else {
         RequirementIterationFilter::All
     };
-    let listed = list_requirement_documents(requirements_root, &filter).map_err(CliError::store)?;
+    let mut listed =
+        list_requirement_documents(requirements_root, &filter).map_err(CliError::store)?;
+    listed
+        .documents
+        .retain(|doc| doc.matches_project_filter(scope));
     if json {
         let envelope = ListEnvelopeJson {
             store_id: listed.store_id.to_string(),
@@ -355,6 +501,7 @@ fn list_documents(
                     path: doc.path.clone(),
                     iteration: doc.iteration.clone(),
                     priority: doc.priority,
+                    projects: doc.projects.clone(),
                     revision: doc.revision.as_str().to_string(),
                 })
                 .collect(),
@@ -397,6 +544,7 @@ fn show_document(
             path: document.meta.path,
             iteration: document.meta.iteration,
             priority: document.meta.priority,
+            projects: document.meta.projects,
             revision: document.meta.revision.as_str().to_string(),
             body: document.body,
         };
@@ -758,6 +906,9 @@ mod tests {
         let output = run(
             store.path(),
             RequirementsCommand::List {
+                project: None,
+                all_projects: true,
+                unassigned_project: false,
                 iteration: Some("Sprint 12".into()),
                 unassigned: false,
                 json: true,
@@ -772,6 +923,9 @@ mod tests {
         let empty = run(
             store.path(),
             RequirementsCommand::List {
+                project: None,
+                all_projects: true,
+                unassigned_project: false,
                 iteration: Some("Missing".into()),
                 unassigned: false,
                 json: true,
@@ -789,6 +943,9 @@ mod tests {
         let output = run(
             store.path(),
             RequirementsCommand::List {
+                project: None,
+                all_projects: true,
+                unassigned_project: false,
                 iteration: None,
                 unassigned: false,
                 json: true,
@@ -812,6 +969,9 @@ mod tests {
         let output = run(
             store.path(),
             RequirementsCommand::List {
+                project: None,
+                all_projects: true,
+                unassigned_project: false,
                 iteration: None,
                 unassigned: true,
                 json: false,

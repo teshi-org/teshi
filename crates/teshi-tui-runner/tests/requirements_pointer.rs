@@ -1,5 +1,8 @@
 //! Requirements controls and modal ownership through a real terminal pointer.
 
+#[path = "support/requirement_project.rs"]
+mod requirement_project;
+
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -47,6 +50,7 @@ impl Fixture {
             meta.iteration = Some(iteration.into());
             index.documents.push(meta);
         }
+        requirement_project::associate(&project, &mut index);
         fs::write(
             store.join("_teshi.json"),
             serde_json::to_vec_pretty(&index).unwrap(),

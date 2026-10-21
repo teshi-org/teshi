@@ -493,6 +493,7 @@ fn apply_import(
                     revision: compute_document_revision(body),
                     iteration: meta.iteration.clone(),
                     priority: meta.priority,
+                    projects: meta.projects.clone(),
                 });
             }
             continue;
@@ -514,6 +515,7 @@ fn apply_import(
                 revision: compute_document_revision(body),
                 iteration: meta.iteration.clone(),
                 priority: meta.priority,
+                projects: meta.projects.clone(),
             });
             continue;
         }
@@ -530,9 +532,20 @@ fn apply_import(
             revision: compute_document_revision(body),
             iteration: meta.iteration.clone(),
             priority: meta.priority,
+            projects: meta.projects.clone(),
         });
     }
 
+    let project = super::projects::ensure_requirement_project(project_root)?;
+    for mapping in mappings {
+        if let Some(doc) = target_index
+            .documents
+            .iter_mut()
+            .find(|doc| doc.id == mapping.target_id)
+        {
+            doc.projects.entry(project.id.clone()).or_default();
+        }
+    }
     write_requirement_index_unlocked(requirements_root, target_index)?;
     if let Some(file) = rewritten_test_points {
         save_test_points(project_root, &file)?;

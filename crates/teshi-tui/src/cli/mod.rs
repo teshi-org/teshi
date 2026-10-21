@@ -330,6 +330,15 @@ pub enum RequirementsCommand {
     },
     /// List requirement documents in the current store
     List {
+        /// Project directory (default: current directory)
+        #[arg(long, conflicts_with_all = ["all_projects", "unassigned_project"])]
+        project: Option<PathBuf>,
+        /// Include every project and unassigned documents
+        #[arg(long, conflicts_with = "unassigned_project")]
+        all_projects: bool,
+        /// Include only documents not linked to any project
+        #[arg(long)]
+        unassigned_project: bool,
         /// Include only documents in this iteration
         #[arg(long, conflicts_with = "unassigned")]
         iteration: Option<String>,
@@ -339,6 +348,54 @@ pub enum RequirementsCommand {
         /// Machine-readable JSON envelope
         #[arg(long)]
         json: bool,
+    },
+    /// Link requirements to a project without resetting existing delivery states
+    LinkProject {
+        /// Requirement IDs, paths, or unique titles
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        /// Project directory (default: current directory)
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove only this project's associations, retaining the shared documents
+    UnlinkProject {
+        /// Requirement IDs, paths, or unique titles
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        /// Project directory (default: current directory)
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record delivery state for an already linked requirement in one project
+    SetProjectStatus {
+        /// Requirement IDs, paths, or unique titles
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        /// Project directory (default: current directory)
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Explicitly recorded state; acceptance is never inferred
+        #[arg(long, value_parser = ["planned", "implemented", "verified"])]
+        status: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export linked Markdown and source identities as a portable JSON snapshot
+    ExportProject {
+        /// Project directory (default: current directory)
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// New snapshot file; existing files are never overwritten
+        #[arg(long)]
+        output: PathBuf,
     },
     /// Print one requirement document
     Show {

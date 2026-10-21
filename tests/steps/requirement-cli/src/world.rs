@@ -107,6 +107,13 @@ impl World {
         save_requirement_markdown(root, &mut index, "shop/checkout.md", CHECKOUT_BODY)?;
         index.documents[0].iteration = Some("Sprint 12".into());
         save_requirement_document_index(root, &index)?;
+        teshi_engine::update_requirement_projects(
+            root,
+            self.project.path(),
+            &["doc-12", "doc-37", "doc-9"],
+            true,
+            None,
+        )?;
         self.store_id = index.store_id.clone();
         self.revisions = index
             .documents
@@ -276,6 +283,19 @@ impl World {
         self.store.path()
     }
 
+    /// Returns an isolated project directory for project-scoped CLI steps.
+    pub fn project_path(&self, name: &str) -> Result<PathBuf> {
+        match name {
+            "A" => Ok(self.project.path().to_path_buf()),
+            "B" => {
+                let path = self.app_data.path().join("project-b");
+                fs::create_dir_all(&path).context("create secondary project")?;
+                Ok(path)
+            }
+            other => bail!("unknown fixture project {other:?}"),
+        }
+    }
+
     /// Requirements-tab snapshot from opening teshi with no PATH.
     pub fn tab(&self) -> Result<&teshi_tui::RequirementsTabSnapshot> {
         self.tab
@@ -306,6 +326,7 @@ impl World {
         let mut cmd = Command::new(&self.teshi);
         cmd.arg("--requirements-root")
             .arg(store)
+            .current_dir(self.project.path())
             .arg("requirements")
             .args(args)
             .env("TESHI_APP_DATA_DIR", self.app_data.path())
@@ -341,6 +362,7 @@ impl World {
         let output = Command::new(&self.teshi)
             .arg("--requirements-root")
             .arg(self.store.path())
+            .current_dir(self.project.path())
             .arg("requirements")
             .args(args)
             .env("TESHI_APP_DATA_DIR", self.app_data.path())

@@ -46,7 +46,7 @@ current project open.
 
 ## Requirements tab
 
-The footer provides clickable New, Delete, Filter, Group, Iteration, Priority, Save,
+The footer provides clickable Scope, Link, New, Delete, Filter, Group, Iteration, Priority, Save,
 and Point actions with their keyboard shortcuts. Dirty-buffer and delete
 confirmations provide clickable choices; their background panes stay blocked.
 Linked test-point rows can be selected with the pointer before navigation.
@@ -64,6 +64,8 @@ bare `h`/`l` do not switch panes.
 | `n` | Create a Proposed test point from the active non-empty selection |
 | `Ctrl+n` | Create a new requirement Markdown document |
 | `i` | Filter by iteration in the tree; enter Insert in the editor |
+| `o` | Cycle Current project / All projects / No project from the tree |
+| `b` | Link or unlink the selected saved document to/from the current project from the tree |
 | `g` | Toggle grouping: path hierarchy vs iteration → path |
 | `I` | Edit iteration from the tree or Browse editor (empty = Unassigned) |
 | `p` | Choose or clear requirement priority from the tree |

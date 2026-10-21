@@ -1305,6 +1305,7 @@ fn active_or_default_scope(
         .map(|store_id| teshi_agent::pipeline::RequirementSourceScope {
             store_id,
             iteration: teshi_core::authoring::RequirementIterationFilter::All,
+            project_filter: app.authoring_ui.project_filter.clone(),
         })
 }
 
@@ -2362,6 +2363,7 @@ mod pipeline_gate_tests {
         );
         app.generation_scope = Some(RequirementSourceScope {
             store_id: store_id.clone(),
+            project_filter: Default::default(),
             iteration: match iteration {
                 Some(name) => RequirementIterationFilter::Named(name.to_string()),
                 None => RequirementIterationFilter::All,
@@ -2577,6 +2579,7 @@ mod pipeline_gate_tests {
             meta: RequirementDocumentMeta {
                 iteration: None,
                 priority: None,
+                projects: Default::default(),
                 id: "doc-1".into(),
                 path: "auth.md".into(),
                 title: "Auth".into(),

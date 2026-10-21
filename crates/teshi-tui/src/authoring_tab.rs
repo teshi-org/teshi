@@ -56,6 +56,7 @@ struct RequirementsEditSnapshot {
 pub enum RequirementsPendingAction {
     Document(String),
     Filter(RequirementIterationFilter),
+    ProjectFilter(teshi_core::authoring::RequirementProjectFilter),
     Iteration { document_id: String, value: String },
     Action(crate::keymap::Action),
 }
@@ -110,6 +111,8 @@ pub struct AuthoringUiState {
     pub discovered: bool,
     pub requirements_root: PathBuf,
     pub project_root: PathBuf,
+    /// Identity error shown instead of silently treating a malformed project as empty.
+    pub project_identity_error: Option<String>,
     pub tree_items: Vec<TreeItem<'static, String>>,
     pub tree_state: TreeState<String>,
     pub focus: RequirementsFocus,
@@ -149,6 +152,8 @@ pub struct AuthoringUiState {
     pub selection_anchor: Option<(usize, usize)>,
     pub selection_end: Option<(usize, usize)>,
     pub iteration_filter: RequirementIterationFilter,
+    /// Project window, separate from the iteration filter.
+    pub project_filter: teshi_core::authoring::RequirementProjectFilter,
     pub group_mode: RequirementGroupMode,
     pub overlay: RequirementsOverlay,
     undo_stack: Vec<RequirementsEditSnapshot>,
@@ -159,6 +164,85 @@ pub struct AuthoringUiState {
 }
 
 impl AuthoringUiState {
+    fn project_filtered_index(&self) -> teshi_core::authoring::RequirementDocumentIndex {
+        let mut index = self
+            .artifacts
+            .as_ref()
+            .map(|a| a.index.clone())
+            .unwrap_or_default();
+        index
+            .documents
+            .retain(|doc| doc.matches_project_filter(&self.project_filter));
+        index
+    }
+
+    /// Label for the active project window.
+    pub fn project_scope_label(&self) -> &'static str {
+        use teshi_core::authoring::RequirementProjectFilter;
+        match self.project_filter {
+            RequirementProjectFilter::All => "All projects",
+            RequirementProjectFilter::Unassigned => "No project",
+            RequirementProjectFilter::Project(_) => "Current project",
+        }
+    }
+
+    /// Changes the project window after resolving any unsaved editor buffer.
+    pub fn set_project_filter(&mut self, filter: teshi_core::authoring::RequirementProjectFilter) {
+        if self.buffer_dirty {
+            self.guard_unsaved(RequirementsPendingAction::ProjectFilter(filter));
+            return;
+        }
+        self.project_filter = filter;
+        self.overlay = RequirementsOverlay::None;
+        self.rebuild_tree();
+    }
+
+    /// Cycles current project, all projects, and documents with no project.
+    ///
+    /// # Errors
+    /// Returns an error when the project's identity file is malformed or unreadable.
+    pub fn cycle_project_filter(&mut self) -> Result<(), String> {
+        use teshi_core::authoring::RequirementProjectFilter;
+        let next = match self.project_filter {
+            RequirementProjectFilter::Project(_) => RequirementProjectFilter::All,
+            RequirementProjectFilter::All => RequirementProjectFilter::Unassigned,
+            RequirementProjectFilter::Unassigned => {
+                teshi_engine::requirement_project_filter(&self.project_root)
+                    .map_err(|err| err.to_string())?
+            }
+        };
+        self.set_project_filter(next);
+        Ok(())
+    }
+
+    /// Links or unlinks the selected saved document only for the current project.
+    ///
+    /// # Errors
+    /// Returns an error for dirty buffers, missing selection, invalid identity, or persistence failure.
+    pub fn toggle_current_project_link(&mut self) -> Result<bool> {
+        if self.buffer_dirty {
+            anyhow::bail!(
+                "Save or discard the requirement before changing its project association"
+            );
+        }
+        let id = self
+            .selected_document_id
+            .clone()
+            .context("Select a requirement document first")?;
+        let project = teshi_engine::read_requirement_project(&self.project_root)?;
+        let doc = teshi_engine::read_requirement_document(&self.requirements_root, &id)?;
+        let linked = !project.is_some_and(|p| doc.meta.projects.contains_key(&p.id));
+        teshi_engine::update_requirement_projects(
+            &self.requirements_root,
+            &self.project_root,
+            &[&id],
+            linked,
+            None,
+        )?;
+        self.reload_from_disk()?;
+        Ok(linked)
+    }
+
     /// Moves a pane viewport, clamping to the last rendered overflow limits.
     pub fn set_pane_scroll(&mut self, pane: usize, axis: usize, value: usize) {
         let value = value.min(self.scroll_limits[pane][axis]);
@@ -459,6 +543,7 @@ impl AuthoringUiState {
             discovered: false,
             requirements_root: PathBuf::new(),
             project_root: PathBuf::new(),
+            project_identity_error: None,
             tree_items: Vec::new(),
             tree_state: TreeState::default(),
             focus: RequirementsFocus::Tree,
@@ -486,6 +571,7 @@ impl AuthoringUiState {
             selection_anchor: None,
             selection_end: None,
             iteration_filter: RequirementIterationFilter::All,
+            project_filter: teshi_core::authoring::RequirementProjectFilter::All,
             group_mode: RequirementGroupMode::Path,
             overlay: RequirementsOverlay::None,
             undo_stack: Vec::new(),
@@ -501,18 +587,18 @@ impl AuthoringUiState {
         let mut state = Self::empty();
         state.project_root = project_root.to_path_buf();
         state.requirements_root = requirements_root.to_path_buf();
+        state.project_filter = match teshi_engine::requirement_project_filter(project_root) {
+            Ok(filter) => filter,
+            Err(error) => {
+                state.project_identity_error = Some(error.to_string());
+                teshi_core::authoring::RequirementProjectFilter::Project(String::new())
+            }
+        };
         match load_authoring_artifacts(project_root, requirements_root) {
             Ok(result) => {
                 state.discovered = result.discovered;
                 state.artifacts = result.artifacts;
                 state.rebuild_tree();
-                let first_id = state
-                    .artifacts
-                    .as_ref()
-                    .and_then(|a| a.index.documents.first().map(|d| d.id.clone()));
-                if let Some(id) = first_id {
-                    state.select_document_by_id(&id);
-                }
                 state.restore_view_prefs();
             }
             Err(error) => {
@@ -548,6 +634,12 @@ impl AuthoringUiState {
         let selection_anchor = self.selection_anchor;
         let selection_end = self.selection_end;
 
+        if matches!(
+            self.project_filter,
+            teshi_core::authoring::RequirementProjectFilter::Project(_)
+        ) {
+            self.project_filter = teshi_engine::requirement_project_filter(&project_root)?;
+        }
         let loaded = load_authoring_artifacts(&project_root, &requirements_root)?;
         // Requirement Markdown/`_teshi.json` can change on disk; keep in-memory test
         // points so unsaved review-state edits are not discarded at an agent boundary.
@@ -564,10 +656,13 @@ impl AuthoringUiState {
         self.overlay = overlay;
         self.rebuild_tree();
         if let Some(id) = selected.as_ref() {
-            let still_present = self
-                .artifacts
-                .as_ref()
-                .is_some_and(|artifacts| artifacts.index.documents.iter().any(|doc| doc.id == *id));
+            let still_present = self.artifacts.as_ref().is_some_and(|artifacts| {
+                artifacts.index.documents.iter().any(|doc| {
+                    doc.id == *id
+                        && doc.matches_project_filter(&self.project_filter)
+                        && doc.matches_iteration_filter(&self.iteration_filter)
+                })
+            });
             if still_present {
                 self.select_document_by_id(id);
             }
@@ -588,12 +683,7 @@ impl AuthoringUiState {
 
     /// Rebuilds the requirement tree from the current index, filter, and group mode.
     pub fn rebuild_tree(&mut self) {
-        let index = self
-            .artifacts
-            .as_ref()
-            .map(|a| &a.index)
-            .cloned()
-            .unwrap_or_default();
+        let index = self.project_filtered_index();
         self.tree_items = build_requirement_tree(&index, &self.iteration_filter, self.group_mode);
         let visible = visible_document_ids(&index, &self.iteration_filter);
         let target = self
@@ -716,7 +806,7 @@ impl AuthoringUiState {
             .find(|doc| doc.id == document_id)
             .cloned()
             .ok_or_else(|| format!("Requirement document '{document_id}' is not indexed"))?;
-        let visible = visible_document_ids(&index_before, &self.iteration_filter);
+        let visible = visible_document_ids(&self.project_filtered_index(), &self.iteration_filter);
         let current_position = visible
             .iter()
             .position(|id| id == &document_id)
@@ -796,12 +886,7 @@ impl AuthoringUiState {
         &mut self,
         filter: RequirementIterationFilter,
     ) -> Result<(), String> {
-        let index = self
-            .artifacts
-            .as_ref()
-            .map(|a| a.index.clone())
-            .unwrap_or_default();
-        let visible = visible_document_ids(&index, &filter);
+        let visible = visible_document_ids(&self.project_filtered_index(), &filter);
         let would_hide = self
             .selected_document_id
             .as_ref()
@@ -984,6 +1069,18 @@ impl AuthoringUiState {
         Ok(())
     }
 
+    fn view_preferences_key(&self, store_id: &str) -> String {
+        if self.project_root.as_os_str().is_empty() {
+            return store_id.to_string();
+        }
+        let identity = teshi_engine::read_requirement_project(&self.project_root)
+            .ok()
+            .flatten()
+            .map(|project| project.id)
+            .unwrap_or_else(|| self.project_root.to_string_lossy().into_owned());
+        format!("{store_id}@{identity}")
+    }
+
     fn restore_view_prefs(&mut self) {
         let Some(store_id) = self
             .artifacts
@@ -995,7 +1092,10 @@ impl AuthoringUiState {
         let Ok(settings) = teshi_engine::load_settings() else {
             return;
         };
-        let Some(prefs) = settings.requirements_views.get(store_id.as_str()) else {
+        let Some(prefs) = settings
+            .requirements_views
+            .get(&self.view_preferences_key(store_id.as_str()))
+        else {
             return;
         };
         self.group_mode = prefs.group;
@@ -1022,7 +1122,7 @@ impl AuthoringUiState {
             return;
         };
         settings.requirements_views.insert(
-            store_id.as_str().to_string(),
+            self.view_preferences_key(store_id.as_str()),
             teshi_engine::RequirementsViewPrefs {
                 filter: self.iteration_filter.clone(),
                 group: self.group_mode,
@@ -1040,7 +1140,17 @@ impl AuthoringUiState {
             return;
         }
         self.load_document_state(doc_id);
-        self.sync_tree_selection();
+        // Following an existing test-point link is an explicit request to reveal
+        // its source, including legacy documents that have no project membership.
+        if self
+            .current_document_meta()
+            .is_some_and(|meta| !meta.matches_project_filter(&self.project_filter))
+        {
+            self.project_filter = teshi_core::authoring::RequirementProjectFilter::All;
+            self.rebuild_tree();
+        } else {
+            self.sync_tree_selection();
+        }
     }
 
     fn load_document_state(&mut self, doc_id: &str) {
@@ -1259,6 +1369,18 @@ impl AuthoringUiState {
     /// Creates a new requirement document under `relative_path` with the given title.
     pub fn create_document(&mut self, relative_path: &str, title: &str) -> Result<String> {
         let id = format!("doc-{}", self.next_document_number()?);
+        let project = if self.project_root.as_os_str().is_empty() {
+            None
+        } else {
+            Some(teshi_engine::ensure_requirement_project(
+                &self.project_root,
+            )?)
+        };
+        if let Some(project) = &project {
+            // New documents always belong to the current project and must stay visible.
+            self.project_filter =
+                teshi_core::authoring::RequirementProjectFilter::Project(project.id.clone());
+        }
         if self.artifacts.is_none() {
             self.artifacts = Some(AuthoringArtifacts {
                 index: Default::default(),
@@ -1272,6 +1394,9 @@ impl AuthoringUiState {
         let body = format!("# {}\n\n", title.trim());
         let revision = compute_document_revision(&body);
         let mut meta = RequirementDocumentMeta::new(id.clone(), relative_path, title, revision);
+        if let Some(project) = project {
+            meta.projects.insert(project.id, Default::default());
+        }
         if let RequirementIterationFilter::Named(name) = &self.iteration_filter
             && !name.trim().is_empty()
         {
@@ -1317,6 +1442,17 @@ impl AuthoringUiState {
             let initialized = initialize_requirement_store(&requirements_root)?;
             artifacts.index.store_id = initialized.store_id;
             artifacts.index.version = initialized.version;
+        }
+        if self.draft_document_id.as_deref() == Some(doc_id.as_str()) {
+            let project = teshi_engine::ensure_requirement_project(project_root)?;
+            if let Some(meta) = artifacts
+                .index
+                .documents
+                .iter_mut()
+                .find(|doc| doc.id == doc_id)
+            {
+                meta.projects.entry(project.id).or_default();
+            }
         }
         let meta = artifacts
             .index
@@ -1955,6 +2091,7 @@ pub fn requirements_footer_line(
         RequirementIterationFilter::Named(name) => name.clone(),
     };
     theme::footer_line(vec![
+        Span::raw(" Scope [o] Link [b] "),
         Span::styled(
             " Delete [d/Delete] ",
             Style::default().fg(theme::FOOTER_DESC),
@@ -2216,6 +2353,7 @@ mod tests {
             *test_point
         );
 
+        assert_eq!(reloaded.selected_document_id.as_deref(), Some(id.as_str()));
         reloaded.open_delete_confirmation().unwrap();
         reloaded.delete_current_document(project.path()).unwrap();
         assert!(reloaded.selected_document_id.is_none());
@@ -2582,7 +2720,7 @@ mod tests {
     }
 
     #[test]
-    fn two_projects_share_the_same_requirement_tree() {
+    fn two_projects_share_storage_but_default_to_their_own_requirement_tree() {
         let store = tempdir().unwrap();
         teshi_engine::initialize_requirement_store(store.path()).unwrap();
         let project_a = tempdir().unwrap();
@@ -2593,7 +2731,17 @@ mod tests {
             .save_current_document(project_a.path())
             .expect("save");
         let a = AuthoringUiState::load_from_project(project_a.path(), store.path());
-        let b = AuthoringUiState::load_from_project(project_b.path(), store.path());
+        let mut b = AuthoringUiState::load_from_project(project_b.path(), store.path());
+        assert!(!a.tree_items.is_empty());
+        assert!(b.tree_items.is_empty());
+        assert!(b.selected_document_id.is_none());
+        b.cycle_project_filter().unwrap();
+        assert_eq!(b.selected_document_id.as_deref(), Some("doc-1"));
+        b.toggle_current_project_link().unwrap();
+        b.cycle_project_filter().unwrap();
+        assert!(b.tree_items.is_empty());
+        b.cycle_project_filter().unwrap();
+        assert_eq!(b.selected_document_id.as_deref(), Some("doc-1"));
         assert_eq!(
             a.artifacts.as_ref().unwrap().index.documents.len(),
             b.artifacts.as_ref().unwrap().index.documents.len()

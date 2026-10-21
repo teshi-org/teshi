@@ -1,6 +1,12 @@
 //! Requirement and test-point authoring persistence.
 
 mod import;
+mod projects;
+pub use projects::{
+    ensure_requirement_project, read_requirement_project, requirement_project_filter,
+    snapshot_requirement_project, update_requirement_projects, RequirementProject,
+    RequirementProjectSnapshot,
+};
 mod service;
 mod store;
 

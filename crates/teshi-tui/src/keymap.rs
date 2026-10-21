@@ -109,6 +109,10 @@ pub enum Action {
     ReqDeleteDocument,
     /// Open the iteration filter picker (`i` on the Requirements tree).
     ReqFilterOverlay,
+    /// Cycle current project, all projects, and unassigned requirements.
+    ReqProjectScope,
+    /// Toggle membership of the selected document in the current project.
+    ReqProjectLink,
     /// Toggle path vs iteration grouping (`g` on the Requirements tree).
     ReqGroupToggle,
     /// Edit the selected document's iteration (`I` on the Requirements tree).
@@ -911,6 +915,8 @@ impl Action {
                     Some(Self::ReqDeleteDocument)
                 }
                 (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Self::ReqFilterOverlay),
+                (KeyCode::Char('o'), KeyModifiers::NONE) => Some(Self::ReqProjectScope),
+                (KeyCode::Char('b'), KeyModifiers::NONE) => Some(Self::ReqProjectLink),
                 (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Self::ReqGroupToggle),
                 (KeyCode::Char('I'), KeyModifiers::SHIFT) => Some(Self::ReqEditIteration),
                 (KeyCode::Char('p'), KeyModifiers::NONE) => Some(Self::ReqEditPriority),
@@ -924,6 +930,7 @@ impl Action {
                     Some(Self::SelectTab(MainTab::TestPoints))
                 }
                 (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
+                (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                 (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
                 (KeyCode::Esc, _) => Some(Self::ClearInputState),
@@ -2048,6 +2055,13 @@ mod tests {
     fn requirements_modes_keep_printable_text_and_commands_separate() {
         use crate::authoring_tab::RequirementsEditorMode;
         let mut context = requirements_tree_context();
+        assert_eq!(
+            Action::from_key_event(
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                context
+            ),
+            Some(Action::Save)
+        );
         context.requirements_focus = RequirementsFocus::Editor;
         for ch in (32u8..=126).map(char::from).chain("中文🙂é".chars()) {
             let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);

@@ -48,7 +48,10 @@ teshi requirements import-project --dry-run
 teshi requirements import-project --yes
 teshi --requirements-root D:\Docs\teshi-requirements requirements path
 
-teshi requirements list
+teshi requirements list                         # current working directory project
+teshi requirements list --project ../other
+teshi requirements list --all-projects
+teshi requirements list --unassigned-project    # no project associations
 teshi requirements list --iteration "Sprint 12" --json
 teshi requirements list --unassigned
 teshi requirements show doc-12
@@ -95,6 +98,10 @@ Unassigned documents use JSON `null` for `iteration`. `show` prints Markdown onl
 | macOS | `dirs::data_dir()/teshi/requirements` |
 
 Path resolution: `--requirements-root` → non-empty `TESHI_REQUIREMENTS_DIR` → `<app_data>/requirements`. Put the store in a separate Git repo if you want version control independent of application projects. Import copies legacy `<project>/requirements/` into the current store and rewrites that project's test-point links; it does not delete the source directory.
+
+See [Requirements shared across projects](requirement-projects.md) for `link-project`,
+`unlink-project`, `set-project-status`, and `export-project`, including identity
+sharing and legacy unassigned documents.
 
 ### Test points (`teshi testpoints`) — 0.7.10+
 

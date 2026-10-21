@@ -53,8 +53,141 @@ fn run_step(world: &mut World, kind: StepKeywordType, step: &BddStep) -> Result<
     }
 }
 
+fn handle_project_given(text: &str) -> Result<bool> {
+    if text == "project A owns the sample requirements" || text == "项目 A 关联样例需求" {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn handle_project_when(world: &mut World, text: &str) -> Result<bool> {
+    let parts = quoted_parts(text);
+    if text.starts_with("the tester links document ")
+        || (text.starts_with("测试人员将文档 ") && text.contains("关联到项目 "))
+    {
+        let [document, project] = parts.as_slice() else {
+            bail!("expected a document and project")
+        };
+        let root = world.project_path(project)?;
+        let root = root.to_str().context("project path is not UTF-8")?;
+        world.run(&["link-project", document, "--project", root, "--json"])?;
+        return Ok(true);
+    }
+    if text.starts_with("the tester unlinks document ") || text.starts_with("测试人员解除文档 ")
+    {
+        let [document, project] = parts.as_slice() else {
+            bail!("expected a document and project")
+        };
+        let root = world.project_path(project)?;
+        let root = root.to_str().context("project path is not UTF-8")?;
+        world.run(&["unlink-project", document, "--project", root, "--json"])?;
+        return Ok(true);
+    }
+    if text.starts_with("the tester records status ") || text.starts_with("测试人员将项目状态设为 ")
+    {
+        let [document, project, status] = parts.as_slice() else {
+            bail!("expected a document, project, and status")
+        };
+        let root = world.project_path(project)?;
+        let root = root.to_str().context("project path is not UTF-8")?;
+        world.run(&[
+            "set-project-status",
+            document,
+            "--project",
+            root,
+            "--status",
+            status,
+            "--json",
+        ])?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn handle_project_then(world: &mut World, text: &str) -> Result<bool> {
+    if text == "project B has no listed requirements" || text == "项目 B 未列出需求" {
+        let ids = json_list_ids(&world.last()?.stdout)?;
+        if !ids.is_empty() {
+            bail!("expected project B to be empty, got {ids:?}");
+        }
+        return Ok(true);
+    }
+    if text.starts_with("project ") || text.starts_with("项目 ") {
+        let parts = quoted_parts(text);
+        if text.contains("recorded project status") || text.contains("已分别记录项目状态")
+        {
+            let [document, project_a, status_a, project_b, status_b] = parts.as_slice() else {
+                bail!("expected document and two project/status pairs")
+            };
+            let index: serde_json::Value =
+                serde_json::from_slice(&fs::read(world.store_path().join("_teshi.json"))?)?;
+            let a = world.project_path(project_a)?;
+            let b = world.project_path(project_b)?;
+            let a_id: serde_json::Value =
+                serde_json::from_slice(&fs::read(a.join(".teshi/project.json"))?)?;
+            let b_id: serde_json::Value =
+                serde_json::from_slice(&fs::read(b.join(".teshi/project.json"))?)?;
+            let meta = index["documents"]
+                .as_array()
+                .context("missing document index")?
+                .iter()
+                .find(|item| item["id"] == *document)
+                .context("document not indexed")?;
+            if meta["projects"][a_id["id"].as_str().context("missing A identity")?] != *status_a
+                || meta["projects"][b_id["id"].as_str().context("missing B identity")?] != *status_b
+            {
+                bail!(
+                    "project states differ from expectations: {}",
+                    meta["projects"]
+                );
+            }
+            return Ok(true);
+        }
+        if text.contains("only lists the removed document")
+            || text.contains("只列出已解除关联的文档")
+        {
+            let [document] = parts.as_slice() else {
+                bail!("expected a document ID")
+            };
+            let ids = json_list_ids(&world.last()?.stdout)?;
+            if ids != [document.to_string()].into_iter().collect() {
+                bail!("expected only {document}, got {ids:?}");
+            }
+            return Ok(true);
+        }
+        if text.contains("snapshot contains every project source")
+            || text.contains("快照包含该项目的所有需求正文")
+        {
+            let [project] = parts.as_slice() else {
+                bail!("expected a project")
+            };
+            let root = world.project_path(project)?;
+            let snapshot: serde_json::Value =
+                serde_json::from_slice(&fs::read(root.join("requirements-snapshot.json"))?)?;
+            let docs = snapshot["documents"]
+                .as_array()
+                .context("snapshot has no documents")?;
+            if docs.len() != 3
+                || !docs.iter().any(|doc| {
+                    doc["meta"]["id"] == "doc-12"
+                        && doc["body"]
+                            .as_str()
+                            .is_some_and(|body| body.starts_with("# Login"))
+                })
+            {
+                bail!("project snapshot does not contain the complete linked sources");
+            }
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn given(world: &mut World, step: &BddStep) -> Result<()> {
     let text = step.text.trim();
+    if handle_project_given(text)? {
+        return Ok(());
+    }
     if text == "an isolated requirement library with sample login and checkout documents"
         || text == "已有一份包含登录和结账样例文档的隔离需求库"
     {
@@ -133,6 +266,9 @@ fn test_point_setup(text: &str) -> Option<TestPointSetup> {
 
 fn when(world: &mut World, step: &BddStep) -> Result<()> {
     let text = step.text.trim();
+    if handle_project_when(world, text)? {
+        return Ok(());
+    }
     if let Some(name) = text
         .strip_prefix("the tester lists requirements in iteration ")
         .and_then(|rest| rest.strip_suffix(" together with unassigned"))
@@ -143,6 +279,38 @@ fn when(world: &mut World, step: &BddStep) -> Result<()> {
     {
         let iteration = unquote(name)?;
         world.run(&["list", "--iteration", &iteration, "--unassigned"])?;
+        return Ok(());
+    }
+    if text.starts_with("the tester lists requirements for project ")
+        || text.starts_with("测试人员列出项目 ")
+    {
+        let parts = quoted_parts(text);
+        let [project] = parts.as_slice() else {
+            bail!("expected one project")
+        };
+        let root = world.project_path(project)?;
+        let root = root.to_str().context("project path is not UTF-8")?;
+        world.run(&["list", "--project", root, "--json"])?;
+        return Ok(());
+    }
+    if text.starts_with("the tester lists unassigned project requirements as JSON")
+        || text == "测试人员以 JSON 列出未关联项目的需求"
+    {
+        world.run(&["list", "--unassigned-project", "--json"])?;
+        return Ok(());
+    }
+    if text.starts_with("the tester exports a requirements snapshot for project ")
+        || text.starts_with("测试人员导出项目 ")
+    {
+        let parts = quoted_parts(text);
+        let [project] = parts.as_slice() else {
+            bail!("expected one project")
+        };
+        let root = world.project_path(project)?;
+        let output = root.join("requirements-snapshot.json");
+        let root = root.to_str().context("project path is not UTF-8")?;
+        let output = output.to_str().context("snapshot path is not UTF-8")?;
+        world.run(&["export-project", "--project", root, "--output", output])?;
         return Ok(());
     }
     if let Some(name) = text
@@ -388,6 +556,9 @@ fn when(world: &mut World, step: &BddStep) -> Result<()> {
 
 fn then(world: &mut World, step: &BddStep) -> Result<()> {
     let text = step.text.trim();
+    if handle_project_then(world, text)? {
+        return Ok(());
+    }
     if text == "the command succeeds" || text == "命令成功" {
         let last = world.last()?;
         if last.status != 0 {

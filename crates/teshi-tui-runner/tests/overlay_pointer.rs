@@ -1,5 +1,8 @@
 //! Real PTY acceptance for session, approval, and location footer actions.
 
+#[path = "support/requirement_project.rs"]
+mod requirement_project;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -341,6 +344,7 @@ fn generation_scope_iteration_cancel_and_confirm_preserve_sources() {
         );
         meta.iteration = Some("Sprint Scope".into());
         index.documents.push(meta);
+        requirement_project::associate(fixture.source.parent().unwrap(), &mut index);
         let index_bytes = serde_json::to_vec_pretty(&index).unwrap();
         fs::write(store.join("_teshi.json"), &index_bytes).unwrap();
         let state_path = fixture

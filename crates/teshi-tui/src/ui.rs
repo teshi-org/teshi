@@ -427,6 +427,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                 ),
             ];
             if !compact {
+                controls.insert(0, (" Link [b]", Action::ReqProjectLink));
+                controls.insert(0, (" Scope [o]", Action::ReqProjectScope));
                 controls.push((" Priority [p]", Action::ReqEditPriority));
             }
             render_action_bar(frame, app, chunks[3], mode, &controls, false);
@@ -4030,7 +4032,11 @@ fn render_requirements_tree(
     focused: bool,
 ) {
     let block = theme::panel_block(
-        crate::authoring_tab::requirements_tree_title(&ui.iteration_filter),
+        format!(
+            "{} · {}",
+            crate::authoring_tab::requirements_tree_title(&ui.iteration_filter),
+            ui.project_scope_label()
+        ),
         focused,
     );
     let inner = block.inner(area);
@@ -4039,15 +4045,31 @@ fn render_requirements_tree(
         return;
     }
 
+    if let Some(error) = &ui.project_identity_error {
+        frame.render_widget(
+            Paragraph::new(format!("Project identity: {error}"))
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .style(Style::default().fg(theme::ERROR)),
+            inner,
+        );
+        return;
+    }
     if !ui.discovered {
         frame.render_widget(
-            Paragraph::new("No requirement artifacts. Ctrl+n to create.")
-                .style(Style::default().fg(theme::MUTED)),
+            Paragraph::new(
+                "No requirement artifacts. Ctrl+n to create. Scope [o]: all / no project.",
+            )
+            .style(Style::default().fg(theme::MUTED)),
             inner,
         );
         return;
     }
 
+    if ui.tree_items.is_empty() {
+        ui.scroll_limits[0] = [0, 0];
+        frame.render_widget(Paragraph::new("No requirements in this scope.\no: change scope   b: link selected\nCtrl+n: create for current project").wrap(ratatui::widgets::Wrap { trim: false }).style(Style::default().fg(theme::MUTED)), inner);
+        return;
+    }
     let visible = ui.tree_state.flatten(&ui.tree_items);
     let height = visible.len();
     let width = visible
@@ -4169,6 +4191,19 @@ fn render_requirements_editor(
             teshi_core::authoring::RequirementPriority::P3 => theme::MUTED,
         };
         heading.push(theme::chip(format!("[{priority}]"), priority_color));
+        heading.push(Span::raw(" "));
+    }
+    if let teshi_core::authoring::RequirementProjectFilter::Project(id) = &ui.project_filter
+        && let Some(status) = ui
+            .current_document_meta()
+            .and_then(|meta| meta.projects.get(id))
+    {
+        let label = match status {
+            teshi_core::authoring::RequirementProjectStatus::Planned => "[planned]",
+            teshi_core::authoring::RequirementProjectStatus::Implemented => "[implemented]",
+            teshi_core::authoring::RequirementProjectStatus::Verified => "[verified]",
+        };
+        heading.push(theme::chip(label, theme::MUTED));
         heading.push(Span::raw(" "));
     }
     heading.push(theme::chip(mode, mode_color));
@@ -4734,6 +4769,10 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             )),
             Line::raw(format!("Store ID: {store_id}")),
             Line::raw(format!("Iteration scope: {filter}")),
+            Line::raw(format!(
+                "Project scope: {}",
+                app.authoring_ui.project_scope_label()
+            )),
             Line::raw(""),
         ];
         let block = theme::popup_block(" Confirm generation source scope ");
@@ -5362,12 +5401,12 @@ mod truncate_tests {
         for (mode, expected, first_key) in [
             (
                 RequirementsEditorMode::Browse,
-                "[BROWSE] New doc [Ctrl+n] Delete [d/Delete] Filter [i] Group [g] Iteration [I] Save [Ctrl+s] Point [n] Priority [p]",
+                "[BROWSE] Scope [o] Link [b] New doc [Ctrl+n] Delete [d/Delete] Filter [i] Group [g] Iteration [I] Save [Ctrl+s] Point [n] Priority [p]",
                 "[Ctrl+n]",
             ),
             (
                 RequirementsEditorMode::Insert,
-                "[INSERT] New doc [Ctrl+n] Delete [d/Delete] Filter [i] Group [g] Iteration [I] Save [Ctrl+s] Point [n] Priority [p]",
+                "[INSERT] Scope [o] Link [b] New doc [Ctrl+n] Delete [d/Delete] Filter [i] Group [g] Iteration [I] Save [Ctrl+s] Point [n] Priority [p]",
                 "[Ctrl+n]",
             ),
         ] {
@@ -5376,14 +5415,15 @@ mod truncate_tests {
             app.status_message = None;
             app.authoring_ui.focus = RequirementsFocus::Editor;
             app.authoring_ui.editor_mode = mode;
-            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
             terminal.draw(|frame| render(frame, &mut app)).unwrap();
             let buffer = terminal.backend().buffer();
-            let text = (0..120)
+            let text = (0..160)
                 .map(|x| buffer[(x, 23)].symbol())
                 .collect::<String>();
             assert_eq!(text.trim_end(), expected);
-            for x in 17..17 + first_key.len() as u16 {
+            let offset = text.find(first_key).unwrap() as u16;
+            for x in offset..offset + first_key.len() as u16 {
                 assert_eq!(buffer[(x, 23)].fg, crate::theme::PRIMARY);
                 assert!(
                     buffer[(x, 23)]

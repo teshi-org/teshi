@@ -4,7 +4,7 @@
 //! is the pair `(store_id, document_id)` so moving the store directory does not
 //! break project test-point links.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -443,6 +443,36 @@ pub struct RequirementDocumentMeta {
     /// Optional scheduling priority. `None` means no priority is assigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<RequirementPriority>,
+    /// Project membership and explicitly recorded delivery state, keyed by durable project ID.
+    /// Missing on older documents, which remain unassigned until explicitly linked.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub projects: BTreeMap<String, RequirementProjectStatus>,
+}
+
+/// Delivery state of a requirement in one project; never inferred from another project.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementProjectStatus {
+    /// Linked to the project but not yet implemented.
+    #[default]
+    Planned,
+    /// Implementation has been recorded, without claiming acceptance.
+    Implemented,
+    /// Acceptance has been explicitly recorded for this project.
+    Verified,
+}
+
+/// Project window over the shared requirement library.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "project_id", rename_all = "snake_case")]
+pub enum RequirementProjectFilter {
+    /// Every document in the library.
+    #[default]
+    All,
+    /// Documents with no project associations.
+    Unassigned,
+    /// Documents linked to this durable project ID.
+    Project(String),
 }
 
 impl RequirementDocumentMeta {
@@ -460,12 +490,22 @@ impl RequirementDocumentMeta {
             revision,
             iteration: None,
             priority: None,
+            projects: BTreeMap::new(),
         }
     }
 
     /// Returns `true` when this document has no iteration assignment.
     pub fn is_unassigned(&self) -> bool {
         self.iteration.is_none()
+    }
+
+    /// Tests project membership independently of the iteration filter.
+    pub fn matches_project_filter(&self, filter: &RequirementProjectFilter) -> bool {
+        match filter {
+            RequirementProjectFilter::All => true,
+            RequirementProjectFilter::Unassigned => self.projects.is_empty(),
+            RequirementProjectFilter::Project(id) => self.projects.contains_key(id),
+        }
     }
 
     /// Returns `true` when this document belongs to `filter`.

@@ -62,12 +62,12 @@ pub struct AppSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_height: Option<u32>,
     pub last_project_parent: Option<String>,
-    /// Requirements tab filter/group preferences keyed by store identity.
+    /// Requirements tab filter/group preferences keyed by store and project identity.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub requirements_views: HashMap<String, RequirementsViewPrefs>,
 }
 
-/// User-level Requirements tab view preferences for one requirement store.
+/// User-level Requirements tab view preferences for one requirement store and project.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequirementsViewPrefs {
     /// Last iteration filter applied to this store.

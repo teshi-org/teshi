@@ -2403,6 +2403,8 @@ impl App {
             requirements_root,
             project_switch: crate::project_context::ProjectSwitchState::new(project_identity),
         };
+        app.authoring_ui
+            .set_project_filter(teshi_core::authoring::RequirementProjectFilter::All);
         app.spawn_llm_if_configured();
         app.activate_active_profile();
         app.sync_cursor_to_first_node();
@@ -3505,6 +3507,7 @@ impl App {
             .map(|store_id| teshi_agent::pipeline::RequirementSourceScope {
                 store_id,
                 iteration: prompt.iteration.clone(),
+                project_filter: self.authoring_ui.project_filter.clone(),
             });
         self.generation_paused_reason = None;
         self.generation_stage = teshi_agent::pipeline::GenerationStage::Gathering;
@@ -7358,6 +7361,26 @@ impl App {
                 self.authoring_ui.delete_visual_selection();
                 self.pending_char = None;
             }
+            Action::ReqProjectScope => {
+                self.status = match self.authoring_ui.cycle_project_filter() {
+                    Ok(()) => format!(
+                        "Requirement scope: {}",
+                        self.authoring_ui.project_scope_label()
+                    ),
+                    Err(error) => error,
+                };
+            }
+            Action::ReqProjectLink => {
+                self.status = match self.authoring_ui.toggle_current_project_link() {
+                    Ok(linked) => if linked {
+                        "Linked requirement to current project"
+                    } else {
+                        "Unlinked requirement from current project"
+                    }
+                    .into(),
+                    Err(error) => error.to_string(),
+                };
+            }
             Action::ReqFilterOverlay => {
                 if self.active_tab == MainTab::Requirements {
                     self.authoring_ui.open_filter_picker();
@@ -8033,6 +8056,9 @@ impl App {
         match pending {
             RequirementsPendingAction::Document(id) => {
                 self.authoring_ui.select_tree_node(&format!("req-doc:{id}"));
+            }
+            RequirementsPendingAction::ProjectFilter(filter) => {
+                self.authoring_ui.set_project_filter(filter);
             }
             RequirementsPendingAction::Filter(filter) => {
                 if let Err(error) = self.authoring_ui.try_set_iteration_filter(filter) {
@@ -11274,6 +11300,16 @@ mod tests {
                 teshi_engine::compute_document_revision(body),
             ));
         fs::write(store.path().join("shared.md"), body).unwrap();
+        let project_a_identity =
+            teshi_engine::ensure_requirement_project(project_a.path()).unwrap();
+        let project_b_identity =
+            teshi_engine::ensure_requirement_project(project_b.path()).unwrap();
+        index.documents[0]
+            .projects
+            .insert(project_a_identity.id, Default::default());
+        index.documents[0]
+            .projects
+            .insert(project_b_identity.id, Default::default());
         teshi_engine::save_requirement_document_index(store.path(), &index).unwrap();
         let mut originals = Vec::new();
         for (project, point) in [(project_a.path(), "A-only"), (project_b.path(), "B-only")] {
@@ -13892,7 +13928,9 @@ mod tests {
         .expect("parse bare teshi");
         assert!(cli.paths.is_empty());
 
-        let app = App::from_cli(&cli).unwrap();
+        let mut app = App::from_cli(&cli).unwrap();
+        app.authoring_ui
+            .set_project_filter(teshi_core::authoring::RequirementProjectFilter::All);
         assert!(app.authoring_ui.discovered);
         let artifacts = app.authoring_ui.artifacts.as_ref().expect("loaded store");
         assert!(

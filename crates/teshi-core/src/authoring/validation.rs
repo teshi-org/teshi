@@ -29,7 +29,7 @@ pub struct AuthoringDiagnostic {
 }
 
 /// Markdown body loaded for one requirement document.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RequirementDocumentContent {
     pub meta: RequirementDocumentMeta,
     pub body: String,

@@ -1,5 +1,8 @@
 //! Requirements Vim acceptance through a real PTY and exact persisted Markdown.
 
+#[path = "support/requirement_project.rs"]
+mod requirement_project;
+
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -31,6 +34,7 @@ impl Fixture {
             "Vim acceptance",
             DocumentRevision::new("fixture-v1"),
         ));
+        requirement_project::associate(&project, &mut index);
         fs::write(
             store.join("_teshi.json"),
             serde_json::to_vec_pretty(&index).unwrap(),

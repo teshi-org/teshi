@@ -1,5 +1,8 @@
 //! Rendered keyboard, pointer, wheel, drag, and resize acceptance for the TUI.
 
+#[path = "support/requirement_project.rs"]
+mod requirement_project;
+
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -49,6 +52,7 @@ impl Fixture {
                 DocumentRevision::new(format!("fixture-{number}")),
             ));
         }
+        requirement_project::associate(&project, &mut index);
         fs::write(
             store.join("_teshi.json"),
             serde_json::to_vec_pretty(&index).unwrap(),

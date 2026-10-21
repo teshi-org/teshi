@@ -257,10 +257,12 @@ fn merge_requirement_indexes(
             .find(|existing| existing.id == doc.id)
         {
             let persisted_priority = slot.priority;
+            let persisted_projects = slot.projects.clone();
             *slot = doc.clone();
             // Priority has its own compare-and-set API. Generic index saves
             // must not clear or overwrite a value from a stale caller.
             slot.priority = persisted_priority;
+            slot.projects = persisted_projects;
         } else {
             merged.documents.push(doc.clone());
         }
@@ -295,10 +297,12 @@ fn upsert_saved_document(
             .find(|existing| existing.id == meta.id)
         {
             let persisted_priority = slot.priority;
+            let persisted_projects = slot.projects.clone();
             *slot = meta.clone();
             // Body saves carry an in-memory snapshot and therefore cannot
             // safely author metadata from that snapshot.
             slot.priority = persisted_priority;
+            slot.projects = persisted_projects;
         } else {
             merged.documents.push(meta.clone());
         }

@@ -1,5 +1,8 @@
 //! Test Points pointer controls, independent scrolling, and modal ownership in a real PTY.
 
+#[path = "support/requirement_project.rs"]
+mod requirement_project;
+
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -57,6 +60,7 @@ impl Fixture {
                 "quote": {"quote": quote}, "resolution": "resolved"
             }));
         }
+        requirement_project::associate(&project, &mut index);
         let index_path = store.join("_teshi.json");
         let index_bytes = serde_json::to_vec_pretty(&index).unwrap();
         fs::write(&index_path, &index_bytes).unwrap();
