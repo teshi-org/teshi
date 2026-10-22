@@ -95,6 +95,22 @@ Protocol version 1 is the current contract. Legacy single-profile heartbeats rem
 
 **Commands** carry a unique request ID and composite instance/window/tab target. P0 supports revision-bound snapshot refs, structured-candidate re-verification, DOM and CDP-pointer activation, typed input/waits, and lease-scoped tab/window/group lifecycle. Direct WebSocket dispatch requires the same broker-start token and atomically claims a command from the heartbeat queue; only a definite pre-send failure restores the same request once, while an ambiguous transport error is never retried because the browser may already have received the mutation. Replies echo request, instance, and target and mismatches are quarantined.
 
+For reading page content, use `teshi browser scan --text-only` with the same explicit
+`--session`, `--window`, `--tab`, and `--lease-token` as a snapshot. The observational
+MCP equivalent is `get_page_text`. This operation requires P0 control and an extension
+advertising `get_page_text`; reload an older unpacked extension after updating it.
+No arbitrary-JavaScript grant is required.
+
+The collector reads rendered DOM text, includes open shadow roots and accessible
+frame documents, preserves paragraph boundaries, describes form fields, and omits
+password values and hidden content. It includes text below the viewport, but cannot
+read canvas text, closed shadow roots, or inaccessible frames. Frame access failures
+appear in `warnings`. Use `--selector` to restrict the content, `--limit` (1–100000,
+default 35000) to bound a response, and `--offset` to page through Unicode characters.
+Responses include `text`, `total_chars`, `returned_chars`, `truncated`, and
+`next_offset`. Pagination reads the current DOM on each call; restart from zero if
+the page changes. DOM traversal stops at 100000 nodes and reports `dom_node_limit`.
+
 **Filtered network capture** — the extension advertises `p1.filtered_network_capture` and `p1.network_batch_transport`. `start_network_capture` requires a broker-issued `capture_id`, one or more exact `allowed_hostnames`, `capture_request_bodies`, and `max_request_body_bytes`. The extension filters parsed HTTP(S) hostnames before body retrieval, retains bounded raw UTF-8 request bodies when enabled, and sends bounded `network_batch` messages over the authenticated WebSocket. Each event has a monotonic sequence number. Events remain in a bounded retry queue until a matching target/capture `network_ack` acknowledges a contiguous sequence; reconnects resend unacknowledged data and include cumulative drop totals.
 
 Debugger attachments are owned per tab by independent preview, command, console, and network roles. Moving the active tab migrates only preview, so captures can continue on several tabs in one profile. Tab closure or an external debugger detach terminates and reports only the affected capture. An active capture or unacknowledged batch keeps the WebSocket reconnecting even when preview is disabled.

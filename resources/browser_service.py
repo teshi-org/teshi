@@ -32,6 +32,8 @@ from browser_agent_broker import (
     operation_success,
 )
 
+from browser_page_text import PAGE_TEXT_JS
+
 DEFAULT_DISCOVERY_PORT = 17373
 # Extension is considered connected if heartbeat POST was received within this window.
 HEARTBEAT_TTL_SEC = 8.0
@@ -1851,6 +1853,25 @@ async def handle_embedded_command(
     if cmd == "clear_highlight":
         await session.clear_highlight()
         return {"type": "response", "request_id": request_id, "ok": True}
+
+    if cmd == "get_page_text":
+        if data.get("target") is not None:
+            if broker is None:
+                return {"type": "response", "request_id": request_id, "ok": False,
+                        "code": "invalid_browser_target", "error": "Target requires a browser broker"}
+            try:
+                broker.authorize_command(data, legacy_compatibility=False)
+            except BrokerError as exc:
+                return exc.response(str(request_id or ""), str(cmd))
+        if session.page is None:
+            return {"type": "response", "request_id": request_id, "ok": False,
+                    "code": "browser_not_connected", "error": "No browser page connected"}
+        result = await session.page.evaluate(
+            "(options) => {" + PAGE_TEXT_JS + "; return collectPageText(options); }",
+            {key: data[key] for key in ("selector", "offset", "limit") if key in data},
+        )
+        result.update(url=session.page.url, title=await session.page.title())
+        return {"type": "response", "request_id": request_id, **result}
 
     if cmd == "get_page_snapshot":
         snapshot = await session.get_page_snapshot()

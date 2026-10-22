@@ -719,6 +719,8 @@ pub enum BrowserCommand {
     Extensions(BrowserExtensionsArgs),
     /// Read page accessibility and interactive element snapshot
     Snapshot(BrowserSnapshotArgs),
+    /// Read rendered page text, including static content and form descriptions
+    Scan(BrowserScanArgs),
     /// Navigate the active browser tab to an explicit URL
     Navigate(BrowserNavigateArgs),
     /// Highlight a selector in the active browser
@@ -1053,6 +1055,27 @@ pub struct BrowserLeaseReleaseArgs {
     /// Secret lease token returned by acquisition
     #[arg(long, allow_hyphen_values = true)]
     pub lease_token: String,
+}
+
+#[derive(Debug, Args)]
+pub struct BrowserScanArgs {
+    /// Optional CSS selector limiting the content scope
+    #[arg(long)]
+    pub selector: Option<String>,
+    /// Unicode character offset into normalized page text
+    #[arg(long, default_value_t = 0)]
+    pub offset: u64,
+    /// Maximum Unicode characters to return
+    #[arg(long, default_value_t = 35000, value_parser = clap::value_parser!(u64).range(1..=100000))]
+    pub limit: u64,
+    /// Explicitly select text output (scan always returns structured text)
+    #[arg(long)]
+    pub text_only: bool,
+    /// Timeout in milliseconds
+    #[arg(long, default_value_t = 60000)]
+    pub timeout_ms: u64,
+    #[command(flatten)]
+    pub target: BrowserTargetArgs,
 }
 
 #[derive(Debug, Args)]

@@ -174,6 +174,7 @@ function loadBackground(fetchImpl = async () => ({ ok: false }), options = {}) {
 
   const context = vm.createContext({
     __TESHI_BRIDGE_TEST__: true,
+    importScripts() {},
     chrome,
     navigator: { userAgent: "Chrome/test", platform: "test" },
     crypto: webcrypto,

@@ -3652,6 +3652,7 @@ fn requires_lease(operation: &str) -> bool {
     matches!(
         operation,
         "get_page_snapshot"
+            | "get_page_text"
             | "navigate"
             | "go_back"
             | "open_tab"
@@ -3685,7 +3686,7 @@ fn requires_lease(operation: &str) -> bool {
 fn required_features_for_operation(request: &OperationRequest) -> Vec<String> {
     let mut required = Vec::new();
     match request.operation.as_str() {
-        "get_page_snapshot" | "navigate" | "execute_browser_action" => {
+        "get_page_snapshot" | "get_page_text" | "navigate" | "execute_browser_action" => {
             required.push("p0.control".into());
         }
         "capture_browser_evidence"
@@ -3724,7 +3725,8 @@ fn required_features_for_operation(request: &OperationRequest) -> Vec<String> {
 fn requires_extension_operation_advertisement(operation: &str) -> bool {
     matches!(
         operation,
-        "capture_browser_evidence"
+        "get_page_text"
+            | "capture_browser_evidence"
             | "capture_browser_screenshot"
             | "generate_browser_pdf"
             | "start_console_capture"
@@ -3782,6 +3784,7 @@ fn is_mutating_operation(operation: &str) -> bool {
     matches!(
         operation,
         "get_page_snapshot"
+            | "get_page_text"
             | "resolve_playwright_locator"
             | "verify_playwright_locator"
             | "capture_browser_evidence"

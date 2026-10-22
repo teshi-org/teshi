@@ -143,7 +143,7 @@ fn acp_chat_copy_command_and_selection_round_trip() {
     let screenshot = std::fs::read_to_string(&selection_screenshot).unwrap();
     assert!(screenshot.contains("WRAPPED_REPLY_01"));
     save_viewport(&terminal, root.path(), "acp-original-selection");
-    terminal.expect_text("Focus [Enter]", true, 5000).unwrap();
+    terminal.expect_text("Focus [i/Enter]", true, 5000).unwrap();
     clipboard
         .set_text("CHAT_SELECTION_AFTER_DRAG_SENTINEL")
         .unwrap();

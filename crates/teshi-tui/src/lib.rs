@@ -381,10 +381,17 @@ pub fn run() -> Result<()> {
                             requirements_focus: app.authoring_ui.focus,
                             requirements_editor_mode: app.authoring_ui.editor_mode,
                             test_points_focus: app.test_points_ui.focus,
+                            test_points_editing: app.test_points_ui.editing,
+                            delete_confirmation_active: app.pending_delete.is_some(),
                             requirements_overlay_active: app.authoring_ui.overlay_active(),
                             requirements_text_overlay: matches!(
                                 app.authoring_ui.overlay,
                                 authoring_tab::RequirementsOverlay::IterationEdit { .. }
+                            ),
+                            requirements_list_overlay: matches!(
+                                app.authoring_ui.overlay,
+                                authoring_tab::RequirementsOverlay::FilterPicker { .. }
+                                    | authoring_tab::RequirementsOverlay::PriorityEdit { .. }
                             ),
                             generation_scope_prompt_active: app.generation_scope_prompt.is_some(),
                             quit_pending_confirm: app.quit_pending_confirm,
@@ -406,6 +413,35 @@ pub fn run() -> Result<()> {
                         mouse_event.modifiers,
                     )?;
                 }
+                Event::Paste(_)
+                    if app.pending_delete.is_some()
+                        || app.quit_pending_confirm
+                        || app.auth_panel_active
+                        || app.session_panel_active
+                        || app.agent_profile_panel_active
+                        || app.approval_panel_active
+                        || (app.model_panel_active
+                            && app.model_panel_mode == app::ModelPanelMode::List)
+                        || app.agent().acp_controls_ui.picker_active()
+                        || app.change_summary_visible
+                        || app.generation_scope_prompt.is_some()
+                        || app.step_keyword_picker.is_some()
+                        || app.authoring_ui.overlay_active()
+                        || app.has_acp_permission_prompt()
+                        || app.has_agent_change_prompt()
+                        || app.has_external_change_prompt()
+                        || !matches!(
+                            app.project_switch.overlay,
+                            crate::project_context::SwitchOverlay::None
+                        ) => {}
+                Event::Paste(text)
+                    if app.model_panel_active
+                        && app.model_panel_mode != app::ModelPanelMode::List =>
+                {
+                    for ch in text.chars().filter(|ch| !ch.is_control()) {
+                        app.handle_action(Action::ModelPanelFormInsert(ch))?;
+                    }
+                }
                 Event::Paste(text) if app.active_tab == crate::app::MainTab::Requirements => {
                     if app.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Editor
                         && app.authoring_ui.editor_mode
@@ -422,7 +458,22 @@ pub fn run() -> Result<()> {
                         }
                     }
                 }
-                Event::Paste(text) if app.ai_input_focused => {
+                Event::Paste(text)
+                    if app.active_tab == crate::app::MainTab::TestPoints
+                        && app.test_points_ui.editing =>
+                {
+                    for ch in text.replace("\r\n", "\n").replace('\r', "\n").chars() {
+                        if !ch.is_control() || ch == '\n' || ch == '\t' {
+                            app.handle_action(Action::Insert(ch))?;
+                        }
+                    }
+                }
+                Event::Paste(text)
+                    if app.ai_input_focused
+                        && (app.active_tab == app::MainTab::Ai
+                            || (app.active_tab == app::MainTab::MindMap
+                                && app.mindmap_focus == app::MindMapFocus::AiPanel)) =>
+                {
                     app.handle_action(Action::AiPaste(text))?;
                 }
                 _ => {}

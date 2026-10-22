@@ -1744,6 +1744,7 @@ pub fn is_supported_operation(operation: &str) -> bool {
             | "access_browser_content_setting"
             | "list_browser_extensions"
             | "get_page_snapshot"
+            | "get_page_text"
             | "navigate"
             | "go_back"
             | "open_tab"

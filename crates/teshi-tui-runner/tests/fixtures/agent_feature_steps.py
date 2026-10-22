@@ -442,7 +442,7 @@ class World:
     def focus_input(self):
         # The footer advertises Send even while the input is unfocused. Click
         # the actual empty input instead of inferring focus from that label.
-        if "Focus [Enter]" in self.screen():
+        if any(label in self.screen() for label in ("Focus [Enter]", "Focus [i/Enter]")):
             self.op("key", "Enter")
             self.expect("Type your message...")
         self.op("click", "Type your message...")

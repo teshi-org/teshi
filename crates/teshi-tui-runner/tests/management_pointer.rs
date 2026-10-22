@@ -325,11 +325,15 @@ fn model_list_add_control(narrow: bool) {
     );
     terminal.key("m").unwrap();
     terminal.expect_text("Model Profiles", true, 1500).unwrap();
-    fixture.click(
-        &terminal,
-        &["Del [d]", "Del[d]", "Delete [d]"],
-        "delete-edited-alpha",
-    );
+    fixture.click(&terminal, &["Del [dd/Del]"], "delete-edited-alpha");
+    terminal
+        .expect_text("Confirm deletion", true, 2000)
+        .unwrap();
+    assert!(fixture.profiles.join("Alpha.json").exists());
+    fixture.click(&terminal, &["Cancel [Esc/n]"], "cancel-delete-alpha");
+    assert!(fixture.profiles.join("Alpha.json").exists());
+    fixture.click(&terminal, &["Del [dd/Del]"], "request-delete-alpha-again");
+    fixture.click(&terminal, &["Delete [Enter/y]"], "confirm-delete-alpha");
     assert!(!fixture.profiles.join("Alpha.json").exists());
     assert!(fixture.profiles.join("Beta.json").is_file());
     assert_eq!(fixture.profile_count(), 1);
@@ -628,6 +632,83 @@ macro_rules! acceptance {
         }
     };
 }
+
+fn vim_model_input_and_delete_confirmation(narrow: bool) {
+    let fixture = Fixture::new("vim-model-input", narrow);
+    fs::write(fixture.profiles.join("Beta.json"), serde_json::to_vec_pretty(&serde_json::json!({
+        "id":"Beta", "name":"Second Beta", "provider":"openai", "model_id":"fixture-beta", "api_key":"", "base_url":"http://127.0.0.1:1/v1"
+    })).unwrap()).unwrap();
+    let terminal = fixture.launch();
+    terminal.key("m").unwrap();
+    terminal.expect_text("Model Profiles", true, 2000).unwrap();
+    terminal.key("e").unwrap();
+    terminal
+        .expect_text("Edit Model Profile", true, 2000)
+        .unwrap();
+    terminal.key("Home").unwrap();
+    terminal.write("jk中🙂").unwrap();
+    terminal.key("Left").unwrap();
+    terminal.key("Delete").unwrap();
+    terminal.key("Backspace").unwrap();
+    terminal.key("Ctrl+s").unwrap();
+    terminal
+        .expect_text("Edit Model Profile", false, 3000)
+        .unwrap();
+    let profile: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.profiles.join("Alpha.json")).unwrap()).unwrap();
+    assert_eq!(profile["name"], "jkExisting Alpha");
+    fixture.capture(&terminal, "unicode-cursor-saved");
+    // The rename changes sort order; select the captured target explicitly.
+    terminal.key("End").unwrap();
+    terminal.key("d").unwrap();
+    terminal.key("d").unwrap();
+    terminal
+        .expect_text("Confirm deletion", true, 2000)
+        .unwrap();
+    terminal.key("Down").unwrap();
+    terminal.key("1").unwrap();
+    terminal.key("Escape").unwrap();
+    terminal
+        .expect_text("Confirm deletion", false, 2000)
+        .unwrap();
+    assert!(fixture.profiles.join("Alpha.json").exists());
+    fixture.capture(&terminal, "deletion-cancelled");
+    terminal.key("Delete").unwrap();
+    terminal
+        .expect_text("Confirm deletion", true, 2000)
+        .unwrap();
+    terminal.key("y").unwrap();
+    terminal
+        .expect_text("Confirm deletion", false, 2000)
+        .unwrap();
+    fixture.capture(&terminal, "deletion-confirmed");
+    assert!(!fixture.profiles.join("Alpha.json").exists());
+    assert!(fixture.profiles.join("Beta.json").exists());
+    terminal.key("Delete").unwrap();
+    terminal
+        .expect_text("Confirm deletion", true, 2000)
+        .unwrap();
+    terminal.key("Enter").unwrap();
+    terminal
+        .expect_text("cannot delete the last remaining", true, 2000)
+        .unwrap();
+    assert!(fixture.profiles.join("Beta.json").exists());
+    fixture.capture(&terminal, "last-profile-preserved");
+    terminal.key("Escape").unwrap();
+    terminal.key("Escape").unwrap();
+    fixture.finish(terminal);
+}
+
+acceptance!(
+    vim_model_input_normal,
+    vim_model_input_and_delete_confirmation,
+    false
+);
+acceptance!(
+    vim_model_input_narrow,
+    vim_model_input_and_delete_confirmation,
+    true
+);
 
 acceptance!(model_list_add_normal, model_list_add_control, false);
 acceptance!(backend_picker_normal, backend_picker, false);

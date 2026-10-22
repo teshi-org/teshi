@@ -264,6 +264,11 @@ pub(crate) struct ControlsUi {
 }
 
 impl ControlsUi {
+    /// Whether settings own text/paste input ahead of the underlying chat.
+    pub(crate) fn picker_active(&self) -> bool {
+        self.picker.is_some()
+    }
+
     pub(crate) fn clear_regions(&mut self) {
         self.regions.clear();
     }
@@ -400,6 +405,20 @@ impl App {
     }
 
     pub(crate) fn handle_acp_controls_key(&mut self, event: KeyEvent) -> bool {
+        if self.pending_delete.is_some()
+            || self.quit_pending_confirm
+            || self.authoring_ui.overlay_active()
+            || self.project_switch.overlay != crate::project_context::SwitchOverlay::None
+            || self.has_acp_permission_prompt()
+            || self.has_agent_change_prompt()
+            || self.has_external_change_prompt()
+            || self.model_panel_active
+            || self.session_panel_active
+            || self.agent_profile_panel_active
+            || self.approval_panel_active
+        {
+            return false;
+        }
         if event.code == KeyCode::Char(',')
             && event.modifiers.contains(KeyModifiers::CONTROL)
             && self.agent().backend.acp_controls().is_some()
@@ -421,13 +440,46 @@ impl App {
                     .map_or(0, |s| s.config.options.len())
             });
         let selected = picker.selected;
+        let top = event.code == KeyCode::Home
+            || (event.code == KeyCode::Char('g') && self.pending_char == Some('g'));
+        let last = event.code == KeyCode::End || event.code == KeyCode::Char('G');
+        let page_up = event.code == KeyCode::PageUp
+            || (event.code == KeyCode::Char('b') && event.modifiers == KeyModifiers::CONTROL);
+        let page_down = event.code == KeyCode::PageDown
+            || (event.code == KeyCode::Char('f') && event.modifiers == KeyModifiers::CONTROL);
+        if top || last || page_up || page_down {
+            if let Some(p) = &mut self.agent_mut().acp_controls_ui.picker {
+                p.selected = if top {
+                    0
+                } else if last {
+                    count.saturating_sub(1)
+                } else if page_up {
+                    selected.saturating_sub(10)
+                } else {
+                    selected.saturating_add(10).min(count.saturating_sub(1))
+                };
+            }
+            self.pending_char = None;
+            return true;
+        }
+        if event.code == KeyCode::Char('g') && event.modifiers.is_empty() {
+            self.pending_char = Some('g');
+            return true;
+        }
+        self.pending_char = None;
         match event.code {
             KeyCode::Esc => {
                 self.agent_mut().acp_controls_ui.picker = None;
             }
-            KeyCode::Left | KeyCode::Backspace => self.open_acp_controls(None),
-            KeyCode::Enter => self.activate_control(Target::Row(selected)),
+            KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h') => self.open_acp_controls(None),
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                self.activate_control(Target::Row(selected))
+            }
             KeyCode::Char('a') => self.activate_control(Target::Agent),
+            KeyCode::Char('p') => {
+                self.agent_mut().acp_controls_ui.picker = None;
+                let _ = self.execute_slash_command("approval");
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Some(p) = &mut self.agent_mut().acp_controls_ui.picker {
                     p.selected = selected.saturating_sub(1);

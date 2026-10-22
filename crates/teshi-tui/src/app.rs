@@ -405,6 +405,15 @@ pub enum ModelPanelMode {
     Editing,
 }
 
+/// Stable model/session target retained until deletion succeeds or is cancelled.
+#[derive(Debug, Clone)]
+pub struct DeleteConfirmation {
+    pub action: Action,
+    pub target_id: String,
+    pub label: String,
+    pub error: Option<String>,
+}
+
 /// Mode of the agent profile management overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentPanelMode {
@@ -554,7 +563,7 @@ pub struct RunSummary {
     pub skipped: usize,
 }
 
-/// UI state for the step-keyword list shown after Space on the keyword prefix.
+/// UI state for the step-keyword list opened by editing a keyword prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StepKeywordPicker {
     /// Buffer line index for the step being edited.
@@ -892,6 +901,10 @@ pub struct App {
     /// When editing, the ID of the profile being edited.
     pub model_form_editing_id: Option<String>,
     pub model_form_focus: usize,
+    /// Character offset within the focused model form field.
+    pub model_form_cursor: usize,
+    /// Stable target and label captured before a destructive confirmation.
+    pub pending_delete: Option<DeleteConfirmation>,
     pub model_form_name: String,
     pub model_form_provider: String,
     pub model_form_model: String,
@@ -2004,6 +2017,8 @@ impl App {
             model_panel_mode: ModelPanelMode::List,
             model_form_editing_id: None,
             model_form_focus: 0,
+            model_form_cursor: 0,
+            pending_delete: None,
             model_form_name: String::new(),
             model_form_provider: String::new(),
             model_form_model: String::new(),
@@ -2190,6 +2205,8 @@ impl App {
             model_panel_mode: ModelPanelMode::List,
             model_form_editing_id: None,
             model_form_focus: 0,
+            model_form_cursor: 0,
+            pending_delete: None,
             model_form_name: String::new(),
             model_form_provider: String::new(),
             model_form_model: String::new(),
@@ -2366,6 +2383,8 @@ impl App {
             model_panel_mode: ModelPanelMode::List,
             model_form_editing_id: None,
             model_form_focus: 0,
+            model_form_cursor: 0,
+            pending_delete: None,
             model_form_name: String::new(),
             model_form_provider: String::new(),
             model_form_model: String::new(),
@@ -6138,6 +6157,77 @@ impl App {
     // ── Action handler ──────────────────────────────────────────────
 
     pub fn handle_action(&mut self, action: Action) -> Result<()> {
+        // Capture a target before showing the modal. Background rows and mouse
+        // actions cannot change the selection while confirmation owns input.
+        let confirmed_delete = self.pending_delete.is_some() && action == Action::DeleteConfirm;
+        let delete_request = self.pending_delete.clone();
+        let action = if let Some(pending) = self.pending_delete.as_ref() {
+            match action {
+                Action::DeleteConfirm => {
+                    let pending = pending.action.clone();
+                    self.pending_delete = None;
+                    pending
+                }
+                Action::DeleteCancel => {
+                    self.pending_delete = None;
+                    self.pending_char = None;
+                    return Ok(());
+                }
+                _ => return Ok(()),
+            }
+        } else {
+            action
+        };
+        if !confirmed_delete {
+            let target = match &action {
+                Action::ModelPanelDelete => self
+                    .model_profiles
+                    .get(self.model_panel_selection)
+                    .map(|p| (p.id.clone(), format!("model profile '{}'", p.name))),
+                Action::SessionPanelDelete => self
+                    .session_list
+                    .get(self.session_panel_selection)
+                    .map(|s| (s.id.clone(), format!("session '{}'", s.id))),
+                _ => None,
+            };
+            if let Some((target_id, label)) = target {
+                self.pending_delete = Some(DeleteConfirmation {
+                    action,
+                    target_id,
+                    label,
+                    error: None,
+                });
+                self.pending_char = None;
+                return Ok(());
+            }
+        }
+        if confirmed_delete && let Some(request) = delete_request.as_ref() {
+            let position = match request.action {
+                Action::ModelPanelDelete => self
+                    .model_profiles
+                    .iter()
+                    .position(|p| p.id == request.target_id),
+                Action::SessionPanelDelete => self
+                    .session_list
+                    .iter()
+                    .position(|s| s.id == request.target_id),
+                _ => None,
+            };
+            let Some(position) = position else {
+                let mut request = request.clone();
+                request.error = Some("The selected item is no longer available.".into());
+                self.pending_delete = Some(request);
+                return Ok(());
+            };
+            match request.action {
+                Action::ModelPanelDelete => self.model_panel_selection = position,
+                Action::SessionPanelDelete => self.session_panel_selection = position,
+                _ => {}
+            }
+        }
+        if !matches!(action, Action::PendingChar(_)) {
+            self.pending_char = None;
+        }
         if !matches!(
             self.project_switch.overlay,
             crate::project_context::SwitchOverlay::None
@@ -6251,6 +6341,10 @@ impl App {
         // Quit confirmation panel intercept (highest priority after prompts)
         if self.quit_pending_confirm {
             return match action {
+                Action::DeleteConfirm => {
+                    self.should_quit = true;
+                    Ok(())
+                }
                 Action::Quit => {
                     if self.quit_panel_selection == 0 {
                         self.should_quit = true;
@@ -6275,6 +6369,9 @@ impl App {
             };
         }
 
+        if self.navigate_modal_list(&action) {
+            return Ok(());
+        }
         if self.authoring_ui.overlay_active() {
             return match action {
                 Action::OverlayConfirm => self.confirm_requirements_overlay(),
@@ -6436,8 +6533,19 @@ impl App {
             };
         }
 
+        // Modal list navigation returns above; do not let a pending dd survive
+        // another command or a cancelled modal.
         if !matches!(action, Action::PendingChar(_)) {
             self.pending_char = None;
+        }
+        if self.active_tab == MainTab::TestPoints
+            && matches!(
+                action,
+                Action::FocusNextColumn | Action::FocusPrevColumn | Action::SelectTab(_)
+            )
+        {
+            self.commit_test_point_field_edit()?;
+            self.test_points_ui.editing = false;
         }
         match action {
             // Explore tab navigation
@@ -6657,6 +6765,7 @@ impl App {
                 self.model_panel_mode = ModelPanelMode::Adding;
                 self.model_form_focus = 0;
                 self.model_form_name.clear();
+                self.model_form_cursor = 0;
                 self.model_form_provider.clear();
                 self.model_form_model.clear();
                 self.model_form_base_url.clear();
@@ -6675,6 +6784,7 @@ impl App {
                     self.model_form_temperature =
                         crate::profiles::profile_temperature(&profile).to_string();
                     self.model_form_name = profile.name;
+                    self.model_form_cursor = self.model_form_name.chars().count();
                     self.model_form_provider = profile.provider;
                     self.model_form_model = profile.model_id;
                     self.model_form_base_url = profile.base_url;
@@ -6691,6 +6801,10 @@ impl App {
                     let deleted_id = profile.id.clone();
                     if let Err(e) = crate::profiles::delete_profile(&deleted_id) {
                         self.status = format!("Failed to delete profile: {e}");
+                        if let Some(mut request) = delete_request {
+                            request.error = Some(e.to_string());
+                            self.pending_delete = Some(request);
+                        }
                     } else {
                         self.model_profiles = crate::profiles::load_all();
                         self.model_active_id = crate::profiles::read_active_id();
@@ -6731,41 +6845,50 @@ impl App {
                 if self.model_form_focus < max {
                     self.model_form_focus += 1;
                 }
+                self.model_form_cursor = self.model_form_field().chars().count();
                 self.quit_pending_confirm = false;
             }
             Action::ModelPanelFormPrev => {
                 if self.model_form_focus > 0 {
                     self.model_form_focus -= 1;
                 }
+                self.model_form_cursor = self.model_form_field().chars().count();
                 self.quit_pending_confirm = false;
             }
             Action::ModelPanelFormInsert(ch) => {
-                let field = match self.model_form_focus {
-                    0 => &mut self.model_form_name,
-                    1 => &mut self.model_form_provider,
-                    2 => &mut self.model_form_model,
-                    3 => &mut self.model_form_base_url,
-                    4 => &mut self.model_form_api_key,
-                    5 => &mut self.model_form_max_tokens,
-                    6 => &mut self.model_form_temperature,
-                    _ => return Ok(()),
-                };
-                field.push(ch);
+                let cursor = self.model_form_cursor;
+                let field = self.model_form_field();
+                let byte = field
+                    .char_indices()
+                    .nth(cursor)
+                    .map_or(field.len(), |(byte, _)| byte);
+                field.insert(byte, ch);
+                self.model_form_cursor = cursor + 1;
                 self.quit_pending_confirm = false;
             }
             Action::ModelPanelFormBackspace => {
-                let field = match self.model_form_focus {
-                    0 => &mut self.model_form_name,
-                    1 => &mut self.model_form_provider,
-                    2 => &mut self.model_form_model,
-                    3 => &mut self.model_form_base_url,
-                    4 => &mut self.model_form_api_key,
-                    5 => &mut self.model_form_max_tokens,
-                    6 => &mut self.model_form_temperature,
-                    _ => return Ok(()),
-                };
-                field.pop();
+                if self.model_form_cursor > 0 {
+                    self.model_form_cursor -= 1;
+                    self.model_form_delete_at_cursor();
+                }
                 self.quit_pending_confirm = false;
+            }
+            Action::ModelPanelFormCursor(code) => {
+                use crossterm::event::KeyCode;
+                let len = self.model_form_field().chars().count();
+                self.model_form_cursor = self.model_form_cursor.min(len);
+                match code {
+                    KeyCode::Left => {
+                        self.model_form_cursor = self.model_form_cursor.saturating_sub(1)
+                    }
+                    KeyCode::Right => {
+                        self.model_form_cursor = (self.model_form_cursor + 1).min(len)
+                    }
+                    KeyCode::Home => self.model_form_cursor = 0,
+                    KeyCode::End => self.model_form_cursor = len,
+                    KeyCode::Delete => self.model_form_delete_at_cursor(),
+                    _ => {}
+                }
             }
             Action::ModelPanelFormSubmit => {
                 let name = self.model_form_name.trim().to_string();
@@ -6880,6 +7003,10 @@ impl App {
                     let id = session.id.clone();
                     if let Err(e) = crate::session::Session::delete(&id) {
                         self.status = format!("Failed to delete session: {e}");
+                        if let Some(mut request) = delete_request {
+                            request.error = Some(e.to_string());
+                            self.pending_delete = Some(request);
+                        }
                     } else {
                         self.session_list = if self.session_panel_legacy {
                             self.legacy_sessions()
@@ -6933,6 +7060,10 @@ impl App {
 
             // Editor navigation (MindMap stage 3 & legacy)
             Action::MoveUp => {
+                if self.is_test_points_details_active() && self.test_points_ui.editing {
+                    self.test_points_ui.field_line_vertical(false);
+                    return Ok(());
+                }
                 if self.active_tab == MainTab::Requirements {
                     match self.authoring_ui.focus {
                         crate::authoring_tab::RequirementsFocus::Tree => {
@@ -6972,6 +7103,10 @@ impl App {
                 }
             }
             Action::MoveDown => {
+                if self.is_test_points_details_active() && self.test_points_ui.editing {
+                    self.test_points_ui.field_line_vertical(true);
+                    return Ok(());
+                }
                 if self.active_tab == MainTab::Requirements {
                     match self.authoring_ui.focus {
                         crate::authoring_tab::RequirementsFocus::Tree => {
@@ -7033,7 +7168,7 @@ impl App {
                 } else if self.active_tab == MainTab::TestPoints {
                     if self.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Details
                     {
-                        // Character-level editing within the active field.
+                        self.test_points_ui.move_field_cursor(-1);
                     }
                 } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     // No-op in Explore browse mode
@@ -7050,7 +7185,7 @@ impl App {
                 } else if self.active_tab == MainTab::TestPoints {
                     if self.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Details
                     {
-                        // Character-level editing within the active field.
+                        self.test_points_ui.move_field_cursor(1);
                     }
                 } else if self.active_tab == MainTab::Explore && !self.explore_edit_mode {
                     // No-op in Explore browse mode
@@ -7059,7 +7194,9 @@ impl App {
                 }
             }
             Action::MoveHome => {
-                if self.is_requirements_editor_active() {
+                if self.is_test_points_details_active() {
+                    self.test_points_ui.field_line_boundary(false);
+                } else if self.is_requirements_editor_active() {
                     self.authoring_ui.cursor_col = 0;
                     self.authoring_ui.desired_col = 0;
                     self.authoring_ui.extend_visual_selection();
@@ -7071,7 +7208,9 @@ impl App {
                 }
             }
             Action::MoveEnd => {
-                if self.is_requirements_editor_active() {
+                if self.is_test_points_details_active() {
+                    self.test_points_ui.field_line_boundary(true);
+                } else if self.is_requirements_editor_active() {
                     let col = self
                         .authoring_ui
                         .buffer
@@ -7086,8 +7225,10 @@ impl App {
                     self.move_end();
                 }
             }
-            Action::PageUp => self.page_up(),
-            Action::PageDown => self.page_down(),
+            Action::PageUp => self.navigate_page(false)?,
+            Action::PageDown => self.navigate_page(true)?,
+            Action::NavigateFirst => self.navigate_boundary(false)?,
+            Action::NavigateLast => self.navigate_boundary(true)?,
             Action::MoveStepUp => self.move_step_block(false),
             Action::MoveStepDown => self.move_step_block(true),
             Action::SwitchKeyword(keyword) => self.switch_step_keyword(keyword),
@@ -7148,7 +7289,7 @@ impl App {
                         self.authoring_ui.insert_char(ch);
                     }
                     self.quit_pending_confirm = false;
-                } else if self.is_test_points_details_active() {
+                } else if self.is_test_points_details_active() && self.test_points_ui.editing {
                     self.test_points_ui.insert_char(ch);
                     self.quit_pending_confirm = false;
                 } else if !self.step_input_active {
@@ -7431,6 +7572,18 @@ impl App {
             | Action::GenerationScopeConfirm
             | Action::GenerationScopeCancel
             | Action::GenerationScopeChangeIteration => {}
+            Action::TpEnterInsert => {
+                if self.is_test_points_details_active()
+                    && self.test_points_ui.selected_test_point_id.is_some()
+                {
+                    self.test_points_ui.editing = true;
+                }
+            }
+            Action::TpExitInsert => {
+                self.commit_test_point_field_edit()?;
+                self.test_points_ui.editing = false;
+            }
+            Action::DeleteConfirm | Action::DeleteCancel => {}
             Action::TpApprove => {
                 if self.active_tab == MainTab::TestPoints {
                     self.commit_test_point_field_edit()?;
@@ -8201,6 +8354,13 @@ impl App {
         if self.active_tab == tab {
             return;
         }
+        if self.active_tab == MainTab::TestPoints
+            && let Err(error) = self.commit_test_point_field_edit()
+        {
+            self.status = format!("Could not save test point: {error}");
+            return;
+        }
+        self.test_points_ui.editing = false;
         self.clear_chat_selection();
         if self.active_tab == MainTab::Requirements
             && self.authoring_ui.guard_unsaved(
@@ -8264,6 +8424,200 @@ impl App {
     fn is_test_points_details_active(&self) -> bool {
         self.active_tab == MainTab::TestPoints
             && self.test_points_ui.focus == crate::test_points_tab::TestPointsFocus::Details
+    }
+
+    fn model_form_field(&mut self) -> &mut String {
+        match self.model_form_focus {
+            0 => &mut self.model_form_name,
+            1 => &mut self.model_form_provider,
+            2 => &mut self.model_form_model,
+            3 => &mut self.model_form_base_url,
+            4 => &mut self.model_form_api_key,
+            5 => &mut self.model_form_max_tokens,
+            _ => &mut self.model_form_temperature,
+        }
+    }
+
+    fn navigate_modal_list(&mut self, action: &Action) -> bool {
+        if !matches!(
+            action,
+            Action::NavigateFirst
+                | Action::NavigateLast
+                | Action::PageUp
+                | Action::PageDown
+                | Action::PendingChar('g')
+        ) {
+            return false;
+        }
+        let filter_count = self.authoring_ui.filter_picker_options().len();
+        let keyword_count = self.buffer.language().all_step_keywords().len();
+        let list = if let Some(prompt) = self.agent_mut().pending_acp_permission.as_mut() {
+            Some((&mut prompt.selected, prompt.options.len()))
+        } else {
+            None
+        };
+        // End the agent borrow before inspecting other independent overlays.
+        if let Some((selection, count)) = list {
+            apply_list_navigation(selection, count, action);
+        } else if let crate::authoring_tab::RequirementsOverlay::FilterPicker { selection } =
+            &mut self.authoring_ui.overlay
+        {
+            apply_list_navigation(selection, filter_count, action);
+        } else if let crate::authoring_tab::RequirementsOverlay::PriorityEdit {
+            selection, ..
+        } = &mut self.authoring_ui.overlay
+        {
+            apply_list_navigation(selection, 5, action);
+        } else if self.agent_profile_panel_active {
+            let count = match self.agent_panel_mode {
+                AgentPanelMode::List => self.agent_registry.len(),
+                AgentPanelMode::SelectBackend => self.installed_acp_agents.len() + 1,
+                AgentPanelMode::InstalledAcp => self.installed_acp_agents.len(),
+                AgentPanelMode::Registry => self.acp_registry_agents.len(),
+            };
+            apply_list_navigation(&mut self.agent_profile_panel_selection, count, action);
+        } else if self.model_panel_active && self.model_panel_mode == ModelPanelMode::List {
+            apply_list_navigation(
+                &mut self.model_panel_selection,
+                self.model_profiles.len(),
+                action,
+            );
+        } else if self.session_panel_active {
+            apply_list_navigation(
+                &mut self.session_panel_selection,
+                self.session_list.len(),
+                action,
+            );
+        } else if self.approval_panel_active {
+            apply_list_navigation(
+                &mut self.approval_panel_selection,
+                teshi_agent::approval::ApprovalMode::ALL.len(),
+                action,
+            );
+        } else if self.change_summary_visible {
+            apply_list_navigation(
+                &mut self.change_summary_selection,
+                self.pending_change_summary.len(),
+                action,
+            );
+        } else if let Some(picker) = self.step_keyword_picker.as_mut() {
+            apply_list_navigation(&mut picker.selected, keyword_count, action);
+        } else if self.scenario_dropdown_open {
+            let count = mindmap::selected_node_id(&self.tree_state)
+                .and_then(|id| self.mindmap_index.locations_for(id))
+                .map_or(0, |locations| locations.len());
+            apply_list_navigation(&mut self.scenario_dropdown_selection, count, action);
+        } else {
+            return false;
+        }
+        if let Action::PendingChar(ch) = action {
+            self.pending_char = Some(*ch);
+        }
+        true
+    }
+
+    fn model_form_delete_at_cursor(&mut self) {
+        let cursor = self.model_form_cursor;
+        let field = self.model_form_field();
+        if let Some((byte, _)) = field.char_indices().nth(cursor) {
+            field.remove(byte);
+        }
+    }
+
+    fn navigate_page(&mut self, down: bool) -> Result<()> {
+        if self.chat_browse_active() {
+            self.handle_action(if down {
+                Action::AiScrollDown
+            } else {
+                Action::AiScrollUp
+            })?;
+        } else if self.active_tab == MainTab::MindMap && self.mindmap_focus == MindMapFocus::Main {
+            for _ in 0..10 {
+                if down {
+                    self.tree_move_down();
+                } else {
+                    self.tree_move_up();
+                }
+            }
+        } else if self.active_tab == MainTab::Requirements
+            || self.active_tab == MainTab::TestPoints
+            || (self.active_tab == MainTab::Explore && !self.explore_edit_mode)
+        {
+            for _ in 0..10 {
+                self.handle_action(if down {
+                    Action::MoveDown
+                } else {
+                    Action::MoveUp
+                })?;
+            }
+        } else if down {
+            self.page_down();
+        } else {
+            self.page_up();
+        }
+        Ok(())
+    }
+
+    fn chat_browse_active(&self) -> bool {
+        !self.ai_input_focused
+            && (self.active_tab == MainTab::Ai
+                || (self.active_tab == MainTab::MindMap
+                    && self.mindmap_focus == MindMapFocus::AiPanel))
+    }
+
+    fn navigate_boundary(&mut self, end: bool) -> Result<()> {
+        let delta = if end { isize::MAX } else { -isize::MAX };
+        if self.chat_browse_active() {
+            self.handle_action(if end {
+                Action::AiScrollBottom
+            } else {
+                Action::AiScrollTop
+            })?;
+        } else if self.active_tab == MainTab::Requirements {
+            match self.authoring_ui.focus {
+                crate::authoring_tab::RequirementsFocus::Tree => {
+                    self.authoring_ui.move_tree_selection(delta)
+                }
+                crate::authoring_tab::RequirementsFocus::LinkedTestPoints => {
+                    self.authoring_ui.move_linked_selection(delta)
+                }
+                crate::authoring_tab::RequirementsFocus::Editor => {
+                    if end {
+                        self.authoring_ui.vim_go_bottom();
+                    } else {
+                        self.authoring_ui.vim_go_top();
+                    }
+                }
+            }
+        } else if self.active_tab == MainTab::TestPoints {
+            self.commit_test_point_field_edit()?;
+            match self.test_points_ui.focus {
+                crate::test_points_tab::TestPointsFocus::Tree => {
+                    self.test_points_ui.move_tree_selection(delta)
+                }
+                crate::test_points_tab::TestPointsFocus::Details => {
+                    self.test_points_ui.move_detail_field(delta)
+                }
+                crate::test_points_tab::TestPointsFocus::Excerpts => {
+                    let count = self.current_excerpt_count();
+                    self.test_points_ui.move_excerpt_selection(delta, count);
+                }
+            }
+            self.reload_test_point_field_buffer();
+        } else if self.active_tab == MainTab::MindMap && self.mindmap_focus == MindMapFocus::Main {
+            if end {
+                self.tree_end();
+            } else {
+                self.tree_home();
+            }
+        } else {
+            self.handle_action(if end {
+                Action::MoveEnd
+            } else {
+                Action::MoveHome
+            })?;
+        }
+        Ok(())
     }
 
     fn commit_test_point_field_edit(&mut self) -> Result<()> {
@@ -8870,7 +9224,8 @@ impl App {
             }
             return Ok(());
         }
-        if self.model_panel_active
+        if self.pending_delete.is_some()
+            || self.model_panel_active
             || self.session_panel_active
             || self.auth_panel_active
             || self.approval_panel_active
@@ -9568,17 +9923,20 @@ impl App {
             }
             ClickableRegion::TestPointField { field, .. } => {
                 self.commit_test_point_field_edit()?;
+                self.test_points_ui.editing = false;
                 self.test_points_ui.focus = crate::test_points_tab::TestPointsFocus::Details;
                 self.test_points_ui.detail_field = *field;
                 self.reload_test_point_field_buffer();
             }
             ClickableRegion::TestPointExcerpt { index, .. } => {
                 self.commit_test_point_field_edit()?;
+                self.test_points_ui.editing = false;
                 self.test_points_ui.focus = crate::test_points_tab::TestPointsFocus::Excerpts;
                 self.test_points_ui.selected_excerpt_index = *index;
             }
             ClickableRegion::TestPointScenario { index, .. } => {
                 self.commit_test_point_field_edit()?;
+                self.test_points_ui.editing = false;
                 self.test_points_ui.focus = crate::test_points_tab::TestPointsFocus::Details;
                 self.test_points_ui.selected_scenario_ref_index = *index;
             }
@@ -9587,6 +9945,7 @@ impl App {
             }
             ClickableRegion::ModelFormField { index, .. } => {
                 self.model_form_focus = (*index).min(6);
+                self.model_form_cursor = self.model_form_field().chars().count();
             }
             ClickableRegion::AgentProfileRow { index, .. } => {
                 self.agent_profile_panel_selection = *index;
@@ -9710,6 +10069,7 @@ impl App {
                 };
                 if self.test_points_ui.focus != focus {
                     self.test_points_ui.commit_field_if_dirty();
+                    self.test_points_ui.editing = false;
                     self.test_points_ui.focus = focus;
                     self.reload_test_point_field_buffer();
                 }
@@ -10195,6 +10555,17 @@ impl App {
         }
         self.quit_pending_confirm = false;
     }
+}
+
+fn apply_list_navigation(selection: &mut usize, count: usize, action: &Action) {
+    let last = count.saturating_sub(1);
+    *selection = match action {
+        Action::NavigateFirst => 0,
+        Action::NavigateLast => last,
+        Action::PageUp => selection.saturating_sub(10),
+        Action::PageDown => selection.saturating_add(10).min(last),
+        _ => (*selection).min(last),
+    };
 }
 
 fn build_case(
@@ -10924,6 +11295,39 @@ mod tests {
             .unwrap();
         app.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Editor;
         (app, project, store)
+    }
+
+    #[test]
+    fn deletion_confirmation_keeps_a_missing_target_and_does_not_delete_another_row() {
+        let (mut app, _project, _store) = requirements_test_app();
+        app.pending_delete = Some(super::DeleteConfirmation {
+            action: Action::ModelPanelDelete,
+            target_id: "missing-fixture-profile".into(),
+            label: "fixture profile".into(),
+            error: None,
+        });
+        app.model_profiles.clear();
+        app.handle_action(Action::DeleteConfirm).unwrap();
+        let pending = app.pending_delete.as_ref().unwrap();
+        assert_eq!(pending.target_id, "missing-fixture-profile");
+        assert!(
+            pending
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("no longer available")
+        );
+        app.handle_action(Action::DeleteCancel).unwrap();
+        assert!(app.pending_delete.is_none());
+    }
+
+    #[test]
+    fn quit_yes_exits_even_when_the_cancel_button_was_selected() {
+        let (mut app, _project, _store) = requirements_test_app();
+        app.quit_pending_confirm = true;
+        app.quit_panel_selection = 1;
+        app.handle_action(Action::DeleteConfirm).unwrap();
+        assert!(app.should_quit);
     }
 
     #[test]
@@ -15479,6 +15883,8 @@ mod tests {
             model_panel_mode: ModelPanelMode::List,
             model_form_editing_id: None,
             model_form_focus: 0,
+            model_form_cursor: 0,
+            pending_delete: None,
             model_form_name: String::new(),
             model_form_provider: String::new(),
             model_form_model: String::new(),
@@ -15667,6 +16073,8 @@ Feature: B
             model_panel_mode: ModelPanelMode::List,
             model_form_editing_id: None,
             model_form_focus: 0,
+            model_form_cursor: 0,
+            pending_delete: None,
             model_form_name: String::new(),
             model_form_provider: String::new(),
             model_form_model: String::new(),

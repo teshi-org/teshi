@@ -434,8 +434,24 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             render_action_bar(frame, app, chunks[3], mode, &controls, false);
         }
     } else if app.active_tab == MainTab::TestPoints {
-        if chunks[3].width < 40 {
-            frame.render_widget(crate::test_points_tab::test_points_footer_line(), chunks[3]);
+        let inserting = app.test_points_ui.editing;
+        if inserting {
+            render_action_bar(
+                frame,
+                app,
+                chunks[3],
+                "[INSERT] ",
+                &[
+                    ("Save [Ctrl+s] ", Action::Save),
+                    ("Normal [Esc]", Action::TpExitInsert),
+                ],
+                false,
+            );
+        } else if chunks[3].width < 40 {
+            frame.render_widget(
+                Paragraph::new("[NORMAL] i edit · Tab panes · s save"),
+                chunks[3],
+            );
         } else {
             let compact = chunks[3].width < 100;
             let controls = [
@@ -465,7 +481,18 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                 ),
                 (if compact { " Save" } else { " Save [s]" }, Action::Save),
             ];
-            render_action_bar(frame, app, chunks[3], "", &controls, false);
+            render_action_bar(
+                frame,
+                app,
+                chunks[3],
+                if compact {
+                    "[NORMAL] "
+                } else {
+                    "[NORMAL] i edit "
+                },
+                &controls,
+                false,
+            );
         }
     } else {
         let key_hints = theme::footer_line(footer_hints(app).spans);
@@ -544,6 +571,57 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
     crate::acp_controls::render_picker(frame, app);
     pointer_controls::render_pending_review(frame, app, chunks[2]);
+    if app.pending_delete.is_some() {
+        // The confirmation is the only interactive layer, including its mouse
+        // targets; covered list rows must not change the captured target.
+        app.clickable_regions.clear();
+        render_delete_confirmation(frame, app, frame.area());
+    }
+}
+
+fn render_delete_confirmation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let label = app
+        .pending_delete
+        .as_ref()
+        .map(|request| request.label.clone())
+        .unwrap_or_default();
+    let error = app
+        .pending_delete
+        .as_ref()
+        .and_then(|request| request.error.clone());
+    let height = if error.is_some() { 10 } else { 7 };
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(60) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        area.width.min(60),
+        area.height.min(height),
+    );
+    frame.render_widget(Clear, popup);
+    let block = theme::popup_block("Confirm deletion");
+    let [body, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(block.inner(popup));
+    frame.render_widget(block, popup);
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Delete {label}?\nThis cannot be undone.{}",
+            error.map_or_else(String::new, |error| format!(
+                "\n\nCould not delete: {error}"
+            ))
+        ))
+        .wrap(ratatui::widgets::Wrap { trim: false }),
+        body,
+    );
+    render_action_bar(
+        frame,
+        app,
+        footer,
+        "",
+        &[
+            ("Delete [Enter/y] ", Action::DeleteConfirm),
+            ("Cancel [Esc/n]", Action::DeleteCancel),
+        ],
+        true,
+    );
 }
 
 fn render_main_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -780,6 +858,31 @@ fn truncate_string_to_cols(text: &str, max_cols: u16) -> String {
         budget -= w;
     }
     out
+}
+
+fn input_with_cursor(text: &str, cursor: usize, width: u16) -> String {
+    let chars: Vec<_> = text
+        .chars()
+        .map(|ch| match ch {
+            '\n' => '↵',
+            '\t' => '→',
+            ch => ch,
+        })
+        .collect();
+    let cursor = cursor.min(chars.len());
+    let mut start = 0;
+    let mut prefix_width: usize = chars[..cursor]
+        .iter()
+        .map(|ch| ch.width().unwrap_or(0))
+        .sum();
+    while start < cursor && prefix_width + 1 > usize::from(width) {
+        prefix_width = prefix_width.saturating_sub(chars[start].width().unwrap_or(0));
+        start += 1;
+    }
+    let mut display: String = chars[start..cursor].iter().collect();
+    display.push('▏');
+    display.extend(chars[cursor..].iter());
+    truncate_string_to_cols(&display, width)
 }
 
 fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -2804,10 +2907,13 @@ fn footer_pill(label: &'static str) -> Span<'static> {
 
 fn footer_hints(app: &App) -> Line<'static> {
     if app.is_editor_active() {
+        if app.step_input_active {
+            return Line::raw("[INSERT] Enter commit · Esc normal · Ctrl+s save · Arrows move");
+        }
         return Line::from(vec![
-            footer_pill(" Edit [Enter] "),
+            footer_pill("[NORMAL] Edit [i/Enter] "),
             Span::raw(" "),
-            footer_pill(" Given/When/Then/And [Ctrl+g/w/t/a] "),
+            footer_pill(" Given/Then/And [Ctrl+g/t/a] "),
             Span::raw(" "),
             footer_pill(" Step [o/O] "),
             Span::raw(" "),
@@ -2830,25 +2936,21 @@ fn footer_hints(app: &App) -> Line<'static> {
         {
             // AI chat input focused — show AI-style hints
             Line::from(vec![
-                footer_pill(" Send [Enter] "),
+                footer_pill("[INPUT] Send [Enter] "),
                 Span::raw(" "),
                 footer_pill(" Back/Browse [Esc] "),
                 Span::raw(" "),
-                footer_pill(" Toggle Panel [p] "),
-                Span::raw(" "),
-                footer_pill(" Quit [q] "),
+                footer_pill(" Newline [Shift+Enter] "),
             ])
         }
         (MainTab::MindMap, _) if app.mindmap_focus == MindMapFocus::AiPanel => {
             // AI panel focused but input not focused
             Line::from(vec![
-                footer_pill(" Focus Input [Enter] "),
+                footer_pill("[NORMAL] Input [i/Enter] "),
                 Span::raw(" "),
-                footer_pill(" Scroll [Alt+↑↓] "),
+                footer_pill(" Scroll [hjkl/Arrows] "),
                 Span::raw(" "),
                 footer_pill(" Return Tree [Esc] "),
-                Span::raw(" "),
-                footer_pill(" Toggle Panel [p] "),
                 Span::raw(" "),
                 footer_pill(" Quit [q] "),
             ])
@@ -2892,11 +2994,12 @@ fn footer_hints(app: &App) -> Line<'static> {
             Span::raw(" "),
             footer_pill(" Quit [q] "),
         ]),
-        (MainTab::Ai, _) => Line::from(vec![
-            footer_pill(" Model [m] "),
-            Span::raw(" "),
-            footer_pill(" Quit [q] "),
-        ]),
+        (MainTab::Ai, _) if app.ai_input_focused => {
+            Line::raw("[INPUT] Enter send · Shift+Enter newline · Esc normal · Ctrl+v paste")
+        }
+        (MainTab::Ai, _) => Line::raw(
+            "[NORMAL] i/Enter input · hjkl/Arrows scroll · [/] agent · a new · x close · q quit",
+        ),
         (MainTab::Requirements, _) => crate::authoring_tab::requirements_footer_line(
             &app.requirements_root,
             &app.authoring_ui.iteration_filter,
@@ -3109,7 +3212,7 @@ fn render_model_list(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         &[
             ("Add [a] ", Action::ModelPanelAdd),
             ("Edit [e] ", Action::ModelPanelEdit),
-            ("Del [d] ", Action::ModelPanelDelete),
+            ("Del [dd/Del] ", Action::ModelPanelDelete),
             ("Use [Enter] ", Action::ModelPanelActivate),
             ("Close [Esc]", Action::ModelPanelClose),
         ],
@@ -3155,7 +3258,9 @@ fn render_model_form(frame: &mut Frame<'_>, app: &mut App, title: &str, area: Re
         } else {
             Style::default().fg(theme::FG)
         };
-        let display_val = if value.is_empty() {
+        let display_val = if focused {
+            input_with_cursor(value, app.model_form_cursor, inner.width.saturating_sub(16))
+        } else if value.is_empty() {
             if focused {
                 "(type here...)".to_string()
             } else {
@@ -3163,8 +3268,13 @@ fn render_model_form(frame: &mut Frame<'_>, app: &mut App, title: &str, area: Re
             }
         } else {
             // Mask API key when not focused
-            if i == 4 && !focused && value.len() > 8 {
-                format!("{}...{}", &value[..4], &value[value.len() - 4..])
+            if i == 4 && value.chars().count() > 8 {
+                let chars: Vec<_> = value.chars().collect();
+                format!(
+                    "{}...{}",
+                    chars[..4].iter().collect::<String>(),
+                    chars[chars.len() - 4..].iter().collect::<String>()
+                )
             } else {
                 value.to_string()
             }
@@ -3274,7 +3384,7 @@ fn render_session_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         "",
         &[
             ("Load [Enter] ", Action::SessionPanelActivate),
-            ("Delete [d] ", Action::SessionPanelDelete),
+            ("Delete [dd/Del] ", Action::SessionPanelDelete),
             ("Close [Esc]", Action::SessionPanelClose),
         ],
         true,
@@ -5119,7 +5229,12 @@ fn render_test_points_details(
     focused: bool,
     regions: &mut Vec<ClickableRegion>,
 ) {
-    let block = theme::panel_block("Intent & review", focused);
+    let title = if ui.editing {
+        "Intent & review [INSERT]"
+    } else {
+        "Intent & review [NORMAL]"
+    };
+    let block = theme::panel_block(title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -5227,8 +5342,12 @@ fn render_test_points_details(
         } else {
             Style::default()
         };
-        let display =
-            truncate_string_to_cols(&value, inner.width.saturating_sub(label.len() as u16 + 3));
+        let width = inner.width.saturating_sub(label.len() as u16 + 3);
+        let display = if active && focused && ui.editing {
+            input_with_cursor(&value, ui.field_cursor, width)
+        } else {
+            truncate_string_to_cols(&value, width)
+        };
         lines.push(Line::from(vec![
             Span::styled(format!("{label}: "), label_style),
             Span::styled(display, value_style),

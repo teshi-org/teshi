@@ -454,7 +454,7 @@ fn ai_input_pointer_click_takes_text_focus() {
     let terminal = fixture.launch();
     terminal.key("3").unwrap();
     terminal.expect_text("AI Chat", true, 5000).unwrap();
-    terminal.expect_text("Focus [Enter]", true, 5000).unwrap();
+    terminal.expect_text("Focus [i/Enter]", true, 5000).unwrap();
     let (col, row) = locate(&terminal, "╭────────────────");
     terminal
         .write(&format!(

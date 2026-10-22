@@ -325,7 +325,10 @@ fn testpoint_field_pointer_edits_the_clicked_field_at_normal_and_narrow_sizes() 
             let fixture = Fixture::new(&format!("field-{key}-{cols}"), cols, rows);
             let terminal = fixture.launch();
             terminal.click_text(label, 1000).unwrap();
+            terminal.key("i").unwrap();
+            terminal.key("End").unwrap();
             terminal.write("Z").unwrap();
+            terminal.key("Escape").unwrap();
             terminal.key("s").unwrap();
             fixture.wait(&terminal, "clicked-field-saved", || {
                 let point = fixture.point(0);
@@ -348,6 +351,46 @@ fn testpoint_field_pointer_edits_the_clicked_field_at_normal_and_narrow_sizes() 
             }
             fixture.finish(&terminal);
         }
+    }
+}
+
+#[test]
+#[ignore = "requires TESHI_SELF_TEST_BIN pointing to a built CLI"]
+fn testpoint_insert_keeps_command_text_and_saves_without_approving_or_switching_tabs() {
+    for cols in [150, 55] {
+        let fixture = Fixture::new(&format!("vim-input-{cols}"), cols, 30);
+        let terminal = fixture.launch();
+        terminal.click_text("Title:", 2000).unwrap();
+        terminal.key("i").unwrap();
+        terminal.expect_text("[INSERT]", true, 2000).unwrap();
+        terminal.key("End").unwrap();
+        let typed = " hjkl ars q12345 中文🙂尾";
+        terminal.write(typed).unwrap();
+        terminal.key("Left").unwrap();
+        terminal.key("Backspace").unwrap();
+        terminal.key("Delete").unwrap();
+        terminal.write("中").unwrap();
+        terminal.key("Ctrl+s").unwrap();
+        let expected = "POINT_00 hjkl ars q12345 中文中";
+        fixture.wait(&terminal, "insert-saved", || {
+            fixture.point(0)["title"] == expected
+        });
+        assert_eq!(fixture.point(0)["review_state"], "proposed");
+        terminal.expect_text("[INSERT]", true, 2000).unwrap();
+        terminal.key("Escape").unwrap();
+        terminal.expect_text("[NORMAL]", true, 2000).unwrap();
+        terminal.key("Ctrl+w").unwrap();
+        terminal.key("Left").unwrap();
+        terminal.key("G").unwrap();
+        fixture.wait(&terminal, "tree-last", || {
+            terminal.screen().unwrap().contains("Title: POINT_40")
+        });
+        terminal.key("g").unwrap();
+        terminal.key("g").unwrap();
+        fixture.wait(&terminal, "tree-first", || {
+            terminal.screen().unwrap().contains("Title: POINT_00")
+        });
+        fixture.finish(&terminal);
     }
 }
 
@@ -415,7 +458,10 @@ fn testpoint_review_filter_batch_and_save_buttons_persist_their_targets() {
     fixture.capture(&terminal, "stale-approve-denied");
     assert_eq!(fixture.point(40)["review_state"], "proposed");
     terminal.click_text("Objective:", 1000).unwrap();
+    terminal.key("i").unwrap();
+    terminal.key("End").unwrap();
     terminal.write("Z").unwrap();
+    terminal.key("Escape").unwrap();
     click_footer(&terminal, "Save");
     fixture.wait(&terminal, "save", || {
         fixture.point(40)["objective"] == "OBJECTIVE_40Z"
@@ -464,7 +510,10 @@ fn testpoint_narrow_review_controls_resize_and_modal_input_own_the_pointer() {
     fixture.capture(&terminal, "narrow-continue-without-active-generation");
     assert_eq!(fixture.records(), batch);
     terminal.click_text("Objective:", 1000).unwrap();
+    terminal.key("i").unwrap();
+    terminal.key("End").unwrap();
     terminal.write("Z").unwrap();
+    terminal.key("Escape").unwrap();
     click_footer(&terminal, "Save");
     fixture.wait(&terminal, "narrow-save-resets-reviewed-intent", || {
         fixture.point(0)["objective"] == "OBJECTIVE_00Z"

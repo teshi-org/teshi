@@ -305,6 +305,35 @@ fn parse_tool_operation(
             target: parse_target(arguments)?,
             lease_token: required_string(arguments, "lease_token")?.into(),
         },
+        "get_page_text" => {
+            let selector = arguments
+                .get("selector")
+                .map(|value| serde_json::from_value::<String>(value.clone()))
+                .transpose()
+                .context("selector must be a string")?;
+            let offset = arguments
+                .get("offset")
+                .map(|value| serde_json::from_value::<u64>(value.clone()))
+                .transpose()
+                .context("offset must be a nonnegative integer")?
+                .unwrap_or(0);
+            let limit = arguments
+                .get("limit")
+                .map(|value| serde_json::from_value::<u64>(value.clone()))
+                .transpose()
+                .context("limit must be an integer")?
+                .unwrap_or(35000);
+            if !(1..=100000).contains(&limit) || offset > 9_007_199_254_740_991 {
+                return Err(anyhow!("invalid page text offset or limit"));
+            }
+            BrowserOperation::GetPageText {
+                target: parse_target(arguments)?,
+                lease_token: required_string(arguments, "lease_token")?.into(),
+                selector,
+                offset,
+                limit,
+            }
+        }
         "resolve_playwright_locator" => {
             let test_id_attributes = match arguments.get("test_id_attributes") {
                 Some(value) => serde_json::from_value(value.clone())
@@ -490,6 +519,20 @@ fn tool_definitions(allow_mutations: bool) -> Vec<Value> {
             targeted_schema(target.clone(), timeout.clone(), json!({}), &[]),
         ),
         tool(
+            "get_page_text",
+            "Read rendered static content and form descriptions from one leased browser tab.",
+            targeted_schema(
+                target.clone(),
+                timeout.clone(),
+                json!({
+                    "selector": { "type": "string" },
+                    "offset": { "type": "integer", "minimum": 0, "default": 0 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100000, "default": 35000 }
+                }),
+                &[],
+            ),
+        ),
+        tool(
             "resolve_playwright_locator",
             "Generate, rank, and browser-verify Playwright locator candidates without executing an action.",
             targeted_schema(
@@ -643,6 +686,7 @@ mod tests {
                 "renew_browser_lease",
                 "release_browser_lease",
                 "get_page_snapshot",
+                "get_page_text",
                 "resolve_playwright_locator",
                 "verify_playwright_locator",
                 "capture_browser_evidence",
@@ -731,6 +775,31 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("target"));
+    }
+
+    #[test]
+    fn page_text_tool_preserves_scope_and_rejects_invalid_pagination() {
+        let arguments = json!({
+            "target": {"extension_instance_id": "profile-a", "window_id": 4, "tab_id": 9},
+            "lease_token": "secret", "selector": "main", "offset": 3, "limit": 20
+        });
+        let (operation, _) =
+            parse_tool_operation(Path::new("."), "get_page_text", &arguments).unwrap();
+        let command = operation.to_sidecar_command("text-request");
+        assert_eq!(command["cmd"], "get_page_text");
+        assert_eq!(command["selector"], "main");
+        assert_eq!(command["offset"], 3);
+        assert_eq!(command["limit"], 20);
+        assert_eq!(command["target"], arguments["target"]);
+        for (field, value) in [
+            ("selector", json!(7)),
+            ("offset", json!(-1)),
+            ("limit", json!(100001)),
+        ] {
+            let mut invalid = arguments.clone();
+            invalid[field] = value;
+            assert!(parse_tool_operation(Path::new("."), "get_page_text", &invalid).is_err());
+        }
     }
 
     #[test]

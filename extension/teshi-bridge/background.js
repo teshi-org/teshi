@@ -3,6 +3,7 @@
  */
 
 const DISCOVERY_URL = "http://127.0.0.1:17373/v1/bridge";
+importScripts("page-text.js");
 const HEARTBEAT_URL = "http://127.0.0.1:17373/v1/bridge/heartbeat";
 const RESPONSE_URL = "http://127.0.0.1:17373/v1/bridge/response";
 // A JSON POST makes Chromium perform a CORS request with its browser-supplied
@@ -80,6 +81,7 @@ const SUPPORTED_ACTIONS = Object.freeze([
   "upload",
 ]);
 const SUPPORTED_OPERATIONS = Object.freeze([
+  "get_page_text",
   "capture_browser_evidence",
   "capture_browser_screenshot",
   "generate_browser_pdf",
@@ -1700,6 +1702,17 @@ async function getPageSnapshot(target = null) {
   };
 }
 
+async function getPageText(target, options) {
+  const tab = await attachActiveTab(target);
+  const { result, exceptionDetails } = await cdp(tab.id, "Runtime.evaluate", {
+    expression: `(${collectPageText.toString()})(${JSON.stringify(options)})`,
+    returnByValue: true,
+  });
+  if (exceptionDetails) return { ok: false, code: "browser_text_failure", error: "Page text extraction failed" };
+  return { ...result.value, url: tab.url || "", title: tab.title || "",
+    tab_id: tab.id, window_id: tab.windowId, page_context_revision: await pageContextRevision(tab.id) };
+}
+
 async function highlightSelector(selector, target = null) {
   if (!selector) {
     return { ok: false, error: "selector is required" };
@@ -2957,6 +2970,7 @@ async function postFrameError(error) {
 }
 
 const COMMANDS_PAUSING_STREAM = new Set([
+  "get_page_text",
   "get_page_snapshot",
   "highlight_selector",
   "clear_highlight",
@@ -2980,6 +2994,8 @@ async function executeCmd(msg) {
   try {
     if (cmd === "get_page_snapshot") {
       body = await getPageSnapshot(target);
+    } else if (cmd === "get_page_text") {
+      body = await getPageText(target, { selector: msg.selector, offset: msg.offset, limit: msg.limit });
     } else if (cmd === "highlight_selector") {
       body = await highlightSelector(selector, target);
     } else if (cmd === "clear_highlight") {

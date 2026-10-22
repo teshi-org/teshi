@@ -612,7 +612,7 @@ fn verify(source: &str, command: &str) {
         vec![
             vec![text("Sample scenario")],
             vec![key("r")],
-            vec![key("e"), text("Edit [Enter]")],
+            vec![key("e"), text("Edit [i/Enter]")],
             vec![text("Status: Passed"), text("[passed] a sample step")],
             vec![
                 key("Enter"),

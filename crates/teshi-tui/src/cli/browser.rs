@@ -91,6 +91,7 @@ pub fn handle_browser_command(action: &BrowserCommand) -> Result<()> {
         BrowserCommand::ContentSetting(args) => privileged_content_setting(&project_root, args),
         BrowserCommand::Extensions(args) => privileged_extensions(&project_root, args),
         BrowserCommand::Snapshot(args) => snapshot(&project_root, args),
+        BrowserCommand::Scan(args) => scan(&project_root, args),
         BrowserCommand::Navigate(args) => navigate(&project_root, args),
         BrowserCommand::Highlight(args) => highlight(&project_root, args),
         BrowserCommand::ClearHighlight(target) => clear_highlight(&project_root, target),
@@ -1180,6 +1181,37 @@ fn navigate(project_root: &Path, args: &BrowserNavigateArgs) -> Result<()> {
         "browser-navigate",
         true,
         Some(&args.target),
+    )?;
+    ensure_ok(&response)?;
+    print_json_response(response)
+}
+
+fn scan(project_root: &Path, args: &super::BrowserScanArgs) -> Result<()> {
+    let timeout = Duration::from_millis(args.timeout_ms);
+    let operation = |target, lease_token| BrowserOperation::GetPageText {
+        target,
+        lease_token,
+        selector: args.selector.clone(),
+        offset: args.offset,
+        limit: args.limit,
+    };
+    if args.target.session.is_some() {
+        let (target, lease_token) = required_target(&args.target)?;
+        return run_typed_operation(project_root, operation(target, lease_token), timeout);
+    }
+    if read_cdp_endpoint(project_root)
+        .ok()
+        .is_some_and(|endpoint| endpoint.bridge == "rust")
+    {
+        let response = execute_implicit_rust_browser_operation(project_root, timeout, operation)?;
+        return print_json_response(response);
+    }
+    let response = send_browser_command(
+        project_root,
+        json!({"cmd": "get_page_text", "request_id": "browser-scan",
+            "selector": args.selector, "offset": args.offset, "limit": args.limit}),
+        timeout,
+        true,
     )?;
     ensure_ok(&response)?;
     print_json_response(response)

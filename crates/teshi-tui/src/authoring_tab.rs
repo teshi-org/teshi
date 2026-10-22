@@ -1525,9 +1525,12 @@ impl AuthoringUiState {
             return;
         }
         let next = if delta < 0 {
-            self.selected_linked_index.saturating_sub(1)
+            self.selected_linked_index
+                .saturating_sub(delta.unsigned_abs())
         } else {
-            self.selected_linked_index.saturating_add(1).min(count - 1)
+            self.selected_linked_index
+                .saturating_add(delta as usize)
+                .min(count - 1)
         };
         self.selected_linked_index = next;
         if let Some(tp) = self.filtered_linked_test_points().get(next) {
@@ -1547,9 +1550,10 @@ impl AuthoringUiState {
             .and_then(|id| documents.iter().position(|(_, doc_id)| doc_id == id))
             .unwrap_or(0);
         let next = if delta < 0 {
-            pos.saturating_sub(1)
+            pos.saturating_sub(delta.unsigned_abs())
         } else {
-            pos.saturating_add(1).min(documents.len().saturating_sub(1))
+            pos.saturating_add(delta as usize)
+                .min(documents.len().saturating_sub(1))
         };
         if let Some((path, doc_id)) = documents.get(next) {
             self.select_document_by_id(doc_id);

@@ -21,7 +21,11 @@ pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect)
         )
     } else {
         (
-            if compact { " Focus" } else { " Focus [Enter]" },
+            if compact {
+                " Focus"
+            } else {
+                " Focus [i/Enter]"
+            },
             Action::AiFocusInput,
         )
     };
@@ -32,18 +36,28 @@ pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             Action::AiBlurInput,
         ),
         (
-            if compact { " Model" } else { " Model [m]" },
+            if compact || app.ai_input_focused {
+                " Model"
+            } else {
+                " Model [m]"
+            },
             Action::ModelPanelOpen,
         ),
     ];
     if !app.ai_input_focused {
         controls.push((if compact { " Quit" } else { " Quit [q]" }, Action::Quit));
     }
-    super::render_action_bar(frame, app, area, "", &controls, false);
-    let used = controls
-        .iter()
-        .map(|(label, _)| label.width() as u16)
-        .sum::<u16>();
+    let mode = if app.ai_input_focused {
+        "[INPUT] "
+    } else {
+        "[NORMAL] "
+    };
+    super::render_action_bar(frame, app, area, mode, &controls, false);
+    let used = mode.width() as u16
+        + controls
+            .iter()
+            .map(|(label, _)| label.width() as u16)
+            .sum::<u16>();
     if used + 2 < area.width
         && let Some(status) = app.agent().tool_status.as_ref()
     {
@@ -52,6 +66,11 @@ pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                 status.clone(),
                 Style::default().fg(theme::WARNING),
             )),
+            Rect::new(area.x + used + 2, area.y, area.width - used - 2, 1),
+        );
+    } else if !app.ai_input_focused && used + 2 < area.width {
+        frame.render_widget(
+            Paragraph::new("hjkl/Arrows scroll · [/] agent"),
             Rect::new(area.x + used + 2, area.y, area.width - used - 2, 1),
         );
     }

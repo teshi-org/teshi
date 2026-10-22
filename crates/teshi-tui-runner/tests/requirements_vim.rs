@@ -101,6 +101,8 @@ impl Fixture {
             title,
             DocumentRevision::new("fixture-v2"),
         ));
+        // Additional documents must join the same project scope as the first.
+        requirement_project::associate(&self._root.path().join("project"), &mut index);
         fs::write(&index_path, serde_json::to_vec_pretty(&index).unwrap()).unwrap();
         let path = store.join("doc-2.md");
         fs::write(&path, body).unwrap();

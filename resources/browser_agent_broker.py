@@ -147,6 +147,7 @@ P2_BROWSER_OPERATION_FEATURES = {
 
 MUTATING_COMMANDS = {
     "get_page_snapshot",
+    "get_page_text",
     "resolve_playwright_locator",
     "verify_playwright_locator",
     "verify_playwright_locators",

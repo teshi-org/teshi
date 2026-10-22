@@ -26,9 +26,19 @@ overlay's click regions are rebuilt from the rendered rows each frame.
 
 ## Shared keyboard contract
 
-`Ctrl+W` starts a two-key pane prefix in browse/navigation states. `h`/`l` move to the previous/next visible pane and clamp at the edge. `j`/`k` target the nearest pane below/above; the current layouts have no unambiguous vertical focus neighbor, so those actions are consumed as documented no-ops. `Esc` cancels a pending prefix without editing or switching tabs. Windows uppercase `Ctrl+W` events are normalized.
+`Ctrl+W` starts a two-key pane prefix in browse/navigation states. `h`/`l` or Left/Right move to the previous/next visible pane and clamp at the edge. `j`/`k` or Down/Up target the nearest pane below/above; the current layouts have no unambiguous vertical focus neighbor, so those actions are consumed as documented no-ops. `Esc` cancels a pending prefix without editing or switching tabs. Windows uppercase `Ctrl+W` events are normalized.
 
 Text input has precedence over the prefix: step editing, Requirements insert mode, TestPoints detail editing, and focused AI input retain their input semantics. Modal overlays, ACP permission prompts, profile/session pickers, and the requirements filter/iteration overlays intercept the same keys before pane navigation.
+
+TestPoints details expose Normal/Insert modes. `i`/Enter starts editing; Esc/Enter
+commits and returns to Normal. Printable commands and tab digits remain text in
+Insert, while arrows operate on a Unicode character cursor. Model forms similarly
+retain printable `j/k` and use Tab/Shift+Tab or Up/Down for fields. Choice lists
+support Home/End, `gg/G`, and page navigation. Chat Normal uses `hjkl` or arrows
+to scroll; `[`/`]` switch conversations on the AI tab. Model/session deletions
+capture stable IDs and require confirmation for keyboard and pointer paths;
+failures retain the modal and show the error. See [the key reference](keybindings.md)
+for mode-specific exceptions and compatibility keys.
 
 The action is shared by the keyboard and pointer paths: a pointer click changes the same selection/focus state as the corresponding list control. Scrollbars are rendered only for overflow. Their track and thumb belong to the owning pane; dragging one cannot start text selection or activate a neighboring control. Shift+wheel changes the horizontal offset where the pane supports horizontal scrolling.
 

@@ -136,6 +136,66 @@ fn tree_contains(screen: &str, text: &str) -> bool {
 
 #[test]
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
+fn vim_boundaries_pages_and_arrow_pane_chords_work_across_tabs() {
+    let mut fixture = Fixture::new();
+    fixture
+        .config
+        .env
+        .push(("TESHI_AGENT_BACKEND".into(), "native".into()));
+    fixture
+        .config
+        .env
+        .push(("TESHI_LLM_API_KEY".into(), String::new()));
+    let terminal = fixture.launch();
+    prefix(&terminal, "Right");
+    terminal.key("G").unwrap();
+    terminal.expect_text("Given step 30", true, 3000).unwrap();
+    terminal.write("gg").unwrap();
+    terminal.expect_text("Given step 01", true, 3000).unwrap();
+    terminal.key("PageDown").unwrap();
+    terminal.expect_text("Given step 11", true, 3000).unwrap();
+    terminal.key("Ctrl+b").unwrap();
+    terminal.expect_text("Given step 01", true, 3000).unwrap();
+    capture(&terminal, "vim-explore-pages");
+
+    terminal.key("2").unwrap();
+    terminal.expect_text("Preview", true, 3000).unwrap();
+    prefix(&terminal, "Right");
+    terminal.key("i").unwrap();
+    terminal.write("hjkl q12345").unwrap();
+    terminal.expect_text("hjkl q12345", true, 3000).unwrap();
+    capture(&terminal, "vim-mindmap-input");
+    terminal.key("Escape").unwrap();
+    prefix(&terminal, "Left");
+
+    terminal.key("4").unwrap();
+    terminal.expect_text("# Req 01", true, 3000).unwrap();
+    terminal.key("End").unwrap();
+    terminal.expect_text("# Req 35", true, 3000).unwrap();
+    terminal.key("PageUp").unwrap();
+    terminal.expect_text("# Req 25", true, 3000).unwrap();
+    prefix(&terminal, "Right");
+    terminal.key("G").unwrap();
+    terminal.expect_text("body 55", true, 3000).unwrap();
+    terminal.write("gg").unwrap();
+    terminal.expect_text("# Req 25", true, 3000).unwrap();
+    capture(&terminal, "vim-requirement-boundaries");
+
+    terminal.key("3").unwrap();
+    terminal.key("i").unwrap();
+    terminal.expect_text("[INPUT]", true, 3000).unwrap();
+    terminal.write("hjkl q12345").unwrap();
+    terminal.expect_text("hjkl q12345", true, 3000).unwrap();
+    terminal.key("Escape").unwrap();
+    terminal.expect_text("[NORMAL]", true, 3000).unwrap();
+    capture(&terminal, "vim-ai-modes");
+    fixture.unchanged();
+    terminal.key("q").unwrap();
+    terminal.expect_exit(0, 10000).unwrap();
+}
+
+#[test]
+#[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn five_tabs_render_at_normal_and_narrow_sizes_and_modal_owns_pointer() {
     let fixture = Fixture::new();
     let terminal = fixture.launch();

@@ -925,6 +925,19 @@ pub enum BrowserOperation {
         capability_grant_token: String,
         max_entries: u64,
     },
+    /// Read bounded rendered page text without executing caller-supplied JavaScript.
+    GetPageText {
+        /// Explicit leased browser target.
+        target: BrowserTarget,
+        /// Valid exclusive lease token.
+        lease_token: String,
+        /// Optional CSS scope; defaults to the document body.
+        selector: Option<String>,
+        /// Unicode character offset into the normalized text.
+        offset: u64,
+        /// Maximum Unicode characters to return (1 through 100000).
+        limit: u64,
+    },
     /// Acquire a structured page snapshot.
     GetPageSnapshot {
         /// Explicit target.
@@ -1184,6 +1197,7 @@ impl BrowserOperation {
             Self::AccessBrowserContentSetting { .. } => "access_browser_content_setting",
             Self::ListBrowserExtensions { .. } => "list_browser_extensions",
             Self::GetPageSnapshot { .. } => "get_page_snapshot",
+            Self::GetPageText { .. } => "get_page_text",
             Self::NavigateBrowser { .. } => "navigate",
             Self::GoBackBrowser { .. } => "go_back",
             Self::OpenBrowserTab { .. } => "open_tab",
