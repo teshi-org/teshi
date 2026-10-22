@@ -249,6 +249,10 @@ pub enum Action {
     AiDelete,
     AiCursorLeft,
     AiCursorRight,
+    /// Move to the previous logical input line.
+    AiCursorUp,
+    /// Move to the next logical input line.
+    AiCursorDown,
     AiCursorHome,
     AiCursorEnd,
     /// Jump to top of chat history (Ctrl+Home).
@@ -1306,7 +1310,8 @@ impl Action {
                 && context.ai_input_focused)
         {
             return match (event.code, event.modifiers) {
-                (KeyCode::Enter, KeyModifiers::SHIFT) => Some(Self::AiNewline),
+                (KeyCode::Enter, KeyModifiers::SHIFT)
+                | (KeyCode::Char('j'), KeyModifiers::CONTROL) => Some(Self::AiNewline),
                 (KeyCode::Enter, _) => Some(Self::AiSendMessage),
                 (KeyCode::Backspace, _) => Some(Self::AiBackspace),
                 (KeyCode::Delete, _) => Some(Self::AiDelete),
@@ -1314,6 +1319,8 @@ impl Action {
                 (KeyCode::Down, KeyModifiers::ALT) => Some(Self::AiScrollDown),
                 (KeyCode::Left, KeyModifiers::ALT) => Some(Self::AiScrollLeft),
                 (KeyCode::Right, KeyModifiers::ALT) => Some(Self::AiScrollRight),
+                (KeyCode::Up, _) => Some(Self::AiCursorUp),
+                (KeyCode::Down, _) => Some(Self::AiCursorDown),
                 (KeyCode::Left, _) => Some(Self::AiCursorLeft),
                 (KeyCode::Right, _) => Some(Self::AiCursorRight),
                 (KeyCode::Esc, _) if context.ai_status_waiting => Some(Self::AiBlurInput),
@@ -1321,9 +1328,7 @@ impl Action {
                 (KeyCode::PageUp, _) | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
                     Some(Self::AiScrollUp)
                 }
-                (KeyCode::PageDown, _) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
-                    Some(Self::AiScrollDown)
-                }
+                (KeyCode::PageDown, _) => Some(Self::AiScrollDown),
                 (KeyCode::Home, KeyModifiers::CONTROL) => Some(Self::AiScrollTop),
                 (KeyCode::End, KeyModifiers::CONTROL) => Some(Self::AiScrollBottom),
                 (KeyCode::Home, _) => Some(Self::AiCursorHome),

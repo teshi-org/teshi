@@ -492,7 +492,7 @@ pub(super) fn render_chat_panel(
     let input_text_width = inner.width.saturating_sub(2);
     let input_text_rows = visual_line_count_for_width(&app.agent().input, input_text_width)
         .min((inner.height / 3).max(3));
-    let input_height: u16 = input_text_rows + 2;
+    let input_height: u16 = (input_text_rows + 2).min(inner.height.saturating_sub(status_height));
 
     let filter = slash_filter(app, placement);
     let sugg_count = filter
@@ -1308,8 +1308,19 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
         block = block
             .title_top(Line::styled(format!(" {label} "), muted()).alignment(Alignment::Right));
     }
+    if active && area.width >= 40 {
+        block = block.title_bottom(Line::styled(
+            " Enter send · Ctrl+J / Shift+Enter newline ",
+            muted(),
+        ));
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let (rows, cursor) = input_rows(&agent.input, agent.input_cursor, inner.width);
+    let scroll = cursor.0.saturating_sub(inner.height - 1);
 
     let display: Text<'static> = if agent.input.is_empty() {
         if active {
@@ -1318,12 +1329,9 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
             Text::default()
         }
     } else {
-        // Build lines explicitly so Paragraph renders multi-line input correctly.
         Text::from(
-            agent
-                .input
-                .lines()
-                .map(|l| Line::raw(l.to_string()))
+            rows.into_iter()
+                .skip(usize::from(scroll))
                 .collect::<Vec<_>>(),
         )
     };
@@ -1331,66 +1339,79 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
         AiStatus::Waiting => muted(),
         _ => Style::default(),
     };
-    frame.render_widget(
-        Paragraph::new(display)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .style(text_style),
-        inner,
-    );
+    frame.render_widget(Paragraph::new(display).style(text_style), inner);
 
     // Show a visible cursor at the insertion point, accounting for wrapping.
     if active && agent.status != AiStatus::Waiting {
-        let (row, col) = visual_cursor_pos(&agent.input, agent.input_cursor, inner.width);
-        frame.set_cursor_position((inner.x + col, inner.y + row));
+        frame.set_cursor_position((inner.x + cursor.1, inner.y + cursor.0 - scroll));
     }
 }
 
 /// Number of visual (wrapped) rows the input text occupies when rendered in a
 /// widget of the given `width` (in columns).
 fn visual_line_count_for_width(input: &str, width: u16) -> u16 {
-    if width == 0 {
-        return input.lines().count().max(1) as u16;
-    }
-    let count: u16 = input
-        .lines()
-        .map(|line| {
-            let w: u16 = line.chars().map(|c| c.width().unwrap_or(0) as u16).sum();
-            if w == 0 { 1 } else { w.div_ceil(width).max(1) }
-        })
-        .sum();
-    count.max(1)
+    input_rows(input, input.chars().count(), width)
+        .0
+        .len()
+        .min(usize::from(u16::MAX)) as u16
 }
 
-/// Compute the visual (wrapped) (row, col) for a character index in a
-/// multi-line string rendered at the given `width`.
+/// Use the same cell wrapping for text and cursor, including trailing empty lines.
+fn input_rows(input: &str, cursor: usize, width: u16) -> (Vec<Line<'static>>, (u16, u16)) {
+    let width = usize::from(width.max(1));
+    let mut rows = vec![String::new()];
+    let mut column = 0;
+    let mut position = (0, 0);
+    for (index, ch) in input.chars().enumerate() {
+        let cells = if ch == '\t' {
+            4 - column % 4
+        } else {
+            ch.width().unwrap_or(0).min(width)
+        };
+        if ch != '\n' && column + cells > width {
+            rows.push(String::new());
+            column = 0;
+        }
+        if index == cursor {
+            position = (
+                (rows.len() - 1).min(usize::from(u16::MAX)) as u16,
+                column as u16,
+            );
+        }
+        if ch == '\n' {
+            rows.push(String::new());
+            column = 0;
+        } else {
+            if let Some(row) = rows.last_mut() {
+                if ch == '\t' {
+                    row.push_str(&" ".repeat(cells));
+                } else if !ch.is_control() {
+                    row.push(ch);
+                }
+            }
+            column += cells;
+            if column == width {
+                rows.push(String::new());
+                column = 0;
+            }
+        }
+    }
+    if cursor >= input.chars().count() {
+        position = (
+            (rows.len() - 1).min(usize::from(u16::MAX)) as u16,
+            column as u16,
+        );
+    }
+    (rows.into_iter().map(Line::raw).collect(), position)
+}
+
+/// Compute the insertion position using the input renderer's cell wrapping.
+#[cfg(test)]
 fn visual_cursor_pos(input: &str, cursor_char_idx: usize, width: u16) -> (u16, u16) {
     if width == 0 {
         return (0, 0);
     }
-    let before: String = input.chars().take(cursor_char_idx).collect();
-    let lines: Vec<&str> = before.split('\n').collect();
-    let Some((cursor_line, complete)) = lines.split_last() else {
-        return (0, 0);
-    };
-
-    // Complete logical lines before the cursor's line.
-    let mut visual_row: u16 = complete
-        .iter()
-        .map(|line| {
-            let w: u16 = line.chars().map(|c| c.width().unwrap_or(0) as u16).sum();
-            if w == 0 { 1 } else { w.div_ceil(width).max(1) }
-        })
-        .sum();
-
-    let cursor_line_width: u16 = cursor_line
-        .chars()
-        .map(|c| c.width().unwrap_or(0) as u16)
-        .sum();
-    if cursor_line_width == 0 {
-        return (visual_row, 0);
-    }
-    visual_row += cursor_line_width / width;
-    (visual_row, cursor_line_width % width)
+    input_rows(input, cursor_char_idx, width).1
 }
 
 /// Wraps one styled line into rows no wider than `width` display cells.
@@ -2114,6 +2135,21 @@ mod tests {
         thoughts.clear();
         push_thinking(&mut thoughts, "First line\nSecond line", 72, true);
         assert_eq!(thoughts.len(), 3);
+    }
+
+    #[test]
+    fn test_input_rows_preserve_empty_lines_and_wide_character_cursor() {
+        let (rows, cursor) = input_rows("hello\n\n", 7, 10);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(cursor, (2, 0));
+        assert_eq!(visual_line_count_for_width("hello\n", 10), 2);
+        let (rows, cursor) = input_rows("ab你c", 2, 3);
+        assert_eq!(
+            rows.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            vec!["ab", "你c", ""]
+        );
+        assert_eq!(cursor, (1, 0));
+        assert_eq!(input_rows("a\tb", 3, 8).1, (0, 5));
     }
 
     #[test]

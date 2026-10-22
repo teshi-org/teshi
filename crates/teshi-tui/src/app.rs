@@ -7846,12 +7846,62 @@ impl App {
                 self.agent_mut().input_cursor = (self.agent().input_cursor + 1).min(max);
                 self.quit_pending_confirm = false;
             }
+            Action::AiCursorUp | Action::AiCursorDown => {
+                let chars: Vec<char> = self.agent().input.chars().collect();
+                let cursor = self.agent().input_cursor.min(chars.len());
+                let start = chars[..cursor]
+                    .iter()
+                    .rposition(|c| *c == '\n')
+                    .map_or(0, |i| i + 1);
+                let column = cursor - start;
+                let target = if matches!(action, Action::AiCursorUp) {
+                    if start == 0 {
+                        cursor
+                    } else {
+                        let end = start - 1;
+                        let previous = chars[..end]
+                            .iter()
+                            .rposition(|c| *c == '\n')
+                            .map_or(0, |i| i + 1);
+                        previous + column.min(end - previous)
+                    }
+                } else if let Some(end) = chars[cursor..].iter().position(|c| *c == '\n') {
+                    let next = cursor + end + 1;
+                    let length = chars[next..]
+                        .iter()
+                        .position(|c| *c == '\n')
+                        .unwrap_or(chars.len() - next);
+                    next + column.min(length)
+                } else {
+                    cursor
+                };
+                self.agent_mut().input_cursor = target;
+                self.quit_pending_confirm = false;
+            }
             Action::AiCursorHome => {
-                self.agent_mut().input_cursor = 0;
+                let cursor = self.agent().input_cursor;
+                self.agent_mut().input_cursor = self
+                    .agent()
+                    .input
+                    .chars()
+                    .take(cursor)
+                    .enumerate()
+                    .filter(|(_, c)| *c == '\n')
+                    .map(|(i, _)| i + 1)
+                    .last()
+                    .unwrap_or(0);
                 self.quit_pending_confirm = false;
             }
             Action::AiCursorEnd => {
-                self.agent_mut().input_cursor = self.agent().input.chars().count();
+                let cursor = self.agent().input_cursor;
+                self.agent_mut().input_cursor = cursor
+                    + self
+                        .agent()
+                        .input
+                        .chars()
+                        .skip(cursor)
+                        .take_while(|c| *c != '\n')
+                        .count();
                 self.quit_pending_confirm = false;
             }
             Action::AiScrollUp => {

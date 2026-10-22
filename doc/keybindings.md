@@ -130,19 +130,20 @@ Only on the AI tab: `[`/`]` select the previous/next Agent conversation,
 |-----|--------|
 | Printable characters | Insert text |
 | Enter | Send; empty input returns to Normal |
-| Shift+Enter | Insert a newline |
-| Left/Right, Home/End | Move input cursor |
+| Ctrl+J / Shift+Enter | Insert a newline |
+| Left/Right, Up/Down | Move input cursor; Up/Down move between input lines |
+| Home/End | Move to the start/end of the current input line |
 | Backspace/Delete | Delete text |
 | Ctrl+V | Paste clipboard text |
 | Alt+arrows | Scroll history |
-| PageUp/PageDown, Ctrl+K/J | Scroll history vertically |
+| PageUp/PageDown, Ctrl+K | Scroll history vertically |
 | Ctrl+Home/End | History top/bottom |
 | Ctrl+Shift+C | Copy chat selection |
 | Esc | Return to Normal |
 
 In the AI tab, Esc from Input followed by Esc in Normal cancels a running
 request. Ctrl+C requests exit instead. Terminal support is needed to distinguish
-Shift+Enter from Enter.
+Shift+Enter from Enter; Ctrl+J also works in terminals without that support.
 
 Drag over chat text to select it; Ctrl+Shift+C or right-click copies the displayed
 plain text without role rails or soft-wrap line breaks. Scrolling/resizing keep
