@@ -127,6 +127,7 @@ jobs:
           TESHI_NAVIGATION_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/navigation
           TESHI_OVERLAY_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/overlay
           TESHI_REQUIREMENTS_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/requirements-pointer
+          TESHI_ACP_DISCOVERY_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/acp-discovery
         run: xvfb-run -a cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked -- --ignored
       - name: Run actual Teshi terminal regressions (Windows)
         if: runner.os == 'Windows'
@@ -138,6 +139,7 @@ jobs:
           TESHI_NAVIGATION_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/navigation
           TESHI_OVERLAY_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/overlay
           TESHI_REQUIREMENTS_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/requirements-pointer
+          TESHI_ACP_DISCOVERY_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/acp-discovery
         run: |
           $env:TESHI_VT_INPUT_TEST_BIN = & ./scripts/prepare-windows-vt-test.ps1
           cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked -- --ignored
