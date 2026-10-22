@@ -2929,6 +2929,7 @@ impl App {
     /// The backend owns model events, conversation records, and continuation.
     pub fn poll_llm_events(&mut self) {
         use teshi_agent::backend::AgentBackendEvent;
+        self.discover_visible_acp_controls();
         self.sync_acp_policy();
         for i in 0..self.agents.len() {
             self.poll_acp_host_tools(i);

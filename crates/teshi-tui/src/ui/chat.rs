@@ -552,6 +552,9 @@ pub(super) fn render_chat_panel(
 /// Draws the approval-mode chip on the panel's top border and registers it as
 /// a click target that opens the approval picker.
 fn render_approval_badge(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    if app.agent().backend.kind() == teshi_agent::backend::AgentBackendKind::Acp {
+        return;
+    }
     let mode = app.effective_approval_mode();
     let label = format!(" {} ", mode.display_name());
     let chip_bg = if mode.requires_manual_approval() {

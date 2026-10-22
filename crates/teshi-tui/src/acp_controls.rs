@@ -11,6 +11,10 @@ mod tests {
     };
 
     fn app_with_agent() -> (App, tempfile::TempDir, tempfile::TempDir) {
+        configured_app(true)
+    }
+
+    fn configured_app(connect: bool) -> (App, tempfile::TempDir, tempfile::TempDir) {
         let project = tempfile::tempdir().unwrap();
         let store = tempfile::tempdir().unwrap();
         teshi_engine::initialize_requirement_store(store.path()).unwrap();
@@ -39,6 +43,9 @@ mod tests {
                 },
             ))
             .unwrap();
+        if !connect {
+            return (app, project, store);
+        }
         app.agent_mut().backend.connect_acp().unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while !app.agent().backend.acp_controls().unwrap().ready {
@@ -46,6 +53,54 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         (app, project, store)
+    }
+
+    #[test]
+    fn entering_ai_discovers_settings_without_a_prompt_or_picker() {
+        let (mut app, _project, _store) = configured_app(false);
+        app.active_tab = crate::app::MainTab::Explore;
+        app.discover_visible_acp_controls();
+        assert!(!app.agent().acp_controls_ui.discovery_started);
+        app.active_tab = crate::app::MainTab::Ai;
+        app.discover_visible_acp_controls();
+        assert!(app.agent().acp_controls_ui.discovery_started);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !app.agent().backend.acp_controls().unwrap().ready {
+            assert!(Instant::now() < deadline);
+            app.discover_visible_acp_controls();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let state = app.agent().backend.acp_controls().unwrap();
+        app.discover_visible_acp_controls();
+        assert_eq!(
+            app.agent().backend.acp_controls().unwrap().revision,
+            state.revision
+        );
+        assert!(!state.config.options.is_empty());
+        assert!(app.agent().acp_controls_ui.picker.is_none());
+        assert!(app.agent().messages().is_empty());
+    }
+
+    #[test]
+    fn discovery_animation_rotates_and_is_visible_in_the_bar() {
+        assert_ne!(
+            loading_frame(Duration::ZERO),
+            loading_frame(Duration::from_millis(120))
+        );
+        let (mut app, _project, _store) = configured_app(false);
+        app.agent_mut().acp_controls_ui.discovery_started = true;
+        let mut terminal = Terminal::new(TestBackend::new(40, 4)).unwrap();
+        terminal
+            .draw(|frame| render_bar(frame, &mut app, Rect::new(0, 2, 40, 1)))
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(content.contains("◐ Loading"), "{content}");
     }
 
     #[test]
@@ -172,9 +227,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventK
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Modifier, Style},
-    text::Line,
-    widgets::{Block, Borders, Clear, Paragraph},
+    style::Style,
+    text::{Line, Span},
+    widgets::{Clear, Paragraph},
 };
 use teshi_acp::session_config::ConfigOption;
 use unicode_width::UnicodeWidthStr;
@@ -186,7 +241,6 @@ enum Target {
     Settings,
     Option(String),
     Agent,
-    Approvals,
     Row(usize),
     Back,
 }
@@ -204,6 +258,9 @@ struct Picker {
 pub(crate) struct ControlsUi {
     picker: Option<Picker>,
     regions: Vec<(Rect, Target)>,
+    discovery_started: bool,
+    animation_started: Option<std::time::Instant>,
+    discovery_error: Option<String>,
 }
 
 impl ControlsUi {
@@ -213,6 +270,17 @@ impl ControlsUi {
 }
 
 impl App {
+    pub(crate) fn discover_visible_acp_controls(&mut self) {
+        let visible = self.active_tab == crate::app::MainTab::Ai
+            || (self.active_tab == crate::app::MainTab::MindMap && self.mindmap_ai_panel_visible);
+        if visible
+            && self.agent().backend.kind() == teshi_agent::backend::AgentBackendKind::Acp
+            && !self.agent().acp_controls_ui.discovery_started
+        {
+            self.connect_acp_controls();
+        }
+    }
+
     pub(crate) fn effective_approval_mode(&self) -> teshi_agent::approval::ApprovalMode {
         use teshi_agent::approval::ApprovalMode;
         match self.agent().backend.acp_controls().and_then(|s| s.policy) {
@@ -223,11 +291,16 @@ impl App {
         }
     }
     pub(crate) fn connect_acp_controls(&mut self) {
+        // A failed discovery stays inspectable instead of restarting every frame.
+        self.agent_mut().acp_controls_ui.discovery_started = true;
+        self.agent_mut().acp_controls_ui.animation_started = Some(std::time::Instant::now());
+        self.agent_mut().acp_controls_ui.discovery_error = None;
         let index = self.selected_agent;
-        if self.ensure_agent_backend(index)
-            && let Err(error) = self.agents[index].backend.connect_acp()
-        {
+        if !self.ensure_agent_backend(index) {
+            self.agent_mut().acp_controls_ui.discovery_error = Some(self.status.clone());
+        } else if let Err(error) = self.agents[index].backend.connect_acp() {
             self.status = error.to_string();
+            self.agent_mut().acp_controls_ui.discovery_error = Some(error.to_string());
         }
     }
 
@@ -293,10 +366,6 @@ impl App {
                 self.agent_mut().acp_controls_ui.picker = None;
                 let _ = self.execute_slash_command("agent");
             }
-            Target::Approvals => {
-                self.agent_mut().acp_controls_ui.picker = None;
-                let _ = self.execute_slash_command("approval");
-            }
             Target::Row(index) => {
                 let Some(picker) = self.agent().acp_controls_ui.picker.clone() else {
                     return;
@@ -359,7 +428,6 @@ impl App {
             KeyCode::Left | KeyCode::Backspace => self.open_acp_controls(None),
             KeyCode::Enter => self.activate_control(Target::Row(selected)),
             KeyCode::Char('a') => self.activate_control(Target::Agent),
-            KeyCode::Char('p') => self.activate_control(Target::Approvals),
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Some(p) = &mut self.agent_mut().acp_controls_ui.picker {
                     p.selected = selected.saturating_sub(1);
@@ -417,12 +485,23 @@ impl App {
 }
 
 fn chip(frame: &mut Frame<'_>, area: Rect, label: String, target: Target, ui: &mut ControlsUi) {
+    let content = if let Some((name, value)) = label.split_once(": ") {
+        Line::from(vec![
+            Span::styled(format!(" {name} "), Style::default().fg(theme::MUTED)),
+            Span::styled(value.to_owned(), Style::default().fg(theme::FG)),
+            Span::raw(" "),
+        ])
+    } else {
+        Line::from(
+            if label.width().saturating_add(2) <= usize::from(area.width) {
+                format!(" {label} ")
+            } else {
+                label
+            },
+        )
+    };
     frame.render_widget(
-        Paragraph::new(label).style(
-            Style::default()
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Paragraph::new(content).style(Style::default().fg(theme::PRIMARY).bg(theme::BLOCK_BG)),
         area,
     );
     ui.regions.push((area, target));
@@ -445,30 +524,40 @@ pub(crate) fn render_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .unwrap_or_else(|| id.clone())
         })
         .unwrap_or_else(|| "ACP".into());
-    let policy = match state.policy {
-        Some(teshi_acp::PermissionPolicy::Manual) => "Ask",
-        Some(teshi_acp::PermissionPolicy::Auto) => "Auto",
-        Some(teshi_acp::PermissionPolicy::Bypass) => "Bypass",
-        None => "Connecting",
-    };
     let busy = matches!(
         app.agent().backend.status(),
         teshi_agent::backend::AgentBackendStatus::Running
             | teshi_agent::backend::AgentBackendStatus::WaitingForPermission
     );
+    let elapsed = app
+        .agent()
+        .acp_controls_ui
+        .animation_started
+        .map_or(std::time::Duration::ZERO, |start| start.elapsed());
     let status = if state.pending {
-        "Applying"
-    } else if state.error.is_some() {
-        "Error"
+        format!("{} Applying", loading_frame(elapsed))
+    } else if state.error.is_some() || app.agent().acp_controls_ui.discovery_error.is_some() {
+        "Error".into()
+    } else if !state.ready && app.agent().acp_controls_ui.discovery_started {
+        format!("{} Loading", loading_frame(elapsed))
     } else if busy {
-        "Busy"
+        "Busy".into()
     } else if state.ready {
-        "More"
+        "Settings".into()
     } else {
-        "Connect"
+        "Connect".into()
     };
-    let more = format!("[{status} ▾]");
-    let more_width = (more.width() as u16).min(area.width);
+    let more = if status.width().saturating_add(4) <= usize::from(area.width) {
+        format!("{status} ▾")
+    } else {
+        status
+    };
+    let more_width = (more.width() as u16 + 2).min(area.width);
+    let activity_on_left = state.pending
+        || (!state.ready
+            && state.error.is_none()
+            && app.agent().acp_controls_ui.discovery_error.is_none()
+            && app.agent().acp_controls_ui.discovery_started);
     let ui = &mut app.agent_mut().acp_controls_ui;
     ui.regions.clear();
     if area.height == 0 || area.width == 0 {
@@ -477,7 +566,11 @@ pub(crate) fn render_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     chip(
         frame,
         Rect::new(
-            area.right().saturating_sub(more_width),
+            if activity_on_left {
+                area.x
+            } else {
+                area.right().saturating_sub(more_width)
+            },
             area.y,
             more_width,
             1,
@@ -486,27 +579,37 @@ pub(crate) fn render_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Target::Settings,
         ui,
     );
-    let mut x = area.x;
-    let end = area.right().saturating_sub(more_width + 1);
-    let controls = std::iter::once((format!("{agent} ▾"), Target::Agent))
-        .chain(state.config.options.iter().map(|o| {
+    let mut x = if activity_on_left {
+        area.x.saturating_add(more_width + 1)
+    } else {
+        area.x
+    };
+    let end = if activity_on_left {
+        area.right()
+    } else {
+        area.right().saturating_sub(more_width + 1)
+    };
+    let controls = std::iter::once((format!("{agent} ▾"), Target::Agent)).chain(
+        state.config.options.iter().map(|o| {
             (
                 format!("{}: {} ▾", o.name, o.value_label()),
                 Target::Option(o.id.clone()),
             )
-        }))
-        .chain(std::iter::once((
-            format!("Approvals: {policy} ▾"),
-            Target::Approvals,
-        )));
+        }),
+    );
     for (label, target) in controls {
-        let width = label.width().min(u16::MAX as usize) as u16;
+        let width = label.width().saturating_add(2).min(u16::MAX as usize) as u16;
         if x.saturating_add(width) > end {
-            break;
+            continue;
         }
         chip(frame, Rect::new(x, area.y, width, 1), label, target, ui);
-        x = x.saturating_add(width + 2);
+        x = x.saturating_add(width + 1);
     }
+}
+
+fn loading_frame(elapsed: std::time::Duration) -> &'static str {
+    const FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
+    FRAMES[(elapsed.as_millis() / 120 % FRAMES.len() as u128) as usize]
 }
 
 /// Render the settings picker above all underlying controls.
@@ -518,14 +621,18 @@ pub(crate) fn render_picker(frame: &mut Frame<'_>, app: &mut App) {
         return;
     };
     let screen = frame.area();
-    let width = screen.width.min(76);
-    let height = screen.height.min(20);
+    let count = picker
+        .option
+        .as_ref()
+        .map_or(state.config.options.len(), |o| o.choices.len());
+    let width = screen.width.min(60);
+    let height = screen.height.min((count.saturating_add(6).min(20)) as u16);
     if width < 4 || height < 5 {
         return;
     }
     let area = Rect::new(
         screen.x + (screen.width - width) / 2,
-        screen.y + (screen.height - height) / 2,
+        screen.bottom().saturating_sub(height + 3).max(screen.y),
         width,
         height,
     );
@@ -533,10 +640,7 @@ pub(crate) fn render_picker(frame: &mut Frame<'_>, app: &mut App) {
         .option
         .as_ref()
         .map_or("ACP settings", |o| o.name.as_str());
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" {title} "))
-        .style(Style::default().bg(theme::CHIP_FG).fg(theme::FG));
+    let block = theme::popup_block(format!(" {title} "));
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
@@ -593,7 +697,7 @@ pub(crate) fn render_picker(frame: &mut Frame<'_>, app: &mut App) {
     {
         let rect = Rect::new(inner.x, inner.y + offset as u16, inner.width, 1);
         let style = if index == selected {
-            Style::default().fg(theme::CHIP_FG).bg(theme::ACCENT)
+            theme::selected_row(true)
         } else {
             Style::default().fg(theme::FG)
         };
@@ -606,20 +710,25 @@ pub(crate) fn render_picker(frame: &mut Frame<'_>, app: &mut App) {
             .and_then(|c| c.description.as_deref())
             .or(o.description.as_deref())
     });
+    let elapsed = ui
+        .animation_started
+        .map_or(std::time::Duration::ZERO, |start| start.elapsed());
+    let fallback = if state.pending {
+        format!("{} Applying setting...", loading_frame(elapsed))
+    } else if !state.ready {
+        format!("{} Loading agent settings...", loading_frame(elapsed))
+    } else if rows.is_empty() {
+        "No editable settings advertised by this agent".into()
+    } else {
+        "↑/↓ select · Enter apply · ← settings · Esc close".into()
+    };
     let message = picker
         .error
         .as_deref()
         .or(state.error.as_deref())
+        .or(ui.discovery_error.as_deref())
         .or(description)
-        .unwrap_or(if state.pending {
-            "Applying setting..."
-        } else if !state.ready {
-            "Connecting to discover settings..."
-        } else if rows.is_empty() {
-            "No editable settings advertised by this agent"
-        } else {
-            "↑/↓ select · Enter apply · ← settings · Esc close"
-        });
+        .unwrap_or(&fallback);
     frame.render_widget(
         Paragraph::new(message)
             .style(Style::default().fg(theme::FG))
@@ -627,15 +736,8 @@ pub(crate) fn render_picker(frame: &mut Frame<'_>, app: &mut App) {
         Rect::new(inner.x, inner.bottom().saturating_sub(3), inner.width, 2),
     );
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
-    frame.render_widget(
-        Paragraph::new(Line::from("[Back]  [Agent]  [Approvals]")),
-        footer,
-    );
-    for (offset, width, target) in [
-        (0, 6, Target::Back),
-        (8, 7, Target::Agent),
-        (17, 11, Target::Approvals),
-    ] {
+    frame.render_widget(Paragraph::new(Line::from("[Back]  [Agent]")), footer);
+    for (offset, width, target) in [(0, 6, Target::Back), (8, 7, Target::Agent)] {
         if offset + width <= inner.width {
             ui.regions
                 .push((Rect::new(inner.x + offset, footer.y, width, 1), target));
