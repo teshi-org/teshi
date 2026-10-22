@@ -333,6 +333,7 @@ jobs:
           @($builtExe, "apps/teshi-web/dist", "apps/teshi-web/dist/pkg/teshi_web_bg.wasm", "resources/browser_service.py",
             "resources/browser_agent_broker.py", "resources/winapp_service.py",
             "resources/api_service.py", "resources/teshi_api.py",
+            "resources/browser_page_text.py",
             "extension/teshi-bridge/manifest.json",
             "agent-packages/teshi-browser-testing/.codex-plugin/plugin.json") |
             ForEach-Object { if (-not (Test-Path $_)) { throw "Missing: $_" } }
@@ -341,6 +342,7 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/teshi-update-helper.exe" (Join-Path $binDir "teshi-update-helper.exe")
           Copy-Item "target/${{ matrix.target }}/release/teshi-desktop.exe" (Join-Path $binDir "teshi-desktop.exe")
           Copy-Item "resources/browser_service.py" (Join-Path $shareDir "browser_service.py") -Force
+          Copy-Item "resources/browser_page_text.py" (Join-Path $shareDir "browser_page_text.py") -Force
           Copy-Item "resources/update_participant.py" (Join-Path $shareDir "update_participant.py") -Force
           Copy-Item "resources/browser_agent_broker.py" (Join-Path $shareDir "browser_agent_broker.py") -Force
           Copy-Item "resources/winapp_service.py"  (Join-Path $shareDir "winapp_service.py") -Force
@@ -427,6 +429,7 @@ jobs:
           $required = @($builtExe, "resources/browser_service.py",
             "resources/browser_agent_broker.py", "resources/winapp_service.py",
             "resources/api_service.py", "resources/teshi_api.py",
+            "resources/browser_page_text.py",
             "extension/teshi-bridge/manifest.json",
             "agent-packages/teshi-browser-testing/.codex-plugin/plugin.json")
           if ($includeWeb) { $required += @("apps/teshi-web/dist", "apps/teshi-web/dist/pkg/teshi_web_bg.wasm") }
@@ -437,6 +440,7 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/teshi-update-helper.exe" (Join-Path $binDir "teshi-update-helper.exe")
           if ($includeDesktop) { Copy-Item "target/${{ matrix.target }}/release/teshi-desktop.exe" (Join-Path $binDir "teshi-desktop.exe") }
           Copy-Item "resources/browser_service.py" (Join-Path $shareDir "browser_service.py") -Force
+          Copy-Item "resources/browser_page_text.py" (Join-Path $shareDir "browser_page_text.py") -Force
           Copy-Item "resources/update_participant.py" (Join-Path $shareDir "update_participant.py") -Force
           Copy-Item "resources/browser_agent_broker.py" (Join-Path $shareDir "browser_agent_broker.py") -Force
           Copy-Item "resources/winapp_service.py"  (Join-Path $shareDir "winapp_service.py") -Force
@@ -559,6 +563,7 @@ jobs:
             python -c 'import json,sys; assert json.load(open(sys.argv[1])) == json.load(open(sys.argv[2]))' "${artifacts_dir}/teshi-${target}/build-identity.json" "${artifacts_dir}/teshi-x86_64-pc-windows-msvc/build-identity.json"
 
             cp "${repo_dir}/resources/browser_service.py" "${stage_dir}/share/browser_service.py"
+            cp "${repo_dir}/resources/browser_page_text.py" "${stage_dir}/share/browser_page_text.py"
             cp "${repo_dir}/resources/update_participant.py" "${stage_dir}/share/update_participant.py"
             cp "${repo_dir}/resources/browser_agent_broker.py" "${stage_dir}/share/browser_agent_broker.py"
             cp "${repo_dir}/resources/api_service.py" "${stage_dir}/share/api_service.py"
