@@ -496,16 +496,16 @@ fn acp_settings_switch_model_by_mouse_and_keyboard() {
         // Escape closes the picker so the click resolves against the bottom row.
         vec![
             text("Thinking"),
-            text("[More"),
+            text("Settings"),
             key("Escape"),
-            text("[More"),
+            text("Settings"),
         ],
-        vec![click("Model: Alpha"), text("Beta")],
+        vec![click("Model Alpha"), text("Beta")],
         vec![key("Down"), key("Enter")],
-        vec![text("Model: Beta")],
-        vec![text("Thinking: Low")],
+        vec![text("Model Beta")],
+        vec![text("Thinking Low")],
         vec![json!({"action":"resize","cols":64,"rows":24})],
-        vec![text("[More")],
+        vec![text("Settings")],
         vec![
             open_settings(),
             key("Enter"),

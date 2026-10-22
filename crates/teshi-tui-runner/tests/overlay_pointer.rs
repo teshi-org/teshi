@@ -186,6 +186,10 @@ fn session_footer_flow(cols: u16, rows: u16, stage: &str) {
     terminal.click_text("Model: Session Alpha", 5000).unwrap();
     click_footer(&terminal, "Delete");
     terminal
+        .expect_text("Confirm deletion", true, 5000)
+        .unwrap();
+    click_footer(&terminal, "Delete [Enter/y]");
+    terminal
         .expect_text("Model: Session Alpha", false, 5000)
         .unwrap();
     assert!(

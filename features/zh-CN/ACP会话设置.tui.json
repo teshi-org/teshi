@@ -122,7 +122,7 @@
         },
         {
           "action": "expect_text",
-          "text": "[More",
+          "text": "Settings",
           "visible": true,
           "timeout_ms": 15000
         }
@@ -206,7 +206,7 @@
       "actions": [
         {
           "action": "expect_text",
-          "text": "[More",
+          "text": "Settings",
           "visible": true,
           "timeout_ms": 15000
         }

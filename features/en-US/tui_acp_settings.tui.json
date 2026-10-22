@@ -122,7 +122,7 @@
         },
         {
           "action": "expect_text",
-          "text": "[More",
+          "text": "Settings",
           "visible": true,
           "timeout_ms": 15000
         }
@@ -135,7 +135,7 @@
       "actions": [
         {
           "action": "click_text",
-          "text": "Model: Alpha",
+          "text": "Model Alpha",
           "timeout_ms": 15000
         },
         {
@@ -168,7 +168,7 @@
       "actions": [
         {
           "action": "expect_text",
-          "text": "Model: Beta",
+          "text": "Model Beta",
           "visible": true,
           "timeout_ms": 15000
         }
@@ -181,7 +181,7 @@
       "actions": [
         {
           "action": "expect_text",
-          "text": "Thinking: Low",
+          "text": "Thinking Low",
           "visible": true,
           "timeout_ms": 15000
         }
@@ -206,7 +206,7 @@
       "actions": [
         {
           "action": "expect_text",
-          "text": "[More",
+          "text": "Settings",
           "visible": true,
           "timeout_ms": 15000
         }

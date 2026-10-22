@@ -129,7 +129,7 @@ class World:
         deadline = time.monotonic() + 15
         while True:
             screen = self.op("screen")
-            if ("Model: " + name in screen and "●" not in screen) or "[Error" in screen:
+            if ("Model " + name in screen and "●" not in screen) or "[Error" in screen:
                 break
             assert time.monotonic() < deadline, "model change was not confirmed\n" + screen
             time.sleep(.05)
@@ -164,7 +164,7 @@ class World:
         if text == "Teshi is open in AI chat":
             self.launch()
         elif text.startswith("the original conversation uses"):
-            self.select(quoted[0]); self.model(quoted[1]); self.expect("Model: Beta")
+            self.select(quoted[0]); self.model(quoted[1]); self.expect("Model Beta")
         elif text.startswith("the current conversation uses"):
             if self.selected != quoted[0]:
                 self.select(quoted[0])
@@ -175,7 +175,7 @@ class World:
         elif text.startswith("I select the ACP model"):
             self.model(quoted[0])
         elif text == "the model change is confirmed":
-            self.expect("[More")
+            self.expect("Settings")
         elif text.startswith("the confirmed ACP model is"):
             self.discover()
             self.expect("Model: " + quoted[0])
@@ -208,7 +208,7 @@ class World:
         elif text == "the ACP settings report that the saved model is unavailable":
             self.expect("[Error"); self.op("click", "[Error"); self.expect("no longer available"); self.op("key", "Escape")
         elif "has a saved confirmed model preference" in text:
-            self.select("Fake Alpha"); self.model("Beta"); self.expect("Model: Beta")
+            self.select("Fake Alpha"); self.model("Beta"); self.expect("Model Beta")
         elif "times out restoring" in text:
             self.rules(timeout=True)
         elif text == "the ACP settings report a model restoration timeout":

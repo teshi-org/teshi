@@ -438,13 +438,13 @@ def scenario_actions(canonical_name: str, scenario_index: int, root: Path, teshi
         return [
             [key("3"), expect("Welcome to AI Chat!"), key("Enter")],
             [write("/settings"), key("Enter"), expect("Model: Alpha")],
-            [expect("Thinking"), expect("[More")],
-            [action("click_text", text="Model: Alpha", timeout_ms=15000), expect("Beta")],
+            [expect("Thinking"), expect("Settings")],
+            [action("click_text", text="Model Alpha", timeout_ms=15000), expect("Beta")],
             [key("Down"), key("Enter")],
-            [expect("Model: Beta")],
-            [expect("Thinking: Low")],
+            [expect("Model Beta")],
+            [expect("Thinking Low")],
             [action("resize", cols=64, rows=24)],
-            [expect("[More")],
+            [expect("Settings")],
             [
                 write("/settings"),
                 key("Enter"),
