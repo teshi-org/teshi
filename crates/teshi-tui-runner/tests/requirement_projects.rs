@@ -26,7 +26,10 @@ fn project_linked(project: &Path, store: &Path, document_id: &str) -> bool {
 fn wait_for_project_link(project: &Path, store: &Path, document_id: &str, linked: bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while project_linked(project, store, document_id) != linked {
-        assert!(Instant::now() < deadline, "project link did not become {linked}");
+        assert!(
+            Instant::now() < deadline,
+            "project link did not become {linked}"
+        );
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -50,10 +53,16 @@ fn wait_for_project_document(project: &Path, store: &Path, document_id: &str) {
                 "planned"
             );
             let body = fs::read_to_string(store.join(doc["path"].as_str().unwrap())).unwrap();
-            assert!(body.starts_with("# Document 1"), "unexpected body: {body:?}");
+            assert!(
+                body.starts_with("# Document 1"),
+                "unexpected body: {body:?}"
+            );
             return;
         }
-        assert!(Instant::now() < deadline, "document was not saved for the project");
+        assert!(
+            Instant::now() < deadline,
+            "document was not saved for the project"
+        );
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -140,9 +149,7 @@ fn project_views_link_existing_sources_and_create_project_owned_documents() {
     terminal.expect_text("# Document 1", true, 10000).unwrap();
     terminal.key("Ctrl+s").unwrap();
     wait_for_project_document(&project, &store, "doc-1");
-    terminal
-        .expect_text("Document 1 *", false, 10000)
-        .unwrap();
+    terminal.expect_text("Document 1 *", false, 10000).unwrap();
 
     if let Some(artifacts) = std::env::var_os("TESHI_REQUIREMENT_PROJECT_ARTIFACTS") {
         let dir = std::path::PathBuf::from(artifacts);
