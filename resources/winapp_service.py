@@ -1685,7 +1685,9 @@ class WinAppSession:
         if not isinstance(args, list):
             return {"ok": False, "error": "args must be a list"}
         try:
-            self.process = subprocess.Popen([path, *[str(a) for a in args]], text=True)
+            self.process = subprocess.Popen([path, *[str(a) for a in args]], text=True,
+                                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL)
         except OSError as exc:
             return {"ok": False, "error": f"launch failed: {exc}"}
         deadline = time.monotonic() + float(payload.get("timeout_ms") or 15000) / 1000.0
@@ -2156,6 +2158,9 @@ class WinAppSession:
         timeout_s = float(payload.get("timeout_ms") or 10000) / 1000.0
         deadline = time.monotonic() + timeout_s
         while True:
+            expected_created = payload.get("_expected_process_created")
+            if expected_created is not None and native_process_created(pid) != expected_created:
+                return {"ok": False, "code": "target_invalid", "error": "Target process exited or changed identity"}
             state = process_window_state(pid)
             if state["visible"] == want_visible:
                 if (
@@ -2331,7 +2336,8 @@ class WinAppSession:
             if _process_is_running(exe_name):
                 return {"ok": True, "exec": "launch", "skipped": True, "reason": f"{exe_name} is already running"}
             try:
-                proc = subprocess.Popen([value_arg], text=True)
+                proc = subprocess.Popen([value_arg], text=True, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return {"ok": True, "exec": "launch", "pid": proc.pid}
             except OSError as exc:
                 return {"ok": False, "error": f"launch failed: {exc}"}
@@ -3054,6 +3060,253 @@ async def handle_command(session: WinAppSession, payload: dict[str, Any]) -> dic
         return {"ok": False, "error": str(exc)}
 
 
+def native_target_identity(hwnd: int | None) -> dict[str, Any] | None:
+    """Identify a live window and its process incarnation without UIA."""
+    if not hwnd or not is_window(hwnd):
+        return None
+    pid = get_window_pid(hwnd)
+    if not pid:
+        return None
+    created = native_process_created(pid)
+    return {"hwnd": hwnd, "pid": pid, "created": created} if created is not None else None
+
+
+def native_process_created(pid: int) -> int | None:
+    """Read process incarnation independently of window lifetime."""
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return None
+    try:
+        times = [wintypes.FILETIME() for _ in range(4)]
+        if not kernel.GetProcessTimes(handle, *[ctypes.byref(value) for value in times]):
+            return None
+        return (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def watch_supervisor(pid: int) -> None:
+    """Exit only this executor if its owning supervisor dies, even during UIA."""
+    if os.name == "nt":
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x00100000, False, pid)
+        if handle:
+            kernel.WaitForSingleObject(handle, 0xFFFFFFFF)
+            kernel.CloseHandle(handle)
+    else:
+        while os.getppid() == pid:
+            time.sleep(0.1)
+    os._exit(2)
+
+
+def run_executor(project_root: Path | None, supervisor_pid: int) -> None:
+    """Own COM/UIA and capture in an expendable, private protocol process."""
+    threading.Thread(target=watch_supervisor, args=(supervisor_pid,), daemon=True).start()
+    session = WinAppSession(project_root)
+    loop = asyncio.new_event_loop()
+    try:
+        for line in sys.stdin:
+            payload = json.loads(line)
+            identity = payload.pop("_restore_target", None)
+            if identity is not None:
+                if (payload.get("_lifecycle")
+                        and native_target_identity(identity["hwnd"]) != identity
+                        and native_process_created(identity["pid"]) == identity["created"]):
+                    session.hwnd = identity["hwnd"]
+                    session.target_pid = identity["pid"]
+                    result = {"ok": True}
+                elif native_target_identity(identity["hwnd"]) != identity:
+                    result = {"ok": False, "code": "target_invalid", "error": "Saved target identity changed"}
+                else:
+                    result = session.attach({"hwnd": identity["hwnd"], "pid": identity["pid"]})
+            else:
+                result = loop.run_until_complete(handle_command(session, payload))
+            current_identity = native_target_identity(session.hwnd)
+            if current_identity is None and session.target_pid and identity is not None:
+                current_identity = identity
+            result["_target_identity"] = current_identity
+            print(json.dumps(result), flush=True)
+    finally:
+        session.close()
+        loop.close()
+
+
+class WinAppSupervisor:
+    """Keep protocol health responsive while a single owned executor is blocked."""
+
+    def __init__(self, project_root: Path | None, executor_command: list[str] | None = None):
+        self.project_root = project_root
+        self.worker = None
+        self.active_request = None
+        self.target_identity = None
+        self.generation = 0
+        self.preview_active = False
+        self.business_pending = 0
+        self.lock = asyncio.Lock()
+        self.executor_command = executor_command
+        self.identity_file = project_root / ".teshi/winapp-target.json" if project_root else None
+        if self.identity_file:
+            with suppress(OSError, ValueError):
+                identity = json.loads(self.identity_file.read_text(encoding="utf-8"))
+                if isinstance(identity, dict) and set(identity) == {"hwnd", "pid", "created"}:
+                    self.target_identity = identity
+
+    async def stop_worker(self) -> None:
+        worker, self.worker = self.worker, None
+        self.generation += 1
+        if worker is not None and worker.returncode is None:
+            with suppress(ProcessLookupError):
+                worker.kill()
+            await asyncio.wait_for(worker.wait(), 1.0)
+
+    async def exchange(self, payload: dict[str, Any]) -> dict[str, Any]:
+        worker = self.worker
+        worker.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
+        await worker.stdin.drain()
+        line = await worker.stdout.readline()
+        if not line:
+            raise RuntimeError("executor exited before replying")
+        result = json.loads(line)
+        if not isinstance(result, dict) or type(result.get("ok")) is not bool:
+            raise RuntimeError("executor response must be an object with a boolean ok field")
+        identity = result.pop("_target_identity", None)
+        if identity is not None and (not isinstance(identity, dict) or set(identity) != {"hwnd", "pid", "created"}):
+            raise RuntimeError("executor returned an invalid target identity")
+        if identity is not None or (payload.get("cmd") != "wait_window" and "_restore_target" not in payload):
+            self.target_identity = identity
+        self.save_identity()
+        return result
+
+    def save_identity(self) -> None:
+        """Persist only a verified identity, never a title-based recovery hint."""
+        if self.identity_file:
+            self.identity_file.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.identity_file.with_suffix(".tmp")
+            temporary.write_text(json.dumps(self.target_identity), encoding="utf-8")
+            temporary.replace(self.identity_file)
+
+    async def execute(self, payload: dict[str, Any], *, background: bool = False) -> dict[str, Any]:
+        """Skip competing previews and let business requests wait for a preview."""
+        if background:
+            if self.lock.locked() or self.business_pending:
+                return {"ok": False, "code": "preview_skipped"}
+            self.preview_active = True
+        else:
+            self.business_pending += 1
+        try:
+            return await self._execute(payload)
+        finally:
+            if background:
+                self.preview_active = False
+            else:
+                self.business_pending -= 1
+
+    async def _execute(self, payload: dict[str, Any]) -> dict[str, Any]:
+        cmd = payload.get("cmd")
+        if cmd == "health":
+            valid = self.target_identity is not None and native_target_identity(
+                self.target_identity["hwnd"]) == self.target_identity
+            return {"ok": True, "protocol": "teshi-winapp", "version": 1,
+                    "generation": self.generation, "busy": self.lock.locked(),
+                    "active_request": self.active_request,
+                    "target": self.target_identity, "target_valid": valid,
+                    "project": str(self.project_root) if self.project_root else None}
+        if cmd == "cancel":
+            if not payload.get("cancel_request_id") or payload["cancel_request_id"] != self.active_request:
+                return {"ok": False, "code": "request_not_active", "error": "Cancellation identity does not match"}
+            await self.stop_worker()
+            return {"ok": True, "cancelled_request": payload["cancel_request_id"],
+                    "business_result": "unverified", "retry_safe": False}
+        if self.lock.locked() and not self.preview_active:
+            return {"ok": False, "code": "executor_busy", "stage": "queue",
+                    "error": "Executor is busy; query health or cancel its request", "retry_safe": True}
+        timeout_ms = payload.get("timeout_ms", 10000)
+        if not isinstance(timeout_ms, (int, float)) or not 0 < timeout_ms <= 120000:
+            return {"ok": False, "code": "invalid_timeout", "error": "timeout_ms must be in 1..120000"}
+        deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+        try:
+            await asyncio.wait_for(self.lock.acquire(), timeout_ms / 1000)
+        except TimeoutError:
+            return {"ok": False, "code": "command_timeout", "stage": "queue",
+                    "timeout_ms": timeout_ms, "error": "Executor queue deadline exceeded",
+                    "action_outcome": "not_dispatched", "business_result": "unverified", "retry_safe": True}
+        try:
+            self.active_request = f"{payload.get('request_id') or 'request'}:{secrets.token_hex(12)}"
+            stage = "executor_start"
+            dispatched = False
+            generation = self.generation
+            try:
+                async with asyncio.timeout_at(deadline):
+                    if self.worker is None or self.worker.returncode is not None:
+                        args = self.executor_command or [sys.executable, str(Path(__file__).resolve()),
+                                                         "--executor", "--supervisor-pid", str(os.getpid())]
+                        if self.project_root and not self.executor_command:
+                            args.extend(["--project-root", str(self.project_root)])
+                        options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+                        self.worker = await asyncio.create_subprocess_exec(
+                            *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.DEVNULL, limit=32 * 1024 * 1024, **options)
+                        if self.target_identity and cmd not in ("attach_window", "launch_app"):
+                            stage = "restore_target"
+                            identity = dict(self.target_identity)
+                            result = await self.exchange({"_restore_target": identity, "_lifecycle": cmd == "wait_window"})
+                            if not result.get("ok"):
+                                # Keep the saved process incarnation for lifecycle queries,
+                                # but discard the executor whose session was never restored.
+                                await self.stop_worker()
+                                return result
+                    stage = "native_execution"
+                    selector = str(payload.get("selector") or "")
+                    needs_target = cmd in ("get_ui_snapshot", "element_screenshot", "assert_screenshot", "highlight_selector", "screenshot") or (
+                        cmd == "execute_locator" and (not selector.startswith("exec:") or selector.startswith("exec:close")))
+                    if needs_target and self.target_identity is None:
+                        return {"ok": False, "code": "target_invalid", "error": "No verified target; attach explicitly"}
+                    if self.target_identity and cmd not in ("attach_window", "launch_app", "list_windows", "get_status"):
+                        if cmd == "wait_window":
+                            valid = native_process_created(self.target_identity["pid"]) == self.target_identity["created"]
+                        else:
+                            valid = native_target_identity(self.target_identity["hwnd"]) == self.target_identity
+                        if not valid:
+                            return {"ok": False, "code": "target_invalid", "error": "Saved target exited or changed identity"}
+                    if cmd in ("attach_window", "launch_app"):
+                        # An interrupted target switch must never silently fall
+                        # back to the previous window on the next command.
+                        self.target_identity = None
+                        self.save_identity()
+                    if cmd == "wait_window" and self.target_identity and str(payload.get("pid")) == str(self.target_identity["pid"]):
+                        payload = {**payload, "_expected_process_created": self.target_identity["created"]}
+                    dispatched = True
+                    return await self.exchange(payload)
+            except (TimeoutError, asyncio.CancelledError) as exc:
+                await self.stop_worker()
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                return {"ok": False, "code": "command_timeout", "stage": stage,
+                        "timeout_ms": timeout_ms, "request_id": self.active_request,
+                        "error": "Executor deadline exceeded; owned executor isolated",
+                        "action_outcome": "uncertain" if dispatched else "not_dispatched",
+                        "business_result": "unverified", "retry_safe": not dispatched}
+            except (OSError, RuntimeError, ValueError) as exc:
+                cancelled = self.generation != generation
+                await self.stop_worker()
+                return {"ok": False, "code": "command_cancelled" if cancelled else "executor_failed",
+                        "stage": stage, "error": str(exc), "retry_safe": not dispatched,
+                        "business_result": "unverified"}
+            finally:
+                self.active_request = None
+        finally:
+            self.lock.release()
+
+
 async def run_server(
     host: str,
     port: int,
@@ -3063,10 +3316,11 @@ async def run_server(
     """Run the WinApp sidecar WebSocket server."""
     if not auth_token:
         raise ValueError("WinApp sidecar authentication token is required")
-    session = WinAppSession(project_root)
+    session = WinAppSupervisor(project_root)
+    clients: set[Any] = set()
 
     async def handler(websocket: Any) -> None:
-        session.clients.add(websocket)
+        clients.add(websocket)
         try:
             async for message in websocket:
                 if isinstance(message, bytes):
@@ -3079,21 +3333,40 @@ async def run_server(
                     )
                     continue
                 request_id = payload.get("request_id")
-                response = await handle_command(session, payload)
+                response = await session.execute(payload)
                 response["type"] = "response"
                 if request_id is not None:
                     response["request_id"] = request_id
                 await websocket.send(json.dumps(response))
         finally:
-            session.clients.discard(websocket)
+            clients.discard(websocket)
 
     async def connection_handler(websocket: Any) -> None:
         if authenticated_websocket_path(_websocket_path(websocket), auth_token) is None:
+            await websocket.send(json.dumps({"type": "response", "ok": False,
+                                            "code": "authentication_failed", "error": "Invalid sidecar credential"}))
             await websocket.close(code=1008, reason="invalid WinApp sidecar token")
             return
         await handler(websocket)
 
-    frame_task = asyncio.create_task(session.broadcast_frame_loop())
+    async def preview_loop() -> None:
+        sequence = 0
+        while True:
+            await asyncio.sleep(FRAME_INTERVAL_SEC)
+            if not clients or not session.target_identity or session.lock.locked():
+                continue
+            response = await session.execute({"cmd": "screenshot", "timeout_ms": 3000}, background=True)
+            sequence += 1
+            if response.get("ok"):
+                frame = {"type": "frame", "data": response.get("screenshot"), "seq": sequence,
+                         "url": f"winapp://hwnd/{session.target_identity['hwnd']}" if session.target_identity else "winapp://detached"}
+            else:
+                frame = {"type": "frame_error", "error": response.get("error"), "code": response.get("code")}
+            for client in list(clients):
+                with suppress(Exception):
+                    await asyncio.wait_for(client.send(json.dumps(frame)), 0.5)
+
+    frame_task = asyncio.create_task(preview_loop())
     try:
         async with websockets.serve(
             connection_handler,
@@ -3111,23 +3384,30 @@ async def run_server(
         frame_task.cancel()
         with suppress(asyncio.CancelledError):
             await frame_task
-        session.close()
+        await session.stop_worker()
 
 
 def main() -> None:
     """Parse arguments and start the sidecar."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--executor", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--supervisor-pid", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--mode", default="winapp")
     parser.add_argument("--project-root")
-    parser.add_argument("--auth-token", required=True)
+    parser.add_argument("--auth-token")
     args = parser.parse_args()
     project_root = Path(args.project_root).resolve() if args.project_root else None
     if os.name != "nt":
         print("winapp mode is only supported on Windows", file=sys.stderr)
         sys.exit(2)
-    asyncio.run(run_server(args.host, args.port, project_root, args.auth_token))
+    if args.executor:
+        if not args.supervisor_pid:
+            parser.error("executor requires an owning supervisor")
+        run_executor(project_root, args.supervisor_pid)
+    else:
+        asyncio.run(run_server(args.host, args.port, project_root, args.auth_token))
 
 
 if __name__ == "__main__":
