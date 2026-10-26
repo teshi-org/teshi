@@ -60,10 +60,10 @@ def main() -> int:
         "Copy-Item -Path (Join-Path $pythonSourceDir '*') -Destination $pythonDir -Recurse -Force",
         "runtime Python copy path",
     )
-    require(WINAPP_RUNTIME, "[int]$RuntimeVersion = 4", "WinApp runtime v4 default")
+    require(WINAPP_RUNTIME, "[int]$RuntimeVersion = 5", "WinApp runtime v5 default")
     require(WINAPP_RUNTIME, 'service_script = "resources/winapp_service.py"', "runtime service manifest path")
-    require(RELEASE, "-RuntimeVersion 4", "release WinApp runtime v4 build")
-    require(RELEASE, "winapp-runtime-windows-x86_64-v4.zip", "release WinApp runtime v4 archive")
+    require(RELEASE, "-RuntimeVersion 5", "release WinApp runtime v5 build")
+    require(RELEASE, "winapp-runtime-windows-x86_64-v5.zip", "release WinApp runtime v5 archive")
     require(RELEASE, "scripts/test-release-package.py", "shipped dependency and bundle validation")
     require(RELEASE, "scripts/package_runtime.py --destination", "browser-agent live import staging")
     require(RELEASE, '--kind msi --run-cli', "compiled MSI broker probe")

@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 use gpui::{AppCell, Entity};
 use serde_json::json;
+use teshi_ui::replay_fixture::{ReplayFixtureBackend, ReplayFixtureMode};
 use teshi_ui::{
     ApiRunBackend, ApiRunEventDto, ApiScenarioSnapshot, AppShell, BackendFuture,
     BrowserMetadataSnapshot, BrowserSessionIdentitySnapshot, BrowserSessionListSnapshot,
@@ -26,6 +27,7 @@ struct E2eHost {
 
 thread_local! {
     static E2E: RefCell<Option<E2eHost>> = const { RefCell::new(None) };
+    static REPLAY: ReplayFixtureBackend = ReplayFixtureBackend::default();
     static BRIDGE_ATTEMPTED: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -46,7 +48,11 @@ pub fn browser_backend() -> Rc<dyn BrowserSessionsBackend> {
 
 /// Return the deterministic Run backend used only by the local E2E dock.
 pub fn api_run_backend() -> Rc<dyn ApiRunBackend> {
-    Rc::new(E2eApiRunBackend)
+    if super::query_parameter("replay_review").as_deref() == Some("1") {
+        REPLAY.with(|backend| Rc::new(backend.clone()))
+    } else {
+        Rc::new(E2eApiRunBackend)
+    }
 }
 
 struct E2eBrowserSessionsBackend;
@@ -251,6 +257,36 @@ fn mount_dom() -> Result<(), String> {
 <button type="button" data-testid="run-reload">Refresh scenarios</button>
 <button type="button" data-testid="run-start">Run scenario</button>
 <button type="button" data-testid="run-expand">Expand secrets</button>
+<button type="button" data-testid="review-ready-image">Prepare selected image</button>
+<button type="button" data-testid="review-active-image">Prepare active replay image</button>
+<button type="button" data-testid="review-failed-history">Prepare failed history</button>
+<button type="button" data-testid="review-capture-error">Prepare capture error history</button>
+<button type="button" data-testid="review-missing-history">Prepare missing image history</button>
+<button type="button" data-testid="review-existing-run">Prepare completed history</button>
+<button type="button" data-testid="review-success">Prepare success</button>
+<button type="button" data-testid="review-running">Prepare active run</button>
+<button type="button" data-testid="review-failed">Prepare failed run</button>
+<button type="button" data-testid="review-capture-failed">Prepare capture failure</button>
+<button type="button" data-testid="review-unsupported">Prepare unsupported backend</button>
+<button type="button" data-testid="review-missing">Prepare missing image</button>
+<button type="button" data-testid="review-two-projects">Prepare two projects</button>
+<button type="button" data-testid="review-seed">Seed saved run</button>
+<button type="button" data-testid="review-latest">Open latest run</button>
+<button type="button" data-testid="review-earlier">Open earlier run</button>
+<button type="button" data-testid="review-first-step">Select first step</button>
+<button type="button" data-testid="review-second-step">Select second step</button>
+<button type="button" data-testid="review-image">Toggle image preview</button>
+<button type="button" data-testid="review-close">Close project</button>
+<button type="button" data-testid="review-reopen">Reopen project</button>
+<button type="button" data-testid="review-switch">Switch project</button>
+<div data-testid="review-image-ready" role="status"></div>
+<div data-testid="review-enlarged" role="status"></div>
+<div data-testid="review-detail" role="status"></div>
+<div data-testid="review-step-id" role="status"></div>
+<div data-testid="review-run-id" role="status"></div>
+<div data-testid="review-step-status" role="status"></div>
+<div data-testid="review-history-count" role="status"></div>
+<div data-testid="review-image-file" role="status"></div>
 <div data-testid="e2e-surface" role="status">browser</div>
 <div data-testid="e2e-browser-status" role="status"></div>
 <div data-testid="e2e-run-status" role="status"></div>
@@ -328,7 +364,131 @@ fn bind_buttons() -> Result<(), String> {
                 .update(cx, |view, cx| view.toggle_expand_public(cx));
         })
     })?;
+    for (id, mode) in [
+        ("review-success", ReplayFixtureMode::Success),
+        ("review-running", ReplayFixtureMode::Running),
+        ("review-failed", ReplayFixtureMode::Failed),
+        ("review-capture-failed", ReplayFixtureMode::CaptureFailed),
+        ("review-unsupported", ReplayFixtureMode::Unsupported),
+        ("review-missing", ReplayFixtureMode::Missing),
+    ] {
+        bind_click(id, move || {
+            REPLAY.with(|backend| backend.reset(mode));
+            reload_replay_view();
+        })?;
+    }
+    for (id, mode, select) in [
+        ("review-ready-image", ReplayFixtureMode::Success, true),
+        ("review-active-image", ReplayFixtureMode::Running, false),
+        ("review-failed-history", ReplayFixtureMode::Failed, false),
+        (
+            "review-capture-error",
+            ReplayFixtureMode::CaptureFailed,
+            false,
+        ),
+        ("review-missing-history", ReplayFixtureMode::Missing, false),
+        ("review-existing-run", ReplayFixtureMode::Success, false),
+    ] {
+        bind_click(id, move || {
+            let run_id = REPLAY.with(|backend| {
+                backend.reset(mode);
+                backend.seed_run()
+            });
+            open_fixture_run(run_id, select);
+        })?;
+    }
+    bind_click("review-seed", || {
+        let id = REPLAY.with(|backend| backend.seed_run());
+        open_fixture_run(id, false);
+    })?;
+    bind_click("review-two-projects", || {
+        let id = REPLAY.with(|backend| {
+            backend.reset(ReplayFixtureMode::Success);
+            let first = backend.seed_run();
+            backend.switch_project();
+            backend.seed_run();
+            backend.switch_project();
+            first
+        });
+        open_fixture_run(id, false);
+    })?;
+    bind_click("review-close", || {
+        REPLAY.with(|backend| backend.set_closed(true));
+        reload_replay_view();
+    })?;
+    bind_click("review-reopen", || {
+        REPLAY.with(|backend| backend.set_closed(false));
+        reload_replay_view();
+    })?;
+    bind_click("review-switch", || {
+        let id = REPLAY.with(|backend| {
+            backend.switch_project();
+            backend.latest_run_id()
+        });
+        if let Some(id) = id {
+            open_fixture_run(id, false);
+        } else {
+            reload_replay_view();
+        }
+    })?;
+    bind_click("review-latest", || {
+        with_run_view(|view, cx| view.open_history_public(0, cx))
+    })?;
+    bind_click("review-earlier", || {
+        with_run_view(|view, cx| view.open_history_public(1, cx))
+    })?;
+    bind_click("review-first-step", || {
+        with_run_view(|view, cx| view.select_capture_public(0, cx))
+    })?;
+    bind_click("review-second-step", || {
+        with_run_view(|view, cx| view.select_capture_public(1, cx))
+    })?;
+    bind_click("review-image", || {
+        with_run_view(|view, cx| view.toggle_image_public(cx))
+    })?;
     Ok(())
+}
+
+fn open_fixture_run(id: String, select_image: bool) {
+    with_run_view(|view, cx| {
+        view.open_replay_public(id.clone(), cx);
+        if !select_image {
+            return;
+        }
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            // Wait on the real asynchronous view load; never mark the image ready here.
+            for _ in 0..300 {
+                let done = this
+                    .update(cx, |view, cx| {
+                        if view.screenshot_state()["run_id"] != id {
+                            return true;
+                        }
+                        if view.capture_count() == 0 {
+                            return false;
+                        }
+                        view.select_capture_public(0, cx);
+                        true
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+                executor.timer(std::time::Duration::from_millis(16)).await;
+            }
+        })
+        .detach();
+    });
+}
+
+fn with_run_view(
+    update: impl FnOnce(&mut teshi_ui::ApiRunView, &mut gpui::Context<teshi_ui::ApiRunView>),
+) {
+    with_shell(|shell, cx| shell.api_run().update(cx, update));
+}
+
+fn reload_replay_view() {
+    with_run_view(|view, cx| view.reload_scenarios_public(cx));
 }
 
 fn bind_click(test_id: &'static str, on_click: impl Fn() + 'static) -> Result<(), String> {
@@ -385,6 +545,23 @@ fn sync_status() {
         let run_status = run.status_text();
         let scenarios = run.scenario_list_text();
         let events = run.events_text();
+        let screenshot = run.screenshot_state();
+        for (key, id) in [
+            ("image_ready", "review-image-ready"),
+            ("enlarged", "review-enlarged"),
+            ("detail", "review-detail"),
+            ("step_id", "review-step-id"),
+            ("run_id", "review-run-id"),
+            ("step_status", "review-step-status"),
+            ("history_count", "review-history-count"),
+            ("image_file", "review-image-file"),
+        ] {
+            let value = screenshot[key]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| screenshot[key].to_string());
+            set_text(id, &value);
+        }
         let _ = run;
         let bridge_attempted =
             BRIDGE_ATTEMPTED.with(|attempted| if attempted.get() { "true" } else { "false" });

@@ -103,6 +103,7 @@ struct ControlClient {
     ready_waiters: RefCell<Vec<oneshot::Sender<Result<(), String>>>>,
     events: RefCell<VecDeque<(String, serde_json::Value)>>,
     next_id: Cell<u64>,
+    project_revision: Cell<u64>,
     reconnect_scheduled: Cell<bool>,
     permanent_error: RefCell<Option<String>>,
 }
@@ -119,6 +120,7 @@ impl ControlClient {
             ready_waiters: RefCell::new(Vec::new()),
             events: RefCell::new(VecDeque::new()),
             next_id: Cell::new(1),
+            project_revision: Cell::new(0),
             reconnect_scheduled: Cell::new(false),
             permanent_error: RefCell::new(None),
         })
@@ -365,6 +367,10 @@ impl ControlClient {
                 }
             }
             ServerMessage::Event { event, payload } => {
+                if event == "project-changed" {
+                    self.project_revision
+                        .set(self.project_revision.get().wrapping_add(1));
+                }
                 let mut events = self.events.borrow_mut();
                 if events.len() >= 256 {
                     events.pop_front();
@@ -437,6 +443,34 @@ impl ControlClient {
         );
         closure.forget();
     }
+}
+
+fn install_project_refresh(app: Rc<AppCell>, shell: Entity<AppShell>, control: Rc<ControlClient>) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let mut observed = control.project_revision.get();
+    let callback = Closure::wrap(Box::new(move || {
+        let revision = control.project_revision.get();
+        if revision == observed {
+            return;
+        }
+        // A busy GPUI update is retried on the next tick, without reentrant borrowing.
+        if let Ok(mut app) = app.try_borrow_mut() {
+            let app: &mut gpui::App = std::ops::DerefMut::deref_mut(&mut app);
+            shell.update(app, |shell, cx| {
+                shell
+                    .api_run()
+                    .update(cx, |view, cx| view.reload_scenarios_public(cx));
+            });
+            observed = revision;
+        }
+    }) as Box<dyn FnMut()>);
+    let _ = window.set_interval_with_callback_and_timeout_and_arguments_0(
+        callback.as_ref().unchecked_ref(),
+        250,
+    );
+    callback.forget();
 }
 
 async fn fetch_manifest() -> Result<UiManifest, String> {
@@ -893,6 +927,62 @@ impl BrowserSessionsBackend for WasmBackend {
 }
 
 impl ApiRunBackend for WasmBackend {
+    fn supports_replay_history(&self) -> bool {
+        true
+    }
+
+    fn begin_replay(&self, ids: &[String]) -> BackendFuture<String> {
+        let control = self.control.clone();
+        let ids = ids.to_vec();
+        Box::pin(async move {
+            let value = control
+                .request("bdd.begin_replay", serde_json::json!({"scenario_ids":ids}))
+                .await?;
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "Missing replay identity".into())
+        })
+    }
+
+    fn replay_history(&self) -> BackendFuture<Vec<serde_json::Value>> {
+        let control = self.control.clone();
+        Box::pin(async move {
+            serde_json::from_value(
+                control
+                    .request("bdd.replay_history", serde_json::json!({}))
+                    .await?,
+            )
+            .map_err(|e| e.to_string())
+        })
+    }
+
+    fn replay_snapshot(&self, id: &str) -> BackendFuture<serde_json::Value> {
+        let control = self.control.clone();
+        let id = id.to_string();
+        Box::pin(async move {
+            control
+                .request("bdd.replay_snapshot", serde_json::json!({"run_id":id}))
+                .await
+        })
+    }
+
+    fn replay_image(&self, id: &str, filename: &str) -> BackendFuture<Vec<u8>> {
+        let control = self.control.clone();
+        let (id, filename) = (id.to_string(), filename.to_string());
+        Box::pin(async move {
+            let value = control
+                .request(
+                    "bdd.replay_image",
+                    serde_json::json!({"run_id":id,"filename":filename}),
+                )
+                .await?;
+            base64::engine::general_purpose::STANDARD
+                .decode(value.as_str().ok_or("Missing image data")?)
+                .map_err(|e| e.to_string())
+        })
+    }
+
     fn list_scenarios(&self) -> BackendFuture<Vec<ApiScenarioSnapshot>> {
         let control = self.control.clone();
         Box::pin(async move {
@@ -1001,6 +1091,9 @@ pub fn run(on_ready: js_sys::Function, on_error: js_sys::Function) -> Result<(),
             shell
         }) {
             Ok(_) => {
+                if let Some(shell) = shell_slot.borrow().clone() {
+                    install_project_refresh(app_cell.clone(), shell, control.clone());
+                }
                 if e2e::e2e_enabled() {
                     if let Some(shell) = shell_slot.borrow().clone() {
                         e2e::install(app_cell.clone(), shell);

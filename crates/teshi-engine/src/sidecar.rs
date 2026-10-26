@@ -256,36 +256,38 @@ pub fn send_sidecar_command_with_timeout(
     command: serde_json::Value,
     timeout: std::time::Duration,
 ) -> Result<serde_json::Value, String> {
-    use tungstenite::{connect, Message};
+    use tungstenite::Message;
 
     let expected_request_id = command
         .get("request_id")
         .and_then(serde_json::Value::as_str);
     let authenticated_url = authenticated_sidecar_ws_url(ws_url)?;
-    let (mut socket, _) = connect(&authenticated_url).map_err(|error| {
-        sidecar_transport_error(
-            "websocket_handshake_failed",
-            error,
-            &authenticated_url,
-            ws_url,
-        )
-    })?;
+    let deadline = std::time::Instant::now() + timeout;
+    let stream = deadline_stream(&authenticated_url, deadline)?;
+    let (mut socket, _) =
+        tungstenite::client(authenticated_url.as_str(), stream).map_err(|error| {
+            sidecar_transport_error(
+                "websocket_handshake_failed: stage=handshake",
+                error,
+                &authenticated_url,
+                ws_url,
+            )
+        })?;
     socket
         .send(Message::Text(command.to_string()))
         .map_err(|error| {
             sidecar_transport_error(
-                "websocket_closed_before_command",
+                "websocket_closed_before_command: stage=send",
                 error,
                 &authenticated_url,
                 ws_url,
             )
         })?;
 
-    let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
         let message = socket.read().map_err(|error| {
             sidecar_transport_error(
-                "websocket_closed_before_command",
+                "websocket_closed_before_command: stage=awaiting_response",
                 error,
                 &authenticated_url,
                 ws_url,
@@ -297,6 +299,9 @@ pub fn send_sidecar_command_with_timeout(
                     format!("websocket_protocol_error: invalid JSON response: {error}")
                 })?;
                 if is_terminal_sidecar_response(&payload, expected_request_id) {
+                    // A one-shot client still owes the peer a closing frame. Dropping
+                    // TCP here makes each successful command look like a server error.
+                    let _ = socket.close(None);
                     return Ok(payload);
                 }
             }
@@ -313,8 +318,103 @@ pub fn send_sidecar_command_with_timeout(
     }
     let secs = timeout.as_secs();
     Err(format!(
-        "browser sidecar did not respond within {secs}s (CLI timeout; check extension heartbeat if using Connect Chrome)"
+        "command_timeout: stage=awaiting_response timeout_s={secs}"
     ))
+}
+
+// Refresh the socket timeout before every IO, including each handshake read.
+// A peer sending occasional bytes cannot extend the absolute command deadline.
+struct DeadlineStream {
+    stream: std::net::TcpStream,
+    deadline: std::time::Instant,
+}
+
+impl DeadlineStream {
+    fn remaining(&self) -> std::io::Result<std::time::Duration> {
+        self.deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "command_timeout"))
+    }
+}
+
+impl std::io::Read for DeadlineStream {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.remaining()?))?;
+        std::io::Read::read(&mut self.stream, bytes).map_err(deadline_io_error)
+    }
+}
+
+impl std::io::Write for DeadlineStream {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        std::io::Write::write(&mut self.stream, bytes).map_err(deadline_io_error)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        std::io::Write::flush(&mut self.stream)
+    }
+}
+
+fn deadline_io_error(error: std::io::Error) -> std::io::Error {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "command_timeout")
+    } else {
+        error
+    }
+}
+
+fn deadline_stream(url: &str, deadline: std::time::Instant) -> Result<DeadlineStream, String> {
+    let parsed = url::Url::parse(url).map_err(|_| "invalid_endpoint: stage=connect".to_string())?;
+    // Sidecars are local plaintext WebSockets. Refuse unsupported transports
+    // rather than silently removing TLS from an unexpected endpoint.
+    if parsed.scheme() != "ws" {
+        return Err("unsupported_transport: stage=connect expected=ws".into());
+    }
+    let host = parsed.host_str().ok_or("invalid_endpoint: stage=connect")?;
+    let port = parsed.port().unwrap_or(80);
+    let addresses = if host == "localhost" {
+        vec![std::net::SocketAddr::from(([127, 0, 0, 1], port))]
+    } else if let Ok(ip) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+        vec![std::net::SocketAddr::new(ip, port)]
+    } else {
+        let host = host.to_owned();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            use std::net::ToSocketAddrs;
+            let _ = sender.send(
+                (host.as_str(), port)
+                    .to_socket_addrs()
+                    .map(|items| items.collect::<Vec<_>>()),
+            );
+        });
+        receiver
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .map_err(|_| "command_timeout: stage=connect dns".to_string())?
+            .map_err(|_| "connection_failed: stage=connect dns".to_string())?
+    };
+    let remaining = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or("command_timeout: stage=connect")?;
+    let mut error = "connection_failed: stage=connect no_addresses".to_owned();
+    for address in addresses {
+        let remaining = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .min(remaining);
+        if remaining.is_zero() {
+            return Err("command_timeout: stage=connect".into());
+        }
+        match std::net::TcpStream::connect_timeout(&address, remaining) {
+            Ok(stream) => return Ok(DeadlineStream { stream, deadline }),
+            Err(failure) => error = format!("connection_failed: stage=connect {failure}"),
+        }
+    }
+    Err(error)
 }
 
 fn sidecar_transport_error(
@@ -328,6 +428,124 @@ fn sidecar_transport_error(
         return format!("{code}: broker credential redacted");
     }
     format!("{code}: {detail}")
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_response_closes_the_one_shot_websocket() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            socket.read().unwrap();
+            socket
+                .send(tungstenite::Message::Text(
+                    serde_json::json!({"type":"response","ok":true}).to_string(),
+                ))
+                .unwrap();
+            assert!(matches!(
+                socket.read().unwrap(),
+                tungstenite::Message::Close(_)
+            ));
+        });
+        let response = send_sidecar_command_with_timeout(
+            &format!("ws://{address}"),
+            serde_json::json!({"cmd":"health"}),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(response["ok"], true);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn sidecar_stderr_is_drained_with_a_bounded_diagnostic_tail() {
+        let mut bytes = vec![b'x'; 1024 * 1024];
+        bytes.extend_from_slice(b"final diagnostic");
+        let stderr = SidecarStderr::drain(std::io::Cursor::new(bytes));
+        stderr
+            .finished
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        let detail = stderr.exit_detail();
+        assert_eq!(detail.len(), SIDECAR_STDERR_TAIL_BYTES);
+        assert!(detail.ends_with("final diagnostic"));
+    }
+
+    #[test]
+    fn stalled_handshake_and_response_obey_absolute_deadline() {
+        for handshake in [true, false] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (release, released) = std::sync::mpsc::channel();
+            let server = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                if handshake {
+                    let _ = released.recv_timeout(Duration::from_secs(3));
+                    drop(stream);
+                } else {
+                    let mut socket = tungstenite::accept(stream).unwrap();
+                    socket.read().unwrap();
+                    let _ = released.recv_timeout(Duration::from_secs(3));
+                }
+            });
+            let start = std::time::Instant::now();
+            let error = send_sidecar_command_with_timeout(
+                &format!("ws://{address}"),
+                serde_json::json!({"cmd":"probe"}),
+                Duration::from_millis(150),
+            )
+            .unwrap_err();
+            let elapsed = start.elapsed();
+            release.send(()).unwrap();
+            server.join().unwrap();
+            assert!(elapsed < Duration::from_secs(1), "{elapsed:?}: {error}");
+            assert!(
+                error.contains(if handshake {
+                    "stage=handshake"
+                } else {
+                    "stage=awaiting_response"
+                }),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_frames_do_not_extend_response_deadline() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            socket.read().unwrap();
+            for _ in 0..30 {
+                if socket
+                    .send(tungstenite::Message::Text("{\"type\":\"frame\"}".into()))
+                    .is_err()
+                {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let start = std::time::Instant::now();
+        assert!(send_sidecar_command_with_timeout(
+            &format!("ws://{address}"),
+            serde_json::json!({"cmd":"probe"}),
+            Duration::from_millis(150)
+        )
+        .is_err());
+        assert!(start.elapsed() < Duration::from_secs(1));
+        server.join().unwrap();
+    }
 }
 
 /// Adds the private generation-bound credential only when a URL identifies the
@@ -857,14 +1075,48 @@ fn valid_broker_ws_query(query: Option<&str>) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
-fn read_child_stderr(child: &mut Child) -> String {
-    if let Some(mut stderr) = child.stderr.take() {
-        let mut buf = Vec::new();
-        if stderr.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
-            return String::from_utf8_lossy(&buf).trim().to_string();
-        }
+const SIDECAR_STDERR_TAIL_BYTES: usize = 16 * 1024;
+
+struct SidecarStderr {
+    tail: Arc<Mutex<Vec<u8>>>,
+    finished: std::sync::mpsc::Receiver<()>,
+}
+
+impl SidecarStderr {
+    fn drain(mut reader: impl Read + Send + 'static) -> Self {
+        let tail = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::clone(&tail);
+        let (done, finished) = std::sync::mpsc::channel();
+        // Keep draining for the child's entire lifetime: a full stderr pipe can
+        // block Python's event loop even when native execution is isolated.
+        std::thread::spawn(move || {
+            let mut chunk = [0; 4096];
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        let mut tail = output.lock().unwrap();
+                        tail.extend_from_slice(&chunk[..count]);
+                        let excess = tail.len().saturating_sub(SIDECAR_STDERR_TAIL_BYTES);
+                        tail.drain(..excess);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+            let _ = done.send(());
+        });
+        Self { tail, finished }
     }
-    String::new()
+
+    fn exit_detail(&self) -> String {
+        // An exited child may leave inherited handles in descendants. Bound the
+        // wait for trailing diagnostics rather than waiting indefinitely for EOF.
+        let _ = self.finished.recv_timeout(Duration::from_millis(100));
+        String::from_utf8_lossy(&self.tail.lock().unwrap())
+            .trim()
+            .to_owned()
+    }
 }
 
 /// Read the first line from the child's stdout and parse it as a port number.
@@ -873,7 +1125,11 @@ fn read_child_stderr(child: &mut Child) -> String {
 ///   - JSON readiness object: `{"ready": true, "ws_url": "ws://127.0.0.1:54321", ...}` (winapp mode)
 ///
 /// Uses a background thread so the main thread can poll for child exit and timeout.
-fn read_port_from_child_stdout(child: &mut Child, timeout: Duration) -> Result<u16, BrowserError> {
+fn read_port_from_child_stdout(
+    child: &mut Child,
+    stderr: &SidecarStderr,
+    timeout: Duration,
+) -> Result<u16, BrowserError> {
     let mut stdout = child.stdout.take().expect("stdout must be piped");
     let deadline = Instant::now() + timeout;
 
@@ -908,7 +1164,7 @@ fn read_port_from_child_stdout(child: &mut Child, timeout: Duration) -> Result<u
             };
         }
         if let Ok(Some(status)) = child.try_wait() {
-            let detail = read_child_stderr(child);
+            let detail = stderr.exit_detail();
             let message = if detail.is_empty() {
                 format!("Browser sidecar exited during startup (status: {status}).")
             } else {
@@ -2113,15 +2369,17 @@ pub async fn start_browser_sidecar_with_options(
                 hint: None,
             })?;
 
-        let actual_port = match read_port_from_child_stdout(&mut child, Duration::from_secs(10)) {
-            Ok(port) => port,
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
-            }
-        };
-        if let Err(error) = wait_until_ready(&mut child, actual_port) {
+        let stderr = SidecarStderr::drain(child.stderr.take().expect("stderr must be piped"));
+        let actual_port =
+            match read_port_from_child_stdout(&mut child, &stderr, Duration::from_secs(10)) {
+                Ok(port) => port,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            };
+        if let Err(error) = wait_until_ready(&mut child, &stderr, actual_port) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(error);
@@ -2309,7 +2567,11 @@ fn wait_until_elevated_ready(process: &ElevatedProcess, port: u16) -> Result<(),
     }
 }
 
-fn wait_until_ready(child: &mut Child, port: u16) -> Result<(), BrowserError> {
+fn wait_until_ready(
+    child: &mut Child,
+    stderr: &SidecarStderr,
+    port: u16,
+) -> Result<(), BrowserError> {
     use std::net::{SocketAddr, TcpStream};
     use std::time::{Duration, Instant};
 
@@ -2318,7 +2580,7 @@ fn wait_until_ready(child: &mut Child, port: u16) -> Result<(), BrowserError> {
 
     loop {
         if let Ok(Some(status)) = child.try_wait() {
-            let detail = read_child_stderr(child);
+            let detail = stderr.exit_detail();
             let message = if detail.is_empty() {
                 format!("Browser sidecar exited during startup (status: {status}).")
             } else {

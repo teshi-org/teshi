@@ -71,6 +71,10 @@ HOSTED_CONTROL_INVENTORY = {
     "bdd.validate_buffer",
     "bdd.list_scenarios",
     "bdd.run",
+    "bdd.begin_replay",
+    "bdd.replay_history",
+    "bdd.replay_snapshot",
+    "bdd.replay_image",
     "api.get_exchange",
     "locator.sync_step",
     "locator.active_step",
@@ -124,6 +128,10 @@ def main() -> int:
         "bdd.validate_buffer",
         "bdd.list_scenarios",
         "bdd.run",
+        "bdd.begin_replay",
+        "bdd.replay_history",
+        "bdd.replay_snapshot",
+        "bdd.replay_image",
         "api.get_exchange",
     }
     if ui_methods != expected_ui_methods:

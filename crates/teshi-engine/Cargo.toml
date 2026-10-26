@@ -13,6 +13,7 @@ dunce = "1"
 dirs = "6"
 fd-lock = "4"
 futures = "0.3"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 notify = "7.0"
 portable-pty = "0.8"
 reqwest = { workspace = true }

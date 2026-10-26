@@ -19,6 +19,7 @@ pub mod model_profile;
 mod project;
 pub mod project_identity;
 mod project_settings;
+pub mod replay_evidence;
 mod screen;
 mod sidecar;
 mod terminal;
@@ -36,6 +37,7 @@ pub mod python_env {
     };
 }
 
+pub use api_dispatch::start_replay_run;
 pub use api_dispatch::{
     api_endpoint_path, dispatch_cases, ensure_api_sidecar, list_runnable_scenarios,
     mode_uses_teshi_dispatch, read_api_endpoint, send_api_command, stop_api_sidecar, ApiEndpoint,

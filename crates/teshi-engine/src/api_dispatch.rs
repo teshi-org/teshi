@@ -264,6 +264,93 @@ pub fn dispatch_cases<F>(
 where
     F: FnMut(Value),
 {
+    for case in cases {
+        let report = validate_feature_scope(project_root, Some(&case.feature_path))?;
+        anyhow::ensure!(
+            !report.has_errors(),
+            "Feature validation failed before dispatch: {}",
+            serde_json::to_string(&report)?
+        );
+    }
+    let run = crate::replay_evidence::ReplayEvidenceRun::create(project_root)?;
+    dispatch_recorded(project_root, script, cases, run, &mut emit)
+}
+
+/// Start a durable run on a worker thread so GPUI can poll steps while it runs.
+///
+/// # Errors
+/// Returns an error for unknown scenarios or unwritable evidence storage.
+pub fn start_replay_run(project: &Path, ids: &[String]) -> Result<String> {
+    let cases: Vec<DispatchCase> = list_runnable_scenarios(project)
+        .into_iter()
+        .filter(|item| ids.contains(&item.id))
+        .map(|item| DispatchCase {
+            id: item.id,
+            feature_path: item.feature_path.into(),
+            scenario: item.name,
+        })
+        .collect();
+    anyhow::ensure!(
+        !cases.is_empty() && cases.len() == ids.len(),
+        "unknown or duplicate scenario selection"
+    );
+    let run = crate::replay_evidence::ReplayEvidenceRun::create(project)?;
+    let id = run.id().to_string();
+    let project = project.to_path_buf();
+    std::thread::Builder::new()
+        .name("replay-evidence".into())
+        .spawn(move || {
+            if let Err(error) = dispatch_recorded(
+                &project,
+                &crate::default_api_service_script(),
+                &cases,
+                run,
+                &mut |_| {},
+            ) {
+                tracing::warn!(%error, "replay worker failed");
+            }
+        })?;
+    Ok(id)
+}
+
+fn dispatch_recorded<F>(
+    project_root: &Path,
+    script: &Path,
+    cases: &[DispatchCase],
+    mut run: crate::replay_evidence::ReplayEvidenceRun,
+    emit: &mut F,
+) -> Result<()>
+where
+    F: FnMut(Value),
+{
+    let directory = run.directory().to_path_buf();
+    let mut persistence_error = None;
+    let result = dispatch_cases_inner(project_root, script, cases, &directory, &mut |value| {
+        if let Err(error) = run.record(value.clone()) {
+            persistence_error = Some(error);
+        }
+        emit(value);
+    });
+    if let Err(error) = &result {
+        run.record(json!({"type":"run_error", "message":error.to_string()}))?;
+        run.record(json!({"type":"end_run", "failed":1}))?;
+    }
+    if let Some(error) = persistence_error {
+        return Err(error);
+    }
+    result
+}
+
+fn dispatch_cases_inner<F>(
+    project_root: &Path,
+    script: &Path,
+    cases: &[DispatchCase],
+    directory: &Path,
+    emit: &mut F,
+) -> Result<()>
+where
+    F: FnMut(Value),
+{
     let feature_paths: BTreeSet<PathBuf> =
         cases.iter().map(|case| case.feature_path.clone()).collect();
     for feature_path in feature_paths {
@@ -289,8 +376,9 @@ where
             "type": "start_case",
             "case_id": case.id,
             "name": case.scenario,
+            "feature": feature_relative(project_root, &case.feature_path),
         }));
-        match dispatch_one_case(project_root, script, case, &mut emit) {
+        match dispatch_one_case(project_root, script, case, directory, emit) {
             Ok(true) => {
                 passed += 1;
                 emit(json!({
@@ -325,6 +413,7 @@ fn dispatch_one_case<F>(
     project_root: &Path,
     script: &Path,
     case: &DispatchCase,
+    directory: &Path,
     emit: &mut F,
 ) -> Result<bool>
 where
@@ -377,7 +466,15 @@ where
     }
 
     for (index, step) in scenario_steps(&feature, scenario).into_iter().enumerate() {
-        if !dispatch_one_step(project_root, &feature, step, mode, &case.id, index, emit)? {
+        if !dispatch_one_step(
+            project_root,
+            &feature,
+            step,
+            mode,
+            (&case.id, index),
+            directory,
+            emit,
+        )? {
             return Ok(false);
         }
     }
@@ -389,13 +486,14 @@ fn dispatch_one_step<F>(
     feature: &BddFeature,
     step: &BddStep,
     mode: EngineMode,
-    case_id: &str,
-    index: usize,
+    identity: (&str, usize),
+    directory: &Path,
     emit: &mut F,
 ) -> Result<bool>
 where
     F: FnMut(Value),
 {
+    let (case_id, index) = identity;
     let (is_api, stripped) = strip_api_marker(&step.text);
     let step_id = format!("{case_id}:step{index}");
     emit(json!({
@@ -450,13 +548,48 @@ where
         anyhow::bail!("UI step in @api-only scenario");
     }
 
-    execute_ui_step(project_root, feature, step)?;
+    let result = execute_ui_step(project_root, feature, step);
+    let status = if result.is_ok() { "passed" } else { "failed" };
+    let mut capture = json!({"type":"step_screenshot", "case_id":case_id, "step_id":step_id,
+        "feature":feature_relative(project_root, &feature.file_path), "step_line":step.line_number,
+        "step_keyword":step.keyword, "step_text":step.text, "status":status});
+    let endpoint: Value = fs::read(project_root.join(".teshi/cdp-endpoint.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or(Value::Null);
+    if endpoint["mode"] == "chrome" {
+        capture["capture_status"] = json!("unsupported");
+        capture["message"] =
+            json!("This backend requires an explicit browser target and screenshot capability.");
+    } else {
+        match crate::replay_evidence::capture_replay_viewport(project_root).and_then(|bytes| {
+            anyhow::ensure!(
+                !bytes.is_empty() && bytes.len() <= 16 * 1024 * 1024,
+                "invalid screenshot size"
+            );
+            let file = format!("{}.jpg", uuid::Uuid::new_v4());
+            fs::write(directory.join(&file), bytes)?;
+            Ok(file)
+        }) {
+            Ok(file) => {
+                capture["capture_status"] = json!("available");
+                capture["screenshot_file"] = json!(file);
+                capture["captured_at"] = json!(chrono::Utc::now().to_rfc3339());
+            }
+            Err(error) => {
+                capture["capture_status"] = json!("failed");
+                capture["message"] = json!(error.to_string());
+            }
+        }
+    }
+    emit(capture);
     emit(json!({
         "type": "end_step",
         "case_id": case_id,
         "step_id": step_id,
-        "status": "passed",
+        "status": status,
     }));
+    result?;
     Ok(true)
 }
 
@@ -533,6 +666,110 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].engine_mode, "api");
         assert_eq!(listed[0].name, "Create");
+    }
+
+    #[test]
+    fn failed_ui_step_publishes_its_image_before_failed_run_completion() {
+        use base64::Engine as _;
+        use std::net::TcpListener;
+        let project = tempfile::tempdir().unwrap();
+        let feature_path = project.path().join("review.feature");
+        fs::write(
+            &feature_path,
+            "Feature: Capture\n  Scenario: Failed assertion\n    Then marker is visible\n",
+        )
+        .unwrap();
+        let feature = parse_feature(
+            &fs::read_to_string(&feature_path).unwrap(),
+            feature_path.clone(),
+        );
+        let step = &feature.scenarios[0].steps[0];
+        fs::write(project.path().join("review.bindings.json"), json!({
+            "format_version":2,"feature":"review.feature","steps":[{
+                "step_line":step.line_number,"step_keyword":step.keyword,"step_text":step.text,
+                "step_text_normalized":step.text,"source":"binding","status":"confirmed",
+                "primary":{"strategy":"css","value":"button","action":"assert_visible"},"confirmed_at":"fixture"
+            }]
+        }).to_string()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        fs::create_dir_all(project.path().join(".teshi")).unwrap();
+        fs::write(
+            project.path().join(".teshi/cdp-endpoint.json"),
+            json!({"mode":"embedded", "ws_url":format!("ws://{address}")}).to_string(),
+        )
+        .unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(png.into_inner());
+        let worker = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (socket, _) = listener.accept().unwrap();
+                let mut socket = tungstenite::accept(socket).unwrap();
+                let request: Value =
+                    serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+                let mut response = if request["cmd"] == "screenshot" {
+                    json!({"ok":true,"screenshot":encoded})
+                } else {
+                    json!({"ok":false,"error":"marker absent"})
+                };
+                response["type"] = json!("response");
+                response["request_id"] = request["request_id"].clone();
+                socket
+                    .send(tungstenite::Message::Text(response.to_string()))
+                    .unwrap();
+            }
+        });
+        let mut events = Vec::new();
+        dispatch_cases(
+            project.path(),
+            Path::new("unused-api-service"),
+            &[DispatchCase {
+                id: "case-one".into(),
+                feature_path,
+                scenario: "Failed assertion".into(),
+            }],
+            |event| {
+                if event["type"] == "step_screenshot" {
+                    let history = crate::replay_evidence::list_replay_runs(project.path()).unwrap();
+                    assert_eq!(history[0].status, "running");
+                    let stored =
+                        crate::replay_evidence::load_replay_run(project.path(), &history[0].id)
+                            .unwrap();
+                    assert!(stored
+                        .events
+                        .iter()
+                        .any(|item| item["type"] == "step_screenshot"));
+                    assert!(!crate::replay_evidence::load_replay_image(
+                        project.path(),
+                        &history[0].id,
+                        event["screenshot_file"].as_str().unwrap()
+                    )
+                    .unwrap()
+                    .is_empty());
+                }
+                events.push(event);
+            },
+        )
+        .unwrap();
+        worker.join().unwrap();
+        let capture = events
+            .iter()
+            .position(|event| event["type"] == "step_screenshot")
+            .unwrap();
+        let failed = events
+            .iter()
+            .position(|event| event["type"] == "case_failed")
+            .unwrap();
+        assert!(capture < failed);
+        assert_eq!(events[capture]["status"], "failed");
+        assert_eq!(events[capture]["capture_status"], "available");
+        assert_eq!(
+            crate::replay_evidence::list_replay_runs(project.path()).unwrap()[0].status,
+            "failed"
+        );
     }
 
     #[test]

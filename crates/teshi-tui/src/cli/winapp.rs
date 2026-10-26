@@ -1,4 +1,3 @@
-use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -7,14 +6,13 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::json;
 use teshi_engine::{
     DaemonManifest, DaemonManifestExt, StepBinding, find_project_root, read_active_step,
-    remove_daemon_manifest, resolve_step_bindings, send_sidecar_command_with_timeout,
-    spawn_daemon_background,
+    remove_daemon_manifest, send_sidecar_command_with_timeout, spawn_daemon_background,
 };
 
 use super::browser_endpoint::{read_cdp_endpoint, write_cdp_endpoint_from_rust};
 use super::check::preflight_feature;
 use super::replay_screenshots::{
-    ReplayScreenshotEntry, capture_and_save_screenshot, iso_now, load_or_create_index, save_index,
+    capture_and_save_screenshot, iso_now, load_or_create_index, save_index,
 };
 use super::{
     ShellCommand, TrayCommand, WinAppAttachArgs, WinAppCommand, WinAppExecuteArgs,
@@ -24,6 +22,16 @@ use super::{
 
 /// Handles `teshi winapp ...` subcommands.
 pub fn handle_winapp_command(action: &WinAppCommand) -> Result<()> {
+    let result = handle_winapp_inner(action);
+    if let Err(error) = &result
+        && let Ok(response) = serde_json::from_str::<serde_json::Value>(&error.to_string())
+    {
+        print_json_response(response)?;
+    }
+    result
+}
+
+fn handle_winapp_inner(action: &WinAppCommand) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let project_root = match action {
         WinAppCommand::Replay(args) => replay_project_root(&cwd, args.feature.as_deref()),
@@ -41,9 +49,11 @@ pub fn handle_winapp_command(action: &WinAppCommand) -> Result<()> {
         _ => None,
     };
     if let Some(command) = visual {
-        let response = ensure_winapp_sidecar(&project_root, false).and_then(|()| {
-            send_winapp_command(&project_root, command.clone(), Duration::from_secs(60))
-        }).unwrap_or_else(|err| json!({"ok": false, "selector": command["selector"], "error": err.to_string()}));
+        let response = ensure_winapp_sidecar(&project_root, false)
+            .and_then(|()| {
+                send_winapp_command(&project_root, command.clone(), Duration::from_secs(60))
+            })
+            .unwrap_or_else(|err| transport_failure(&err.to_string()));
         print_json_response(response.clone())?;
         return ensure_ok(&response);
     }
@@ -74,6 +84,24 @@ pub fn handle_winapp_command(action: &WinAppCommand) -> Result<()> {
         ensure_winapp_sidecar(&project_root, elevated)?;
     }
     match action {
+        WinAppCommand::Health => {
+            let response = send_winapp_command(
+                &project_root,
+                json!({"cmd":"health"}),
+                Duration::from_secs(2),
+            )?;
+            print_json_response(response.clone())?;
+            ensure_ok(&response)
+        }
+        WinAppCommand::Cancel { request_id } => {
+            let response = send_winapp_command(
+                &project_root,
+                json!({"cmd":"cancel","cancel_request_id":request_id}),
+                Duration::from_secs(2),
+            )?;
+            print_json_response(response.clone())?;
+            ensure_ok(&response)
+        }
         WinAppCommand::ListWindows => list_windows(&project_root),
         WinAppCommand::Status => status(&project_root),
         WinAppCommand::Attach(args) => attach(&project_root, args),
@@ -108,7 +136,8 @@ fn list_windows(project_root: &Path) -> Result<()> {
         json!({ "cmd": "list_windows", "request_id": "winapp-list-windows" }),
         Duration::from_secs(10),
     )?;
-    print_json_response(response)
+    print_json_response(response.clone())?;
+    ensure_ok(&response)
 }
 
 fn status(project_root: &Path) -> Result<()> {
@@ -117,7 +146,8 @@ fn status(project_root: &Path) -> Result<()> {
         json!({ "cmd": "get_status", "request_id": "winapp-status" }),
         Duration::from_secs(10),
     )?;
-    print_json_response(response)
+    print_json_response(response.clone())?;
+    ensure_ok(&response)
 }
 
 fn attach(project_root: &Path, args: &WinAppAttachArgs) -> Result<()> {
@@ -133,8 +163,8 @@ fn attach(project_root: &Path, args: &WinAppAttachArgs) -> Result<()> {
         }),
         Duration::from_secs(15),
     )?;
-    ensure_ok(&response)?;
-    print_json_response(response)
+    print_json_response(response.clone())?;
+    ensure_ok(&response)
 }
 
 fn launch(project_root: &Path, args: &WinAppLaunchArgs) -> Result<()> {
@@ -151,8 +181,8 @@ fn launch(project_root: &Path, args: &WinAppLaunchArgs) -> Result<()> {
         }),
         command_timeout_for_ms(args.timeout_ms),
     )?;
-    ensure_ok(&response)?;
-    print_json_response(response)
+    print_json_response(response.clone())?;
+    ensure_ok(&response)
 }
 
 fn snapshot(project_root: &Path, args: &WinAppSnapshotArgs) -> Result<()> {
@@ -161,7 +191,8 @@ fn snapshot(project_root: &Path, args: &WinAppSnapshotArgs) -> Result<()> {
         json!({ "cmd": "get_ui_snapshot", "request_id": "winapp-snapshot" }),
         Duration::from_millis(args.timeout_ms),
     )?;
-    print_json_response(response)
+    print_json_response(response.clone())?;
+    ensure_ok(&response)
 }
 
 fn highlight(project_root: &Path, args: &WinAppSelectorArgs) -> Result<()> {
@@ -174,7 +205,8 @@ fn highlight(project_root: &Path, args: &WinAppSelectorArgs) -> Result<()> {
         }),
         Duration::from_secs(20),
     )?;
-    print_json_response(response)
+    print_json_response(response.clone())?;
+    ensure_ok(&response)
 }
 
 fn clear_highlight(project_root: &Path) -> Result<()> {
@@ -183,7 +215,8 @@ fn clear_highlight(project_root: &Path) -> Result<()> {
         json!({ "cmd": "clear_highlight", "request_id": "winapp-clear-highlight" }),
         Duration::from_secs(10),
     )?;
-    print_json_response(response)
+    print_json_response(response.clone())?;
+    ensure_ok(&response)
 }
 
 fn execute(project_root: &Path, args: &WinAppExecuteArgs) -> Result<()> {
@@ -263,141 +296,189 @@ fn wait_window(project_root: &Path, args: &WinAppWaitWindowArgs) -> Result<()> {
         }),
         command_timeout_for_ms(args.timeout_ms),
     )?;
-    ensure_ok(&response)?;
-    print_json_response(response)
+    print_json_response(response.clone())?;
+    ensure_ok(&response)
 }
 
 fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
     let feature = match args.feature.as_deref() {
         Some(feature) => feature.replace('\\', "/"),
-        None => {
-            read_active_step(project_root)
-                .context("read .teshi/active-step.json for default feature")?
-                .feature_relative_path
-        }
+        None => read_active_step(project_root)?.feature_relative_path,
     };
     preflight_feature(project_root, &feature)?;
-
-    let steps = resolve_step_bindings(project_root, &feature, args.until_line)?;
-    if steps.is_empty() {
-        return Err(anyhow!("no confirmed bindings found for {feature}"));
+    let plan = super::winapp_plan::build(project_root, &feature, args.until_line)?;
+    let scope = if plan.omitted > 0 { "partial" } else { "full" };
+    let coverage = json!({"scope":scope,"until_line":args.until_line,
+        "executable_steps":plan.steps.len(),"omitted_steps":plan.omitted,"gaps":plan.gaps});
+    print_json_response(
+        json!({"event":"replay_plan","feature":feature,"dry_run":args.dry_run,"coverage":coverage}),
+    )?;
+    if !plan.gaps.is_empty() {
+        let status = if plan.gaps.iter().any(|gap| gap["status"] == "unbound") {
+            "unbound"
+        } else if plan.gaps.iter().any(|gap| gap["status"] == "blocked") {
+            "blocked"
+        } else {
+            "manual"
+        };
+        print_json_response(
+            json!({"event":"replay_rejected","status":status,"coverage":coverage}),
+        )?;
+        return Err(anyhow!(
+            "replay {status}: selected Feature coverage is incomplete"
+        ));
     }
-    if !args.dry_run {
-        for step in &steps {
-            if let Some(mut error) = input_permission_error(
-                &step.primary.action,
+    if args.dry_run {
+        for step in &plan.steps {
+            print_json_response(json!({"event":"planned_step","step_id":step.step_id,
+                "scenario":step.scenario,"step_line":step.binding.step_line,"step":step.binding.step_text,
+                "action":step.binding.primary.action,"target":step.binding.primary.value,
+                "value_arg":step.binding.primary.value_arg}))?;
+        }
+        return Ok(());
+    }
+    let mut run = super::replay_screenshots::create_cli_replay(project_root, &feature, None)?;
+    run.record(json!({"type":"coverage","coverage":coverage,"screenshot_policy":"optional"}))?;
+    print_json_response(json!({"event":"replay_started","run_id":run.id(),"coverage":coverage}))?;
+    let directory = run.directory().to_path_buf();
+    let mut index = load_or_create_index(&directory, &feature);
+    save_index(&directory, &index)?;
+    let mut failed_line = None;
+    let mut capture_failures = 0usize;
+    let result: Result<()> = (|| {
+        for step in &plan.steps {
+            if let Some(error) = input_permission_error(
+                &step.binding.primary.action,
                 &args.mode,
                 args.allow_interactive_input,
             ) {
-                error["step_line"] = json!(step.step_line);
+                run.record(json!({"type":"preflight_error","response":error}))?;
                 print_json_response(error.clone())?;
-                return ensure_ok(&error);
+                ensure_ok(&error)?;
             }
         }
+        ensure_winapp_sidecar(project_root, false)?;
         ensure_winapp_attached(project_root, args.launch.as_deref())?;
-    }
-
-    let mut screenshot_entries: Vec<ReplayScreenshotEntry> = Vec::new();
-    let screenshot_dir = project_root
-        .join(".teshi")
-        .join("logs")
-        .join("replay-screenshots");
-    let _ = fs::create_dir_all(&screenshot_dir);
-
-    let non_interactive = args.non_interactive || args.yes;
-    for (idx, step) in steps.iter().enumerate() {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "index": idx + 1,
-                "total": steps.len(),
-                "step_line": step.step_line,
-                "step": format!("{} {}", step.step_keyword, step.step_text),
-                "action": step.primary.action,
-                "target": step.primary.value,
-                "value_arg": step.primary.value_arg
-            }))?
-        );
-        if args.dry_run {
-            continue;
-        }
-        if !non_interactive {
-            prompt_continue(step)?;
-        }
-        let timeout_ms = 5_000;
-        let response = execute_locator(
-            project_root,
-            &step.primary.value,
-            &step.primary.action,
-            step.primary.value_arg.as_deref(),
-            timeout_ms,
-            command_timeout_for_ms(timeout_ms),
-            &if step.primary.action == "assert_screenshot" {
-                format!(
-                    "{}-L{}",
-                    teshi_engine::sanitize_feature_path(&feature),
-                    step.step_line
+        for planned in &plan.steps {
+            let step = &planned.binding;
+            if !args.non_interactive && !args.yes {
+                prompt_continue(step)?;
+            }
+            run.record(json!({"type":"start_step","step_id":planned.step_id,
+                "case_id":planned.case_id,"scenario":planned.scenario,"step_line":step.step_line,"text":step.step_text}))?;
+            let response = execute_locator(
+                project_root,
+                &step.primary.value,
+                &step.primary.action,
+                step.primary.value_arg.as_deref(),
+                5000,
+                command_timeout_for_ms(5000),
+                &if step.primary.action == "assert_screenshot" {
+                    format!(
+                        "{}-L{}",
+                        teshi_engine::sanitize_feature_path(&feature),
+                        step.step_line
+                    )
+                } else {
+                    format!("{}:{}", run.id(), planned.step_id)
+                },
+                &args.mode,
+                args.allow_interactive_input,
+            )
+            .unwrap_or_else(|error| transport_failure(&error.to_string()));
+            let passed = ensure_ok(&response).is_ok();
+            // The action result is durable before any potentially failing capture.
+            run.record(json!({"type":"step_result","step_id":planned.step_id,
+                "case_id":planned.case_id,"scenario":planned.scenario,"step_line":step.step_line,
+                "status":if passed {"passed"} else {"failed"},"response":response}))?;
+            print_json_response(response.clone())?;
+            let capture = read_cdp_endpoint(project_root).and_then(|endpoint| {
+                capture_and_save_screenshot(
+                    &endpoint.ws_url,
+                    project_root,
+                    &teshi_engine::sanitize_feature_path(&feature),
+                    step.step_line,
+                    &step.step_keyword,
+                    &step.step_text,
+                    &directory,
                 )
-            } else {
-                format!("winapp-replay-{}", idx + 1)
-            },
-            &args.mode,
-            args.allow_interactive_input,
-        )?;
-        // Capture screenshot after each step (before ensure_ok so we capture even on failure)
-        if !args.dry_run {
-            match read_cdp_endpoint(project_root) {
-                Ok(endpoint) => {
-                    match capture_and_save_screenshot(
-                        &endpoint.ws_url,
-                        project_root,
-                        &teshi_engine::sanitize_feature_path(&feature),
-                        step.step_line,
-                        &step.step_keyword,
-                        &step.step_text,
-                        &screenshot_dir,
-                    ) {
-                        Ok(entry) => screenshot_entries.push(entry),
-                        Err(e) => eprintln!(
-                            "warning: screenshot capture failed at L{}: {e}",
-                            step.step_line
-                        ),
-                    }
+            });
+            let mut event = json!({"type":"step_screenshot","step_id":planned.step_id,
+                "case_id":planned.case_id,"scenario":planned.scenario,"feature":feature,
+                "step_line":step.step_line,"step_keyword":step.step_keyword,"step_text":step.step_text,
+                "status":if passed {"passed"} else {"failed"}});
+            match capture {
+                Ok(entry) => {
+                    event["capture_status"] = json!("available");
+                    event["screenshot_file"] = json!(entry.screenshot_file);
+                    event["captured_at"] = json!(entry.captured_at);
                 }
-                Err(e) => eprintln!(
-                    "warning: cannot read cdp-endpoint for screenshot at L{}: {e}",
-                    step.step_line
-                ),
+                Err(error) => {
+                    capture_failures += 1;
+                    event["capture_status"] = json!("failed");
+                    event["capture_error"] = json!(error.to_string());
+                    event["message"] = json!(error.to_string());
+                }
+            }
+            run.record(event)?;
+            if !passed {
+                failed_line = Some(step.step_line);
+                return Err(anyhow!(
+                    "replay failed at line {}: {}",
+                    step.step_line,
+                    response["error"]
+                ));
             }
         }
-        print_json_response(response.clone())?;
-        ensure_ok(&response).with_context(|| {
-            format!(
-                "replay failed at line {}: {} {}",
-                step.step_line, step.step_keyword, step.step_text
-            )
-        })?;
-    }
-
-    if !args.dry_run && !screenshot_entries.is_empty() {
-        let mut index = load_or_create_index(&screenshot_dir, &feature);
-        index.steps = screenshot_entries;
-        index.completed_at = Some(iso_now());
-        index.status = "completed".to_string();
-        if let Err(e) = save_index(&screenshot_dir, &index) {
-            eprintln!("warning: failed to write screenshot index: {e}");
+        Ok(())
+    })();
+    let status = if result.is_err() {
+        if failed_line.is_some() {
+            "failed"
+        } else {
+            "blocked"
         }
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "event": "replay_complete",
-                "screenshots_saved": index.steps.len(),
-                "screenshots_dir": screenshot_dir.to_string_lossy(),
-            }))?
-        );
-    }
+    } else if plan.omitted > 0 {
+        "partial"
+    } else {
+        "passed"
+    };
+    index = load_or_create_index(&directory, &feature);
+    index.status = status.into();
+    index.completed_at = Some(iso_now());
+    save_index(&directory, &index)?;
+    run.record(json!({"type":"end_run","status":status,"failed":usize::from(result.is_err()),
+        "capture_failures":capture_failures,"error":result.as_ref().err().map(ToString::to_string)}))?;
+    print_json_response(
+        json!({"event":"replay_complete","run_id":run.id(),"status":status,
+        "coverage":coverage,"screenshot_policy":"optional","capture_failures":capture_failures,
+        "screenshot_dir":directory,"screenshots":index.steps.len(),"failed_line":failed_line}),
+    )?;
+    result
+}
 
-    Ok(())
+fn transport_failure(error: &str) -> serde_json::Value {
+    if let Ok(response) = serde_json::from_str::<serde_json::Value>(error)
+        && response["ok"] == false
+    {
+        return response;
+    }
+    let stage = if error.contains("stage=handshake") {
+        "handshake"
+    } else if error.contains("stage=connect") {
+        "connect"
+    } else if error.contains("stage=send") {
+        "send"
+    } else {
+        "awaiting_response"
+    };
+    let code =
+        if error.contains("timed out") || error.contains("timeout") || error.contains("10060") {
+            "command_timeout"
+        } else {
+            "transport_failed"
+        };
+    json!({"ok":false,"code":code,"stage":stage,"error":error,"business_result":"unverified","retry_safe":false})
 }
 
 fn prompt_continue(step: &StepBinding) -> Result<()> {
@@ -460,6 +541,7 @@ fn ensure_winapp_attached(project_root: &Path, launch: Option<&str>) -> Result<(
         json!({ "cmd": "get_target", "request_id": "winapp-get-target" }),
         Duration::from_secs(10),
     )?;
+    ensure_ok(&target)?;
     let attached = target
         .get("target")
         .and_then(|t| t.get("attached"))
@@ -503,15 +585,25 @@ fn send_winapp_command(
             endpoint.mode
         ));
     }
-    send_sidecar_command_with_timeout(&endpoint.ws_url, command, timeout).map_err(|err| {
-        anyhow!(
-            "Teshi WinApp service did not respond. Retry the command to let Teshi recover stale runtime state. Details: {err}"
-        )
-    })
+    let mut command = command;
+    if command.get("timeout_ms").is_none() {
+        command["timeout_ms"] = json!(timeout.as_millis().saturating_sub(1000).max(1));
+    }
+    // Loss of a reply does not imply loss of effects. Recover discovery only
+    // before dispatch; never automatically replay an uncertain mutation.
+    Ok(
+        send_sidecar_command_with_timeout(&endpoint.ws_url, command, timeout).unwrap_or_else(
+            |err| {
+                let mut response = transport_failure(&err);
+                response["timeout_ms"] = json!(timeout.as_millis());
+                response
+            },
+        ),
+    )
 }
 
 fn ensure_winapp_sidecar(project_root: &Path, elevated: bool) -> Result<()> {
-    if !elevated && winapp_endpoint_is_healthy(project_root) {
+    if !elevated && winapp_endpoint_is_healthy(project_root)? {
         return Ok(());
     }
     let port = ensure_daemon_for_project(project_root)?;
@@ -546,33 +638,53 @@ fn ensure_winapp_sidecar(project_root: &Path, elevated: bool) -> Result<()> {
         .and_then(|value| value.as_str())
         .ok_or_else(|| anyhow!("daemon did not return WinApp WebSocket URL"))?;
     write_cdp_endpoint_from_rust(project_root, ws_url, "winapp", "winapp://detached")?;
-    Ok(())
+    if winapp_endpoint_is_healthy(project_root)? {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            json!({"ok":false,"code":"stale_endpoint",
+            "error":"Daemon returned an unreachable WinApp endpoint"})
+            .to_string()
+        ))
+    }
 }
 
-fn winapp_endpoint_is_healthy(project_root: &Path) -> bool {
+fn winapp_endpoint_is_healthy(project_root: &Path) -> Result<bool> {
     let Ok(endpoint) = read_cdp_endpoint(project_root) else {
-        return false;
+        return Ok(false);
     };
-    endpoint.mode == "winapp" && tcp_probe_ws_url(&endpoint.ws_url)
-}
-
-fn tcp_probe_ws_url(ws_url: &str) -> bool {
-    let Some(stripped) = ws_url
-        .strip_prefix("ws://")
-        .or_else(|| ws_url.strip_prefix("wss://"))
-    else {
-        return false;
+    if endpoint.mode != "winapp" {
+        return Ok(false);
+    }
+    let response = match send_sidecar_command_with_timeout(
+        &endpoint.ws_url,
+        json!({"cmd":"health","request_id":"winapp-health"}),
+        Duration::from_secs(2),
+    ) {
+        Ok(response) => response,
+        Err(error) if error.contains("stage=connect") => return Ok(false),
+        Err(error) => {
+            let response = transport_failure(&error);
+            return Err(anyhow!(serde_json::to_string(&response)?));
+        }
     };
-    let Some((host, rest)) = stripped.split_once(':') else {
-        return false;
-    };
-    let Ok(port) = rest.split('/').next().unwrap_or(rest).parse::<u16>() else {
-        return false;
-    };
-    let Ok(addr) = format!("{host}:{port}").parse() else {
-        return false;
-    };
-    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+    if response["ok"] != true {
+        return Err(anyhow!(serde_json::to_string(&response)?));
+    }
+    if response["protocol"] != "teshi-winapp" || response["version"] != 1 {
+        let error = json!({"ok":false,"code":"protocol_mismatch","error":"Endpoint is not a compatible WinApp supervisor"});
+        return Err(anyhow!(serde_json::to_string(&error)?));
+    }
+    if let Some(project) = response["project"].as_str()
+        && Path::new(project).canonicalize().ok() != project_root.canonicalize().ok()
+    {
+        return Err(anyhow!(
+            json!({"ok":false,"code":"project_identity_mismatch",
+            "error":"Refusing another project's executor"})
+            .to_string()
+        ));
+    }
+    Ok(true)
 }
 
 fn ensure_daemon_for_project(project_root: &Path) -> Result<u16> {

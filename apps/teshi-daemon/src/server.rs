@@ -503,7 +503,7 @@ fn control_method_capability(method: &str) -> Option<HostedCapability> {
         return None;
     }
     let prefix = method.split('.').next()?;
-    if method == "bdd.run" {
+    if matches!(method, "bdd.run" | "bdd.begin_replay") {
         return Some(HostedCapability::BddRun);
     }
     Some(match prefix {
@@ -1059,6 +1059,64 @@ async fn dispatch_control_request(
                 .filter(|scenario| !hosted_private_path(&root, FsPath::new(&scenario.feature_path)))
                 .collect::<Vec<_>>();
             hosted_control_value(state, encode_control_value(scenarios)?)
+        }
+        "bdd.begin_replay" | "bdd.replay_history" | "bdd.replay_snapshot" | "bdd.replay_image" => {
+            let root = get_project_root(&state.rt)
+                .map(PathBuf::from)
+                .ok_or_else(|| handshake_error(ErrorCode::RequestFailed, "no project is open"))?;
+            let failure =
+                |error: anyhow::Error| handshake_error(ErrorCode::RequestFailed, error.to_string());
+            match method {
+                "bdd.begin_replay" => {
+                    let ids: Vec<String> = serde_json::from_value(
+                        params.get("scenario_ids").cloned().unwrap_or(Value::Null),
+                    )
+                    .map_err(|e| handshake_error(ErrorCode::InvalidMessage, e.to_string()))?;
+                    let listed = list_runnable_scenarios(&root);
+                    for id in &ids {
+                        let scenario = listed
+                            .iter()
+                            .find(|scenario| &scenario.id == id)
+                            .ok_or_else(|| {
+                                handshake_error(ErrorCode::InvalidMessage, "unknown scenario")
+                            })?;
+                        let relative = FsPath::new(&scenario.feature_path)
+                            .strip_prefix(&root)
+                            .map_err(|_| {
+                                handshake_error(ErrorCode::Forbidden, "feature is outside project")
+                            })?;
+                        hosted_feature_path(state, &relative.to_string_lossy())?;
+                    }
+                    json!(teshi_engine::start_replay_run(&root, &ids).map_err(failure)?)
+                }
+                "bdd.replay_history" => {
+                    let runs =
+                        teshi_engine::replay_evidence::list_replay_runs(&root).map_err(failure)?;
+                    let visible = runs
+                        .into_iter()
+                        .filter(|run| hosted_replay_snapshot(state, &root, &run.id).is_ok())
+                        .collect::<Vec<_>>();
+                    hosted_control_value(state, encode_control_value(visible)?)
+                }
+                "bdd.replay_snapshot" => {
+                    let id = control_param_string(&params, "run_id")?;
+                    hosted_control_value(
+                        state,
+                        encode_control_value(hosted_replay_snapshot(state, &root, &id)?)?,
+                    )
+                }
+                "bdd.replay_image" => {
+                    use base64::Engine as _;
+                    let id = control_param_string(&params, "run_id")?;
+                    let filename = control_param_string(&params, "filename")?;
+                    hosted_replay_snapshot(state, &root, &id)?;
+                    let bytes =
+                        teshi_engine::replay_evidence::load_replay_image(&root, &id, &filename)
+                            .map_err(failure)?;
+                    json!(base64::engine::general_purpose::STANDARD.encode(bytes))
+                }
+                _ => unreachable!("replay method matched by the outer dispatcher"),
+            }
         }
         "bdd.run" => {
             let mut body = decode_control_params::<RunApiBody>(params)?;
@@ -2393,6 +2451,21 @@ fn hosted_read_project_file(state: &DaemonState, requested: &str) -> Result<Stri
         .map_err(|_| handshake_error(ErrorCode::RequestFailed, "file is not readable text"))
 }
 
+fn hosted_replay_snapshot(
+    state: &DaemonState,
+    root: &FsPath,
+    id: &str,
+) -> Result<teshi_engine::replay_evidence::ReplayRunSnapshot, ProtocolError> {
+    let run = teshi_engine::replay_evidence::load_replay_run(root, id)
+        .map_err(|_| handshake_error(ErrorCode::RequestFailed, "replay run is unavailable"))?;
+    for event in &run.events {
+        if let Some(feature) = event.get("feature").and_then(Value::as_str) {
+            hosted_feature_path(state, feature)?;
+        }
+    }
+    Ok(run)
+}
+
 fn hosted_feature_path(state: &DaemonState, requested: &str) -> Result<String, ProtocolError> {
     let project_root = hosted_project_root(state)?;
     let path = resolve_hosted_project_path(&project_root, requested)?;
@@ -3470,6 +3543,63 @@ mod integration {
             active_control_sessions: Arc::new(StdMutex::new(HashSet::new())),
             hosted_session_gate: Arc::new(tokio::sync::RwLock::new(())),
         }
+    }
+
+    #[tokio::test]
+    async fn replay_control_keeps_history_scoped_and_rejects_private_features() {
+        let state = test_state();
+        let project =
+            std::env::temp_dir().join(format!("teshi-replay-control-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(project.join("features")).unwrap();
+        fs::write(
+            project.join("features/demo.feature"),
+            "Feature: Demo\n  Scenario: View\n    Then image is visible\n",
+        )
+        .unwrap();
+        *state.rt.project.root.lock().unwrap() = Some(project.clone());
+        let mut run = teshi_engine::replay_evidence::ReplayEvidenceRun::create(&project).unwrap();
+        let id = run.id().to_string();
+        run.record(json!({"type":"start_case","feature":"features/demo.feature"}))
+            .unwrap();
+        run.record(json!({"type":"end_run","failed":1})).unwrap();
+        let history = dispatch_control_request(&state, "bdd.replay_history", json!({}))
+            .await
+            .unwrap();
+        assert!(history
+            .value
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|run| run["id"] == id));
+        let snapshot =
+            dispatch_control_request(&state, "bdd.replay_snapshot", json!({"run_id":id}))
+                .await
+                .unwrap();
+        assert_eq!(snapshot.value["status"], "failed");
+        assert!(dispatch_control_request(
+            &state,
+            "bdd.replay_snapshot",
+            json!({"run_id":"../escape"})
+        )
+        .await
+        .is_err());
+        run.record(json!({"type":"start_case","feature":".teshi/private.feature"}))
+            .unwrap();
+        assert!(
+            dispatch_control_request(&state, "bdd.replay_snapshot", json!({"run_id":id}))
+                .await
+                .is_err()
+        );
+        let history = dispatch_control_request(&state, "bdd.replay_history", json!({}))
+            .await
+            .unwrap();
+        assert!(history.value.as_array().unwrap().is_empty());
+        assert_eq!(
+            control_method_capability("bdd.begin_replay"),
+            Some(HostedCapability::BddRun)
+        );
+        drop(run);
+        fs::remove_dir_all(project).unwrap();
     }
 
     #[test]

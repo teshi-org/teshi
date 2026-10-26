@@ -18,6 +18,7 @@ pub mod testpoints;
 pub mod trace;
 pub mod update;
 pub mod winapp;
+mod winapp_plan;
 
 use std::path::PathBuf;
 
@@ -1538,6 +1539,14 @@ pub struct McpServeArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum WinAppCommand {
+    /// Query the supervisor without waiting for UI Automation
+    Health,
+    /// Cancel only the active request with this identity; never repeat its action
+    Cancel {
+        /// Active request identity reported by health
+        #[arg(long)]
+        request_id: String,
+    },
     /// Save a visible UIA element as lossless PNG
     Screenshot(WinAppScreenshotArgs),
     /// Compare a visible UIA element with a PNG baseline

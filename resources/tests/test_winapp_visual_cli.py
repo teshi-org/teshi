@@ -23,6 +23,14 @@ class VisualCliTests(unittest.TestCase):
         (self.root / ".teshi").mkdir()
         self.commands = []
         self.disconnect = False
+        self.capture_failure = False
+        self.fail_action_number = None
+        self.action_count = 0
+        self.health_response = None
+        self.stall_commands = set()
+        self.release_stall = threading.Event()
+        self.capture_count = 0
+        self.fail_capture_number = None
         self.response = {"ok": True, "bounds": {"x": 20, "y": 30, "width": 2, "height": 3}, "dpi": 144}
         logger = logging.getLogger("winapp-test-sidecar")
         logger.setLevel(logging.CRITICAL)
@@ -30,12 +38,19 @@ class VisualCliTests(unittest.TestCase):
         def handler(socket):
             command = json.loads(socket.recv())
             self.commands.append(command)
+            if command["cmd"] in self.stall_commands:
+                self.release_stall.wait(5)
+                return
             if self.disconnect:
                 return
-            if command["cmd"] == "get_target":
+            if command["cmd"] == "health":
+                response = self.health_response or {"ok": True, "protocol": "teshi-winapp", "version": 1, "project": str(self.root)}
+            elif command["cmd"] == "get_target":
                 response = {"ok": True, "target": {"attached": True}}
             elif command["cmd"] == "screenshot":
-                response = {"ok": True, "screenshot": "AA=="}
+                self.capture_count += 1
+                response = ({"ok": False, "error": "injected capture failure"} if self.capture_failure or self.capture_count == self.fail_capture_number
+                            else {"ok": True, "screenshot": "AA=="})
             elif (command.get("action") == "pointer_click" or command["cmd"] == "shell_tray_click") and not (
                 command.get("mode") == "foreground" and command.get("allow_interactive_input") is True
             ):
@@ -46,6 +61,10 @@ class VisualCliTests(unittest.TestCase):
                 response = {"ok": True}
             else:
                 response = self.response
+            if command["cmd"] == "execute_locator":
+                self.action_count += 1
+                if self.action_count == self.fail_action_number:
+                    response = {"ok": False, "error": "injected action failure", "code": "assertion_failed"}
             socket.send(json.dumps({"type": "response", **response}))
 
         self.server = serve(handler, "127.0.0.1", 0, logger=logger)
@@ -58,6 +77,7 @@ class VisualCliTests(unittest.TestCase):
         }), encoding="utf-8")
 
     def stop_server(self):
+        self.release_stall.set()
         self.server.shutdown()
         self.thread.join(timeout=5)
 
@@ -137,7 +157,7 @@ class VisualCliTests(unittest.TestCase):
         )
         self.assertNotEqual(replay.returncode, 0)
         self.assertIn("requires_interactive_input", replay.stdout)
-        self.assertNotIn("replay_complete", replay.stdout)
+        self.assertIn('"status": "blocked"', replay.stdout)
         self.assertFalse(any(c.get("action") == "pointer_click" for c in self.commands))
         replay = self.cli("winapp", "replay", "--feature", "pointer.feature", "--yes",
                           "--mode", "foreground", "--allow-interactive-input")
@@ -202,6 +222,172 @@ class VisualCliTests(unittest.TestCase):
                                      "--value-arg", "text").returncode, 0)
             self.assertNotIn("pixel_tolerance", self.commands[-1])
             self.assertNotIn("diff_out", self.commands[-1])
+
+    def fixture(self, source, lines):
+        (self.root / "coverage.feature").write_text(source, encoding="utf-8")
+        checked = self.cli("check", "--feature", "coverage.feature", "--json")
+        self.assertEqual(checked.returncode, 0, checked.stderr + checked.stdout)
+        for line in lines:
+            for args in [
+                ("steps", "select", "--feature", "coverage.feature", "--line", str(line)),
+                ("steps", "propose", "--line", str(line), "--strategy", "uia", "--value", "uia:name=<name>",
+                 "--action", "assert_visible", "--confidence", "1", "--rationale", "Isolated coverage fixture"),
+                ("steps", "confirm", "--rank", "1")]:
+                result = self.cli(*args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def replay_fixture(self, *args):
+        return self.cli("winapp", "replay", "--feature", "coverage.feature", "--yes", *args)
+
+    def latest_run(self):
+        runs = list((self.root / ".teshi/logs/replay-screenshots").glob("*/run.json"))
+        path = max(runs, key=lambda item: item.stat().st_mtime_ns)
+        return json.loads(path.read_text()), json.loads(path.with_name("index.json").read_text())
+
+    def test_missing_steps_are_rejected_before_any_action(self):
+        source = "Feature: Coverage\n  Scenario: All steps\n    Given ready\n\n    When inspected\n\n    Then visible\n"
+        for missing in (3, 5, 7):
+            with self.subTest(missing=missing):
+                # Each subcase must have a genuinely missing binding.
+                import shutil
+                shutil.rmtree(self.root / ".teshi/step-bindings", ignore_errors=True)
+                (self.root / "coverage.bindings.json").unlink(missing_ok=True)
+                self.fixture(source, [line for line in (3, 5, 7) if line != missing])
+                result = self.replay_fixture()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('"status": "unbound"', result.stdout)
+                self.assertEqual(self.action_count, 0)
+
+    def test_no_bindings_manual_and_dry_run_do_not_execute(self):
+        self.fixture("Feature: Coverage\n  Scenario: Empty\n    Given ready\n", [])
+        self.assertNotEqual(self.replay_fixture().returncode, 0)
+        self.fixture("Feature: Coverage\n  @manual\n  Scenario: Human\n    Given ready\n", [4])
+        manual = self.replay_fixture()
+        self.assertNotEqual(manual.returncode, 0)
+        self.assertIn('"status": "manual"', manual.stdout)
+        self.fixture("Feature: Coverage\n  Scenario: Preview\n    Given ready\n", [3])
+        preview = self.replay_fixture("--dry-run")
+        self.assertEqual(preview.returncode, 0, preview.stderr)
+        self.assertEqual(self.action_count, 0)
+        self.assertFalse((self.root / ".teshi/logs/replay-screenshots").exists())
+
+    def test_background_outline_and_partial_scope(self):
+        self.fixture("Feature: Coverage\n  Background:\n    Given ready\n\n"
+                     "  Scenario Outline: Names\n    Then <name> is visible\n\n"
+                     "    Examples:\n      | name |\n      | Alpha |\n      | Beta |\n\n"
+                     "  Scenario: Later\n    Then finished\n", [3, 6, 14])
+        result = self.replay_fixture("--until-line", "6")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"status": "partial"', result.stdout)
+        actions = [c for c in self.commands if c["cmd"] == "execute_locator"]
+        self.assertEqual(len(actions), 4)
+        self.assertEqual([actions[1]["selector"], actions[3]["selector"]], ["uia:name=Alpha", "uia:name=Beta"])
+        run, index = self.latest_run()
+        self.assertEqual(run["status"], "partial")
+        self.assertEqual(index["status"], "partial")
+        identities = [e["step_id"] for e in run["events"] if e["type"] == "step_result"]
+        self.assertEqual(len(set(identities)), 4)
+
+    def test_all_captures_fail_but_terminal_is_passed_and_unique(self):
+        self.fixture("Feature: Coverage\n  Scenario: Result\n    Given ready\n", [3])
+        self.capture_failure = True
+        ids = set()
+        for _ in range(2):
+            result = self.replay_fixture()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('"event": "replay_complete"', result.stdout)
+            run, index = self.latest_run()
+            ids.add(run["id"])
+            self.assertEqual(run["status"], "passed")
+            self.assertEqual(index["status"], "passed")
+            self.assertEqual(run["events"][-1]["capture_failures"], 1)
+            kinds = [event["type"] for event in run["events"]]
+            self.assertLess(kinds.index("step_result"), kinds.index("step_screenshot"))
+        self.assertEqual(len(ids), 2)
+
+    def test_first_and_middle_failure_keep_terminal_and_evidence(self):
+        self.fixture("Feature: Coverage\n  Scenario: Result\n    Given ready\n\n    Then visible\n", [3, 5])
+        for fail in (1, 2):
+            self.action_count = 0
+            self.fail_action_number = fail
+            result = self.replay_fixture()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('"event": "replay_complete"', result.stdout)
+            run, index = self.latest_run()
+            self.assertEqual(run["status"], "failed")
+            self.assertEqual(index["status"], "failed")
+            self.assertEqual(len(index["steps"]), fail)
+            results = [e for e in run["events"] if e["type"] == "step_result"]
+            self.assertEqual(results[-1]["response"]["code"], "assertion_failed")
+
+    def test_partial_capture_failure_does_not_change_action_outcome(self):
+        self.fixture("Feature: Coverage\n  Scenario: Result\n    Given ready\n\n    Then visible\n", [3, 5])
+        self.fail_capture_number = 2
+        result = self.replay_fixture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run, index = self.latest_run()
+        self.assertEqual(run["status"], "passed")
+        self.assertEqual(len(index["steps"]), 1)
+        self.assertEqual(run["events"][-1]["capture_failures"], 1)
+
+    def test_protocol_and_authentication_failures_are_not_mutation_retries(self):
+        for response, code in [({"ok": True}, "protocol_mismatch"),
+                               ({"ok": False, "code": "authentication_failed", "error": "Bad credential"}, "authentication_failed")]:
+            self.health_response = response
+            result = self.cli("winapp", "execute", "--selector", "uia:name=Close", "--action", "click")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(json.loads(result.stdout)["code"], code)
+        self.assertEqual(self.action_count, 0)
+
+    def test_protocol_stall_and_response_stall_are_bounded(self):
+        import time
+        for command, args, limit in [
+            ("health", ("winapp", "health"), 3.5),
+            ("get_ui_snapshot", ("winapp", "snapshot", "--timeout-ms", "150"), 1.5)]:
+            self.stall_commands = {command}
+            started = time.monotonic()
+            result = self.cli(*args)
+            self.assertLess(time.monotonic() - started, limit)
+            self.assertNotEqual(result.returncode, 0)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["stage"], "awaiting_response")
+
+    def test_stale_endpoint_rediscovery_uses_project_daemon(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import socket
+        healthy = json.loads((self.root / ".teshi/cdp-endpoint.json").read_text())
+        with socket.socket() as unused:
+            unused.bind(("127.0.0.1", 0))
+            stale = {**healthy, "ws_url": f"ws://127.0.0.1:{unused.getsockname()[1]}"}
+        (self.root / ".teshi/cdp-endpoint.json").write_text(json.dumps(stale))
+        requests = []
+
+        class Daemon(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_POST(self):
+                requests.append((self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+                body = json.dumps({"ws_url": healthy["ws_url"]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        daemon = ThreadingHTTPServer(("127.0.0.1", 0), Daemon)
+        thread = threading.Thread(target=daemon.serve_forever, daemon=True)
+        thread.start()
+        try:
+            (self.root / ".teshi/daemon.json").write_text(json.dumps({"pid": os.getpid(), "port": daemon.server_port,
+                                                                   "started": "2026-10-23T00:00:00Z"}))
+            result = self.cli("winapp", "health")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(requests, [("/api/v1/browser/start", {"mode": "winapp"})])
+            self.assertEqual(self.action_count, 0)
+        finally:
+            daemon.shutdown()
+            daemon.server_close()
+            thread.join(timeout=2)
 
 
 if __name__ == "__main__":

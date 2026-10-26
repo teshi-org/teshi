@@ -505,6 +505,50 @@ impl BrowserSessionsBackend for NativePlatformBackend {
 }
 
 impl ApiRunBackend for NativePlatformBackend {
+    fn supports_replay_history(&self) -> bool {
+        true
+    }
+
+    fn begin_replay(&self, ids: &[String]) -> teshi_ui::backend::BackendFuture<String> {
+        let ids = ids.to_vec();
+        Box::pin(async move {
+            let root = std::env::current_dir().map_err(|e| e.to_string())?;
+            teshi_engine::start_replay_run(&root, &ids).map_err(|e| e.to_string())
+        })
+    }
+
+    fn replay_history(&self) -> teshi_ui::backend::BackendFuture<Vec<serde_json::Value>> {
+        Box::pin(async {
+            let root = std::env::current_dir().map_err(|e| e.to_string())?;
+            teshi_engine::replay_evidence::list_replay_runs(&root)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|run| serde_json::to_value(run).map_err(|e| e.to_string()))
+                .collect()
+        })
+    }
+
+    fn replay_snapshot(&self, id: &str) -> teshi_ui::backend::BackendFuture<serde_json::Value> {
+        let id = id.to_string();
+        Box::pin(async move {
+            let root = std::env::current_dir().map_err(|e| e.to_string())?;
+            serde_json::to_value(
+                teshi_engine::replay_evidence::load_replay_run(&root, &id)
+                    .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())
+        })
+    }
+
+    fn replay_image(&self, id: &str, filename: &str) -> teshi_ui::backend::BackendFuture<Vec<u8>> {
+        let (id, filename) = (id.to_string(), filename.to_string());
+        Box::pin(async move {
+            let root = std::env::current_dir().map_err(|e| e.to_string())?;
+            teshi_engine::replay_evidence::load_replay_image(&root, &id, &filename)
+                .map_err(|e| e.to_string())
+        })
+    }
+
     fn list_scenarios(&self) -> teshi_ui::backend::BackendFuture<Vec<ApiScenarioSnapshot>> {
         Box::pin(async {
             let root = std::env::current_dir().map_err(|e| e.to_string())?;

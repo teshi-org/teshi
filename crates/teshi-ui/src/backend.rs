@@ -473,6 +473,43 @@ pub struct ApiRunEventDto {
 ///
 /// `teshi-ui` must not depend on `teshi-engine`; hosts implement this trait.
 pub trait ApiRunBackend {
+    /// Whether this host exposes durable, pollable replay evidence.
+    fn supports_replay_history(&self) -> bool {
+        false
+    }
+
+    /// Start a replay without waiting for completion; returns its durable run ID.
+    ///
+    /// # Errors
+    /// Returns an error when the host cannot start the selected cases.
+    fn begin_replay(&self, _ids: &[String]) -> BackendFuture<String> {
+        Box::pin(async { Err("Replay history is unavailable on this host".into()) })
+    }
+
+    /// List project-scoped replay summaries, newest first.
+    ///
+    /// # Errors
+    /// Returns an error when history cannot be read.
+    fn replay_history(&self) -> BackendFuture<Vec<Value>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    /// Read the latest durable events for one run.
+    ///
+    /// # Errors
+    /// Returns an error for an unavailable run.
+    fn replay_snapshot(&self, _id: &str) -> BackendFuture<Value> {
+        Box::pin(async { Err("Replay history is unavailable on this host".into()) })
+    }
+
+    /// Load one associated image; hosts must enforce project/run containment.
+    ///
+    /// # Errors
+    /// Returns an error for a missing or unreadable image.
+    fn replay_image(&self, _id: &str, _filename: &str) -> BackendFuture<Vec<u8>> {
+        Box::pin(async { Err("Saved image cannot be loaded".into()) })
+    }
+
     /// List runnable scenarios in the open project.
     ///
     /// # Errors

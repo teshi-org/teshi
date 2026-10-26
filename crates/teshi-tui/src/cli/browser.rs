@@ -1497,10 +1497,19 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
     }
 
     let mut screenshot_entries: Vec<ReplayScreenshotEntry> = Vec::new();
-    let screenshot_dir = project_root
-        .join(".teshi")
-        .join("logs")
-        .join("replay-screenshots");
+    let mut evidence = if args.dry_run {
+        None
+    } else {
+        Some(super::replay_screenshots::create_cli_replay(
+            project_root,
+            &feature,
+            args.scenario.as_deref(),
+        )?)
+    };
+    let screenshot_dir = evidence
+        .as_ref()
+        .map(|run| run.directory().to_path_buf())
+        .unwrap_or_else(|| project_root.join(".teshi/logs/replay-screenshots"));
     let _ = fs::create_dir_all(&screenshot_dir);
 
     let non_interactive = args.non_interactive || args.yes;
@@ -1523,121 +1532,128 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
         if !non_interactive {
             prompt_continue(step)?;
         }
-        let response = if step.primary.action == "navigate" && args.target.session.is_some() {
-            let (target, lease_token) = required_target(&args.target)?;
-            let url = step
-                .primary
-                .value_arg
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(&step.primary.value);
-            execute_typed_operation_value(
-                project_root,
-                BrowserOperation::NavigateBrowser {
-                    target,
-                    lease_token,
-                    url: url.to_string(),
-                    timeout_ms: 15_000,
-                    wait: Some(BrowserWaitCondition::LoadComplete),
-                    monitor: false,
+        let response = (|| -> Result<serde_json::Value> {
+            Ok(
+                if step.primary.action == "navigate" && args.target.session.is_some() {
+                    let (target, lease_token) = required_target(&args.target)?;
+                    let url = step
+                        .primary
+                        .value_arg
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or(&step.primary.value);
+                    execute_typed_operation_value(
+                        project_root,
+                        BrowserOperation::NavigateBrowser {
+                            target,
+                            lease_token,
+                            url: url.to_string(),
+                            timeout_ms: 15_000,
+                            wait: Some(BrowserWaitCondition::LoadComplete),
+                            monitor: false,
+                        },
+                        command_timeout_for_ms(15_000),
+                    )?
+                } else if step.primary.action == "navigate" {
+                    let url = step
+                        .primary
+                        .value_arg
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or(&step.primary.value);
+                    let timeout_ms = 15_000;
+                    navigate_to_url(
+                        project_root,
+                        url,
+                        timeout_ms,
+                        command_timeout_for_ms(timeout_ms),
+                        &format!("browser-replay-{}", idx + 1),
+                        true,
+                        Some(&args.target),
+                    )?
+                } else if step.primary.action == "open_project" {
+                    let path = step
+                        .primary
+                        .value_arg
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or(&step.primary.value);
+                    let timeout_ms = 15_000;
+                    open_project_via_sidecar(
+                        project_root,
+                        path,
+                        command_timeout_for_ms(timeout_ms),
+                        &format!("browser-replay-{}", idx + 1),
+                        Some(&args.target),
+                    )?
+                } else if args.target.session.is_some() {
+                    let (target, lease_token) = required_target(&args.target)?;
+                    let action: BrowserAction = serde_json::from_value(json!(step.primary.action))
+                        .with_context(|| {
+                            format!("unsupported binding action {}", step.primary.action)
+                        })?;
+                    let candidate = step
+                        .primary
+                        .structured_candidate
+                        .clone()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .context("binding structured_candidate is invalid")?;
+                    let page_context_revision = match step.primary.page_context_revision.clone() {
+                        Some(revision) => Some(PageContextRevision(revision)),
+                        None => Some(current_page_context_revision(
+                            project_root,
+                            &target,
+                            &lease_token,
+                        )?),
+                    };
+                    let element = BrowserElementInput {
+                        reference: step.primary.element_reference.clone(),
+                        candidate,
+                        css: (step.primary.element_reference.is_none()
+                            && step.primary.structured_candidate.is_none())
+                        .then(|| step.primary.value.clone()),
+                        snapshot_id: None,
+                        page_context_revision,
+                    };
+                    execute_typed_operation_value(
+                        project_root,
+                        BrowserOperation::ExecuteBrowserAction {
+                            target,
+                            lease_token,
+                            action,
+                            element,
+                            value: step.primary.value_arg.clone(),
+                            files: vec![],
+                            wait: None,
+                            // Feature pages may finish their WASM/UI update after
+                            // navigation reports load-complete. Keep replay bounded,
+                            // without relying on stage-5 screenshots as a delay.
+                            timeout_ms: 15_000,
+                            focus: false,
+                            monitor: false,
+                        },
+                        command_timeout_for_ms(15_000),
+                    )?
+                } else {
+                    let timeout_ms = 5_000;
+                    execute_locator(
+                        project_root,
+                        ExecuteLocatorParams {
+                            selector: &step.primary.value,
+                            action: &step.primary.action,
+                            value: step.primary.value_arg.as_deref(),
+                            timeout_ms,
+                            request_id: &format!("browser-replay-{}", idx + 1),
+                            health_check: true,
+                            target: Some(&args.target),
+                        },
+                        command_timeout_for_ms(timeout_ms),
+                    )?
                 },
-                command_timeout_for_ms(15_000),
-            )?
-        } else if step.primary.action == "navigate" {
-            let url = step
-                .primary
-                .value_arg
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(&step.primary.value);
-            let timeout_ms = 15_000;
-            navigate_to_url(
-                project_root,
-                url,
-                timeout_ms,
-                command_timeout_for_ms(timeout_ms),
-                &format!("browser-replay-{}", idx + 1),
-                true,
-                Some(&args.target),
-            )?
-        } else if step.primary.action == "open_project" {
-            let path = step
-                .primary
-                .value_arg
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(&step.primary.value);
-            let timeout_ms = 15_000;
-            open_project_via_sidecar(
-                project_root,
-                path,
-                command_timeout_for_ms(timeout_ms),
-                &format!("browser-replay-{}", idx + 1),
-                Some(&args.target),
-            )?
-        } else if args.target.session.is_some() {
-            let (target, lease_token) = required_target(&args.target)?;
-            let action: BrowserAction = serde_json::from_value(json!(step.primary.action))
-                .with_context(|| format!("unsupported binding action {}", step.primary.action))?;
-            let candidate = step
-                .primary
-                .structured_candidate
-                .clone()
-                .map(serde_json::from_value)
-                .transpose()
-                .context("binding structured_candidate is invalid")?;
-            let page_context_revision = match step.primary.page_context_revision.clone() {
-                Some(revision) => Some(PageContextRevision(revision)),
-                None => Some(current_page_context_revision(
-                    project_root,
-                    &target,
-                    &lease_token,
-                )?),
-            };
-            let element = BrowserElementInput {
-                reference: step.primary.element_reference.clone(),
-                candidate,
-                css: (step.primary.element_reference.is_none()
-                    && step.primary.structured_candidate.is_none())
-                .then(|| step.primary.value.clone()),
-                snapshot_id: None,
-                page_context_revision,
-            };
-            execute_typed_operation_value(
-                project_root,
-                BrowserOperation::ExecuteBrowserAction {
-                    target,
-                    lease_token,
-                    action,
-                    element,
-                    value: step.primary.value_arg.clone(),
-                    files: vec![],
-                    wait: None,
-                    // Feature pages may finish their WASM/UI update after
-                    // navigation reports load-complete. Keep replay bounded,
-                    // without relying on stage-5 screenshots as a delay.
-                    timeout_ms: 15_000,
-                    focus: false,
-                    monitor: false,
-                },
-                command_timeout_for_ms(15_000),
-            )?
-        } else {
-            let timeout_ms = 5_000;
-            execute_locator(
-                project_root,
-                ExecuteLocatorParams {
-                    selector: &step.primary.value,
-                    action: &step.primary.action,
-                    value: step.primary.value_arg.as_deref(),
-                    timeout_ms,
-                    request_id: &format!("browser-replay-{}", idx + 1),
-                    health_check: true,
-                    target: Some(&args.target),
-                },
-                command_timeout_for_ms(timeout_ms),
-            )?
-        };
+            )
+        })()
+        .unwrap_or_else(|error| json!({"ok":false,"error":error.to_string()}));
         // Capture screenshot after each step (before ensure_ok so we capture even on failure).
         if !args.dry_run && capture_replay_screenshots {
             match capture_replay_step_screenshot(
@@ -1667,12 +1683,31 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                 ),
             }
         }
+        if let Some(run) = evidence.as_mut() {
+            super::replay_screenshots::record_cli_step(
+                run,
+                project_root,
+                super::replay_screenshots::CliReplayStep {
+                    feature: &feature,
+                    source: (step.step_line, &step.step_keyword, &step.step_text),
+                    passed: ensure_ok(&response).is_ok(),
+                    capture_supported: capture_replay_screenshots,
+                },
+                screenshot_entries
+                    .last()
+                    .filter(|entry| entry.step_line == step.step_line),
+            )?;
+        }
         ensure_ok(&response).with_context(|| {
             format!(
                 "replay failed at line {}: {} {}",
                 step.step_line, step.step_keyword, step.step_text
             )
         })?;
+    }
+
+    if let Some(run) = evidence.as_mut() {
+        run.record(json!({"type":"end_run", "failed":0}))?;
     }
 
     if !args.dry_run && !screenshot_entries.is_empty() {

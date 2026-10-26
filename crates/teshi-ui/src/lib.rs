@@ -8,6 +8,8 @@ pub mod backend;
 mod browser_sessions_view;
 mod gherkin_diagnostics_view;
 mod llm_config_view;
+#[cfg(any(test, target_arch = "wasm32"))]
+pub mod replay_fixture;
 mod run_view;
 mod winapp_preview;
 

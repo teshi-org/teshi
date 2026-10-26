@@ -6,6 +6,7 @@ publish = false
 description = "Local HTTP/WebSocket host for teshi desktop UI in the browser"
 
 [dependencies]
+base64 = { workspace = true }
 anyhow = { workspace = true }
 axum = { version = "0.8", features = ["ws"] }
 chrono = { workspace = true }

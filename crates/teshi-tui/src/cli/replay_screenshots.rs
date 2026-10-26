@@ -4,7 +4,84 @@ use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use teshi_engine::replay_evidence::ReplayEvidenceRun;
 use teshi_engine::send_sidecar_command_with_timeout;
+
+/// Create a CLI run visible in the GPUI evidence history.
+///
+/// # Errors
+/// Returns an error when the run manifest cannot be created.
+pub fn create_cli_replay(
+    project: &Path,
+    feature: &str,
+    scenario: Option<&str>,
+) -> Result<ReplayEvidenceRun> {
+    let mut run = ReplayEvidenceRun::create(project)?;
+    run.record(json!({"type":"start_case", "case_id":"replay", "feature":feature, "name":scenario.unwrap_or(feature)}))?;
+    Ok(run)
+}
+
+/// Step identity and execution outcome recorded by a CLI replay.
+pub struct CliReplayStep<'a> {
+    /// Source Feature path relative to the project.
+    pub feature: &'a str,
+    /// Source step line, keyword, and text.
+    pub source: (usize, &'a str, &'a str),
+    /// Whether executing the step succeeded.
+    pub passed: bool,
+    /// Whether the selected backend supports screenshots.
+    pub capture_supported: bool,
+}
+
+/// Persist the capture outcome independently from the step execution outcome.
+///
+/// # Errors
+/// Returns an error when the capture association or run outcome cannot be saved.
+pub fn record_cli_step(
+    run: &mut ReplayEvidenceRun,
+    project: &Path,
+    step: CliReplayStep<'_>,
+    entry: Option<&ReplayScreenshotEntry>,
+) -> Result<()> {
+    let CliReplayStep {
+        feature,
+        source: (line, keyword, text),
+        passed,
+        capture_supported: supported,
+    } = step;
+    let step_id = format!("replay:L{line}");
+    let mut event = json!({"type":"step_screenshot", "case_id":"replay", "step_id":step_id,
+        "feature":feature, "step_line":line, "step_keyword":keyword, "step_text":text,
+        "status":if passed {"passed"} else {"failed"},
+        "capture_status":if entry.is_some() {"available"} else if supported {"failed"} else {"unsupported"}});
+    if let Ok(source) = fs::read_to_string(project.join(feature)) {
+        let parsed = teshi_core::parse_feature(&source, project.join(feature));
+        if let Some(scenario) = parsed
+            .all_scenarios()
+            .into_iter()
+            .rev()
+            .find(|scenario| scenario.line_number <= line)
+        {
+            event["scenario"] = json!(scenario.name);
+        }
+    }
+    if let Some(entry) = entry {
+        event["screenshot_file"] = json!(entry.screenshot_file);
+        event["captured_at"] = json!(entry.captured_at);
+    }
+    run.record(event)?;
+    let mut index = load_or_create_index(run.directory(), feature);
+    index.feature = feature.to_string();
+    if !passed {
+        index.status = "failed".into();
+        index.completed_at = Some(iso_now());
+    }
+    save_index(run.directory(), &index)?;
+    if !passed {
+        run.record(json!({"type":"end_run", "failed":1}))?;
+    }
+    Ok(())
+}
 
 /// One JPEG captured after a replayed Gherkin step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,7 +206,12 @@ pub fn save_jpeg_bytes(
         .unwrap_or_default()
         .as_millis();
 
-    let filename = format!("{feature_sanitized}_L{step_line}_{unix_ms}.jpg");
+    static CAPTURE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = CAPTURE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let filename = format!(
+        "{feature_sanitized}_L{step_line}_{unix_ms}_{}_{sequence}.jpg",
+        std::process::id()
+    );
     let filepath = screenshot_dir.join(&filename);
 
     fs::create_dir_all(screenshot_dir)
@@ -137,13 +219,17 @@ pub fn save_jpeg_bytes(
     fs::write(&filepath, bytes)
         .with_context(|| format!("write screenshot {}", filepath.display()))?;
 
-    Ok(ReplayScreenshotEntry {
+    let entry = ReplayScreenshotEntry {
         step_line,
         step_keyword: step_keyword.to_string(),
         step_text: step_text.to_string(),
         screenshot_file: filename,
         captured_at: iso_now(),
-    })
+    };
+    let mut index = load_or_create_index(screenshot_dir, feature_sanitized);
+    index.steps.push(entry.clone());
+    save_index(screenshot_dir, &index)?;
+    Ok(entry)
 }
 
 /// Reads the existing index.json or creates a fresh one.
@@ -167,7 +253,8 @@ pub fn load_or_create_index(screenshot_dir: &Path, feature: &str) -> ReplayScree
 pub fn save_index(screenshot_dir: &Path, index: &ReplayScreenshotsIndex) -> Result<()> {
     let path = screenshot_dir.join("index.json");
     let text = serde_json::to_string_pretty(index).context("serialize screenshot index")?;
-    fs::write(&path, &text).with_context(|| format!("write {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)?;
+    teshi_engine::write_atomic(&path, &value)?;
     Ok(())
 }
 
@@ -246,5 +333,52 @@ mod tests {
         .unwrap();
         let copied = fs::read(dest.join(&entry.screenshot_file)).unwrap();
         assert_eq!(copied, b"jpeg-bytes");
+    }
+    #[test]
+    fn cli_failure_retains_prior_capture_and_publishes_failed_outcome() {
+        let project = tempfile::tempdir().unwrap();
+        fs::write(
+            project.path().join("review.feature"),
+            "Feature: Review\n  Scenario: Capture\n    Given ready\n    Then missing\n",
+        )
+        .unwrap();
+        let mut run = create_cli_replay(project.path(), "review.feature", Some("Capture")).unwrap();
+        let entry =
+            save_jpeg_bytes(b"fixture", "review", 3, "Given", "ready", run.directory()).unwrap();
+        record_cli_step(
+            &mut run,
+            project.path(),
+            CliReplayStep {
+                feature: "review.feature",
+                source: (3, "Given", "ready"),
+                passed: true,
+                capture_supported: true,
+            },
+            Some(&entry),
+        )
+        .unwrap();
+        record_cli_step(
+            &mut run,
+            project.path(),
+            CliReplayStep {
+                feature: "review.feature",
+                source: (4, "Then", "missing"),
+                passed: false,
+                capture_supported: true,
+            },
+            None,
+        )
+        .unwrap();
+        let snapshot =
+            teshi_engine::replay_evidence::load_replay_run(project.path(), run.id()).unwrap();
+        assert_eq!(snapshot.status, "failed");
+        assert_eq!(snapshot.events[1]["scenario"], "Capture");
+        assert_eq!(snapshot.events[1]["capture_status"], "available");
+        assert_eq!(snapshot.events[2]["capture_status"], "failed");
+        assert!(run.directory().join(entry.screenshot_file).is_file());
+        let index = load_or_create_index(run.directory(), "review.feature");
+        assert_eq!(index.status, "failed");
+        assert_eq!(index.steps.len(), 1);
+        assert_eq!(index.feature, "review.feature");
     }
 }
