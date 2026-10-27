@@ -823,11 +823,10 @@ fn narrow_requirements_panes_remain_reachable_with_selection_and_edit() {
     prefix(&terminal, "Right");
     terminal.expect_text("LOCAL_DRAFT", true, 10000).unwrap();
     terminal.expect_text("Req 02", true, 10000).unwrap();
-    assert_eq!(
-        fs::read_to_string(fixture._root.path().join("requirements/doc-02.md"))
+    assert!(
+        !fs::read_to_string(fixture._root.path().join("requirements/doc-02.md"))
             .unwrap()
-            .contains("LOCAL_DRAFT"),
-        false
+            .contains("LOCAL_DRAFT")
     );
     capture(&terminal, "compact-editor-return");
 }

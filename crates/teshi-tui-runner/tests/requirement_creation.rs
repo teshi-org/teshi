@@ -178,15 +178,16 @@ fn requirements_footer_save_and_keyboard_both_persist_documents() {
     let wait_count = |count: usize| {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            if let Ok(bytes) = fs::read(store.join("_teshi.json")) {
-                if let Ok(index) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                    if index["documents"]
+            let saved = fs::read(store.join("_teshi.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .filter(|index| {
+                    index["documents"]
                         .as_array()
                         .is_some_and(|items| items.len() == count)
-                    {
-                        break index;
-                    }
-                }
+                });
+            if let Some(index) = saved {
+                break index;
             }
             assert!(
                 Instant::now() < deadline,
