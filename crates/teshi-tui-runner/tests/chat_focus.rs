@@ -128,9 +128,12 @@ fn repeated_focus_keeps_input_title_and_context_statistics() {
 fn newline_message_is_sent_once_with_exact_body() {
     let (root, terminal) = setup(true);
     terminal.key("Enter").unwrap();
-    terminal.write("first line").unwrap();
-    terminal.key("Shift+Enter").unwrap();
-    terminal.write("second line").unwrap();
+    // Legacy PTY key encoding cannot distinguish Shift+Enter (or Ctrl+J) from
+    // Enter, so a literal newline can only reach the buffer through bracketed
+    // paste. This covers the multi-line body reaching the ACP prompt intact.
+    terminal
+        .write("\u{1b}[200~first line\nsecond line\u{1b}[201~")
+        .unwrap();
     terminal.key("Enter").unwrap();
     let trace = root.path().join("trace/trace.jsonl");
     let deadline = Instant::now() + Duration::from_secs(15);

@@ -144,6 +144,12 @@ fn explore_run_and_detail_pointer_use_the_selected_scenario_at_normal_and_narrow
             fixture.config.rows = 16;
         }
         let terminal = fixture.launch();
+        if narrow {
+            // doc-31/doc-36: below 70 columns only the focused pane is drawn,
+            // so the scenario column has to be focused before it is clickable.
+            terminal.key("Tab").unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+        }
         terminal.click_text("Beta", 10000).unwrap();
         terminal
             .click_text(if narrow { " Run" } else { "Run [r]" }, 10000)
@@ -178,6 +184,9 @@ fn explore_run_and_detail_pointer_use_the_selected_scenario_at_normal_and_narrow
         terminal.key("Escape").unwrap();
         terminal.expect_text("Scenarios", true, 10000).unwrap();
         assert_eq!(fs::read_to_string(&fixture.source).unwrap(), SOURCE);
+        if narrow {
+            terminal.key("Escape").unwrap();
+        }
         quit(terminal);
     }
 }
