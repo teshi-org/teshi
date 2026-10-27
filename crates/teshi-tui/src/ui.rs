@@ -1615,7 +1615,9 @@ fn render_git_file_fallback(
 
 fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let changes = app.explore_changed_steps();
-    if !changes.is_empty() {
+    // An explicitly opened pending-agent diff owns the pane until it is closed;
+    // the Git-diff view must not shadow the Diff action behind it.
+    if !changes.is_empty() && app.explore_diff_lines.is_none() {
         let block = explore_block(
             "Steps (Git diff) · j/k select · Shift+←/→ scroll",
             app.explore_focus == ColumnFocus::Step,

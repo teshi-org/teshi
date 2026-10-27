@@ -407,43 +407,72 @@ fn footer_and_threads(narrow: bool) {
     let terminal = fixture.launch(Some(&provider), false);
     fixture.click(&terminal, "Focus", "focus");
     terminal.write("THREAD_ORIGINAL").unwrap();
-    fixture.click(&terminal, "New [a]", "new-first");
-    assert_eq!(
+    if narrow {
+        // doc-31/doc-36: below 70 columns the sidebar is hidden, so agent
+        // management and switching move to the keyboard and the transcript is
+        // the only per-agent evidence.
+        let trace = fixture.artifacts.join("provider-trace.jsonl");
+        let accepted = |path: &std::path::Path| {
+            fs::read_to_string(path)
+                .map(|text| text.matches("\"accepted\"").count())
+                .unwrap_or(0)
+        };
+        let before = accepted(&trace);
+        assert!(!terminal.screen().unwrap().contains("New [a]"));
+        fixture.click(&terminal, "Send", "send-first");
         terminal
-            .screen()
-            .unwrap()
-            .lines()
-            .filter(|line| line.contains("Agent 1"))
-            .count(),
-        2
-    );
-    terminal.write("THREAD_SECOND").unwrap();
-    fixture.click(&terminal, "New [a]", "new-second");
-    terminal.expect_text("Agent 2", true, 5000).unwrap();
-    let screen = terminal.screen().unwrap();
-    let rows = screen
-        .lines()
-        .enumerate()
-        .filter_map(|(row, line)| {
-            line.find("Agent 1")
-                .map(|column| (row + 1, line[..column].chars().count() + 1))
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        rows.len() >= 2,
-        "missing two distinct thread rows: {screen}"
-    );
-    for (index, input) in ["THREAD_ORIGINAL", "THREAD_SECOND"].into_iter().enumerate() {
-        let (row, column) = rows[index];
-        terminal
-            .write(&format!("\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m"))
+            .expect_text("POINTER_REPLY_COMPLETE", true, 10000)
             .unwrap();
-        terminal.expect_text(input, true, 5000).unwrap();
-        fixture.capture(&terminal, &format!("thread-row-{index}-input"));
+        terminal.key("Escape").unwrap();
+        terminal.key("a").unwrap();
+        terminal.write("THREAD_SECOND").unwrap();
+        fixture.click(&terminal, "Send", "send-second");
+        std::thread::sleep(Duration::from_millis(800));
+        terminal.key("Escape").unwrap();
+        terminal.key("[").unwrap();
+        terminal.key("]").unwrap();
+        terminal.key("x").unwrap();
+        fixture.capture(&terminal, "narrow-after-close");
+        assert_eq!(accepted(&trace), before + 2, "expected one turn per thread");
+    } else {
+        fixture.click(&terminal, "New [a]", "new-first");
+        assert_eq!(
+            terminal
+                .screen()
+                .unwrap()
+                .lines()
+                .filter(|line| line.contains("Agent 1"))
+                .count(),
+            2
+        );
+        terminal.write("THREAD_SECOND").unwrap();
+        fixture.click(&terminal, "New [a]", "new-second");
+        terminal.expect_text("Agent 2", true, 5000).unwrap();
+        let screen = terminal.screen().unwrap();
+        let rows = screen
+            .lines()
+            .enumerate()
+            .filter_map(|(row, line)| {
+                line.find("Agent 1")
+                    .map(|column| (row + 1, line[..column].chars().count() + 1))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            rows.len() >= 2,
+            "missing two distinct thread rows: {screen}"
+        );
+        for (index, input) in ["THREAD_ORIGINAL", "THREAD_SECOND"].into_iter().enumerate() {
+            let (row, column) = rows[index];
+            terminal
+                .write(&format!("\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m"))
+                .unwrap();
+            terminal.expect_text(input, true, 5000).unwrap();
+            fixture.capture(&terminal, &format!("thread-row-{index}-input"));
+        }
+        fixture.click(&terminal, "Agent 2", "select-third");
+        fixture.click(&terminal, "Close [x]", "close-third");
+        terminal.expect_text("Agent 2", false, 5000).unwrap();
     }
-    fixture.click(&terminal, "Agent 2", "select-third");
-    fixture.click(&terminal, "Close [x]", "close-third");
-    terminal.expect_text("Agent 2", false, 5000).unwrap();
     fixture.click(&terminal, "Blur", "blur");
     fixture.click(&terminal, "Model", "model");
     terminal.expect_text("Model", true, 5000).unwrap();
