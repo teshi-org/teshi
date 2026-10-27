@@ -34,8 +34,9 @@ The paired Features are `features/en-US/replay_screenshot_review.feature` and
 `features/zh-CN/回放截图查看.feature`. Their ten scenarios per locale remain
 pending live UI binding and replay. There is currently no ready browser session
 for verified locator acquisition. No confirmed bindings have been fabricated.
-The Feature catalog gate consequently reports the two missing binding sidecars;
-this is an outstanding acceptance failure, not an allowlisted pass.
+Their headers say live bindings remain pending, so the catalog keeps the
+`@web-ui` owner and does not fail the release gate for the missing sidecars.
+Live replay is still outstanding.
 
 The 2026-10-22 replay attempt used an independently built CLI from this checkout:
 all 20 localized scenarios failed at unbound steps. Results and binary/source

@@ -11,7 +11,7 @@ Complete the requested native regression: feature → verified binding → confi
 
 Work from the intended project root. Check `teshi --version`, `teshi winapp --help`, and `teshi steps --help`; do not rely on a minimum historical version as proof of current capabilities.
 
-WinApp commands require a live native Windows sidecar and project `.teshi/cdp-endpoint.json` with `mode: "winapp"`. `winapp attach` selects a window through that sidecar; it does not start the sidecar. If the endpoint is absent, stale, or in another mode, report the missing connection and use setup supported by the installed application. Do not fabricate the endpoint or assume current GPUI exposes a legacy **Connect WinUI3 App** button. The current WinApp GPUI surface is a screenshot stream, not an embedded terminal or Gherkin editor.
+WinApp commands require a live native Windows sidecar and project `.teshi/cdp-endpoint.json` with `mode: "winapp"`. `winapp attach` selects a window through that sidecar; current source CLI commands ensure a sidecar is available. Check installed behavior before relying on automatic startup. If the endpoint is absent, stale, or in another mode, report the missing connection and use setup supported by the installed application. Do not fabricate the endpoint or assume current GPUI exposes a legacy **Connect WinUI3 App** button. The current WinApp GPUI surface is a screenshot stream, not an embedded terminal or Gherkin editor.
 
 ## Write and select a regression
 
@@ -126,3 +126,31 @@ alone does not cover UIA's internal automatic focus. For navigation, inspect
 `input_method` and verify the destination: a Legacy default-action return is not
 proof of navigation. Authorized keyboard/pointer input may still be rejected by
 Windows foreground rules; do not use focus hacks to force it.
+
+
+## Capability-aware visual exploration
+
+Inspect `snapshot` capability diagnostics before choosing a route. A complete tree
+with effective controls favors semantic UIA. A complete container-only tree favors
+`winapp visual-plan --file plan.json` when the installed help exposes it. Truncated
+or failed traversal is uncertain, not proof that controls do not exist. Do not loop
+snapshot indefinitely or invent a brand-specific accessibility rule.
+
+A plan has 1..32 `steps`: `observe` (window/client/region), `wait_stable`, `click`,
+`double_click`, `scroll`, `drag`, `text`, `keys`, `resize`, `maximize`, `restore`.
+Start with observation. Coordinate inputs use physical client pixels and the returned
+observation; changing position, size, DPI or target identity invalidates it. Input
+requires both foreground mode and explicit interactive-input permission. A sequence
+stops at its first error or missing post-action screenshot and retains a journal.
+Stable pixels and provider completion do not verify business behavior. Never
+resume by blindly rerunning the whole plan or retry an uncertain mutation.
+
+`instance --file request.json` uses executor-owned launch tokens, exit handles and
+window counts; `stop` affects only that token. Lost ownership must fail, never fall
+back to killing by executable name. `external-check --file check.json` provides
+bounded, explicitly supplied read-only business checks. Uncalibrated thresholds
+cannot produce an accepted pass. New extension code has no runtime acceptance in
+this delivery; inspect help/version and retain success, failure and blocked evidence.
+
+Exploration must still pass human review before becoming confirmed regression
+bindings. These commands do not automatically bind, replay, or mark a Feature passed.

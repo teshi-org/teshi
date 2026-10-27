@@ -311,3 +311,33 @@ process; it does not restore its prior tool state or transient settings. Compati
 reasoning and tool progress are displayed in chat. `/copy` excludes partial text,
 reasoning, and tools. Interrupted ACP tasks also expose a clickable Continue task
 button; continuing is explicit and does not bypass generation review.
+
+
+## Compact panes and external Feature refresh
+
+- **F6** requests a Feature rescan. Automatic directory discovery runs at most
+  once a second using the opened project's recursion scope. Running cases and
+  pending agent edits defer synchronization. Dirty changes/deletions prompt;
+  keep-local retains edits, reload accepts the disk version (including deletion).
+- **Shift+Left / Shift+Right** pans the focused Explore pane four columns without
+  moving focus. Existing scrollbar pointer controls remain available.
+- **j / k** in Step changes selects individual additions/removals. Removed Steps
+  are read-only; ambiguous modified text is not used to guess an edit target.
+- Requirements, Testpoints and Explore use two columns with vertically combined
+  details. Below 70 columns or 12 body rows only the focused pane is shown; normal
+  pane navigation still reaches every pane. Narrow AI retains agent switching
+  through **[ / ]** while hiding the sidebar.
+- The input focus border no longer adds a transient shortcut title. **Enter**
+  sends; **Ctrl+J / Shift+Enter** inserts a newline, as before.
+
+These changes have no PTY acceptance evidence yet.
+
+
+## Chat profile title and ACP status row
+
+The built-in fallback no longer adds a `Default` suffix to AI Chat. Custom profiles,
+including a custom profile named Default, display `Agent: <name>`; `/agent-profile`
+still opens selection. ACP activity and controls now share one status row. On narrow
+screens, Agent names are clipped and option chips may be omitted; the settings chip
+(`⋯` when compact) or **Ctrl+,** opens the full settings picker. Errors, approval and
+interrupted-task recovery retain priority. These changes have not been runtime-tested.

@@ -559,3 +559,27 @@ and `--allow-interactive-input`. Foreground mutations require the same permissio
 Auto/background never grant physical input, including when `--yes` is used.
 Inspect `requires_interactive_input` and `action_result_uncertain` JSON codes;
 see [WinApp input and result contracts](winapp-modes.md#supported-actions).
+
+
+## Direct requirement creation
+
+```text
+teshi requirements create --title "Sign in" --file sign-in.md --priority P1 --project . --json
+teshi requirements create --title "Sign in" --stdin --json
+```
+
+`--file` and `--stdin` supply the complete Markdown document; its first H1 must
+match `--title`. With neither, a heading-only document is created. `--iteration`
+is optional. Omitting `--project` creates no association, including no implicit
+association with the current working directory. JSON contains `ok`, `id`, `path`,
+`revision`, `priority`, `iteration`, and `projects`. Store errors return a nonzero
+exit code and a JSON diagnostic when requested. Use `--requirements-root` for
+isolated fixtures. New default filenames use UTC microseconds; historical IDs,
+paths and links are preserved. See [the implementation record](requirements-delivery-2026-10-27.md).
+
+## WinApp owned instances and visual exploration
+
+See [the WinApp extension contract](winapp-exploration.md) for `instance`,
+`visual-plan`, and `external-check`. Check the installed executable's version
+and help first: source implementation does not establish installed capability.
+These extensions were authored without executing tests or window acceptance.

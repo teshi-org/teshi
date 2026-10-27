@@ -20,8 +20,9 @@ Every product Feature has a runner tag checked by
 - `@cli` covers requirement-library and command-line workflows.
 - `@validation-e2e` covers validation self-bootstrap through the built CLI.
 - `@tui` covers real terminal behavior through the TUI runner.
-- `@web-ui` covers browser UI behavior and requires a binding sidecar.
-- `@winapp` covers native Windows UIA behavior and requires a binding sidecar.
+- `@web-ui` covers browser UI behavior and requires a binding sidecar once bindings are confirmed.
+- `@winapp` covers native Windows UIA behavior and requires a binding sidecar once bindings are confirmed.
+- A header that says the work is not bound, or that bindings remain pending, keeps the runner tag without a fabricated sidecar.
 - `@api` covers HTTP/API workflows.
 
 The English and Chinese product Feature trees are paired where the workflow is

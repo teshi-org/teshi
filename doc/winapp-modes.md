@@ -279,3 +279,11 @@ rather than trusting the SetForegroundWindow return value. An already-active
 target needs no activation. A target that remains in the background is rejected.
 `exec close` sends WM_CLOSE once and waits up to one second for the HWND to
 vanish; disappearance verifies closure, otherwise the result is uncertain.
+
+
+## Instance, visual and external-check extensions
+
+See [WinApp exploration contracts](winapp-exploration.md) for the source-checkout
+extensions and the distinction between provider completion, screenshot capture and
+business verification. Installed capabilities must be checked with version/help.
+No runtime acceptance was performed for these extensions in the current delivery.
