@@ -103,9 +103,14 @@ fn elapsed_time_advances_through_acp_tool_activity_and_remains_after_completion(
         .expect_text("I will inspect the project", true, 15000)
         .unwrap();
     let screen = terminal.screen().unwrap();
-    let status = screen.lines().find(|line| line.contains("thinking") && line.contains("ACP") && line.contains("Settings"))
+    let status = screen
+        .lines()
+        .find(|line| line.contains("thinking") && line.contains("ACP") && line.contains("Settings"))
         .unwrap_or_else(|| panic!("activity and controls not on one row: {screen}"));
-    assert!(status.contains('●'), "waiting animation not visible: {status}");
+    assert!(
+        status.contains('●'),
+        "waiting animation not visible: {status}"
+    );
     let initial = timer_line(&terminal);
     capture(&terminal, "elapsed-initial");
     std::thread::sleep(Duration::from_millis(2200));

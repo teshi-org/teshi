@@ -36,7 +36,9 @@ pub(crate) fn with_exclusive_lock<T>(path: &Path, f: impl FnOnce() -> Result<T>)
     let _guard = lock.write().context("acquire exclusive lock")?;
     let result = f();
     drop(_guard);
-    fs::remove_file(&lock_path).ok();
+    // The lock file must outlive the guard: unlinking it lets the next caller
+    // create a fresh inode and lock that instead, so two writers can hold
+    // "exclusive" locks at once. Store scanners already ignore the name.
     result
 }
 
