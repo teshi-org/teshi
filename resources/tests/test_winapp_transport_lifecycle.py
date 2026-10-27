@@ -19,8 +19,21 @@ SERVICE = REPO / "resources/winapp_service.py"
 class TransportLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="teshi-transport-")
-        self.addCleanup(self.temp.cleanup)
+        self.addCleanup(self.cleanup_runtime)
         self.root = Path(self.temp.name)
+
+    def cleanup_runtime(self):
+        # The executor watchdog can outlive the supervisor by a scheduling tick.
+        # Windows holds pythonw.exe open until that owned executor has exited.
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                self.temp.cleanup()
+                return
+            except PermissionError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
 
     def health(self, environment=None):
         result = subprocess.run([str(CLI), "winapp", "health"], cwd=self.root,

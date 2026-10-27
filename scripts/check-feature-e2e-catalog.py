@@ -22,8 +22,47 @@ def feature_tags(content: str) -> set[str]:
     }
 
 
+def bindings_explicitly_pending(content: str) -> bool:
+    """Return whether the Feature header says verified bindings do not exist yet.
+
+    The release catalog still requires a runner tag. A header that says the
+    work is not bound, or that live bindings remain pending, keeps that owner
+    without a fabricated sidecar.
+    """
+    header: list[str] = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("Feature:", "功能:")):
+            break
+        header.append(stripped)
+    text = " ".join(header)
+    return "not bound" in text or "remain pending" in text
+
+
+def require_binding(
+    path: Path, relative: str, content: str, tag: str, errors: list[str], pending: list[str]
+) -> None:
+    if bindings_explicitly_pending(content):
+        pending.append(relative)
+        return
+    binding_path = path.with_suffix(".bindings.json")
+    if not binding_path.is_file():
+        errors.append(f"{relative}: {tag} requires {binding_path.name}")
+        return
+    try:
+        binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        errors.append(f"{relative}: invalid binding sidecar: {error}")
+        return
+    if not isinstance(binding, dict):
+        errors.append(f"{relative}: binding sidecar must contain a JSON object")
+    elif binding.get("feature") != relative:
+        errors.append(f"{relative}: binding sidecar points to {binding.get('feature')!r}")
+
+
 def main() -> int:
     errors: list[str] = []
+    pending: list[str] = []
     feature_files = sorted(FEATURES.rglob("*.feature"))
     for path in feature_files:
         relative = path.relative_to(ROOT).as_posix()
@@ -42,38 +81,10 @@ def main() -> int:
             errors.append(f"{relative}: @validation-e2e must also declare the CLI surface")
 
         if "@web-ui" in tags:
-            binding_path = path.with_suffix(".bindings.json")
-            if not binding_path.is_file():
-                errors.append(f"{relative}: @web-ui requires {binding_path.name}")
-            else:
-                try:
-                    binding = json.loads(binding_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError) as error:
-                    errors.append(f"{relative}: invalid binding sidecar: {error}")
-                else:
-                    if not isinstance(binding, dict):
-                        errors.append(f"{relative}: binding sidecar must contain a JSON object")
-                    elif binding.get("feature") != relative:
-                        errors.append(
-                            f"{relative}: binding sidecar points to {binding.get('feature')!r}"
-                        )
+            require_binding(path, relative, content, "@web-ui", errors, pending)
 
         if "@winapp" in tags:
-            binding_path = path.with_suffix(".bindings.json")
-            if not binding_path.is_file():
-                errors.append(f"{relative}: @winapp requires {binding_path.name}")
-            else:
-                try:
-                    binding = json.loads(binding_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError) as error:
-                    errors.append(f"{relative}: invalid binding sidecar: {error}")
-                else:
-                    if not isinstance(binding, dict):
-                        errors.append(f"{relative}: binding sidecar must contain a JSON object")
-                    elif binding.get("feature") != relative:
-                        errors.append(
-                            f"{relative}: binding sidecar points to {binding.get('feature')!r}"
-                        )
+            require_binding(path, relative, content, "@winapp", errors, pending)
 
         unknown = sorted(tag for tag in tags if tag.startswith("@") and tag not in RUNNER_TAGS)
         if unknown:
@@ -86,6 +97,10 @@ def main() -> int:
         return 1
 
     print(f"Feature E2E catalog check passed: {len(feature_files)} executable Feature files")
+    if pending:
+        print(f"Pending bindings, not a release failure ({len(pending)}):")
+        for relative in pending:
+            print(f"- {relative}")
     return 0
 
 

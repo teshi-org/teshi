@@ -125,8 +125,150 @@ fn new_requirement_creation_keeps_tree_and_editor_in_sync() {
     terminal
         .expect_text("Saved requirement document", true, 10000)
         .unwrap();
+    // The old success message may still be visible from document 29. Await the
+    // persistence boundary rather than accepting that stale status as an ACK.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let index = loop {
+        let index: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.join("_teshi.json")).unwrap()).unwrap();
+        if index["documents"].as_array().unwrap().len() == 30 {
+            break index;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "document 30 was not persisted: {index}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    if let Some(path) = artifact_path("saved-index.json") {
+        fs::write(path, serde_json::to_vec_pretty(&index).unwrap()).unwrap();
+    }
+    let documents = index["documents"].as_array().unwrap();
+    assert_eq!(documents.len(), 30);
+    for document in documents {
+        let path = document["path"].as_str().unwrap();
+        assert_eq!(path.len(), 26);
+        assert_eq!(&path[8..9], "T");
+        assert!(path.ends_with("Z.md"));
+        assert_eq!(
+            fs::read_to_string(store.join(path)).unwrap(),
+            format!("# {}\n\n", document["title"].as_str().unwrap())
+        );
+    }
     terminal.key("q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
+}
+
+#[test]
+#[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
+fn requirements_footer_save_and_keyboard_both_persist_documents() {
+    let binary = fs::canonicalize(std::env::var("TESHI_SELF_TEST_BIN").unwrap()).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    let store = root.path().join("requirements");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("sample.feature"), "Feature: Sample\n").unwrap();
+    let terminal = Terminal::launch(launch_config(&binary, &project, &store, root.path())).unwrap();
+    terminal.expect_text("sample", true, 10000).unwrap();
+    terminal.key("4").unwrap();
+    terminal.key("Ctrl+n").unwrap();
+    terminal.expect_text("# Document 1", true, 10000).unwrap();
+    terminal.expect_text("Save [Ctrl+s]", true, 10000).unwrap();
+    terminal.click_text("Save", 10000).unwrap();
+    let wait_count = |count: usize| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(bytes) = fs::read(store.join("_teshi.json")) {
+                if let Ok(index) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    if index["documents"]
+                        .as_array()
+                        .is_some_and(|items| items.len() == count)
+                    {
+                        break index;
+                    }
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "save did not persist {count} documents"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let first = wait_count(1);
+    let doc = &first["documents"][0];
+    assert_eq!(doc["title"], "Document 1");
+    assert_eq!(
+        fs::read_to_string(store.join(doc["path"].as_str().unwrap())).unwrap(),
+        "# Document 1\n\n"
+    );
+    terminal.key("Ctrl+n").unwrap();
+    terminal.expect_text("# Document 2", true, 10000).unwrap();
+    terminal.key("Ctrl+s").unwrap();
+    let second = wait_count(2);
+    let doc = &second["documents"][1];
+    assert_eq!(doc["title"], "Document 2");
+    assert_eq!(
+        fs::read_to_string(store.join(doc["path"].as_str().unwrap())).unwrap(),
+        "# Document 2\n\n"
+    );
+    if let Some(path) = artifact_path("footer-save-index.json") {
+        fs::write(path, serde_json::to_vec_pretty(&second).unwrap()).unwrap();
+    }
+    terminal.key("q").unwrap();
+    terminal.expect_exit(0, 10000).unwrap();
+}
+
+#[test]
+#[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
+fn clipped_footer_blank_space_does_not_trigger_hidden_action() {
+    let binary = fs::canonicalize(std::env::var("TESHI_SELF_TEST_BIN").unwrap()).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    let store = root.path().join("requirements");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("sample.feature"), "Feature: Sample\n").unwrap();
+    let mut config = launch_config(&binary, &project, &store, root.path());
+    config.cols = 45;
+    config.rows = 16;
+    let terminal = Terminal::launch(config).unwrap();
+    terminal.expect_text("sample", true, 10000).unwrap();
+    terminal.key("4").unwrap();
+    terminal.key("Ctrl+n").unwrap();
+    terminal.expect_text("Document 1", true, 10000).unwrap();
+    let screen = terminal.screen().unwrap();
+    let footer = screen.lines().nth(15).unwrap();
+    let blank = footer
+        .chars()
+        .collect::<Vec<_>>()
+        .iter()
+        .rposition(|c| *c != ' ')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    assert!(blank < 45, "no unused footer cell: {screen}");
+    let before = fs::read(store.join("_teshi.json")).ok();
+    terminal
+        .write(&format!(
+            "\x1b[<0;{};16M\x1b[<0;{};16m",
+            blank + 1,
+            blank + 1
+        ))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        fs::read(store.join("_teshi.json")).ok(),
+        before,
+        "blank click changed persistence"
+    );
+    terminal.expect_text("Document 1", true, 10000).unwrap();
+    assert_eq!(
+        terminal.screen().unwrap(),
+        screen,
+        "blank click changed the UI"
+    );
+    if let Some(path) = artifact_path("clipped-footer.txt") {
+        fs::write(path, terminal.screen().unwrap()).unwrap();
+    }
 }
 
 #[test]

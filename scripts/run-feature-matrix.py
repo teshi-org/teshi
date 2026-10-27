@@ -78,6 +78,8 @@ def resolve_runner(teshi: Path, name: str, default: str | None = None) -> Path:
 
 def tui_runner(teshi: Path, feature: Path) -> tuple[str | None, str]:
     name = feature.name
+    if name in {"external_feature_sync.feature", "外部功能文件同步.feature", "footer_actions.feature", "底部操作.feature", "chat_profile_title.feature", "聊天配置标题.feature", "chat_focus_hint.feature", "聊天聚焦提示.feature", "chat_runtime_context.feature", "聊天耗时与上下文.feature", "explore_horizontal_navigation.feature", "步骤横向导航.feature", "combined_detail_layout.feature", "合并细节布局.feature", "compact_terminal_layout.feature", "小屏终端布局.feature", "pointer_feedback.feature", "点击悬停反馈.feature", "chat_acp_status_row.feature", "聊天ACP状态行.feature"}:
+        return sys.executable, "source-pinned-pty"
     if name in {"tui_acp_model_persistence.feature", "ACP模型选择持久化.feature"}:
         return str(resolve_runner(teshi, "TESHI_RUNNER_ACP_MODEL_FEATURE", "teshi-acp-model-feature-runner")), "confirmed-semantic"
     if name in {"tui_acp_authoring.feature", "ACP功能生成.feature"}:
@@ -211,11 +213,10 @@ def run_one(
         runner_text, binding = tui_runner(teshi, feature)
         route = "tui"
         runner = Path(runner_text) if runner_text else None
-        runner_args = (
-            [str(ROOT / "scripts" / "run-tui-sidecar-feature.py")]
-            if binding == "generated-tui"
-            else []
-        )
+        runner_args = ([str(ROOT / "scripts" / "run-tui-sidecar-feature.py")]
+                       if binding == "generated-tui" else
+                       [str(ROOT / "scripts" / "run-tui-acceptance-feature.py")]
+                       if binding == "source-pinned-pty" else [])
     elif "@web-ui" in feature_tags:
         route = "browser-replay"
         binding = "confirmed-sidecar"

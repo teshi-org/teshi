@@ -11,15 +11,18 @@ have an explicit runner owner:
 - `@api` for HTTP API E2E
 - `@winapp` for native Windows UIA regressions replayed with `teshi winapp`
 
-`@web-ui` files also require a matching `*.bindings.json` artifact. The native
-CI job checks the catalog and runs the CLI self-bootstrap; browser replay is
-run through Teshi's browser workflow. A Feature without a bound browser
-workflow is not added here just to document an internal protocol contract.
+`@web-ui` and `@winapp` files require a matching `*.bindings.json` once
+bindings are confirmed. A header that says the work is `not bound`, or that
+live bindings `remain pending`, keeps the runner tag and does not fail this
+catalog for a missing sidecar. Confirmed bindings are still not invented.
+The native CI job checks the catalog and runs the CLI self-bootstrap; browser
+replay is run through Teshi's browser workflow. A Feature without a bound
+browser workflow is not added here just to document an internal protocol
+contract.
 
-`@winapp` files require a matching `*.bindings.json` artifact and a live
-Windows target for replay. They are cataloged in CI but are not replayed on the
-Linux quality job; use `teshi winapp replay` on Windows with the attached
-`teshi-desktop` target.
+`@winapp` replay still needs a live Windows target. Those files are cataloged
+in CI but are not replayed on the Linux quality job; use `teshi winapp replay`
+on Windows with the attached `teshi-desktop` target.
 
 Do not put Core unit-test intent, architecture ownership, implementation
 boundaries, CI packaging rules, or transport-internal invariants here. Keep

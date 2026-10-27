@@ -22,6 +22,13 @@ pub fn run_case(teshi: &Path, feature_path: &str, scenario_name: &str) -> Result
         .find(|item| item.name == scenario_name)
         .with_context(|| format!("scenario {scenario_name:?} not found in {feature_path}"))?;
 
+    if matches!(
+        Path::new(feature_path).file_stem().and_then(|s| s.to_str()),
+        Some("requirement_creation" | "直接创建需求")
+    ) {
+        return crate::creation::run(teshi, &scenario.steps);
+    }
+
     let mut world = World::new(teshi.to_path_buf())?;
     let mut last_kind = StepKeywordType::Given;
     let background = feature
