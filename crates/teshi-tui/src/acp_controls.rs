@@ -227,12 +227,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventK
 use ratatui::{
     Frame,
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph},
 };
 use teshi_acp::session_config::ConfigOption;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{app::App, theme};
 
@@ -576,11 +576,6 @@ pub(crate) fn render_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .unwrap_or_else(|| id.clone())
         })
         .unwrap_or_else(|| "ACP".into());
-    let busy = matches!(
-        app.agent().backend.status(),
-        teshi_agent::backend::AgentBackendStatus::Running
-            | teshi_agent::backend::AgentBackendStatus::WaitingForPermission
-    );
     let elapsed = app
         .agent()
         .acp_controls_ui
@@ -592,19 +587,23 @@ pub(crate) fn render_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         "Error".into()
     } else if !state.ready && app.agent().acp_controls_ui.discovery_started {
         format!("{} Loading", loading_frame(elapsed))
-    } else if busy {
-        "Busy".into()
     } else if state.ready {
         "Settings".into()
     } else {
         "Connect".into()
     };
-    let more = if status.width().saturating_add(4) <= usize::from(area.width) {
+    let more = if area.width < 32 && status == "Settings" {
+        "⋯".into()
+    } else if status.width().saturating_add(4) <= usize::from(area.width) {
         format!("{status} ▾")
     } else {
         status
     };
-    let more_width = (more.width() as u16 + 2).min(area.width);
+    let more_width = (more.width() as u16 + 2).min(if area.width >= 8 {
+        area.width / 2
+    } else {
+        area.width
+    });
     let activity_on_left = state.pending
         || (!state.ready
             && state.error.is_none()
@@ -649,13 +648,39 @@ pub(crate) fn render_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             )
         }),
     );
-    for (label, target) in controls {
-        let width = label.width().saturating_add(2).min(u16::MAX as usize) as u16;
+    for (mut label, target) in controls {
+        let mut width = label.width().saturating_add(2).min(u16::MAX as usize) as u16;
+        if matches!(&target, Target::Agent) && x.saturating_add(width) > end {
+            let available = end.saturating_sub(x);
+            if available >= 3 {
+                let budget = available.saturating_sub(3) as usize;
+                let mut used = 0;
+                label = agent
+                    .chars()
+                    .take_while(|ch| {
+                        used += ch.width().unwrap_or(0);
+                        used <= budget
+                    })
+                    .collect();
+                label.push('▾');
+                width = available;
+            }
+        }
         if x.saturating_add(width) > end {
             continue;
         }
         chip(frame, Rect::new(x, area.y, width, 1), label, target, ui);
         x = x.saturating_add(width + 1);
+    }
+    if let Some((x, y)) = app.mouse_position {
+        for (rect, _) in &app.agent().acp_controls_ui.regions {
+            if rect.contains((x, y).into()) {
+                frame
+                    .buffer_mut()
+                    .set_style(*rect, Style::default().add_modifier(Modifier::UNDERLINED));
+                break;
+            }
+        }
     }
 }
 

@@ -400,6 +400,12 @@ if os.name == "nt":
     user32.VkKeyScanW.restype = ctypes.c_short
     user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(Rect)]
     user32.GetClientRect.restype = ctypes.c_bool
+    user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+    user32.ClientToScreen.restype = ctypes.c_bool
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.ShowWindow.restype = ctypes.c_bool
+    user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    user32.SetWindowPos.restype = ctypes.c_bool
     user32.ScreenToClient.argtypes = [wintypes.HWND, ctypes.POINTER(ctypes.c_long * 2)]
     user32.ScreenToClient.restype = ctypes.c_bool
 
@@ -1535,6 +1541,272 @@ class WinAppSession:
         self._capture_switch_lock = threading.RLock()
         self._capture_backend: WgcCaptureBackend | ImageGrabCaptureBackend | None = None
         self._capture_fallback_reason = ""
+        self.instances: dict[str, subprocess.Popen] = {}
+        self.observations: dict[str, dict] = {}
+
+    def instance_command(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Operate only on process handles launched and owned by this executor."""
+        action = payload.get("action", "status")
+        token = str(payload.get("instance") or "")
+        if action == "launch":
+            argv = payload.get("argv")
+            if not isinstance(argv, list) or not argv or not all(isinstance(v, str) for v in argv):
+                return {"ok": False, "code": "invalid_argv"}
+            process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL, shell=False)
+            token = secrets.token_hex(16)
+            self.instances[token] = process
+        process = self.instances.get(token)
+        if process is None:
+            return {"ok": False, "code": "instance_unknown", "error": "Instance ownership lost or unknown; no PID-based fallback"}
+        if action == "stop" and process.poll() is None:
+            process.terminate()
+        elif action not in ("launch", "status", "wait", "stop"):
+            return {"ok": False, "code": "unsupported_instance_action"}
+        if action in ("wait", "stop"):
+            try:
+                process.wait(timeout=min(max(float(payload.get("wait_ms", 1000)), 1), 10000) / 1000)
+            except subprocess.TimeoutExpired:
+                return {"ok": False, "code": "instance_wait_timeout", "instance": token,
+                        "pid": process.pid, "business_result": "unverified", "retry_safe": action == "wait"}
+        exit_code = process.poll()
+        # Popen retains the original process handle even after the PID is reused.
+        windows = windows_of_pid(process.pid) if exit_code is None else []
+        exit_code = process.poll()
+        if exit_code is not None:
+            windows = []
+        passed = ("expected_exit_code" not in payload or exit_code == payload["expected_exit_code"])
+        passed &= ("expected_windows" not in payload or len(windows) == payload["expected_windows"])
+        passed &= ("expected_alive" not in payload or (exit_code is None) == payload["expected_alive"])
+        return {"ok": passed, "instance": token, "pid": process.pid, "alive": exit_code is None,
+                "exit_code": exit_code, "window_count": len(windows), "windows": windows,
+                "business_result": "passed" if passed and any(k.startswith("expected_") for k in payload) else "failed" if not passed else "unverified"}
+
+    def external_check(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run an explicitly supplied checker with JSON stdin and a strict result contract."""
+        argv = payload.get("argv")
+        if not isinstance(argv, list) or not argv or not all(isinstance(v, str) for v in argv):
+            return {"ok": False, "code": "invalid_checker_argv"}
+        timeout = min(max(float(payload.get("check_timeout_ms", 5000)), 1), 30000) / 1000
+        process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True, encoding="utf-8", shell=False,
+                                   cwd=self.project_root)
+        try:
+            stdout, stderr = process.communicate(json.dumps({"version": 1, "input": payload.get("input", {})}), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            try:
+                stdout, stderr = process.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", "Checker descendants retained output pipes"
+                if process.stdout: process.stdout.close()
+                if process.stderr: process.stderr.close()
+            root = (self.project_root or Path.cwd()) / ".teshi/artifacts/checks"
+            root.mkdir(parents=True, exist_ok=True)
+            evidence = root / f"{secrets.token_hex(16)}.json"
+            response = {"ok": False, "code": "checker_timeout", "business_result": "unverified", "retry_safe": False}
+            evidence.write_text(json.dumps({**response, "stdout": stdout[:1024*1024], "stderr": stderr[:65536]}), encoding="utf-8")
+            return {**response, "evidence": str(evidence)}
+        root = (self.project_root or Path.cwd()) / ".teshi/artifacts/checks"
+        root.mkdir(parents=True, exist_ok=True)
+        evidence = root / f"{secrets.token_hex(16)}.json"
+        try:
+            result = json.loads(stdout) if len(stdout) <= 1024 * 1024 else None
+            if not isinstance(result, dict) or result.get("business_result") not in ("passed", "failed", "blocked", "unverified"):
+                raise ValueError("checker must return a structured business_result")
+            if result["business_result"] == "passed" and result.get("thresholds_verified") is not True:
+                raise ValueError("uncalibrated thresholds cannot report passed")
+            ok = process.returncode == 0 and result["business_result"] == "passed"
+            response = {"ok": ok, "exit_code": process.returncode, "result": result,
+                        "business_result": result["business_result"] if process.returncode == 0 else "failed"}
+        except (ValueError, TypeError) as exc:
+            response = {"ok": False, "code": "invalid_checker_result", "error": str(exc),
+                        "exit_code": process.returncode, "business_result": "unverified"}
+        evidence.write_text(json.dumps({**response, "stdout": stdout[:1024*1024], "stderr": stderr[:65536]}), encoding="utf-8")
+        return {**response, "evidence": str(evidence)}
+
+    def window_geometry(self) -> dict[str, Any]:
+        """Physical client coordinates bound to a process incarnation and window."""
+        identity = native_target_identity(self.hwnd)
+        if identity is None:
+            raise RuntimeError("target identity is unavailable")
+        rect, origin = Rect(), wintypes.POINT()
+        if not user32.GetClientRect(self.hwnd, ctypes.byref(rect)) or not user32.ClientToScreen(self.hwnd, ctypes.byref(origin)):
+            raise RuntimeError("cannot read client geometry")
+        return {"target": identity, "window_bounds": get_window_rect(self.hwnd),
+                "origin": [origin.x, origin.y], "width": rect.right, "height": rect.bottom,
+                "dpi": int(user32.GetDpiForWindow(self.hwnd)), "units": "physical_client_pixels"}
+
+    def observe_window(self, scope: str = "client", region: Any = None) -> dict[str, Any]:
+        """Capture without requiring a UIA element; reject geometry changes during capture."""
+        with physical_coordinates():
+            before = self.window_geometry()
+            with self._capture_switch_lock:
+                if self._capture_backend is None:
+                    raise RuntimeError("capture backend unavailable")
+                image, bounds = self._capture_backend.capture_rgb()
+            if before != self.window_geometry():
+                raise RuntimeError("window changed during capture; observe again")
+            if scope == "window":
+                crop = list(bounds)
+            elif scope in ("client", "region"):
+                x, y = before["origin"]
+                left, top, width, height = (0, 0, before["width"], before["height"])
+                if scope == "region":
+                    if not isinstance(region, list) or len(region) != 4 or not all(type(v) is int for v in region):
+                        raise ValueError("region must be [x,y,width,height] in client pixels")
+                    left, top, width, height = region
+                if min(left, top) < 0 or min(width, height) <= 0 or left + width > before["width"] or top + height > before["height"]:
+                    raise ValueError("capture region is outside the client")
+                crop = [x + left, y + top, x + left + width, y + top + height]
+            else:
+                raise ValueError("scope must be window, client or region")
+            if crop[0] < bounds[0] or crop[1] < bounds[1] or crop[2] > bounds[2] or crop[3] > bounds[3]:
+                raise RuntimeError("capture does not contain the requested region")
+            image = image.crop((crop[0]-bounds[0], crop[1]-bounds[1], crop[2]-bounds[0], crop[3]-bounds[1]))
+            token = secrets.token_hex(16)
+            root = (self.project_root or Path.cwd()) / ".teshi/artifacts/visual"
+            root.mkdir(parents=True, exist_ok=True)
+            path = root / f"{token}.png"
+            image.save(path, format="PNG")
+            self.observations = {token: before}
+            return {"ok": True, "observation": token, **before, "screenshot": str(path),
+                    "capture_origin": crop[:2], "dimensions": list(image.size), "time": time.time(),
+                    **self.capture_metadata(), "business_result": "unverified"}
+
+    def visual_plan(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Bounded sequential exploration; never retry input or create bindings."""
+        steps = payload.get("steps")
+        if not isinstance(steps, list) or not 1 <= len(steps) <= 32:
+            return {"ok": False, "code": "invalid_plan", "error": "Provide 1..32 sequential steps"}
+        supported = {"observe", "wait_stable", "click", "double_click", "scroll", "drag", "keys", "text", "maximize", "restore", "resize"}
+        if any(not isinstance(s, dict) or s.get("action") not in supported for s in steps):
+            return {"ok": False, "code": "unsupported_visual_action"}
+        if any(s["action"] not in ("observe", "wait_stable") for s in steps) and not interactive_input_allowed(payload):
+            return interactive_input_error("visual_plan")
+        if error := self.integrity_guard("visual_plan"):
+            return error
+        results = []
+        root = (self.project_root or Path.cwd()) / ".teshi/artifacts/visual"
+        root.mkdir(parents=True, exist_ok=True)
+        journal = root / f"plan-{secrets.token_hex(16)}.jsonl"
+        observation = payload.get("observation")
+        for index, step in enumerate(steps):
+            started, dispatched = time.monotonic(), False
+            # Persist intent before native dispatch. A supervisor timeout can kill
+            # this executor; an unmatched start is an uncertain step, never a retry cue.
+            with journal.open("a", encoding="utf-8") as out:
+                out.write(json.dumps({"phase": "started", "index": index,
+                    "action": step["action"], "observation": observation,
+                    "target": native_target_identity(self.hwnd), "business_result": "unverified"}) + "\n")
+                out.flush()
+                os.fsync(out.fileno())
+            try:
+                with physical_coordinates():
+                    action = step["action"]
+                    if action == "wait_stable":
+                        deadline = time.monotonic() + min(max(float(step.get("wait_ms", 2000)), 100), 5000) / 1000
+                        previous, matches = None, 0
+                        while time.monotonic() < deadline:
+                            result = self.observe_window()
+                            pixels = Path(result["screenshot"]).read_bytes()
+                            matches = matches + 1 if pixels == previous else 0
+                            if matches >= 2:
+                                break
+                            previous = pixels
+                            time.sleep(0.1)
+                        else:
+                            raise RuntimeError("visual stability deadline exceeded")
+                        result["stable"] = True
+                        observation = result["observation"]
+                    elif action == "observe":
+                        result = self.observe_window(step.get("scope", "client"), step.get("region"))
+                        observation = result["observation"]
+                    else:
+                        geometry = self.observations.get(observation)
+                        if geometry is None or geometry != self.window_geometry():
+                            raise ValueError("stale observation; capture again before input")
+                        self._activate_foreground(action)
+                        if geometry != self.window_geometry():
+                            raise ValueError("activation changed window geometry; capture again")
+                        if action in ("click", "double_click", "scroll", "drag"):
+                            x, y = step.get("x"), step.get("y")
+                            if type(x) is not int or type(y) is not int or not 0 <= x < geometry["width"] or not 0 <= y < geometry["height"]:
+                                raise ValueError("coordinates must be inside the observed client")
+                            end_x, end_y = step.get("to_x"), step.get("to_y")
+                            if action == "drag" and (type(end_x) is not int or type(end_y) is not int or not 0 <= end_x < geometry["width"] or not 0 <= end_y < geometry["height"]):
+                                raise ValueError("drag destination must be inside the observed client")
+                            delta = step.get("delta", 120)
+                            if action == "scroll" and (type(delta) is not int or not -12000 <= delta <= 12000):
+                                raise ValueError("scroll delta must be an integer in -12000..12000")
+                            dispatched = True
+                            sx, sy = geometry["origin"][0]+x, geometry["origin"][1]+y
+                            if action in ("click", "double_click"):
+                                send_pointer_click(sx, sy, 2 if action == "double_click" else 1)
+                            else:
+                                def inject(event):
+                                    inputs = (Input * 1)(event)
+                                    if user32.SendInput(1, inputs, ctypes.sizeof(Input)) != 1:
+                                        raise ActionResultUncertain("partial pointer dispatch")
+                                def move(px, py):
+                                    ax, ay = virtual_desktop_coordinate(px, py)
+                                    inject(mouse_input(ax, ay, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK))
+                                move(sx, sy)
+                                if action == "scroll":
+                                    event = mouse_input(0, 0, 0x0800)
+                                    event.mi.mouseData = delta & 0xffffffff
+                                    inject(event)
+                                else:
+                                    try:
+                                        inject(mouse_input(0, 0, MOUSEEVENTF_LEFTDOWN))
+                                        for part in range(1, 11):
+                                            if user32.GetForegroundWindow() != self.hwnd or geometry != self.window_geometry():
+                                                raise ActionResultUncertain("target changed during drag")
+                                            move(sx + (end_x-x)*part//10, sy + (end_y-y)*part//10)
+                                            time.sleep(0.01)
+                                    finally:
+                                        inject(mouse_input(0, 0, MOUSEEVENTF_LEFTUP))
+                        elif action in ("keys", "text"):
+                            if auto is None:
+                                raise RuntimeError("keyboard provider unavailable")
+                            value = step.get("value")
+                            if not isinstance(value, str) or len(value) > 4096:
+                                raise ValueError("input value must be a string of at most 4096 characters")
+                            dispatched = True
+                            if action == "text":
+                                value = "".join("{{}" if c == "{" else "{}}" if c == "}" else c for c in value)
+                            auto.SendKeys(value, waitTime=0.05)
+                        elif action == "resize":
+                            width, height = step.get("width"), step.get("height")
+                            if type(width) is not int or type(height) is not int or not 1 <= width <= 16384 or not 1 <= height <= 16384:
+                                raise ValueError("window size must be in 1..16384 physical pixels")
+                            dispatched = True
+                            if not user32.SetWindowPos(self.hwnd, None, 0, 0, width, height, 0x0002 | 0x0004):
+                                raise ActionResultUncertain("SetWindowPos failed")
+                        else:
+                            dispatched = True
+                            user32.ShowWindow(self.hwnd, 3 if action == "maximize" else 9)
+                        result = {"ok": True, "action_outcome": "provider_completed", "business_result": "unverified",
+                                  "input_method": "physical", "coordinate_reference": observation, "target": geometry["target"]}
+                        try:
+                            result["after"] = self.observe_window()
+                            observation = result["after"]["observation"]
+                        except Exception as exc:
+                            result["screenshot_error"] = str(exc)
+                            observation = None
+            except Exception as exc:
+                result = {"ok": False, "error": str(exc), "code": "action_result_uncertain" if dispatched else "visual_precondition_failed",
+                          "business_result": "unverified", "retry_safe": not dispatched}
+            result.update(phase="finished", index=index, elapsed_ms=round((time.monotonic()-started)*1000))
+            results.append(result)
+            with journal.open("a", encoding="utf-8") as out:
+                out.write(json.dumps(result) + "\n")
+                out.flush()
+            if not result["ok"] or result.get("screenshot_error"):
+                break
+        return {"ok": len(results) == len(steps) and all(r["ok"] and not r.get("screenshot_error") for r in results),
+                "results": results, "journal": str(journal), "completed_steps": sum(r["ok"] for r in results),
+                "business_result": "unverified", "retry_safe": False, "observation": observation}
 
     def _stop_capture_backend(self) -> None:
         backend = self._capture_backend
@@ -1793,6 +2065,7 @@ class WinAppSession:
             if node.get("control_type") in INTERACTIVE_TYPES
             and not node.get("is_offscreen")
         ]
+        interactive_count = len(interactive)
         if not for_screenshot:
             interactive = interactive[:80]
         return {
@@ -1802,6 +2075,15 @@ class WinAppSession:
             "title": get_window_title(self.hwnd or 0) or self.title,
             "accessibility_tree": tree,
             "interactive_elements": interactive,
+            "capabilities": {
+                "interactive_count": interactive_count,
+                "returned_count": len(interactive),
+                "traversal_complete": not truncated,
+                "uia": "available" if interactive_count else "unknown" if truncated else "containers_only",
+                "visual_actions": ["observe", "wait_stable", "click", "double_click", "scroll", "drag", "keys", "text", "maximize", "restore", "resize"],
+                "unsupported_visual_actions": [],
+                "next": "Use semantic UIA selectors" if interactive_count else "Traversal is incomplete; absence is not established" if truncated else "Use visual-plan observation; physical input requires foreground permission",
+            },
             "target": self.target_info(),
         }
 
@@ -3019,6 +3301,12 @@ async def handle_command(session: WinAppSession, payload: dict[str, Any]) -> dic
             return {"ok": True, "windows": enum_windows()}
         if cmd == "get_status":
             return session.status()
+        if cmd == "instance":
+            return session.instance_command(payload)
+        if cmd == "external_check":
+            return session.external_check(payload)
+        if cmd == "visual_plan":
+            return session.visual_plan(payload)
         if cmd == "attach_window":
             return session.attach(payload)
         if cmd == "launch_app":
@@ -3181,7 +3469,7 @@ class WinAppSupervisor:
         identity = result.pop("_target_identity", None)
         if identity is not None and (not isinstance(identity, dict) or set(identity) != {"hwnd", "pid", "created"}):
             raise RuntimeError("executor returned an invalid target identity")
-        if identity is not None or (payload.get("cmd") != "wait_window" and "_restore_target" not in payload):
+        if identity is not None or (payload.get("cmd") not in ("wait_window", "instance", "external_check") and "_restore_target" not in payload):
             self.target_identity = identity
         self.save_identity()
         return result
@@ -3255,7 +3543,7 @@ class WinAppSupervisor:
                         self.worker = await asyncio.create_subprocess_exec(
                             *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.DEVNULL, limit=32 * 1024 * 1024, **options)
-                        if self.target_identity and cmd not in ("attach_window", "launch_app"):
+                        if self.target_identity and cmd not in ("attach_window", "launch_app", "instance", "external_check"):
                             stage = "restore_target"
                             identity = dict(self.target_identity)
                             result = await self.exchange({"_restore_target": identity, "_lifecycle": cmd == "wait_window"})
@@ -3266,11 +3554,11 @@ class WinAppSupervisor:
                                 return result
                     stage = "native_execution"
                     selector = str(payload.get("selector") or "")
-                    needs_target = cmd in ("get_ui_snapshot", "element_screenshot", "assert_screenshot", "highlight_selector", "screenshot") or (
+                    needs_target = cmd in ("visual_plan", "get_ui_snapshot", "element_screenshot", "assert_screenshot", "highlight_selector", "screenshot") or (
                         cmd == "execute_locator" and (not selector.startswith("exec:") or selector.startswith("exec:close")))
                     if needs_target and self.target_identity is None:
                         return {"ok": False, "code": "target_invalid", "error": "No verified target; attach explicitly"}
-                    if self.target_identity and cmd not in ("attach_window", "launch_app", "list_windows", "get_status"):
+                    if self.target_identity and cmd not in ("attach_window", "launch_app", "list_windows", "get_status", "instance", "external_check"):
                         if cmd == "wait_window":
                             valid = native_process_created(self.target_identity["pid"]) == self.target_identity["created"]
                         else:

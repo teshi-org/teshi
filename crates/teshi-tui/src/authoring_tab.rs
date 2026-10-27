@@ -1338,10 +1338,13 @@ impl AuthoringUiState {
         Some(id)
     }
 
-    /// Creates a default document using one available number for its ID, path, and title.
+    /// Creates a timestamp-named draft while retaining independent stable IDs.
     pub fn create_default_document(&mut self) -> Result<String> {
         let n = self.next_document_number()?;
-        self.create_document(&format!("doc-{n}.md"), &format!("Document {n}"))
+        self.create_document(
+            &teshi_engine::requirement_timestamp_filename(),
+            &format!("Document {n}"),
+        )
     }
 
     fn next_document_number(&self) -> Result<u32> {
@@ -1461,7 +1464,12 @@ impl AuthoringUiState {
             .find(|d| d.id == doc_id)
             .context("selected document not in index")?;
         let relative_path = meta.path.clone();
-        save_requirement_markdown(
+        let save = if self.draft_document_id.as_deref() == Some(doc_id.as_str()) {
+            teshi_engine::save_requirement_draft
+        } else {
+            save_requirement_markdown
+        };
+        save(
             &requirements_root,
             &mut artifacts.index,
             &relative_path,
@@ -2426,7 +2434,9 @@ mod tests {
                 .documents
                 .last()
                 .unwrap();
-            assert_eq!(meta.path, format!("doc-{expected}.md"));
+            assert_eq!(meta.path.len(), 26);
+            assert!(meta.path.ends_with("Z.md"));
+            assert_eq!(&meta.path[8..9], "T");
             assert_eq!(meta.title, format!("Document {expected}"));
             assert_eq!(
                 state.buffer.as_string(),

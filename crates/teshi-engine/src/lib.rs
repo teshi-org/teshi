@@ -51,11 +51,12 @@ pub use app_data::{
     MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, TESHI_REQUIREMENTS_DIR_ENV,
 };
 pub use authoring::{
-    compute_document_revision, delete_requirement_document, ensure_requirement_project,
-    import_project_requirements, initialize_requirement_store, is_requirement_document_id_reserved,
-    list_requirement_documents, load_authoring_artifacts, read_requirement_document,
-    read_requirement_project, requirement_project_filter, resolve_requirement_ref,
-    resolve_requirement_ref_in_store, save_requirement_document_index, save_requirement_markdown,
+    compute_document_revision, create_requirement_document, delete_requirement_document,
+    ensure_requirement_project, import_project_requirements, initialize_requirement_store,
+    is_requirement_document_id_reserved, list_requirement_documents, load_authoring_artifacts,
+    read_requirement_document, read_requirement_project, requirement_project_filter,
+    requirement_timestamp_filename, resolve_requirement_ref, resolve_requirement_ref_in_store,
+    save_requirement_document_index, save_requirement_draft, save_requirement_markdown,
     save_test_points, set_requirement_document_iteration, set_requirement_documents_iteration,
     snapshot_requirement_project, update_requirement_document_body,
     update_requirement_document_priority, update_requirement_projects, AuthoringLoadResult,

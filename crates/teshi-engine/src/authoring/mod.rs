@@ -1,6 +1,10 @@
 //! Requirement and test-point authoring persistence.
 
+mod create;
 mod import;
+pub use create::{
+    create_requirement_document, requirement_timestamp_filename, save_requirement_draft,
+};
 mod projects;
 pub use projects::{
     ensure_requirement_project, read_requirement_project, requirement_project_filter,

@@ -69,6 +69,10 @@ pub struct KeyContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum Action {
+    /// Rescan Feature files while preserving unsaved buffers.
+    RefreshFeatures,
+    /// Pan the focused Explore pane without moving keyboard focus.
+    ExplorePan(isize),
     // Editor movement (stage 3)
     MoveUp,
     MoveDown,
@@ -564,6 +568,16 @@ impl Action {
             }
         }
 
+        if event.code == KeyCode::F(6) && !context.external_change_prompt_active {
+            return Some(Self::RefreshFeatures);
+        }
+        if context.active_tab == MainTab::Explore && event.modifiers == KeyModifiers::SHIFT {
+            match event.code {
+                KeyCode::Left => return Some(Self::ExplorePan(-4)),
+                KeyCode::Right => return Some(Self::ExplorePan(4)),
+                _ => {}
+            }
+        }
         // Ctrl+C always maps to Quit, regardless of mode.
         if event.code == KeyCode::Char('c') && event.modifiers == KeyModifiers::CONTROL {
             return Some(Self::Quit);

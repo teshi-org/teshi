@@ -1052,6 +1052,7 @@ dependencies = [
  "tempfile",
  "teshi-core",
  "tui-test-rs",
+ "unicode-width",
  "windows-sys 0.61.2",
 ]
 

@@ -470,10 +470,16 @@ pub(super) fn render_chat_panel(
         return;
     }
 
-    let title = Line::from(vec![
-        Span::styled(" AI Chat ", fg(theme::PRIMARY).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("· {} ", app.active_agent_profile().name), muted()),
-    ]);
+    let mut title = Line::from(Span::styled(
+        " AI Chat ",
+        fg(theme::PRIMARY).add_modifier(Modifier::BOLD),
+    ));
+    if !app.agent_registry.uses_builtin_fallback() {
+        title.push_span(Span::styled(
+            format!("· Agent: {} ", app.active_agent_profile().name),
+            muted(),
+        ));
+    }
     let block = theme::panel_block(title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -485,7 +491,7 @@ pub(super) fn render_chat_panel(
 
     let input_active = focused && app.ai_input_focused;
     let has_acp = app.agent().backend.acp_controls().is_some();
-    let status_height: u16 = if has_acp { 2 } else { 1 };
+    let status_height: u16 = 1;
 
     // The input grows with its wrapped content but never takes more than a
     // third of the panel, so history always stays visible.
@@ -529,17 +535,39 @@ pub(super) fn render_chat_panel(
     );
 
     render_chat_history(frame, app, chat_area, placement);
-    render_chat_status(
-        frame,
-        app,
-        Rect::new(status_area.x, status_area.y, status_area.width, 1),
-    );
     if has_acp {
+        let has_status = app.agent().status != AiStatus::Idle
+            || app.agent().task_interrupted()
+            || !matches!(
+                app.generation_stage,
+                GenerationStage::Idle | GenerationStage::Complete
+            );
+        // Preserve the activity first, then the agent/settings controls. Detailed
+        // messages remain in the conversation and approval UI when this row clips.
+        let status_width = if has_status {
+            (status_area.width / 2).min(48)
+        } else {
+            0
+        };
+        if status_width > 0 {
+            render_chat_status(
+                frame,
+                app,
+                Rect::new(status_area.x, status_area.y, status_width, 1),
+            );
+        }
         crate::acp_controls::render_bar(
             frame,
             app,
-            Rect::new(status_area.x, status_area.y + 1, status_area.width, 1),
+            Rect::new(
+                status_area.x + status_width,
+                status_area.y,
+                status_area.width - status_width,
+                1,
+            ),
         );
+    } else {
+        render_chat_status(frame, app, status_area);
     }
     if let Some(filter) = filter.as_deref()
         && sugg_height > 0
@@ -1191,7 +1219,8 @@ fn render_chat_status(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     }
     let agent = app.agent();
-    let thinking = agent.status == AiStatus::Waiting && agent.partial_response().is_empty();
+    let thinking = agent.status == AiStatus::Waiting
+        && (agent.partial_response().is_empty() || agent.backend.acp_controls().is_some());
     let status_text: String = match agent.status {
         AiStatus::Waiting if thinking => agent
             .tool_status
@@ -1299,7 +1328,29 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
         .push(crate::app::ClickableRegion::ChatInput { rect: area });
     let border_color = if active { theme::ACCENT } else { theme::BORDER };
     let agent = app.agent();
-    let label = token_usage_label(agent.total_input_tokens, agent.total_output_tokens);
+    let usage = token_usage_label(agent.total_input_tokens, agent.total_output_tokens);
+    let context = match agent.last_input_tokens {
+        Some(tokens) => format!(
+            "ctx {tokens}/{}{}",
+            app.active_context_window(),
+            if u64::from(tokens) * 10 >= u64::from(app.active_context_window()) * 7 {
+                " !"
+            } else {
+                ""
+            }
+        ),
+        None => "ctx unknown".to_string(),
+    };
+    let seconds = agent
+        .task_started
+        .map_or(agent.task_elapsed, |start| start.elapsed())
+        .as_secs();
+    let runtime = format!("{}m{:02}s", seconds / 60, seconds % 60);
+    let label = if area.width >= 75 {
+        format!("{runtime} · {context} · {usage}")
+    } else {
+        format!("{runtime} · {context}")
+    };
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1307,12 +1358,6 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
     if !label.is_empty() {
         block = block
             .title_top(Line::styled(format!(" {label} "), muted()).alignment(Alignment::Right));
-    }
-    if active && area.width >= 40 {
-        block = block.title_bottom(Line::styled(
-            " Enter send · Ctrl+J / Shift+Enter newline ",
-            muted(),
-        ));
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1531,6 +1576,57 @@ mod tests {
             teshi_agent::backend::AgentBackendKind::Native,
         );
         (app, project, store)
+    }
+
+    #[test]
+    fn input_title_keeps_elapsed_time_and_unknown_usage_without_focus_hint() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let (mut app, _project, _store) = activity_test_app();
+        app.agents[0].task_elapsed = std::time::Duration::from_secs(125);
+        app.agents[0].task_started = None;
+        app.agents[0].last_input_tokens = None;
+        let mut terminal = Terminal::new(TestBackend::new(100, 6)).unwrap();
+        for focused in [true, false] {
+            terminal
+                .draw(|frame| render_chat_input(frame, &mut app, frame.area(), focused))
+                .unwrap();
+            let screen: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(screen.contains("2m05s"), "{screen}");
+            assert!(screen.contains("ctx unknown"), "{screen}");
+            assert!(!screen.contains("Enter send"), "{screen}");
+        }
+    }
+
+    #[test]
+    fn context_warning_uses_last_input_and_seventy_percent_boundary() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let (mut app, _project, _store) = activity_test_app();
+        let limit = app.active_context_window();
+        let threshold = (u64::from(limit) * 7).div_ceil(10) as u32;
+        let mut terminal = Terminal::new(TestBackend::new(100, 6)).unwrap();
+        for (tokens, warning) in [(threshold - 1, false), (threshold, true)] {
+            app.agents[0].last_input_tokens = Some(tokens);
+            app.agents[0].total_input_tokens = 0;
+            terminal
+                .draw(|frame| render_chat_input(frame, &mut app, frame.area(), true))
+                .unwrap();
+            let screen: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            let label = format!("ctx {tokens}/{limit}");
+            assert!(screen.contains(&label), "{screen}");
+            assert_eq!(screen.contains(&format!("{label} !")), warning, "{screen}");
+        }
     }
 
     #[test]

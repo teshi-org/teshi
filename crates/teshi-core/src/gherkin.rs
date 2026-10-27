@@ -374,11 +374,23 @@ pub fn parse_project(root_dir: &std::path::Path) -> BddProject {
 /// Returns a filesystem error with the affected path when traversal or reading
 /// fails. No partially loaded project is returned.
 pub fn try_parse_project(root_dir: &std::path::Path) -> std::io::Result<BddProject> {
+    try_parse_project_with_depth(root_dir, true)
+}
+
+/// Reads a complete project snapshot with the same recursion scope as the UI.
+///
+/// # Errors
+/// Returns traversal or read failures instead of treating unreadable files as deleted.
+pub fn try_parse_project_with_depth(
+    root_dir: &std::path::Path,
+    recursive: bool,
+) -> std::io::Result<BddProject> {
     fn at(path: &std::path::Path, error: std::io::Error) -> std::io::Error {
         std::io::Error::new(error.kind(), format!("read {}: {error}", path.display()))
     }
     fn collect(
         dir: &std::path::Path,
+        recursive: bool,
         visited: &mut std::collections::HashSet<PathBuf>,
         paths: &mut Vec<PathBuf>,
     ) -> std::io::Result<()> {
@@ -395,7 +407,9 @@ pub fn try_parse_project(root_dir: &std::path::Path) -> std::io::Result<BddProje
             let path = entry.path();
             let metadata = std::fs::metadata(&path).map_err(|error| at(&path, error))?;
             if metadata.is_dir() {
-                collect(&path, visited, paths)?;
+                if recursive {
+                    collect(&path, recursive, visited, paths)?;
+                }
             } else if path.extension().is_some_and(|ext| ext == "feature") {
                 paths.push(path);
             }
@@ -403,7 +417,12 @@ pub fn try_parse_project(root_dir: &std::path::Path) -> std::io::Result<BddProje
         Ok(())
     }
     let mut paths = Vec::new();
-    collect(root_dir, &mut std::collections::HashSet::new(), &mut paths)?;
+    collect(
+        root_dir,
+        recursive,
+        &mut std::collections::HashSet::new(),
+        &mut paths,
+    )?;
     paths.sort();
     let features = paths
         .into_iter()

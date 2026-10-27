@@ -295,6 +295,65 @@ fn run_store_command(
     let requirements_root =
         requirements_data_dir(cli_override).map_err(|err| (false, CliError::Io(err)))?;
     match action {
+        RequirementsCommand::Create {
+            title,
+            file,
+            stdin,
+            priority,
+            project,
+            iteration,
+            json,
+        } => (|| -> Result<String, CliError> {
+            let body = if let Some(path) = file {
+                fs::read_to_string(path).map_err(|e| CliError::Io(e.into()))?
+            } else if *stdin {
+                if let Some(body) = &runtime.stdin_body {
+                    body.clone()
+                } else {
+                    let mut body = String::new();
+                    io::stdin()
+                        .read_to_string(&mut body)
+                        .map_err(|e| CliError::Io(e.into()))?;
+                    body
+                }
+            } else {
+                format!("# {}\n\n", title.trim())
+            };
+            let parsed = teshi_core::authoring::requirement_title(&body)
+                .map_err(|e| CliError::Io(e.into()))?;
+            if title.trim() != parsed || title.contains(['\n', '\r']) {
+                return Err(CliError::Io(anyhow::anyhow!(
+                    "title must match the document H1"
+                )));
+            }
+            let priority = priority
+                .as_deref()
+                .map(RequirementPriority::parse)
+                .transpose()
+                .map_err(|e| CliError::Io(e.into()))?;
+            let project = project
+                .as_deref()
+                .map(teshi_engine::ensure_requirement_project)
+                .transpose()
+                .map_err(CliError::Io)?;
+            let meta = teshi_engine::create_requirement_document(
+                &requirements_root,
+                &body,
+                priority,
+                iteration.as_deref(),
+                project.as_ref().map(|p| p.id.as_str()),
+            )
+            .map_err(CliError::Io)?;
+            if *json {
+                Ok(serde_json::json!({"ok": true, "id": meta.id,
+                    "path": meta.path, "revision": meta.revision, "projects": meta.projects,
+                    "priority": meta.priority, "iteration": meta.iteration})
+                .to_string())
+            } else {
+                Ok(format!("Created {} ({})", meta.id, meta.path))
+            }
+        })()
+        .map_err(|e| (*json, e)),
         RequirementsCommand::List {
             project,
             all_projects,

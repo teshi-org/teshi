@@ -315,6 +315,30 @@ pub enum ExportTargetArg {
 /// Subcommands for `teshi requirements`.
 #[derive(Debug, Subcommand)]
 pub enum RequirementsCommand {
+    /// Create a timestamp-named requirement (no implicit project association)
+    Create {
+        /// Title; must match the first Markdown heading when a body is supplied
+        #[arg(long)]
+        title: String,
+        /// Complete Markdown document
+        #[arg(long, conflicts_with = "stdin")]
+        file: Option<PathBuf>,
+        /// Read complete Markdown from stdin
+        #[arg(long)]
+        stdin: bool,
+        /// Priority (P0 through P2)
+        #[arg(long, value_parser = ["P0", "P1", "P2"])]
+        priority: Option<String>,
+        /// Explicit project to associate with planned status
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Iteration name
+        #[arg(long)]
+        iteration: Option<String>,
+        /// Machine-readable result or diagnostic
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the resolved user-level requirement store path
     Path,
     /// Import a project's legacy `requirements/` directory into the current store
@@ -1539,6 +1563,30 @@ pub struct McpServeArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum WinAppCommand {
+    /// Run an explicitly supplied external checker with structured results and evidence
+    ExternalCheck {
+        /// JSON argv, input and check_timeout_ms; checker must be read-only
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Execute an explicit bounded visual exploration plan; never creates bindings
+    VisualPlan {
+        /// JSON with steps and optional observation from a prior capture
+        #[arg(long)]
+        file: PathBuf,
+        /// Physical input requires foreground mode
+        #[arg(long, default_value = "auto", value_parser = ["auto", "foreground", "background"])]
+        mode: String,
+        /// Explicitly permit physical input for this plan
+        #[arg(long)]
+        allow_interactive_input: bool,
+    },
+    /// Launch, inspect, wait for, or stop only an executor-owned process instance
+    Instance {
+        /// JSON action with argv for launch or instance token for status/wait/stop
+        #[arg(long)]
+        file: PathBuf,
+    },
     /// Query the supervisor without waiting for UI Automation
     Health,
     /// Cancel only the active request with this identity; never repeat its action

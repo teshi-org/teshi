@@ -131,6 +131,10 @@ pub struct AgentThread {
     pub total_output_tokens: u64,
     /// Last reported input token count (used for context trimming).
     pub last_input_tokens: Option<u32>,
+    /// Start of the current task, including tool continuations and approval waits.
+    pub task_started: Option<Instant>,
+    /// Final elapsed time of the most recently observed task.
+    pub task_elapsed: Duration,
     /// Selected agent profile ID (None = use default).
     pub profile_id: Option<String>,
     /// Current conversation's ACP selection, also included in session snapshots.
@@ -274,6 +278,8 @@ impl AgentThread {
             total_input_tokens: 0,
             total_output_tokens: 0,
             last_input_tokens: None,
+            task_started: None,
+            task_elapsed: Duration::ZERO,
             profile_id: None,
             selected_acp_id: None,
             selection_root: None,
@@ -2495,6 +2501,10 @@ impl App {
     }
 
     fn explore_selected_step_count(&self) -> usize {
+        let changes = self.explore_changed_steps();
+        if !changes.is_empty() {
+            return changes.len();
+        }
         if self.explore_selected_deleted_feature.is_some()
             || self.explore_selected_scenario_is_deleted()
         {
@@ -2506,6 +2516,96 @@ impl App {
             .and_then(|feature| feature.scenario_at(self.explore_selected_scenario))
             .map(|scenario| scenario.steps.len())
             .unwrap_or(0)
+    }
+
+    /// Changed Step entries, including removed Steps that have no current AST index.
+    pub(crate) fn explore_changed_steps(&self) -> Vec<(String, ChangeKind)> {
+        let feature = self.project.features.get(self.explore_selected_feature);
+        let view = self
+            .explore_selected_deleted_feature
+            .and_then(|index| self.git_status.deleted.get(index))
+            .or_else(|| self.git_status.current_at(self.explore_selected_feature));
+        let language_code = if let Some(index) = self.explore_selected_deleted_feature {
+            self.git_status
+                .deleted
+                .get(index)
+                .and_then(|v| v.diff.as_ref())
+                .and_then(|d| d.old_content.as_deref())
+                .map(teshi_core::gherkin_lang::GherkinLanguages::detect_from_content)
+                .unwrap_or("en")
+        } else {
+            feature.map_or("en", |f| f.language.as_str())
+        };
+        let language = teshi_core::gherkin_lang::GherkinLanguages::global().get(language_code);
+        let source: Vec<(String, ChangeKind)> = if let Some(lines) = &self.explore_diff_lines {
+            lines
+                .iter()
+                .map(|line| (line.text.clone(), line.kind))
+                .collect()
+        } else if let Some(view) = view {
+            let lines = if self.explore_selected_deleted_feature.is_some() {
+                view.deleted_scenarios()
+                    .nth(self.explore_selected_scenario)
+                    .map(|s| s.diff_lines.as_slice())
+                    .unwrap_or_default()
+            } else if let Some(scenario) =
+                feature.and_then(|f| f.scenario_at(self.explore_selected_scenario))
+            {
+                view.scenario_diff_lines(scenario).unwrap_or_default()
+            } else {
+                view.deleted_scenarios()
+                    .nth(
+                        self.explore_selected_scenario
+                            .saturating_sub(self.explore_current_scenario_count()),
+                    )
+                    .map(|s| s.diff_lines.as_slice())
+                    .unwrap_or_default()
+            };
+            lines
+                .iter()
+                .map(|line| {
+                    (
+                        line.text.clone(),
+                        match line.status {
+                            teshi_core::git::DiffStatus::Added => ChangeKind::Added,
+                            teshi_core::git::DiffStatus::Deleted => ChangeKind::Deleted,
+                            teshi_core::git::DiffStatus::Modified => ChangeKind::Modified,
+                            teshi_core::git::DiffStatus::Unchanged => ChangeKind::Unchanged,
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut steps: Vec<(String, ChangeKind)> = Vec::new();
+        let mut current = None;
+        let mut doc_string = false;
+        for (text, kind) in source {
+            let trimmed = text.trim_start();
+            let fence = trimmed.starts_with("\"\"\"") || trimmed.starts_with("```");
+            if !doc_string && !fence && language.is_step_line(trimmed) {
+                steps.push((text, kind));
+                current = Some(steps.len() - 1);
+            } else if fence || doc_string || trimmed.starts_with('|') {
+                if let Some(index) = current {
+                    steps[index].0.push('\n');
+                    steps[index].0.push_str(&text);
+                    if !matches!(kind, ChangeKind::Unchanged)
+                        && matches!(steps[index].1, ChangeKind::Unchanged)
+                    {
+                        steps[index].1 = ChangeKind::Modified;
+                    }
+                }
+                if fence {
+                    doc_string = !doc_string;
+                }
+            } else if language.is_structural(trimmed) {
+                current = None;
+            }
+        }
+        steps.retain(|(_, kind)| !matches!(kind, ChangeKind::Unchanged));
+        steps
     }
 
     fn explore_set_feature_row(&mut self, row: usize) {
@@ -2947,6 +3047,14 @@ impl App {
     /// Apply backend progress to the TUI and provide Teshi's host tools.
     /// The backend owns model events, conversation records, and continuation.
     pub fn poll_llm_events(&mut self) {
+        for agent in &mut self.agents {
+            if matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval) {
+                let start = agent.task_started.get_or_insert_with(Instant::now);
+                agent.task_elapsed = start.elapsed();
+            } else if let Some(start) = agent.task_started.take() {
+                agent.task_elapsed = start.elapsed();
+            }
+        }
         use teshi_agent::backend::AgentBackendEvent;
         self.discover_visible_acp_controls();
         self.sync_acp_policy();
@@ -4146,15 +4254,61 @@ impl App {
     }
 
     pub fn poll_external_feature_changes(&mut self) {
-        if self.project.features.is_empty() || self.external_change_prompt.is_some() {
+        if self.external_change_prompt.is_some() {
             return;
         }
-        if self.last_external_check.elapsed() < Duration::from_millis(250) {
+        if self.last_external_check.elapsed() < Duration::from_millis(1000) {
             return;
         }
         self.last_external_check = Instant::now();
 
-        for idx in 0..self.project.features.len() {
+        // Index-based runner events and pending agent edits must retain their targets.
+        if self.runner_rx.is_some() || !self.pending_agent_changes.is_empty() {
+            return;
+        }
+        if self.git_status.scope != teshi_core::git::GitProjectScope::CurrentFiles {
+            let recursive = self.git_status.scope == teshi_core::git::GitProjectScope::Recursive;
+            match gherkin::try_parse_project_with_depth(&self.project.root_dir, recursive) {
+                Ok(snapshot) => {
+                    let mut added = false;
+                    for feature in snapshot.features {
+                        if self
+                            .project
+                            .features
+                            .iter()
+                            .any(|f| f.file_path == feature.file_path)
+                        {
+                            continue;
+                        }
+                        match fs::read_to_string(&feature.file_path) {
+                            Ok(body) => {
+                                self.disk_stamps
+                                    .push(FileStamp::capture(&feature.file_path));
+                                self.buffers.push(EditorBuffer::from_string(body));
+                                self.buffer_dirty.push(false);
+                                self.project.features.push(feature);
+                                added = true;
+                            }
+                            Err(error) => {
+                                self.status = format!("Feature discovery failed: {error}")
+                            }
+                        }
+                    }
+                    if added {
+                        self.bump_git_status_revision();
+                        let selection = self.selected_tree_location();
+                        self.rebuild_project_views(selection);
+                        self.refresh_git_status();
+                    }
+                }
+                Err(error) => {
+                    self.status = format!("Feature refresh incomplete; retained project: {error}");
+                    return;
+                }
+            }
+        }
+
+        for idx in (0..self.project.features.len()).rev() {
             let path = self.project.features[idx].file_path.clone();
             let current_stamp = FileStamp::capture(&path);
             let known_stamp = self.disk_stamps.get(idx).cloned().unwrap_or(None);
@@ -4172,12 +4326,60 @@ impl App {
                     "Feature changed on disk: {}. Reload [Enter/r] or keep local [Esc/k].",
                     path.display()
                 );
+                break;
+            } else if current_stamp.is_none() && !path.exists() {
+                self.remove_external_feature(idx);
             } else if let Err(err) = self.reload_feature_from_disk(idx, current_stamp) {
                 self.status = format!("Failed to reload {}: {err}", path.display());
             }
             self.quit_pending_confirm = false;
-            break;
         }
+    }
+
+    fn remove_external_feature(&mut self, idx: usize) {
+        self.project.features.remove(idx);
+        self.buffers.remove(idx);
+        self.buffer_dirty.remove(idx);
+        self.disk_stamps.remove(idx);
+        self.active_buffer_idx = self.active_buffer_idx.and_then(|i| {
+            if i == idx {
+                None
+            } else {
+                Some(if i > idx { i - 1 } else { i })
+            }
+        });
+        if self.active_buffer_idx.is_none() {
+            self.buffer = EditorBuffer::from_string(String::new());
+            self.file_path = None;
+        }
+        self.explore_selected_feature = self
+            .explore_selected_feature
+            .saturating_sub(usize::from(self.explore_selected_feature > idx));
+        self.explore_feature_scenario_memory.clear();
+        self.explore_scenario_step_memory.clear();
+        self.explore_case_map.retain(|_, (i, _)| *i != idx);
+        for (i, _) in self.explore_case_map.values_mut() {
+            if *i > idx {
+                *i -= 1;
+            }
+        }
+        self.explore_case_status = std::mem::take(&mut self.explore_case_status)
+            .into_iter()
+            .filter(|((i, _), _)| *i != idx)
+            .map(|((i, s), value)| ((if i > idx { i - 1 } else { i }, s), value))
+            .collect();
+        self.explore_case_details = std::mem::take(&mut self.explore_case_details)
+            .into_iter()
+            .filter(|((i, _), _)| *i != idx)
+            .map(|((i, s), value)| ((if i > idx { i - 1 } else { i }, s), value))
+            .collect();
+        self.explore_detail_case = None;
+        self.explore_detail_open = false;
+        self.external_change_prompt = None;
+        self.bump_git_status_revision();
+        self.rebuild_project_views(None);
+        self.refresh_git_status();
+        self.status = "Removed externally deleted Feature; on-disk run evidence retained".into();
     }
 
     /// Clear the temporary status message if its 3-second lifespan has elapsed.
@@ -4233,7 +4435,7 @@ impl App {
     /// 1. `max_context_tokens` from the in-memory active model profile (when set).
     /// 2. `context_window` from config.toml provider settings.
     /// 3. Hard-coded default of 128 000.
-    fn active_context_window(&self) -> u32 {
+    pub(crate) fn active_context_window(&self) -> u32 {
         // Prefer the active profile's max_context_tokens when available.
         if let Some(profile) = self
             .model_profiles
@@ -5032,7 +5234,12 @@ impl App {
         let Some(prompt) = self.external_change_prompt.clone() else {
             return Ok(());
         };
-        self.reload_feature_from_disk(prompt.feature_idx, prompt.disk_stamp)
+        if !prompt.path.exists() {
+            self.remove_external_feature(prompt.feature_idx);
+            Ok(())
+        } else {
+            self.reload_feature_from_disk(prompt.feature_idx, FileStamp::capture(&prompt.path))
+        }
     }
 
     fn keep_local_external_version(&mut self) {
@@ -5696,7 +5903,34 @@ impl App {
             self.status = "Deleted Feature cannot be edited".to_string();
             return;
         }
-        let Some(line) = self.explore_selected_step_line() else {
+        let changes = self.explore_changed_steps();
+        let selected_line = if let Some((text, kind)) = changes.get(self.explore_selected_step) {
+            if matches!(kind, ChangeKind::Deleted) {
+                self.status = "Deleted Step is read-only".into();
+                return;
+            }
+            let matches: Vec<_> = self
+                .project
+                .features
+                .get(self.explore_selected_feature)
+                .and_then(|feature| feature.scenario_at(self.explore_selected_scenario))
+                .into_iter()
+                .flat_map(|scenario| scenario.steps.iter())
+                .filter(|step| {
+                    format!("{} {}", step.keyword, step.text).trim()
+                        == text.lines().next().unwrap_or_default().trim()
+                })
+                .map(|step| step.line_number)
+                .collect();
+            if matches.len() == 1 {
+                Some(matches[0])
+            } else {
+                None
+            }
+        } else {
+            self.explore_selected_step_line()
+        };
+        let Some(line) = selected_line else {
             self.status = "No step to edit".to_string();
             return;
         };
@@ -7730,6 +7964,24 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::Save => self.save()?,
+            Action::RefreshFeatures => {
+                self.last_external_check = Instant::now() - Duration::from_secs(2);
+                self.status.clear();
+                self.poll_external_feature_changes();
+                let message = if self.status.starts_with("Feature refresh incomplete;") {
+                    self.status.clone()
+                } else {
+                    "Feature refresh requested; active runs and pending edits defer synchronization"
+                        .into()
+                };
+                self.set_status_message(message);
+            }
+            Action::ExplorePan(delta) => {
+                let index = self.explore_focus.index();
+                self.explore_horizontal_scroll[index] = self.explore_horizontal_scroll[index]
+                    .saturating_add_signed(delta)
+                    .min(self.explore_viewports[index].max_horizontal);
+            }
             Action::Quit => self.quit(),
             Action::SelectTab(tab) => self.select_tab(tab),
             Action::ActivateStepInput => self.begin_step_or_title_edit()?,
@@ -9240,6 +9492,11 @@ impl App {
         row: u16,
         modifiers: KeyModifiers,
     ) -> Result<()> {
+        // Pane and modal handlers may consume motion; update hover coordinates
+        // first so moving away from a control always clears its feedback.
+        if matches!(kind, MouseEventKind::Moved) {
+            self.mouse_position = Some((col, row));
+        }
         if !matches!(
             self.project_switch.overlay,
             crate::project_context::SwitchOverlay::None
@@ -11527,7 +11784,9 @@ mod tests {
         let artifacts = app.authoring_ui.artifacts.as_ref().unwrap();
         let new = artifacts.index.documents.last().unwrap();
         assert_eq!(new.id, "doc-2");
-        assert_eq!(new.path, "doc-2.md");
+        assert_eq!(new.path.len(), 26);
+        assert!(new.path.ends_with("Z.md"));
+        assert_eq!(&new.path[8..9], "T");
         assert_eq!(new.title, "Document 2");
     }
 
@@ -15596,7 +15855,12 @@ mod tests {
         app.handle_action(Action::MoveDown)
             .expect("move to the deleted scenario");
         assert_eq!(app.explore_selected_scenario, 1);
-        assert_eq!(app.explore_selected_step_count(), 0);
+        assert_eq!(app.explore_selected_step_count(), 1);
+        assert_eq!(
+            app.explore_changed_steps()[0].1,
+            crate::app::ChangeKind::Deleted
+        );
+        assert!(app.explore_changed_steps()[0].0.contains("Given old"));
 
         app.handle_action(Action::MoveUp)
             .expect("move back to the current scenario");
@@ -16269,6 +16533,63 @@ Feature: B
         assert!(app.external_change_prompt.is_none());
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_manual_external_refresh_waits_for_active_runner() {
+        let original = "Feature: T\n  Scenario: S\n    Given one\n";
+        let updated = "Feature: T\n  Scenario: S\n    Given changed during run\n";
+        let (mut app, path) = feature_file_app("external-running", original);
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        app.runner_rx = Some(receiver);
+        fs::write(&path, updated).expect("updated feature should be written");
+
+        app.handle_action(Action::RefreshFeatures).unwrap();
+        assert!(app.runner_rx.is_some());
+        assert_eq!(app.buffer.as_string(), original);
+        assert_eq!(app.project.features[0].scenarios[0].steps[0].text, "one");
+
+        app.runner_rx = None;
+        app.last_external_check = Instant::now() - Duration::from_secs(2);
+        app.poll_external_feature_changes();
+        assert_eq!(app.buffer.as_string(), updated);
+        assert_eq!(
+            app.project.features[0].scenarios[0].steps[0].text,
+            "changed during run"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_external_scan_failure_keeps_loaded_project() {
+        let project = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        let path = project.path().join("kept.feature");
+        fs::write(&path, "Feature: Kept\n  Scenario: S\n    Given retained\n").unwrap();
+        let mut app = App::from_directory(
+            project.path(),
+            crate::config::load_config().unwrap(),
+            true,
+            store.path().to_path_buf(),
+        )
+        .unwrap();
+        // A missing scan root deterministically exercises the traversal error path
+        // without changing permissions or deleting anything outside the fixture.
+        app.project.root_dir = project.path().join("missing-scan-root");
+        app.handle_action(Action::RefreshFeatures).unwrap();
+        assert_eq!(app.project.features.len(), 1);
+        assert_eq!(app.project.features[0].file_path, path);
+        assert_eq!(
+            app.project.features[0].scenarios[0].steps[0].text,
+            "retained"
+        );
+        assert!(
+            app.status
+                .contains("Feature refresh incomplete; retained project")
+        );
+        assert!(app.status_message.as_deref().is_some_and(|message| {
+            message.contains("Feature refresh incomplete; retained project")
+        }));
     }
 
     #[test]

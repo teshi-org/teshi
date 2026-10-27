@@ -354,6 +354,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         chunks[3],
     );
     render_main_panel(frame, app, chunks[2]);
+    render_tree_pointer_feedback(frame, app);
 
     // Agent change approval status is shown only in the AI chat panel's status
     // bar (above the input area) — never in the bottom command line.
@@ -379,12 +380,18 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             RequirementsEditorMode::VisualLine => "[V-LINE]",
         };
         if chunks[3].width < 55 {
-            frame.render_widget(
-                crate::authoring_tab::requirements_footer_line(
-                    &app.requirements_root,
-                    &app.authoring_ui.iteration_filter,
-                ),
+            render_action_bar(
+                frame,
+                app,
                 chunks[3],
+                "",
+                &[
+                    (" Save", Action::Save),
+                    (" New", Action::ReqNewDocument),
+                    (" Filter", Action::ReqFilterOverlay),
+                    (" Point", Action::ReqNewTestPoint),
+                ],
+                false,
             );
         } else {
             let compact = chunks[3].width < 100;
@@ -448,9 +455,17 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                 false,
             );
         } else if chunks[3].width < 40 {
-            frame.render_widget(
-                Paragraph::new("[NORMAL] i edit · Tab panes · s save"),
+            render_action_bar(
+                frame,
+                app,
                 chunks[3],
+                "",
+                &[
+                    (" Save", Action::Save),
+                    (" Approve", Action::TpApprove),
+                    (" Reject", Action::TpReject),
+                ],
+                false,
             );
         } else {
             let compact = chunks[3].width < 100;
@@ -496,7 +511,30 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         }
     } else {
         let key_hints = theme::footer_line(footer_hints(app).spans);
-        frame.render_widget(Paragraph::new(key_hints), chunks[3]);
+        let controls_width = chunks[3].width.min(31);
+        render_action_bar(
+            frame,
+            app,
+            Rect::new(chunks[3].x, chunks[3].y, controls_width, chunks[3].height),
+            "",
+            &[
+                (" Save", Action::Save),
+                (" Model", Action::ModelPanelOpen),
+                (" Quit", Action::Quit),
+            ],
+            false,
+        );
+        if chunks[3].width > controls_width {
+            frame.render_widget(
+                Paragraph::new(key_hints),
+                Rect::new(
+                    chunks[3].x + controls_width,
+                    chunks[3].y,
+                    chunks[3].width - controls_width,
+                    chunks[3].height,
+                ),
+            );
+        }
     }
 
     if app.auth_panel_active
@@ -577,6 +615,160 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         app.clickable_regions.clear();
         render_delete_confirmation(frame, app, frame.area());
     }
+    render_pointer_feedback(frame, app);
+}
+
+fn render_tree_pointer_feedback(frame: &mut Frame<'_>, app: &mut App) {
+    let Some((x, y)) = app.mouse_position else {
+        return;
+    };
+    if app.pending_delete.is_some()
+        || app.has_external_change_prompt()
+        || app.auth_panel_active
+        || app.model_panel_active
+        || app.session_panel_active
+        || app.agent_profile_panel_active
+        || app.approval_panel_active
+        || app.quit_pending_confirm
+        || !matches!(
+            app.authoring_ui.overlay,
+            crate::authoring_tab::RequirementsOverlay::None
+        )
+        || !matches!(
+            app.project_switch.overlay,
+            crate::project_context::SwitchOverlay::None
+        )
+    {
+        return;
+    }
+    let mut rows = Vec::new();
+    let inner = |area: Rect| {
+        area.inner(ratatui::layout::Margin {
+            horizontal: 1,
+            vertical: 1,
+        })
+    };
+    match app.active_tab {
+        MainTab::Requirements => {
+            let ui = &mut app.authoring_ui;
+            rows.push((
+                inner(ui.pane_areas[0]),
+                ui.tree_state.flatten(&ui.tree_items).len(),
+                ui.tree_state.get_offset(),
+            ));
+            rows.push((
+                inner(ui.pane_areas[2]),
+                ui.filtered_linked_test_points().len(),
+                ui.linked_scroll,
+            ));
+        }
+        MainTab::TestPoints => {
+            if let Some(area) = app.clickable_regions.iter().find_map(|r| match r {
+                ClickableRegion::TestPointsPane { pane: 0, rect } => Some(*rect),
+                _ => None,
+            }) {
+                let ui = &mut app.test_points_ui;
+                rows.push((
+                    inner(area),
+                    ui.tree_state.flatten(&ui.tree_items).len(),
+                    ui.tree_state.get_offset(),
+                ));
+            }
+        }
+        MainTab::MindMap => {
+            if let Some(area) = app.tree_panel_rect {
+                rows.push((
+                    area,
+                    app.tree_state.flatten(&app.mindmap_index.items).len(),
+                    app.tree_state.get_offset(),
+                ));
+            }
+        }
+        _ => {}
+    }
+    for (area, count, offset) in rows {
+        if area.contains((x, y).into()) && offset + usize::from(y - area.y) < count {
+            frame.buffer_mut().set_style(
+                Rect::new(area.x, y, area.width, 1),
+                Style::default().add_modifier(Modifier::UNDERLINED),
+            );
+        }
+    }
+}
+
+fn render_pointer_feedback(frame: &mut Frame<'_>, app: &App) {
+    let Some((x, y)) = app.mouse_position else {
+        return;
+    };
+    // Only registered, currently visible targets get feedback. Modal rendering
+    // already removes covered targets, so hover cannot imply a blocked action.
+    for region in app.clickable_regions.iter().rev() {
+        let rect = match region {
+            ClickableRegion::ActionButton { rect, .. }
+            | ClickableRegion::RequirementFilterOption { rect, .. }
+            | ClickableRegion::TestPointField { rect, .. }
+            | ClickableRegion::TestPointExcerpt { rect, .. }
+            | ClickableRegion::TestPointScenario { rect, .. }
+            | ClickableRegion::ModelProfileRow { rect, .. }
+            | ClickableRegion::ModelFormField { rect, .. }
+            | ClickableRegion::AgentProfileRow { rect, .. }
+            | ClickableRegion::ChangeSummaryRow { rect, .. }
+            | ClickableRegion::StepKeywordRow { rect, .. }
+            | ClickableRegion::SessionRow { rect, .. }
+            | ClickableRegion::MindMapLocation { rect, .. }
+            | ClickableRegion::Tab { rect, .. }
+            | ClickableRegion::ProjectRecent { rect, .. }
+            | ClickableRegion::ProjectOpenPath { rect, .. }
+            | ClickableRegion::ExploreHorizontalScrollbar { rect, .. } => *rect,
+            ClickableRegion::ExploreFeature {
+                row_y,
+                col_x,
+                col_right,
+                ..
+            }
+            | ClickableRegion::ExploreDeletedFeature {
+                row_y,
+                col_x,
+                col_right,
+                ..
+            }
+            | ClickableRegion::ExploreScenario {
+                row_y,
+                col_x,
+                col_right,
+                ..
+            }
+            | ClickableRegion::ExploreStep {
+                row_y,
+                col_x,
+                col_right,
+                ..
+            }
+            | ClickableRegion::ApprovalBadge {
+                row_y,
+                col_x,
+                col_right,
+                ..
+            }
+            | ClickableRegion::ApprovalOption {
+                row_y,
+                col_x,
+                col_right,
+                ..
+            } => Rect::new(*col_x, *row_y, col_right.saturating_sub(*col_x), 1),
+            _ => continue,
+        };
+        if rect.contains((x, y).into()) {
+            let visible = rect.intersection(frame.area());
+            frame.buffer_mut().set_style(
+                visible,
+                Style::default()
+                    .add_modifier(Modifier::UNDERLINED)
+                    .bg(theme::FOOTER_BG),
+            );
+            break;
+        }
+    }
 }
 
 fn render_delete_confirmation(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -640,6 +832,10 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     }
 
+    if area.width < 70 {
+        chat::render_chat_panel(frame, app, area, true, chat::ChatPlacement::Tab);
+        return;
+    }
     // Layout: sidebar (left) + main panel (right)
     let [sidebar_area, main_area] =
         Layout::horizontal([Constraint::Length(28), Constraint::Min(10)]).areas(area);
@@ -678,6 +874,21 @@ fn render_mindmap_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 /// Renders the Explore tab: three-column feature/scenario/step browser.
+/// Two columns with supporting details below the main content; tiny terminals
+/// show only the focused pane, preserving all keyboard navigation targets.
+fn compact_panes(area: Rect, focus: usize) -> [Rect; 3] {
+    if area.width < 70 || area.height < 12 {
+        let mut panes = [Rect::default(); 3];
+        panes[focus.min(2)] = area;
+        return panes;
+    }
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(28), Constraint::Percentage(72)]).areas(area);
+    let [main, detail] =
+        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(right);
+    [left, main, detail]
+}
+
 fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if app.explore_edit_mode {
         let cols = Layout::default()
@@ -688,14 +899,7 @@ fn render_explore_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         render_reserved_panel(frame, app, cols[1]);
         return;
     }
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(20),
-            Constraint::Percentage(30),
-            Constraint::Percentage(50),
-        ])
-        .split(area);
+    let cols = compact_panes(area, app.explore_focus.index());
 
     render_explore_features(frame, app, cols[0]);
     render_explore_scenarios(frame, app, cols[1]);
@@ -744,6 +948,17 @@ fn render_explore_lines<'a>(
     inner: Rect,
     lines: Vec<Line<'a>>,
 ) -> Rect {
+    render_explore_lines_selected(frame, app, column, inner, lines, None)
+}
+
+fn render_explore_lines_selected<'a>(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    column: ColumnFocus,
+    inner: Rect,
+    lines: Vec<Line<'a>>,
+    selected_row: Option<usize>,
+) -> Rect {
     let content_width = lines.iter().map(Line::width).max().unwrap_or(0);
     let viewport_width = inner.width as usize;
     let overflow = content_width > viewport_width && inner.height >= 3;
@@ -755,7 +970,7 @@ fn render_explore_lines<'a>(
     let max_scroll = content_width.saturating_sub(viewport_width);
     let offset = app.explore_horizontal_scroll[column.index()].min(max_scroll);
     app.explore_horizontal_scroll[column.index()] = offset;
-    let selected = match column {
+    let selected = selected_row.unwrap_or_else(|| match column {
         ColumnFocus::Feature => app
             .explore_selected_deleted_feature
             .map_or(app.explore_selected_feature, |i| {
@@ -763,7 +978,7 @@ fn render_explore_lines<'a>(
             }),
         ColumnFocus::Scenario => app.explore_selected_scenario,
         ColumnFocus::Step => app.explore_selected_step,
-    };
+    });
     let view = &mut app.explore_viewports[column.index()];
     let owner = match column {
         ColumnFocus::Feature => (0, None, None),
@@ -1399,6 +1614,63 @@ fn render_git_file_fallback(
 }
 
 fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let changes = app.explore_changed_steps();
+    if !changes.is_empty() {
+        let block = explore_block(
+            "Steps (Git diff) · j/k select · Shift+←/→ scroll",
+            app.explore_focus == ColumnFocus::Step,
+        );
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        // Keep document-level changes visible alongside independently selectable
+        // steps; replacing the old diff renderer must not hide title changes.
+        let view = app
+            .explore_selected_deleted_feature
+            .and_then(|index| app.git_status.deleted.get(index))
+            .or_else(|| app.git_status.current_at(app.explore_selected_feature));
+        let mut lines = Vec::new();
+        if let Some(view) = view {
+            render_git_diff_lines(&view.feature_diff_lines, &mut lines);
+        }
+        let prefix_rows = lines.len();
+        lines.extend(changes.iter().enumerate().map(|(index, (text, kind))| {
+            let (marker, color) = match kind {
+                crate::app::ChangeKind::Added => ("+", theme::SUCCESS),
+                crate::app::ChangeKind::Deleted => ("-", theme::ERROR),
+                _ => ("~", theme::WARNING),
+            };
+            let style = if index == app.explore_selected_step {
+                theme::selected_row(true)
+            } else {
+                Style::default().fg(color)
+            };
+            Line::styled(format!("{marker} {}", text.replace('\n', " ↳ ")), style)
+        }));
+        let content = render_explore_lines_selected(
+            frame,
+            app,
+            ColumnFocus::Step,
+            inner,
+            lines,
+            Some(prefix_rows + app.explore_selected_step),
+        );
+        for index in 0..changes.len() {
+            // render_explore_panel translates logical rows once and removes
+            // off-screen hit targets after every pane has been rendered.
+            app.clickable_regions.push(ClickableRegion::ExploreStep {
+                step_idx: index,
+                row_y: content
+                    .y
+                    .saturating_add((prefix_rows + index).min(u16::MAX as usize) as u16),
+                col_x: content.x,
+                col_right: content.right(),
+            });
+        }
+        return;
+    }
     let focused = app.explore_focus == ColumnFocus::Step;
     if app.explore_edit_mode {
         render_editor_panel(frame, app, area, false);
@@ -4088,23 +4360,14 @@ fn render_requirements_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if area.width < 20 || area.height < 3 {
         return;
     }
-    let layout = if area.width < 60 {
-        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).split(area)
-    } else if area.width < 100 {
-        Layout::horizontal([
-            Constraint::Percentage(22),
-            Constraint::Percentage(48),
-            Constraint::Percentage(30),
-        ])
-        .split(area)
-    } else {
-        Layout::horizontal([
-            Constraint::Percentage(20),
-            Constraint::Percentage(50),
-            Constraint::Percentage(30),
-        ])
-        .split(area)
-    };
+    let layout = compact_panes(
+        area,
+        match app.authoring_ui.focus {
+            crate::authoring_tab::RequirementsFocus::Tree => 0,
+            crate::authoring_tab::RequirementsFocus::Editor => 1,
+            crate::authoring_tab::RequirementsFocus::LinkedTestPoints => 2,
+        },
+    );
 
     {
         let ui = &mut app.authoring_ui;
@@ -4124,7 +4387,7 @@ fn render_requirements_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             render_requirements_linked(frame, ui, layout[2], linked_focused);
         }
     }
-    if app.authoring_ui.current_document_meta().is_some() {
+    if app.authoring_ui.current_document_meta().is_some() && layout[1].width > 2 {
         let pane = layout[1];
         let width = 17.min(pane.width.saturating_sub(2));
         app.clickable_regions.push(ClickableRegion::ActionButton {
@@ -5071,23 +5334,14 @@ fn render_test_points_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if area.width < 20 || area.height < 3 {
         return;
     }
-    let layout = if area.width < 60 {
-        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).split(area)
-    } else if area.width < 100 {
-        Layout::horizontal([
-            Constraint::Percentage(22),
-            Constraint::Percentage(48),
-            Constraint::Percentage(30),
-        ])
-        .split(area)
-    } else {
-        Layout::horizontal([
-            Constraint::Percentage(20),
-            Constraint::Percentage(50),
-            Constraint::Percentage(30),
-        ])
-        .split(area)
-    };
+    let layout = compact_panes(
+        area,
+        match app.test_points_ui.focus {
+            crate::test_points_tab::TestPointsFocus::Tree => 0,
+            crate::test_points_tab::TestPointsFocus::Details => 1,
+            crate::test_points_tab::TestPointsFocus::Excerpts => 2,
+        },
+    );
 
     // Register the exact pane rectangles used by the render pass.  The
     // pointer path uses these regions to focus the same pane as Tab/arrow
@@ -5810,7 +6064,7 @@ Feature: Rule only
         )];
         app.explore_horizontal_scroll[crate::app::ColumnFocus::Feature.index()] = usize::MAX;
 
-        let mut terminal = Terminal::new(TestBackend::new(60, 18)).expect("terminal");
+        let mut terminal = Terminal::new(TestBackend::new(80, 18)).expect("terminal");
         terminal
             .draw(|frame| render(frame, &mut app))
             .expect("render");
@@ -6054,6 +6308,58 @@ Feature: Rule only
         assert!(screen.contains("+ Feature: New title"));
         assert!(screen.contains("-     Given a backup exists"));
         assert!(screen.contains("+     Given a snapshot exists"));
+    }
+
+    #[test]
+    fn changed_step_scroll_and_pointer_rows_include_feature_header_offset() {
+        let old = format!(
+            "Feature: Old title\n  Scenario: Steps\n{}",
+            (0..20)
+                .map(|n| format!("    Given old step {n}\n"))
+                .collect::<String>()
+        );
+        let new = format!(
+            "Feature: New title\n  Scenario: Steps\n{}",
+            (0..20)
+                .map(|n| format!("    Given new step {n}\n"))
+                .collect::<String>()
+        );
+        let path = PathBuf::from("steps.feature");
+        let mut app = App::from_args().unwrap();
+        app.project.features = vec![gherkin::parse_feature(&new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(&old), Some(&new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Step;
+        app.explore_selected_step = app.explore_changed_steps().len() - 1;
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let viewport = &app.explore_viewports[crate::app::ColumnFocus::Step.index()];
+        assert!(viewport.offset > 0);
+        let mut selected_visible = false;
+        for region in &app.clickable_regions {
+            if let ClickableRegion::ExploreStep {
+                step_idx, row_y, ..
+            } = region
+            {
+                assert!(*row_y >= viewport.rect.y && *row_y < viewport.rect.bottom());
+                let row: String = (viewport.rect.x..viewport.rect.right())
+                    .map(|x| terminal.backend().buffer()[(x, *row_y)].symbol())
+                    .collect();
+                assert!(
+                    row.contains(app.explore_changed_steps()[*step_idx].0.trim()),
+                    "{row}"
+                );
+                selected_visible |= *step_idx == app.explore_selected_step;
+            }
+        }
+        assert!(selected_visible);
     }
 
     #[test]

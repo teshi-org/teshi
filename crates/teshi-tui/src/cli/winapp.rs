@@ -84,6 +84,44 @@ fn handle_winapp_inner(action: &WinAppCommand) -> Result<()> {
         ensure_winapp_sidecar(&project_root, elevated)?;
     }
     match action {
+        WinAppCommand::VisualPlan {
+            file,
+            mode,
+            allow_interactive_input,
+        } => {
+            let mut command: serde_json::Value = serde_json::from_slice(&std::fs::read(file)?)?;
+            let object = command
+                .as_object_mut()
+                .context("plan must be a JSON object")?;
+            object.insert("cmd".into(), json!("visual_plan"));
+            object.insert("mode".into(), json!(mode));
+            object.insert(
+                "allow_interactive_input".into(),
+                json!(allow_interactive_input),
+            );
+            object.insert("timeout_ms".into(), json!(60000));
+            let response = send_winapp_command(&project_root, command, Duration::from_secs(60))?;
+            print_json_response(response.clone())?;
+            ensure_ok(&response)
+        }
+        WinAppCommand::Instance { file } | WinAppCommand::ExternalCheck { file } => {
+            let mut command: serde_json::Value = serde_json::from_slice(&std::fs::read(file)?)?;
+            command
+                .as_object_mut()
+                .context("instance request must be a JSON object")?
+                .insert(
+                    "cmd".into(),
+                    json!(if matches!(action, WinAppCommand::Instance { .. }) {
+                        "instance"
+                    } else {
+                        "external_check"
+                    }),
+                );
+            command["timeout_ms"] = json!(45000);
+            let response = send_winapp_command(&project_root, command, Duration::from_secs(45))?;
+            print_json_response(response.clone())?;
+            ensure_ok(&response)
+        }
         WinAppCommand::Health => {
             let response = send_winapp_command(
                 &project_root,
