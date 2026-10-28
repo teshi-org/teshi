@@ -29,8 +29,8 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum, 
     name = "teshi",
     version,
     about = "Terminal-first BDD editor with AI assistance",
-    long_about = "Terminal UI: `teshi` opens an empty buffer; `teshi .` recursively scans the current directory.\n\
-                  `teshi path/` scans one level; add `--recursive` to scan subdirectories.\n\
+    long_about = "Terminal UI: `teshi`, `teshi .`, and `teshi path/` load the project features/ using the system language.\n\
+                  Add `-R` or `--recursive` to scan the entire target directory recursively.\n\
                   Browser GUI: `teshi web [--project PATH]`.\n\
                   Native locator workflow: `teshi desktop [--project PATH]`.\n\
                   Headless CI runs: `teshi run [PATH] [--scenario NAME]`."
@@ -44,7 +44,7 @@ pub struct Cli {
     #[arg(long, short = 'R')]
     pub recursive: bool,
 
-    /// File or directory paths for TUI mode (`teshi .` = recursive project root)
+    /// Feature file or project directory paths for TUI mode
     #[arg(value_name = "PATH")]
     pub paths: Vec<String>,
 

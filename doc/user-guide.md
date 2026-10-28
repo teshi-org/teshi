@@ -1,5 +1,18 @@
 # User Guide
 
+## Opening a project
+
+Run `teshi` in the project directory to recursively load `.feature` files from
+`./features`. When `features` has language directories such as `zh-CN` and
+`en-US`, only the one matching your system UI language is loaded. Without
+language directories, all Feature files under `features` are included. A missing
+`features` directory opens an empty project; a missing language match reports
+an error.
+
+Use `teshi .` for the same loading rules, or `teshi project/` to open another project.
+Use `teshi -R` or `teshi project/ -R` to recursively scan the entire target directory.
+See [CLI startup rules](cli-usage.md#open-files-tui) for details.
+
 ## Tabs
 
 teshi has five core tabs:

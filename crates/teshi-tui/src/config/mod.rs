@@ -228,6 +228,14 @@ pub fn resolve_provider_key(config: &AppConfig, name: &str) -> Result<Option<Str
 ///
 /// All `${auth:*}` / `${env:*}` placeholders are resolved after merging.
 pub fn load_config() -> Result<AppConfig> {
+    load_config_for_project(&std::env::current_dir().context("resolve project config directory")?)
+}
+
+/// Loads user settings and the selected project's settings without changing process cwd.
+///
+/// # Errors
+/// Returns configuration read or parse errors.
+pub fn load_config_for_project(project_root: &Path) -> Result<AppConfig> {
     let mut config = hardcoded_defaults();
 
     let user_config_path = dirs::config_dir()
@@ -239,10 +247,7 @@ pub fn load_config() -> Result<AppConfig> {
         merge_config(&mut config, &user_cfg);
     }
 
-    let project_config_path = std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
-        .join(".teshi")
-        .join("config.toml");
+    let project_config_path = project_root.join(".teshi").join("config.toml");
 
     if let Some(project_cfg) = load_toml_file(&project_config_path)? {
         warn_plaintext_keys(&project_config_path, &project_cfg);

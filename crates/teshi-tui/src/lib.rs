@@ -11,6 +11,7 @@ mod config;
 mod diff;
 mod editor_buffer;
 mod engine;
+mod feature_discovery;
 mod generation_state;
 mod highlight;
 mod input;

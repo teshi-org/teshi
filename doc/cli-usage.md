@@ -5,12 +5,38 @@
 ### Open files (TUI)
 
 ```bash
-teshi                              # scan current directory for .feature files
-teshi path/to/features/            # open directory of .feature files
-teshi path/to/file.feature         # open single .feature file
+teshi                    # load the current project's localized features/
+teshi .                  # same Feature loading as teshi
+teshi path/to/project/   # load path/to/project/features/ with the same language rules
+teshi -R                 # recursively scan the entire current directory
+teshi path/to/project -R # recursively scan the entire selected project
+teshi path/to/file.feature # open a single file directly
 ```
 
-If no `.feature` files are found, the TUI opens an empty project buffer.
+Without `-R`, all directory forms load only the selected project's `features` folder:
+
+- Without language subdirectories, load all `.feature` files recursively under `features`.
+- With language directories such as `zh-CN` or `en-US`, load only the matching system UI
+  language and its descendants, excluding root-level files and other languages.
+- Match the complete language tag case-insensitively (`en-GB` does not fall back to `en-US`).
+  On Windows use the user's preferred UI language. An explicit `TESHI_FEATURE_LANGUAGE`
+  environment override is also supported, including for deterministic acceptance fixtures.
+- Missing `features` opens an empty project; a missing language match reports an error.
+  Neither case falls back to scanning the entire project.
+
+`-R`/`--recursive` explicitly disables language selection and scans all Feature files in
+its target directory. `teshi -R` and `teshi . -R` are equivalent. The unrestricted initial
+walk and periodic directory discovery run in a single background worker per active
+project so directory traversal does not block terminal input. Switching projects discards
+results from the previous worker. No new directory exclusions are implied by `-R`.
+
+Background discovery retains the startup scope. Project configuration, history, and
+relative runner working directories stay rooted at the selected project, not the language
+folder or the launcher's cwd. Bare `teshi` preserves the All projects requirements view;
+explicit directory arguments preserve the Current project view.
+
+Performance thresholds and the directory exclusion/cancellation policy remain separate
+acceptance decisions; asynchronous scanning alone is not a quantified performance pass.
 
 Global flag (all subcommands): `--requirements-root PATH` overrides the user-level requirement library for this process.
 

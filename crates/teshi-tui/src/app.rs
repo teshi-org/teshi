@@ -822,6 +822,8 @@ pub struct App {
     runner_rx: Option<Receiver<RunEvent>>,
     runner_cancel: Option<Sender<()>>,
     last_external_check: Instant,
+    feature_discovery_root: Option<PathBuf>,
+    feature_discovery_worker: Option<crate::feature_discovery::BackgroundDiscovery>,
     external_change_prompt: Option<ExternalChangePrompt>,
     /// Pending text modifications requested by AI agent tools, awaiting user confirmation.
     pub pending_agent_changes: Vec<AgentPendingChange>,
@@ -1181,17 +1183,6 @@ pub enum ClickableRegion {
     },
 }
 
-/// True when the path denotes "." (e.g. `.`, `./`, `././.`).
-fn is_dot_directory(path: &Path) -> bool {
-    path.components()
-        .all(|c| matches!(c, std::path::Component::CurDir))
-}
-
-/// Whether a TUI directory open should recurse into subdirectories.
-fn directory_scan_recursive(path: &Path, cli_recursive: bool) -> bool {
-    cli_recursive || is_dot_directory(path)
-}
-
 impl App {
     pub fn current_project_stamp(&self) -> teshi_engine::ProjectStamp {
         self.project_switch.current_stamp()
@@ -1351,6 +1342,8 @@ impl App {
         };
 
         self.project = prepared.project;
+        self.feature_discovery_root = None;
+        self.feature_discovery_worker = None;
         self.git_status = prepared.git_status;
         self.git_status_rx = None;
         self.git_status_refresh_requested = false;
@@ -1800,50 +1793,40 @@ impl App {
             teshi_core::validate_feature_source(&self.buffer.as_string(), &path).diagnostics;
     }
 
-    /// Builds the editor state from process arguments.
+    /// Creates the empty editor fixture used by rendering and keymap tests.
     ///
-    /// Accepts a directory path or a single file path. Directory scans follow the
-    /// same rules as [`Self::from_cli`]: `.` is recursive; other directories are
-    /// shallow unless `--recursive` is present.
-    #[allow(dead_code)]
+    /// Tests must not treat the test harness arguments, repository contents, or
+    /// host locale as an application launch. Startup behavior uses `from_cli`.
+    #[cfg(test)]
     pub fn from_args() -> Result<Self> {
-        let config = crate::config::load_config()?;
-        let recursive_flag = std::env::args().any(|a| a == "--recursive" || a == "-R");
-        let paths: Vec<PathBuf> = std::env::args()
-            .skip(1)
-            .filter(|arg| !arg.starts_with('-'))
-            .map(PathBuf::from)
-            .collect();
-
-        if paths.is_empty() {
-            return Ok(Self::empty(config));
-        }
-
-        let feature_file = paths
-            .iter()
-            .find(|p| p.extension().is_some_and(|ext| ext == "feature"));
-        if let Some(p) = feature_file {
-            return Self::from_file(p, config, teshi_engine::requirements_data_dir(None)?);
-        }
-
-        match paths.iter().find(|p| p.is_dir()) {
-            Some(p) => Self::from_directory(
-                p,
-                config,
-                directory_scan_recursive(p, recursive_flag),
-                teshi_engine::requirements_data_dir(None)?,
-            ),
-            None => Ok(Self::empty(config)),
-        }
+        Ok(Self::empty(crate::config::load_config()?))
     }
 
     /// Builds the editor state from parsed CLI arguments.
     pub fn from_cli(cli: &crate::cli::Cli) -> Result<Self> {
-        let config = crate::config::load_config()?;
+        let config_root = cli
+            .paths
+            .first()
+            .map(Path::new)
+            .map(|path| {
+                if path.is_file() {
+                    path.parent().unwrap_or(Path::new("."))
+                } else {
+                    path
+                }
+            })
+            .unwrap_or(Path::new("."));
+        let config = crate::config::load_config_for_project(config_root)?;
         let requirements_root =
             teshi_engine::requirements_data_dir(cli.requirements_root.as_deref())?;
         if cli.paths.is_empty() {
-            return Ok(Self::empty_with_requirements(config, requirements_root));
+            return Self::from_project_directory(
+                Path::new("."),
+                config,
+                cli.recursive,
+                true,
+                requirements_root,
+            );
         }
 
         let paths: Vec<PathBuf> = cli.paths.iter().map(PathBuf::from).collect();
@@ -1856,28 +1839,103 @@ impl App {
         }
 
         match paths.iter().find(|p| p.is_dir()) {
-            Some(p) => Self::from_directory(
-                p,
-                config,
-                directory_scan_recursive(p, cli.recursive),
-                requirements_root,
-            ),
+            Some(p) => {
+                Self::from_project_directory(p, config, cli.recursive, false, requirements_root)
+            }
             None => Ok(Self::empty_with_requirements(config, requirements_root)),
         }
     }
 
+    fn from_project_directory(
+        root: &Path,
+        config: AppConfig,
+        recursive: bool,
+        library_view: bool,
+        requirements_root: PathBuf,
+    ) -> Result<Self> {
+        let identity = teshi_engine::ProjectIdentity::new(root)?;
+        let root = identity.root();
+        let mut app = if recursive {
+            let project = BddProject {
+                root_dir: root.to_path_buf(),
+                features: Vec::new(),
+            };
+            Self::from_loaded_directory(root, root, config, true, requirements_root, project)?
+        } else {
+            let locale = std::env::var("TESHI_FEATURE_LANGUAGE")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(sys_locale::get_locale);
+            let discovery_root =
+                crate::feature_discovery::default_feature_directory(root, locale.as_deref())?;
+            let mut app = Self::from_directory_with_discovery(
+                root,
+                &discovery_root,
+                config,
+                true,
+                requirements_root,
+            )?;
+            app.feature_discovery_root = Some(discovery_root);
+            app
+        };
+        let mut worker = crate::feature_discovery::BackgroundDiscovery::default();
+        if recursive {
+            // Render before the unrestricted walk; a dropped project ignores its old worker result.
+            let _ = worker.poll(root, true);
+        }
+        app.feature_discovery_worker = Some(worker);
+        // Preserve library browsing for a bare launch; directory arguments keep their project filter.
+        if library_view {
+            app.authoring_ui
+                .set_project_filter(teshi_core::authoring::RequirementProjectFilter::All);
+        }
+        Ok(app)
+    }
+
+    #[cfg(test)]
     fn from_directory(
         dir: &Path,
         config: AppConfig,
         recursive: bool,
         requirements_root: PathBuf,
     ) -> Result<Self> {
+        Self::from_directory_with_discovery(dir, dir, config, recursive, requirements_root)
+    }
+
+    fn from_directory_with_discovery(
+        dir: &Path,
+        discovery_root: &Path,
+        config: AppConfig,
+        recursive: bool,
+        requirements_root: PathBuf,
+    ) -> Result<Self> {
         let project = if recursive {
-            gherkin::parse_project(dir)
+            gherkin::parse_project(discovery_root)
         } else {
-            gherkin::parse_project_shallow(dir)
+            gherkin::parse_project_shallow(discovery_root)
         };
-        let git_scope = if recursive {
+        Self::from_loaded_directory(
+            dir,
+            discovery_root,
+            config,
+            recursive,
+            requirements_root,
+            project,
+        )
+    }
+
+    fn from_loaded_directory(
+        dir: &Path,
+        discovery_root: &Path,
+        config: AppConfig,
+        recursive: bool,
+        requirements_root: PathBuf,
+        mut project: BddProject,
+    ) -> Result<Self> {
+        project.root_dir = dir.to_path_buf();
+        let git_scope = if dir != discovery_root {
+            teshi_core::git::GitProjectScope::CurrentFiles
+        } else if recursive {
             teshi_core::git::GitProjectScope::Recursive
         } else {
             teshi_core::git::GitProjectScope::Shallow
@@ -1970,6 +2028,8 @@ impl App {
             runner_rx: None,
             runner_cancel: None,
             last_external_check: Instant::now(),
+            feature_discovery_root: None,
+            feature_discovery_worker: None,
             external_change_prompt: None,
             pending_agent_changes: Vec::new(),
             pending_change_diffs: Vec::new(),
@@ -2168,6 +2228,8 @@ impl App {
             runner_rx: None,
             runner_cancel: None,
             last_external_check: Instant::now(),
+            feature_discovery_root: None,
+            feature_discovery_worker: None,
             external_change_prompt: None,
             pending_agent_changes: Vec::new(),
             pending_change_diffs: Vec::new(),
@@ -2346,6 +2408,8 @@ impl App {
             runner_rx: None,
             runner_cancel: None,
             last_external_check: Instant::now(),
+            feature_discovery_root: None,
+            feature_discovery_worker: None,
             external_change_prompt: None,
             pending_agent_changes: Vec::new(),
             pending_change_diffs: Vec::new(),
@@ -4266,9 +4330,31 @@ impl App {
         if self.runner_rx.is_some() || !self.pending_agent_changes.is_empty() {
             return;
         }
-        if self.git_status.scope != teshi_core::git::GitProjectScope::CurrentFiles {
-            let recursive = self.git_status.scope == teshi_core::git::GitProjectScope::Recursive;
-            match gherkin::try_parse_project_with_depth(&self.project.root_dir, recursive) {
+        if self.feature_discovery_root.is_some()
+            || self.git_status.scope != teshi_core::git::GitProjectScope::CurrentFiles
+        {
+            let recursive = self.feature_discovery_root.is_some()
+                || self.git_status.scope == teshi_core::git::GitProjectScope::Recursive;
+            let discovery_root = self
+                .feature_discovery_root
+                .as_deref()
+                .unwrap_or(&self.project.root_dir);
+            let snapshot = if let Some(worker) = self.feature_discovery_worker.as_mut() {
+                let Some(result) = worker.poll(discovery_root, recursive) else {
+                    return;
+                };
+                result
+            } else if self.feature_discovery_root.is_some() && !discovery_root.exists() {
+                // A missing default directory never widens discovery to the project root.
+                Ok(BddProject {
+                    root_dir: discovery_root.to_path_buf(),
+                    features: Vec::new(),
+                })
+            } else {
+                gherkin::try_parse_project_with_depth(discovery_root, recursive)
+                    .map_err(|e| e.to_string())
+            };
+            match snapshot {
                 Ok(snapshot) => {
                     let mut added = false;
                     for feature in snapshot.features {
@@ -4295,6 +4381,12 @@ impl App {
                         }
                     }
                     if added {
+                        // Async startup begins without an editor buffer; initialize it just as
+                        // synchronous loading does, while preserving an existing unsaved buffer.
+                        if self.active_buffer_idx.is_none() && !self.dirty {
+                            self.switch_to_buffer(0);
+                            self.sync_cursor_to_first_node();
+                        }
                         self.bump_git_status_revision();
                         let selection = self.selected_tree_location();
                         self.rebuild_project_views(selection);
@@ -14650,9 +14742,131 @@ mod tests {
     }
 
     #[test]
+    fn explicit_project_directory_loads_only_features_and_preserves_runner_root() {
+        let root = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        fs::create_dir_all(root.path().join("features/deep")).unwrap();
+        let body = "Feature: Sample\n  Scenario: Ready\n    Given a fixture\n";
+        fs::write(root.path().join("features/deep/in.feature"), body).unwrap();
+        fs::write(root.path().join("outside.feature"), body).unwrap();
+        fs::write(
+            root.path().join("teshi.toml"),
+            "[runner]\ncmd = 'fixture'\ncwd = 'work'\n",
+        )
+        .unwrap();
+        let config = crate::config::AppConfig {
+            default_provider: None,
+            providers: Default::default(),
+        };
+        let app = App::from_project_directory(
+            root.path(),
+            config,
+            false,
+            false,
+            store.path().to_path_buf(),
+        )
+        .unwrap();
+        assert_eq!(app.project.root_dir, root.path());
+        assert_eq!(app.project.features.len(), 1);
+        assert_eq!(
+            app.project.features[0].file_path,
+            root.path().join("features/deep/in.feature")
+        );
+        assert_eq!(
+            app.runner_config.as_ref().unwrap().cwd,
+            Some(root.path().join("work"))
+        );
+    }
+
+    #[test]
+    fn explicit_recursive_project_loads_outside_features_asynchronously() {
+        let root = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        fs::write(
+            root.path().join("outside.feature"),
+            "Feature: Outside\n  Scenario: Ready\n    Given a fixture\n",
+        )
+        .unwrap();
+        let config = crate::config::AppConfig {
+            default_provider: None,
+            providers: Default::default(),
+        };
+        let mut app = App::from_project_directory(
+            root.path(),
+            config,
+            true,
+            false,
+            store.path().to_path_buf(),
+        )
+        .unwrap();
+        assert!(
+            app.project.features.is_empty(),
+            "recursive startup must render before walking"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.project.features.is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "background scan never completed: {}",
+                app.status
+            );
+            app.last_external_check = Instant::now() - Duration::from_secs(2);
+            app.poll_external_feature_changes();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.project.features[0].name, "Outside");
+        assert_eq!(app.project.root_dir, root.path());
+        assert_eq!(app.active_buffer_idx, Some(0));
+        assert!(app.buffer.as_string().contains("Feature: Outside"));
+        app.handle_action(Action::SelectTab(MainTab::Ai)).unwrap();
+        app.handle_action(Action::SelectTab(MainTab::Explore))
+            .unwrap();
+        app.handle_action(Action::Quit).unwrap();
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn default_discovery_and_refresh_stay_in_the_selected_language() {
+        let root = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        let selected = root.path().join("features/zh-CN");
+        let other = root.path().join("features/en-US");
+        fs::create_dir_all(&selected).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        let feature = "Feature: Selected\n  Scenario: Example\n    Given something\n";
+        fs::write(selected.join("initial.feature"), feature).unwrap();
+        fs::write(other.join("other.feature"), feature).unwrap();
+        fs::write(root.path().join("outside.feature"), feature).unwrap();
+        let mut app = App::from_directory_with_discovery(
+            root.path(),
+            &selected,
+            crate::config::load_config().unwrap(),
+            true,
+            store.path().to_path_buf(),
+        )
+        .unwrap();
+        app.feature_discovery_root = Some(selected.clone());
+        assert_eq!(app.project.root_dir, root.path());
+        assert_eq!(app.project.features.len(), 1);
+        fs::create_dir_all(selected.join("nested")).unwrap();
+        fs::write(selected.join("nested/added.feature"), feature).unwrap();
+        app.last_external_check = Instant::now() - Duration::from_secs(2);
+        app.poll_external_feature_changes();
+        assert_eq!(app.project.features.len(), 2);
+        assert!(
+            app.project
+                .features
+                .iter()
+                .all(|f| f.file_path.starts_with(&selected))
+        );
+    }
+
+    #[test]
     fn test_bare_teshi_loads_requirement_documents_into_tab() {
         use crate::authoring_tab::AuthoringUiState;
-        use clap::Parser;
 
         let project = tempdir().unwrap();
         let store = tempdir().unwrap();
@@ -14662,17 +14876,22 @@ mod tests {
         writer.buffer = EditorBuffer::from_string("# Login\n\nMust authenticate.\n".into());
         writer.save_current_document(project.path()).unwrap();
 
-        let cli = crate::cli::Cli::try_parse_from([
-            "teshi",
-            "--requirements-root",
-            store.path().to_str().expect("utf-8 temp path"),
-        ])
-        .expect("parse bare teshi");
-        assert!(cli.paths.is_empty());
-
-        let mut app = App::from_cli(&cli).unwrap();
-        app.authoring_ui
-            .set_project_filter(teshi_core::authoring::RequirementProjectFilter::All);
+        let config = crate::config::AppConfig {
+            default_provider: None,
+            providers: Default::default(),
+        };
+        let app = App::from_project_directory(
+            project.path(),
+            config,
+            false,
+            true,
+            store.path().to_path_buf(),
+        )
+        .unwrap();
+        assert_eq!(
+            app.authoring_ui.project_filter,
+            teshi_core::authoring::RequirementProjectFilter::All
+        );
         assert!(app.authoring_ui.discovered);
         let artifacts = app.authoring_ui.artifacts.as_ref().expect("loaded store");
         assert!(
@@ -16171,6 +16390,8 @@ mod tests {
             runner_rx: None,
             runner_cancel: None,
             last_external_check: Instant::now(),
+            feature_discovery_root: None,
+            feature_discovery_worker: None,
             external_change_prompt: None,
             pending_agent_changes: Vec::new(),
             pending_change_diffs: Vec::new(),
@@ -16361,6 +16582,8 @@ Feature: B
             runner_rx: None,
             runner_cancel: None,
             last_external_check: Instant::now(),
+            feature_discovery_root: None,
+            feature_discovery_worker: None,
             external_change_prompt: None,
             pending_agent_changes: Vec::new(),
             pending_change_diffs: Vec::new(),
