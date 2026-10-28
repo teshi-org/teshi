@@ -113,7 +113,7 @@ fn verify_live_codebuddy(source: &str) {
     let scenario = parsed.all_scenarios()[0];
     let launch = json!({"action":"launch","config":{
         "program":binary,
-        "args":[project,"--requirements-root",root.path().join("requirements")],
+        "args":[project,"--recursive","--requirements-root",root.path().join("requirements")],
         "cwd":root.path(),
         "env":[
             ["APPDATA",root.path().join("appdata")],
@@ -219,7 +219,7 @@ fn verify_wrapped_chat(source: &str, batches: &[(usize, usize)]) {
     let scenario = parsed.all_scenarios()[0];
     let launch = json!({"action":"launch","config":{
         "program":binary,
-        "args":[project,"--requirements-root",root.path().join("requirements")],
+        "args":[project,"--recursive","--requirements-root",root.path().join("requirements")],
         "cwd":root.path(),
         "env":[
             ["APPDATA",root.path().join("appdata")],
@@ -352,7 +352,7 @@ fn verify_permission_prompt(source: &str, allow: bool) {
     let scenario = parsed.all_scenarios()[0];
     let launch = json!({"action":"launch","config":{
         "program":binary,
-        "args":[project,"--requirements-root",root.path().join("requirements")],
+        "args":[project,"--recursive","--requirements-root",root.path().join("requirements")],
         "cwd":root.path(),
         "env":[
             ["APPDATA",root.path().join("appdata")],
@@ -474,7 +474,7 @@ fn acp_settings_switch_model_by_mouse_and_keyboard() {
         vec![
             json!({"action":"launch","config":{
                 "program":binary,
-                "args":[project,"--requirements-root",root.path().join("requirements")],
+                "args":[project,"--recursive","--requirements-root",root.path().join("requirements")],
                 "cwd":root.path(),
                 "env":[
                     ["APPDATA",root.path().join("appdata")],
@@ -592,7 +592,7 @@ fn verify(source: &str, command: &str) {
     }]})).unwrap()).unwrap();
     let launch_actions = vec![
         json!({"action":"launch","config":{
-            "program":binary,"args":[project,"--requirements-root",root.path().join("requirements")],"cwd":root.path(),
+            "program":binary,"args":[project,"--recursive","--requirements-root",root.path().join("requirements")],"cwd":root.path(),
             "env":[["APPDATA",root.path().join("appdata")],["LOCALAPPDATA",root.path().join("localappdata")],["XDG_CONFIG_HOME",root.path().join("config")],["XDG_DATA_HOME",root.path().join("data")]],
             "cols":140,"rows":40
         }}),
@@ -605,7 +605,9 @@ fn verify(source: &str, command: &str) {
             vec![key("3")],
             vec![text("Welcome to AI Chat!")],
             vec![key("1")],
-            vec![text("Sample scenario")],
+            vec![
+                json!({"action":"expect_stable_text","text":"Sample scenario","visible":true,"timeout_ms":15000,"stable_ms":300}),
+            ],
             vec![key("q")],
             vec![exit()],
         ],

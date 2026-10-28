@@ -20,6 +20,7 @@ fn acp_reply_color_and_event_order_in_real_terminal() {
     let launch = Launch {
         program: std::env::var("TESHI_SELF_TEST_BIN").unwrap(),
         args: vec![
+            "--recursive".into(),
             project.to_string_lossy().into_owned(),
             "--requirements-root".into(),
             root.path()
@@ -231,6 +232,7 @@ fn fake_acp_activity_compact_expanded_and_narrow() {
     let terminal = Terminal::launch(Launch {
         program: binary.to_string_lossy().into_owned(),
         args: vec![
+            "--recursive".into(),
             project.to_string_lossy().into_owned(),
             "--requirements-root".into(),
             root.path()
@@ -324,6 +326,7 @@ fn interrupted_acp_task_can_continue_in_real_terminal() {
         let launch = Launch {
             program: std::env::var("TESHI_SELF_TEST_BIN").unwrap(),
             args: vec![
+                "--recursive".into(),
                 project.to_string_lossy().into_owned(),
                 "--requirements-root".into(),
                 root.path()

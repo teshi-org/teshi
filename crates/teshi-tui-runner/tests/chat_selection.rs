@@ -68,6 +68,7 @@ fn acp_chat_copy_command_and_selection_round_trip() {
     let terminal = Terminal::launch(Launch {
         program: binary.to_string_lossy().into_owned(),
         args: vec![
+            "--recursive".into(),
             project.to_string_lossy().into_owned(),
             "--requirements-root".into(),
             root.path()
@@ -205,6 +206,7 @@ fn native_chat_copy_command_reads_completed_responses() {
     let terminal = Terminal::launch(Launch {
         program: binary.to_string_lossy().into_owned(),
         args: vec![
+            "--recursive".into(),
             project.to_string_lossy().into_owned(),
             "--requirements-root".into(),
             root.path()
@@ -509,6 +511,7 @@ impl ChatCase {
         let terminal = Terminal::launch(Launch {
             program: std::env::var("TESHI_SELF_TEST_BIN").unwrap(),
             args: vec![
+                "--recursive".into(),
                 self.project.to_string_lossy().into_owned(),
                 "--requirements-root".into(),
                 self.root

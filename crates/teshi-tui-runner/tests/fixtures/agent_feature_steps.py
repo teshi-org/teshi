@@ -203,7 +203,7 @@ class World:
             "launch",
             config={
                 "program": os.environ["TESHI_SELF_TEST_BIN"],
-                "args": [str(self.project), "--requirements-root", str(self.requirements)],
+                "args": [str(self.project), "--recursive", "--requirements-root", str(self.requirements)],
                 "cwd": str(self.root),
                 "env": self._env(backend),
                 "cols": 120,

@@ -130,6 +130,7 @@ impl Fixture {
                 .to_string_lossy()
                 .into_owned(),
             args: vec![
+                "--recursive".into(),
                 self.project.to_string_lossy().into_owned(),
                 "--requirements-root".into(),
                 self.root

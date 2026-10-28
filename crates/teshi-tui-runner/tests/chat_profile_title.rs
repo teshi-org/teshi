@@ -20,6 +20,7 @@ fn launch(project: &Path, root: &Path) -> Terminal {
     let terminal = Terminal::launch(Launch {
         program: binary.to_string_lossy().into_owned(),
         args: vec![
+            "--recursive".into(),
             project.to_string_lossy().into_owned(),
             "--requirements-root".into(),
             root.join("requirements").to_string_lossy().into_owned(),

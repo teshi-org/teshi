@@ -28,6 +28,7 @@ fn explicit_acp_selection_survives_new_and_restart() {
         Terminal::launch(Launch {
             program: binary.to_string_lossy().into_owned(),
             args: vec![
+                "--recursive".into(),
                 project.to_string_lossy().into_owned(),
                 "--requirements-root".into(),
                 root.path()

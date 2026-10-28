@@ -57,6 +57,7 @@ fn setup(acp: bool) -> (tempfile::TempDir, Terminal) {
             .to_string_lossy()
             .into_owned(),
         args: vec![
+            "--recursive".into(),
             project.to_string_lossy().into_owned(),
             "--requirements-root".into(),
             root.path()

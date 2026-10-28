@@ -55,6 +55,7 @@ fn restored_agent_loads_on_ai_entry() {
                 .to_string_lossy()
                 .into_owned(),
             args: vec![
+                "--recursive".into(),
                 project.to_string_lossy().into_owned(),
                 "--requirements-root".into(),
                 root.path()

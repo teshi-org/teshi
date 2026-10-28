@@ -59,7 +59,7 @@ class World:
         env = [(key, str(self.root / key.lower())) for key in
                ("APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME")]
         env += [("TESHI_ACP_STORE_DIR", str(self.store)), ("TESHI_APP_DATA_DIR", str(self.root / "data")), ("TESHI_SESSION_DIR", str(self.root / "sessions"))]
-        self.op("launch", config=dict(program=self.binary, args=[str(self.project), "--requirements-root", str(self.root / "requirements")],
+        self.op("launch", config=dict(program=self.binary, args=[str(self.project), "--recursive", "--requirements-root", str(self.root / "requirements")],
                                       cwd=str(self.root), env=env, cols=140, rows=40))
         self.expect("Explore")
         self.op("key", "3")

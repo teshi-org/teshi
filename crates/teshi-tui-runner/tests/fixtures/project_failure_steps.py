@@ -96,7 +96,7 @@ class World(TerminalWorld):
                 fixture = fixture.with_name("fake_acp_agent.py")
                 env += [("TESHI_ACP_ARGS_JSON", json.dumps([str(fixture), "mcp_review"]))]
         program = os.environ["TESHI_SELF_TEST_BIN"]
-        args = [str(self.project), "--requirements-root", str(self.requirements)]
+        args = [str(self.project), "--recursive", "--requirements-root", str(self.requirements)]
         if os.name != "nt" and os.geteuid() == 0:
             args = ["--bounding-set=-dac_override,-dac_read_search", program] + args
             program = "/usr/bin/setpriv"

@@ -85,7 +85,7 @@ class World:
         ]
         self.op("launch", config={
             "program": self.binary,
-            "args": [str(self.project), "--requirements-root", str(self.requirements)],
+            "args": [str(self.project), "--recursive", "--requirements-root", str(self.requirements)],
             "cwd": str(self.root),
             "env": env,
             "cols": 140,

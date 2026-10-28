@@ -105,3 +105,24 @@ Outline header (all rows) or a specific Examples data-row source line.
 
 Rule Background and multiple Background blocks still fail explicitly. Bindings are authored as JSON; the
 repository self-tests generate their bindings inside isolated fixture directories.
+
+## Project-directory loading acceptance
+
+`teshi-directory-feature-runner` binds the source steps and Examples in
+`features/zh-CN/features/zh-CN/项目目录加载.feature` to isolated real PTY flows.
+Unknown steps fail, each Examples row has its own temporary project and data stores,
+and success/failure screens, launch identities, and per-step results are retained.
+Language variants use the explicit `TESHI_FEATURE_LANGUAGE` fixture override;
+unit tests separately exercise selection from the resolved locale.
+
+```powershell
+cargo build -p teshi-cli --locked
+cargo build --manifest-path crates/teshi-tui-runner/Cargo.toml --bin teshi-directory-feature-runner --locked
+$env:TESHI_SELF_TEST_BIN = (Resolve-Path target/debug/teshi.exe).Path
+$runner = (Resolve-Path crates/teshi-tui-runner/target/debug/teshi-directory-feature-runner.exe).Path
+& $env:TESHI_SELF_TEST_BIN run features/zh-CN/features/zh-CN/项目目录加载.feature --runner-cmd $runner
+```
+
+The configuration/session scenario opens the real project-session browser and executes
+an owned probe runner to verify the selected project's relative runner cwd. Its probe
+result is separate from the acceptance run's actual per-step outcomes.

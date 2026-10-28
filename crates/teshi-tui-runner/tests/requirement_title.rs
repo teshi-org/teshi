@@ -31,6 +31,7 @@ fn requirement_title_tracks_keyboard_save_and_survives_restart() {
     let config = Launch {
         program: binary.to_string_lossy().into_owned(),
         args: vec![
+            "--recursive".into(),
             project.to_string_lossy().into_owned(),
             "--requirements-root".into(),
             store.to_string_lossy().into_owned(),

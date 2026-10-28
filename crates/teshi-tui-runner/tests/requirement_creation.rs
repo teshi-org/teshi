@@ -38,6 +38,7 @@ fn launch_config(binary: &Path, project: &Path, store: &Path, root: &Path) -> La
     Launch {
         program: binary.to_string_lossy().into_owned(),
         args: vec![
+            "--recursive".into(),
             project.to_string_lossy().into_owned(),
             "--requirements-root".into(),
             store.to_string_lossy().into_owned(),

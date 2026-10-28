@@ -80,6 +80,7 @@ fn elapsed_time_advances_through_acp_tool_activity_and_remains_after_completion(
             .to_string_lossy()
             .into_owned(),
         args: vec![
+            "--recursive".into(),
             project.to_string_lossy().into_owned(),
             "--requirements-root".into(),
             root.path()
@@ -243,6 +244,7 @@ fn reported_context_usage_above_threshold_is_visible() {
             .to_string_lossy()
             .into_owned(),
         args: vec![
+            "--recursive".into(),
             project.to_string_lossy().into_owned(),
             "--requirements-root".into(),
             root.path()
