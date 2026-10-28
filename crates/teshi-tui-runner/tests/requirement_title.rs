@@ -4,7 +4,6 @@
 mod documents;
 
 use std::fs;
-use std::path::{Path, PathBuf};
 
 use documents::document_path;
 use teshi_tui_runner::{Launch, Terminal};
