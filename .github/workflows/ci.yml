@@ -125,7 +125,7 @@ jobs:
           $suffix = if ($IsWindows) { ".exe" } else { "" }
           $env:TESHI_SELF_TEST_BIN = (Resolve-Path "target/debug/teshi$suffix").Path
           $runner = (Resolve-Path "crates/teshi-tui-runner/target/debug/teshi-directory-feature-runner$suffix").Path
-          & $env:TESHI_SELF_TEST_BIN run features/zh-CN/features/zh-CN/项目目录加载.feature --runner-cmd $runner --report "$env:TESHI_FEATURE_ARTIFACTS/report.json"
+          & $env:TESHI_SELF_TEST_BIN run features/zh-CN/项目目录加载.feature --runner-cmd $runner --report "$env:TESHI_FEATURE_ARTIFACTS/report.json"
           exit $LASTEXITCODE
       - name: Upload project-directory replay evidence
         if: always()
