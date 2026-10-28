@@ -412,8 +412,7 @@ fn explore_pointer_selection_and_scenario_wheel_leave_feature_and_step_independe
 #[test]
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn external_feature_additions_are_discovered_in_recursive_project() {
-    let mut fixture = Fixture::new();
-    fixture.config.args.push("--recursive".into());
+    let fixture = Fixture::new();
     let terminal = fixture.launch();
     let project = fixture.source.parent().unwrap();
     let nested = project.join("nested");
@@ -514,8 +513,7 @@ fn externally_deleted_dirty_feature_can_keep_local_edits() {
 #[test]
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn external_scan_failure_is_visible_and_preserves_project() {
-    let mut fixture = Fixture::new();
-    fixture.config.args.push("--recursive".into());
+    let fixture = Fixture::new();
     let terminal = fixture.launch();
     let project = fixture.source.parent().unwrap();
     // Invalid UTF-8 is a deterministic read failure on Windows without

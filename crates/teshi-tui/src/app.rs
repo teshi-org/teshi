@@ -2324,6 +2324,7 @@ impl App {
         Ok(app)
     }
 
+    #[cfg(test)]
     fn empty(config: AppConfig) -> Self {
         Self::empty_with_requirements(
             config,

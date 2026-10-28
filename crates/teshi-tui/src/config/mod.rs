@@ -227,6 +227,7 @@ pub fn resolve_provider_key(config: &AppConfig, name: &str) -> Result<Option<Str
 /// 4. Environment variable overrides (highest priority)
 ///
 /// All `${auth:*}` / `${env:*}` placeholders are resolved after merging.
+#[cfg(test)]
 pub fn load_config() -> Result<AppConfig> {
     load_config_for_project(&std::env::current_dir().context("resolve project config directory")?)
 }
