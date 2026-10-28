@@ -83,3 +83,6 @@ wix/web-files.wxs
 
 teshi-bridge.zip
 crates/teshi-tui/testpoints/
+
+# Runtime Test Points store created when the bundled sample project is opened
+features/*/testpoints/
