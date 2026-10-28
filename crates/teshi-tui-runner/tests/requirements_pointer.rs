@@ -1,5 +1,7 @@
 //! Requirements controls and modal ownership through a real terminal pointer.
 
+#[path = "support/documents.rs"]
+mod documents;
 #[path = "support/requirement_project.rs"]
 mod requirement_project;
 
@@ -132,10 +134,51 @@ impl Fixture {
         }
     }
 
+    /// Below 70 columns only the focused pane is drawn, so the acceptance
+    /// steps have to focus the pane they assert on.
+    fn focus(&self, terminal: &Terminal, forward: bool) {
+        if self.config.cols >= 60 {
+            return;
+        }
+        // The editor owns Left/Right for cursor movement, so cross panes with
+        // the vim window prefix the app documents for this tab.
+        terminal.key("Ctrl+w").unwrap();
+        terminal.key(if forward { "l" } else { "h" }).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    /// Narrow terminals draw one pane at a time, so focus the tree before
+    /// walking forward to whatever pane the next assertion needs.
+    fn focus_tree(&self, terminal: &Terminal) {
+        if self.config.cols >= 60 {
+            return;
+        }
+        for _ in 0..3 {
+            if terminal.screen().unwrap().contains("╭Requirements") {
+                return;
+            }
+            self.focus(terminal, false);
+        }
+    }
+
+    fn reveal(&self, terminal: &Terminal, text: &str) {
+        if self.config.cols >= 60 {
+            return;
+        }
+        self.focus_tree(terminal);
+        for _ in 0..3 {
+            if terminal.screen().unwrap().contains(text) {
+                return;
+            }
+            self.focus(terminal, true);
+        }
+    }
+
     fn launch(&self) -> Terminal {
         let terminal = Terminal::launch(self.config.clone()).unwrap();
         terminal.expect_text("sample", true, 10000).unwrap();
         terminal.key("4").unwrap();
+        self.focus(&terminal, true);
         terminal
             .expect_text("# Alpha requirement", true, 10000)
             .unwrap();
@@ -221,11 +264,9 @@ fn new_document(narrow: bool) {
     fixture.click_new(&terminal);
     terminal.expect_text("# Document 1", true, 1500).unwrap();
     fixture.click(&terminal, "Save", "save-new");
-    wait_until(|| fixture.store.join("doc-1.md").is_file());
-    assert_eq!(
-        fs::read_to_string(fixture.store.join("doc-1.md")).unwrap(),
-        "# Document 1\n\n"
-    );
+    wait_until(|| documents::document_path(&fixture.store, "doc-1").is_some_and(|p| p.is_file()));
+    let body = documents::document_path(&fixture.store, "doc-1").expect("doc-1 is indexed");
+    assert_eq!(fs::read_to_string(body).unwrap(), "# Document 1\n\n");
     assert_eq!(fixture.index().documents.len(), 3);
     assert_eq!(
         fs::read_to_string(fixture.store.join("alpha.md")).unwrap(),
@@ -263,6 +304,7 @@ fn filter_and_group(narrow: bool) {
         .expect_text("# Beta requirement", true, 1500)
         .unwrap();
     fixture.click(&terminal, "Group", "group-iterations");
+    fixture.reveal(&terminal, "Sprint A");
     terminal.expect_text("Sprint A", true, 1500).unwrap();
     terminal.expect_text("Sprint B", true, 1500).unwrap();
     fixture.click(&terminal, "Group", "group-paths");
@@ -278,6 +320,7 @@ fn filter_and_group(narrow: bool) {
     fixture.capture(&terminal, "unassigned-empty-view");
     fixture.click(&terminal, "Filter", "filter-from-empty");
     fixture.click(&terminal, "All", "restore-all-from-empty");
+    fixture.reveal(&terminal, "# Alpha requirement");
     terminal
         .expect_text("# Alpha requirement", true, 1500)
         .unwrap();
@@ -346,6 +389,7 @@ fn deletion(narrow: bool) {
             .any(|document| document.id == "alpha")
     });
     assert!(!fixture.store.join("alpha.md").exists());
+    fixture.reveal(&terminal, "# Beta requirement");
     terminal
         .expect_text("# Beta requirement", true, 1500)
         .unwrap();
@@ -433,7 +477,7 @@ fn dirty_modal(narrow: bool, save: bool) {
         }
     );
     fixture.click(&terminal, "Save", "save-new-after-dirty");
-    wait_until(|| fixture.store.join("doc-1.md").is_file());
+    wait_until(|| documents::document_path(&fixture.store, "doc-1").is_some_and(|p| p.is_file()));
     fixture.capture(&terminal, "dirty-resolution-persisted");
     fixture.finish(terminal);
 }
@@ -493,6 +537,7 @@ fn priority_roundtrip(narrow: bool) {
     terminal.expect_text("Priority: P1", true, 1500).unwrap();
     assert_eq!(fixture.index(), before);
     // The keyboard entry remains on the tree, independent of the editor's Vim keys.
+    fixture.focus_tree(&terminal);
     terminal.key("p").unwrap();
     terminal
         .expect_text("Requirement priority", true, 1500)
@@ -501,6 +546,7 @@ fn priority_roundtrip(narrow: bool) {
     terminal.key("Up").unwrap();
     terminal.key("Enter").unwrap();
     wait_until(|| fixture.index().documents[0].priority.is_none());
+    fixture.reveal(&terminal, "Priority: Unset");
     terminal.expect_text("Priority: Unset", true, 1500).unwrap();
     fixture.capture(&terminal, "priority-cleared");
     assert_eq!(fixture.index().documents[0].id, "alpha");

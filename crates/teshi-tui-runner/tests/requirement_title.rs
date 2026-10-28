@@ -1,7 +1,12 @@
 //! Requirement renaming through keyboard input in the actual Teshi TUI.
 
-use std::fs;
+#[path = "support/documents.rs"]
+mod documents;
 
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use documents::document_path;
 use teshi_tui_runner::{Launch, Terminal};
 
 fn assert_tree_title(terminal: &Terminal, title: &str) {
@@ -70,11 +75,16 @@ fn requirement_title_tracks_keyboard_save_and_survives_restart() {
         .expect_text("Saved requirement document", true, 10000)
         .unwrap();
     assert_tree_title(&terminal, title);
-    let markdown = fs::read(store.join("doc-1.md")).unwrap();
+    let document = document_path(&store, "doc-1").expect("doc-1 is indexed");
+    let markdown = fs::read(&document).unwrap();
     let index = fs::read(store.join("_teshi.json")).unwrap();
     let metadata: serde_json::Value = serde_json::from_slice(&index).unwrap();
     assert_eq!(metadata["documents"][0]["id"], "doc-1");
-    assert_eq!(metadata["documents"][0]["path"], "doc-1.md");
+    let recorded = metadata["documents"][0]["path"].as_str().unwrap();
+    assert!(
+        recorded.ends_with(".md") && recorded != "doc-1.md",
+        "new bodies carry timestamp names: {recorded}"
+    );
     assert_eq!(metadata["documents"][0]["title"], title);
     assert_eq!(
         String::from_utf8(markdown.clone()).unwrap(),
@@ -88,7 +98,7 @@ fn requirement_title_tracks_keyboard_save_and_survives_restart() {
     terminal
         .expect_text("Requirement title cannot be empty", true, 10000)
         .unwrap();
-    assert_eq!(fs::read(store.join("doc-1.md")).unwrap(), markdown);
+    assert_eq!(fs::read(&document).unwrap(), markdown);
     assert_eq!(fs::read(store.join("_teshi.json")).unwrap(), index);
     terminal.write(title).unwrap();
     terminal.key("Home").unwrap();
@@ -98,7 +108,7 @@ fn requirement_title_tracks_keyboard_save_and_survives_restart() {
     terminal
         .expect_text("Requirement must start with an H1 title", true, 10000)
         .unwrap();
-    assert_eq!(fs::read(store.join("doc-1.md")).unwrap(), markdown);
+    assert_eq!(fs::read(&document).unwrap(), markdown);
     assert_eq!(fs::read(store.join("_teshi.json")).unwrap(), index);
     terminal.write("# ").unwrap();
     terminal.key("Ctrl+s").unwrap();
