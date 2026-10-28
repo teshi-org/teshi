@@ -1111,6 +1111,10 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     }
     let rows = app.feature_browser_rows();
+    if rows.is_empty() {
+        frame.render_widget(Paragraph::new("(no features)"), inner);
+        return;
+    }
     let selected = app.explore_selected_feature_row();
     let lines = rows
         .iter()
