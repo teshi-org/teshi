@@ -4424,6 +4424,7 @@ impl App {
                 }
                 Err(error) => {
                     self.status = format!("Feature refresh incomplete; retained project: {error}");
+                    self.set_status_message(self.status.clone());
                     return;
                 }
             }
@@ -16922,6 +16923,37 @@ Feature: B
         assert!(app.status_message.as_deref().is_some_and(|message| {
             message.contains("Feature refresh incomplete; retained project")
         }));
+    }
+
+    #[test]
+    fn background_external_scan_failure_is_visible() {
+        let project = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        let path = project.path().join("kept.feature");
+        fs::write(&path, "Feature: Kept\n  Scenario: S\n    Given retained\n").unwrap();
+        let mut app = App::from_project_directory(
+            project.path(),
+            crate::config::load_config().unwrap(),
+            true,
+            false,
+            store.path().to_path_buf(),
+        )
+        .unwrap();
+        fs::write(project.path().join("unreadable.feature"), [0xff, 0xfe]).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            app.last_external_check = Instant::now() - Duration::from_secs(2);
+            app.poll_external_feature_changes();
+            if app
+                .status_message
+                .as_deref()
+                .is_some_and(|msg| msg.contains("Feature refresh incomplete"))
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("background scan failure was not shown");
     }
 
     #[test]
