@@ -4317,6 +4317,18 @@ impl App {
             }
 
             if self.buffer_dirty.get(idx).copied().unwrap_or(false) {
+                // A write the app performed itself leaves the buffer equal to the
+                // disk, so only the stamp is stale - that is not a conflict.
+                let disk_matches_buffer = self.buffers.get(idx).is_some_and(|buffer| {
+                    fs::read_to_string(&path).is_ok_and(|disk| buffer.as_string() == disk)
+                });
+                if disk_matches_buffer {
+                    if let Some(slot) = self.disk_stamps.get_mut(idx) {
+                        *slot = current_stamp;
+                    }
+                    self.set_buffer_dirty(idx, false);
+                    continue;
+                }
                 self.external_change_prompt = Some(ExternalChangePrompt {
                     feature_idx: idx,
                     path: path.clone(),
@@ -6491,6 +6503,12 @@ impl App {
                 Action::ExternalChangeReload => self.accept_external_reload(),
                 Action::ExternalChangeKeepLocal => {
                     self.keep_local_external_version();
+                    Ok(())
+                }
+                // The prompt owns file edits, not the whole session: quitting
+                // must never look like a dead keyboard.
+                Action::Quit => {
+                    self.quit();
                     Ok(())
                 }
                 _ => Ok(()),

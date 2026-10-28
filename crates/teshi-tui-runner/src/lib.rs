@@ -13,7 +13,10 @@ use tui_test::{
 
 /// Delay after writing a lone Escape so the application consumes it before the
 /// next key byte can arrive in the same read and be parsed as an Alt prefix.
-const ESCAPE_SETTLE_MS: u64 = 50;
+// Crossterm folds a following byte into the Escape read (ESC + q becomes
+// Alt+q), which silently swallows both keys. The settling delay must outlast a
+// busy frame, so it is generous rather than minimal.
+const ESCAPE_SETTLE_MS: u64 = 250;
 
 /// Executable configuration; arguments are passed directly without a shell.
 #[derive(Debug, Clone, Serialize, Deserialize)]
