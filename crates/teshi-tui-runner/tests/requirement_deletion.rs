@@ -11,6 +11,19 @@ fn artifact_path(name: &str) -> Option<PathBuf> {
     Some(directory.join(name))
 }
 
+/// Requirement bodies carry timestamp names, so resolve the path through the
+/// index instead of assuming a `doc-N.md` layout.
+fn document_path(store: &Path, id: &str) -> Option<PathBuf> {
+    let index: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.join("_teshi.json")).ok()?).ok()?;
+    index["documents"]
+        .as_array()?
+        .iter()
+        .find(|document| document["id"] == id)
+        .and_then(|document| document["path"].as_str())
+        .map(|path| store.join(path))
+}
+
 fn launch_config(binary: &Path, project: &Path, store: &Path, root: &Path) -> Launch {
     Launch {
         program: binary.to_string_lossy().into_owned(),
@@ -84,7 +97,8 @@ fn global_requirement_delete_confirms_cancels_and_updates_viewport() -> anyhow::
 
     terminal.key("Escape")?;
     terminal.expect_text("global requirement library", false, 5000)?;
-    assert!(store.join("doc-2.md").is_file());
+    let doc2 = document_path(&store, "doc-2").expect("doc-2 is indexed");
+    assert!(doc2.is_file(), "cancel removed {}", doc2.display());
 
     terminal.click_text("Delete [d/Delete]", 5000)?;
     terminal.expect_text("global requirement library", true, 5000)?;
@@ -101,7 +115,7 @@ fn global_requirement_delete_confirms_cancels_and_updates_viewport() -> anyhow::
         terminal.screenshot(&path.with_file_name("after-delete.svg"))?;
     }
 
-    assert!(!store.join("doc-2.md").exists());
+    assert!(!doc2.exists());
     let trash = fs::read_to_string(store.join("_teshi-trash.json"))?;
     assert!(trash.contains("doc-2"));
     let index = fs::read_to_string(store.join("_teshi.json"))?;

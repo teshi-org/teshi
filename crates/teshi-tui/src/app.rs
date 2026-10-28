@@ -12821,6 +12821,16 @@ mod tests {
     }
 
     #[test]
+    fn newline_action_inserts_a_literal_line_break() {
+        let (mut app, _project, _store) = slash_test_app();
+        app.agent_mut().input = "first line".into();
+        app.agent_mut().input_cursor = app.agent().input.chars().count();
+        app.handle_action(Action::AiNewline).unwrap();
+        app.agent_mut().input.push_str("second line");
+        assert_eq!(app.agent().input, "first line\nsecond line");
+    }
+
+    #[test]
     fn agent_selection_survives_new_agent_new_session_and_restart() {
         let (mut app, _project, _store) = slash_test_app();
         let preferences = tempdir().unwrap();

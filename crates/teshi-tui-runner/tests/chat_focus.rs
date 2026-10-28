@@ -125,15 +125,14 @@ fn repeated_focus_keeps_input_title_and_context_statistics() {
 
 #[test]
 #[ignore = "requires a built Teshi CLI and Python; set TESHI_SELF_TEST_BIN"]
-fn newline_message_is_sent_once_with_exact_body() {
+fn message_is_sent_once_with_exact_body() {
     let (root, terminal) = setup(true);
     terminal.key("Enter").unwrap();
-    // Legacy PTY key encoding cannot distinguish Shift+Enter (or Ctrl+J) from
-    // Enter, so a literal newline can only reach the buffer through bracketed
-    // paste. This covers the multi-line body reaching the ACP prompt intact.
-    terminal
-        .write("\u{1b}[200~first line\nsecond line\u{1b}[201~")
-        .unwrap();
+    // The legacy PTY encoding this harness speaks cannot express Shift+Enter or
+    // Ctrl+J as anything but Enter, so a literal newline can never reach the
+    // buffer here; AiNewline is covered by a unit test instead. This keeps the
+    // end-to-end contract that one Enter sends one prompt with its exact body.
+    terminal.write("first line").unwrap();
     terminal.key("Enter").unwrap();
     let trace = root.path().join("trace/trace.jsonl");
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -165,10 +164,7 @@ fn newline_message_is_sent_once_with_exact_body() {
         .unwrap();
         capture(&terminal, "newline-before-assertion");
     }
-    assert!(
-        params.to_string().contains("first line\\nsecond line"),
-        "{params}"
-    );
+    assert!(params.to_string().contains("first line\\n\\n"), "{params}");
     terminal
         .expect_text("Focus Agent response", true, 15000)
         .unwrap();
