@@ -971,11 +971,7 @@ fn render_explore_lines_selected<'a>(
     let offset = app.explore_horizontal_scroll[column.index()].min(max_scroll);
     app.explore_horizontal_scroll[column.index()] = offset;
     let selected = selected_row.unwrap_or_else(|| match column {
-        ColumnFocus::Feature => app
-            .explore_selected_deleted_feature
-            .map_or(app.explore_selected_feature, |i| {
-                app.project.features.len() + i
-            }),
+        ColumnFocus::Feature => app.explore_selected_feature_row().unwrap_or(0),
         ColumnFocus::Scenario => app.explore_selected_scenario,
         ColumnFocus::Step => app.explore_selected_step,
     });
@@ -1101,99 +1097,89 @@ fn input_with_cursor(text: &str, cursor: usize, width: u16) -> String {
 }
 
 fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    use crate::feature_browser::Row;
     let focused = app.explore_focus == ColumnFocus::Feature;
-    let block = explore_block("Features", focused);
+    let title = if app.feature_browser.searching || !app.feature_browser.query.is_empty() {
+        format!("Features /{}", app.feature_browser.query)
+    } else {
+        "Features [/] Search".to_string()
+    };
+    let block = explore_block(&title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-
-    let highlight_style = explore_select_style(focused);
-    let normal = Style::default();
-    let mut lines: Vec<Line> = Vec::new();
-
-    if app.project.features.is_empty() {
-        if app.git_status.deleted.is_empty() {
-            lines.push(Line::styled(
-                " (no features)",
-                Style::default().fg(theme::MUTED),
-            ));
-        }
-    } else {
-        for (i, feature) in app.project.features.iter().enumerate() {
-            let label = feature_display_name(&feature.file_path);
-            let file_status = app
-                .git_status
-                .current_at(i)
-                .map(|view| view.file_status)
-                .unwrap_or_default();
-            let selected =
-                app.explore_selected_deleted_feature.is_none() && i == app.explore_selected_feature;
-            let style = if selected { highlight_style } else { normal };
-            let marker = file_status.marker();
-            let mut line = Line::from(vec![
-                Span::raw(" "),
-                Span::styled(format!("{marker:<2} "), git_file_status_style(file_status)),
-                Span::styled(label, style),
-            ]);
-            let trail = if selected {
-                highlight_style
-            } else {
-                Style::default()
+    let rows = app.feature_browser_rows();
+    let selected = app.explore_selected_feature_row();
+    let lines = rows
+        .iter()
+        .enumerate()
+        .map(|(row, item)| {
+            let label = match item {
+                Row::Directory(path, depth) => format!(
+                    " {}{} {}/",
+                    "  ".repeat(*depth),
+                    if app.feature_directory_collapsed(path) {
+                        "▸"
+                    } else {
+                        "▾"
+                    },
+                    path.rsplit('/').next().unwrap_or(path)
+                ),
+                Row::File(index, label, deleted) => {
+                    let status = if *deleted {
+                        app.git_status.deleted[*index].file_status
+                    } else {
+                        app.git_status
+                            .current_at(*index)
+                            .map(|view| view.file_status)
+                            .unwrap_or_default()
+                    };
+                    return Line::from(vec![
+                        Span::styled(
+                            format!(" {:<2} ", status.marker()),
+                            git_file_status_style(status),
+                        ),
+                        Span::styled(
+                            label.clone(),
+                            if selected == Some(row) {
+                                explore_select_style(focused)
+                            } else {
+                                Style::default()
+                            },
+                        ),
+                    ]);
+                }
             };
-            line = pad_line_to_width(line, inner.width, trail);
-            lines.push(line);
-        }
-    }
-
-    for (deleted_idx, deleted) in app.git_status.deleted.iter().enumerate() {
-        let label = feature_display_name(&deleted.path);
-        let selected = app.explore_selected_deleted_feature == Some(deleted_idx);
-        let label_style = if selected {
-            highlight_style
-        } else {
-            Style::default().fg(theme::ERROR)
-        };
-        let mut line = Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                format!("{:<2} ", deleted.file_status.marker()),
-                git_file_status_style(deleted.file_status),
-            ),
-            Span::styled(label, label_style),
-        ]);
-        line = pad_line_to_width(
-            line,
-            inner.width,
-            if selected {
-                highlight_style
-            } else {
-                Style::default()
+            Line::styled(
+                label,
+                if selected == Some(row) {
+                    explore_select_style(focused)
+                } else {
+                    Style::default()
+                },
+            )
+        })
+        .collect();
+    let content =
+        render_explore_lines_selected(frame, app, ColumnFocus::Feature, inner, lines, selected);
+    for (row, item) in rows.iter().enumerate() {
+        let region = match item {
+            Row::File(index, _, true) => ClickableRegion::ExploreDeletedFeature {
+                deleted_idx: *index,
+                row_y: content.y + row as u16,
+                col_x: content.x,
+                col_right: content.right(),
             },
-        );
-        lines.push(line);
-    }
-
-    let content_area = render_explore_lines(frame, app, ColumnFocus::Feature, inner, lines);
-
-    // Register clickable regions for each feature row
-    for (i, _feature) in app.project.features.iter().enumerate() {
-        app.clickable_regions.push(ClickableRegion::ExploreFeature {
-            feature_idx: i,
-            row_y: content_area.y + i as u16,
-            col_x: content_area.x,
-            col_right: content_area.right(),
-        });
-    }
-    for (deleted_idx, _deleted) in app.git_status.deleted.iter().enumerate() {
-        app.clickable_regions
-            .push(ClickableRegion::ExploreDeletedFeature {
-                deleted_idx,
-                row_y: content_area.y + (app.project.features.len() + deleted_idx) as u16,
-                col_x: content_area.x,
-                col_right: content_area.right(),
-            });
+            _ => ClickableRegion::ExploreFeature {
+                feature_idx: row,
+                row_y: content.y + row as u16,
+                col_x: content.x,
+                col_right: content.right(),
+            },
+        };
+        app.clickable_regions.push(region);
     }
 }
 

@@ -52,14 +52,26 @@ struct ChatProjectedLine {
     source: Option<ChatSourceRange>,
 }
 
+#[derive(Clone)]
 struct ChatBlock {
     key: usize,
-    text: String,
+    text: std::rc::Rc<String>,
 }
 
+#[derive(Clone)]
 struct ChatProjection {
-    lines: Vec<ChatProjectedLine>,
+    lines: Vec<std::rc::Rc<ChatProjectedLine>>,
     blocks: Vec<ChatBlock>,
+}
+
+type CachedActivity = (Vec<(String, Option<String>)>, bool, String, ChatProjection);
+
+/// Cached immutable message layouts, shared by drawing and pointer projection.
+#[derive(Default)]
+pub(crate) struct ChatLayoutCache {
+    context: (usize, usize, bool),
+    activities: std::collections::HashMap<usize, CachedActivity>,
+    entries: std::collections::HashMap<usize, (AiChatMessage, ChatProjection)>,
 }
 
 fn line_text(line: &Line<'_>) -> String {
@@ -84,8 +96,7 @@ fn plain_markdown_text(text: &str) -> String {
         .join("\n")
 }
 
-fn find_char_text(haystack: &str, needle: &str, from: usize) -> Option<(usize, usize)> {
-    let haystack: Vec<char> = haystack.chars().collect();
+fn find_char_text(haystack: &[char], needle: &str, from: usize) -> Option<(usize, usize)> {
     let needle: Vec<char> = needle.chars().collect();
     if needle.is_empty() || from > haystack.len() || needle.len() > haystack.len() {
         return None;
@@ -98,7 +109,7 @@ fn find_char_text(haystack: &str, needle: &str, from: usize) -> Option<(usize, u
 }
 
 fn find_display_source(
-    block_text: &str,
+    block_text: &[char],
     display_text: &str,
     source_cursor: usize,
     display_start: usize,
@@ -130,19 +141,19 @@ fn find_display_source(
     None
 }
 
-fn append_unselectable(out: &mut Vec<ChatProjectedLine>, lines: Vec<Line<'static>>) {
+fn append_unselectable(out: &mut Vec<std::rc::Rc<ChatProjectedLine>>, lines: Vec<Line<'static>>) {
     out.extend(
         lines
             .into_iter()
-            .map(|line| ChatProjectedLine { line, source: None }),
+            .map(|line| std::rc::Rc::new(ChatProjectedLine { line, source: None })),
     );
 }
 
-fn append_blank(out: &mut Vec<ChatProjectedLine>) {
-    out.push(ChatProjectedLine {
+fn append_blank(out: &mut Vec<std::rc::Rc<ChatProjectedLine>>) {
+    out.push(std::rc::Rc::new(ChatProjectedLine {
         line: Line::default(),
         source: None,
-    });
+    }));
 }
 
 /// Add rendered rows and map visible body text to a width-independent block.
@@ -151,18 +162,19 @@ fn append_blank(out: &mut Vec<ChatProjectedLine>) {
 /// syntax is intentionally omitted from this projection, so selection copies
 /// what the user can read rather than hidden formatting markers.
 fn append_selectable_chunk(
-    out: &mut Vec<ChatProjectedLine>,
+    out: &mut Vec<std::rc::Rc<ChatProjectedLine>>,
     blocks: &mut Vec<ChatBlock>,
     lines: Vec<Line<'static>>,
     block_key: usize,
     block_text: String,
 ) {
-    if !blocks.iter().any(|block| block.key == block_key) {
-        blocks.push(ChatBlock {
-            key: block_key,
-            text: block_text.clone(),
-        });
-    }
+    // Each message/group is appended once, and the streaming block has its own key.
+    // Searching earlier blocks here makes cold layout quadratic in message count.
+    blocks.push(ChatBlock {
+        key: block_key,
+        text: std::rc::Rc::new(block_text.clone()),
+    });
+    let source_chars: Vec<char> = block_text.chars().collect();
     let mut source_cursor = 0;
     for line in lines {
         let full_text = line_text(&line);
@@ -172,19 +184,18 @@ fn append_selectable_chunk(
             (0, full_text.as_str())
         };
         let candidate = selectable.trim_end_matches(' ');
-        let source = find_display_source(&block_text, candidate, source_cursor, display_start).map(
-            |(start, end, display_start)| ChatSourceRange {
+        let source = find_display_source(&source_chars, candidate, source_cursor, display_start)
+            .map(|(start, end, display_start)| ChatSourceRange {
                 block: block_key,
                 start,
                 end,
                 display_start,
                 display_end: display_start + end.saturating_sub(start),
-            },
-        );
+            });
         if let Some(source) = &source {
             source_cursor = source.end;
         }
-        out.push(ChatProjectedLine { line, source });
+        out.push(std::rc::Rc::new(ChatProjectedLine { line, source }));
     }
 }
 
@@ -672,7 +683,7 @@ fn build_chat_lines(
     build_chat_projection(app, width, view_height, placement)
         .lines
         .into_iter()
-        .map(|line| line.line)
+        .map(|line| line.line.clone())
         .collect()
 }
 
@@ -682,7 +693,7 @@ fn build_chat_projection(
     view_height: usize,
     placement: ChatPlacement,
 ) -> ChatProjection {
-    let mut out: Vec<ChatProjectedLine> = Vec::new();
+    let mut out: Vec<std::rc::Rc<ChatProjectedLine>> = Vec::new();
     let mut blocks = Vec::new();
     let agent = app.agent();
 
@@ -715,6 +726,18 @@ fn build_chat_projection(
     }
 
     let messages = agent.messages();
+    let mut cache = app.chat_layout_cache.borrow_mut();
+    let context = (app.selected_agent, width, agent.activity_details_expanded);
+    if cache.context != context {
+        cache.entries.clear();
+        cache.activities.clear();
+        cache.context = context;
+    }
+    cache.entries.retain(|index, _| *index < messages.len());
+    cache.activities.retain(|index, _| *index < messages.len());
+    let last_user = messages
+        .iter()
+        .rposition(|message| message.role == AiRole::User);
     let mut message_index = 0;
     while let Some(msg) = messages.get(message_index) {
         if msg.source.as_deref() == Some("acp_activity") {
@@ -725,9 +748,31 @@ fn build_chat_projection(
                 + message_index;
             let group: Vec<&AiChatMessage> = messages[message_index..group_end].iter().collect();
             let active = matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval)
-                && !messages[group_end..]
+                && last_user.is_none_or(|index| index < group_end);
+            let animated = active
+                && group
                     .iter()
-                    .any(|message| matches!(message.role, AiRole::User));
+                    .any(|message| message.reasoning_content.as_deref() == Some("in_progress"));
+            let animation = if animated { tool_spinner_frame() } else { "" };
+            if let Some((previous, previous_active, previous_animation, projection)) =
+                cache.activities.get(&message_index)
+                && *previous_active == active
+                && previous_animation == animation
+                && previous.len() == group.len()
+                && previous
+                    .iter()
+                    .zip(&group)
+                    .all(|((content, status), message)| {
+                        content == &message.content && status == &message.reasoning_content
+                    })
+            {
+                out.extend(projection.lines.iter().cloned());
+                blocks.extend(projection.blocks.iter().cloned());
+                message_index = group_end;
+                continue;
+            }
+            let line_start = out.len();
+            let block_start = blocks.len();
             let mut chunk = Vec::new();
             push_activity_group(
                 &mut chunk,
@@ -744,9 +789,41 @@ fn build_chat_projection(
                 .join("\n");
             append_selectable_chunk(&mut out, &mut blocks, chunk, message_index, source);
             append_blank(&mut out);
+            cache.activities.insert(
+                message_index,
+                (
+                    group
+                        .iter()
+                        .map(|message| (message.content.clone(), message.reasoning_content.clone()))
+                        .collect(),
+                    active,
+                    animation.to_owned(),
+                    ChatProjection {
+                        lines: out[line_start..].to_vec(),
+                        blocks: blocks[block_start..].to_vec(),
+                    },
+                ),
+            );
             message_index = group_end;
             continue;
         }
+        // Tool-call rows depend on live approval/result state and animation.
+        let cacheable = msg.tool_calls.as_ref().is_none_or(|calls| calls.is_empty());
+        if cacheable
+            && let Some((previous, projection)) = cache.entries.get(&message_index)
+            && previous.role == msg.role
+            && previous.content == msg.content
+            && previous.source == msg.source
+            && previous.reasoning_content == msg.reasoning_content
+            && previous.tool_call_id == msg.tool_call_id
+        {
+            out.extend(projection.lines.iter().cloned());
+            blocks.extend(projection.blocks.iter().cloned());
+            message_index += 1;
+            continue;
+        }
+        let line_start = out.len();
+        let block_start = blocks.len();
         let mut chunk = Vec::new();
         match msg.role {
             AiRole::Tool => push_tool_result(&mut chunk, msg, width),
@@ -760,6 +837,20 @@ fn build_chat_projection(
             block_text_for_message(msg),
         );
         append_blank(&mut out);
+        if cacheable {
+            cache.entries.insert(
+                message_index,
+                (
+                    msg.clone(),
+                    ChatProjection {
+                        lines: out[line_start..].to_vec(),
+                        blocks: blocks[block_start..].to_vec(),
+                    },
+                ),
+            );
+        } else {
+            cache.entries.remove(&message_index);
+        }
         message_index += 1;
     }
 
@@ -1547,6 +1638,71 @@ fn build_row(cells: Vec<(char, Style)>, width: usize, pad_style: Option<Style>) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn activity_layout_reuses_completed_groups_and_tracks_updates() {
+        let (mut app, _project, _store) = activity_test_app();
+        for index in 0..1000 {
+            app.agents[0].messages_mut().push(AiChatMessage {
+                role: AiRole::Assistant,
+                content: format!("Read file {index}: 中文 tool title"),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: Some("completed".into()),
+                source: Some("acp_activity".into()),
+            });
+        }
+        let started = std::time::Instant::now();
+        let first = build_chat_projection(&app, 80, 24, ChatPlacement::Tab);
+        let cold = started.elapsed();
+        let started = std::time::Instant::now();
+        let second = build_chat_projection(&app, 80, 24, ChatPlacement::Tab);
+        eprintln!("1000 tools: cold={cold:?}, warm={:?}", started.elapsed());
+        assert!(std::rc::Rc::ptr_eq(&first.lines[0], &second.lines[0]));
+        app.agents[0].messages_mut()[500].reasoning_content = Some("failed".into());
+        let changed = build_chat_projection(&app, 80, 24, ChatPlacement::Tab);
+        assert!(!std::rc::Rc::ptr_eq(&second.lines[0], &changed.lines[0]));
+        assert!(
+            changed
+                .lines
+                .iter()
+                .any(|line| line_text(&line.line).contains("Failed"))
+        );
+        app.agents[0].messages_mut().clear();
+        build_chat_projection(&app, 80, 24, ChatPlacement::Tab);
+        assert!(app.chat_layout_cache.borrow().activities.is_empty());
+    }
+
+    #[test]
+    fn history_layout_reuses_rows_and_invalidates_content_and_width() {
+        let (mut app, _project, _store) = activity_test_app();
+        for index in 0..1000 {
+            app.agents[0].messages_mut().push(AiChatMessage {
+                role: AiRole::Assistant,
+                content: format!("Message {index}: **中文** repeated text\n").repeat(8),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                source: None,
+            });
+        }
+        let started = std::time::Instant::now();
+        let first = build_chat_projection(&app, 80, 24, ChatPlacement::Tab);
+        let cold = started.elapsed();
+        let started = std::time::Instant::now();
+        let second = build_chat_projection(&app, 80, 24, ChatPlacement::Tab);
+        eprintln!("1000 messages: cold={cold:?}, warm={:?}", started.elapsed());
+        assert_eq!(first.lines.len(), second.lines.len());
+        assert!(std::rc::Rc::ptr_eq(&first.lines[0], &second.lines[0]));
+        app.agents[0].messages_mut()[0].content = "Changed".into();
+        let changed = build_chat_projection(&app, 80, 24, ChatPlacement::Tab);
+        assert!(!std::rc::Rc::ptr_eq(&second.lines[0], &changed.lines[0]));
+        let resized = build_chat_projection(&app, 40, 24, ChatPlacement::Tab);
+        assert!(!std::rc::Rc::ptr_eq(&changed.lines[0], &resized.lines[0]));
+        app.agents[0].messages_mut().clear();
+        build_chat_projection(&app, 40, 24, ChatPlacement::Tab);
+        assert!(app.chat_layout_cache.borrow().entries.is_empty());
+    }
+
     #[test]
     fn progress_header_is_muted_and_final_header_is_green() {
         let progress = role_header(AiRole::Assistant, Some("agent_progress"));

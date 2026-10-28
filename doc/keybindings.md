@@ -37,6 +37,8 @@ pointer; Shift+wheel scrolls horizontally where supported.
 
 | Key | Action |
 |-----|--------|
+| `/` | Search Feature names, titles, and relative paths in the Features column; Enter keeps the filter, Esc clears it |
+| Enter, Left/Right | Toggle, collapse, or expand the selected Feature directory |
 | `j/k`, Down/Up | Select next/previous row |
 | `h/Left`, Shift+Tab | Previous column |
 | `l/Right` | Navigate right according to the selected column |

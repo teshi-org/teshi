@@ -11,6 +11,7 @@ mod config;
 mod diff;
 mod editor_buffer;
 mod engine;
+mod feature_browser;
 mod feature_discovery;
 mod generation_state;
 mod highlight;
@@ -352,6 +353,9 @@ pub fn run() -> Result<()> {
                         if let KeyCode::Char(ch) = key_event.code {
                             app.project_switch.append_path_input(ch);
                         }
+                        continue;
+                    }
+                    if app.handle_feature_browser_key(key_event) {
                         continue;
                     }
                     if let Some(action) = Action::from_key_event(

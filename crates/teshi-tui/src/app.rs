@@ -802,6 +802,8 @@ pub struct App {
     /// Screen rectangle of the editor panel, updated each render frame.
     pub editor_panel_rect: Option<ratatui::layout::Rect>,
     /// Body rectangle of the active chat history, updated each render frame.
+    /// Reusable message layouts for chat rendering and selection.
+    pub(crate) chat_layout_cache: std::cell::RefCell<crate::ui::chat::ChatLayoutCache>,
     pub chat_history_rect: Option<ratatui::layout::Rect>,
     /// Current chat text selection, if any.
     pub chat_selection: Option<ChatSelection>,
@@ -822,7 +824,7 @@ pub struct App {
     runner_rx: Option<Receiver<RunEvent>>,
     runner_cancel: Option<Sender<()>>,
     last_external_check: Instant,
-    feature_discovery_root: Option<PathBuf>,
+    pub(crate) feature_discovery_root: Option<PathBuf>,
     feature_discovery_worker: Option<crate::feature_discovery::BackgroundDiscovery>,
     external_change_prompt: Option<ExternalChangePrompt>,
     /// Pending text modifications requested by AI agent tools, awaiting user confirmation.
@@ -840,6 +842,7 @@ pub struct App {
     // ── Explore tab state ───────────────────────────────────────────
     pub explore_focus: ColumnFocus,
     pub explore_selected_feature: usize,
+    pub(crate) feature_browser: crate::feature_browser::FeatureBrowser,
     /// Selected HEAD-only deleted Feature row, when the selection is not a
     /// current project Feature.
     pub explore_selected_deleted_feature: Option<usize>,
@@ -1401,6 +1404,7 @@ impl App {
         self.change_summary_selection = 0;
         self.explore_focus = ColumnFocus::Feature;
         self.explore_selected_feature = 0;
+        self.feature_browser = Default::default();
         self.explore_selected_deleted_feature = None;
         self.explore_selected_scenario = 0;
         self.explore_selected_step = 0;
@@ -2015,6 +2019,7 @@ impl App {
             selection_end: None,
             mouse_position: None,
             editor_panel_rect: None,
+            chat_layout_cache: Default::default(),
             chat_history_rect: None,
             chat_selection: None,
             system_clipboard: None,
@@ -2039,6 +2044,7 @@ impl App {
             change_summary_selection: 0,
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
+            feature_browser: Default::default(),
             explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
@@ -2215,6 +2221,7 @@ impl App {
             selection_end: None,
             mouse_position: None,
             editor_panel_rect: None,
+            chat_layout_cache: Default::default(),
             chat_history_rect: None,
             chat_selection: None,
             system_clipboard: None,
@@ -2239,6 +2246,7 @@ impl App {
             change_summary_selection: 0,
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
+            feature_browser: Default::default(),
             explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
@@ -2396,6 +2404,7 @@ impl App {
             selection_end: None,
             mouse_position: None,
             editor_panel_rect: None,
+            chat_layout_cache: Default::default(),
             chat_history_rect: None,
             chat_selection: None,
             system_clipboard: None,
@@ -2420,6 +2429,7 @@ impl App {
             change_summary_selection: 0,
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
+            feature_browser: Default::default(),
             explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
@@ -2516,16 +2526,26 @@ impl App {
     }
 
     fn explore_feature_item_count(&self) -> usize {
-        self.project.features.len() + self.git_status.deleted.len()
+        self.feature_browser_rows().len()
     }
 
-    fn explore_selected_feature_row(&self) -> Option<usize> {
-        if let Some(deleted_idx) = self.explore_selected_deleted_feature {
-            return (deleted_idx < self.git_status.deleted.len())
-                .then_some(self.project.features.len() + deleted_idx);
-        }
-        (self.explore_selected_feature < self.project.features.len())
-            .then_some(self.explore_selected_feature)
+    pub(crate) fn explore_selected_feature_row(&self) -> Option<usize> {
+        self.feature_browser_rows()
+            .iter()
+            .position(|row| match row {
+                crate::feature_browser::Row::Directory(path, _) => {
+                    self.feature_browser.directory.as_ref() == Some(path)
+                }
+                crate::feature_browser::Row::File(index, _, deleted) => {
+                    self.feature_browser.directory.is_none()
+                        && if *deleted {
+                            self.explore_selected_deleted_feature == Some(*index)
+                        } else {
+                            self.explore_selected_deleted_feature.is_none()
+                                && self.explore_selected_feature == *index
+                        }
+                }
+            })
     }
 
     fn explore_selected_scenario_count(&self) -> usize {
@@ -2673,11 +2693,19 @@ impl App {
         steps
     }
 
-    fn explore_set_feature_row(&mut self, row: usize) {
-        if row < self.project.features.len() {
-            self.explore_set_feature(row);
-        } else {
-            self.explore_set_deleted_feature(row - self.project.features.len());
+    pub(crate) fn explore_set_feature_row(&mut self, row: usize) {
+        use crate::feature_browser::Row;
+        match self.feature_browser_rows().get(row).cloned() {
+            Some(Row::Directory(path, _)) => self.feature_browser.directory = Some(path),
+            Some(Row::File(index, _, deleted)) => {
+                self.feature_browser.directory = None;
+                if deleted {
+                    self.explore_set_deleted_feature(index);
+                } else {
+                    self.explore_set_feature(index);
+                }
+            }
+            None => {}
         }
     }
 
@@ -4641,9 +4669,24 @@ impl App {
     /// Finds the feature index in `project.features` whose file path matches
     /// `file_path` (compared by file name and/or full path suffix).
     pub fn find_feature_idx_for_file(&self, file_path: &str) -> Option<usize> {
-        self.project.features.iter().position(|f| {
-            let p = f.file_path.to_string_lossy();
-            p == file_path || p.ends_with(file_path) || file_path.ends_with(p.as_ref())
+        let requested = Path::new(file_path);
+        let requested = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            self.project.root_dir.join(requested)
+        };
+        // Discovery canonicalizes the project root. Tools may still supply a
+        // Windows short-name path, extended prefix, or a path containing `..`.
+        let identity = fs::canonicalize(requested).ok();
+        self.project.features.iter().position(|feature| {
+            let path = feature.file_path.to_string_lossy();
+            path == file_path
+                || path.ends_with(file_path)
+                || file_path.ends_with(path.as_ref())
+                || identity.as_ref().is_some_and(|requested| {
+                    fs::canonicalize(&feature.file_path)
+                        .is_ok_and(|candidate| candidate == *requested)
+                })
         })
     }
 
@@ -5853,6 +5896,7 @@ impl App {
     }
 
     fn explore_set_feature(&mut self, idx: usize) {
+        self.feature_browser.directory = None;
         if idx >= self.project.features.len() {
             return;
         }
@@ -5865,6 +5909,7 @@ impl App {
     }
 
     fn explore_set_deleted_feature(&mut self, idx: usize) {
+        self.feature_browser.directory = None;
         if idx >= self.git_status.deleted.len() {
             return;
         }
@@ -5908,11 +5953,7 @@ impl App {
                 let current = self.explore_selected_feature_row().unwrap_or(0);
                 let next = clamp_idx(current as isize + delta, len);
                 if next != current {
-                    if next < self.project.features.len() {
-                        self.explore_set_feature(next);
-                    } else {
-                        self.explore_set_deleted_feature(next - self.project.features.len());
-                    }
+                    self.explore_set_feature_row(next);
                 }
             }
             ColumnFocus::Scenario => {
@@ -10409,7 +10450,7 @@ impl App {
                 }
             }
             ClickableRegion::ExploreFeature { feature_idx, .. } => {
-                self.explore_set_feature(*feature_idx);
+                self.explore_set_feature_row(*feature_idx);
                 self.explore_focus = crate::app::ColumnFocus::Feature;
                 // Reset scenario/step selection
                 self.explore_selected_scenario = 0;
@@ -14743,6 +14784,41 @@ mod tests {
     }
 
     #[test]
+    fn feature_tool_lookup_accepts_canonical_project_path_aliases() {
+        let root = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        teshi_engine::initialize_requirement_store(store.path()).unwrap();
+        fs::create_dir_all(root.path().join("features/nested")).unwrap();
+        fs::write(
+            root.path().join("features/sample.feature"),
+            "Feature: Sample\n  Scenario: Ready\n    Given a fixture\n",
+        )
+        .unwrap();
+        let config = crate::config::AppConfig {
+            default_provider: None,
+            providers: Default::default(),
+        };
+        let app = App::from_project_directory(
+            root.path(),
+            config,
+            false,
+            false,
+            store.path().to_path_buf(),
+        )
+        .unwrap();
+        let alias = root.path().join("features/nested/../sample.feature");
+        assert_eq!(
+            app.find_feature_idx_for_file(alias.to_str().unwrap()),
+            Some(0)
+        );
+        assert_eq!(
+            app.find_feature_idx_for_file("features/nested/../sample.feature"),
+            Some(0)
+        );
+        assert_eq!(app.find_feature_idx_for_file("missing.feature"), None);
+    }
+
+    #[test]
     fn explicit_project_directory_loads_only_features_and_preserves_runner_root() {
         let root = tempdir().unwrap();
         let store = tempdir().unwrap();
@@ -16378,6 +16454,7 @@ mod tests {
             selection_end: None,
             mouse_position: None,
             editor_panel_rect: None,
+            chat_layout_cache: Default::default(),
             chat_history_rect: None,
             chat_selection: None,
             system_clipboard: None,
@@ -16402,6 +16479,7 @@ mod tests {
             change_summary_selection: 0,
             explore_focus: ColumnFocus::Step,
             explore_selected_feature: 0,
+            feature_browser: Default::default(),
             explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
@@ -16570,6 +16648,7 @@ Feature: B
             selection_end: None,
             mouse_position: None,
             editor_panel_rect: None,
+            chat_layout_cache: Default::default(),
             chat_history_rect: None,
             chat_selection: None,
             system_clipboard: None,
@@ -16594,6 +16673,7 @@ Feature: B
             change_summary_selection: 0,
             explore_focus: ColumnFocus::Feature,
             explore_selected_feature: 0,
+            feature_browser: Default::default(),
             explore_selected_deleted_feature: None,
             explore_selected_scenario: 0,
             explore_selected_step: 0,
