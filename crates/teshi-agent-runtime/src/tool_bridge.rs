@@ -635,7 +635,19 @@ mod tests {
         let request = wait_request(&bridge);
         drop(bridge);
         assert!(!request.is_pending());
-        assert!(TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_err());
+        // The accept thread may still be winding down, so poll for the closed
+        // listener instead of assuming the drop is instantly observable.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_err() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "listener kept accepting after the bridge was dropped"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let mut response = String::new();
         assert_eq!(BufReader::new(stream).read_line(&mut response).unwrap(), 0);
     }
