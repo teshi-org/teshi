@@ -516,6 +516,23 @@ mod windows_vt {
         }
 
         #[test]
+        fn bracketed_paste_survives_a_split_read() {
+            let mut parser = InputParser::new();
+            let mut pasted = String::new();
+            for chunk in [
+                &b"\x1b[200~\xe7\x94\xb2\xf0\x9f\x99\x82\r\n\tsec"[..],
+                &b"ond line\x1b[201~"[..],
+            ] {
+                for event in parser.parse_as_vec(chunk, true) {
+                    if let InputEvent::Paste(text) = event {
+                        pasted.push_str(&text);
+                    }
+                }
+            }
+            assert_eq!(pasted, "甲🙂\r\n\tsecond line");
+        }
+
+        #[test]
         fn shifted_tab_becomes_back_tab() {
             let event = convert_key(TermwizKeyEvent {
                 key: TermwizKeyCode::Tab,
