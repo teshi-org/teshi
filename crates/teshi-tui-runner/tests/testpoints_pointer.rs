@@ -156,6 +156,10 @@ impl Fixture {
         terminal.expect_text("sample", true, 10000).unwrap();
         if self.config.cols < 60 {
             terminal.click_text("Points [5]", 10000).unwrap();
+            // doc-31/doc-36: below 70 columns only the focused pane is drawn,
+            // so the review pane has to be focused before it is visible.
+            terminal.key("Tab").unwrap();
+            std::thread::sleep(Duration::from_millis(200));
         } else {
             terminal.click_text("Test Points [5]", 10000).unwrap();
         }
@@ -226,6 +230,15 @@ impl Fixture {
             );
         }
         terminal.key("q").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        if terminal
+            .screen()
+            .unwrap_or_default()
+            .contains("Quit Teshi?")
+        {
+            // The first Enter activates the default "Quit" choice.
+            terminal.key("Enter").unwrap();
+        }
         terminal.expect_exit(0, 10000).unwrap();
     }
 }
@@ -239,6 +252,46 @@ fn pane(screen: &str, start: usize, end: usize) -> String {
             line.chars()
                 .skip(start)
                 .take(end - start)
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Column where the right-hand stack starts, measured from the rendered pane
+/// borders so the assertions follow the layout instead of a fixed geometry.
+fn right_column(screen: &str) -> usize {
+    let Some(line) = screen.lines().nth(2) else {
+        return 0;
+    };
+    let mut boxes = line
+        .char_indices()
+        .filter(|(_, character)| *character == '╭')
+        .map(|(byte, _)| byte);
+    boxes.next();
+    boxes
+        .next()
+        .map(|byte| line[..byte].chars().count())
+        .unwrap_or(0)
+}
+
+/// First row of the excerpts pane inside the right-hand stack.
+fn excerpts_row(screen: &str) -> usize {
+    screen
+        .lines()
+        .position(|line| line.contains("Requirement excerpts"))
+        .unwrap_or_else(|| screen.lines().count().saturating_sub(1))
+}
+
+fn region(screen: &str, x0: usize, x1: usize, y0: usize, y1: usize) -> String {
+    screen
+        .lines()
+        .skip(y0)
+        .take(y1.saturating_sub(y0))
+        .map(|line| {
+            line.chars()
+                .skip(x0)
+                .take(x1.saturating_sub(x0))
                 .collect::<String>()
         })
         .collect::<Vec<_>>()
@@ -269,26 +322,59 @@ fn testpoint_tree_pointer_and_three_pane_wheels_keep_independent_context() {
     let fixture = Fixture::new("tree-wheel", 150, 30);
     let terminal = fixture.launch();
     let before = terminal.screen().unwrap();
-    terminal.scroll_at(50, 8, false, false).unwrap();
+    let right = right_column(&before);
+    let width = before.lines().next().map_or(0, |line| line.chars().count());
+    let split = excerpts_row(&before);
+    let body = (3, before.lines().count().saturating_sub(1));
+    // The review pane sits above the excerpts inside the right-hand stack.
+    let wheel = |column: usize, row: usize| {
+        terminal
+            .scroll_at(column as u16, row as u16, false, false)
+            .unwrap()
+    };
+    wheel(right + 10, 8);
     fixture.capture(&terminal, "details-wheel");
     let details = terminal.screen().unwrap();
-    assert_eq!(pane(&before, 0, 30), pane(&details, 0, 30));
-    assert_eq!(pane(&before, 105, 150), pane(&details, 105, 150));
-    assert_ne!(pane(&before, 30, 105), pane(&details, 30, 105));
-    terminal.scroll_at(120, 8, false, false).unwrap();
+    assert_eq!(
+        region(&before, 0, right, body.0, body.1),
+        region(&details, 0, right, body.0, body.1)
+    );
+    assert_eq!(
+        region(&before, right, width, split, body.1),
+        region(&details, right, width, split, body.1)
+    );
+    assert_ne!(
+        region(&before, right, width, body.0, split),
+        region(&details, right, width, body.0, split)
+    );
+    wheel(right + 10, split + 3);
     fixture.capture(&terminal, "excerpts-wheel");
     let excerpts = terminal.screen().unwrap();
-    assert_eq!(pane(&details, 0, 30), pane(&excerpts, 0, 30));
-    assert_eq!(pane(&details, 30, 105), pane(&excerpts, 30, 105));
-    assert_ne!(pane(&details, 105, 150), pane(&excerpts, 105, 150));
+    assert_eq!(
+        region(&details, 0, right, body.0, body.1),
+        region(&excerpts, 0, right, body.0, body.1)
+    );
+    assert_eq!(
+        region(&details, right, width, body.0, split),
+        region(&excerpts, right, width, body.0, split)
+    );
+    assert_ne!(
+        region(&details, right, width, split, body.1),
+        region(&excerpts, right, width, split, body.1)
+    );
     for _ in 0..2 {
-        terminal.scroll_at(5, 8, false, false).unwrap();
+        wheel(5, 8);
     }
     fixture.capture(&terminal, "tree-wheel");
     let tree = terminal.screen().unwrap();
-    assert_eq!(pane(&excerpts, 30, 105), pane(&tree, 30, 105));
-    assert_eq!(pane(&excerpts, 105, 150), pane(&tree, 105, 150));
-    assert_ne!(pane(&excerpts, 0, 30), pane(&tree, 0, 30));
+    assert_eq!(
+        region(&excerpts, right, width, body.0, body.1),
+        region(&tree, right, width, body.0, body.1)
+    );
+    assert_ne!(
+        region(&excerpts, 0, right, body.0, body.1),
+        region(&tree, 0, right, body.0, body.1)
+    );
     terminal.click_text("POINT_08", 1000).unwrap();
     fixture.wait(&terminal, "tree-row-selected", || {
         terminal.screen().unwrap().contains("Title: POINT_08")
@@ -329,6 +415,10 @@ fn testpoint_field_pointer_edits_the_clicked_field_at_normal_and_narrow_sizes() 
             terminal.key("End").unwrap();
             terminal.write("Z").unwrap();
             terminal.key("Escape").unwrap();
+            // Wait for the editor to leave INSERT before the NORMAL save key.
+            terminal
+                .expect_text("Intent & review [NORMAL]", true, 2000)
+                .unwrap();
             terminal.key("s").unwrap();
             fixture.wait(&terminal, "clicked-field-saved", || {
                 let point = fixture.point(0);
@@ -380,15 +470,20 @@ fn testpoint_insert_keeps_command_text_and_saves_without_approving_or_switching_
         terminal.key("Escape").unwrap();
         terminal.expect_text("[NORMAL]", true, 2000).unwrap();
         terminal.key("Ctrl+w").unwrap();
-        terminal.key("Left").unwrap();
+        // The review pane owns Left/Right now, so step focus back to the tree.
+        terminal.key("Shift+Tab").unwrap();
+        terminal.key("Shift+Tab").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
         terminal.key("G").unwrap();
         fixture.wait(&terminal, "tree-last", || {
-            terminal.screen().unwrap().contains("Title: POINT_40")
+            let screen = terminal.screen().unwrap();
+            screen.contains("Title: POINT_40") || screen.contains("[P] POINT_40")
         });
         terminal.key("g").unwrap();
         terminal.key("g").unwrap();
         fixture.wait(&terminal, "tree-first", || {
-            terminal.screen().unwrap().contains("Title: POINT_00")
+            let screen = terminal.screen().unwrap();
+            screen.contains("Title: POINT_00") || screen.contains("[P] POINT_00")
         });
         fixture.finish(&terminal);
     }
@@ -400,7 +495,19 @@ fn testpoint_excerpt_and_realized_scenario_rows_select_before_navigation() {
     let fixture = Fixture::new("excerpt-scenario", 150, 30);
     let terminal = fixture.launch();
     terminal.resize(95, 24).unwrap();
-    terminal.scroll_at(80, 8, false, false).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let resized = terminal.screen().unwrap();
+    let excerpt_x = (right_column(&resized) + 10) as u16;
+    let excerpt_y = (excerpts_row(&resized) + 3) as u16;
+    for _ in 0..12 {
+        if terminal.screen().unwrap().contains("SOURCE_05") {
+            break;
+        }
+        terminal
+            .scroll_at(excerpt_x, excerpt_y, false, false)
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(80));
+    }
     fixture.capture(&terminal, "three-pane-resized-and-excerpts-scrolled");
     terminal.click_text("SOURCE_05", 1000).unwrap();
     fixture.capture(&terminal, "excerpt-selected");
@@ -462,6 +569,9 @@ fn testpoint_review_filter_batch_and_save_buttons_persist_their_targets() {
     terminal.key("End").unwrap();
     terminal.write("Z").unwrap();
     terminal.key("Escape").unwrap();
+    terminal
+        .expect_text("Intent & review [NORMAL]", true, 2000)
+        .unwrap();
     click_footer(&terminal, "Save");
     fixture.wait(&terminal, "save", || {
         fixture.point(40)["objective"] == "OBJECTIVE_40Z"
@@ -509,11 +619,15 @@ fn testpoint_narrow_review_controls_resize_and_modal_input_own_the_pointer() {
     click_footer(&terminal, "Continue");
     fixture.capture(&terminal, "narrow-continue-without-active-generation");
     assert_eq!(fixture.records(), batch);
+    // Below 70 columns only the focused pane is drawn; focus the review pane.
+    terminal.key("Tab").unwrap();
+    std::thread::sleep(Duration::from_millis(200));
     terminal.click_text("Objective:", 1000).unwrap();
     terminal.key("i").unwrap();
     terminal.key("End").unwrap();
     terminal.write("Z").unwrap();
     terminal.key("Escape").unwrap();
+    terminal.expect_text("[NORMAL]", true, 2000).unwrap();
     click_footer(&terminal, "Save");
     fixture.wait(&terminal, "narrow-save-resets-reviewed-intent", || {
         fixture.point(0)["objective"] == "OBJECTIVE_00Z"
