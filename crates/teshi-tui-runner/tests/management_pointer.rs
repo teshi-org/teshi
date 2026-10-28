@@ -582,7 +582,8 @@ fn registry_picker(narrow: bool) {
         .expect_text("Installed ACP Agents", true, 1500)
         .unwrap();
     fixture.click(&terminal, &["Registry [i]"], "open-registry");
-    let registry_visible = terminal.expect_text("Registry Beta", true, 5000);
+    // The picker waits on a real registry fetch; a loaded runner needs slack.
+    let registry_visible = terminal.expect_text("Registry Beta", true, 20000);
     fs::write(
         fixture.artifacts.join("registry-fetch-requests.json"),
         serde_json::to_vec_pretty(&registry.requests.lock().unwrap().clone()).unwrap(),
