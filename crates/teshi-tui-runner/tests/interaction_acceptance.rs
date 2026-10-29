@@ -387,6 +387,7 @@ fn explore_pointer_selection_and_scenario_wheel_leave_feature_and_step_independe
     // One notch per event: a loaded runner may coalesce bursts, so keep
     // scrolling until the list reaches its last scenario.
     let wheel_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    terminal.scroll_at(45, 5, false, false).unwrap();
     loop {
         let visible = terminal.screen().unwrap();
         if visible.contains("scenario 30") {
