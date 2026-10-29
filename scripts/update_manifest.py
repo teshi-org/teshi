@@ -161,10 +161,13 @@ def main():
         write_json(args.output, value)
         if "GITHUB_ENV" in os.environ:
             with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as stream:
-                day = args.tag.split("-nightly.")[1].split(".")[0] if "-nightly." in args.tag else value["build_timestamp"][:10].replace("-", "")
+                parts = args.tag.split("-nightly.")[1].split(".") if "-nightly." in args.tag else []
+                day = parts[-2] if parts else value["build_timestamp"][:10].replace("-", "")
                 values = dict(TESHI_BUILD_CHANNEL=value["channel"], TESHI_GIT_SHA=value["git_sha"],
                               TESHI_BUILD_DATE=day,
                               TESHI_BUILD_TIMESTAMP=value["build_timestamp"], TESHI_BUILD_SEQUENCE=str(value["build_sequence"]))
+                if parts and os.environ.get("TESHI_NIGHTLY_RELEASE_NUMBER", "").isdigit():
+                    values["TESHI_NIGHTLY_NUMBER"] = os.environ["TESHI_NIGHTLY_RELEASE_NUMBER"]
                 stream.writelines(f"{key}={value}\n" for key, value in values.items())
     elif args.mode == "bundle":
         bundle(

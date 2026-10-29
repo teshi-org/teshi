@@ -81,6 +81,8 @@ pub struct VersionInfo {
     pub git_sha: Option<&'static str>,
     /// RFC3339 build timestamp with the build machine's offset for local display.
     pub build_timestamp: Option<&'static str>,
+    /// Human-readable Nightly workflow run number.
+    pub nightly_number: Option<&'static str>,
 }
 
 impl VersionInfo {
@@ -107,6 +109,18 @@ impl VersionInfo {
         match (self.channel, self.build_date, self.git_sha) {
             (Some(channel), Some(date), Some(sha)) if channel != "stable" => {
                 if let Some(date) = format_yyyymmdd(date) {
+                    if channel == "nightly"
+                        && let Some(number) = self.nightly_number
+                        && !number.is_empty()
+                        && number.bytes().all(|b| b.is_ascii_digit())
+                    {
+                        return format!(
+                            "{}-nightly.{} ({date}, {})",
+                            self.semver,
+                            number,
+                            sha.chars().take(7).collect::<String>()
+                        );
+                    }
                     format!(
                         "{}-{channel}-{date} ({})",
                         self.semver,
@@ -130,6 +144,7 @@ pub fn version_info() -> VersionInfo {
         git_sha: nonempty_env(option_env!("TESHI_GIT_SHA")),
         build_timestamp: nonempty_env(option_env!("TESHI_BUILD_LOCAL_TIMESTAMP"))
             .or_else(|| nonempty_env(option_env!("TESHI_BUILD_TIMESTAMP"))),
+        nightly_number: nonempty_env(option_env!("TESHI_NIGHTLY_NUMBER")),
     }
 }
 
@@ -161,6 +176,7 @@ mod tests {
             channel: None,
             build_date: None,
             git_sha: None,
+            nightly_number: None,
             build_timestamp: None,
         };
         assert_eq!(info.display_string(), "0.7.10");
@@ -173,9 +189,18 @@ mod tests {
             channel: Some("nightly"),
             build_date: Some("20260907"),
             git_sha: Some("cb4361a"),
+            nightly_number: None,
             build_timestamp: None,
         };
         assert_eq!(info.display_string(), "0.7.10-nightly-2026.09.07 (cb4361a)");
+        assert_eq!(
+            VersionInfo {
+                nightly_number: Some("101"),
+                ..info
+            }
+            .display_string(),
+            "0.7.10-nightly.101 (2026.09.07, cb4361a)"
+        );
     }
 
     #[test]
@@ -185,6 +210,7 @@ mod tests {
             channel: Some("nightly"),
             build_date: Some("20260907"),
             git_sha: None,
+            nightly_number: None,
             build_timestamp: None,
         };
         assert_eq!(info.display_string(), "0.7.10");
@@ -197,6 +223,7 @@ mod tests {
             channel: Some("nightly"),
             build_date: Some("2026-09-07"),
             git_sha: Some("cb4361a"),
+            nightly_number: None,
             build_timestamp: None,
         };
         assert_eq!(info.display_string(), "0.7.10");
@@ -210,6 +237,7 @@ mod tests {
             channel: Some("local"),
             build_date: Some("20261013"),
             git_sha: Some("26fd0b6"),
+            nightly_number: None,
             build_timestamp: Some("2026-10-13T20:03:59+08:00"),
         };
         assert_eq!(
@@ -218,6 +246,7 @@ mod tests {
         );
         assert_eq!(
             VersionInfo {
+                nightly_number: None,
                 build_timestamp: None,
                 ..info
             }
@@ -243,6 +272,7 @@ mod tests {
                 channel: Some("local"),
                 build_date: None,
                 git_sha: Some("26fd0b6"),
+                nightly_number: None,
                 build_timestamp: Some(timestamp),
             };
             assert_eq!(info.display_string(), expected);

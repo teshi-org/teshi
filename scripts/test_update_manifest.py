@@ -4,12 +4,26 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import sys
 from unittest.mock import patch
 
 import update_manifest as manifest
 
 
 class UpdateManifestTests(unittest.TestCase):
+    def test_nightly_number_is_exported_for_binary_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "identity.json"
+            github_env = Path(directory) / "github-env"
+            with patch.dict("os.environ", {"TESHI_RELEASE_TIMESTAMP": "2026-09-08T01:02:03Z", "TESHI_NIGHTLY_RELEASE_NUMBER": "101", "GITHUB_ENV": str(github_env)}), \
+                 patch.object(sys, "argv", ["update_manifest.py", "identity", "--tag", "v0.7.10-nightly.20260908.aaaaaaa", "--sequence", "99", "--output", str(output)]), \
+                 patch.object(manifest.subprocess, "check_output", return_value="a" * 40):
+                manifest.main()
+            exported = github_env.read_text(encoding="utf-8")
+            self.assertIn("TESHI_NIGHTLY_NUMBER=101\n", exported)
+            self.assertIn("TESHI_BUILD_SEQUENCE=99\n", exported)
+            self.assertIn("TESHI_BUILD_DATE=20260908\n", exported)
+
     @patch.dict("os.environ", {"TESHI_RELEASE_TIMESTAMP": "2026-09-08T01:02:03Z"})
     def test_build_identity_and_nightly_tag(self):
         sha = "a" * 40

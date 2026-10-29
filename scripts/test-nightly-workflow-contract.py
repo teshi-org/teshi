@@ -45,6 +45,8 @@ def main() -> int:
     if "target_commitish: ${{ needs.resolve.outputs.source_ref }}" not in RELEASE:
         raise SystemExit("release workflow must anchor the GitHub tag to source_ref")
     require("python scripts/update_manifest.py identity", "compiled release identity", RELEASE)
+    require("TESHI_NIGHTLY_RELEASE_NUMBER", "nightly display number", RELEASE)
+    require("Nightly #{1}", "numbered release title", RELEASE)
 
     sha = "a" * 40
     cases = [

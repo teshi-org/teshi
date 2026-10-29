@@ -25,6 +25,7 @@ const IDENTITY_KEYS: [&str; 6] = [
 ];
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=TESHI_NIGHTLY_NUMBER");
     for key in IDENTITY_KEYS {
         println!("cargo:rerun-if-env-changed={key}");
     }
