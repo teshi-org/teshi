@@ -1872,14 +1872,15 @@ impl App {
                 .or_else(sys_locale::get_locale);
             let discovery_root =
                 crate::feature_discovery::default_feature_directory(root, locale.as_deref())?;
+            let scan_recursively = discovery_root != root;
             let mut app = Self::from_directory_with_discovery(
                 root,
                 &discovery_root,
                 config,
-                true,
+                scan_recursively,
                 requirements_root,
             )?;
-            app.feature_discovery_root = Some(discovery_root);
+            app.feature_discovery_root = scan_recursively.then_some(discovery_root);
             app
         };
         let mut worker = crate::feature_discovery::BackgroundDiscovery::default();
@@ -14858,6 +14859,70 @@ mod tests {
     }
 
     #[test]
+    fn missing_features_loads_and_refreshes_only_root_files() {
+        for library_view in [false, true] {
+            let root = tempdir().unwrap();
+            let store = tempdir().unwrap();
+            teshi_engine::initialize_requirement_store(store.path()).unwrap();
+            fs::create_dir_all(root.path().join("nested/deep")).unwrap();
+            let body = "Feature: Sample\n  Scenario: Ready\n    Given a fixture\n";
+            fs::write(root.path().join("nested/deep/hidden.feature"), body).unwrap();
+            let mut app = App::from_project_directory(
+                root.path(),
+                crate::config::AppConfig {
+                    default_provider: None,
+                    providers: Default::default(),
+                },
+                false,
+                library_view,
+                store.path().to_path_buf(),
+            )
+            .unwrap();
+            assert!(app.project.features.is_empty());
+            assert_eq!(app.project.root_dir, root.path());
+            assert_eq!(
+                app.git_status.scope,
+                teshi_core::git::GitProjectScope::Shallow
+            );
+            assert!(app.feature_discovery_root.is_none());
+            fs::write(root.path().join("root.feature"), body).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while app.project.features.is_empty() {
+                assert!(
+                    Instant::now() < deadline,
+                    "root refresh timed out: {}",
+                    app.status
+                );
+                app.last_external_check = Instant::now() - Duration::from_secs(2);
+                app.poll_external_feature_changes();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(app.project.features.len(), 1);
+            assert_eq!(
+                app.project.features[0].file_path,
+                root.path().join("root.feature")
+            );
+            assert!(!root.path().join("features").exists());
+            let reloaded = App::from_project_directory(
+                root.path(),
+                crate::config::AppConfig {
+                    default_provider: None,
+                    providers: Default::default(),
+                },
+                false,
+                library_view,
+                store.path().to_path_buf(),
+            )
+            .unwrap();
+            assert_eq!(reloaded.project.features.len(), 1);
+            assert_eq!(
+                reloaded.project.features[0].file_path,
+                root.path().join("root.feature")
+            );
+        }
+    }
+
+    #[test]
     fn explicit_recursive_project_loads_outside_features_asynchronously() {
         let root = tempdir().unwrap();
         let store = tempdir().unwrap();
@@ -14865,6 +14930,12 @@ mod tests {
         fs::write(
             root.path().join("outside.feature"),
             "Feature: Outside\n  Scenario: Ready\n    Given a fixture\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.path().join("nested/deep")).unwrap();
+        fs::write(
+            root.path().join("nested/deep/inside.feature"),
+            "Feature: Inside\n  Scenario: Ready\n    Given a fixture\n",
         )
         .unwrap();
         let config = crate::config::AppConfig {
@@ -14894,10 +14965,22 @@ mod tests {
             app.poll_external_feature_changes();
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(app.project.features[0].name, "Outside");
+        assert_eq!(app.project.features.len(), 2);
+        assert!(
+            app.project
+                .features
+                .iter()
+                .any(|feature| feature.name == "Outside")
+        );
+        assert!(
+            app.project
+                .features
+                .iter()
+                .any(|feature| feature.name == "Inside")
+        );
         assert_eq!(app.project.root_dir, root.path());
         assert_eq!(app.active_buffer_idx, Some(0));
-        assert!(app.buffer.as_string().contains("Feature: Outside"));
+        assert!(app.buffer.as_string().contains("Feature:"));
         app.handle_action(Action::SelectTab(MainTab::Ai)).unwrap();
         app.handle_action(Action::SelectTab(MainTab::Explore))
             .unwrap();

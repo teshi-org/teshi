@@ -13,7 +13,7 @@ teshi path/to/project -R # recursively scan the entire selected project
 teshi path/to/file.feature # open a single file directly
 ```
 
-Without `-R`, all directory forms load only the selected project's `features` folder:
+Without `-R`, all directory forms prefer the selected project's `features` folder:
 
 - Without language subdirectories, load all `.feature` files recursively under `features`.
 - With language directories such as `zh-CN` or `en-US`, load only the matching system UI
@@ -21,8 +21,10 @@ Without `-R`, all directory forms load only the selected project's `features` fo
 - Match the complete language tag case-insensitively (`en-GB` does not fall back to `en-US`).
   On Windows use the user's preferred UI language. An explicit `TESHI_FEATURE_LANGUAGE`
   environment override is also supported, including for deterministic acceptance fixtures.
-- Missing `features` opens an empty project; a missing language match reports an error.
-  Neither case falls back to scanning the entire project.
+- Missing `features` loads only `.feature` files directly in the project root, including
+  during background refresh. Subdirectories require `-R`/`--recursive`. If no files match,
+  the project opens empty without creating `features`.
+- A missing language match reports an error.
 
 `-R`/`--recursive` explicitly disables language selection and scans all Feature files in
 its target directory. `teshi -R` and `teshi . -R` are equivalent. The unrestricted initial

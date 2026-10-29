@@ -112,6 +112,20 @@ class World:
         self.expect("登录")
 
     def step(self, text):
+        translations = {
+            "an isolated launch directory and project xxx": "已准备隔离的启动目录和项目 xxx",
+            "the project uses isolated configuration and session data": "隔离项目不使用真实用户的配置和会话数据",
+            "the Feature list is empty": "Feature 列表为空",
+            "project xxx has no features directory": "项目 xxx 没有 features 目录",
+            "project xxx has “根层功能.feature” in its root": "项目 xxx 根目录有“根层功能.feature”",
+            "project xxx has “其他功能.feature” in another directory": "项目 xxx 的其他目录中有“其他功能.feature”",
+            "the Feature list contains exactly “根层功能”": "Feature 列表恰好包含“根层功能”",
+            "the Feature list contains exactly “根层功能” and “其他功能”": "Feature 列表恰好包含“根层功能”和“其他功能”",
+        }
+        text = translations.get(text, text)
+        match = re.fullmatch(r"I launch “([^”]+)” in “([^”]+)”", text)
+        if match:
+            text = f"我在“{match[2]}”中启动“{match[1]}”"
         quoted = re.findall("“([^”]+)”", text)
         if text == "已准备隔离的启动目录和项目 xxx":
             assert self.project.is_dir() and self.root != self.project
@@ -127,6 +141,8 @@ class World:
         elif text == "features 中没有语言子目录" or text == "项目 xxx 的 features 中没有语言子目录":
             self.features.mkdir(exist_ok=True)
             assert not any((self.features / name).exists() for name in ("zh-CN", "en-US"))
+        elif text == "项目 xxx 根目录有“根层功能.feature”":
+            self.write_feature(self.project / quoted[0])
         elif text == "项目 xxx 没有 features 目录":
             assert not self.features.exists()
         elif text == "项目 xxx 的 features 中同时存在 zh-CN 和 en-US 语言目录":
@@ -149,6 +165,10 @@ class World:
             self.launch(self.root, quoted[0])
         elif text.startswith("我在“") and "中启动“" in text:
             self.launch(self.project if quoted[0] == "项目 xxx" else self.root, quoted[1])
+        elif text == "Feature 列表恰好包含“根层功能”":
+            self.exact(["根层功能"])
+        elif text == "Feature 列表恰好包含“根层功能”和“其他功能”":
+            self.exact(["根层功能", "其他功能"])
         elif text == "Feature 列表恰好包含“登录”和“退出”":
             self.exact(["登录", "退出"])
         elif text == "Feature 列表恰好包含“登录”和“其他功能”":

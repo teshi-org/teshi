@@ -30,6 +30,7 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum, 
     version,
     about = "Terminal-first BDD editor with AI assistance",
     long_about = "Terminal UI: `teshi`, `teshi .`, and `teshi path/` load the project features/ using the system language.\n\
+                  Without features/, load only .feature files directly in the target directory.\n\
                   Add `-R` or `--recursive` to scan the entire target directory recursively.\n\
                   Browser GUI: `teshi web [--project PATH]`.\n\
                   Native locator workflow: `teshi desktop [--project PATH]`.\n\

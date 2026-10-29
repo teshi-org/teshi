@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 pub(crate) fn default_feature_directory(root: &Path, locale: Option<&str>) -> Result<PathBuf> {
     let features = root.join("features");
     if !features.is_dir() {
-        return Ok(features);
+        return Ok(root.to_path_buf());
     }
     let mut languages = Vec::new();
     for entry in std::fs::read_dir(&features).context("read features directory")? {
@@ -76,11 +76,11 @@ mod tests {
     }
 
     #[test]
-    fn missing_features_does_not_fall_back_to_the_project_root() {
+    fn missing_features_falls_back_to_the_project_root() {
         let root = tempfile::tempdir().unwrap();
         assert_eq!(
             default_feature_directory(root.path(), Some("en-US")).unwrap(),
-            root.path().join("features")
+            root.path()
         );
     }
 }

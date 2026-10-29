@@ -63,6 +63,47 @@
       | 项目 xxx | teshi .   |
       | 启动目录 | teshi xxx |
 
+  场景大纲: 缺少 features 时加载根目录文件
+    假如 项目 xxx 没有 features 目录
+    并且 项目 xxx 根目录有“根层功能.feature”
+    并且 项目 xxx 的其他目录中有“其他功能.feature”
+    当 我在“<工作目录>”中启动“<命令>”
+    那么 Feature 列表恰好包含“根层功能”
+    并且 项目 xxx 没有 features 目录
+
+    例子:
+      | 工作目录 | 命令      |
+      | 项目 xxx | teshi     |
+      | 项目 xxx | teshi .   |
+      | 启动目录 | teshi xxx |
+
+  场景大纲: 缺少 features 时显式递归加载根目录和子目录
+    假如 项目 xxx 没有 features 目录
+    并且 项目 xxx 根目录有“根层功能.feature”
+    并且 项目 xxx 的其他目录中有“其他功能.feature”
+    当 我在“<工作目录>”中启动“<命令>”
+    那么 Feature 列表恰好包含“根层功能”和“其他功能”
+    并且 项目 xxx 没有 features 目录
+
+    例子:
+      | 工作目录 | 命令                    |
+      | 项目 xxx | teshi -R                |
+      | 项目 xxx | teshi . --recursive     |
+      | 启动目录 | teshi xxx -R            |
+      | 启动目录 | teshi xxx --recursive   |
+
+  场景大纲: 缺少 features 且没有功能文件时打开空项目
+    假如 项目 xxx 没有 features 目录
+    当 我在“项目 xxx”中启动“<命令>”
+    那么 Feature 列表为空
+    并且 项目 xxx 没有 features 目录
+
+    例子:
+      | 命令                |
+      | teshi               |
+      | teshi -R            |
+      | teshi --recursive   |
+
   场景: 语言扫描目录不改变项目上下文
     假如 项目 xxx 的 features 中存在与系统界面语言匹配的语言目录
     并且 项目 xxx 的配置指定隔离的测试运行工作目录

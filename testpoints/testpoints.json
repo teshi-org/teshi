@@ -1,4 +1,123 @@
 {
   "version": 1,
-  "test_points": []
+  "test_points": [
+    {
+      "id": "tp-1",
+      "title": "三种启动方式采用一致的回退规则",
+      "objective": "验证显式目录、无路径和点路径启动在目标目录缺少 features 时均回退到目标目录；无路径和点路径以当前目录为目标。",
+      "preconditions": "目标目录不存在 features 文件夹，目录中包含可加载的功能文件。",
+      "expected_outcomes": "三种启动方式均加载对应目标目录中的功能文件。",
+      "hierarchy_path": [
+        "项目目录加载",
+        "缺少 features 时回退"
+      ],
+      "review_state": "approved",
+      "requirement_links": [],
+      "scenario_refs": [
+        {
+          "feature_path": "features/zh-CN/项目目录加载.feature",
+          "scenario_name": "缺少 features 时加载根目录文件"
+        },
+        {
+          "feature_path": "features/en-US/project_directory_fallback.feature",
+          "scenario_name": "Load root files when features is absent"
+        }
+      ]
+    },
+    {
+      "id": "tp-2",
+      "title": "默认回退只加载目标目录这一层",
+      "objective": "验证未指定递归参数时，回退扫描仅覆盖目标目录中的 .feature 文件。",
+      "preconditions": "目标目录没有 features 文件夹，目标目录及其他子目录均有功能文件。",
+      "expected_outcomes": "仅加载目标目录这一层的功能文件，子目录中的文件不加载。",
+      "hierarchy_path": [
+        "项目目录加载",
+        "缺少 features 时回退"
+      ],
+      "review_state": "approved",
+      "requirement_links": [],
+      "scenario_refs": [
+        {
+          "feature_path": "features/zh-CN/项目目录加载.feature",
+          "scenario_name": "缺少 features 时加载根目录文件"
+        },
+        {
+          "feature_path": "features/en-US/project_directory_fallback.feature",
+          "scenario_name": "Load root files when features is absent"
+        }
+      ]
+    },
+    {
+      "id": "tp-3",
+      "title": "递归参数扩展回退扫描范围",
+      "objective": "验证现有 -R 和 --recursive 两种参数形式均使回退扫描包含目标目录及多层子目录。",
+      "preconditions": "目标目录没有 features 文件夹，目标目录及多层子目录中有功能文件。",
+      "expected_outcomes": "两种参数形式均加载目标目录及子目录中的功能文件；适用于显式目录、无路径和点路径启动。",
+      "hierarchy_path": [
+        "项目目录加载",
+        "递归扫描"
+      ],
+      "review_state": "approved",
+      "requirement_links": [],
+      "scenario_refs": [
+        {
+          "feature_path": "features/zh-CN/项目目录加载.feature",
+          "scenario_name": "缺少 features 时显式递归加载根目录和子目录"
+        },
+        {
+          "feature_path": "features/en-US/project_directory_fallback.feature",
+          "scenario_name": "Recursively load root and nested files when features is absent"
+        }
+      ]
+    },
+    {
+      "id": "tp-4",
+      "title": "回退范围没有功能文件时打开空项目",
+      "objective": "验证缺少 features 且扫描范围没有功能文件时，启动结果清晰且不产生意外目录。",
+      "expected_outcomes": "正常打开空项目，不因缺少 features 失败，不自动创建 features；默认及递归模式均适用。",
+      "hierarchy_path": [
+        "项目目录加载",
+        "空项目边界"
+      ],
+      "review_state": "approved",
+      "requirement_links": [],
+      "scenario_refs": [
+        {
+          "feature_path": "features/zh-CN/项目目录加载.feature",
+          "scenario_name": "缺少 features 不扩大默认扫描范围"
+        },
+        {
+          "feature_path": "features/zh-CN/项目目录加载.feature",
+          "scenario_name": "缺少 features 且没有功能文件时打开空项目"
+        },
+        {
+          "feature_path": "features/en-US/project_directory_fallback.feature",
+          "scenario_name": "Open an empty project when no Feature files exist"
+        }
+      ]
+    },
+    {
+      "id": "tp-5",
+      "title": "已有 features 目录的加载规则保持一致",
+      "objective": "验证新增回退规则与现有 features 目录优先规则及递归参数行为兼容。",
+      "preconditions": "目标目录有 features 文件夹，目录内外均有功能文件。",
+      "expected_outcomes": "默认按已有规则加载 features；显式使用递归参数时按已有规则扫描整个目标目录。",
+      "hierarchy_path": [
+        "项目目录加载",
+        "已有目录兼容"
+      ],
+      "review_state": "approved",
+      "requirement_links": [],
+      "scenario_refs": [
+        {
+          "feature_path": "features/zh-CN/项目目录加载.feature",
+          "scenario_name": "默认打开项目只加载 features"
+        },
+        {
+          "feature_path": "features/zh-CN/项目目录加载.feature",
+          "scenario_name": "显式递归加载整个目标目录"
+        }
+      ]
+    }
+  ]
 }
