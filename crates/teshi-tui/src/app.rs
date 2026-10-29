@@ -1901,7 +1901,13 @@ impl App {
             project,
         )?;
         app.feature_discovery_root = Some(discovery_root.clone());
-        app.git_status.scope = teshi_core::git::GitProjectScope::CurrentFiles;
+        // Deleted Files must still be reported for a recursive project even though
+        // only the selected Feature is parsed.
+        app.git_status.scope = if scan_recursively {
+            teshi_core::git::GitProjectScope::Recursive
+        } else {
+            teshi_core::git::GitProjectScope::CurrentFiles
+        };
         app.lazy_features = Some(crate::lazy_features::LazyFeatures::new(
             discovery_root,
             scan_recursively,
@@ -3305,11 +3311,12 @@ impl App {
                             }
                         }
                         use teshi_agent::backend::AgentBackendDecision;
+                        let has_feature_files = self.has_feature_files();
                         let decision = self.agents[i].backend.after_tools(
                             self.generation_stage,
                             pending_queued,
                             self.approval_mode.requires_manual_approval(),
-                            !self.project.features.is_empty(),
+                            has_feature_files,
                         );
                         match decision {
                             AgentBackendDecision::Continue { allow_tools } => {
@@ -4153,9 +4160,10 @@ impl App {
             self.generation_stage = teshi_agent::pipeline::GenerationStage::Writing;
         }
         use teshi_agent::backend::AgentBackendDecision;
+        let has_feature_files = self.has_feature_files();
         match self.agents[agent_idx]
             .backend
-            .resume_after_approval(!self.project.features.is_empty())
+            .resume_after_approval(has_feature_files)
         {
             AgentBackendDecision::Continue { allow_tools } => {
                 self.agents[agent_idx].status = AiStatus::Waiting;
@@ -4430,6 +4438,13 @@ impl App {
         }
     }
 
+    fn has_feature_files(&self) -> bool {
+        self.lazy_features.as_ref().map_or_else(
+            || !self.project.features.is_empty(),
+            |catalog| !catalog.paths.is_empty(),
+        )
+    }
+
     /// Whether the selected catalog file has been installed in the editor.
     pub(crate) fn catalog_selection_ready(&self) -> bool {
         self.lazy_features.as_ref().is_none_or(|state| {
@@ -4440,6 +4455,37 @@ impl App {
                     .is_some_and(|f| &f.file_path == path)
             })
         })
+    }
+
+    /// Loads the pending launch selection for user actions that cannot wait for a
+    /// frame, such as entering edit mode or starting a run right after launch.
+    /// This reads one bounded Feature on the UI thread; it never replaces edits.
+    pub(crate) fn ensure_selected_feature(&mut self) -> bool {
+        if self.catalog_selection_ready() {
+            return true;
+        }
+        let Some(path) = self
+            .lazy_features
+            .as_ref()
+            .and_then(|state| state.selected.clone())
+        else {
+            return false;
+        };
+        if self.dirty
+            || self.buffer_dirty.iter().any(|dirty| *dirty)
+            || self.runner_rx.is_some()
+            || !self.pending_agent_changes.is_empty()
+        {
+            return false;
+        }
+        let Ok((feature, source)) = crate::lazy_features::read_content(&path) else {
+            return false;
+        };
+        if let Some(state) = self.lazy_features.as_mut() {
+            state.cancel_selection(path);
+        }
+        self.install_lazy_feature(feature, source);
+        self.catalog_selection_ready()
     }
 
     /// Loads an explicitly targeted catalog file for tools using editor-backed mutations.
@@ -4521,10 +4567,23 @@ impl App {
 
     /// Polls the directory catalog and installs only the selected Feature's AST.
     pub(crate) fn poll_lazy_features(&mut self) {
+        let busy = self.dirty
+            || self.buffer_dirty.iter().any(|dirty| *dirty)
+            || self.runner_rx.is_some()
+            || !self.pending_agent_changes.is_empty();
         let Some(state) = self.lazy_features.as_mut() else {
             return;
         };
         state.poll_catalog();
+        // A launch still shows the first Feature as eager loading did, but only
+        // that file is read and parsed. Never replace edits or pending work.
+        if !busy
+            && state.ready
+            && state.selected.is_none()
+            && let Some(first) = state.paths.first().filter(|path| path.exists()).cloned()
+        {
+            state.select(first);
+        }
         let content = state.poll_content();
         if let Some(error) = state.error.as_ref().or(state.scan_error.as_ref()) {
             self.status = format!("Feature loading failed: {error}");
@@ -4579,9 +4638,11 @@ impl App {
         self.explore_selected_scenario = 0;
         self.explore_selected_step = 0;
         self.switch_to_buffer(0);
+        // Keep the project scope discovered at startup; forcing current files
+        // here would stop reporting Features deleted on disk.
         self.git_status = teshi_core::git::FeatureGitStatusModel::empty_for_project(
             &self.project,
-            teshi_core::git::GitProjectScope::CurrentFiles,
+            self.git_status.scope,
         );
         self.bump_git_status_revision();
         self.rebuild_project_views(None);
@@ -5250,6 +5311,11 @@ impl App {
         };
         self.pending_change_diffs.push(diff);
         self.pending_agent_changes.push(change);
+        if self.lazy_features.is_some() {
+            // Lazy loading builds the MindMap index for the MindMap tab only, yet
+            // the summary maps diff lines onto its nodes from any tab.
+            self.rebuild_project_views(None);
+        }
         self.compute_change_summary();
 
         // Auto-show diff in Explore tab and Change Summary in MindMap tab
@@ -5640,7 +5706,11 @@ impl App {
 
     fn rebuild_project_views(&mut self, selected_tree_location: Option<(usize, usize)>) {
         self.step_index = StepIndex::build(&self.project);
-        let build_map = (self.lazy_features.is_none() || self.active_tab == MainTab::MindMap)
+        // A pending agent change needs the node index for its Change Summary even
+        // when the user reviews it from another tab.
+        let build_map = (self.lazy_features.is_none()
+            || self.active_tab == MainTab::MindMap
+            || !self.pending_agent_changes.is_empty())
             && self.mindmap_within_budget();
         let map_project = if build_map {
             &self.project
@@ -6021,7 +6091,7 @@ impl App {
     }
 
     fn start_explore_run(&mut self) {
-        if !self.catalog_selection_ready() {
+        if !self.ensure_selected_feature() {
             self.status = "Select a Feature and wait for it to load before running".into();
             return;
         }
@@ -7771,7 +7841,7 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::EnterEdit => {
-                if !self.catalog_selection_ready() {
+                if !self.ensure_selected_feature() {
                     self.status = "Select a Feature and wait for it to load before editing".into();
                     return Ok(());
                 }
@@ -10562,6 +10632,7 @@ impl App {
 
     /// Find the first clickable region that contains `pos`.
     fn hit_test(&self, pos: &ratatui::layout::Position) -> Option<&ClickableRegion> {
+        let _ = &self.dirty;
         // Specific controls overlay broad pane regions. Reverse render order
         // gives modal controls priority over the content beneath them.
         if let Some(region) = self
@@ -15159,6 +15230,20 @@ mod tests {
         assert!(app.status.contains("approve at least one test point"));
     }
 
+    /// Waits for the launch selection to install the first discovered Feature.
+    fn await_launch_selection(app: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.project.features.is_empty() {
+            app.poll_lazy_features();
+            assert!(
+                Instant::now() < deadline,
+                "launch selection did not load: {}",
+                app.status
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     fn await_catalog(app: &mut App, count: usize) {
         let deadline = Instant::now() + Duration::from_secs(12);
         loop {
@@ -15271,15 +15356,15 @@ mod tests {
         )
         .unwrap();
         await_catalog(&mut app, 2);
-        assert!(app.project.features.is_empty());
-        assert!(app.buffers.is_empty());
+        await_launch_selection(&mut app);
+        assert_eq!(app.project.features.len(), 1);
+        assert_eq!(app.buffers.len(), 1);
         assert_eq!(
             app.feature_scope(None)
                 .map(|f| f.unwrap().name.clone())
                 .collect::<Vec<_>>(),
             ["First", "Second"]
         );
-        assert!(app.project.features.is_empty());
         load_catalog_file(&mut app, 0);
         assert_eq!(app.project.features[0].name, "First");
         app.buffer = EditorBuffer::from_string("Feature: Unsaved".into());
@@ -15295,6 +15380,46 @@ mod tests {
         assert_eq!(app.project.features[0].name, "Second");
         assert_eq!(app.build_explore_cases().len(), 1);
         assert!(app.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn pending_change_queued_from_ai_tab_summarizes_lazy_feature() {
+        let root = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        fs::write(
+            root.path().join("sample.feature"),
+            "Feature: Sample\n  Scenario: Ready\n    Given a fixture\n",
+        )
+        .unwrap();
+        let mut app = App::from_project_directory(
+            root.path(),
+            crate::config::load_config().unwrap(),
+            true,
+            false,
+            store.path().into(),
+        )
+        .unwrap();
+        await_catalog(&mut app, 1);
+        load_catalog_file(&mut app, 0);
+        // The MindMap index is built on demand for the MindMap tab only, but the
+        // Change Summary maps diff lines onto its nodes from any tab.
+        app.active_tab = MainTab::Ai;
+        app.queue_agent_change(super::AgentPendingChange {
+            description: "update step 0".into(),
+            file_path: app.project.features[0].file_path.display().to_string(),
+            mutation: super::AgentMutation::ReplaceLine {
+                row_0based: 2,
+                new_text: "    Given a replacement".into(),
+            },
+            scenario_name: "Ready".into(),
+            test_point_ids: Vec::new(),
+            tool_call_id: "summary".into(),
+            old_buffer_snapshot: app.buffer.as_string(),
+            agent_idx: 0,
+        });
+
+        assert!(app.change_summary_visible);
+        assert_eq!(app.pending_change_summary.len(), 1);
     }
 
     #[test]
@@ -15321,8 +15446,8 @@ mod tests {
         )
         .unwrap();
         await_catalog(&mut app, 1);
-        assert!(app.project.features.is_empty());
-        load_catalog_file(&mut app, 0);
+        await_launch_selection(&mut app);
+        assert_eq!(app.project.features.len(), 1);
         let alias = root.path().join("features/nested/../sample.feature");
         assert_eq!(
             app.find_feature_idx_for_file(alias.to_str().unwrap()),
@@ -15362,7 +15487,14 @@ mod tests {
         )
         .unwrap();
         await_catalog(&mut app, 1);
-        assert!(app.project.features.is_empty());
+        await_launch_selection(&mut app);
+        // Only the launched Feature is resident; the sibling outside the
+        // discovery root stays unparsed.
+        assert_eq!(app.project.features.len(), 1);
+        assert_eq!(
+            app.project.features[0].file_path,
+            root.path().join("features/deep/in.feature")
+        );
         load_catalog_file(&mut app, 0);
         assert_eq!(app.project.root_dir, root.path());
         assert_eq!(app.project.features.len(), 1);
@@ -15466,7 +15598,9 @@ mod tests {
             "recursive startup must render before walking"
         );
         await_catalog(&mut app, 2);
-        assert!(app.project.features.is_empty());
+        await_launch_selection(&mut app);
+        // Two paths were discovered, but a launch keeps a single AST resident.
+        assert_eq!(app.project.features.len(), 1);
         load_catalog_file(&mut app, 0);
         assert_eq!(app.project.features.len(), 1);
         load_catalog_file(&mut app, 1);

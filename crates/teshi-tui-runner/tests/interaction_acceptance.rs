@@ -428,6 +428,11 @@ fn external_feature_additions_are_discovered_in_recursive_project() {
     )
     .unwrap();
     terminal.expect_text("added_root", true, 10000).unwrap();
+    // Directory rows start collapsed, so the recursive scope is verified through
+    // file search rather than by expanding every discovered directory.
+    terminal.key("/").unwrap();
+    terminal.write("added_nested").unwrap();
+    terminal.key("Enter").unwrap();
     terminal.expect_text("added_nested", true, 10000).unwrap();
     capture(&terminal, "external-additions");
     fixture.unchanged();
@@ -512,7 +517,7 @@ fn externally_deleted_dirty_feature_can_keep_local_edits() {
 
 #[test]
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
-fn external_scan_failure_is_visible_and_preserves_project() {
+fn external_unreadable_feature_reports_error_and_preserves_project() {
     let fixture = Fixture::new();
     let terminal = fixture.launch();
     let project = fixture.source.parent().unwrap();
@@ -520,9 +525,14 @@ fn external_scan_failure_is_visible_and_preserves_project() {
     // changing ACLs or moving an open project directory.
     let invalid = project.join("unreadable.feature");
     fs::write(&invalid, [0xff, 0xfe]).unwrap();
+    // Discovery only collects paths, so the refresh still succeeds and lists the
+    // unreadable file; the read error surfaces when it is selected.
     terminal.key("F6").unwrap();
+    terminal.expect_text("unreadable", true, 10000).unwrap();
+    terminal.expect_text("sample", true, 10000).unwrap();
+    terminal.click_text("unreadable", 10000).unwrap();
     terminal
-        .expect_text("Feature refresh incomplete", true, 10000)
+        .expect_text("stream did not", true, 10000)
         .unwrap();
     terminal.expect_text("sample", true, 10000).unwrap();
     capture(&terminal, "external-scan-failure");

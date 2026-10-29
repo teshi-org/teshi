@@ -4,6 +4,8 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 use teshi_core::gherkin::{BddFeature, parse_feature};
 
+const CHANGED_DURING_LOAD: &str = "Feature changed while loading; select it again to retry";
+
 /// A bounded single-file working set, independent of the directory catalog.
 pub(crate) struct LazyFeatures {
     pub(crate) paths: Vec<PathBuf>,
@@ -21,6 +23,7 @@ pub(crate) struct LazyFeatures {
     requested_revision: u64,
     last_scan: Instant,
     refresh_requested: bool,
+    retries: u8,
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -69,7 +72,7 @@ fn verify_content(path: &Path, source: &str, stamp: &ContentStamp) -> Result<(),
         || read_source(path)? != source
         || ContentStamp::capture(path)? != *stamp
     {
-        return Err("Feature changed while loading; select it again to retry".into());
+        return Err(CHANGED_DURING_LOAD.into());
     }
     Ok(())
 }
@@ -93,6 +96,7 @@ impl LazyFeatures {
             requested_revision: 0,
             last_scan: Instant::now(),
             refresh_requested: false,
+            retries: 0,
             cancelled: Default::default(),
         };
         state.scan();
@@ -167,6 +171,7 @@ impl LazyFeatures {
         self.selection_revision = self.selection_revision.wrapping_add(1);
         self.selected = Some(path);
         self.error = None;
+        self.retries = 0;
         self.start_content();
     }
 
@@ -176,6 +181,7 @@ impl LazyFeatures {
         self.requested = None;
         self.selected = Some(path);
         self.error = None;
+        self.retries = 0;
     }
 
     fn start_content(&mut self) {
@@ -221,18 +227,37 @@ impl LazyFeatures {
                     content.stamp.modified,
                     content.stamp.length,
                 )),
-                _ => {
-                    self.error = Some(
-                        "Feature changed before loading completed; select it again to retry".into(),
-                    );
-                    None
-                }
+                _ => self.retry_content(),
             },
+            Err(error) if error == CHANGED_DURING_LOAD => self.retry_content(),
             Err(error) => {
+                if self.selected.as_ref().is_some_and(|path| !path.exists()) {
+                    // The selection disappeared while loading; drop it so the
+                    // caller can move on instead of reporting a missing file.
+                    self.selected = None;
+                    self.requested = None;
+                    self.request_refresh();
+                    return None;
+                }
                 self.error = Some(error);
                 None
             }
         }
+    }
+
+    /// A clean selection whose file changed mid-read is reread; a file that keeps
+    /// changing still surfaces the explicit retry message after a bounded number
+    /// of attempts instead of blocking the window.
+    fn retry_content(&mut self) -> Option<(BddFeature, String, std::time::SystemTime, u64)> {
+        const MAX_RETRIES: u8 = 2;
+        if self.retries < MAX_RETRIES {
+            self.retries += 1;
+            self.start_content();
+            return None;
+        }
+        self.error =
+            Some("Feature changed before loading completed; select it again to retry".into());
+        None
     }
 }
 
@@ -387,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_file_result_is_rejected_before_installation() {
+    fn changed_file_result_is_reread_before_installation() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("changing.feature");
         std::fs::write(&path, "Feature: Old").unwrap();
@@ -399,8 +424,18 @@ mod tests {
         state.content_rx = Some(rx);
         state.requested = Some(path.clone());
         state.selected = Some(path);
+        // The stale snapshot is never installed; the reread carries the new body.
         assert!(state.poll_content().is_none());
-        assert!(state.error.as_ref().unwrap().contains("changed"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some((feature, _, _, _)) = state.poll_content() {
+                assert_eq!(feature.name, "New content");
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(state.error.is_none());
     }
 
     #[test]
