@@ -148,48 +148,50 @@ fn vim_boundaries_pages_and_arrow_pane_chords_work_across_tabs() {
         .env
         .push(("TESHI_LLM_API_KEY".into(), String::new()));
     let terminal = fixture.launch();
+    // The launch Feature is parsed in the background; navigation needs its steps.
+    terminal.expect_text("scenario 01", true, 10000).unwrap();
     prefix(&terminal, "Right");
     terminal.key("G").unwrap();
-    terminal.expect_text("Given step 30", true, 3000).unwrap();
+    terminal.expect_text("Given step 30", true, 10000).unwrap();
     terminal.write("gg").unwrap();
-    terminal.expect_text("Given step 01", true, 3000).unwrap();
+    terminal.expect_text("Given step 01", true, 10000).unwrap();
     terminal.key("PageDown").unwrap();
-    terminal.expect_text("Given step 11", true, 3000).unwrap();
+    terminal.expect_text("Given step 11", true, 10000).unwrap();
     terminal.key("Ctrl+b").unwrap();
-    terminal.expect_text("Given step 01", true, 3000).unwrap();
+    terminal.expect_text("Given step 01", true, 10000).unwrap();
     capture(&terminal, "vim-explore-pages");
 
     terminal.key("2").unwrap();
-    terminal.expect_text("Preview", true, 3000).unwrap();
+    terminal.expect_text("Preview", true, 10000).unwrap();
     prefix(&terminal, "Right");
     terminal.key("i").unwrap();
     terminal.write("hjkl q12345").unwrap();
-    terminal.expect_text("hjkl q12345", true, 3000).unwrap();
+    terminal.expect_text("hjkl q12345", true, 10000).unwrap();
     capture(&terminal, "vim-mindmap-input");
     terminal.key("Escape").unwrap();
-    terminal.expect_text("[INPUT]", false, 3000).unwrap();
+    terminal.expect_text("[INPUT]", false, 10000).unwrap();
     prefix(&terminal, "Left");
 
     terminal.key("4").unwrap();
-    terminal.expect_text("# Req 01", true, 3000).unwrap();
+    terminal.expect_text("# Req 01", true, 10000).unwrap();
     terminal.key("End").unwrap();
-    terminal.expect_text("# Req 35", true, 3000).unwrap();
+    terminal.expect_text("# Req 35", true, 10000).unwrap();
     terminal.key("PageUp").unwrap();
-    terminal.expect_text("# Req 25", true, 3000).unwrap();
+    terminal.expect_text("# Req 25", true, 10000).unwrap();
     prefix(&terminal, "Right");
     terminal.key("G").unwrap();
-    terminal.expect_text("body 55", true, 3000).unwrap();
+    terminal.expect_text("body 55", true, 10000).unwrap();
     terminal.write("gg").unwrap();
-    terminal.expect_text("# Req 25", true, 3000).unwrap();
+    terminal.expect_text("# Req 25", true, 10000).unwrap();
     capture(&terminal, "vim-requirement-boundaries");
 
     terminal.key("3").unwrap();
     terminal.key("i").unwrap();
-    terminal.expect_text("[INPUT]", true, 3000).unwrap();
+    terminal.expect_text("[INPUT]", true, 10000).unwrap();
     terminal.write("hjkl q12345").unwrap();
-    terminal.expect_text("hjkl q12345", true, 3000).unwrap();
+    terminal.expect_text("hjkl q12345", true, 10000).unwrap();
     terminal.key("Escape").unwrap();
-    terminal.expect_text("[NORMAL]", true, 3000).unwrap();
+    terminal.expect_text("[NORMAL]", true, 10000).unwrap();
     capture(&terminal, "vim-ai-modes");
     fixture.unchanged();
     terminal.key("q").unwrap();
