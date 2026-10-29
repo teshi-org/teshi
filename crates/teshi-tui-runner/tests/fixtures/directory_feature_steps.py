@@ -90,6 +90,12 @@ class World:
     def exact(self, expected):
         expected = set(expected)
         candidates = set(self.files.values())
+        # Directory rows start collapsed. Search all Feature paths to compare the
+        # discovered scope without depending on expansion state.
+        self.op("key", "Escape")
+        self.op("key", "/")
+        self.op("write", ".feature")
+        self.op("key", "Enter")
         self.wait(lambda screen: all(name in screen for name in expected))
         # Hold the negative assertion across multiple external refresh opportunities.
         deadline = time.monotonic() + 3.2

@@ -92,13 +92,32 @@ pub(crate) struct BackgroundDiscovery {
 }
 
 impl BackgroundDiscovery {
+    /// Whether a directory scan is awaiting completion.
+    pub(crate) fn is_loading(&self) -> bool {
+        self.receiver.is_some()
+    }
+
     /// Starts or polls a scan without walking the directory on the UI thread.
+    #[cfg(test)]
     pub(crate) fn poll(
         &mut self,
         root: &Path,
         recursive: bool,
     ) -> Option<Result<teshi_core::gherkin::BddProject, String>> {
+        self.poll_excluding(root, recursive, &[])
+    }
+
+    /// Discovers additions without reparsing files already owned by the editor.
+    /// Existing-file edits remain handled by the disk-stamp conflict workflow.
+    pub(crate) fn poll_excluding(
+        &mut self,
+        root: &Path,
+        recursive: bool,
+        known: &[teshi_core::gherkin::BddFeature],
+    ) -> Option<Result<teshi_core::gherkin::BddProject, String>> {
         if self.receiver.is_none() {
+            let known: std::collections::HashSet<_> =
+                known.iter().map(|f| f.file_path.clone()).collect();
             let root = root.to_path_buf();
             let (sender, receiver) = std::sync::mpsc::channel();
             if let Err(error) = std::thread::Builder::new()
@@ -110,8 +129,23 @@ impl BackgroundDiscovery {
                             features: Vec::new(),
                         })
                     } else {
-                        teshi_core::gherkin::try_parse_project_with_depth(&root, recursive)
-                            .map_err(|e| e.to_string())
+                        (|| {
+                            let paths =
+                                teshi_core::gherkin::discover_feature_paths(&root, recursive)?;
+                            let features = paths
+                                .into_iter()
+                                .filter(|path| !known.contains(path))
+                                .map(|path| {
+                                    let source = std::fs::read_to_string(&path)?;
+                                    Ok(teshi_core::gherkin::parse_feature(&source, path))
+                                })
+                                .collect::<std::io::Result<Vec<_>>>()?;
+                            Ok(teshi_core::gherkin::BddProject {
+                                root_dir: root,
+                                features,
+                            })
+                        })()
+                        .map_err(|e: std::io::Error| e.to_string())
                     };
                     let _ = sender.send(snapshot);
                 })
@@ -153,6 +187,32 @@ mod background_tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn refresh_does_not_read_known_feature_contents() {
+        let root = tempfile::tempdir().unwrap();
+        let existing = root.path().join("existing.feature");
+        // Invalid UTF-8 would fail a full reparse. Known files belong to the
+        // editor's conflict-aware reload path, not background discovery.
+        std::fs::write(&existing, [0xff]).unwrap();
+        std::fs::write(root.path().join("added.feature"), "Feature: Added").unwrap();
+        let known = vec![teshi_core::gherkin::parse_feature(
+            "Feature: Existing",
+            existing,
+        )];
+        let mut worker = BackgroundDiscovery::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let result = loop {
+            if let Some(result) = worker.poll_excluding(root.path(), true, &known) {
+                break result.unwrap();
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(result.features.len(), 1);
+        assert_eq!(result.features[0].name, "Added");
+        assert!(!worker.is_loading());
     }
 
     #[test]

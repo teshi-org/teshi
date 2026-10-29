@@ -114,6 +114,21 @@ fn execute_tool_impl(
     tool_call_id: &str,
     agent_idx: usize,
 ) -> Result<String> {
+    if matches!(
+        name,
+        "get_feature_content"
+            | "insert_scenario"
+            | "update_step"
+            | "delete_scenario"
+            | "rename_scenario"
+            | "reorder_steps"
+    ) {
+        let args: serde_json::Value =
+            serde_json::from_str(args_json).context("invalid JSON arguments")?;
+        if let Some(path) = args.get("file_path").and_then(|value| value.as_str()) {
+            app.ensure_tool_feature(path)?;
+        }
+    }
     match name {
         "get_project_info" => execute_get_project_info(app),
         "highlight_mindmap_nodes" => execute_highlight_mindmap_nodes(app, args_json),
@@ -227,6 +242,25 @@ fn execute_apply_mindmap_filter(app: &mut crate::app::App, args_json: &str) -> R
 
 fn execute_get_project_info(app: &crate::app::App) -> Result<String> {
     let project = &app.project;
+    if let Some(catalog) = &app.lazy_features {
+        return Ok(format!(
+            "Project directory: {}\nFeature files discovered: {}\nCatalog loading: {}\nAST/MindMap scope: current Feature only\nActive file: {}\nFiles (first 100):\n{}",
+            project.root_dir.display(),
+            catalog.paths.len(),
+            catalog.is_loading(),
+            app.file_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "none selected".into()),
+            catalog
+                .paths
+                .iter()
+                .take(100)
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
 
     if project.features.is_empty() {
         let current_dir = std::env::current_dir()
@@ -1123,9 +1157,10 @@ fn execute_search_features(app: &crate::app::App, args_json: &str) -> Result<Str
 
     let mut results: Vec<String> = Vec::new();
 
-    for feature in &app.project.features {
+    for feature in app.feature_scope(None) {
+        let feature = feature?;
         let file_path = feature.file_path.to_string_lossy();
-        for scenario in &feature.scenarios {
+        for scenario in feature.all_scenarios() {
             // Check tag filter
             if let Some(tag) = tag_filter
                 && !scenario.tags.iter().any(|t| t == tag)
@@ -1188,15 +1223,10 @@ fn execute_run_tests(app: &mut crate::app::App, args_json: &str) -> Result<Strin
 
     // Build run cases from project features
     let mut cases: Vec<crate::runner::RunCase> = Vec::new();
-    for feature in &app.project.features {
+    for feature in app.feature_scope(feature_path_filter) {
+        let feature = feature?;
         let fp = feature.file_path.to_string_lossy().to_string();
-        if let Some(filter_path) = feature_path_filter
-            && fp != filter_path
-            && !fp.ends_with(filter_path)
-        {
-            continue;
-        }
-        for scenario in &feature.scenarios {
+        for scenario in feature.all_scenarios() {
             if let Some(filter_name) = scenario_name_filter
                 && scenario.name != filter_name
             {
@@ -1910,59 +1940,32 @@ fn execute_validate_feature(app: &mut crate::app::App, args_json: &str) -> Resul
 
     let file_path_opt = args.get("file_path").and_then(|v| v.as_str());
 
-    let project = &app.project;
-    let selected = if let Some(fp) = file_path_opt {
-        let selected: Vec<_> = project
-            .features
-            .iter()
-            .filter(|f| {
-                let path_str = f.file_path.to_string_lossy().replace('\\', "/");
-                path_str == fp || path_str.ends_with(fp)
-            })
-            .collect();
-
-        if selected.is_empty() {
-            let available: Vec<_> = project
-                .features
-                .iter()
-                .map(|f| f.file_path.to_string_lossy().to_string())
-                .collect();
-            anyhow::bail!(
-                "Feature file '{}' not found. Available files: {}",
-                fp,
-                if available.is_empty() {
-                    "(none)".into()
-                } else {
-                    available.join(", ")
-                }
-            );
-        }
-        selected
-    } else {
-        project.features.iter().collect()
-    };
-
     let mut issues = Vec::new();
-    for feature in selected {
-        // Accepted host edits live in buffers until Save. Validate the same
-        // content the user sees, including scenarios just inserted through MCP.
+    let mut selected_count = 0usize;
+    for feature in app.feature_scope(file_path_opt) {
+        let feature = feature?;
+        selected_count += 1;
         let content = app
             .find_feature_idx_for_file(&feature.file_path.to_string_lossy())
             .and_then(|index| app.buffers.get(index))
             .map(|buffer| buffer.as_string())
-            .or_else(|| std::fs::read_to_string(&feature.file_path).ok());
-        match content {
-            Some(content) => issues.extend(teshi_agent::validator::validate_feature(
-                &content,
-                &feature.file_path,
-            )),
-            None => issues.extend(teshi_agent::validator::validate_project(
-                &teshi_core::gherkin::BddProject {
-                    root_dir: project.root_dir.clone(),
-                    features: vec![feature.clone()],
-                },
-            )),
+            .map(Ok)
+            .unwrap_or_else(|| {
+                crate::lazy_features::read_content(&feature.file_path).map(|(_, source)| source)
+            })
+            .map_err(anyhow::Error::msg)?;
+        issues.extend(teshi_agent::validator::validate_feature(
+            &content,
+            &feature.file_path,
+        ));
+        if issues.len() > 1000 {
+            anyhow::bail!(
+                "More than 1000 validation issues; narrow the file scope. Validation is incomplete."
+            );
         }
+    }
+    if selected_count == 0 {
+        anyhow::bail!("No matching Feature files in the discovered scope");
     }
 
     if issues.is_empty() {

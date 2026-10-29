@@ -385,6 +385,32 @@ pub fn try_parse_project_with_depth(
     root_dir: &std::path::Path,
     recursive: bool,
 ) -> std::io::Result<BddProject> {
+    let paths = discover_feature_paths(root_dir, recursive)?;
+    fn at(path: &std::path::Path, error: std::io::Error) -> std::io::Error {
+        std::io::Error::new(error.kind(), format!("read {}: {error}", path.display()))
+    }
+    let features = paths
+        .into_iter()
+        .map(|path| {
+            let source = std::fs::read_to_string(&path).map_err(|error| at(&path, error))?;
+            Ok(parse_feature(&source, path))
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    Ok(BddProject {
+        root_dir: root_dir.to_path_buf(),
+        features,
+    })
+}
+
+/// Discovers sorted Feature paths without reading or parsing file contents.
+/// Directory aliases are visited once, and recursion follows the requested scope.
+///
+/// # Errors
+/// Returns traversal and metadata errors with the affected path.
+pub fn discover_feature_paths(
+    root_dir: &std::path::Path,
+    recursive: bool,
+) -> std::io::Result<Vec<PathBuf>> {
     fn at(path: &std::path::Path, error: std::io::Error) -> std::io::Error {
         std::io::Error::new(error.kind(), format!("read {}: {error}", path.display()))
     }
@@ -424,17 +450,7 @@ pub fn try_parse_project_with_depth(
         &mut paths,
     )?;
     paths.sort();
-    let features = paths
-        .into_iter()
-        .map(|path| {
-            let source = std::fs::read_to_string(&path).map_err(|error| at(&path, error))?;
-            Ok(parse_feature(&source, path))
-        })
-        .collect::<std::io::Result<Vec<_>>>()?;
-    Ok(BddProject {
-        root_dir: root_dir.to_path_buf(),
-        features,
-    })
+    Ok(paths)
 }
 
 /// Parses only direct `.feature` files in `root_dir` (non-recursive scan).

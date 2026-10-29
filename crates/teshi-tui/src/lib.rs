@@ -17,6 +17,7 @@ mod generation_state;
 mod highlight;
 mod input;
 mod keymap;
+mod lazy_features;
 mod llm;
 pub mod markdown;
 mod mindmap;
@@ -309,6 +310,7 @@ pub fn run() -> Result<()> {
             app.status = format!("Failed to save conversations: {error}");
             app.set_status_message(app.status.clone());
         }
+        app.poll_lazy_features();
         app.poll_git_status();
         app.poll_external_feature_changes();
         app.poll_status_message_expiry();

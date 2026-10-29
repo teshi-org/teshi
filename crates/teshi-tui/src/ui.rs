@@ -1009,13 +1009,19 @@ fn render_explore_lines_selected<'a>(
         }
         view.last_selected = Some(selected);
     }
-    let vertical_offset = view.offset.min(u16::MAX as usize) as u16;
+    // Pad and render only the viewport, rather than allocating full-width
+    // backgrounds for every file in a large project.
+    let visible_lines = lines
+        .into_iter()
+        .skip(view.offset)
+        .take(content_area.height as usize)
+        .collect();
     frame.render_widget(
         Paragraph::new(Text::from(theme::popup_rows(
-            lines,
+            visible_lines,
             content_width.max(viewport_width).min(u16::MAX as usize) as u16,
         )))
-        .scroll((vertical_offset, offset.min(u16::MAX as usize) as u16)),
+        .scroll((0, offset.min(u16::MAX as usize) as u16)),
         content_area,
     );
 
@@ -1099,11 +1105,30 @@ fn input_with_cursor(text: &str, cursor: usize, width: u16) -> String {
 fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     use crate::feature_browser::Row;
     let focused = app.explore_focus == ColumnFocus::Feature;
-    let title = if app.feature_browser.searching || !app.feature_browser.query.is_empty() {
+    let mut title = if app.feature_browser.searching || !app.feature_browser.query.is_empty() {
         format!("Features /{}", app.feature_browser.query)
     } else {
-        "Features [/] Search".to_string()
+        if app.lazy_features.is_some() {
+            format!(
+                "Features ({}) [/] File search",
+                app.lazy_features
+                    .as_ref()
+                    .map_or(0, |catalog| catalog.paths.len())
+            )
+        } else {
+            "Features [/] Search".to_string()
+        }
     };
+    if app.features_loading() {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let frame = (START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis()
+            / 100) as usize;
+        let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        title.push_str(&format!(" {} Loading...", spinner[frame % spinner.len()]));
+    }
     let block = explore_block(&title, focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1112,7 +1137,17 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     let rows = app.feature_browser_rows();
     if rows.is_empty() {
-        frame.render_widget(Paragraph::new("(no features)"), inner);
+        frame.render_widget(
+            Paragraph::new(if app.features_loading() {
+                "Scanning Feature files..."
+            } else {
+                app.lazy_features
+                    .as_ref()
+                    .and_then(|state| state.scan_error.as_deref())
+                    .unwrap_or("(no features)")
+            }),
+            inner,
+        );
         return;
     }
     let selected = app.explore_selected_feature_row();
@@ -1135,8 +1170,15 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     let status = if *deleted {
                         app.git_status.deleted[*index].file_status
                     } else {
-                        app.git_status
-                            .current_at(*index)
+                        let current_index = if let Some(catalog) = &app.lazy_features {
+                            app.project.features.iter().position(|feature| {
+                                catalog.paths.get(*index) == Some(&feature.file_path)
+                            })
+                        } else {
+                            Some(*index)
+                        };
+                        current_index
+                            .and_then(|index| app.git_status.current_at(index))
                             .map(|view| view.file_status)
                             .unwrap_or_default()
                     };
@@ -1188,6 +1230,19 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    if !app.catalog_selection_ready() {
+        frame.render_widget(
+            Paragraph::new(
+                app.lazy_features
+                    .as_ref()
+                    .and_then(|state| state.error.as_deref())
+                    .unwrap_or("Select a Feature; content loads on demand"),
+            )
+            .block(explore_block("Feature content", false)),
+            area,
+        );
+        return;
+    }
     let focused = app.explore_focus == ColumnFocus::Scenario;
     let scenarios_title = explore_scenarios_title(app);
     let block = explore_block(scenarios_title.as_str(), focused);
@@ -1661,6 +1716,19 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 col_right: content.right(),
             });
         }
+        return;
+    }
+    if !app.catalog_selection_ready() {
+        frame.render_widget(
+            Paragraph::new(
+                app.lazy_features
+                    .as_ref()
+                    .and_then(|state| state.error.as_deref())
+                    .unwrap_or("Select a Feature; content loads on demand"),
+            )
+            .block(explore_block("Feature content", false)),
+            area,
+        );
         return;
     }
     let focused = app.explore_focus == ColumnFocus::Step;
@@ -2191,12 +2259,21 @@ fn apply_line_background(line: Line<'static>, bg: Style) -> Line<'static> {
 
 /// Renders the collapsible tree using `tui-tree-widget`.
 fn render_tree_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect, focused: bool) {
+    if !app.mindmap_within_budget() {
+        frame.render_widget(Paragraph::new("This Feature exceeds the interactive MindMap budget. Its scenarios and steps remain available in Explore.")
+            .wrap(ratatui::widgets::Wrap { trim: true }).block(theme::panel_block("MindMap [current Feature]", focused)), area);
+        return;
+    }
     let items = &app.mindmap_index.items;
 
     let highlight_style = theme::selected_row(focused);
 
     // Build title with indicators when highlights/filter are active
-    let mut title_parts: Vec<&str> = vec!["MindMap"];
+    let mut title_parts: Vec<&str> = vec![if app.lazy_features.is_some() {
+        "MindMap [current Feature]"
+    } else {
+        "MindMap"
+    }];
     if app.mindmap_index.has_active_filter() {
         title_parts.push("[filtered]");
     }

@@ -826,6 +826,7 @@ pub struct App {
     last_external_check: Instant,
     pub(crate) feature_discovery_root: Option<PathBuf>,
     feature_discovery_worker: Option<crate::feature_discovery::BackgroundDiscovery>,
+    pub(crate) lazy_features: Option<crate::lazy_features::LazyFeatures>,
     external_change_prompt: Option<ExternalChangePrompt>,
     /// Pending text modifications requested by AI agent tools, awaiting user confirmation.
     pub pending_agent_changes: Vec<AgentPendingChange>,
@@ -969,6 +970,7 @@ pub struct App {
 }
 
 struct PreparedProjectContext {
+    lazy_features: Option<crate::lazy_features::LazyFeatures>,
     project: BddProject,
     git_status: teshi_core::git::FeatureGitStatusModel,
     step_index: StepIndex,
@@ -1347,6 +1349,7 @@ impl App {
         self.project = prepared.project;
         self.feature_discovery_root = None;
         self.feature_discovery_worker = None;
+        self.lazy_features = prepared.lazy_features;
         self.git_status = prepared.git_status;
         self.git_status_rx = None;
         self.git_status_refresh_requested = false;
@@ -1461,10 +1464,25 @@ impl App {
         target: &teshi_engine::ProjectIdentity,
     ) -> Result<PreparedProjectContext> {
         let root = target.root();
-        let project = gherkin::try_parse_project(root)?;
+        if self.dirty || self.buffer_dirty.iter().any(|dirty| *dirty) {
+            crate::lazy_features::validate_replacement(root).map_err(anyhow::Error::msg)?;
+        }
+
+        let lazy_features = Some(crate::lazy_features::LazyFeatures::new(
+            root.to_path_buf(),
+            true,
+        ));
+        let project = BddProject {
+            root_dir: root.to_path_buf(),
+            features: Vec::new(),
+        };
         let git_status = teshi_core::git::FeatureGitStatusModel::empty_for_project(
             &project,
-            teshi_core::git::GitProjectScope::Recursive,
+            if lazy_features.is_some() {
+                teshi_core::git::GitProjectScope::CurrentFiles
+            } else {
+                teshi_core::git::GitProjectScope::Recursive
+            },
         );
         let step_index = StepIndex::build(&project);
         let mut mindmap_index = mindmap::build_index(&project);
@@ -1476,7 +1494,7 @@ impl App {
                     .map(EditorBuffer::from_string)
                     .with_context(|| format!("read {}", feature.file_path.display()))
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<anyhow::Result<Vec<_>>>()?;
         let buffer_dirty = vec![false; buffers.len()];
         let tree_state = mindmap::init_tree_state(&mut mindmap_index);
         let active_buffer_idx = (!buffers.is_empty()).then_some(0);
@@ -1497,6 +1515,7 @@ impl App {
         let runner_config = runner::load_optional_runner_config_for_project(root, None)
             .with_context(|| format!("load runner configuration for {}", root.display()))?;
         Ok(PreparedProjectContext {
+            lazy_features,
             disk_stamps: Self::capture_disk_stamps(&project),
             project,
             git_status,
@@ -1859,36 +1878,34 @@ impl App {
     ) -> Result<Self> {
         let identity = teshi_engine::ProjectIdentity::new(root)?;
         let root = identity.root();
-        let mut app = if recursive {
-            let project = BddProject {
-                root_dir: root.to_path_buf(),
-                features: Vec::new(),
-            };
-            Self::from_loaded_directory(root, root, config, true, requirements_root, project)?
+        let locale = std::env::var("TESHI_FEATURE_LANGUAGE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(sys_locale::get_locale);
+        let discovery_root = if recursive {
+            root.to_path_buf()
         } else {
-            let locale = std::env::var("TESHI_FEATURE_LANGUAGE")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .or_else(sys_locale::get_locale);
-            let discovery_root =
-                crate::feature_discovery::default_feature_directory(root, locale.as_deref())?;
-            let scan_recursively = discovery_root != root;
-            let mut app = Self::from_directory_with_discovery(
-                root,
-                &discovery_root,
-                config,
-                scan_recursively,
-                requirements_root,
-            )?;
-            app.feature_discovery_root = scan_recursively.then_some(discovery_root);
-            app
+            crate::feature_discovery::default_feature_directory(root, locale.as_deref())?
         };
-        let mut worker = crate::feature_discovery::BackgroundDiscovery::default();
-        if recursive {
-            // Render before the unrestricted walk; a dropped project ignores its old worker result.
-            let _ = worker.poll(root, true);
-        }
-        app.feature_discovery_worker = Some(worker);
+        let scan_recursively = recursive || discovery_root != root;
+        let project = BddProject {
+            root_dir: root.to_path_buf(),
+            features: Vec::new(),
+        };
+        let mut app = Self::from_loaded_directory(
+            root,
+            &discovery_root,
+            config,
+            scan_recursively,
+            requirements_root,
+            project,
+        )?;
+        app.feature_discovery_root = Some(discovery_root.clone());
+        app.git_status.scope = teshi_core::git::GitProjectScope::CurrentFiles;
+        app.lazy_features = Some(crate::lazy_features::LazyFeatures::new(
+            discovery_root,
+            scan_recursively,
+        ));
         // Preserve library browsing for a bare launch; directory arguments keep their project filter.
         if library_view {
             app.authoring_ui
@@ -1907,6 +1924,7 @@ impl App {
         Self::from_directory_with_discovery(dir, dir, config, recursive, requirements_root)
     }
 
+    #[cfg(test)]
     fn from_directory_with_discovery(
         dir: &Path,
         discovery_root: &Path,
@@ -2036,6 +2054,7 @@ impl App {
             last_external_check: Instant::now(),
             feature_discovery_root: None,
             feature_discovery_worker: None,
+            lazy_features: None,
             external_change_prompt: None,
             pending_agent_changes: Vec::new(),
             pending_change_diffs: Vec::new(),
@@ -2238,6 +2257,7 @@ impl App {
             last_external_check: Instant::now(),
             feature_discovery_root: None,
             feature_discovery_worker: None,
+            lazy_features: None,
             external_change_prompt: None,
             pending_agent_changes: Vec::new(),
             pending_change_diffs: Vec::new(),
@@ -2421,6 +2441,7 @@ impl App {
             last_external_check: Instant::now(),
             feature_discovery_root: None,
             feature_discovery_worker: None,
+            lazy_features: None,
             external_change_prompt: None,
             pending_agent_changes: Vec::new(),
             pending_change_diffs: Vec::new(),
@@ -2543,7 +2564,14 @@ impl App {
                             self.explore_selected_deleted_feature == Some(*index)
                         } else {
                             self.explore_selected_deleted_feature.is_none()
-                                && self.explore_selected_feature == *index
+                                && if let Some(catalog) = &self.lazy_features {
+                                    catalog
+                                        .selected
+                                        .as_ref()
+                                        .is_some_and(|path| catalog.paths.get(*index) == Some(path))
+                                } else {
+                                    self.explore_selected_feature == *index
+                                }
                         }
                 }
             })
@@ -2702,6 +2730,8 @@ impl App {
                 self.feature_browser.directory = None;
                 if deleted {
                     self.explore_set_deleted_feature(index);
+                } else if self.lazy_features.is_some() {
+                    self.select_catalog_feature(index);
                 } else {
                     self.explore_set_feature(index);
                 }
@@ -4347,6 +4377,230 @@ impl App {
         }
     }
 
+    /// Visits the declared Feature scope one file at a time, including unloaded files.
+    /// Loaded content takes precedence so unsaved edits are never replaced by disk data.
+    pub(crate) fn feature_scope<'a>(
+        &'a self,
+        file_path: Option<&'a str>,
+    ) -> Box<dyn Iterator<Item = anyhow::Result<std::borrow::Cow<'a, gherkin::BddFeature>>> + 'a>
+    {
+        // Filter catalog paths before any source IO, including errors in unrelated files.
+        let matches = move |path: &Path| {
+            file_path.is_none_or(|requested| {
+                let requested = requested.replace('\\', "/");
+                let path = path.to_string_lossy().replace('\\', "/");
+                path == requested || path.ends_with(&format!("/{requested}"))
+            })
+        };
+        if let Some(catalog) = &self.lazy_features {
+            if !catalog.ready {
+                return Box::new(std::iter::once(Err(anyhow::anyhow!(
+                    "Feature discovery has not completed"
+                ))));
+            }
+
+            Box::new(
+                catalog
+                    .paths
+                    .iter()
+                    .filter(move |path| matches(path))
+                    .map(|path| {
+                        if let Some(feature) = self
+                            .project
+                            .features
+                            .iter()
+                            .find(|feature| &feature.file_path == path)
+                        {
+                            Ok(std::borrow::Cow::Borrowed(feature))
+                        } else {
+                            crate::lazy_features::read_content(path)
+                                .map(|(feature, _)| std::borrow::Cow::Owned(feature))
+                                .map_err(anyhow::Error::msg)
+                        }
+                    }),
+            )
+        } else {
+            Box::new(
+                self.project
+                    .features
+                    .iter()
+                    .filter(move |feature| matches(&feature.file_path))
+                    .map(|feature| Ok(std::borrow::Cow::Borrowed(feature))),
+            )
+        }
+    }
+
+    /// Whether the selected catalog file has been installed in the editor.
+    pub(crate) fn catalog_selection_ready(&self) -> bool {
+        self.lazy_features.as_ref().is_none_or(|state| {
+            state.selected.as_ref().is_some_and(|path| {
+                self.project
+                    .features
+                    .first()
+                    .is_some_and(|f| &f.file_path == path)
+            })
+        })
+    }
+
+    /// Loads an explicitly targeted catalog file for tools using editor-backed mutations.
+    pub(crate) fn ensure_tool_feature(&mut self, file_path: &str) -> Result<()> {
+        if self.lazy_features.is_none() || self.find_feature_idx_for_file(file_path).is_some() {
+            return Ok(());
+        }
+        let requested = Path::new(file_path);
+        let requested = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            self.project.root_dir.join(requested)
+        };
+        let identity = fs::canonicalize(&requested)
+            .with_context(|| format!("read {}", requested.display()))?;
+        let path = self
+            .lazy_features
+            .as_ref()
+            .and_then(|state| {
+                state
+                    .paths
+                    .iter()
+                    .find(|path| fs::canonicalize(path).is_ok_and(|p| p == identity))
+            })
+            .cloned()
+            .context(
+                "Feature is outside the discovered project scope or discovery is still running",
+            )?;
+        if self.dirty
+            || self.buffer_dirty.iter().any(|dirty| *dirty)
+            || self.runner_rx.is_some()
+            || !self.pending_agent_changes.is_empty()
+        {
+            anyhow::bail!("Save edits and finish pending work before loading another Feature");
+        }
+        let (feature, source) =
+            crate::lazy_features::read_content(&path).map_err(anyhow::Error::msg)?;
+        if let Some(state) = self.lazy_features.as_mut() {
+            state.cancel_selection(path);
+        }
+        self.install_lazy_feature(feature, source);
+        Ok(())
+    }
+
+    fn select_catalog_feature(&mut self, index: usize) {
+        let Some(path) = self
+            .lazy_features
+            .as_ref()
+            .and_then(|state| state.paths.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        if self
+            .project
+            .features
+            .first()
+            .is_some_and(|feature| feature.file_path == path)
+        {
+            if let Some(state) = self.lazy_features.as_mut() {
+                state.selected = Some(path);
+            }
+            return;
+        }
+        if self.dirty
+            || self.buffer_dirty.iter().any(|dirty| *dirty)
+            || self.runner_rx.is_some()
+            || !self.pending_agent_changes.is_empty()
+        {
+            self.status =
+                "Save current edits and finish pending work before switching Feature".into();
+            return;
+        }
+        self.explore_edit_mode = false;
+        if let Some(state) = self.lazy_features.as_mut() {
+            state.select(path);
+        }
+    }
+
+    /// Polls the directory catalog and installs only the selected Feature's AST.
+    pub(crate) fn poll_lazy_features(&mut self) {
+        let Some(state) = self.lazy_features.as_mut() else {
+            return;
+        };
+        state.poll_catalog();
+        let content = state.poll_content();
+        if let Some(error) = state.error.as_ref().or(state.scan_error.as_ref()) {
+            self.status = format!("Feature loading failed: {error}");
+        }
+        let Some((feature, source, modified, len)) = content else {
+            return;
+        };
+        // A user may start editing or running the old selection while IO is in flight.
+        if self.dirty
+            || self.buffer_dirty.iter().any(|dirty| *dirty)
+            || self.runner_rx.is_some()
+            || !self.pending_agent_changes.is_empty()
+        {
+            self.status =
+                "Feature load deferred: save edits and finish pending work, then select again"
+                    .into();
+            return;
+        }
+        self.install_lazy_feature(feature, source);
+        // Preserve the revision actually read. Recapturing it during installation
+        // could acknowledge an intervening disk write without loading its content.
+        self.disk_stamps = vec![Some(FileStamp {
+            modified: Some(modified),
+            len,
+        })];
+    }
+
+    fn install_lazy_feature(&mut self, feature: gherkin::BddFeature, source: String) {
+        self.git_status_rx = None;
+        self.project.features = vec![feature];
+        self.buffers = vec![EditorBuffer::from_string(source)];
+        self.buffer_dirty = vec![false];
+        self.disk_stamps = Self::capture_disk_stamps(&self.project);
+        self.active_buffer_idx = None;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.preview_buffer = None;
+        self.pending_change_diffs.clear();
+        self.pending_change_summary.clear();
+        self.explore_diff_lines = None;
+        self.explore_feature_scenario_memory.clear();
+        self.explore_scenario_step_memory.clear();
+        self.explore_case_map.clear();
+        self.explore_case_status.clear();
+        self.explore_case_details.clear();
+        self.explore_run_summary = None;
+        self.explore_detail_case = None;
+        self.explore_detail_open = false;
+        self.external_change_prompt = None;
+        self.explore_selected_feature = 0;
+        self.explore_selected_deleted_feature = None;
+        self.explore_selected_scenario = 0;
+        self.explore_selected_step = 0;
+        self.switch_to_buffer(0);
+        self.git_status = teshi_core::git::FeatureGitStatusModel::empty_for_project(
+            &self.project,
+            teshi_core::git::GitProjectScope::CurrentFiles,
+        );
+        self.bump_git_status_revision();
+        self.rebuild_project_views(None);
+        self.refresh_git_status();
+        self.status = "Feature loaded; AST and MindMap scope: current Feature".into();
+    }
+
+    /// Whether the active project is waiting for a background Feature scan.
+    pub(crate) fn features_loading(&self) -> bool {
+        self.lazy_features
+            .as_ref()
+            .is_some_and(|state| state.is_loading())
+            || self
+                .feature_discovery_worker
+                .as_ref()
+                .is_some_and(|worker| worker.is_loading())
+    }
+
+    /// Polls external Feature discovery and disk changes.
     pub fn poll_external_feature_changes(&mut self) {
         if self.external_change_prompt.is_some() {
             return;
@@ -4360,8 +4614,9 @@ impl App {
         if self.runner_rx.is_some() || !self.pending_agent_changes.is_empty() {
             return;
         }
-        if self.feature_discovery_root.is_some()
-            || self.git_status.scope != teshi_core::git::GitProjectScope::CurrentFiles
+        if self.lazy_features.is_none()
+            && (self.feature_discovery_root.is_some()
+                || self.git_status.scope != teshi_core::git::GitProjectScope::CurrentFiles)
         {
             let recursive = self.feature_discovery_root.is_some()
                 || self.git_status.scope == teshi_core::git::GitProjectScope::Recursive;
@@ -4370,7 +4625,9 @@ impl App {
                 .as_deref()
                 .unwrap_or(&self.project.root_dir);
             let snapshot = if let Some(worker) = self.feature_discovery_worker.as_mut() {
-                let Some(result) = worker.poll(discovery_root, recursive) else {
+                let Some(result) =
+                    worker.poll_excluding(discovery_root, recursive, &self.project.features)
+                else {
                     return;
                 };
                 result
@@ -4387,13 +4644,16 @@ impl App {
             match snapshot {
                 Ok(snapshot) => {
                     let mut added = false;
+                    // Discovery snapshots contain every file. Index existing paths once
+                    // instead of comparing every discovered path with the entire project.
+                    let mut known_paths: std::collections::HashSet<_> = self
+                        .project
+                        .features
+                        .iter()
+                        .map(|feature| feature.file_path.clone())
+                        .collect();
                     for feature in snapshot.features {
-                        if self
-                            .project
-                            .features
-                            .iter()
-                            .any(|f| f.file_path == feature.file_path)
-                        {
+                        if !known_paths.insert(feature.file_path.clone()) {
                             continue;
                         }
                         match fs::read_to_string(&feature.file_path) {
@@ -4787,7 +5047,17 @@ impl App {
         self.git_status_refresh_deadline = None;
         let revision = self.git_status_revision;
         let project_stamp = self.current_project_stamp();
-        let project = self.project.clone();
+        // Git rebuilds scenario mappings from diff contents; only paths are
+        // needed from the editor. Avoid cloning loaded ASTs on the UI thread.
+        let project = BddProject {
+            root_dir: self.project.root_dir.clone(),
+            features: self
+                .project
+                .features
+                .iter()
+                .map(|feature| gherkin::parse_feature("", feature.file_path.clone()))
+                .collect(),
+        };
         let scope = self.git_status.scope;
         let content_overrides = self.git_content_overrides();
         let (tx, rx) = mpsc::channel();
@@ -5331,9 +5601,56 @@ impl App {
         Ok(())
     }
 
+    /// Bounds the current Feature's graph expansion, including duplicated path labels.
+    pub(crate) fn mindmap_within_budget(&self) -> bool {
+        if self.lazy_features.is_none() {
+            return true;
+        }
+        let mut nodes = 0usize;
+        let mut path_entries = 0usize;
+        let mut path_bytes = 0usize;
+        for feature in &self.project.features {
+            let background = feature.background.as_ref().map_or(0, |b| b.steps.len());
+            for scenario in feature.all_scenarios() {
+                let depth = background.saturating_add(scenario.steps.len());
+                if depth > 256 {
+                    return false;
+                }
+                let steps = feature
+                    .background
+                    .iter()
+                    .flat_map(|b| b.steps.iter())
+                    .chain(scenario.steps.iter());
+                for (index, step) in steps.enumerate() {
+                    path_bytes = path_bytes
+                        .saturating_add((step.text.len() + 64).saturating_mul(depth - index + 4));
+                    if path_bytes > 16 * 1024 * 1024 {
+                        return false;
+                    }
+                }
+                nodes = nodes.saturating_add(depth);
+                path_entries = path_entries.saturating_add(depth.saturating_mul(depth + 1) / 2);
+                if nodes > 10_000 || path_entries > 250_000 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     fn rebuild_project_views(&mut self, selected_tree_location: Option<(usize, usize)>) {
         self.step_index = StepIndex::build(&self.project);
-        self.mindmap_index = mindmap::build_index(&self.project);
+        let build_map = (self.lazy_features.is_none() || self.active_tab == MainTab::MindMap)
+            && self.mindmap_within_budget();
+        let map_project = if build_map {
+            &self.project
+        } else {
+            &BddProject {
+                root_dir: self.project.root_dir.clone(),
+                features: Vec::new(),
+            }
+        };
+        self.mindmap_index = mindmap::build_index(map_project);
         self.tree_state = mindmap::init_tree_state(&mut self.mindmap_index);
         self.mindmap_location_selection.clear();
         self.normalize_explore_selection();
@@ -5360,10 +5677,46 @@ impl App {
         let Some(artifacts) = self.authoring_ui.artifacts.as_mut() else {
             return;
         };
-        teshi_core::authoring::sync_scenario_refs_from_project(
-            &self.project,
-            &mut artifacts.test_points.test_points,
-        );
+        if self.lazy_features.is_some() {
+            let loaded: HashSet<_> = self
+                .project
+                .features
+                .iter()
+                .map(|feature| {
+                    feature
+                        .file_path
+                        .strip_prefix(&self.project.root_dir)
+                        .unwrap_or(&feature.file_path)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect();
+            let retained: Vec<_> = artifacts
+                .test_points
+                .test_points
+                .iter()
+                .map(|point| {
+                    point
+                        .scenario_refs
+                        .iter()
+                        .filter(|r| !loaded.contains(&r.feature_path))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            teshi_core::authoring::sync_scenario_refs_from_project(
+                &self.project,
+                &mut artifacts.test_points.test_points,
+            );
+            for (point, refs) in artifacts.test_points.test_points.iter_mut().zip(retained) {
+                point.scenario_refs.extend(refs);
+            }
+        } else {
+            teshi_core::authoring::sync_scenario_refs_from_project(
+                &self.project,
+                &mut artifacts.test_points.test_points,
+            );
+        }
     }
 
     fn restore_tree_selection_from_line(&mut self, feature_idx: usize, line_number: usize) {
@@ -5668,6 +6021,10 @@ impl App {
     }
 
     fn start_explore_run(&mut self) {
+        if !self.catalog_selection_ready() {
+            self.status = "Select a Feature and wait for it to load before running".into();
+            return;
+        }
         if self.runner_rx.is_some() {
             self.status = "Runner already active".to_string();
             return;
@@ -5952,7 +6309,10 @@ impl App {
                 if len == 0 {
                     return;
                 }
-                let current = self.explore_selected_feature_row().unwrap_or(0);
+                let Some(current) = self.explore_selected_feature_row() else {
+                    self.explore_set_feature_row(0);
+                    return;
+                };
                 let next = clamp_idx(current as isize + delta, len);
                 if next != current {
                     self.explore_set_feature_row(next);
@@ -7411,6 +7771,10 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::EnterEdit => {
+                if !self.catalog_selection_ready() {
+                    self.status = "Select a Feature and wait for it to load before editing".into();
+                    return Ok(());
+                }
                 if self.active_tab == MainTab::Explore {
                     self.explore_enter_edit();
                     self.quit_pending_confirm = false;
@@ -8119,6 +8483,10 @@ impl App {
             }
             Action::Save => self.save()?,
             Action::RefreshFeatures => {
+                if let Some(catalog) = self.lazy_features.as_mut() {
+                    catalog.request_refresh();
+                }
+                self.poll_lazy_features();
                 self.last_external_check = Instant::now() - Duration::from_secs(2);
                 self.status.clear();
                 self.poll_external_feature_changes();
@@ -8840,6 +9208,9 @@ impl App {
         self.quit_pending_confirm = false;
         self.active_tab = tab;
         if self.active_tab == MainTab::MindMap {
+            if self.lazy_features.is_some() {
+                self.rebuild_project_views(None);
+            }
             self.view_stage = ViewStage::TreeOnly;
             self.mindmap_focus = MindMapFocus::Main;
             self.ai_input_focused = false;
@@ -12246,6 +12617,9 @@ mod tests {
         let before = app.current_project_stamp();
 
         app.request_project_switch(project_b.path()).unwrap();
+        assert!(app.project.features.is_empty());
+        await_catalog(&mut app, 1);
+        load_catalog_file(&mut app, 0);
 
         assert_eq!(app.project.root_dir, project_b.path());
         assert_eq!(
@@ -14785,6 +15159,144 @@ mod tests {
         assert!(app.status.contains("approve at least one test point"));
     }
 
+    fn await_catalog(app: &mut App, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(12);
+        loop {
+            app.poll_lazy_features();
+            if app
+                .lazy_features
+                .as_ref()
+                .is_some_and(|state| !state.is_loading() && state.paths.len() == count)
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "catalog did not complete: {}",
+                app.status
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn load_catalog_file(app: &mut App, index: usize) {
+        app.select_catalog_feature(index);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !app.catalog_selection_ready() {
+            app.poll_lazy_features();
+            assert!(
+                Instant::now() < deadline,
+                "content did not load: {}",
+                app.status
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn first_navigation_selects_a_single_collapsed_directory() {
+        let mut app = App::from_args().unwrap();
+        app.project.features = vec![teshi_core::gherkin::parse_feature(
+            "Feature: Nested",
+            "only/one.feature".into(),
+        )];
+        app.git_status = Default::default();
+        app.explore_focus = ColumnFocus::Feature;
+        assert_eq!(app.feature_browser_rows().len(), 1);
+        assert!(app.explore_selected_feature_row().is_none());
+        app.explore_move_selection(1);
+        assert_eq!(app.explore_selected_feature_row(), Some(0));
+        assert_eq!(app.feature_browser.directory.as_deref(), Some("only"));
+    }
+
+    #[test]
+    fn targeted_feature_scope_skips_unreadable_unrelated_files() {
+        let root = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        fs::write(root.path().join("a-broken.feature"), [0xff]).unwrap();
+        fs::write(
+            root.path().join("good.feature"),
+            "Feature: Good\n  Scenario: Example\n    Given a fixture\n",
+        )
+        .unwrap();
+        let mut app = App::from_project_directory(
+            root.path(),
+            crate::config::load_config().unwrap(),
+            true,
+            false,
+            store.path().into(),
+        )
+        .unwrap();
+        await_catalog(&mut app, 2);
+        for path in [
+            "good.feature".to_owned(),
+            root.path()
+                .join("good.feature")
+                .to_string_lossy()
+                .into_owned(),
+        ] {
+            let selected = app
+                .feature_scope(Some(&path))
+                .collect::<anyhow::Result<Vec<_>>>();
+            let selected = selected.unwrap();
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].name, "Good");
+        }
+        assert!(app.feature_scope(Some("ood.feature")).next().is_none());
+        assert!(
+            app.feature_scope(None)
+                .collect::<anyhow::Result<Vec<_>>>()
+                .is_err()
+        );
+        assert!(app.project.features.is_empty());
+    }
+
+    #[test]
+    fn lazy_selection_replaces_clean_content_and_preserves_dirty_edits() {
+        let root = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        for (name, title) in [("a", "First"), ("b", "Second")] {
+            fs::write(
+                root.path().join(format!("{name}.feature")),
+                format!("Feature: {title}\n  Scenario: Example\n    Given a fixture\n"),
+            )
+            .unwrap();
+        }
+        let mut app = App::from_project_directory(
+            root.path(),
+            crate::config::load_config().unwrap(),
+            true,
+            false,
+            store.path().into(),
+        )
+        .unwrap();
+        await_catalog(&mut app, 2);
+        assert!(app.project.features.is_empty());
+        assert!(app.buffers.is_empty());
+        assert_eq!(
+            app.feature_scope(None)
+                .map(|f| f.unwrap().name.clone())
+                .collect::<Vec<_>>(),
+            ["First", "Second"]
+        );
+        assert!(app.project.features.is_empty());
+        load_catalog_file(&mut app, 0);
+        assert_eq!(app.project.features[0].name, "First");
+        app.buffer = EditorBuffer::from_string("Feature: Unsaved".into());
+        app.mark_current_buffer_dirty();
+        app.select_catalog_feature(1);
+        assert_eq!(app.project.features[0].name, "First");
+        assert!(app.buffer.as_string().contains("Unsaved"));
+        assert!(app.status.contains("Save current edits"));
+        app.set_buffer_dirty(0, false);
+        load_catalog_file(&mut app, 1);
+        assert_eq!(app.project.features.len(), 1);
+        assert_eq!(app.buffers.len(), 1);
+        assert_eq!(app.project.features[0].name, "Second");
+        assert_eq!(app.build_explore_cases().len(), 1);
+        assert!(app.undo_stack.is_empty());
+    }
+
     #[test]
     fn feature_tool_lookup_accepts_canonical_project_path_aliases() {
         let root = tempdir().unwrap();
@@ -14800,7 +15312,7 @@ mod tests {
             default_provider: None,
             providers: Default::default(),
         };
-        let app = App::from_project_directory(
+        let mut app = App::from_project_directory(
             root.path(),
             config,
             false,
@@ -14808,6 +15320,9 @@ mod tests {
             store.path().to_path_buf(),
         )
         .unwrap();
+        await_catalog(&mut app, 1);
+        assert!(app.project.features.is_empty());
+        load_catalog_file(&mut app, 0);
         let alias = root.path().join("features/nested/../sample.feature");
         assert_eq!(
             app.find_feature_idx_for_file(alias.to_str().unwrap()),
@@ -14838,7 +15353,7 @@ mod tests {
             default_provider: None,
             providers: Default::default(),
         };
-        let app = App::from_project_directory(
+        let mut app = App::from_project_directory(
             root.path(),
             config,
             false,
@@ -14846,6 +15361,9 @@ mod tests {
             store.path().to_path_buf(),
         )
         .unwrap();
+        await_catalog(&mut app, 1);
+        assert!(app.project.features.is_empty());
+        load_catalog_file(&mut app, 0);
         assert_eq!(app.project.root_dir, root.path());
         assert_eq!(app.project.features.len(), 1);
         assert_eq!(
@@ -14882,28 +15400,19 @@ mod tests {
             assert_eq!(app.project.root_dir, root.path());
             assert_eq!(
                 app.git_status.scope,
-                teshi_core::git::GitProjectScope::Shallow
+                teshi_core::git::GitProjectScope::CurrentFiles
             );
-            assert!(app.feature_discovery_root.is_none());
+            assert_eq!(app.feature_discovery_root.as_deref(), Some(root.path()));
             fs::write(root.path().join("root.feature"), body).unwrap();
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while app.project.features.is_empty() {
-                assert!(
-                    Instant::now() < deadline,
-                    "root refresh timed out: {}",
-                    app.status
-                );
-                app.last_external_check = Instant::now() - Duration::from_secs(2);
-                app.poll_external_feature_changes();
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            await_catalog(&mut app, 1);
+            load_catalog_file(&mut app, 0);
             assert_eq!(app.project.features.len(), 1);
             assert_eq!(
                 app.project.features[0].file_path,
                 root.path().join("root.feature")
             );
             assert!(!root.path().join("features").exists());
-            let reloaded = App::from_project_directory(
+            let mut reloaded = App::from_project_directory(
                 root.path(),
                 crate::config::AppConfig {
                     default_provider: None,
@@ -14914,6 +15423,8 @@ mod tests {
                 store.path().to_path_buf(),
             )
             .unwrap();
+            await_catalog(&mut reloaded, 1);
+            load_catalog_file(&mut reloaded, 0);
             assert_eq!(reloaded.project.features.len(), 1);
             assert_eq!(
                 reloaded.project.features[0].file_path,
@@ -14954,30 +15465,12 @@ mod tests {
             app.project.features.is_empty(),
             "recursive startup must render before walking"
         );
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while app.project.features.is_empty() {
-            assert!(
-                Instant::now() < deadline,
-                "background scan never completed: {}",
-                app.status
-            );
-            app.last_external_check = Instant::now() - Duration::from_secs(2);
-            app.poll_external_feature_changes();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(app.project.features.len(), 2);
-        assert!(
-            app.project
-                .features
-                .iter()
-                .any(|feature| feature.name == "Outside")
-        );
-        assert!(
-            app.project
-                .features
-                .iter()
-                .any(|feature| feature.name == "Inside")
-        );
+        await_catalog(&mut app, 2);
+        assert!(app.project.features.is_empty());
+        load_catalog_file(&mut app, 0);
+        assert_eq!(app.project.features.len(), 1);
+        load_catalog_file(&mut app, 1);
+        assert_eq!(app.project.features.len(), 1);
         assert_eq!(app.project.root_dir, root.path());
         assert_eq!(app.active_buffer_idx, Some(0));
         assert!(app.buffer.as_string().contains("Feature:"));
@@ -16554,6 +17047,7 @@ mod tests {
             last_external_check: Instant::now(),
             feature_discovery_root: None,
             feature_discovery_worker: None,
+            lazy_features: None,
             external_change_prompt: None,
             pending_agent_changes: Vec::new(),
             pending_change_diffs: Vec::new(),
@@ -16748,6 +17242,7 @@ Feature: B
             last_external_check: Instant::now(),
             feature_discovery_root: None,
             feature_discovery_worker: None,
+            lazy_features: None,
             external_change_prompt: None,
             pending_agent_changes: Vec::new(),
             pending_change_diffs: Vec::new(),
@@ -17023,20 +17518,19 @@ Feature: B
         )
         .unwrap();
         fs::write(project.path().join("unreadable.feature"), [0xff, 0xfe]).unwrap();
+        await_catalog(&mut app, 2);
+        load_catalog_file(&mut app, 0);
+        app.select_catalog_feature(1);
         let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            app.last_external_check = Instant::now() - Duration::from_secs(2);
-            app.poll_external_feature_changes();
-            if app
-                .status_message
-                .as_deref()
-                .is_some_and(|msg| msg.contains("Feature refresh incomplete"))
-            {
-                return;
+        loop {
+            app.poll_lazy_features();
+            if app.status.contains("Feature loading failed") {
+                break;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            assert!(Instant::now() < deadline, "content error was not shown");
+            std::thread::sleep(Duration::from_millis(5));
         }
-        panic!("background scan failure was not shown");
+        assert_eq!(app.project.features[0].name, "Kept");
     }
 
     #[test]
