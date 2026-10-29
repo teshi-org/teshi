@@ -531,9 +531,7 @@ fn external_unreadable_feature_reports_error_and_preserves_project() {
     terminal.expect_text("unreadable", true, 10000).unwrap();
     terminal.expect_text("sample", true, 10000).unwrap();
     terminal.click_text("unreadable", 10000).unwrap();
-    terminal
-        .expect_text("stream did not", true, 10000)
-        .unwrap();
+    terminal.expect_text("stream did not", true, 10000).unwrap();
     terminal.expect_text("sample", true, 10000).unwrap();
     capture(&terminal, "external-scan-failure");
     fs::remove_file(invalid).unwrap();
