@@ -583,6 +583,11 @@ fn registry_picker(narrow: bool) {
         .expect_text("Installed ACP Agents", true, 1500)
         .unwrap();
     fixture.click(&terminal, &["Registry [i]"], "open-registry");
+    // A click can land before the picker frame exists on a loaded runner; the
+    // retry only re-issues the same control and keeps the same assertions.
+    if terminal.expect_text("Registry Beta", true, 2000).is_err() {
+        fixture.click(&terminal, &["Registry [i]"], "open-registry-retry");
+    }
     // The picker waits on a real registry fetch; a loaded runner needs slack.
     let registry_visible = terminal.expect_text("Registry Beta", true, 20000);
     fs::write(
