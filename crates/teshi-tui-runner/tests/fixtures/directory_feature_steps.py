@@ -92,10 +92,7 @@ class World:
         candidates = set(self.files.values())
         # Directory rows start collapsed. Search all Feature paths to compare the
         # discovered scope without depending on expansion state.
-        self.op("key", "Escape")
-        self.op("key", "/")
-        self.op("write", ".feature")
-        self.op("key", "Enter")
+        self.search_paths()
         self.wait(lambda screen: all(name in screen for name in expected))
         # Hold the negative assertion across multiple external refresh opportunities.
         deadline = time.monotonic() + 3.2
@@ -104,6 +101,12 @@ class World:
             actual = {name for name in candidates if name in screen}
             assert actual == expected, (expected, actual, screen)
             time.sleep(.08)
+
+    def search_paths(self):
+        self.op("key", "Escape")
+        self.op("key", "/")
+        self.op("write", ".feature")
+        self.op("key", "Enter")
 
     def open_sessions(self):
         self.op("key", "3")
@@ -115,7 +118,10 @@ class World:
         self.expect("DIRECTORY-SAVED-SESSION")
         self.op("key", "Escape")
         self.op("click", "Explore [1]")
+        self.search_paths()
         self.expect("登录")
+        self.op("click", "登录")
+        self.expect("Ready")
 
     def step(self, text):
         translations = {
@@ -203,6 +209,7 @@ class World:
         elif text.startswith("我在项目 xxx 之外新增"):
             self.write_feature(self.root / quoted[0])
         elif text.startswith("下一次外部文件检查完成后可以看到"):
+            self.search_paths()
             self.expect(quoted[0])
         elif text.startswith("Feature 列表不包含"):
             deadline = time.monotonic() + 3.2
