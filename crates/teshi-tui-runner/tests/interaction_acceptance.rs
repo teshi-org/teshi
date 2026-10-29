@@ -384,7 +384,18 @@ fn explore_pointer_selection_and_scenario_wheel_leave_feature_and_step_independe
     terminal.click_text("scenario 02", 10000).unwrap();
     terminal.expect_text("Given step 02", true, 10000).unwrap();
     capture(&terminal, "explore-pointer-selected-scenario");
-    for _ in 0..9 {
+    // One notch per event: a loaded runner may coalesce bursts, so keep
+    // scrolling until the list reaches its last scenario.
+    let wheel_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let visible = terminal.screen().unwrap();
+        if visible.contains("scenario 30") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < wheel_deadline,
+            "scenario wheel did not reach the bottom: {visible}"
+        );
         terminal.scroll_at(45, 5, false, false).unwrap();
     }
     capture(&terminal, "explore-scenario-wheel");
