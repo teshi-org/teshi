@@ -179,7 +179,9 @@ impl Fixture {
         let terminal = Terminal::launch(self.config.clone()).unwrap();
         terminal.expect_text("sample", true, 10000).unwrap();
         terminal.key("4").unwrap();
-        self.focus(&terminal, true);
+        // Narrow panes show one column at a time and the tab may open on either
+        // the list or the document, so walk forward until the document is drawn.
+        self.reveal(&terminal, "# Alpha requirement");
         terminal
             .expect_text("# Alpha requirement", true, 10000)
             .unwrap();
