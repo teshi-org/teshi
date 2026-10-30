@@ -765,10 +765,9 @@ fn render_pointer_feedback(frame: &mut Frame<'_>, app: &App) {
         };
         if rect.contains((x, y).into()) {
             let visible = rect.intersection(frame.area());
-            frame.buffer_mut().set_style(
-                visible,
-                Style::default().bg(theme::HOVER_BG),
-            );
+            frame
+                .buffer_mut()
+                .set_style(visible, Style::default().bg(theme::HOVER_BG));
             break;
         }
     }
