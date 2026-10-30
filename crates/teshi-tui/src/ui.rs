@@ -547,6 +547,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         || app.approval_panel_active
         || app.agent_profile_panel_active
         || app.change_summary_visible
+        || app.screenshot.visible
         || app.has_external_change_prompt()
         || app.step_keyword_picker.is_some()
         || app.has_agent_change_prompt()
@@ -610,6 +611,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     {
         render_requirements_overlay(frame, app, frame.area());
     }
+    render_screenshot_overlay(frame, app, chunks[2]);
     crate::acp_controls::render_picker(frame, app);
     pointer_controls::render_pending_review(frame, app, chunks[2]);
     if app.pending_delete.is_some() {
@@ -2420,7 +2422,6 @@ fn render_mindmap_scenario_preview(
     if area.width < 10 || area.height < 3 {
         return;
     }
-
     let Some(buffer) = app.preview_buffer.as_ref() else {
         // No preview available — render an empty placeholder panel
         let title = "Preview";
@@ -2521,6 +2522,167 @@ fn render_mindmap_scenario_preview(
         }
         buf.set_line(inner.x, y, line, inner.width);
     }
+}
+
+/// Renders the replay screenshot viewer over the active tab.
+///
+/// Terminals without a pixel protocol keep pointing at the system viewer
+/// instead of drawing half-blocks, which show a UI screenshot as noise.
+fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    if !app.screenshot.visible || area.width < 20 || area.height < 6 {
+        return;
+    }
+    let popup = Rect::new(
+        area.x + area.width / 20,
+        area.y + area.height / 20,
+        area.width.saturating_sub(area.width / 10),
+        area.height.saturating_sub(area.height / 10),
+    );
+    frame.render_widget(Clear, popup);
+    let total = app.screenshot.refs.len();
+    let index = app.screenshot.index.min(total.saturating_sub(1));
+    let size = app
+        .screenshot
+        .rendered
+        .as_ref()
+        .map(|rendered| {
+            let source = format!("  {}×{}", rendered.pixels.0, rendered.pixels.1);
+            if app.screenshot.view.is_zoomed() {
+                format!("{source} @ {},{}", rendered.region.x, rendered.region.y)
+            } else {
+                source
+            }
+        })
+        .unwrap_or_default();
+    let view = app.screenshot.view.label();
+    let progress = if app.screenshot.loading {
+        " · Loading"
+    } else if app
+        .screenshot
+        .rendered
+        .as_ref()
+        .is_some_and(|image| image.is_drawing())
+    {
+        " · Drawing"
+    } else {
+        ""
+    };
+    let title = match app.screenshot.refs.get(index) {
+        Some(shot) if total > 0 => {
+            let step = shot.step_text.trim();
+            let step = if step.is_empty() {
+                "step capture"
+            } else {
+                step
+            };
+            format!(
+                "Screenshot {}/{}{} · {}{}  {} · {}",
+                index + 1,
+                total,
+                size,
+                view,
+                progress,
+                shot.scenario,
+                step
+            )
+        }
+        _ => "Screenshot".to_string(),
+    };
+    let title: String = title
+        .chars()
+        .take(popup.width.saturating_sub(4) as usize)
+        .collect();
+    let block = theme::popup_block(title);
+    let warning = app.screenshot.support_detail.contains("Windows Zellij")
+        && app.screenshot.support.is_pixels();
+    let [body, footer] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(if warning { 2 } else { 1 }),
+    ])
+    .areas(block.inner(popup));
+    frame.render_widget(block, popup);
+    if body.width == 0 || body.height == 0 {
+        return;
+    }
+    app.screenshot.request_viewport(body);
+    if let Some(rendered) = app.screenshot.rendered.as_mut() {
+        crate::image_view::render(frame, body, rendered);
+    } else {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        if let Some(error) = app.screenshot.error.as_ref() {
+            lines.push(Line::raw(format!("Cannot show capture: {error}")));
+            lines.push(Line::raw(
+                "Press o to open the original in the system viewer.",
+            ));
+        } else if app.screenshot.loading {
+            lines.push(Line::raw("Preparing image in the background..."));
+            lines.push(Line::raw("Zoom, switch steps, or press i/Esc to close."));
+        } else if app.screenshot.refs.is_empty() {
+            lines.push(Line::raw("No captured screenshots for this scenario."));
+            lines.push(Line::raw(String::new()));
+            let captured = &app.capture_index.entries;
+            if captured.is_empty() {
+                lines.push(Line::raw("Run a replay for this Feature to capture steps."));
+            } else {
+                lines.push(Line::styled(
+                    format!("Scenarios with captures ({}):", captured.len()),
+                    Style::default().fg(theme::MUTED),
+                ));
+                for entry in captured.iter().take(10) {
+                    lines.push(Line::raw(format!(
+                        "  {} · {} ({})",
+                        entry.feature, entry.scenario, entry.count
+                    )));
+                }
+                if captured.len() > 10 {
+                    lines.push(Line::styled(
+                        format!("  … {} more", captured.len() - 10),
+                        Style::default().fg(theme::MUTED),
+                    ));
+                }
+            }
+        } else {
+            if !app.screenshot.support.is_pixels() {
+                lines.push(Line::raw(format!(
+                    "This terminal has no image protocol ({}).",
+                    app.screenshot.support.label()
+                )));
+                if !app.screenshot.support_detail.is_empty() {
+                    lines.push(Line::styled(
+                        format!("  {}", app.screenshot.support_detail),
+                        Style::default().fg(theme::MUTED),
+                    ));
+                }
+                lines.push(Line::raw(String::new()));
+                lines.push(Line::raw(
+                    "Use a terminal with image support, or open the original externally.",
+                ));
+                lines.push(Line::raw(
+                    "Press o to open the capture in the system viewer.",
+                ));
+            }
+            if let Some(shot) = app.screenshot.refs.get(index) {
+                lines.push(Line::raw(
+                    crate::image_view::capture_path(&app.project.root_dir, shot)
+                        .display()
+                        .to_string(),
+                ));
+            }
+        }
+        frame.render_widget(Paragraph::new(lines), body);
+    }
+    let mut footer_lines = Vec::new();
+    if warning {
+        footer_lines.push(Line::styled(
+            " Windows Zellij may filter images; try direct Windows Terminal or press o.",
+            Style::default().fg(theme::MUTED),
+        ));
+    }
+    footer_lines.push(Line::styled(
+        " +/- zoom · 1 100% · 0 fit · arrows pan · j/k steps · o open · i/Esc close",
+        Style::default().fg(theme::MUTED),
+    ));
+    frame.render_widget(Paragraph::new(footer_lines), footer);
 }
 
 /// Renders the scenario location dropdown inside the preview panel.

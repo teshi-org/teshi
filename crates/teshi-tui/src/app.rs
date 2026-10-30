@@ -20,7 +20,9 @@ pub use crate::diff::{ChangeKind, DiffLine};
 use crate::keymap::Action;
 use crate::mindmap;
 use crate::runner::{self, RunCase, RunEvent, RunRequest, RunnerConfig};
-use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use teshi_core::StepIndex;
 use teshi_core::gherkin::{self, BddProject, BddScenario};
 use teshi_core::gherkin_lang::{StepKeywordType, StructuralType};
@@ -868,6 +870,11 @@ pub struct App {
     pub tree_panel_rect: Option<ratatui::layout::Rect>,
     /// Screen rectangle of the preview panel, updated each render frame.
     pub preview_panel_rect: Option<ratatui::layout::Rect>,
+    /// Replay screenshot panel state for the MindMap preview.
+    pub screenshot: crate::image_view::ScreenshotPanel,
+    /// Which scenarios have saved captures, for tree markers and the fallback
+    /// list.
+    pub capture_index: crate::image_view::CaptureIndex,
     undo_stack: Vec<(EditorBuffer, usize, usize)>,
     redo_stack: Vec<(EditorBuffer, usize, usize)>,
     pub runner_config: Option<RunnerConfig>,
@@ -2102,6 +2109,8 @@ impl App {
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
             preview_panel_rect: None,
+            screenshot: Default::default(),
+            capture_index: Default::default(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             runner_config: runner::load_runner_config_for_project(&project_root, None).ok(),
@@ -2305,6 +2314,8 @@ impl App {
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
             preview_panel_rect: None,
+            screenshot: Default::default(),
+            capture_index: Default::default(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             runner_config: runner::load_runner_config_for_project(&project_root, None).ok(),
@@ -2489,6 +2500,8 @@ impl App {
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
             preview_panel_rect: None,
+            screenshot: Default::default(),
+            capture_index: Default::default(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             runner_config: runner::load_runner_config_for_project(&project_root, None).ok(),
@@ -6817,6 +6830,184 @@ impl App {
         self.preview_scroll_row = 0;
     }
 
+    /// Records the terminal's pixel capability detected at startup.
+    pub fn set_image_support(&mut self, detection: crate::image_view::Detection) {
+        self.screenshot.picker = detection.picker;
+        self.screenshot.support = detection.support;
+        self.screenshot.support_detail = detection.detail;
+    }
+
+    /// Handles keys owned by the screenshot panel in the MindMap tab.
+    ///
+    /// Returns true when the key was consumed and must not also run its normal
+    /// binding.
+    pub fn handle_screenshot_key(&mut self, key: KeyEvent) -> bool {
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return false;
+        }
+        if !self.screenshot.visible {
+            if self.active_tab != MainTab::MindMap {
+                return false;
+            }
+            let opens = key.code == KeyCode::Char('i')
+                && key.modifiers == KeyModifiers::NONE
+                && self.mindmap_focus == MindMapFocus::Main
+                && !self.scenario_dropdown_open;
+            if opens {
+                self.open_screenshot_panel();
+            }
+            return opens;
+        }
+        match key.code {
+            KeyCode::Char('i') | KeyCode::Esc => self.screenshot.close(),
+            KeyCode::Char('j') => self.step_screenshot(1),
+            KeyCode::Char('k') => self.step_screenshot(-1),
+            KeyCode::Char('+') | KeyCode::Char('=') => self
+                .screenshot
+                .change_view(crate::image_view::ViewAction::ZoomIn),
+            KeyCode::Char('-') => self
+                .screenshot
+                .change_view(crate::image_view::ViewAction::ZoomOut),
+            KeyCode::Char('1') => self
+                .screenshot
+                .change_view(crate::image_view::ViewAction::ActualSize),
+            KeyCode::Char('0') | KeyCode::Char('f') => self
+                .screenshot
+                .change_view(crate::image_view::ViewAction::Fit),
+            KeyCode::Left | KeyCode::Char('h') => self
+                .screenshot
+                .change_view(crate::image_view::ViewAction::Pan(-1, 0)),
+            KeyCode::Right | KeyCode::Char('l') => self
+                .screenshot
+                .change_view(crate::image_view::ViewAction::Pan(1, 0)),
+            KeyCode::Up if self.screenshot.view.is_zoomed() => self
+                .screenshot
+                .change_view(crate::image_view::ViewAction::Pan(0, -1)),
+            KeyCode::Down if self.screenshot.view.is_zoomed() => self
+                .screenshot
+                .change_view(crate::image_view::ViewAction::Pan(0, 1)),
+            KeyCode::Down => self.step_screenshot(1),
+            KeyCode::Up => self.step_screenshot(-1),
+            KeyCode::Char('o') => self.open_screenshot_externally(),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Rescans replay history for tree markers and the fallback list.
+    ///
+    /// Losing the markers when the project is rebuilt would silently hide
+    /// every capture, so the tree is updated on each refresh; the marker state
+    /// itself decides whether a rebuild is needed.
+    fn refresh_capture_index(&mut self) {
+        self.capture_index = crate::image_view::CaptureIndex::scan(&self.project);
+        let captured = self.captured_scenarios();
+        self.mindmap_index.set_captured_scenarios(captured);
+    }
+
+    /// Maps the newest captures onto `(feature index, scenario index)`.
+    ///
+    /// Entries whose scenario could not be resolved are left out; marking a
+    /// whole Feature would point at nodes with no capture of their own.
+    fn captured_scenarios(&self) -> HashMap<(usize, usize), usize> {
+        let mut captured = HashMap::new();
+        for entry in &self.capture_index.entries {
+            if entry.scenario.is_empty() {
+                continue;
+            }
+            let Some(feature_idx) = self.project.features.iter().position(|feature| {
+                crate::image_view::relative_feature_path(&self.project.root_dir, &feature.file_path)
+                    == entry.feature
+            }) else {
+                continue;
+            };
+            let Some(feature) = self.project.features.get(feature_idx) else {
+                continue;
+            };
+            let Some(scenario_idx) = feature
+                .all_scenarios()
+                .iter()
+                .position(|scenario| scenario.name == entry.scenario)
+            else {
+                continue;
+            };
+            captured
+                .entry((feature_idx, scenario_idx))
+                .and_modify(|count: &mut usize| *count = (*count).max(entry.count))
+                .or_insert(entry.count);
+        }
+        captured
+    }
+
+    fn open_screenshot_panel(&mut self) {
+        self.refresh_capture_index();
+        self.screenshot.close();
+        self.screenshot.visible = true;
+        self.screenshot.index = 0;
+        self.screenshot.cancel();
+        self.screenshot.refs = self.collect_scenario_screenshots();
+        if self.screenshot.refs.is_empty() {
+            self.set_status_message("No captured screenshots for this scenario".to_string());
+            return;
+        }
+        self.load_selected_screenshot();
+    }
+
+    fn step_screenshot(&mut self, delta: isize) {
+        let total = self.screenshot.refs.len();
+        if total == 0 {
+            return;
+        }
+        let next = (self.screenshot.index as isize + delta).rem_euclid(total as isize) as usize;
+        self.screenshot.index = next;
+        self.load_selected_screenshot();
+    }
+
+    fn load_selected_screenshot(&mut self) {
+        self.screenshot.cancel();
+        let Some(shot) = self.screenshot.refs.get(self.screenshot.index).cloned() else {
+            return;
+        };
+        self.screenshot.select(&self.project.root_dir, shot);
+    }
+
+    fn open_screenshot_externally(&mut self) {
+        let Some(shot) = self.screenshot.refs.get(self.screenshot.index).cloned() else {
+            return;
+        };
+        match crate::image_view::open_externally(&self.project.root_dir, &shot) {
+            Ok(()) => self.set_status_message("Opened capture in the system viewer".to_string()),
+            Err(error) => self.set_status_message(format!("Cannot open capture: {error:#}")),
+        }
+    }
+
+    /// Captures recorded for the selected scenario, in step order.
+    ///
+    /// Only the newest run that recorded captures for this Feature is used, so
+    /// two runs of the same Feature never mix in one panel.
+    fn collect_scenario_screenshots(&mut self) -> Vec<crate::image_view::ScreenshotRef> {
+        let Some(loc) = self.selected_node_location() else {
+            return Vec::new();
+        };
+        let Some(feature) = self.project.features.get(loc.feature_idx) else {
+            return Vec::new();
+        };
+        let feature_rel =
+            crate::image_view::relative_feature_path(&self.project.root_dir, &feature.file_path);
+        let scenario = match loc.context {
+            mindmap::LocationContext::Scenario(index) => {
+                feature.scenario_at(index).map(|item| item.name.clone())
+            }
+            mindmap::LocationContext::Background => None,
+        };
+
+        crate::image_view::screenshots_for(
+            &self.project.root_dir,
+            &feature_rel,
+            scenario.as_deref(),
+        )
+    }
+
     /// Transition back one stage.
     fn stage_back(&mut self) {
         match self.view_stage {
@@ -9358,6 +9549,7 @@ impl App {
             if self.lazy_features.is_some() {
                 self.rebuild_project_views(None);
             }
+            self.refresh_capture_index();
             self.view_stage = ViewStage::TreeOnly;
             self.mindmap_focus = MindMapFocus::Main;
             self.ai_input_focused = false;
@@ -12250,7 +12442,7 @@ mod tests {
     use crate::bdd_nav::step_edit_start_col;
     use crate::editor_buffer::EditorBuffer;
     use crate::keymap::Action;
-    use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
     use tempfile::tempdir;
     use teshi_core::StepIndex;
@@ -17250,6 +17442,8 @@ mod tests {
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
             preview_panel_rect: None,
+            screenshot: Default::default(),
+            capture_index: Default::default(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             runner_config: None,
@@ -17445,6 +17639,8 @@ Feature: B
             clickable_regions: Vec::new(),
             tree_panel_rect: None,
             preview_panel_rect: None,
+            screenshot: Default::default(),
+            capture_index: Default::default(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             runner_config: None,
@@ -17968,6 +18164,103 @@ Feature: B
         assert!(App::is_url_allowed("https://example.com", &whitelist));
         assert!(App::is_url_allowed("https://trusted.org/page", &whitelist));
         assert!(!App::is_url_allowed("https://evil.com", &whitelist));
+    }
+
+    #[test]
+    fn screenshot_panel_opens_and_closes_on_mindmap_i() {
+        let mut app = editor_test_app();
+        app.mindmap_focus = MindMapFocus::Main;
+
+        assert!(app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+        assert!(app.screenshot.visible);
+        assert!(app.handle_screenshot_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.screenshot.visible);
+
+        // The binding stays inert outside the MindMap tab and off the tree.
+        app.active_tab = MainTab::Ai;
+        assert!(!app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+        app.active_tab = MainTab::MindMap;
+        app.mindmap_focus = MindMapFocus::AiPanel;
+        assert!(!app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn screenshot_zoom_keys_do_not_switch_tabs_and_close_cancels_loading() {
+        let mut app = editor_test_app();
+        app.screenshot.visible = true;
+        app.screenshot.loading = true;
+        for (key, label) in [('1', "100%"), ('+', "125%"), ('-', "100%"), ('0', "Fit")] {
+            assert!(
+                app.handle_screenshot_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE))
+            );
+            assert_eq!(app.screenshot.view.label(), label);
+            assert_eq!(app.active_tab, MainTab::MindMap);
+        }
+        app.screenshot.loading = true;
+        assert!(app.handle_screenshot_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.screenshot.visible);
+        assert!(!app.screenshot.loading);
+    }
+
+    #[test]
+    fn screenshot_overlay_lists_scenarios_that_have_captures() {
+        let mut app = editor_test_app();
+        app.active_tab = MainTab::MindMap;
+        app.screenshot.visible = true;
+        app.screenshot.support = crate::image_view::GraphicsSupport::None;
+        app.capture_index = crate::image_view::CaptureIndex {
+            entries: vec![crate::image_view::CaptureEntry {
+                feature: "features/demo.feature".into(),
+                scenario: "First".into(),
+                count: 4,
+                started_at: "2026-10-30T00:00:00Z".into(),
+            }],
+        };
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..30)
+            .flat_map(|y| (0..120).map(move |x| (x, y)))
+            .map(|cell| buffer[cell].symbol())
+            .collect();
+        assert!(
+            text.contains("features/demo.feature · First (4)"),
+            "overlay was: {text}"
+        );
+    }
+
+    #[test]
+    fn screenshot_overlay_explains_a_missing_pixel_protocol() {
+        let mut app = editor_test_app();
+        app.active_tab = MainTab::MindMap;
+        app.screenshot.visible = true;
+        app.screenshot.support = crate::image_view::GraphicsSupport::None;
+        app.screenshot.refs = vec![crate::image_view::ScreenshotRef {
+            run_id: "run-1".into(),
+            file: "frame.png".into(),
+            scenario: "First".into(),
+            step_text: "Given a".into(),
+            step_line: Some(4),
+            captured_at: "2026-01-01T00:00:00Z".into(),
+            status: "passed".into(),
+        }];
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..30)
+            .flat_map(|y| (0..120).map(move |x| (x, y)))
+            .map(|cell| buffer[cell].symbol())
+            .collect();
+        assert!(text.contains("no image protocol"), "overlay was: {text}");
+        assert!(text.contains("frame.png"), "overlay was: {text}");
     }
 
     #[test]

@@ -79,6 +79,9 @@ fn english_and_chinese_rows_continue_after_failure_and_filter_by_source_line() {
             vec!["passed", "failed", "passed"]
         );
         assert_eq!(rows[1]["example_line"], 11);
+        assert!(rows.iter().all(|row| row["evidence"]["saved"] == 3));
+        assert_eq!(rows[0]["acceptance_status"], "passed");
+        assert_eq!(rows[1]["acceptance_status"], "failed");
         let failure = events.iter().find(|e| e["type"] == "case_failed").unwrap();
         let path = failure["error"]["attachments"][0]["path"].as_str().unwrap();
         assert!(
@@ -87,8 +90,59 @@ fn english_and_chinese_rows_continue_after_failure_and_filter_by_source_line() {
                 .contains("answer-two")
         );
         assert_eq!(events.last().unwrap()["failed"], 1);
+        let captures: Vec<_> = events
+            .iter()
+            .filter(|e| e["type"] == "step_screenshot")
+            .collect();
+        assert_eq!(
+            captures.len(),
+            9,
+            "every step of every example must capture, including the failing assertion"
+        );
+        assert!(captures.iter().all(|e| e["capture_status"] == "available"));
+        assert_eq!(
+            captures.iter().filter(|e| e["status"] == "failed").count(),
+            1
+        );
+        let filenames: std::collections::HashSet<_> = captures
+            .iter()
+            .map(|e| e["screenshot_file"].as_str().unwrap())
+            .collect();
+        assert_eq!(filenames.len(), 9, "examples must not reuse frames");
+        let history = teshi_replay_evidence::list_replay_runs(directory.path()).unwrap();
+        assert_eq!(history.len(), 1);
+        let first_id = history[0].id.clone();
+        assert_eq!(history[0].evidence.saved, 9);
+        for capture in &captures {
+            assert!(
+                !teshi_replay_evidence::load_replay_image(
+                    directory.path(),
+                    &first_id,
+                    capture["screenshot_file"].as_str().unwrap()
+                )
+                .unwrap()
+                .is_empty()
+            );
+            for key in ["svg_file", "text_file"] {
+                assert!(
+                    directory
+                        .path()
+                        .join(".teshi/logs/replay-screenshots")
+                        .join(&first_id)
+                        .join(capture[key].as_str().unwrap())
+                        .is_file()
+                );
+            }
+        }
+
         let mut output = Vec::new();
         assert_eq!(run(request(Some(14)), &mut output).unwrap(), 0);
+        let history = teshi_replay_evidence::list_replay_runs(directory.path()).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_ne!(history[0].id, first_id);
+        assert_eq!(history[0].evidence.saved, 3);
+        assert_eq!(history[0].status, "passed");
+
         let events: Vec<Value> = String::from_utf8(output)
             .unwrap()
             .lines()

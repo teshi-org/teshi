@@ -10,6 +10,7 @@ pub mod export;
 pub mod install_skill;
 pub mod locator_verify;
 pub mod mcp;
+pub(crate) mod replay_plan;
 pub mod replay_screenshots;
 pub mod requirements;
 pub mod steps;
@@ -18,7 +19,6 @@ pub mod testpoints;
 pub mod trace;
 pub mod update;
 pub mod winapp;
-mod winapp_plan;
 
 use std::path::PathBuf;
 

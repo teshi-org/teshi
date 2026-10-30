@@ -344,7 +344,7 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
         None => read_active_step(project_root)?.feature_relative_path,
     };
     preflight_feature(project_root, &feature)?;
-    let plan = super::winapp_plan::build(project_root, &feature, args.until_line)?;
+    let plan = super::replay_plan::build(project_root, &feature, args.until_line)?;
     let scope = if plan.omitted > 0 { "partial" } else { "full" };
     let coverage = json!({"scope":scope,"until_line":args.until_line,
         "executable_steps":plan.steps.len(),"omitted_steps":plan.omitted,"gaps":plan.gaps});
@@ -376,8 +376,20 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
         return Ok(());
     }
     let mut run = super::replay_screenshots::create_cli_replay(project_root, &feature, None)?;
-    run.record(json!({"type":"coverage","coverage":coverage,"screenshot_policy":"optional"}))?;
+    if let Some(program) = args.launch.as_deref() {
+        run.record(teshi_engine::replay_evidence::target_executable_identity(
+            Path::new(program),
+        ))?;
+    }
+    run.record(json!({"type":"coverage","coverage":coverage,"screenshot_policy":"required"}))?;
     print_json_response(json!({"event":"replay_started","run_id":run.id(),"coverage":coverage}))?;
+    for planned in &plan.steps {
+        run.record(
+            json!({"type":"planned_step","step_id":planned.step_id,"case_id":planned.case_id,
+            "feature":feature,"scenario":planned.scenario,"step_line":planned.binding.step_line,
+            "screenshot_required":true,"source":"windows_window"}),
+        )?;
+    }
     let directory = run.directory().to_path_buf();
     let mut index = load_or_create_index(&directory, &feature);
     save_index(&directory, &index)?;
@@ -404,6 +416,22 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
             }
             run.record(json!({"type":"start_step","step_id":planned.step_id,
                 "case_id":planned.case_id,"scenario":planned.scenario,"step_line":step.step_line,"text":step.step_text}))?;
+            let capture_frame = || {
+                read_cdp_endpoint(project_root).and_then(|endpoint| {
+                    capture_and_save_screenshot(
+                        &endpoint.ws_url,
+                        project_root,
+                        &teshi_engine::sanitize_feature_path(&feature),
+                        step.step_line,
+                        &step.step_keyword,
+                        &step.step_text,
+                        &directory,
+                    )
+                })
+            };
+            let closing = step.primary.capture_before
+                || teshi_engine::replay_evidence::capture_before_action(&step.primary.action);
+            let before_capture = closing.then(capture_frame);
             let response = execute_locator(
                 project_root,
                 &step.primary.value,
@@ -430,21 +458,12 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
                 "case_id":planned.case_id,"scenario":planned.scenario,"step_line":step.step_line,
                 "status":if passed {"passed"} else {"failed"},"response":response}))?;
             print_json_response(response.clone())?;
-            let capture = read_cdp_endpoint(project_root).and_then(|endpoint| {
-                capture_and_save_screenshot(
-                    &endpoint.ws_url,
-                    project_root,
-                    &teshi_engine::sanitize_feature_path(&feature),
-                    step.step_line,
-                    &step.step_keyword,
-                    &step.step_text,
-                    &directory,
-                )
-            });
+            let capture = before_capture.unwrap_or_else(capture_frame);
             let mut event = json!({"type":"step_screenshot","step_id":planned.step_id,
                 "case_id":planned.case_id,"scenario":planned.scenario,"feature":feature,
                 "step_line":step.step_line,"step_keyword":step.step_keyword,"step_text":step.step_text,
-                "status":if passed {"passed"} else {"failed"}});
+                "status":if passed {"passed"} else {"failed"}, "source":"windows_window",
+                "capture_timing":if closing {"before_close"} else {"after_step"}});
             match capture {
                 Ok(entry) => {
                     event["capture_status"] = json!("available");
@@ -488,11 +507,12 @@ fn replay(project_root: &Path, args: &WinAppReplayArgs) -> Result<()> {
     run.record(json!({"type":"end_run","status":status,"failed":usize::from(result.is_err()),
         "capture_failures":capture_failures,"error":result.as_ref().err().map(ToString::to_string)}))?;
     print_json_response(
-        json!({"event":"replay_complete","run_id":run.id(),"status":status,
-        "coverage":coverage,"screenshot_policy":"optional","capture_failures":capture_failures,
+        json!({"event":"replay_complete","run_id":run.id(),"status":run.snapshot().status,"test_status":status,"acceptance_status":run.snapshot().acceptance_status,"evidence":run.snapshot().evidence,
+        "coverage":coverage,"screenshot_policy":"required","capture_failures":capture_failures,
         "screenshot_dir":directory,"screenshots":index.steps.len(),"failed_line":failed_line}),
     )?;
-    result
+    result?;
+    run.ensure_accepted()
 }
 
 fn transport_failure(error: &str) -> serde_json::Value {

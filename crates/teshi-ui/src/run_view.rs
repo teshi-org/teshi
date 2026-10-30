@@ -13,6 +13,15 @@ use serde_json::Value;
 
 use crate::backend::{ApiRunEventDto, ApiScenarioSnapshot, SharedApiRunBackend};
 
+fn capture_key(event: &Value) -> String {
+    serde_json::json!([
+        event["case_id"],
+        event["step_id"],
+        event["attempt"].as_u64().unwrap_or(1)
+    ])
+    .to_string()
+}
+
 /// Lists project scenarios, starts a run, and shows step/exchange trees.
 pub struct ApiRunView {
     backend: SharedApiRunBackend,
@@ -26,10 +35,12 @@ pub struct ApiRunView {
     history: Vec<Value>,
     active_run: Option<String>,
     selected_step: Option<String>,
+    selected_capture_key: Option<String>,
     screenshot: Option<Arc<Image>>,
     screenshot_detail: String,
     enlarged: bool,
     revision: u64,
+    evidence_summary: String,
 }
 
 impl ApiRunView {
@@ -49,10 +60,12 @@ impl ApiRunView {
             history: Vec::new(),
             active_run: None,
             selected_step: None,
+            selected_capture_key: None,
             screenshot: None,
             screenshot_detail: "Select a step to view its screenshot.".into(),
             enlarged: false,
             revision: 0,
+            evidence_summary: String::new(),
         };
         view.reload_scenarios(cx);
         view
@@ -118,11 +131,12 @@ impl ApiRunView {
     pub fn screenshot_state(&self) -> Value {
         let selected = self.events.iter().find(|event| {
             event.type_name == "step_screenshot"
-                && event.payload["step_id"].as_str() == self.selected_step.as_deref()
+                && self.selected_capture_key.as_deref()
+                    == Some(capture_key(&event.payload).as_str())
         });
         serde_json::json!({"run_id":self.active_run,"step_id":self.selected_step,
             "image_ready":self.screenshot.is_some(),"enlarged":self.enlarged,
-            "detail":self.screenshot_detail,"history_count":self.history.len(),
+            "detail":self.screenshot_detail,"evidence_summary":self.evidence_summary,"history_count":self.history.len(),
             "step_status":selected.map(|event| &event.payload["status"]),
             "image_file":selected.map(|event| &event.payload["screenshot_file"])})
     }
@@ -170,6 +184,8 @@ impl ApiRunView {
         self.events.clear();
         self.history.clear();
         self.selected_step = None;
+        self.selected_capture_key = None;
+        self.evidence_summary.clear();
         self.screenshot = None;
         self.enlarged = false;
         self.screenshot_detail = "Select a step to view its screenshot.".into();
@@ -219,6 +235,8 @@ impl ApiRunView {
             self.events.clear();
             self.active_run = None;
             self.selected_step = None;
+            self.selected_capture_key = None;
+            self.evidence_summary.clear();
             self.screenshot = None;
             self.enlarged = false;
             self.screenshot_detail = "Waiting for step screenshots…".into();
@@ -268,6 +286,8 @@ impl ApiRunView {
         self.events.clear();
         self.expanded_exchange = None;
         self.selected_step = None;
+        self.selected_capture_key = None;
+        self.evidence_summary.clear();
         self.screenshot = None;
         self.enlarged = false;
         self.screenshot_detail = "Select a step to view its screenshot.".into();
@@ -300,13 +320,29 @@ impl ApiRunView {
                                     })
                                     .collect();
                                 let status = snapshot["status"].as_str().unwrap_or("unknown");
-                                view.status = format!("Run {status} · {id}").into();
+                                let test = snapshot["test_status"].as_str().filter(|s|!s.is_empty()).unwrap_or(status);
+                                let raw_events: Vec<Value> = view.events.iter().map(|e|e.payload.clone()).collect();
+                                let counts=teshi_core::replay_evidence::summarize(&raw_events,None);
+                                let evidence=serde_json::to_value(&counts).unwrap_or(Value::Null);
+                                let status=snapshot["acceptance_status"].as_str().filter(|s|!s.is_empty()).unwrap_or_else(||counts.acceptance(test));
+                                view.status = format!("Tests: {test} · Evidence: {} · Acceptance: {status} · {id}",snapshot["evidence_status"].as_str().filter(|s|!s.is_empty()).unwrap_or_else(||counts.status())).into();
+                                view.evidence_summary = format!("Required {} · Saved {} · Failed {} · Not executed {} · Missing {} · N/A {}",
+                                    evidence["required"], evidence["saved"], evidence["failed"], evidence["not_executed"], evidence["missing"], evidence["not_applicable"]);
+                                let events: Vec<Value> = view.events.iter().map(|e|e.payload.clone()).collect();
+                                let features: std::collections::BTreeSet<&str> = events.iter().filter_map(|e|e["feature"].as_str()).collect();
+                                for feature in features {
+                                    let counts = teshi_core::replay_evidence::summarize(&events, Some(feature));
+                                    view.evidence_summary.push_str(&format!("\n{feature}: required {}, saved {}, failed {}, not executed {}, missing {}",counts.required,counts.saved,counts.failed,counts.not_executed,counts.missing));
+                                }
+                                view.events.extend(teshi_core::replay_evidence::missing_capture_rows(&events).into_iter().map(|payload|ApiRunEventDto{type_name:"step_screenshot".into(),payload}));
                                 cx.notify();
                                 status == "running"
                             }
                             Err(error) => {
                                 view.screenshot = None;
                                 view.selected_step = None;
+                                view.selected_capture_key = None;
+                                view.evidence_summary.clear();
                                 view.enlarged = false;
                                 view.events.clear();
                                 view.screenshot_detail =
@@ -335,17 +371,33 @@ impl ApiRunView {
         let Some(step_id) = event["step_id"].as_str().map(str::to_owned) else {
             return;
         };
+        let key = capture_key(&event);
+        self.selected_capture_key = Some(key.clone());
         self.selected_step = Some(step_id.clone());
         self.screenshot = None;
         self.enlarged = false;
         self.screenshot_detail = match event["capture_status"].as_str() {
             Some("available") => "Loading screenshot…".into(),
-            Some("unsupported") => "This backend does not support screenshots for this run.".into(),
+            Some("not_applicable") => format!(
+                "Screenshot not applicable: {}",
+                event["message"].as_str().unwrap_or("nonvisual_step")
+            ),
+            Some("unsupported" | "not_executed") => format!(
+                "Screenshot unavailable: {}",
+                event["message"]
+                    .as_str()
+                    .unwrap_or("backend_capability_unavailable")
+            ),
             Some("failed") => format!(
                 "Screenshot capture failed: {}",
                 event["message"].as_str().unwrap_or("Capture unavailable")
             ),
-            _ => "No screenshot is available for this step.".into(),
+            _ => format!(
+                "Screenshot missing: {}",
+                event["message"]
+                    .as_str()
+                    .unwrap_or("capture_outcome_not_recorded")
+            ),
         };
         let Some(filename) = event["screenshot_file"].as_str().map(str::to_owned) else {
             cx.notify();
@@ -357,7 +409,7 @@ impl ApiRunView {
             let result = backend.replay_image(&run_id, &filename).await;
             let _ = this.update(cx, |view, cx| {
                 // Discard images arriving after a different step, run, or project was selected.
-                if view.revision != revision || view.selected_step.as_deref() != Some(&step_id) {
+                if view.revision != revision || view.selected_capture_key.as_deref() != Some(&key) {
                     return;
                 }
                 match result {
@@ -381,14 +433,24 @@ impl ApiRunView {
                             })
                             .unwrap_or("");
                         view.screenshot_detail = format!(
-                            "{} · {}\n{} {} · {}\n{}",
+                            "{} · {}\n{} {} · {}\n{} · {} · {}",
                             event["feature"].as_str().unwrap_or(""),
                             scenario,
                             event["step_keyword"].as_str().unwrap_or(""),
                             event["step_text"].as_str().unwrap_or(""),
                             event["status"].as_str().unwrap_or(""),
-                            event["captured_at"].as_str().unwrap_or("")
+                            event["captured_at"].as_str().unwrap_or(""),
+                            event["source"].as_str().unwrap_or("unreported source"),
+                            event["capture_timing"]
+                                .as_str()
+                                .unwrap_or("unreported timing")
                         );
+                        if event["capture_status"] != "available" {
+                            view.screenshot_detail.push_str(&format!(
+                                "\nCapture incomplete: {}",
+                                event["message"].as_str().unwrap_or("capture_failed")
+                            ));
+                        }
                     }
                     Err(error) => {
                         view.screenshot_detail = format!("Saved image cannot be loaded: {error}")
@@ -509,7 +571,15 @@ impl ApiRunView {
                     .unwrap_or(true);
                 format!("    {method} {url}  redacted={redacted}")
             }
-            "case_passed" => "case passed".into(),
+            "case_passed" => format!(
+                "case tests passed · evidence {} · acceptance {}",
+                event.payload["evidence_status"]
+                    .as_str()
+                    .unwrap_or("unknown"),
+                event.payload["acceptance_status"]
+                    .as_str()
+                    .unwrap_or("unknown")
+            ),
             "case_failed" => format!(
                 "case failed {}",
                 event
@@ -669,7 +739,8 @@ impl Render for ApiRunView {
                         div()
                             .text_sm()
                             .text_color(rgb(0xa6adc8))
-                            .child(self.status.clone()),
+                            .child(self.status.clone())
+                            .child(div().text_sm().child(self.evidence_summary.clone())),
                     )
                     .child(div().text_sm().child("Run history"))
                     .child(
@@ -732,8 +803,8 @@ impl Render for ApiRunView {
                                         element
                                             .cursor_pointer()
                                             .bg(
-                                                if self.selected_step.as_deref()
-                                                    == event.payload["step_id"].as_str()
+                                                if self.selected_capture_key.as_deref()
+                                                    == Some(capture_key(&event.payload).as_str())
                                                 {
                                                     rgb(0x45475a)
                                                 } else {
@@ -880,10 +951,15 @@ mod tests {
                 detail.contains(match mode {
                     ReplayFixtureMode::Missing => "cannot be loaded",
                     ReplayFixtureMode::CaptureFailed => "capture failed",
-                    _ => "does not support",
+                    _ => "Fixture capture unavailable",
                 }),
                 "{detail}"
             );
+            if mode != ReplayFixtureMode::Missing {
+                let status = cx.read(|cx| view.read(cx).status_text());
+                assert!(status.contains("Acceptance: incomplete"), "{status}");
+                assert!(detail.contains("Fixture capture unavailable"), "{detail}");
+            }
             cx.quit();
         }
     }

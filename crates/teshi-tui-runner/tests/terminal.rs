@@ -181,6 +181,7 @@ fn scenario_protocol_replays_background_and_preserves_failure_screen() {
     let feature = directory.path().join("terminal.feature");
     std::fs::write(&feature, "Feature: Terminal\n  Background:\n    Given the application is running\n  Scenario: Replace screen\n    When I replace the screen\n    Then the replacement appears\n  Scenario: Missing content\n    Then missing content appears\n").unwrap();
     let binding = |line, text: &str, actions| Binding {
+        capture_before: false,
         line,
         text: text.into(),
         confirmed: true,
@@ -290,4 +291,123 @@ fn scenario_protocol_replays_background_and_preserves_failure_screen() {
             .contains("fixture-ready")
     );
     assert_eq!(events.last().unwrap()["failed"], 1);
+}
+
+#[test]
+fn teardown_step_keeps_the_real_terminal_frame_before_sending_exit() {
+    use std::collections::HashMap;
+    use teshi_tui_runner::scenario::{Case, Request, run};
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("exit.feature"),"Feature: Automatic evidence\n  Scenario: Exit\n    Given a terminal is ready\n    When the terminal exits\n").unwrap();
+    let bindings = serde_json::json!({"version":1,"mode":"tui","steps":[
+        {"line":3,"text":"a terminal is ready","confirmed":true,"actions":[{"action":"launch","config":fixture()},{"action":"expect_text","text":"fixture-ready","visible":true,"timeout_ms":5000}]},
+        {"line":4,"text":"the terminal exits","confirmed":true,"capture_before":true,"actions":[{"action":"write","text":"quit"},{"action":"key","key":"Enter"},{"action":"expect_exit","code":0,"timeout_ms":5000}]}
+    ]});
+    std::fs::write(project.path().join("exit.tui.json"), bindings.to_string()).unwrap();
+    let mut out = Vec::new();
+    assert_eq!(
+        run(
+            Request {
+                command: "run".into(),
+                cases: vec![Case {
+                    id: "exit".into(),
+                    feature_path: "exit.feature".into(),
+                    scenario: "Exit".into(),
+                    line_number: None,
+                    until_line: None
+                }],
+                meta: HashMap::from([(
+                    "project_root".into(),
+                    project.path().to_string_lossy().into_owned()
+                )])
+            },
+            &mut out
+        )
+        .unwrap(),
+        0
+    );
+    let history = teshi_replay_evidence::list_replay_runs(project.path()).unwrap();
+    let snapshot = teshi_replay_evidence::load_replay_run(project.path(), &history[0].id).unwrap();
+    assert_eq!(snapshot.status, "passed");
+    assert_eq!(snapshot.evidence.saved, 2);
+    let closing = snapshot
+        .events
+        .iter()
+        .find(|e| e["capture_timing"] == "before_close")
+        .unwrap();
+    let directory = project
+        .path()
+        .join(".teshi/logs/replay-screenshots")
+        .join(&snapshot.id);
+    let text =
+        std::fs::read_to_string(directory.join(closing["text_file"].as_str().unwrap())).unwrap();
+    assert!(text.contains("fixture-ready"));
+    assert!(
+        !text.contains("quit"),
+        "exit input was sent before the last frame was captured"
+    );
+    assert_eq!(closing["format"], "png");
+}
+
+#[test]
+fn failed_launch_has_a_capture_reason_and_does_not_mark_later_steps_executed() {
+    use std::collections::HashMap;
+    use teshi_tui_runner::scenario::{Case, Request, run};
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("missing.feature"),"Feature: Launch evidence\n  Scenario: Missing executable\n    Given the application starts\n    Then ready is visible\n").unwrap();
+    let mut config = fixture();
+    config.program = project
+        .path()
+        .join("missing-executable")
+        .to_string_lossy()
+        .into_owned();
+    std::fs::write(project.path().join("missing.tui.json"),serde_json::json!({"version":1,"mode":"tui","steps":[
+        {"line":3,"text":"the application starts","confirmed":true,"actions":[{"action":"launch","config":config}]},
+        {"line":4,"text":"ready is visible","confirmed":true,"actions":[{"action":"expect_text","text":"ready","visible":true,"timeout_ms":100}]}
+    ]}).to_string()).unwrap();
+    let mut out = Vec::new();
+    assert_eq!(
+        run(
+            Request {
+                command: "run".into(),
+                cases: vec![Case {
+                    id: "missing".into(),
+                    feature_path: "missing.feature".into(),
+                    scenario: "Missing executable".into(),
+                    line_number: None,
+                    until_line: None
+                }],
+                meta: HashMap::from([(
+                    "project_root".into(),
+                    project.path().to_string_lossy().into_owned()
+                )])
+            },
+            &mut out
+        )
+        .unwrap(),
+        1
+    );
+    let runs = teshi_replay_evidence::list_replay_runs(project.path()).unwrap();
+    let snapshot = teshi_replay_evidence::load_replay_run(project.path(), &runs[0].id).unwrap();
+    assert_eq!(
+        (
+            snapshot.evidence.required,
+            snapshot.evidence.failed,
+            snapshot.evidence.not_executed
+        ),
+        (2, 1, 1)
+    );
+    assert_eq!(snapshot.test_status, "failed");
+    assert!(snapshot.events.iter().any(|e| {
+        e["capture_status"] == "failed"
+            && e["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("TUI session missing"))
+    }));
+    assert!(
+        snapshot
+            .events
+            .iter()
+            .any(|e| e["capture_status"] == "not_executed" && e["message"] == "step_not_executed")
+    );
 }

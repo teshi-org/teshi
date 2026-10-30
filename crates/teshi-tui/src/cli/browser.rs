@@ -15,8 +15,8 @@ use teshi_engine::{
     TeshiEngine, chrome_broker_pairing_approve, chrome_broker_pairing_list,
     chrome_broker_pairing_remove, chrome_broker_pairing_store, default_browser_service_script,
     default_winapp_service_script, ensure_user_chrome_broker, fetch_chrome_broker_endpoint,
-    load_project_settings, open_project, read_active_step, resolve_step_bindings,
-    send_sidecar_command_with_timeout, start_browser_sidecar, stop_browser_sidecar,
+    load_project_settings, open_project, read_active_step, send_sidecar_command_with_timeout,
+    start_browser_sidecar, stop_browser_sidecar,
 };
 
 use super::browser_endpoint::{
@@ -1447,41 +1447,33 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
         }
     };
     preflight_feature(project_root, &feature)?;
-    let mut steps = resolve_step_bindings(project_root, &feature, args.until_line)?;
-    if let Some(name) = args.scenario.as_deref() {
-        let path = project_root.join(&feature);
-        let source = fs::read_to_string(&path)?;
-        let parsed = teshi_core::gherkin::parse_feature(&source, path);
-        let matches: Vec<_> = parsed
-            .all_scenarios()
-            .into_iter()
-            .filter(|s| s.name == name)
-            .collect();
-        if matches.len() != 1 {
-            return Err(anyhow!(
-                "scenario name must match exactly one scenario: {name}"
-            ));
-        }
-        let required: Vec<_> = parsed
-            .background
-            .iter()
-            .flat_map(|b| &b.steps)
-            .chain(&matches[0].steps)
-            .filter(|s| args.until_line.is_none_or(|line| s.line_number <= line))
-            .map(|s| s.line_number)
-            .collect();
-        for line in &required {
-            if !steps.iter().any(|step| step.step_line == *line) {
-                return Err(anyhow!(
-                    "unbound replay step at line {line} in scenario {name}"
-                ));
-            }
-        }
-        steps.retain(|step| required.contains(&step.step_line));
+    let plan = super::replay_plan::build_selected(
+        project_root,
+        &feature,
+        args.until_line,
+        args.scenario.as_deref(),
+    )?;
+    if let Some(gap) = plan
+        .gaps
+        .iter()
+        .find(|gap| gap["status"] == "unbound" && gap["step_line"].is_number())
+    {
+        anyhow::bail!(
+            "unbound replay step at line {}: {}",
+            gap["step_line"],
+            gap["reason"]
+        );
     }
-    if steps.is_empty() {
-        return Err(anyhow!("no confirmed bindings found for {feature}"));
-    }
+    anyhow::ensure!(
+        plan.gaps.is_empty(),
+        "replay coverage incomplete: {}",
+        json!(plan.gaps)
+    );
+    let steps = &plan.steps;
+    anyhow::ensure!(
+        !steps.is_empty(),
+        "no confirmed bindings found for {feature}"
+    );
 
     let capture_replay_screenshots = replay_screenshots_supported(project_root, args)?;
     if !args.dry_run && !capture_replay_screenshots {
@@ -1491,7 +1483,7 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                 "event": "replay_screenshots_skipped",
                 "reason": "broker_capability_unavailable",
                 "required_feature": "p1.observability_artifacts",
-                "message": "Rust P0 replay continues without stage-5 screenshot capture"
+                "message": "Capture unavailable; replay will retain test results but cannot pass evidence acceptance"
             }))?
         );
     }
@@ -1506,6 +1498,13 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
             args.scenario.as_deref(),
         )?)
     };
+    if let Some(run) = evidence.as_mut() {
+        for planned in steps {
+            let step = &planned.binding;
+            run.record(json!({"type":"planned_step","case_id":planned.case_id, "step_id":planned.step_id,
+                "feature":feature,"scenario":planned.scenario,"step_line":step.step_line,"screenshot_required":true,"source":"web_page"}))?;
+        }
+    }
     let screenshot_dir = evidence
         .as_ref()
         .map(|run| run.directory().to_path_buf())
@@ -1513,7 +1512,8 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
     let _ = fs::create_dir_all(&screenshot_dir);
 
     let non_interactive = args.non_interactive || args.yes;
-    for (idx, step) in steps.iter().enumerate() {
+    for (idx, planned) in steps.iter().enumerate() {
+        let step = &planned.binding;
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
@@ -1532,6 +1532,21 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
         if !non_interactive {
             prompt_continue(step)?;
         }
+        let closing = step.primary.capture_before
+            || teshi_engine::replay_evidence::capture_before_action(&step.primary.action);
+        let capture_frame = || {
+            capture_replay_step_screenshot(
+                project_root,
+                &feature,
+                step.step_line,
+                &step.step_keyword,
+                &step.step_text,
+                &screenshot_dir,
+                &args.target,
+            )
+        };
+        let before_capture = (closing && capture_replay_screenshots).then(capture_frame);
+        let mut capture_error = None;
         let response = (|| -> Result<serde_json::Value> {
             Ok(
                 if step.primary.action == "navigate" && args.target.session.is_some() {
@@ -1656,15 +1671,7 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
         .unwrap_or_else(|error| json!({"ok":false,"error":error.to_string()}));
         // Capture screenshot after each step (before ensure_ok so we capture even on failure).
         if !args.dry_run && capture_replay_screenshots {
-            match capture_replay_step_screenshot(
-                project_root,
-                &feature,
-                step.step_line,
-                &step.step_keyword,
-                &step.step_text,
-                &screenshot_dir,
-                &args.target,
-            ) {
+            match before_capture.unwrap_or_else(capture_frame) {
                 Ok(entry) => {
                     println!(
                         "{}",
@@ -1677,10 +1684,13 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                     );
                     screenshot_entries.push(entry);
                 }
-                Err(e) => eprintln!(
-                    "warning: screenshot capture failed at L{}: {e}",
-                    step.step_line
-                ),
+                Err(e) => {
+                    eprintln!(
+                        "warning: screenshot capture failed at L{}: {e}",
+                        step.step_line
+                    );
+                    capture_error = Some(e.to_string());
+                }
             }
         }
         if let Some(run) = evidence.as_mut() {
@@ -1689,9 +1699,13 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
                 project_root,
                 super::replay_screenshots::CliReplayStep {
                     feature: &feature,
+                    identity: Some((&planned.case_id, &planned.step_id, &planned.scenario)),
                     source: (step.step_line, &step.step_keyword, &step.step_text),
                     passed: ensure_ok(&response).is_ok(),
+                    response: Some(&response),
                     capture_supported: capture_replay_screenshots,
+                    capture_error: capture_error.as_deref(),
+                    before_close: closing,
                 },
                 screenshot_entries
                     .last()
@@ -1707,14 +1721,17 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
     }
 
     if let Some(run) = evidence.as_mut() {
-        run.record(json!({"type":"end_run", "failed":0}))?;
+        run.record(json!({"type":"end_run", "failed":0, "status":if plan.omitted>0 {"partial"} else {"passed"}}))?;
     }
 
     if !args.dry_run && !screenshot_entries.is_empty() {
         let mut index = load_or_create_index(&screenshot_dir, &feature);
         index.steps = screenshot_entries;
         index.completed_at = Some(iso_now());
-        index.status = "completed".to_string();
+        index.status = evidence
+            .as_ref()
+            .map(|run| run.snapshot().status.clone())
+            .unwrap_or_else(|| "unknown".into());
         if let Err(e) = save_index(&screenshot_dir, &index) {
             eprintln!("warning: failed to write screenshot index: {e}");
         }
@@ -1725,10 +1742,17 @@ fn replay(project_root: &Path, args: &BrowserReplayArgs) -> Result<()> {
             "{}",
             serde_json::to_string(&json!({
                 "event": "replay_complete", "steps_replayed": steps.len(),
+                "status":evidence.as_ref().map(|run|&run.snapshot().status),
+                "test_status":evidence.as_ref().map(|run|&run.snapshot().test_status),
+                "evidence":evidence.as_ref().map(|run|&run.snapshot().evidence),
                 "scenario": args.scenario,
                 "screenshots_dir": screenshot_dir.to_string_lossy(),
             }))?
         );
+    }
+
+    if let Some(run) = evidence.as_ref() {
+        run.ensure_accepted()?;
     }
 
     Ok(())
@@ -1885,7 +1909,7 @@ fn capture_replay_step_screenshot(
                 element: None,
             })
             .map_err(|error| anyhow!("{}", error.message))?;
-        let artifact = artifact_path_from_screenshot_payload(&response.payload)?;
+        let artifact = artifact_path_from_screenshot_payload(project_root, &response.payload)?;
         save_screenshot_from_artifact(
             &artifact,
             &feature_sanitized,

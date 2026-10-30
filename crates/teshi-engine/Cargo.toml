@@ -21,6 +21,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 teshi-core = { workspace = true }
+teshi-replay-evidence = { path = "../teshi-replay-evidence" }
 teshi-browser-broker = { path = "../teshi-browser-broker" }
 toml = "0.8"
 zip = { version = "2", default-features = false, features = ["deflate"] }

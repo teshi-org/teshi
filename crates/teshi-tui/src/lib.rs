@@ -15,6 +15,7 @@ mod feature_browser;
 mod feature_discovery;
 mod generation_state;
 mod highlight;
+mod image_view;
 mod input;
 mod keymap;
 mod lazy_features;
@@ -296,9 +297,23 @@ pub fn run() -> Result<()> {
     }
 
     let _guard = TerminalGuard::setup()?;
+    // Query the terminal before anything reads stdin: the graphics probe
+    // consumes the terminal's reply, and `EventSource` starts a reader on
+    // Windows that would take those bytes instead.
+    let image_detection = image_view::init();
+    if let Some(file) = diag_file.as_mut() {
+        let _ = writeln!(
+            file,
+            "image protocol: {} ({})",
+            image_detection.support.label(),
+            image_detection.detail
+        );
+        let _ = file.flush();
+    }
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let mut app = App::from_cli(&cli_args)?;
+    app.set_image_support(image_detection);
     app.version = version_display().to_string();
     let mut event_source = input::EventSource::new()?;
 
@@ -314,13 +329,23 @@ pub fn run() -> Result<()> {
         app.poll_git_status();
         app.poll_external_feature_changes();
         app.poll_status_message_expiry();
+        app.screenshot.poll();
+        app.screenshot.prepare_frame(&mut terminal)?;
         terminal.draw(|frame| ui::render(frame, &mut app))?;
+        app.screenshot.finish_frame(&mut terminal)?;
 
         // Drain bounded input bursts before redrawing the complete chat. A
         // redraw per character makes pasted prompts stall as history grows.
+        // Worker results and bounded pixel batches are only handled between
+        // iterations, so a busy image viewer must not idle for a full tick.
+        let first_wait = if app.screenshot.is_busy() {
+            Duration::from_millis(4)
+        } else {
+            Duration::from_millis(50)
+        };
         for event_index in 0..128 {
             let timeout = if event_index == 0 {
-                Duration::from_millis(50)
+                first_wait
             } else {
                 Duration::ZERO
             };
@@ -337,6 +362,9 @@ pub fn run() -> Result<()> {
                         continue;
                     }
                     if app.handle_acp_controls_key(key_event) {
+                        continue;
+                    }
+                    if app.handle_screenshot_key(key_event) {
                         continue;
                     }
                     // The project picker reserves j/k for recent-entry

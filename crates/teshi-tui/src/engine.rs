@@ -62,6 +62,8 @@ pub enum EngineEvent {
         duration_ms: f64,
         error: Option<String>,
         screenshot_path: Option<String>,
+        capture_timing: Option<String>,
+        attempt: u64,
     },
     ScenarioFinished {
         scenario_id: String,
@@ -146,6 +148,8 @@ pub(crate) struct EngineStepLocator {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct EngineStep {
     id: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    capture_before: bool,
     action: String,
     locator: EngineStepLocator,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -171,6 +175,7 @@ impl EngineStep {
 
         Self {
             id: format!("L{step_line}"),
+            capture_before: false,
             action: engine_action.to_string(),
             locator: EngineStepLocator {
                 locator_type: strategy.to_string(),
@@ -356,45 +361,70 @@ pub fn run_feature_with_engine(
         return Err(anyhow::anyhow!("no scenarios found to run"));
     }
 
+    let mut run = teshi_engine::replay_evidence::ReplayEvidenceRun::create(&project_root)?;
+    let mut executions: Vec<(String, String, Vec<EngineStep>)> = Vec::new();
+    for case in &cases {
+        let path = Path::new(&case.feature_path);
+        let relative = path
+            .strip_prefix(&project_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let plan = crate::cli::replay_plan::build_selected(
+            &project_root,
+            &relative,
+            case.until_line,
+            Some(&case.scenario),
+        )?;
+        anyhow::ensure!(
+            plan.gaps.is_empty(),
+            "engine replay coverage incomplete: {}",
+            serde_json::json!(plan.gaps)
+        );
+        for planned in plan.steps {
+            let case_id = format!("{}:{}", case.id, planned.case_id);
+            let binding = planned.binding;
+            let mut engine_step = EngineStep::from_binding(
+                binding.step_line,
+                &binding.primary.action,
+                &binding.primary.strategy,
+                &binding.primary.value,
+                binding.primary.value_arg.as_deref(),
+            );
+            engine_step.capture_before = binding.primary.capture_before
+                || teshi_engine::replay_evidence::capture_before_action(&binding.primary.action);
+            run.record(serde_json::json!({"type":"planned_step","case_id":case_id,"step_id":format!("{case_id}:{}",engine_step.id),
+                "feature":relative,"scenario":planned.scenario,"step_line":binding.step_line,"step_text":binding.step_text,"screenshot_required":true}))?;
+            if let Some((_, _, steps)) = executions.iter_mut().find(|(id, _, _)| *id == case_id) {
+                steps.push(engine_step);
+            } else {
+                executions.push((case_id, relative.clone(), vec![engine_step]));
+            }
+        }
+    }
+    let started = std::time::SystemTime::now();
     let (cmd_tx, event_rx) = spawn_engine(config)?;
-
     let mut passed = 0usize;
     let mut failed = 0usize;
-    let mut skipped = 0usize;
+    let skipped = 0usize;
 
-    for case in &cases {
-        // Resolve step bindings for this case
-        let steps = match bindings_to_engine_steps(&project_root, &case.feature_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!(
-                    "warning: failed to resolve bindings for {}: {e}",
-                    case.feature_path
-                );
-                skipped += 1;
-                continue;
-            }
-        };
-
-        if steps.is_empty() {
-            eprintln!("warning: no confirmed bindings for {}", case.feature_path);
-            skipped += 1;
-            continue;
-        }
-
-        let scenario_id = format!("{}:{}", case.id, case.scenario.replace(' ', "_"));
+    for (case_id, feature, steps) in &executions {
+        run.record(serde_json::json!({"type":"start_case","case_id":case_id,"feature":feature,"name":case_id}))?;
+        let scenario_id = case_id.clone();
         let msg = serde_json::json!({
             "type": "RUN_SCENARIO",
             "scenario_id": scenario_id,
             "steps": steps,
+            "screenshot_policy":"required",
+            "screenshot_dir":run.directory(),
         });
 
         if cmd_tx.send(msg).is_err() {
-            eprintln!("engine process died");
-            break;
+            anyhow::bail!("engine process died");
         }
 
         let mut case_passed = true;
+        let mut reported_retries = 0usize;
         loop {
             match event_rx.recv() {
                 Ok(EngineEvent::StepExecuted {
@@ -402,8 +432,53 @@ pub fn run_feature_with_engine(
                     status,
                     duration_ms,
                     error,
-                    ..
+                    screenshot_path,
+                    capture_timing,
+                    attempt,
                 }) => {
+                    reported_retries += usize::from(attempt > 1);
+                    let identity = format!("{case_id}:{step_id}");
+                    run.record(serde_json::json!({"type":"step_result","case_id":case_id,"step_id":identity,"attempt":attempt,
+                        "feature":feature,"status":if status=="success" {"passed"} else {"failed"},"error":error,"duration_ms":duration_ms}))?;
+                    let closing = steps
+                        .iter()
+                        .any(|step| step.id == step_id && step.capture_before);
+                    let mut metadata = serde_json::json!({"case_id":case_id,"step_id":identity,"attempt":attempt,"feature":feature,"source":"engine_reported_viewport",
+                        "capture_timing":capture_timing.as_deref().unwrap_or("engine_step_completion"),"status":if status=="success" {"passed"} else {"failed"}});
+                    if closing && capture_timing.as_deref() != Some("before_close") {
+                        metadata["capture_status"] = serde_json::json!("failed");
+                        metadata["message"] =
+                            serde_json::json!("engine_did_not_confirm_capture_before_close");
+                    }
+                    let capture = (|| -> Result<()> {
+                        let path = Path::new(
+                            screenshot_path
+                                .as_deref()
+                                .context("engine_capture_not_reported")?,
+                        );
+                        let path = if path.is_absolute() {
+                            path.to_path_buf()
+                        } else {
+                            project_root.join(path)
+                        };
+                        anyhow::ensure!(
+                            std::fs::metadata(&path)?.modified()? >= started,
+                            "engine returned a stale screenshot"
+                        );
+                        anyhow::ensure!(
+                            std::fs::metadata(&path)?.len() <= 16 * 1024 * 1024,
+                            "engine capture too large"
+                        );
+                        run.screenshot(&std::fs::read(path)?, metadata.clone())?;
+                        Ok(())
+                    })();
+                    if let Err(error) = capture {
+                        let mut event = metadata;
+                        event["type"] = serde_json::json!("step_screenshot");
+                        event["capture_status"] = serde_json::json!("failed");
+                        event["message"] = serde_json::json!(error.to_string());
+                        run.record(event)?;
+                    }
                     let icon = if status == "success" { "✓" } else { "✗" };
                     let err_info = error.map(|e| format!("  {e}")).unwrap_or_default();
                     println!("  {icon} {step_id} ({duration_ms:.0}ms){err_info}");
@@ -420,6 +495,14 @@ pub fn run_feature_with_engine(
                     self_healed,
                     ..
                 }) => {
+                    // Opaque self-healing must not turn an unrecorded first
+                    // attempt into a fully evidenced pass.
+                    for missing in reported_retries..self_healed {
+                        run.record(serde_json::json!({"type":"step_screenshot","case_id":case_id,
+                            "step_id":format!("{case_id}:unreported-retry-{missing}"),"feature":feature,
+                            "source":"engine_reported_viewport","capture_status":"failed",
+                            "message":"engine_retry_evidence_not_reported"}))?;
+                    }
                     let heal_info = if self_healed > 0 {
                         format!(" (self-healed: {self_healed})")
                     } else {
@@ -470,7 +553,7 @@ pub fn run_feature_with_engine(
                         if !healed_value.is_empty() {
                             let _ = teshi_engine::update_binding_locator(
                                 &project_root,
-                                &case.feature_path,
+                                feature,
                                 step_line,
                                 healed_strategy,
                                 healed_value,
@@ -487,19 +570,18 @@ pub fn run_feature_with_engine(
                     break;
                 }
                 Ok(EngineEvent::EngineExit { code, success }) => {
-                    if !success {
-                        eprintln!("engine exited with code {:?}", code);
-                    }
-                    break;
+                    anyhow::bail!(
+                        "engine exited before scenario completion: {code:?}, success={success}"
+                    );
                 }
                 Err(_) => {
-                    eprintln!("engine communication lost");
-                    return Ok(());
+                    anyhow::bail!("engine communication lost");
                 }
                 _ => {}
             }
         }
 
+        run.record(serde_json::json!({"type":if case_passed {"case_passed"}else{"case_failed"},"case_id":case_id}))?;
         if case_passed {
             passed += 1;
         } else {
@@ -517,11 +599,14 @@ pub fn run_feature_with_engine(
         }
     }
 
+    run.record(
+        serde_json::json!({"type":"end_run","passed":passed,"failed":failed,"skipped":skipped}),
+    )?;
     println!("run complete: {passed} passed, {failed} failed, {skipped} skipped");
     if failed > 0 {
         anyhow::bail!("run completed with {failed} failure(s)");
     }
-    Ok(())
+    run.ensure_accepted()
 }
 
 /// Handle `teshi record` — start an engine recording session.
@@ -912,6 +997,11 @@ fn parse_engine_event(line: &str) -> Option<EngineEvent> {
                 .get("screenshot_path")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            capture_timing: value
+                .get("capture_timing")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            attempt: value.get("attempt").and_then(|v| v.as_u64()).unwrap_or(1),
         }),
         "SCENARIO_FINISHED" => Some(EngineEvent::ScenarioFinished {
             scenario_id: value.get("scenario_id")?.as_str()?.to_string(),

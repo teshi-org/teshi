@@ -49,6 +49,9 @@ pub enum Action {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
+    /// Capture before a step that closes the terminal, including exit keystrokes.
+    #[serde(default)]
+    pub capture_before: bool,
     /// One-based Gherkin source line.
     pub line: usize,
     /// Exact parsed step body, used to reject stale recordings.
@@ -464,6 +467,114 @@ fn emit(out: &mut impl Write, value: serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+struct EvidenceOutput<'a, W: Write> {
+    out: &'a mut W,
+    run: teshi_replay_evidence::ReplayEvidenceRun,
+    pending: Vec<u8>,
+}
+
+impl<W: Write> Write for EvidenceOutput<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.pending.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        for line in self
+            .pending
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            let mut event: serde_json::Value = serde_json::from_slice(line)?;
+            self.run
+                .record(event.clone())
+                .map_err(std::io::Error::other)?;
+            event = self.run.snapshot().events.last().cloned().unwrap_or(event);
+            if event["type"] == "end_run" {
+                event["test_status"] = json!(self.run.snapshot().test_status);
+                event["status"] = json!(self.run.snapshot().status);
+                event["evidence"] = json!(self.run.snapshot().evidence);
+                event["run_id"] = json!(self.run.id());
+            }
+            serde_json::to_writer(&mut self.out, &event)?;
+            self.out.write_all(b"\n")?;
+        }
+        self.pending.clear();
+        self.out.flush()
+    }
+}
+
+fn capture_terminal(
+    terminal: &Option<Terminal>,
+    artifacts: &Path,
+    case: &Case,
+    step: &Binding,
+    timing: &str,
+) -> serde_json::Value {
+    let mut event = json!({"type":"step_screenshot","case_id":case.id,"step_id":format!("{}:L{}",case.id,step.line),
+        "feature":case.feature_path,"step_line":step.line,"step_text":step.text,"source":"pty",
+        "capture_timing":timing,"captured_at":teshi_replay_evidence::capture_timestamp()});
+    let result = (|| -> Result<(String, String, String)> {
+        let session = terminal
+            .as_ref()
+            .context("TUI session missing: target not started or disconnected")?;
+        std::fs::create_dir_all(artifacts)?;
+        let temp = tempfile::Builder::new()
+            .prefix("frame-")
+            .tempfile_in(artifacts)?;
+        let stem = temp
+            .path()
+            .file_name()
+            .context("missing capture name")?
+            .to_string_lossy()
+            .into_owned();
+        let svg = format!("{stem}.svg");
+        let png = format!("{stem}.png");
+        let text = format!("{stem}.txt");
+        std::fs::write(artifacts.join(&text), session.screen()?)?;
+        session.screenshot(&artifacts.join(&svg))?;
+        let mut options = resvg::usvg::Options::default();
+        static FONTS: std::sync::OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> =
+            std::sync::OnceLock::new();
+        options.fontdb = FONTS
+            .get_or_init(|| {
+                let mut database = resvg::usvg::fontdb::Database::new();
+                database.load_system_fonts();
+                std::sync::Arc::new(database)
+            })
+            .clone();
+        let tree = resvg::usvg::Tree::from_data(&std::fs::read(artifacts.join(&svg))?, &options)?;
+        let size = tree.size().to_int_size();
+        anyhow::ensure!(
+            size.width() <= 16384
+                && size.height() <= 16384
+                && u64::from(size.width()) * u64::from(size.height()) <= 32 * 1024 * 1024,
+            "terminal preview is too large"
+        );
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height())
+            .context("cannot allocate terminal preview")?;
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::default(),
+            &mut pixmap.as_mut(),
+        );
+        pixmap.save_png(artifacts.join(&png))?;
+        Ok((svg, png, text))
+    })();
+    match result {
+        Ok((svg, png, text)) => {
+            event["capture_status"] = json!("available");
+            event["screenshot_file"] = json!(png);
+            event["svg_file"] = json!(svg);
+            event["text_file"] = json!(text);
+        }
+        Err(error) => {
+            event["capture_status"] = json!("failed");
+            event["message"] = json!(format!("{error:#}"));
+        }
+    }
+    event
+}
+
 fn expect_file(path: &Path, timeout_ms: u64) -> Result<()> {
     let deadline = Instant::now() + std::time::Duration::from_millis(timeout_ms);
     loop {
@@ -492,27 +603,35 @@ fn execute(
     terminal: &mut Option<Terminal>,
     out: &mut impl Write,
     artifacts: &Path,
+    run_directory: &Path,
 ) -> Result<()> {
     // Validate all selected bindings before launching any application.
     for step in steps {
-        let capture_viewport = step.actions.iter().any(|action| {
-            matches!(
-                action,
-                Action::ExpectText { .. } | Action::ExpectStableText { .. }
-            )
-        });
+        let closing = step.capture_before
+            || step
+                .actions
+                .iter()
+                .any(|action| matches!(action, Action::ExpectExit { .. }));
+        let before =
+            closing.then(|| capture_terminal(terminal, run_directory, case, &step, "before_close"));
         emit(
             out,
-            json!({"type":"start_step","case_id":case.id,"step_id":step.line.to_string(),"text":step.text,"doc_string":step.doc_string,"data_table":step.data_table}),
+            json!({"type":"start_step","case_id":case.id,"step_id":format!("{}:L{}",case.id,step.line),"text":step.text,"doc_string":step.doc_string,"data_table":step.data_table}),
         )?;
         let result: Result<()> = (|| {
-            for action in step.actions {
+            for action in step.actions.clone() {
                 if let Action::Launch { mut config } = action {
                     let cwd = config
                         .cwd
                         .as_ref()
                         .map_or_else(|| root.to_path_buf(), |cwd| root.join(cwd));
                     config.cwd = Some(cwd.to_string_lossy().into_owned());
+                    emit(
+                        out,
+                        teshi_replay_evidence::target_executable_identity(std::path::Path::new(
+                            &config.program,
+                        )),
+                    )?;
                     *terminal = Some(Terminal::launch(config)?);
                     continue;
                 }
@@ -546,17 +665,31 @@ fn execute(
             }
             Ok(())
         })();
+        let mut capture = before.unwrap_or_else(|| {
+            capture_terminal(terminal, run_directory, case, &step, "after_step")
+        });
+        capture["status"] = json!(if result.is_ok() { "passed" } else { "failed" });
+        emit(out, capture)?;
         emit(
             out,
-            json!({"type":"end_step","case_id":case.id,"step_id":step.line.to_string(),"status":if result.is_ok(){"passed"}else{"failed"},"message":result.as_ref().err().map(|e|format!("{e:#}"))}),
+            json!({"type":"end_step","case_id":case.id,"step_id":format!("{}:L{}",case.id,step.line),"status":if result.is_ok(){"passed"}else{"failed"},"message":result.as_ref().err().map(|e|format!("{e:#}"))}),
         )?;
         result.with_context(|| format!("TUI step at line {}", step.line))?;
-        if capture_viewport && let Some(session) = terminal.as_ref() {
-            std::fs::create_dir_all(artifacts)?;
-            std::fs::write(
-                artifacts.join(format!("step-{}.screen.txt", step.line)),
-                session.screen()?,
-            )?;
+        if let Some(session) = terminal.as_ref() {
+            let compatibility = (|| -> Result<()> {
+                std::fs::create_dir_all(artifacts)?;
+                std::fs::write(
+                    artifacts.join(format!("step-{}.screen.txt", step.line)),
+                    session.screen()?,
+                )?;
+                Ok(())
+            })();
+            if let Err(error) = compatibility {
+                emit(
+                    out,
+                    json!({"type":"artifact_error","case_id":case.id,"step_id":format!("{}:L{}",case.id,step.line),"message":error.to_string()}),
+                )?;
+            }
         }
     }
     if let Some(session) = terminal.take() {
@@ -571,6 +704,32 @@ fn execute(
 /// # Errors
 /// Returns errors for invalid requests or failed event/artifact I/O.
 pub fn run(request: Request, out: &mut impl Write) -> Result<usize> {
+    let root = request
+        .meta
+        .get("project_root")
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
+    if let Some(directory) = request.meta.get("evidence_run_directory") {
+        let directory = PathBuf::from(directory).canonicalize()?;
+        let managed = root.join(".teshi/logs/replay-screenshots").canonicalize()?;
+        anyhow::ensure!(
+            directory.parent() == Some(managed.as_path()),
+            "external evidence directory escaped project"
+        );
+        return run_inner(request, out, &directory);
+    }
+    let run = teshi_replay_evidence::ReplayEvidenceRun::create(&root)?;
+    let directory = run.directory().to_path_buf();
+    let mut output = EvidenceOutput {
+        out,
+        run,
+        pending: Vec::new(),
+    };
+    let failed = run_inner(request, &mut output, &directory)?;
+    Ok(failed.max(usize::from(!output.run.snapshot().evidence.complete())))
+}
+
+fn run_inner(request: Request, out: &mut impl Write, run_directory: &Path) -> Result<usize> {
     if request.command != "run" {
         bail!("expected command run");
     }
@@ -591,7 +750,7 @@ pub fn run(request: Request, out: &mut impl Write) -> Result<usize> {
     for case in &request.cases {
         emit(
             out,
-            json!({"type":"start_case","case_id":case.id,"name":case.scenario}),
+            json!({"type":"start_case","case_id":case.id,"name":case.scenario,"feature":case.feature_path}),
         )?;
         let start = Instant::now();
         let mut terminal = None;
@@ -599,6 +758,19 @@ pub fn run(request: Request, out: &mut impl Write) -> Result<usize> {
         let result = (|| -> Result<()> {
             let plans = example_plans(case, &root)?;
             let mut errors = Vec::new();
+            for row in &plans {
+                let execution_id = row.line.map_or_else(
+                    || case.id.clone(),
+                    |line| format!("{}:example-{line}", case.id),
+                );
+                for step in &row.steps {
+                    emit(
+                        out,
+                        json!({"type":"planned_step","case_id":execution_id,"step_id":format!("{execution_id}:L{}",step.line),
+                        "feature":case.feature_path,"step_line":step.line,"text":step.text,"example_line":row.line,"screenshot_required":true}),
+                    )?;
+                }
+            }
             for row in plans {
                 if let Some(line) = row.line {
                     emit(
@@ -621,7 +793,20 @@ pub fn run(request: Request, out: &mut impl Write) -> Result<usize> {
                     row.line
                         .map_or_else(|| "case".into(), |line| format!("example-{line}")),
                 );
-                let result = execute(case, &root, row.steps, &mut terminal, out, &row_artifacts);
+                let mut execution_case = case.clone();
+                execution_case.id = row.line.map_or_else(
+                    || case.id.clone(),
+                    |line| format!("{}:example-{line}", case.id),
+                );
+                let result = execute(
+                    &execution_case,
+                    &root,
+                    row.steps,
+                    &mut terminal,
+                    out,
+                    &row_artifacts,
+                    run_directory,
+                );
                 let mut attachments = Vec::new();
                 if let Err(error) = &result {
                     if let Some(session) = &terminal {

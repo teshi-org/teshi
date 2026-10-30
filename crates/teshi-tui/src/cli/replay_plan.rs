@@ -1,24 +1,33 @@
-//! Native replay coverage is derived from source, never from the binding subset.
+//! Replay coverage is derived from source, never from the binding subset.
 
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::{collections::HashMap, fs, path::Path};
 use teshi_core::{gherkin::ScenarioKind, locator::StepBinding};
 
-pub(super) struct PlannedStep {
+pub(crate) struct PlannedStep {
     pub binding: StepBinding,
     pub case_id: String,
     pub scenario: String,
     pub step_id: String,
 }
 
-pub(super) struct ReplayPlan {
+pub(crate) struct ReplayPlan {
     pub steps: Vec<PlannedStep>,
     pub gaps: Vec<Value>,
     pub omitted: usize,
 }
 
-pub(super) fn build(project: &Path, feature: &str, until: Option<usize>) -> Result<ReplayPlan> {
+pub(crate) fn build(project: &Path, feature: &str, until: Option<usize>) -> Result<ReplayPlan> {
+    build_selected(project, feature, until, None)
+}
+
+pub(crate) fn build_selected(
+    project: &Path,
+    feature: &str,
+    until: Option<usize>,
+    selected_scenario: Option<&str>,
+) -> Result<ReplayPlan> {
     let path = project.join(feature);
     let source = fs::read_to_string(&path)?;
     let parsed = teshi_core::parse_feature(&source, path);
@@ -29,7 +38,17 @@ pub(super) fn build(project: &Path, feature: &str, until: Option<usize>) -> Resu
         gaps: Vec::new(),
         omitted: 0,
     };
-    for scenario in parsed.all_scenarios() {
+    let scenarios = parsed.all_scenarios();
+    if let Some(name) = selected_scenario {
+        anyhow::ensure!(
+            scenarios.iter().filter(|s| s.name == name).count() == 1,
+            "scenario name must match exactly one scenario: {name}"
+        );
+    }
+    for scenario in scenarios
+        .into_iter()
+        .filter(|s| selected_scenario.is_none_or(|name| s.name == name))
+    {
         let rule = parsed.rules.iter().find(|rule| {
             rule.scenarios
                 .iter()

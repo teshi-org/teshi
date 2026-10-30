@@ -103,6 +103,36 @@ Ctrl+7, Ctrl+underscore, and Ctrl+Shift+minus.
 | `p` | Show/hide the AI panel |
 | Enter | Focus the visible AI panel |
 | `o` | Open the scenario-location dropdown |
+| `i` | Toggle the replay screenshot viewer |
+
+The screenshot viewer shows the captures recorded for the selected scenario by
+the newest replay run that has them. `j/k` switch between steps. `+`/`=` and
+`-` zoom, `1` selects 100 percent, and `0`/`f` resets to fit. In a zoomed view,
+arrow keys pan through original pixels; `h/l` also pan horizontally. In fit
+view, Up/Down retain step navigation. `o` opens the original in the system
+viewer, and `i` or Esc closes it, including while an image is loading.
+Loading and encoding run in the background; the title distinguishes loading
+from incremental pixel output. See [screenshot viewing](tui-image-viewer.md)
+for limits and validation.
+Terminals without an image protocol (kitty, sixel or iTerm2) show the capture
+path instead of the picture; `o` still works there.
+
+Windows Terminal 1.22+ supports Sixel. On Windows, Teshi queries device
+attributes through the console before starting its input reader. Sixel does
+not require a font-size reply; Windows Terminal uses a 10 by 20 virtual pixel
+grid per cell. `WT_SESSION` alone does not establish graphics support.
+`NO_COLOR`, `TERM=dumb`, `TESHI_NO_IMAGE`, and the BDD harness disable automatic
+graphics detection. The viewer displays the reason. For troubleshooting on a
+terminal with known support, set `TESHI_IMAGE_PROTOCOL=sixel` (or `kitty` or
+`iterm2`) before launching; `none` disables images explicitly.
+Forcing a protocol does not bypass a multiplexer or console backend that
+filters images. Native Windows Zellij launches show an explicit compatibility
+hint; a direct Windows Terminal session is a separate acceptance target.
+
+Tree nodes whose scenario has captures end with `●N`, where N is the number of
+step images in the newest run; the marker is refreshed when the tab is opened
+and whenever the viewer opens. Selecting a scenario without captures lists the
+other scenarios in the project that have them.
 
 The tree is display-only. Its AI panel uses the chat Normal/Input rules below.
 Esc from the panel's Normal mode returns focus to the tree; Esc from its input

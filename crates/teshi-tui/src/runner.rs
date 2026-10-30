@@ -432,10 +432,67 @@ pub fn spawn_teshi_dispatch_with_control(
 
 fn run_child(
     config: RunnerConfig,
-    request: RunRequest,
+    mut request: RunRequest,
     tx: Sender<RunEvent>,
     cancel_rx: Receiver<()>,
 ) -> Result<()> {
+    let root = request
+        .meta
+        .get("project_root")
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
+    let mut evidence = teshi_engine::replay_evidence::ReplayEvidenceRun::create(&root)?;
+    let directory = evidence.directory().to_path_buf();
+    request.meta.insert(
+        "evidence_run_directory".into(),
+        directory.to_string_lossy().into_owned(),
+    );
+    evidence.record(serde_json::json!({"type":"runner_command","command":config.cmd,"args":config.args,"cwd":config.cwd}))?;
+    let mut nonvisual = std::collections::HashSet::new();
+    for case in &request.cases {
+        let path = if Path::new(&case.feature_path).is_absolute() {
+            PathBuf::from(&case.feature_path)
+        } else {
+            root.join(&case.feature_path)
+        };
+        if let Ok(source) = std::fs::read_to_string(&path) {
+            let feature = teshi_core::parse_feature(&source, path);
+            if let Some(scenario) = feature
+                .all_scenarios()
+                .into_iter()
+                .find(|s| s.name == case.scenario)
+            {
+                let nonvisual_case =
+                    request
+                        .meta
+                        .get("runner_mode")
+                        .is_some_and(|mode| mode == "cli")
+                        || feature.tags.iter().chain(&scenario.tags).any(|tag| {
+                            matches!(tag.trim_start_matches('@'), "cli" | "logic" | "unit")
+                        })
+                        || matches!(
+                            teshi_core::scenario_engine_mode(&feature, scenario),
+                            teshi_core::EngineMode::Api
+                        );
+                if nonvisual_case {
+                    nonvisual.insert(case.id.clone());
+                }
+                // Specialized TUI runners expand Examples and publish their own plan.
+                if !Path::new(&case.feature_path)
+                    .with_extension("tui.json")
+                    .is_file()
+                {
+                    for step in teshi_core::scenario_steps(&feature, scenario) {
+                        evidence.record(serde_json::json!({"type":"planned_step","case_id":case.id,"step_id":format!("{}:L{}",case.id,step.line_number),
+                            "step_line":step.line_number,"feature":case.feature_path,"screenshot_required":!nonvisual_case}))?;
+                    }
+                }
+            }
+        }
+    }
+    let stdout_file = std::fs::File::create(directory.join("stdout.ndjson"))?;
+    let stderr_file = std::fs::File::create(directory.join("stderr.txt"))?;
+    let evidence = std::sync::Arc::new(std::sync::Mutex::new(evidence));
     let mut cmd = Command::new(&config.cmd);
     cmd.args(&config.args)
         .stdin(Stdio::piped())
@@ -466,9 +523,27 @@ fn run_child(
 
     let stderr_thread = if let Some(stderr) = child.stderr.take() {
         let tx_err = tx.clone();
+        let evidence = evidence.clone();
         Some(thread::spawn(move || {
+            let mut saved = stderr_file;
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
+                if let Err(error) = writeln!(saved, "{line}") {
+                    let _ = tx_err.send(RunEvent::RunnerError {
+                        message: error.to_string(),
+                    });
+                }
+                let recorded = evidence
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("evidence writer poisoned"))
+                    .and_then(|mut run| {
+                        run.record(serde_json::json!({"type":"stderr","message":line}))
+                    });
+                if let Err(error) = recorded {
+                    let _ = tx_err.send(RunEvent::RunnerError {
+                        message: error.to_string(),
+                    });
+                }
                 let _ = tx_err.send(RunEvent::Log {
                     case_id: None,
                     message: line,
@@ -481,9 +556,52 @@ fn run_child(
 
     let stdout_thread = if let Some(stdout) = child.stdout.take() {
         let tx_out = tx.clone();
+        let evidence = evidence.clone();
         Some(thread::spawn(move || {
+            let mut saved = stdout_file;
             let reader = BufReader::new(stdout);
             for line in reader.lines().map_while(Result::ok) {
+                if let Err(error) = writeln!(saved, "{line}") {
+                    let _ = tx_out.send(RunEvent::RunnerError {
+                        message: error.to_string(),
+                    });
+                }
+                let value = serde_json::from_str::<serde_json::Value>(&line)
+                    .unwrap_or_else(|_| serde_json::json!({"type":"stdout","message":line}));
+                if let Ok(mut run) = evidence.lock() {
+                    let mut value = value;
+                    if value["step_id"].is_null()
+                        && let Some(line) = value["step_line"].as_u64()
+                        && let Some(case) = value["case_id"].as_str()
+                    {
+                        value["step_id"] = serde_json::json!(format!("{case}:L{line}"));
+                    }
+                    if value["case_id"]
+                        .as_str()
+                        .is_some_and(|id| nonvisual.contains(id))
+                    {
+                        value["screenshot_required"] = serde_json::json!(false);
+                        if value["type"] == "end_step" {
+                            let mut capture = value.clone();
+                            capture["type"] = serde_json::json!("step_screenshot");
+                            capture["capture_status"] = serde_json::json!("not_applicable");
+                            capture["source"] = serde_json::json!("cli");
+                            capture["message"] = serde_json::json!(
+                                "nonvisual_step; see stdout.ndjson, stderr.txt and assertion events"
+                            );
+                            if let Err(error) = run.record(capture) {
+                                let _ = tx_out.send(RunEvent::RunnerError {
+                                    message: error.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    if let Err(error) = run.record(value) {
+                        let _ = tx_out.send(RunEvent::RunnerError {
+                            message: error.to_string(),
+                        });
+                    }
+                }
                 if let Some(event) = parse_event_line(&line) {
                     let _ = tx_out.send(event);
                 }
@@ -522,8 +640,27 @@ fn run_child(
     if let Some(handle) = stderr_thread {
         let _ = handle.join();
     }
+    let mut run = evidence
+        .lock()
+        .map_err(|_| anyhow::anyhow!("evidence writer poisoned"))?;
+    run.record(serde_json::json!({"type":"runner_exit","exit_code":status.code(),"stdout_file":"stdout.ndjson","stderr_file":"stderr.txt"}))?;
+    if run.snapshot().test_status == "running" {
+        run.record(serde_json::json!({"type":"end_run","status":"interrupted","reason":"runner_exited_without_completion"}))?;
+    }
+    let accepted = run.snapshot().acceptance_status == "passed";
+    if status.success() && !accepted {
+        let _ = tx.send(RunEvent::RunnerError {
+            message: format!(
+                "Replay acceptance {} (tests: {}, evidence: {:?}); run {}",
+                run.snapshot().acceptance_status,
+                run.snapshot().test_status,
+                run.snapshot().evidence,
+                run.id()
+            ),
+        });
+    }
     let code = status.code();
-    let success = status.success();
+    let success = status.success() && accepted;
     let _ = tx.send(RunEvent::RunnerExit { code, success });
     Ok(())
 }
@@ -1297,12 +1434,28 @@ fn format_event(event: &RunEvent) -> String {
 
 fn drain_dispatch_events(project_root: &Path, cases: Vec<RunCase>) -> Result<()> {
     let rx = spawn_teshi_dispatch(project_root.to_path_buf(), cases)?;
+    let mut failed = false;
+    let mut completed = false;
     while let Ok(event) = rx.recv() {
         println!("{}", format_event(&event));
+        failed |= matches!(
+            &event,
+            RunEvent::CaseFailed { .. }
+                | RunEvent::RunnerError { .. }
+                | RunEvent::RunnerExit { success: false, .. }
+        );
+        if let RunEvent::EndRun { failed: count, .. } = &event {
+            failed |= *count > 0;
+        }
         if matches!(event, RunEvent::RunnerExit { .. }) {
+            completed = true;
             break;
         }
     }
+    anyhow::ensure!(
+        completed && !failed,
+        "replay execution or evidence acceptance failed"
+    );
     Ok(())
 }
 
@@ -1418,7 +1571,10 @@ mod tests {
         let event = rx
             .recv_timeout(Duration::from_secs(3))
             .expect("quiet child should acknowledge cancellation");
-        assert!(matches!(event, RunEvent::RunnerExit { success: false, .. }));
+        assert!(
+            matches!(event, RunEvent::RunnerExit { success: false, .. }),
+            "unexpected cancellation event: {event:?}"
+        );
     }
 
     #[test]
@@ -1478,5 +1634,91 @@ mod tests {
         assert_eq!(collector.report.cases[0].steps[0].status, "passed");
         assert_eq!(collector.report.cases[0].attachments[0].path, "screen.txt");
         assert_eq!(collector.report.cases[1].status, "blocked");
+    }
+}
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+
+    #[test]
+    fn evidence_runner_child() {
+        if std::env::var_os("TESHI_EVIDENCE_RUNNER_CHILD").is_none() {
+            return;
+        }
+        println!(
+            "{}",
+            serde_json::json!({"type":"end_step","case_id":"case","step_id":"case:L3","status":"passed"})
+        );
+        println!(
+            "{}",
+            serde_json::json!({"type":"end_run","passed":1,"failed":0,"skipped":0})
+        );
+    }
+
+    #[test]
+    fn external_runner_preserves_cli_output_and_blocks_visual_missing_evidence() {
+        for nonvisual in [true, false] {
+            let project = tempfile::tempdir().unwrap();
+            std::fs::write(
+                project.path().join("case.feature"),
+                "Feature: Evidence\n  Scenario: Output\n    Then output exists\n",
+            )
+            .unwrap();
+            let config = RunnerConfig {
+                cmd: std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                args: vec![
+                    "--exact".into(),
+                    "runner::evidence_tests::evidence_runner_child".into(),
+                    "--nocapture".into(),
+                ],
+                cwd: None,
+                env: HashMap::from([("TESHI_EVIDENCE_RUNNER_CHILD".into(), "1".into())]),
+            };
+            let mut meta = HashMap::from([(
+                "project_root".into(),
+                project.path().to_string_lossy().into_owned(),
+            )]);
+            if nonvisual {
+                meta.insert("runner_mode".into(), "cli".into());
+            }
+            let request = RunRequest {
+                command: "run".into(),
+                cases: vec![RunCase {
+                    id: "case".into(),
+                    feature_path: "case.feature".into(),
+                    scenario: "Output".into(),
+                    line_number: None,
+                    until_line: None,
+                }],
+                meta,
+            };
+            let (tx, rx) = mpsc::channel();
+            let (_cancel, cancel_rx) = mpsc::channel();
+            run_child(config, request, tx, cancel_rx).unwrap();
+            let events: Vec<_> = rx.try_iter().collect();
+            assert!(events.iter().any(
+                |event| matches!(event,RunEvent::RunnerExit{success,..} if *success==nonvisual)
+            ));
+            let runs = teshi_engine::replay_evidence::list_replay_runs(project.path()).unwrap();
+            assert_eq!(runs[0].test_status, "passed");
+            assert_eq!(
+                runs[0].status,
+                if nonvisual { "passed" } else { "incomplete" }
+            );
+            let directory = project
+                .path()
+                .join(".teshi/logs/replay-screenshots")
+                .join(&runs[0].id);
+            assert!(
+                std::fs::read_to_string(directory.join("stdout.ndjson"))
+                    .unwrap()
+                    .contains("end_step")
+            );
+            assert!(directory.join("stderr.txt").is_file());
+        }
     }
 }

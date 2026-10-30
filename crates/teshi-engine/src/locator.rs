@@ -334,6 +334,7 @@ fn binding_from_candidate(step: &ActiveStep, candidate: &LocatorCandidate) -> St
         source: "binding".to_string(),
         status: "confirmed".to_string(),
         primary: LocatorPrimary {
+            capture_before: false,
             strategy: candidate.strategy.clone(),
             value: candidate.value.clone(),
             action: candidate.action.clone(),

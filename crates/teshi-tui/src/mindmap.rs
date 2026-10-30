@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::{highlight, theme};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Text as TuiText;
+use ratatui::text::{Span, Text as TuiText};
 use tui_tree_widget::TreeItem;
 
 // ── Re-exports from core ──────────────────────────────────────────────
@@ -91,6 +91,8 @@ pub struct MindMapIndex {
     pub inner: teshi_core::mindmap::MindMapIndex,
     pub items: Vec<TreeItem<'static, String>>,
     base_styles: HashMap<String, Style>,
+    /// Captures per `(feature index, scenario index)` for the tree marker.
+    captured_scenarios: HashMap<(usize, usize), usize>,
 }
 
 impl std::ops::Deref for MindMapIndex {
@@ -113,7 +115,20 @@ impl MindMapIndex {
             inner,
             items: Vec::new(),
             base_styles: HashMap::new(),
+            captured_scenarios: HashMap::new(),
         }
+    }
+
+    /// Records which scenarios have saved captures and rebuilds tree items.
+    ///
+    /// Nodes belonging to a captured scenario gain a `●N` marker showing how
+    /// many step images the newest run holds.
+    pub fn set_captured_scenarios(&mut self, captured: HashMap<(usize, usize), usize>) {
+        if self.captured_scenarios == captured {
+            return;
+        }
+        self.captured_scenarios = captured;
+        self.rebuild_items();
     }
 
     // ── Highlight methods ──────────────────────────────────────────
@@ -181,6 +196,7 @@ impl MindMapIndex {
             label_colors: &label_colors,
             node_categories: &inner.node_categories,
             base_styles: &self.base_styles,
+            captured: &self.captured_scenarios,
             filter: &inner.filter,
             parent_map: &mut inner.parent_map,
             children_map: &mut inner.children_map,
@@ -220,6 +236,7 @@ struct BuildItemsCtx<'a> {
     label_colors: &'a HashMap<String, Color>,
     node_categories: &'a HashMap<String, HighlightCategory>,
     base_styles: &'a HashMap<String, Style>,
+    captured: &'a HashMap<(usize, usize), usize>,
     filter: &'a Option<MindMapFilter>,
     parent_map: &'a mut HashMap<String, String>,
     children_map: &'a mut HashMap<String, Vec<String>>,
@@ -257,6 +274,17 @@ fn build_items(
         ctx.arena[node_idx].label.clone()
     };
     ctx.node_labels.insert(id.clone(), label.clone());
+    let captures = ctx.arena[node_idx]
+        .locations
+        .iter()
+        .filter_map(|loc| match loc.context {
+            LocationContext::Scenario(index) => {
+                ctx.captured.get(&(loc.feature_idx, index)).copied()
+            }
+            LocationContext::Background => None,
+        })
+        .max()
+        .unwrap_or(0);
 
     let mut children: Vec<TreeItem<'static, String>> = Vec::new();
     for &child_idx in &ctx.arena[node_idx].children {
@@ -275,30 +303,33 @@ fn build_items(
     }
 
     // Apply semantic styling based on node category
-    let label_text = if let Some(&color) = ctx.label_colors.get(&id) {
-        TuiText::styled(label, Style::default().fg(color))
+    let style = if let Some(&color) = ctx.label_colors.get(&id) {
+        Style::default().fg(color)
     } else {
         match ctx.node_categories.get(&id) {
             Some(HighlightCategory::Selected) => {
-                TuiText::styled(label, ctx.base_styles.get(&id).copied().unwrap_or_default())
+                ctx.base_styles.get(&id).copied().unwrap_or_default()
             }
-            Some(HighlightCategory::Ancestor) => {
-                TuiText::styled(label, Style::default().fg(theme::PRIMARY))
-            }
-            Some(HighlightCategory::Descendant) => {
-                TuiText::styled(label, Style::default().fg(theme::SUCCESS))
-            }
+            Some(HighlightCategory::Ancestor) => Style::default().fg(theme::PRIMARY),
+            Some(HighlightCategory::Descendant) => Style::default().fg(theme::SUCCESS),
             Some(HighlightCategory::Sibling) | None => {
-                TuiText::styled(label, ctx.base_styles.get(&id).copied().unwrap_or_default())
+                ctx.base_styles.get(&id).copied().unwrap_or_default()
             }
-            Some(HighlightCategory::GrayedOut) => TuiText::styled(
-                label,
-                Style::default()
-                    .fg(theme::MUTED)
-                    .add_modifier(Modifier::DIM),
-            ),
+            Some(HighlightCategory::GrayedOut) => Style::default()
+                .fg(theme::MUTED)
+                .add_modifier(Modifier::DIM),
         }
     };
+    let mut spans = vec![Span::styled(label, style)];
+    if captures > 0 {
+        spans.push(Span::styled(
+            format!(" ●{captures}"),
+            Style::default()
+                .fg(theme::SUCCESS)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
+    let label_text = TuiText::from(ratatui::text::Line::from(spans));
 
     TreeItem::new(id, label_text, children).ok()
 }
@@ -343,6 +374,7 @@ pub fn selected_node_context(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     use super::{MindMapIndex, build_index, init_tree_state, selected_node_context};
@@ -442,5 +474,39 @@ Feature: F
         assert_eq!(ctx.step_text, ".", "root label is the project dir name");
         assert_eq!(ctx.path_labels, &["."], "root path is just the root label");
         assert_eq!(ctx.location_count, 0, "root has no source locations");
+    }
+
+    #[test]
+    fn captured_scenarios_mark_tree_labels() {
+        let project = sample_project();
+        let mut index = build_tui_index(&project);
+        let _ = init_tree_state(&mut index);
+        assert!(
+            !format!("{:?}", index.items).contains('●'),
+            "no marker without captures"
+        );
+
+        index.set_captured_scenarios(HashMap::from([((0usize, 0usize), 3usize)]));
+
+        assert!(
+            format!("{:?}", index.items).contains("●3"),
+            "marker missing: {:?}",
+            index.items
+        );
+        // Labels stay plain so filters and AI context never see the marker.
+        assert!(index.node_labels.values().any(|label| label == "a"));
+    }
+
+    #[test]
+    fn clearing_captures_removes_the_marker() {
+        let project = sample_project();
+        let mut index = build_tui_index(&project);
+        let _ = init_tree_state(&mut index);
+        index.set_captured_scenarios(HashMap::from([((0usize, 0usize), 1usize)]));
+        assert!(format!("{:?}", index.items).contains("●1"));
+
+        index.set_captured_scenarios(HashMap::new());
+
+        assert!(!format!("{:?}", index.items).contains('●'));
     }
 }

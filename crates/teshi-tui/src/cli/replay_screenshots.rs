@@ -25,12 +25,20 @@ pub fn create_cli_replay(
 pub struct CliReplayStep<'a> {
     /// Source Feature path relative to the project.
     pub feature: &'a str,
+    /// Expanded case, execution step and scenario identities.
+    pub identity: Option<(&'a str, &'a str, &'a str)>,
     /// Source step line, keyword, and text.
     pub source: (usize, &'a str, &'a str),
     /// Whether executing the step succeeded.
     pub passed: bool,
+    /// Original backend execution response, kept independently of capture errors.
+    pub response: Option<&'a serde_json::Value>,
     /// Whether the selected backend supports screenshots.
     pub capture_supported: bool,
+    /// Original capture error, including backend codes.
+    pub capture_error: Option<&'a str>,
+    /// Whether the image was captured before a teardown action.
+    pub before_close: bool,
 }
 
 /// Persist the capture outcome independently from the step execution outcome.
@@ -45,12 +53,17 @@ pub fn record_cli_step(
 ) -> Result<()> {
     let CliReplayStep {
         feature,
+        identity,
         source: (line, keyword, text),
         passed,
+        response,
         capture_supported: supported,
+        capture_error,
+        before_close,
     } = step;
-    let step_id = format!("replay:L{line}");
-    let mut event = json!({"type":"step_screenshot", "case_id":"replay", "step_id":step_id,
+    let fallback = format!("replay:L{line}");
+    let (case_id, step_id, scenario) = identity.unwrap_or(("replay", &fallback, ""));
+    let mut event = json!({"type":"step_screenshot", "case_id":case_id, "step_id":step_id,
         "feature":feature, "step_line":line, "step_keyword":keyword, "step_text":text,
         "status":if passed {"passed"} else {"failed"},
         "capture_status":if entry.is_some() {"available"} else if supported {"failed"} else {"unsupported"}});
@@ -65,10 +78,25 @@ pub fn record_cli_step(
             event["scenario"] = json!(scenario.name);
         }
     }
+    if !scenario.is_empty() {
+        event["scenario"] = json!(scenario);
+    }
     if let Some(entry) = entry {
         event["screenshot_file"] = json!(entry.screenshot_file);
         event["captured_at"] = json!(entry.captured_at);
     }
+    event["message"] = json!(capture_error.or(if !supported {
+        Some("broker_capability_unavailable")
+    } else {
+        None
+    }));
+    event["execution_response"] = json!(response);
+    event["source"] = json!("web_page");
+    event["capture_timing"] = json!(if before_close {
+        "before_close"
+    } else {
+        "after_step"
+    });
     run.record(event)?;
     let mut index = load_or_create_index(run.directory(), feature);
     index.feature = feature.to_string();
@@ -128,6 +156,7 @@ pub fn capture_and_save_screenshot(
     )
     .map_err(|e| anyhow!("screenshot WebSocket command failed: {e}"))?;
 
+    anyhow::ensure!(response["ok"] != false, "capture rejected: {}", response);
     let b64 = response
         .get("screenshot")
         .and_then(|v| v.as_str())
@@ -173,20 +202,55 @@ pub fn save_screenshot_from_artifact(
     )
 }
 
-/// Reads the managed artifact path from a `capture_browser_screenshot` payload.
+/// Resolves a screenshot's broker-generated filename inside this project's
+/// managed browser artifact directory, independently of the process directory.
 ///
 /// # Errors
 ///
-/// Returns an error when `artifact.path` is missing or empty.
-pub fn artifact_path_from_screenshot_payload(payload: &serde_json::Value) -> Result<PathBuf> {
-    let path = payload
+/// Returns an error for missing/unmanaged artifacts, unsafe filenames, unreadable
+/// files, or paths that resolve outside the project's managed directory.
+pub fn artifact_path_from_screenshot_payload(
+    project_root: &Path,
+    payload: &serde_json::Value,
+) -> Result<PathBuf> {
+    let filename = payload
         .get("artifact")
         .and_then(|artifact| artifact.get("path"))
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow!("screenshot response missing artifact.path"))?;
-    Ok(PathBuf::from(path))
+    anyhow::ensure!(
+        payload["artifact"]["managed"] == true,
+        "screenshot artifact is not managed"
+    );
+    anyhow::ensure!(
+        !matches!(filename, "." | "..")
+            && filename
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')),
+        "screenshot artifact.path must be a managed filename"
+    );
+    let project = project_root
+        .canonicalize()
+        .context("resolve screenshot project")?;
+    let managed = project
+        .join(".teshi/artifacts/browser")
+        .canonicalize()
+        .context("resolve managed browser artifact directory")?;
+    anyhow::ensure!(
+        managed.starts_with(&project),
+        "browser artifact directory escaped project"
+    );
+    let path = managed
+        .join(filename)
+        .canonicalize()
+        .context("resolve screenshot artifact")?;
+    anyhow::ensure!(
+        path.parent() == Some(managed.as_path()) && path.is_file(),
+        "screenshot artifact escaped its managed directory"
+    );
+    Ok(path)
 }
 
 /// Writes JPEG bytes into the replay screenshot directory and returns an index entry.
@@ -273,24 +337,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn artifact_path_from_screenshot_payload_reads_managed_path() {
+    fn artifact_path_from_screenshot_payload_resolves_project_managed_filename() {
+        let project = tempfile::tempdir().unwrap();
+        let managed = project.path().join(".teshi/artifacts/browser");
+        fs::create_dir_all(&managed).unwrap();
+        fs::write(managed.join("shot.jpeg"), b"captured-image").unwrap();
         let payload = json!({
             "ok": true,
             "operation": "capture_browser_screenshot",
             "artifact": {
-                "path": "D:\\\\tmp\\\\shot.jpg",
-                "format": "jpeg"
+                "path": "shot.jpeg",
+                "format": "jpeg",
+                "managed": true
             }
         });
-        let path = artifact_path_from_screenshot_payload(&payload).unwrap();
-        // Sidecar payloads use Windows paths; PathBuf::ends_with is separator-sensitive.
-        assert!(path.to_string_lossy().ends_with("shot.jpg"), "{path:?}");
+        let path = artifact_path_from_screenshot_payload(project.path(), &payload).unwrap();
+        assert_eq!(path, managed.join("shot.jpeg").canonicalize().unwrap());
+        let replay = project.path().join("replay");
+        let entry =
+            save_screenshot_from_artifact(&path, "review", 3, "Then", "ready", &replay).unwrap();
+        assert_eq!(
+            fs::read(replay.join(entry.screenshot_file)).unwrap(),
+            b"captured-image"
+        );
     }
 
     #[test]
     fn artifact_path_from_screenshot_payload_rejects_missing_path() {
-        let err = artifact_path_from_screenshot_payload(&json!({"ok": true})).unwrap_err();
+        let err = artifact_path_from_screenshot_payload(Path::new("."), &json!({"ok": true}))
+            .unwrap_err();
         assert!(err.to_string().contains("artifact.path"));
+    }
+
+    #[test]
+    fn screenshot_artifact_rejects_unmanaged_and_non_filename_paths() {
+        for filename in [
+            ".",
+            "..",
+            "../shot.jpeg",
+            "folder/shot.jpeg",
+            "folder\\shot.jpeg",
+            "/shot.jpeg",
+            "C:\\shot.jpeg",
+            "shot.jpeg:stream",
+        ] {
+            let payload = json!({"artifact":{"path":filename,"managed":true}});
+            let error =
+                artifact_path_from_screenshot_payload(Path::new("."), &payload).unwrap_err();
+            assert!(
+                error.to_string().contains("managed filename"),
+                "{filename}: {error}"
+            );
+        }
+        let payload = json!({"artifact":{"path":"shot.jpeg","managed":false}});
+        let error = artifact_path_from_screenshot_payload(Path::new("."), &payload).unwrap_err();
+        assert!(error.to_string().contains("not managed"));
     }
 
     #[test]
@@ -343,16 +444,27 @@ mod tests {
         )
         .unwrap();
         let mut run = create_cli_replay(project.path(), "review.feature", Some("Capture")).unwrap();
-        let entry =
-            save_jpeg_bytes(b"fixture", "review", 3, "Given", "ready", run.directory()).unwrap();
+        let entry = {
+            let bytes: &[u8] = &[
+                137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0,
+                1, 8, 2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 96,
+                96, 96, 0, 0, 0, 4, 0, 1, 246, 23, 56, 85, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96,
+                130,
+            ];
+            save_jpeg_bytes(bytes, "review", 3, "Given", "ready", run.directory()).unwrap()
+        };
         record_cli_step(
             &mut run,
             project.path(),
             CliReplayStep {
                 feature: "review.feature",
+                identity: None,
                 source: (3, "Given", "ready"),
                 passed: true,
+                response: None,
                 capture_supported: true,
+                capture_error: None,
+                before_close: false,
             },
             Some(&entry),
         )
@@ -362,9 +474,13 @@ mod tests {
             project.path(),
             CliReplayStep {
                 feature: "review.feature",
+                identity: None,
                 source: (4, "Then", "missing"),
                 passed: false,
+                response: None,
                 capture_supported: true,
+                capture_error: None,
+                before_close: false,
             },
             None,
         )

@@ -17,6 +17,7 @@ pub mod markdown;
 pub mod mindmap;
 pub mod project_settings;
 pub mod render;
+pub mod replay_evidence;
 pub mod step_index;
 pub mod validation;
 pub mod venv;

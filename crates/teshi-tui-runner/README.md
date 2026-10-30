@@ -1,5 +1,16 @@
 # Teshi TUI runner
 
+## Screenshot viewer acceptance
+
+`teshi-image-feature-runner` binds the paired screenshot viewer Features to
+owned real PTYs. It exercises an 8192 by 4096 input, close during preparation,
+100 percent viewing, pan, zoom, resize/reset, superseded work, decoded-image
+limits, and unavailable terminal graphics. It preserves pass/fail step events,
+viewports, executable identities and latency observations under
+`.teshi/tui-results/images` or `TESHI_FEATURE_ARTIFACTS`.
+See [the viewer guide](../../doc/tui-image-viewer.md) for commands and the
+separate terminal-pixel acceptance boundary.
+
 ## ACP model preference acceptance
 
 `teshi-acp-model-feature-runner` binds the paired

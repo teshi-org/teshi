@@ -53,6 +53,9 @@ pub struct PendingLocator {
 /// Persisted executable locator for one confirmed Gherkin step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocatorPrimary {
+    /// Capture before an invocation that closes its target viewport.
+    #[serde(default)]
+    pub capture_before: bool,
     pub strategy: String,
     pub value: String,
     pub action: String,
