@@ -695,7 +695,7 @@ fn render_tree_pointer_feedback(frame: &mut Frame<'_>, app: &mut App) {
         if area.contains((x, y).into()) && offset + usize::from(y - area.y) < count {
             frame.buffer_mut().set_style(
                 Rect::new(area.x, y, area.width, 1),
-                Style::default().add_modifier(Modifier::UNDERLINED),
+                Style::default().bg(theme::HOVER_BG),
             );
         }
     }
@@ -767,9 +767,7 @@ fn render_pointer_feedback(frame: &mut Frame<'_>, app: &App) {
             let visible = rect.intersection(frame.area());
             frame.buffer_mut().set_style(
                 visible,
-                Style::default()
-                    .add_modifier(Modifier::UNDERLINED)
-                    .bg(theme::FOOTER_BG),
+                Style::default().bg(theme::HOVER_BG),
             );
             break;
         }
