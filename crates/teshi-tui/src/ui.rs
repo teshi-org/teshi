@@ -1170,17 +1170,17 @@ fn render_explore_features(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     let status = if *deleted {
                         app.git_status.deleted[*index].file_status
                     } else {
-                        let current_index = if let Some(catalog) = &app.lazy_features {
-                            app.project.features.iter().position(|feature| {
-                                catalog.paths.get(*index) == Some(&feature.file_path)
-                            })
-                        } else {
-                            Some(*index)
+                        let path = match &app.lazy_features {
+                            Some(catalog) => catalog.paths.get(*index),
+                            None => app
+                                .project
+                                .features
+                                .get(*index)
+                                .map(|feature| &feature.file_path),
                         };
-                        current_index
-                            .and_then(|index| app.git_status.current_at(index))
-                            .map(|view| view.file_status)
-                            .unwrap_or_default()
+                        path.map_or(teshi_core::git::FileGitStatus::Unmodified, |path| {
+                            app.git_status.file_status_at_path(path)
+                        })
                     };
                     return Line::from(vec![
                         Span::styled(
@@ -6006,6 +6006,54 @@ Feature: Rule only
             .collect::<String>();
         assert!(screen.contains("M  backup"), "screen was: {screen}");
         assert!(!screen.contains("backup.feature"), "screen was: {screen}");
+    }
+
+    #[test]
+    fn explore_feature_list_marks_rows_whose_ast_is_not_loaded() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let loaded = root.path().join("loaded.feature");
+        let other = root.path().join("other.feature");
+        let source = "Feature: Loaded\n  Scenario: S\n    Given a step\n";
+        std::fs::write(&loaded, source).expect("write Feature");
+        std::fs::write(&other, "Feature: Other\n  Scenario: S\n    Given a step\n")
+            .expect("write Feature");
+        let mut app = App::from_args().expect("app init");
+        app.active_tab = crate::app::MainTab::Explore;
+        app.explore_focus = crate::app::ColumnFocus::Feature;
+        app.project.root_dir = root.path().to_path_buf();
+        app.project.features = vec![gherkin::parse_feature(source, loaded.clone())];
+        let mut lazy = crate::lazy_features::LazyFeatures::new(root.path().to_path_buf(), true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !lazy.ready {
+            assert!(std::time::Instant::now() < deadline, "catalog scan stalled");
+            lazy.poll_catalog();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        lazy.selected = Some(loaded);
+        app.lazy_features = Some(lazy);
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            repository_root: Some(root.path().to_path_buf()),
+            statuses: std::collections::HashMap::from([(
+                "other.feature".into(),
+                teshi_core::git::FileGitStatus::Modified,
+            )]),
+            ..Default::default()
+        };
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("M  other"), "screen was: {screen}");
+        assert!(screen.contains("  loaded"), "screen was: {screen}");
     }
 
     #[test]

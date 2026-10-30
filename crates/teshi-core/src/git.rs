@@ -574,6 +574,12 @@ pub struct FeatureGitStatusModel {
     pub current: Vec<FeatureGitView>,
     /// HEAD-only deleted Feature files.
     pub deleted: Vec<FeatureGitView>,
+    /// Working-tree status of every path Git reported, keyed by the normalized
+    /// repository-relative path.
+    ///
+    /// Unlike `current`, this is not aligned with the loaded project Features,
+    /// so the Feature list can mark rows whose AST is not loaded.
+    pub statuses: HashMap<String, FileGitStatus>,
 }
 
 impl FeatureGitStatusModel {
@@ -586,6 +592,22 @@ impl FeatureGitStatusModel {
     /// Returns the current-file view at the same index as the project Feature.
     pub fn current_at(&self, index: usize) -> Option<&FeatureGitView> {
         self.current.get(index)
+    }
+
+    /// Returns the working-tree status of a Feature path, including paths whose
+    /// AST is not loaded while browsing a directory.
+    ///
+    /// Loaded Feature views win because they honor unsaved buffer contents.
+    pub fn file_status_at_path(&self, path: &Path) -> FileGitStatus {
+        if let Some(view) = self.current.iter().find(|view| view.path == path) {
+            return view.file_status;
+        }
+        let Some(root) = self.repository_root.as_deref() else {
+            return FileGitStatus::Unmodified;
+        };
+        repo_relative_path(root, path)
+            .and_then(|relative| self.statuses.get(&path_key(&relative)).copied())
+            .unwrap_or(FileGitStatus::Unmodified)
     }
 }
 
@@ -808,6 +830,7 @@ pub fn load_feature_git_status_with_repository_and_scope_and_content_overrides<R
             }
         }
     }
+    model.statuses = by_path;
     model
 }
 
@@ -1631,6 +1654,39 @@ mod tests {
         assert!(model.available);
         assert_eq!(model.current[0].file_status, FileGitStatus::Modified);
         assert_eq!(model.current[0].scenarios[0].status, DiffStatus::Modified);
+    }
+
+    #[test]
+    fn path_status_covers_features_outside_the_loaded_project() {
+        let root = PathBuf::from("/fixture");
+        let content = "Feature: Loaded\n  Scenario: S\n    Given a step\n";
+        let project = project(&root, content, "loaded.feature");
+        let repository = FakeRepository {
+            root: root.clone(),
+            entries: vec![
+                GitStatusEntry {
+                    path: PathBuf::from("loaded.feature"),
+                    status: FileGitStatus::Unmodified,
+                },
+                GitStatusEntry {
+                    path: PathBuf::from("other.feature"),
+                    status: FileGitStatus::Modified,
+                },
+            ],
+            diffs: HashMap::new(),
+            fail_status: Cell::new(false),
+        };
+        let model = load_feature_git_status_with_repository(&project, &repository);
+
+        assert_eq!(model.current.len(), 1);
+        assert_eq!(
+            model.file_status_at_path(&root.join("other.feature")),
+            FileGitStatus::Modified
+        );
+        assert_eq!(
+            model.file_status_at_path(&root.join("untracked.feature")),
+            FileGitStatus::Unmodified
+        );
     }
 
     #[test]

@@ -4640,10 +4640,16 @@ impl App {
         self.switch_to_buffer(0);
         // Keep the project scope discovered at startup; forcing current files
         // here would stop reporting Features deleted on disk.
+        // The repository snapshot stays until the new projection lands, so the
+        // Feature list keeps its markers instead of blanking on every selection.
+        let statuses = std::mem::take(&mut self.git_status.statuses);
+        let repository_root = self.git_status.repository_root.clone();
         self.git_status = teshi_core::git::FeatureGitStatusModel::empty_for_project(
             &self.project,
             self.git_status.scope,
         );
+        self.git_status.statuses = statuses;
+        self.git_status.repository_root = repository_root;
         self.bump_git_status_revision();
         self.rebuild_project_views(None);
         self.refresh_git_status();
