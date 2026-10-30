@@ -7,12 +7,14 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use tui_tree_widget::Tree;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, CaseDetail, ClickableRegion, ColumnFocus, MainTab, MindMapFocus, RunStatus};
+use crate::app::{
+    App, CaseDetail, ChangedStep, ClickableRegion, ColumnFocus, MainTab, MindMapFocus, RunStatus,
+};
 use crate::bdd_nav::{
     nav_body_char_range_in_buffer, row_is_in_background_block, structural_prefix_char_range,
 };
 use crate::highlight::{
-    StepHighlightState, highlight_line_with_state, leading_whitespace_chars,
+    StepHighlightState, highlight_line_with_state, kind_to_style, leading_whitespace_chars,
     step_keyword_gutter_pad, step_keyword_gutter_styled_span,
 };
 use crate::keymap::Action;
@@ -20,6 +22,7 @@ use teshi_core::gherkin::{BddScenario, ScenarioKind};
 use teshi_core::gherkin_lang::{
     GherkinLanguage, GherkinLanguages, StepKeywordType, StructuralType,
 };
+use teshi_core::highlight::{HighlightKind, highlight_line_spans};
 
 pub(crate) mod chat;
 mod pointer_controls;
@@ -1475,25 +1478,126 @@ fn explore_scenarios_title(app: &App) -> String {
     format!("Scenarios ({})", current_count + deleted_count)
 }
 
-fn render_git_diff_line(diff_line: &teshi_core::git::GitDiffLine) -> Line<'static> {
-    let marker = diff_line.status.marker();
-    let background = match diff_line.status {
-        teshi_core::git::DiffStatus::Added => theme::DIFF_ADDED_BG,
-        teshi_core::git::DiffStatus::Deleted => theme::DIFF_DELETED_BG,
-        teshi_core::git::DiffStatus::Modified => theme::DIFF_MODIFIED_BG,
-        teshi_core::git::DiffStatus::Unchanged => theme::RESET,
-    };
-    let line_style = theme::diff_style(diff_line.status).bg(background);
-    let marker_style = git_diff_status_style(diff_line.status).bg(background);
-    Line::from(vec![
-        Span::styled(format!("{marker} "), marker_style),
-        Span::styled(diff_line.text.clone(), line_style),
-    ])
+/// Gherkin syntax spans for one source line. `keyword_kind` overrides the
+/// keyword colour when the caller already resolved it from the AST.
+///
+/// Diff rows must show the file exactly as written, so the highlighter's
+/// keyword gutter padding is removed and any line the highlighter would
+/// re-space (tags) is returned unstyled instead.
+fn gherkin_syntax_spans(
+    line: &str,
+    state: &mut StepHighlightState,
+    lang: &GherkinLanguage,
+    keyword_kind: Option<HighlightKind>,
+) -> Vec<Span<'static>> {
+    let mut tokens = highlight_line_spans(line, state, lang);
+    for token in &mut tokens {
+        if matches!(
+            token.kind,
+            HighlightKind::Given
+                | HighlightKind::When
+                | HighlightKind::Then
+                | HighlightKind::AndBut
+        ) {
+            token.text = token.text.trim_start().to_string();
+            if let Some(kind) = keyword_kind {
+                token.kind = kind;
+            }
+        }
+    }
+    let text: String = tokens.iter().map(|token| token.text.as_str()).collect();
+    if text != line {
+        return vec![Span::styled(
+            line.to_string(),
+            kind_to_style(HighlightKind::Default),
+        )];
+    }
+    tokens
+        .into_iter()
+        .map(|token| Span::styled(token.text, kind_to_style(token.kind)))
+        .collect()
 }
 
-fn render_git_diff_lines(lines: &[teshi_core::git::GitDiffLine], output: &mut Vec<Line<'static>>) {
+/// Spans for a changed Step row; folded doc-string and table lines keep their
+/// own Gherkin colours.
+fn changed_step_spans(change: &ChangedStep, lang: &GherkinLanguage) -> Vec<Span<'static>> {
+    let mut state = StepHighlightState::default();
+    let mut lines = change.text.split('\n');
+    let mut spans = gherkin_syntax_spans(
+        lines.next().unwrap_or_default(),
+        &mut state,
+        lang,
+        change.keyword_kind,
+    );
+    for line in lines {
+        spans.push(Span::styled(" ↳ ", Style::default().fg(theme::MUTED)));
+        spans.extend(gherkin_syntax_spans(line, &mut state, lang, None));
+    }
+    spans
+}
+
+/// Shared diff garnish for one Explore row: a `+`/`-`/`~` gutter marker. The
+/// caller keeps the Gherkin syntax foregrounds, so a changed row never loses
+/// its colours and no row paints a background.
+fn decorate_diff_row(
+    spans: Vec<Span<'static>>,
+    status: teshi_core::git::DiffStatus,
+) -> Line<'static> {
+    let mut line = Vec::with_capacity(spans.len() + 1);
+    line.push(Span::styled(
+        format!("{} ", status.marker()),
+        theme::diff_style(status).add_modifier(Modifier::BOLD),
+    ));
+    line.extend(spans);
+    Line::from(line)
+}
+
+/// Maps the buffer-diff kind of a changed Step onto the Git diff status.
+fn change_status(kind: crate::app::ChangeKind) -> teshi_core::git::DiffStatus {
+    use teshi_core::git::DiffStatus;
+    match kind {
+        crate::app::ChangeKind::Added => DiffStatus::Added,
+        crate::app::ChangeKind::Modified => DiffStatus::Modified,
+        crate::app::ChangeKind::Deleted => DiffStatus::Deleted,
+        crate::app::ChangeKind::Unchanged => DiffStatus::Unchanged,
+    }
+}
+
+/// Gherkin language of the Feature currently open in Explore; removed Features
+/// fall back to the `HEAD` content.
+fn explore_gherkin_language(app: &App) -> &'static GherkinLanguage {
+    let code = app
+        .explore_selected_deleted_feature
+        .and_then(|index| app.git_status.deleted.get(index))
+        .and_then(|view| view.diff.as_ref()?.old_content.as_deref())
+        .map(GherkinLanguages::detect_from_content)
+        .or_else(|| {
+            app.project
+                .features
+                .get(app.explore_selected_feature)
+                .map(|feature| feature.language.as_str())
+        })
+        .unwrap_or("en");
+    GherkinLanguages::global().get(code)
+}
+
+fn render_git_diff_line(
+    diff_line: &teshi_core::git::GitDiffLine,
+    state: &mut StepHighlightState,
+    lang: &GherkinLanguage,
+) -> Line<'static> {
+    let spans = gherkin_syntax_spans(&diff_line.text, state, lang, None);
+    decorate_diff_row(spans, diff_line.status)
+}
+
+fn render_git_diff_lines(
+    lines: &[teshi_core::git::GitDiffLine],
+    state: &mut StepHighlightState,
+    lang: &GherkinLanguage,
+    output: &mut Vec<Line<'static>>,
+) {
     for diff_line in lines {
-        output.push(render_git_diff_line(diff_line));
+        output.push(render_git_diff_line(diff_line, state, lang));
     }
 }
 
@@ -1513,6 +1617,8 @@ fn render_git_steps(
     }
 
     let scenario_status = view.scenario_status(scenario);
+    let lang = explore_gherkin_language(app);
+    let mut highlight = StepHighlightState::default();
     let old_scenario_line = view
         .scenarios
         .iter()
@@ -1533,7 +1639,7 @@ fn render_git_steps(
                 .fg(theme::WARNING)
                 .add_modifier(Modifier::BOLD),
         ));
-        render_git_diff_lines(&view.feature_diff_lines, &mut lines);
+        render_git_diff_lines(&view.feature_diff_lines, &mut highlight, lang, &mut lines);
         lines.push(Line::raw(""));
     }
     if let Some(background) = &view.background
@@ -1546,7 +1652,7 @@ fn render_git_steps(
                 .add_modifier(Modifier::BOLD),
         ));
         for diff_line in &background.diff_lines {
-            lines.push(render_git_diff_line(diff_line));
+            lines.push(render_git_diff_line(diff_line, &mut highlight, lang));
         }
         lines.push(Line::raw(""));
     }
@@ -1571,7 +1677,7 @@ fn render_git_steps(
                         continue;
                     }
                     let row_y = inner.y + lines.len() as u16;
-                    lines.push(render_git_diff_line(diff_line));
+                    lines.push(render_git_diff_line(diff_line, &mut highlight, lang));
                     if let Some(new_line) = diff_line.new_line_number
                         && let Some(step_idx) = scenario
                             .steps
@@ -1588,7 +1694,7 @@ fn render_git_steps(
                     continue;
                 }
                 let row_y = inner.y + lines.len() as u16;
-                lines.push(render_git_diff_line(diff_line));
+                lines.push(render_git_diff_line(diff_line, &mut highlight, lang));
                 if let Some(new_line) = diff_line.new_line_number
                     && let Some(step_idx) = scenario
                         .steps
@@ -1602,7 +1708,16 @@ fn render_git_steps(
     } else {
         for step in &scenario.steps {
             let row_y = inner.y + lines.len() as u16;
-            lines.push(Line::raw(format!("  {} {}", step.keyword, step.text)));
+            let spans = gherkin_syntax_spans(
+                &format!("  {} {}", step.keyword, step.text),
+                &mut highlight,
+                lang,
+                None,
+            );
+            lines.push(decorate_diff_row(
+                spans,
+                teshi_core::git::DiffStatus::Unchanged,
+            ));
             if let Some(step_idx) = scenario
                 .steps
                 .iter()
@@ -1625,7 +1740,7 @@ fn render_git_steps(
             if diff_line.old_line_number == deleted.old_line_number {
                 continue;
             }
-            lines.push(render_git_diff_line(diff_line));
+            lines.push(render_git_diff_line(diff_line, &mut highlight, lang));
         }
     }
     render_explore_lines(frame, app, ColumnFocus::Step, inner, lines);
@@ -1647,7 +1762,13 @@ fn render_git_file_fallback(
     }
     let mut lines = Vec::new();
     if let Some(diff) = &view.diff {
-        render_git_diff_lines(&diff.lines, &mut lines);
+        let mut highlight = StepHighlightState::default();
+        render_git_diff_lines(
+            &diff.lines,
+            &mut highlight,
+            explore_gherkin_language(app),
+            &mut lines,
+        );
     }
     if lines.is_empty() {
         lines.push(Line::styled(
@@ -1679,22 +1800,25 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .and_then(|index| app.git_status.deleted.get(index))
             .or_else(|| app.git_status.current_at(app.explore_selected_feature));
         let mut lines = Vec::new();
+        let lang = explore_gherkin_language(app);
         if let Some(view) = view {
-            render_git_diff_lines(&view.feature_diff_lines, &mut lines);
+            let mut highlight = StepHighlightState::default();
+            render_git_diff_lines(&view.feature_diff_lines, &mut highlight, lang, &mut lines);
         }
         let prefix_rows = lines.len();
-        lines.extend(changes.iter().enumerate().map(|(index, (text, kind))| {
-            let (marker, color) = match kind {
-                crate::app::ChangeKind::Added => ("+", theme::SUCCESS),
-                crate::app::ChangeKind::Deleted => ("-", theme::ERROR),
-                _ => ("~", theme::WARNING),
-            };
-            let style = if index == app.explore_selected_step {
-                theme::selected_row(true)
-            } else {
-                Style::default().fg(color)
-            };
-            Line::styled(format!("{marker} {}", text.replace('\n', " ↳ ")), style)
+        lines.extend(changes.iter().enumerate().map(|(index, change)| {
+            let mut line =
+                decorate_diff_row(changed_step_spans(change, lang), change_status(change.kind));
+            if index == app.explore_selected_step {
+                // The selection fill replaces the diff tint, matching the other
+                // Explore columns and the MindMap tree.
+                let selection = theme::selected_row(true);
+                line.style = selection;
+                for span in &mut line.spans {
+                    span.style = span.style.patch(selection);
+                }
+            }
+            line
         }));
         let content = render_explore_lines_selected(
             frame,
@@ -1780,26 +1904,11 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Style::default().fg(theme::MUTED),
             ));
         } else {
+            let lang = explore_gherkin_language(app);
             for dl in relevant {
-                let (gutter_ch, gutter_color, bg_color) = match dl.kind {
-                    crate::app::ChangeKind::Added => ("+", theme::SUCCESS, theme::DIFF_ADDED_BG),
-                    crate::app::ChangeKind::Modified => {
-                        ("~", theme::WARNING, theme::DIFF_MODIFIED_BG)
-                    }
-                    crate::app::ChangeKind::Deleted => ("-", theme::ERROR, theme::DIFF_DELETED_BG),
-                    crate::app::ChangeKind::Unchanged => (" ", theme::MUTED, theme::RESET),
-                };
-                let line_style = Style::default().bg(bg_color);
-                let gutter_style = Style::default()
-                    .fg(gutter_color)
-                    .add_modifier(Modifier::BOLD)
-                    .bg(bg_color);
-                let text_style = Style::default().bg(bg_color);
-                let gutter = Span::styled(format!("{gutter_ch} "), gutter_style);
-                let text = Span::styled(dl.text.clone(), text_style);
-                let mut line = Line::from(vec![gutter, text]);
-                line = pad_line_to_width(line, inner.width, line_style);
-                lines.push(line);
+                let mut state = StepHighlightState::default();
+                let spans = gherkin_syntax_spans(&dl.text, &mut state, lang, None);
+                lines.push(decorate_diff_row(spans, change_status(dl.kind)));
             }
         }
 
@@ -6357,6 +6466,108 @@ Feature: Rule only
         assert!(screen.contains("+     And the application is not running"));
     }
 
+    /// Coordinates of the first cell whose row contains `needle` (ASCII only).
+    fn cell_at_text(terminal: &Terminal<TestBackend>, needle: &str) -> Option<(u16, u16)> {
+        let buffer = terminal.backend().buffer();
+        for y in 0..buffer.area.height {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            if let Some(index) = row.find(needle) {
+                // Border glyphs are multi-byte, so convert to a cell index.
+                return Some((row[..index].chars().count() as u16, y));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn changed_steps_keep_gherkin_colors() {
+        let old = "Feature: Backup\n  Scenario: Restore\n    Given a backup exists\n    And the application is closed\n";
+        let new = "Feature: Backup\n  Scenario: Restore\n    Given a backup exists\n    And the application is not running\n    And the cache is warm\n";
+        let mut app = App::from_args().expect("app init");
+        let path = PathBuf::from("backup.feature");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Step;
+        // Keep the selection off the rows under test: it repaints the row.
+        app.explore_selected_step = app
+            .explore_changed_steps()
+            .iter()
+            .position(|change| change.text.contains("cache"))
+            .expect("third changed step");
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+
+        // The added Step keeps a Gherkin keyword colour and inherits `Given`,
+        // exactly like the browse view.
+        let (x, y) =
+            cell_at_text(&terminal, "And the application is not running").expect("added row");
+        let cell = &terminal.backend().buffer()[(x, y)];
+        assert_eq!(cell.fg, crate::theme::PRIMARY);
+
+        // Removed Steps have no AST counterpart, so they fall back to the plain
+        // continuation colour.
+        let (x, y) = cell_at_text(&terminal, "And the application is closed").expect("removed row");
+        let cell = &terminal.backend().buffer()[(x, y)];
+        assert_eq!(cell.fg, crate::theme::TAB_INACTIVE);
+    }
+
+    #[test]
+    fn diff_rows_paint_no_background() {
+        let row = super::decorate_diff_row(
+            vec![Span::raw("Given a user exists")],
+            teshi_core::git::DiffStatus::Added,
+        );
+        assert!(row.style.bg.is_none());
+        assert!(row.spans.iter().all(|span| span.style.bg.is_none()));
+    }
+
+    #[test]
+    fn selected_changed_step_uses_the_selection_fill() {
+        let old = "Feature: Backup\n  Scenario: Restore\n    Given a backup exists\n";
+        let new = "Feature: Backup\n  Scenario: Restore\n    Given a snapshot exists\n";
+        let mut app = App::from_args().expect("app init");
+        let path = PathBuf::from("backup.feature");
+        app.project.features = vec![gherkin::parse_feature(new, path.clone())];
+        app.git_status = teshi_core::git::FeatureGitStatusModel {
+            available: true,
+            current: vec![teshi_core::git::map_feature_git_diff(
+                path,
+                teshi_core::git::FileGitStatus::Modified,
+                teshi_core::git::GitFileDiff::from_contents(Some(old), Some(new)),
+            )],
+            ..Default::default()
+        };
+        app.explore_focus = crate::app::ColumnFocus::Step;
+        app.explore_selected_step = app
+            .explore_changed_steps()
+            .iter()
+            .position(|change| change.text.contains("snapshot"))
+            .expect("added step");
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render");
+
+        let (x, y) = cell_at_text(&terminal, "Given a snapshot exists").expect("selected row");
+        let cell = &terminal.backend().buffer()[(x, y)];
+        assert_eq!(cell.fg, crate::theme::CURSOR_FG);
+        assert_eq!(cell.bg, crate::theme::CURSOR_BG);
+    }
+
     #[test]
     fn explore_steps_render_feature_level_diff_without_scenarios() {
         let old = "Feature: Old title\n  Old description\n";
@@ -6470,7 +6681,7 @@ Feature: Rule only
                     .map(|x| terminal.backend().buffer()[(x, *row_y)].symbol())
                     .collect();
                 assert!(
-                    row.contains(app.explore_changed_steps()[*step_idx].0.trim()),
+                    row.contains(app.explore_changed_steps()[*step_idx].text.trim()),
                     "{row}"
                 );
                 selected_visible |= *step_idx == app.explore_selected_step;

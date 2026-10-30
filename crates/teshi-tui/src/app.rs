@@ -22,8 +22,9 @@ use crate::mindmap;
 use crate::runner::{self, RunCase, RunEvent, RunRequest, RunnerConfig};
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 use teshi_core::StepIndex;
-use teshi_core::gherkin::{self, BddProject};
-use teshi_core::gherkin_lang::StructuralType;
+use teshi_core::gherkin::{self, BddProject, BddScenario};
+use teshi_core::gherkin_lang::{StepKeywordType, StructuralType};
+use teshi_core::highlight::HighlightKind;
 
 const GIT_STATUS_REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
 const PROJECT_SWITCH_STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -644,6 +645,55 @@ pub struct ChangeSummaryNode {
     pub step_text: String,
     pub old_step_text: Option<String>,
     pub line_number_1based: usize,
+}
+
+/// One changed Step row in the Explore Steps pane, including removed Steps
+/// that no longer exist in the current AST.
+#[derive(Debug, Clone)]
+pub(crate) struct ChangedStep {
+    /// Step text, with attached doc-string and table lines folded in.
+    pub text: String,
+    /// Diff status relative to `HEAD`.
+    pub kind: ChangeKind,
+    /// Resolved keyword colour from the current AST, so a changed `And`/`But`
+    /// inherits exactly like the browse view. `None` for removed Steps and for
+    /// lines that no longer map back onto the AST.
+    pub keyword_kind: Option<HighlightKind>,
+}
+
+/// Keyword highlight kind of a Step that still exists in the current AST.
+///
+/// The diff line must agree with the AST text so a shifted line number cannot
+/// recolour a different Step.
+fn ast_keyword_kind(
+    scenario: Option<&BddScenario>,
+    line_number: Option<usize>,
+    text: &str,
+) -> Option<HighlightKind> {
+    let steps = &scenario?.steps;
+    let index = steps
+        .iter()
+        .position(|step| Some(step.line_number) == line_number)?;
+    let step = &steps[index];
+    if format!("{} {}", step.keyword, step.text).trim() != text.trim() {
+        return None;
+    }
+    let inherited =
+        steps[..index]
+            .iter()
+            .rev()
+            .find_map(|candidate| match candidate.keyword_type {
+                StepKeywordType::Given => Some(HighlightKind::Given),
+                StepKeywordType::When => Some(HighlightKind::When),
+                StepKeywordType::Then => Some(HighlightKind::Then),
+                StepKeywordType::And | StepKeywordType::But => None,
+            });
+    Some(match step.keyword_type {
+        StepKeywordType::Given => HighlightKind::Given,
+        StepKeywordType::When => HighlightKind::When,
+        StepKeywordType::Then => HighlightKind::Then,
+        StepKeywordType::And | StepKeywordType::But => inherited.unwrap_or(HighlightKind::AndBut),
+    })
 }
 
 /// A pending text modification queued by an AI agent tool waiting for user approval.
@@ -2639,7 +2689,7 @@ impl App {
     }
 
     /// Changed Step entries, including removed Steps that have no current AST index.
-    pub(crate) fn explore_changed_steps(&self) -> Vec<(String, ChangeKind)> {
+    pub(crate) fn explore_changed_steps(&self) -> Vec<ChangedStep> {
         let feature = self.project.features.get(self.explore_selected_feature);
         let view = self
             .explore_selected_deleted_feature
@@ -2657,64 +2707,85 @@ impl App {
             feature.map_or("en", |f| f.language.as_str())
         };
         let language = teshi_core::gherkin_lang::GherkinLanguages::global().get(language_code);
-        let source: Vec<(String, ChangeKind)> = if let Some(lines) = &self.explore_diff_lines {
-            lines
-                .iter()
-                .map(|line| (line.text.clone(), line.kind))
-                .collect()
-        } else if let Some(view) = view {
-            let lines = if self.explore_selected_deleted_feature.is_some() {
-                view.deleted_scenarios()
-                    .nth(self.explore_selected_scenario)
-                    .map(|s| s.diff_lines.as_slice())
-                    .unwrap_or_default()
-            } else if let Some(scenario) =
-                feature.and_then(|f| f.scenario_at(self.explore_selected_scenario))
-            {
-                view.scenario_diff_lines(scenario).unwrap_or_default()
+        // Text, change kind, and the 1-based line in the current file when the
+        // line still exists there.
+        let source: Vec<(String, ChangeKind, Option<usize>)> =
+            if let Some(lines) = &self.explore_diff_lines {
+                lines
+                    .iter()
+                    .map(|line| {
+                        (
+                            line.text.clone(),
+                            line.kind,
+                            (line.line_number_1based > 0).then_some(line.line_number_1based),
+                        )
+                    })
+                    .collect()
+            } else if let Some(view) = view {
+                let lines = if self.explore_selected_deleted_feature.is_some() {
+                    view.deleted_scenarios()
+                        .nth(self.explore_selected_scenario)
+                        .map(|s| s.diff_lines.as_slice())
+                        .unwrap_or_default()
+                } else if let Some(scenario) =
+                    feature.and_then(|f| f.scenario_at(self.explore_selected_scenario))
+                {
+                    view.scenario_diff_lines(scenario).unwrap_or_default()
+                } else {
+                    view.deleted_scenarios()
+                        .nth(
+                            self.explore_selected_scenario
+                                .saturating_sub(self.explore_current_scenario_count()),
+                        )
+                        .map(|s| s.diff_lines.as_slice())
+                        .unwrap_or_default()
+                };
+                lines
+                    .iter()
+                    .map(|line| {
+                        (
+                            line.text.clone(),
+                            match line.status {
+                                teshi_core::git::DiffStatus::Added => ChangeKind::Added,
+                                teshi_core::git::DiffStatus::Deleted => ChangeKind::Deleted,
+                                teshi_core::git::DiffStatus::Modified => ChangeKind::Modified,
+                                teshi_core::git::DiffStatus::Unchanged => ChangeKind::Unchanged,
+                            },
+                            line.new_line_number,
+                        )
+                    })
+                    .collect()
             } else {
-                view.deleted_scenarios()
-                    .nth(
-                        self.explore_selected_scenario
-                            .saturating_sub(self.explore_current_scenario_count()),
-                    )
-                    .map(|s| s.diff_lines.as_slice())
-                    .unwrap_or_default()
+                Vec::new()
             };
-            lines
-                .iter()
-                .map(|line| {
-                    (
-                        line.text.clone(),
-                        match line.status {
-                            teshi_core::git::DiffStatus::Added => ChangeKind::Added,
-                            teshi_core::git::DiffStatus::Deleted => ChangeKind::Deleted,
-                            teshi_core::git::DiffStatus::Modified => ChangeKind::Modified,
-                            teshi_core::git::DiffStatus::Unchanged => ChangeKind::Unchanged,
-                        },
-                    )
-                })
-                .collect()
+        // Only a live Feature can supply keyword colours; removed Features have
+        // no AST counterpart in the project.
+        let scenario = if self.explore_selected_deleted_feature.is_none() {
+            feature.and_then(|f| f.scenario_at(self.explore_selected_scenario))
         } else {
-            Vec::new()
+            None
         };
-        let mut steps: Vec<(String, ChangeKind)> = Vec::new();
+        let mut steps: Vec<ChangedStep> = Vec::new();
         let mut current = None;
         let mut doc_string = false;
-        for (text, kind) in source {
+        for (text, kind, line_number) in source {
             let trimmed = text.trim_start();
             let fence = trimmed.starts_with("\"\"\"") || trimmed.starts_with("```");
             if !doc_string && !fence && language.is_step_line(trimmed) {
-                steps.push((text, kind));
+                steps.push(ChangedStep {
+                    keyword_kind: ast_keyword_kind(scenario, line_number, trimmed),
+                    text,
+                    kind,
+                });
                 current = Some(steps.len() - 1);
             } else if fence || doc_string || trimmed.starts_with('|') {
                 if let Some(index) = current {
-                    steps[index].0.push('\n');
-                    steps[index].0.push_str(&text);
+                    steps[index].text.push('\n');
+                    steps[index].text.push_str(&text);
                     if !matches!(kind, ChangeKind::Unchanged)
-                        && matches!(steps[index].1, ChangeKind::Unchanged)
+                        && matches!(steps[index].kind, ChangeKind::Unchanged)
                     {
-                        steps[index].1 = ChangeKind::Modified;
+                        steps[index].kind = ChangeKind::Modified;
                     }
                 }
                 if fence {
@@ -2724,7 +2795,7 @@ impl App {
                 current = None;
             }
         }
-        steps.retain(|(_, kind)| !matches!(kind, ChangeKind::Unchanged));
+        steps.retain(|step| !matches!(step.kind, ChangeKind::Unchanged));
         steps
     }
 
@@ -6488,8 +6559,8 @@ impl App {
             return;
         }
         let changes = self.explore_changed_steps();
-        let selected_line = if let Some((text, kind)) = changes.get(self.explore_selected_step) {
-            if matches!(kind, ChangeKind::Deleted) {
+        let selected_line = if let Some(change) = changes.get(self.explore_selected_step) {
+            if matches!(change.kind, ChangeKind::Deleted) {
                 self.status = "Deleted Step is read-only".into();
                 return;
             }
@@ -6502,7 +6573,7 @@ impl App {
                 .flat_map(|scenario| scenario.steps.iter())
                 .filter(|step| {
                     format!("{} {}", step.keyword, step.text).trim()
-                        == text.lines().next().unwrap_or_default().trim()
+                        == change.text.lines().next().unwrap_or_default().trim()
                 })
                 .map(|step| step.line_number)
                 .collect();
@@ -16898,10 +16969,10 @@ mod tests {
         assert_eq!(app.explore_selected_scenario, 1);
         assert_eq!(app.explore_selected_step_count(), 1);
         assert_eq!(
-            app.explore_changed_steps()[0].1,
+            app.explore_changed_steps()[0].kind,
             crate::app::ChangeKind::Deleted
         );
-        assert!(app.explore_changed_steps()[0].0.contains("Given old"));
+        assert!(app.explore_changed_steps()[0].text.contains("Given old"));
 
         app.handle_action(Action::MoveUp)
             .expect("move back to the current scenario");

@@ -17,7 +17,7 @@ is the source of truth. GPUI desktop and web shells are outside this guide.
 10. Clear popups first, then draw rounded PRIMARY borders, PRIMARY bold titles, and action chips.
 
 Never paint the terminal background globally. Fill only selections, chips, active
-tabs, footers, code/quote blocks, current lines, overlays, and diff tints.
+tabs, footers, code/quote blocks, current lines, and overlays.
 Preserve visible text, key bindings, tab padding, dividers, and click regions.
 
 ## Token table
@@ -48,11 +48,7 @@ Preserve visible text, key bindings, tab padding, dividers, and click regions.
 | EDITOR_SELECTION_BG | #5F5F87 | Selected editor text |
 | CURRENT_LINE_BG | #303030 | Preview cursor line |
 | OVERLAY_BG | #3A3A3A | Overlay surface |
-| DIFF_ADDED_BG | #263E2C | Added-line tint |
-| DIFF_MODIFIED_BG | #3E3226 | Modified-line tint |
-| DIFF_DELETED_BG | #3E2626 | Deleted-line tint |
 | SYNTAX_STRING | #D7AF87 | Gherkin strings |
-| RESET | Terminal default | Unchanged diff surfaces |
 
 ## Component helper catalog
 
@@ -68,7 +64,7 @@ Preserve visible text, key bindings, tab padding, dividers, and click regions.
 | `footer_line(hints)` | Hint line on FOOTER_BG; render paragraph across footer width |
 | `muted()` | Metadata foreground |
 | `status_style(status)` | Idle muted, running warning, passed success, failed error, skipped border |
-| `diff_style(kind)` | Semantic diff foreground; apply matching tint for tinted rows |
+| `diff_style(kind)` | Semantic diff foreground for `+`/`-`/`~` gutter markers; changed rows keep Gherkin syntax colours and paint no background |
 | `scrollbar_lines(total, height, start)` | Vertical track/thumb with clamped position |
 | `highlight_color(color)` | Map existing named MindMap highlights onto theme roles |
 

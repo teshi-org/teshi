@@ -11,9 +11,6 @@ use ratatui::widgets::{Block, BorderType, Borders};
 use crate::app::RunStatus;
 use teshi_core::git::DiffStatus;
 
-/// Explicit terminal default for unchanged diff surfaces.
-pub(crate) const RESET: Color = Color::Reset;
-
 /// Maps existing named MindMap highlight rules onto the shared palette.
 pub(crate) fn highlight_color(color: teshi_core::mindmap::HighlightColor) -> Color {
     use teshi_core::mindmap::HighlightColor;
@@ -78,12 +75,6 @@ pub(crate) const EDITOR_SELECTION_BG: Color = Color::Rgb(0x5F, 0x5F, 0x87);
 pub(crate) const CURRENT_LINE_BG: Color = Color::Rgb(0x30, 0x30, 0x30);
 /// Overlay and toast surface.
 pub(crate) const OVERLAY_BG: Color = Color::Rgb(0x3A, 0x3A, 0x3A);
-/// Added-line tint.
-pub(crate) const DIFF_ADDED_BG: Color = Color::Rgb(0x26, 0x3E, 0x2C);
-/// Modified-line tint.
-pub(crate) const DIFF_MODIFIED_BG: Color = Color::Rgb(0x3E, 0x32, 0x26);
-/// Deleted-line tint.
-pub(crate) const DIFF_DELETED_BG: Color = Color::Rgb(0x3E, 0x26, 0x26);
 /// Gherkin string literals.
 pub(crate) const SYNTAX_STRING: Color = Color::Rgb(0xD7, 0xAF, 0x87);
 
