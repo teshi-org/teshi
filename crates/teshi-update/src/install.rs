@@ -76,7 +76,7 @@ impl Installation {
             let explanation = match bundle.kind {
                 InstallKind::External => Some(bundle.update_explanation.clone().unwrap_or_else(|| "Use the package manager that installed Teshi".into())),
                 InstallKind::Msi if !registered => Some("MSI registration does not match this installation; reinstall using the official MSI or the Windows setup program".into()),
-                InstallKind::Msi => Some("MSI and WinGet installs cannot self-update. Install the Windows setup program (teshi-*-x64-setup.exe) for in-app updates".into()),
+                InstallKind::Msi => Some("MSI installs cannot self-update. Install the Windows setup program (teshi-*-x64-setup.exe) for in-app updates".into()),
                 InstallKind::Exe if !cfg!(windows) => Some("Windows setup updates are not available on this operating system".into()),
                 InstallKind::Exe if registered => Some("Windows Installer owns this directory; setup.exe replacement is disabled".into()),
                 InstallKind::Exe => None,

@@ -25,7 +25,7 @@ pub const TARGETS: &[&str] = &[
 pub enum InstallKind {
     /// Dedicated extracted archive. Check-only; never self-updates.
     Portable,
-    /// Registered Windows Installer / WinGet package. Check-only; never self-updates.
+    /// Registered Windows Installer package. Check-only; never self-updates.
     Msi,
     /// Per-user Windows setup.exe install. The only in-app update backend.
     Exe,
