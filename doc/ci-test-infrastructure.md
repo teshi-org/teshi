@@ -4,23 +4,37 @@ The terminal suite builds once per platform, runs isolated single-threaded
 acceptance shards, and verifies their actual execution before the existing
 required check can pass. Product startup, discovery and screenshots remain real.
 
-## Successful scheduling baseline
+## Measured sharded run
 
+[CI run 41176323449](https://github.com/teshi-org/teshi/actions/runs/41176323449)
+was the first sharded run. It passed for
+`97e8a3b40f8d46093ea960e71f0bf22c2b4a7ca8` on October 31, 2026, in 13m36s.
+The preceding unsharded
 [CI run 41166978257](https://github.com/teshi-org/teshi/actions/runs/41166978257)
-passed for `5e62a50cac82d6909051ef8e86517030bf98dcd2` on October 31, 2026.
-The complete workflow elapsed time was 16m26s.
+took 16m26s for `5e62a50`.
 
-| Step | Windows | Linux |
+| Job or step | Windows | Linux |
 | --- | ---: | ---: |
-| Directory Feature replay, including runner build | 368s | 340s |
-| Actual terminal regressions | 405s | 369s |
-| PTY backend and protocol tests, including compilation | 78s | 73s |
-| Build CLI | 51s | 26s |
-| Restore Cargo cache | 55s | 31s |
+| Prepare job total | 523s | 432s |
+| Compile once and inventory tests | 361s | 279s |
+| Non-ignored compiled tests | 13s | 59s |
+| Pack executables | 7s | 36s |
+| Save Cargo cache (post step) | 86s | 21s |
+| Directory shard job / replay step | 222s / 188s | 243s / 159s |
+| Terminal A shard job / test step | 161s / 136s | 266s / 203s |
+| Terminal B shard job / test step | 212s / 185s | 215s / 152s |
+| Restore and verify archive | 8-9s | 33-42s |
+| Final platform gate | 19s | 13s |
 
-The terminal binary boundaries in `.github/terminal-partitions.json` use the
-Windows run's observed binary times: approximately 184s in each group.
-These are initial scheduling weights, not predicted timings after optimization.
+Compilation in the prepare job is now the critical path. Shards finish within
+about 4.5 minutes of it. Linux terminal A (203s) is the slowest shard, while
+Windows terminal A (136s) finishes well ahead of terminal B (185s).
+
+The unsharded run spent 368s/340s (Windows/Linux) on directory replay with its
+runner build, 405s/369s on terminal regressions and 78s/73s on backend tests.
+The terminal binary boundaries in `.github/terminal-partitions.json` came from
+that run's Windows binary times, about 184s per group. Rebalance them from
+sharded measurements rather than these initial weights.
 
 ## Build, shards and platform gates
 
@@ -78,9 +92,9 @@ again. Arbitrary paths, links, changed payloads and stale inventories fail close
 Only the platform build job restores and saves the existing Cargo cache.
 Packaging uses gzip level 1, and artifact upload disables a second compression
 pass. Build-command, total preparation, package size, packaging time and restore
-time remain separate measurements. Compare these with the next run's avoided
-compilation before changing cache policies further; hosted transfer time still
-needs actual CI evidence.
+time remain separate measurements. In the measured sharded run, packing took
+7s/36s and each shard's restore and verification took 8-9s/33-42s
+(Windows/Linux), well below the compilation each shard avoids.
 
 The directory binding caches one executable hash per Python process, keyed by
 resolved path, device/inode, size, modification time and change time. Changed
@@ -183,6 +197,6 @@ terminal backend tests. Mutable fixtures and evidence stay independent.
 The summary rejects mismatched SHAs/images or any missing, failed, timed-out or
 cleanup-failed sample before reporting medians and ratios.
 
-Hosted Windows temporary-storage and artifact-transfer benefits remain unproven
-until those workflows run. Local path probes and local conversion/package
+Hosted Windows temporary-storage benefits remain unproven until that experiment
+runs. Local path probes and local conversion/package
 measurements do not replace hosted CI or external-provider acceptance.
