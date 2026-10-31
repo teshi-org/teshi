@@ -766,7 +766,8 @@ pub(crate) fn relative_feature_path(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
-#[cfg(test)]
+// Only the Windows probe's tests drive a real capture pipeline.
+#[cfg(all(test, windows))]
 fn load(picker: &Picker, project: &Path, shot: &ScreenshotRef, size: Size) -> Result<Rendered> {
     let request = Request {
         project: project.into(),
