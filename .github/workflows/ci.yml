@@ -50,6 +50,9 @@ jobs:
       - name: Check hosted UI WebSocket operation coverage
         run: python scripts/test-hosted-ui-transport.py
 
+      - name: Check CI timeout and diagnostic infrastructure
+        run: python -m unittest discover -s scripts/tests -p 'test_ci_*.py'
+
       - name: Validate Gherkin Features
         run: cargo run --locked -p teshi-cli -- check --all
 
@@ -86,21 +89,22 @@ jobs:
       - name: Build doc
         run: cargo doc --workspace --exclude teshi-web --locked --no-deps --document-private-items
 
-  tui-tests:
-    name: Terminal interface tests (${{ matrix.os }})
+  tui-build:
+    name: Prepare terminal tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      PYTHONUTF8: "1"
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - name: Cache Cargo artifacts
+      - name: Restore and save Cargo artifacts once per platform
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -108,63 +112,128 @@ jobs:
             crates/teshi-tui-runner -> target
       - name: Check terminal runner formatting
         run: cargo fmt --manifest-path crates/teshi-tui-runner/Cargo.toml --check
-      - name: Test real PTY backend and scenario protocol
-        run: cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked
+      - name: Check partition ownership
+        run: python scripts/run-ci-suite.py check
+      - name: Check CI infrastructure
+        timeout-minutes: 3
+        run: python -m unittest discover -s scripts/tests -p 'test_ci_*.py'
+      - name: Compile once and inventory platform tests and Examples
+        timeout-minutes: 25
+        run: python scripts/run-ci-suite.py prepare --artifacts "${{ runner.temp }}/teshi-ci/build"
+      - name: Run all non-ignored compiled tests and verify their execution
+        timeout-minutes: 10
+        run: python scripts/run-ci-command.py --label backend --timeout-seconds 540 --artifacts "${{ runner.temp }}/teshi-ci/backend/supervisor" -- python scripts/run-ci-suite.py backend --inventory "${{ runner.temp }}/teshi-ci/build/inventory.json" --artifacts "${{ runner.temp }}/teshi-ci/backend"
       - name: Lint terminal runner
         run: cargo clippy --manifest-path crates/teshi-tui-runner/Cargo.toml --locked --all-targets -- -D warnings
-      - name: Build Teshi CLI
-        run: cargo build -p teshi-cli --locked
-      - name: Replay project-directory loading Feature
-        shell: pwsh
-        env:
-          TESHI_FEATURE_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/directory
-          PYTHONUTF8: "1"
-        run: |
-          cargo build --manifest-path crates/teshi-tui-runner/Cargo.toml --bin teshi-directory-feature-runner --locked
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $suffix = if ($IsWindows) { ".exe" } else { "" }
-          $env:TESHI_SELF_TEST_BIN = (Resolve-Path "target/debug/teshi$suffix").Path
-          $runner = (Resolve-Path "crates/teshi-tui-runner/target/debug/teshi-directory-feature-runner$suffix").Path
-          & $env:TESHI_SELF_TEST_BIN run features/zh-CN/项目目录加载.feature --runner-cmd $runner --report "$env:TESHI_FEATURE_ARTIFACTS/report.json"
-          exit $LASTEXITCODE
-      - name: Upload project-directory replay evidence
+      - name: Pack required immutable executables and measure packaging cost
+        run: python scripts/run-ci-suite.py pack --inventory "${{ runner.temp }}/teshi-ci/build/inventory.json" --artifacts "${{ runner.temp }}/teshi-ci/build" --archive "${{ runner.temp }}/terminal-binaries.tar.gz"
+      - name: Upload compiled platform binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-binaries-${{ matrix.os }}
+          path: ${{ runner.temp }}/terminal-binaries.tar.gz
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload platform inventory, backend execution and build timings
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: project-directory-${{ matrix.os }}
-          path: ${{ runner.temp }}/teshi-artifacts/directory
-          if-no-files-found: warn
+          name: terminal-build-${{ matrix.os }}
+          path: ${{ runner.temp }}/teshi-ci
+          if-no-files-found: error
+
+  tui-shards:
+    name: Terminal ${{ matrix.shard }} (${{ matrix.os }})
+    needs: tui-build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        shard: [directory, terminal-a, terminal-b]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: terminal-build-${{ matrix.os }}
+          path: ${{ runner.temp }}/teshi-ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: terminal-binaries-${{ matrix.os }}
+          path: ${{ runner.temp }}
+      - name: Restore and verify exact compiled artifacts
+        run: python scripts/run-ci-suite.py unpack --inventory "${{ runner.temp }}/teshi-ci/build/inventory.json" --archive "${{ runner.temp }}/terminal-binaries.tar.gz" --artifacts "${{ runner.temp }}/teshi-ci/${{ matrix.shard }}"
       - name: Install Linux clipboard display
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.shard != 'directory'
         run: sudo apt-get update && sudo apt-get install -y xvfb xauth
-      - name: Run actual Teshi terminal regressions (Linux)
-        if: runner.os != 'Windows'
+      - name: Run isolated shard (Linux clipboard)
+        if: runner.os == 'Linux' && matrix.shard != 'directory'
+        timeout-minutes: 22
+        run: python scripts/run-ci-command.py --label shard --timeout-seconds 1200 --artifacts "${{ runner.temp }}/teshi-ci/${{ matrix.shard }}/supervisor" -- xvfb-run -a python scripts/run-ci-suite.py ${{ matrix.shard }} --inventory "${{ runner.temp }}/teshi-ci/build/inventory.json" --artifacts "${{ runner.temp }}/teshi-ci/${{ matrix.shard }}"
+      - name: Run isolated shard (Windows or directory)
+        if: runner.os == 'Windows' || matrix.shard == 'directory'
+        timeout-minutes: 22
+        run: python scripts/run-ci-command.py --label shard --timeout-seconds 1200 --artifacts "${{ runner.temp }}/teshi-ci/${{ matrix.shard }}/supervisor" -- python scripts/run-ci-suite.py ${{ matrix.shard }} --inventory "${{ runner.temp }}/teshi-ci/build/inventory.json" --artifacts "${{ runner.temp }}/teshi-ci/${{ matrix.shard }}"
+      - name: Upload shard execution, timings and all evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-${{ matrix.shard }}-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/teshi-ci/${{ matrix.shard }}
+          if-no-files-found: error
+
+  tui-tests:
+    # Keep the existing required check name stable across the sharding change.
+    name: Terminal interface tests (${{ matrix.os }})
+    if: always()
+    needs: [tui-build, tui-shards]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require successful preparation and every shard
+        shell: pwsh
         env:
-          TESHI_SELF_TEST_BIN: ${{ github.workspace }}/target/debug/teshi
-          TESHI_AI_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/ai-pointer
-          TESHI_EXPLORE_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/explore-pointer
-          TESHI_MANAGEMENT_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/management-pointer
-          TESHI_NAVIGATION_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/navigation
-          TESHI_OVERLAY_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/overlay
-          TESHI_REQUIREMENTS_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/requirements-pointer
-          TESHI_ACP_DISCOVERY_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/acp-discovery
-        # Real TUI regressions are timing-sensitive: a loaded runner can paint a
-        # panel frame before its controls, so run them one at a time.
-        run: xvfb-run -a cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked -- --ignored --test-threads=1
-      - name: Run actual Teshi terminal regressions (Windows)
-        if: runner.os == 'Windows'
-        env:
-          TESHI_SELF_TEST_BIN: ${{ github.workspace }}/target/debug/teshi.exe
-          TESHI_AI_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/ai-pointer
-          TESHI_EXPLORE_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/explore-pointer
-          TESHI_MANAGEMENT_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/management-pointer
-          TESHI_NAVIGATION_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/navigation
-          TESHI_OVERLAY_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/overlay
-          TESHI_REQUIREMENTS_POINTER_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/requirements-pointer
-          TESHI_ACP_DISCOVERY_ARTIFACTS: ${{ runner.temp }}/teshi-artifacts/acp-discovery
+          BUILD_RESULT: ${{ needs.tui-build.result }}
+          SHARDS_RESULT: ${{ needs.tui-shards.result }}
         run: |
-          $env:TESHI_VT_INPUT_TEST_BIN = & ./scripts/prepare-windows-vt-test.ps1
-          cargo test --manifest-path crates/teshi-tui-runner/Cargo.toml --locked -- --ignored --test-threads=1
+          if ($env:BUILD_RESULT -ne 'success' -or $env:SHARDS_RESULT -ne 'success') {
+            throw 'Every platform preparation job and required shard must succeed'
+          }
+      - uses: actions/download-artifact@v4
+        with:
+          name: terminal-build-${{ matrix.os }}
+          path: ${{ runner.temp }}/teshi-ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: terminal-directory-${{ matrix.os }}
+          path: ${{ runner.temp }}/teshi-ci/directory
+      - uses: actions/download-artifact@v4
+        with:
+          name: terminal-terminal-a-${{ matrix.os }}
+          path: ${{ runner.temp }}/teshi-ci/terminal-a
+      - uses: actions/download-artifact@v4
+        with:
+          name: terminal-terminal-b-${{ matrix.os }}
+          path: ${{ runner.temp }}/teshi-ci/terminal-b
+      - name: Verify compiled test coverage, Examples and actual capture files
+        run: python scripts/run-ci-suite.py gate --inventory "${{ runner.temp }}/teshi-ci/build/inventory.json" --artifacts "${{ runner.temp }}/teshi-ci"
+      - name: Upload the platform coverage gate result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-gate-${{ matrix.os }}
+          path: ${{ runner.temp }}/teshi-ci/platform-gate.json
+          if-no-files-found: error
 
   desktop:
     name: teshi-desktop build (GPUI)
