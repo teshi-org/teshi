@@ -82,7 +82,7 @@
     },
     {
       "line": 12,
-      "text": "当前键盘焦点允许按“q”退出 Teshi",
+      "text": "当前键盘焦点允许按“Ctrl+Q”退出 Teshi",
       "confirmed": true,
       "actions": [
         {
@@ -108,12 +108,12 @@
     },
     {
       "line": 16,
-      "text": "我按下“q”",
+      "text": "我按下“Ctrl+Q”",
       "confirmed": true,
       "actions": [
         {
           "action": "key",
-          "key": "q"
+          "key": "ctrl+q"
         }
       ]
     },
@@ -169,12 +169,12 @@
     },
     {
       "line": 29,
-      "text": "我按下“q”",
+      "text": "我按下“Ctrl+Q”",
       "confirmed": true,
       "actions": [
         {
           "action": "key",
-          "key": "q"
+          "key": "ctrl+q"
         }
       ]
     },
@@ -229,12 +229,12 @@
     },
     {
       "line": 44,
-      "text": "我按下“q”",
+      "text": "我按下“Ctrl+Q”",
       "confirmed": true,
       "actions": [
         {
           "action": "key",
-          "key": "q"
+          "key": "ctrl+q"
         }
       ]
     },
@@ -302,12 +302,12 @@
     },
     {
       "line": 57,
-      "text": "我按下“q”",
+      "text": "我按下“Ctrl+Q”",
       "confirmed": true,
       "actions": [
         {
           "action": "key",
-          "key": "q"
+          "key": "ctrl+q"
         }
       ]
     },
@@ -385,7 +385,7 @@
     },
     {
       "line": 64,
-      "text": "我按下“q”",
+      "text": "我按下“Ctrl+Q”",
       "confirmed": true,
       "actions": [
         {
@@ -394,7 +394,7 @@
         },
         {
           "action": "key",
-          "key": "q"
+          "key": "ctrl+q"
         }
       ]
     },

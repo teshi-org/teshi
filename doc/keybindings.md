@@ -21,7 +21,7 @@ current modal layer. Requirements calls its Normal mode **Browse**.
 | `Ctrl+B/Ctrl+F` or PageUp/PageDown | Page up/down in Normal mode and choice lists |
 | `s` / `Ctrl+S` | Save the active editable buffer in Normal mode |
 | `m` | Open model settings in Normal mode |
-| `q` / `Ctrl+C` | Request exit; modal panels may capture input first |
+| `Ctrl+Q` | Exit immediately; the `^q 退出` control at the bottom-right of every tab is the clickable equivalent. `q` and `Ctrl+C` never exit, and Ctrl+C copies the selection |
 
 Pane chords do not steal text input or Requirements visual selections. Existing
 Tab/Shift+Tab and non-text column-navigation keys remain available. Layouts with
@@ -186,7 +186,8 @@ Only on the AI tab: `[`/`]` select the previous/next Agent conversation,
 | Esc | Return to Normal |
 
 In the AI tab, Esc from Input followed by Esc in Normal cancels a running
-request. Ctrl+C requests exit instead. Terminal support is needed to distinguish
+request. Ctrl+Q exits from any mode; Ctrl+C copies the selection instead.
+Terminal support is needed to distinguish
 Shift+Enter from Enter; Ctrl+J also works in terminals without that support.
 
 Drag over chat text to select it; Ctrl+Shift+C or right-click copies the displayed

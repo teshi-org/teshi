@@ -302,7 +302,7 @@ Maps `KeyEvent` → `Action` (60+ variants) using `KeyContext` to capture mode s
 ### Priority order
 
 1. Complete `dd`/`yy` two-key sequence
-2. `Ctrl+C` → global quit
+2. `Ctrl+Q` → global quit
 3. External change prompt keys
 4. Agent change prompt keys (y/n)
 5. Auth panel keys (Esc)

@@ -336,7 +336,7 @@ class World:
                 self.op("screenshot", str(self.evidence / "screen.svg"))
                 self.op("key", "Escape")
                 self.op("click", "Explore [1]")
-                self.op("key", "q")
+                self.op("key", "ctrl+q")
                 self.op("exit")
         finally:
             try:

@@ -95,7 +95,7 @@ fn keyboard_project_switch_reloads_project_feature_and_runner_config() {
     terminal.key("Escape").unwrap();
     terminal.key("1").unwrap();
     terminal.expect_text("project-b step", true, 15000).unwrap();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 15000).unwrap();
 }
 
@@ -155,6 +155,6 @@ fn project_picker_pointer_and_open_path_switch_projects() {
     terminal.key("Escape").unwrap();
     terminal.key("1").unwrap();
     terminal.expect_text("project-a step", true, 15000).unwrap();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 15000).unwrap();
 }

@@ -526,8 +526,43 @@ pub fn run() -> Result<()> {
         }
     }
 
-    app.save_sessions(true)?;
+    // Leave the alternate screen before any teardown work. Saving sessions and
+    // reaping agent processes can block for seconds; the shell must come back
+    // at once, with that work visible in the normal terminal instead of behind
+    // a frozen full-screen UI.
+    drop(terminal);
+    drop(_guard);
+    // Only the Windows reader thread outlives the loop; elsewhere there is
+    // nothing to release and `drop` would just trip clippy::drop_non_drop.
+    #[cfg(windows)]
+    drop(event_source);
+
+    let saved = app.save_sessions(true);
+    stop_agents(&mut app);
+    drop(app);
+    saved?;
     Ok(())
+}
+
+/// Waits briefly for agent backends to release their processes.
+///
+/// The TUI is already gone when this runs, so a slow agent container costs a
+/// status line in the terminal rather than a frozen screen. Whatever has not
+/// finished by the deadline is still reaped by the ordinary drop path.
+fn stop_agents(app: &mut App) {
+    const GRACE: Duration = Duration::from_secs(2);
+    app.request_agent_shutdown();
+    let deadline = std::time::Instant::now() + GRACE;
+    let mut announced = false;
+    while app.agent_shutdown_pending() && std::time::Instant::now() < deadline {
+        if !announced {
+            println!("teshi: stopping agent sessions...");
+            let _ = io::stdout().flush();
+            announced = true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        app.poll_agent_shutdown();
+    }
 }
 
 #[cfg(test)]

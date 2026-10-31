@@ -61,7 +61,7 @@ fn main() -> anyhow::Result<()> {
         // Allow the local fixture to finish its initialization before measuring.
         std::thread::sleep(std::time::Duration::from_secs(1));
         let start = Instant::now();
-        terminal.key("q")?;
+        terminal.key("ctrl+q")?;
         terminal.expect_exit(0, 15000)?;
         println!(
             "backend={} quit_ms={}",

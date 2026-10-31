@@ -201,7 +201,7 @@ fn mindmap(terminal: &Terminal) {
 fn close(terminal: &Terminal) {
     terminal.key("Escape").unwrap();
     terminal.key("Escape").unwrap();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 

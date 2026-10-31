@@ -165,7 +165,7 @@ class World:
             self.op("key", "Escape")
             self.input_focused = False
         elif text == "I quit ACP authoring":
-            self.op("key", "q")
+            self.op("key", "ctrl+q")
         elif text == "ACP authoring exits successfully":
             self.op("exit", code=0, timeout_ms=15_000)
         else:

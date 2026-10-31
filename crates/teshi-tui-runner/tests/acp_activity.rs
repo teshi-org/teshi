@@ -107,7 +107,7 @@ fn acp_reply_color_and_event_order_in_real_terminal() {
     std::fs::write(gate.with_extension("finish"), "continue").unwrap();
     assert_svg_headers(&terminal, &output.join("completed.svg"), 1, 1);
     terminal.key("Escape").unwrap();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
     drop(terminal);
 
@@ -177,7 +177,7 @@ fn acp_reply_color_and_event_order_in_real_terminal() {
         .unwrap();
     assert_svg_headers(&terminal, &output.join("recovered.svg"), 1, 0);
     terminal.key("Escape").unwrap();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
     println!("Color and order evidence: {}", output.display());
 }
@@ -317,7 +317,7 @@ fn fake_acp_activity_compact_expanded_and_narrow() {
     terminal.screenshot(&output.join("narrow.svg")).unwrap();
     std::fs::write(output.join("narrow.txt"), terminal.screen().unwrap()).unwrap();
     terminal.key("Escape").unwrap();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
     println!("Screenshots: {}", output.display());
 }
@@ -435,7 +435,7 @@ fn interrupted_acp_task_can_continue_in_real_terminal() {
             .unwrap();
         terminal.screenshot(&output.join("continued.svg")).unwrap();
         terminal.key("Escape").unwrap();
-        terminal.key("q").unwrap();
+        terminal.key("ctrl+q").unwrap();
         terminal.expect_exit(0, 10000).unwrap();
         let sessions = std::fs::read_dir(root.path().join("sessions")).unwrap();
         let transcript = sessions

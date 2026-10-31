@@ -82,7 +82,7 @@
     },
     {
       "line": 12,
-      "text": "keyboard focus allows \"q\" to quit Teshi",
+      "text": "keyboard focus allows \"Ctrl+Q\" to quit Teshi",
       "confirmed": true,
       "actions": [
         {
@@ -108,12 +108,12 @@
     },
     {
       "line": 16,
-      "text": "I press \"q\"",
+      "text": "I press \"Ctrl+Q\"",
       "confirmed": true,
       "actions": [
         {
           "action": "key",
-          "key": "q"
+          "key": "ctrl+q"
         }
       ]
     },
@@ -169,12 +169,12 @@
     },
     {
       "line": 29,
-      "text": "I press \"q\"",
+      "text": "I press \"Ctrl+Q\"",
       "confirmed": true,
       "actions": [
         {
           "action": "key",
-          "key": "q"
+          "key": "ctrl+q"
         }
       ]
     },
@@ -229,12 +229,12 @@
     },
     {
       "line": 44,
-      "text": "I press \"q\"",
+      "text": "I press \"Ctrl+Q\"",
       "confirmed": true,
       "actions": [
         {
           "action": "key",
-          "key": "q"
+          "key": "ctrl+q"
         }
       ]
     },
@@ -302,12 +302,12 @@
     },
     {
       "line": 57,
-      "text": "I press \"q\"",
+      "text": "I press \"Ctrl+Q\"",
       "confirmed": true,
       "actions": [
         {
           "action": "key",
-          "key": "q"
+          "key": "ctrl+q"
         }
       ]
     },
@@ -385,7 +385,7 @@
     },
     {
       "line": 64,
-      "text": "I press \"q\"",
+      "text": "I press \"Ctrl+Q\"",
       "confirmed": true,
       "actions": [
         {
@@ -394,7 +394,7 @@
         },
         {
           "action": "key",
-          "key": "q"
+          "key": "ctrl+q"
         }
       ]
     },

@@ -131,7 +131,7 @@ impl Fixture {
     }
 }
 fn quit(terminal: Terminal) {
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -233,7 +233,7 @@ fn quit_modal_owns_pointer_and_no_keeps_unsaved_feature_content() {
     terminal.write("POINTER_DIRTY").unwrap();
     terminal.key("Enter").unwrap();
     terminal.key("Escape").unwrap();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_text("Quit Teshi?", true, 10000).unwrap();
     terminal.click_text("AI [3]", 10000).unwrap();
     terminal.scroll_at(2, 5, false, false).unwrap();
@@ -243,7 +243,7 @@ fn quit_modal_owns_pointer_and_no_keeps_unsaved_feature_content() {
     terminal.expect_text("Quit Teshi?", false, 10000).unwrap();
     assert_eq!(fs::read_to_string(&fixture.source).unwrap(), SOURCE);
     fixture.capture(&terminal, "quit-no-keeps-edit");
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_text("Quit Teshi?", true, 10000).unwrap();
     terminal.click_text("[Yes]", 10000).unwrap();
     terminal.expect_exit(0, 10000).unwrap();

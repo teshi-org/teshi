@@ -158,7 +158,7 @@ fn new_requirement_creation_keeps_tree_and_editor_in_sync() {
             format!("# {}\n\n", document["title"].as_str().unwrap())
         );
     }
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -219,7 +219,7 @@ fn requirements_footer_save_and_keyboard_both_persist_documents() {
     if let Some(path) = artifact_path("footer-save-index.json") {
         fs::write(path, serde_json::to_vec_pretty(&second).unwrap()).unwrap();
     }
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -328,7 +328,7 @@ fn new_requirement_creation_dirty_guard_supports_cancel_and_discard() {
     terminal
         .expect_text("Saved requirement document", true, 10000)
         .unwrap();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -396,6 +396,6 @@ fn requirements_tree_wheel_routes_under_pointer_and_keeps_editor_selection() {
         println!("Requirement wheel viewport evidence: {}", path.display());
     }
 
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }

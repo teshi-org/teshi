@@ -182,7 +182,7 @@ impl Fixture {
     fn finish(&self, terminal: Terminal) {
         terminal.key("Escape").unwrap();
         terminal.key("Escape").unwrap();
-        terminal.key("q").unwrap();
+        terminal.key("ctrl+q").unwrap();
         terminal.expect_exit(0, 10000).unwrap();
     }
 }
@@ -484,7 +484,13 @@ fn footer_and_threads(narrow: bool) {
     expect_wrapped_marker(&terminal, "POINTER_REPLY_COMPLETE");
     fixture.capture(&terminal, "reply-visible");
     fixture.click(&terminal, "Blur", "blur-before-quit");
-    fixture.click(&terminal, "Quit", "quit");
+    if fixture.narrow {
+        // The pinned exit control starts at 60 columns; narrow terminals keep
+        // the chord as their exit affordance.
+        terminal.key("ctrl+q").unwrap();
+    } else {
+        fixture.click(&terminal, "^q", "quit");
+    }
     terminal.expect_exit(0, 10000).unwrap();
     assert_eq!(fs::read_to_string(&fixture.source).unwrap(), ORIGINAL);
     let sessions = fixture.root.path().join("TESHI_SESSION_DIR");

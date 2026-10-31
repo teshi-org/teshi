@@ -198,7 +198,7 @@ class World:
         elif action == "quit":
             self.op("screenshot", str(self.evidence / "before-quit.svg"))
             self.quit_started = time.perf_counter()
-            self.key("q")
+            self.key("ctrl+q")
             self.op("exit")
             self.metrics["quit_ms"] = (time.perf_counter() - self.quit_started) * 1000
             self.running = False

@@ -119,7 +119,7 @@ fn requirement_title_tracks_keyboard_save_and_survives_restart() {
         .unwrap();
     terminal.key("Escape").unwrap();
     terminal.expect_text("[BROWSE]", true, 10000).unwrap();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
     drop(terminal);
 
@@ -130,6 +130,6 @@ fn requirement_title_tracks_keyboard_save_and_survives_restart() {
         .expect_text(&format!("# {title}"), true, 10000)
         .unwrap();
     assert_tree_title(&reopened, title);
-    reopened.key("q").unwrap();
+    reopened.key("ctrl+q").unwrap();
     reopened.expect_exit(0, 10000).unwrap();
 }

@@ -423,6 +423,12 @@ pub enum Action {
 
 impl Action {
     pub fn from_key_event(event: KeyEvent, context: KeyContext) -> Option<Self> {
+        // Ctrl+Q is the only exit chord, and it wins over every mode so the
+        // user can always leave. Ctrl+C belongs to copying, and a bare `q` is
+        // ordinary input in insert modes.
+        if event.code == KeyCode::Char('q') && event.modifiers == KeyModifiers::CONTROL {
+            return Some(Self::Quit);
+        }
         if context.delete_confirmation_active {
             return match event.code {
                 KeyCode::Enter | KeyCode::Char('y' | 'Y') => Some(Self::DeleteConfirm),
@@ -578,9 +584,11 @@ impl Action {
                 _ => {}
             }
         }
-        // Ctrl+C always maps to Quit, regardless of mode.
+        // Ctrl+C copies the current selection instead of exiting. With nothing
+        // selected it reports that to the status line rather than closing the
+        // session, so the habitual interrupt cannot lose work.
         if event.code == KeyCode::Char('c') && event.modifiers == KeyModifiers::CONTROL {
-            return Some(Self::Quit);
+            return Some(Self::CopySelection);
         }
 
         if context.external_change_prompt_active {
@@ -634,7 +642,7 @@ impl Action {
         if context.quit_pending_confirm {
             return match (event.code, event.modifiers) {
                 (KeyCode::Char('y' | 'Y'), _) => Some(Self::DeleteConfirm),
-                (KeyCode::Char('q'), KeyModifiers::NONE) | (KeyCode::Enter, _) => Some(Self::Quit),
+                (KeyCode::Enter, _) => Some(Self::Quit),
                 (KeyCode::Char('n'), KeyModifiers::NONE)
                 | (KeyCode::Char('N'), KeyModifiers::SHIFT)
                 | (KeyCode::Esc, _) => Some(Self::ClearInputState),
@@ -988,7 +996,6 @@ impl Action {
                     Some(Self::SelectTab(MainTab::TestPoints))
                 }
                 (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
-                (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                 (KeyCode::Char('c' | 'C'), modifiers)
                     if modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
                 {
@@ -1133,7 +1140,6 @@ impl Action {
                     (KeyCode::Char('5'), KeyModifiers::NONE) => {
                         Some(Self::SelectTab(MainTab::TestPoints))
                     }
-                    (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                     (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                     (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
                     (KeyCode::Esc, _) => Some(Self::ReqExitInsert),
@@ -1166,7 +1172,6 @@ impl Action {
                 (KeyCode::Char('5'), KeyModifiers::NONE) => {
                     Some(Self::SelectTab(MainTab::TestPoints))
                 }
-                (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                 (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                 (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
@@ -1256,7 +1261,6 @@ impl Action {
                 (KeyCode::Char('5'), KeyModifiers::NONE) => {
                     Some(Self::SelectTab(MainTab::TestPoints))
                 }
-                (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                 (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
                 (KeyCode::Esc, _) => Some(Self::ClearInputState),
@@ -1293,7 +1297,6 @@ impl Action {
                 (KeyCode::Char('5'), KeyModifiers::NONE) => {
                     Some(Self::SelectTab(MainTab::TestPoints))
                 }
-                (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                 (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
                 (KeyCode::Esc, _) => Some(Self::ClearInputState),
@@ -1405,7 +1408,6 @@ impl Action {
                 (KeyCode::Char('5'), KeyModifiers::NONE) => {
                     Some(Self::SelectTab(MainTab::TestPoints))
                 }
-                (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
                 (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
                 (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::MindMapSendToAi),
                 (KeyCode::Char('p'), KeyModifiers::NONE) => Some(Self::ToggleMindMapAiPanel),
@@ -1425,7 +1427,6 @@ impl Action {
                 Some(Self::SelectTab(MainTab::Requirements))
             }
             (KeyCode::Char('5'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::TestPoints)),
-            (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Self::Quit),
             (KeyCode::Char('s'), KeyModifiers::NONE) => Some(Self::Save),
             (KeyCode::Char('s'), KeyModifiers::CONTROL) => Some(Self::Save),
             (KeyCode::Char('m'), KeyModifiers::NONE) => Some(Self::ModelPanelOpen),
@@ -1744,6 +1745,40 @@ mod tests {
             quit_pending_confirm: false,
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
+        }
+    }
+
+    #[test]
+    fn ctrl_q_exits_while_ctrl_c_and_bare_q_do_not() {
+        for context in [
+            chat_context(MainTab::Ai, MindMapFocus::Main, true),
+            chat_context(MainTab::Explore, MindMapFocus::Main, false),
+            requirements_tree_context(),
+        ] {
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
+                    context
+                ),
+                Some(Action::Quit),
+                "Ctrl+Q must exit from every mode"
+            );
+            assert_ne!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                    context
+                ),
+                Some(Action::Quit),
+                "a bare q must never exit"
+            );
+            assert_eq!(
+                Action::from_key_event(
+                    KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                    context
+                ),
+                Some(Action::CopySelection),
+                "Ctrl+C must copy the selection instead of exiting"
+            );
         }
     }
 
