@@ -748,7 +748,7 @@ fn ownership_uses_manifest_not_package_manager_presence() {
         "teshi"
     });
     std::fs::write(&exe, b"cli").unwrap();
-    std::fs::write(unmarked.join("winget.exe"), b"pm").unwrap();
+    std::fs::write(unmarked.join("package-manager.exe"), b"pm").unwrap();
     let unknown = Installation::detect(&exe, &identity(1, 'a')).unwrap();
     assert_eq!(unknown.kind, InstallKind::Unknown);
     assert!(!unknown.can_install());

@@ -7,7 +7,7 @@ Coding agents should follow [AI_INSTALL.md](../AI_INSTALL.md) to install the tes
 | Asset | Contents |
 |-------|----------|
 | `teshi-vX.Y.Z-x64-setup.exe` | **User install (in-app updates).** Per-user copy under `%LOCALAPPDATA%\Programs\teshi`, no administrator prompt |
-| `teshi-vX.Y.Z-x64.msi` / WinGet | Machine-wide package for IT/WinGet. Check-only in `teshi update`; does not self-update |
+| `teshi-vX.Y.Z-x64.msi` | Machine-wide package for IT deployments. Check-only in `teshi update`; does not self-update |
 | `teshi-vX.Y.Z-x86_64-pc-windows-msvc.zip` | Portable full bundle. Check-only; replace the folder manually |
 | `teshi-bridge-vX.Y.Z.zip` | Chrome extension for locator recording (load unpacked) |
 
@@ -20,8 +20,8 @@ teshi web
 teshi desktop
 teshi update
 
-# Machine-wide / WinGet (no in-app replace)
-winget install teshi-org.teshi
+# Machine-wide MSI (no in-app replace; run from an elevated shell)
+msiexec /i teshi-<tag>-x64.msi /qn
 ```
 
 ## Linux and macOS
@@ -41,7 +41,7 @@ Shipped release binaries include `teshi update`. The first updater-enabled **set
 |--------------|----------------|
 | Windows setup.exe (`%LOCALAPPDATA%\Programs\teshi`, `kind: exe`) | Download the new setup.exe, silent `/update=true`, helper replaces managed files |
 | Portable ZIP/tar.gz with `teshi-bundle.json` | Check-only; do not self-update |
-| Registered Teshi MSI / WinGet | Check-only; install setup.exe if you want in-app updates |
+| Registered Teshi MSI | Check-only; install setup.exe if you want in-app updates |
 | Explicit external package-manager marker | Prints the manager guidance; never overwrites files |
 | Source/Cargo/`cargo run` builds | Check-only with manual-install guidance |
 

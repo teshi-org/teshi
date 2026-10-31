@@ -6,18 +6,17 @@ Ask before choosing a teshi-bridge unpack directory. Show `teshi install-skill -
 
 ## 1. Install the teshi CLI
 
-Prefer Windows WinGet:
+Prefer the portable GitHub Release archive for this machine (`teshi-v*-x86_64-pc-windows-msvc.zip` on Windows) from https://github.com/teshi-org/teshi/releases. Unpack it and put `teshi` on `PATH`, then check the install:
 
 ```powershell
-winget install teshi-org.teshi
+# or, on Windows with an elevated shell, install the machine-wide MSI
+msiexec /i teshi-v*-x64.msi /qn
 teshi --version
 ```
 
-If `teshi` is missing from the current shell after WinGet, open a new terminal or refresh `PATH`, then retry `teshi --version`.
+The per-user `teshi-v*-x64-setup.exe` is the only installer that can self-update; use it when the user wants in-app updates and can run an installer interactively.
 
-If WinGet is unavailable, download the latest GitHub Release archive for this machine (`teshi-v*-x86_64-pc-windows-msvc.zip` on Windows) from https://github.com/teshi-org/teshi/releases, unpack it, and put `teshi` on `PATH`.
-
-If that also fails, build from source:
+If no archive is reachable, build from source:
 
 ```bash
 git clone https://github.com/teshi-org/teshi.git
@@ -31,7 +30,7 @@ Then run the built binary (for example `target/release/teshi --version`).
 
 Ask the user which directory should hold the unpacked Chrome extension.
 
-- If teshi was installed with WinGet/MSI, prefer the bundled copy at `C:\Program Files\teshi\share\teshi-bridge` (or the portable zip's `share/teshi-bridge` next to `teshi.exe`).
+- If teshi was installed with the MSI, prefer the bundled copy at `C:\Program Files\teshi\share\teshi-bridge` (or the portable zip's `share/teshi-bridge` next to `teshi.exe`).
 - Otherwise download the **same release tag** as `teshi --version`, using `teshi-bridge-vX.Y.Z.zip`, and unpack it into the directory the user named.
 
 Then ask the user to:
