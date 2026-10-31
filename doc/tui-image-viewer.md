@@ -1,7 +1,16 @@
 # TUI screenshot viewing
 
-Open MindMap with `2`, select a node with a capture marker, and press `i`.
-The viewer uses the newest replay run with captures for that scenario.
+Captures are reached from where a scenario is run and reviewed. In Explore the
+Scenarios and Steps panes end rows with `●N`, and `i` opens the capture of the
+selected step. The Failure Details popup opens the failing step's capture with
+`i` from any Explore pane, and closing the viewer moves the Steps selection to
+the capture that was last shown. `i` on a MindMap node opens the same viewer for
+browsing evidence by requirement structure. The viewer uses the newest replay
+run with captures for that scenario.
+
+In Explore the viewer covers the Scenarios and Steps panes and leaves the
+Features column visible; below 84 columns of tab width it covers the whole tab.
+On the MindMap tab it always covers the tab.
 
 | Key | Behavior |
 | --- | --- |
@@ -95,7 +104,8 @@ LRU eviction, source-file invalidation, latest-request coalescing, discarded
 late results, prompt worker drop, text clearing, and bounded tile output.
 
 The paired `tui_image_viewer.feature` / `流畅截图查看.feature` files are bound
-by `teshi-image-feature-runner` and `tests/fixtures/image_feature_steps.py`.
+by `teshi-image-feature-runner` and
+`crates/teshi-tui-runner/tests/fixtures/image_feature_steps.py`.
 The runner parses the exact source steps, rejects unknown steps, creates an
 isolated project with 8192 by 4096 and 1024 by 512 captures, and drives the
 actual CLI through an owned PTY. It records per-step pass/fail events, viewport

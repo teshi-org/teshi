@@ -46,6 +46,7 @@ pointer; Shift+wheel scrolls horizontally where supported.
 | Home/End, `gg/G` | First/last row |
 | PageUp/PageDown, Ctrl+B/Ctrl+F | Navigate approximately ten rows |
 | Enter | Expand/collapse failure details |
+| `i` | Open the replay screenshot viewer for the selected step, or for the failed step while Failure Details is open |
 | `r` | Run the selected scenario |
 | `p` | Toggle plaintext for redacted HTTP inspector fields |
 | `a` | Request an AI suggestion |
@@ -105,7 +106,16 @@ Ctrl+7, Ctrl+underscore, and Ctrl+Shift+minus.
 | `o` | Open the scenario-location dropdown |
 | `i` | Toggle the replay screenshot viewer |
 
-The screenshot viewer shows the captures recorded for the selected scenario by
+The viewer also opens from Explore, which is the main entry point: the
+Scenarios and Steps panes mark captures with `●N`, `i` on the Steps pane opens
+the capture of the selected step, and `i` in Failure Details opens the failing
+step. In Explore the viewer covers the Scenarios and Steps panes, leaving the
+Features column as context; narrow terminals fall back to the whole tab.
+Closing the viewer moves the Steps selection to the capture that was last
+shown. The MindMap entry stays available for browsing evidence by requirement
+structure.
+
+The viewer shows the captures recorded for the selected scenario by
 the newest replay run that has them. `j/k` switch between steps. `+`/`=` and
 `-` zoom, `1` selects 100 percent, and `0`/`f` resets to fit. In a zoomed view,
 arrow keys pan through original pixels; `h/l` also pan horizontally. In fit
@@ -130,9 +140,11 @@ filters images. Native Windows Zellij launches show an explicit compatibility
 hint; a direct Windows Terminal session is a separate acceptance target.
 
 Tree nodes whose scenario has captures end with `●N`, where N is the number of
-step images in the newest run; the marker is refreshed when the tab is opened
-and whenever the viewer opens. Selecting a scenario without captures lists the
-other scenarios in the project that have them.
+step images in the newest run. The Explore Scenarios and Steps panes use the
+same marker, counted per step there. Markers are refreshed when the tab is
+opened, when a Feature is loaded, when a run ends, and whenever the viewer
+opens. Selecting a scenario without captures lists the other scenarios in the
+project that have them.
 
 The tree is display-only. Its AI panel uses the chat Normal/Input rules below.
 Esc from the panel's Normal mode returns focus to the tree; Esc from its input
