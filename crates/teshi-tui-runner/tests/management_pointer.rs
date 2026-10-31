@@ -446,6 +446,11 @@ fn auth_overview_close(narrow: bool) {
 }
 
 fn click_sidebar(terminal: &Terminal, text: &str) {
+    // The panel opens before its sidebar rows are listed, so wait for the row
+    // instead of reading the first screen that shows the title.
+    terminal
+        .expect_text(text, true, 2000)
+        .unwrap_or_else(|error| panic!("missing sidebar text {text}: {error}"));
     let screen = terminal.screen().unwrap();
     let (col, row) = screen
         .lines()

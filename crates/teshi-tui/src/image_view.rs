@@ -1201,6 +1201,13 @@ mod tests {
             "features/demo.feature"
         );
         assert_eq!(
+            relative_feature_path(root, Path::new("proj/features\\demo.feature")),
+            "features/demo.feature"
+        );
+        // A drive root is only a prefix once the platform treats `\` as a
+        // separator, so the recorded Windows path can only be stripped there.
+        #[cfg(windows)]
+        assert_eq!(
             relative_feature_path(
                 Path::new("C:/proj"),
                 Path::new("C:/proj\\features\\demo.feature")
