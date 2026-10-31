@@ -158,7 +158,7 @@ fn acp_chat_copy_command_and_selection_round_trip() {
     assert_clipboard(&mut clipboard, "WRAPPED_REPLY_01");
 
     terminal.key("Escape").unwrap();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -336,7 +336,7 @@ fn native_chat_copy_command_reads_completed_responses() {
     assert_clipboard(&mut clipboard, "NATIVE_REPLY_01");
 
     terminal.key("Escape").unwrap();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -608,7 +608,7 @@ fn command(terminal: &Terminal, text: &str) {
 
 fn close_chat(terminal: &Terminal) {
     terminal.key("Escape").unwrap();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 

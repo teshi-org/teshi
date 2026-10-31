@@ -83,7 +83,7 @@ fn builtin_default_title_has_no_profile_suffix() {
     let line = title(&terminal);
     assert!(!line.contains("Agent:"), "{line}");
     capture(&terminal, "builtin-default");
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -95,7 +95,7 @@ fn custom_default_profile_is_identified_in_title() {
     let terminal = launch(&project, root.path());
     assert!(title(&terminal).contains("Agent: Default"));
     capture(&terminal, "custom-default");
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 

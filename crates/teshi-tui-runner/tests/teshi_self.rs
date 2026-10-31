@@ -150,7 +150,7 @@ fn verify_live_codebuddy(source: &str) {
     }
     actions.extend([
         vec![key("Escape")],
-        vec![key("q")],
+        vec![key("ctrl+q")],
         vec![json!({"action":"expect_exit","code":0,"timeout_ms":10000})],
     ]);
     let steps = background
@@ -260,7 +260,7 @@ fn verify_wrapped_chat(source: &str, batches: &[(usize, usize)]) {
     }
     actions.extend([
         vec![key("Escape")],
-        vec![key("q")],
+        vec![key("ctrl+q")],
         vec![json!({"action":"expect_exit","code":0,"timeout_ms":10000})],
     ]);
     let steps = background
@@ -385,7 +385,7 @@ fn verify_permission_prompt(source: &str, allow: bool) {
             vec![text("PERMISSION_AFTER_allow_always")],
             vec![text("PERMISSION_BEFORE")],
             vec![key("Escape")],
-            vec![key("q")],
+            vec![key("ctrl+q")],
             vec![json!({"action":"expect_exit","code":0,"timeout_ms":10000})],
         ]);
     } else {
@@ -396,7 +396,7 @@ fn verify_permission_prompt(source: &str, allow: bool) {
             vec![key("Escape"), key("Escape"), absent("Allow once")],
             vec![absent("PERMISSION_AFTER")],
             vec![key("Escape")],
-            vec![key("q")],
+            vec![key("ctrl+q")],
             vec![json!({"action":"expect_exit","code":0,"timeout_ms":10000})],
         ]);
     }
@@ -525,9 +525,9 @@ fn acp_settings_switch_model_by_mouse_and_keyboard() {
             text("Fast: On"),
             key("Escape"),
         ],
-        // Leave the chat input first; a bare q would be typed as message text.
+        // Leave the chat input first so the exit chord is pressed from Normal mode.
         vec![key("Escape")],
-        vec![key("q")],
+        vec![key("ctrl+q")],
         vec![json!({"action":"expect_exit","code":0,"timeout_ms":10000})],
     ];
     let steps = background
@@ -608,7 +608,7 @@ fn verify(source: &str, command: &str) {
             vec![
                 json!({"action":"expect_stable_text","text":"Sample scenario","visible":true,"timeout_ms":15000,"stable_ms":300}),
             ],
-            vec![key("q")],
+            vec![key("ctrl+q")],
             vec![exit()],
         ],
         vec![
@@ -625,7 +625,7 @@ fn verify(source: &str, command: &str) {
             vec![text("a sample step updated")],
             vec![key("s")],
             vec![text("a sample step updated")],
-            vec![key("q")],
+            vec![key("ctrl+q")],
             vec![exit()],
         ],
     ];

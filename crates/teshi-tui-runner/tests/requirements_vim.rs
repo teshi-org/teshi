@@ -165,7 +165,7 @@ fn keys(terminal: &Terminal, keys: &[&str]) {
 }
 
 fn quit(terminal: Terminal) {
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 

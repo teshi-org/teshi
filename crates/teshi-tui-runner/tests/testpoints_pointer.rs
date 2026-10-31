@@ -230,7 +230,7 @@ impl Fixture {
                 path.display()
             );
         }
-        terminal.key("q").unwrap();
+        terminal.key("ctrl+q").unwrap();
         std::thread::sleep(Duration::from_millis(300));
         if terminal
             .screen()

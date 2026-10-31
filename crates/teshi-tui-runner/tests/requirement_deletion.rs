@@ -122,7 +122,7 @@ fn global_requirement_delete_confirms_cancels_and_updates_viewport() -> anyhow::
     let index = fs::read_to_string(store.join("_teshi.json"))?;
     assert!(!index.contains("doc-2"));
 
-    terminal.key("q")?;
+    terminal.key("ctrl+q")?;
     terminal.expect_exit(0, 10000)?;
     Ok(())
 }

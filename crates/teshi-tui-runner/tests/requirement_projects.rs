@@ -164,7 +164,7 @@ fn project_views_link_existing_sources_and_create_project_owned_documents() {
         )
         .unwrap();
     }
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
     let identity: serde_json::Value =
         serde_json::from_slice(&fs::read(project.join(".teshi/project.json")).unwrap()).unwrap();
