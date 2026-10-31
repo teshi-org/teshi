@@ -6,15 +6,16 @@ Ask before choosing a teshi-bridge unpack directory. Show `teshi install-skill -
 
 ## 1. Install the teshi CLI
 
-Prefer the portable GitHub Release archive for this machine (`teshi-v*-x86_64-pc-windows-msvc.zip` on Windows) from https://github.com/teshi-org/teshi/releases. Unpack it and put `teshi` on `PATH`, then check the install:
+Download the latest portable archive for this machine (`teshi-v*-x86_64-pc-windows-msvc.zip` on Windows, `teshi-v*-<target>.tar.gz` on Linux and macOS) from https://github.com/teshi-org/teshi/releases, unpack it, put `teshi` on `PATH`, then check the install:
 
 ```powershell
-# or, on Windows with an elevated shell, install the machine-wide MSI
-msiexec /i teshi-v*-x64.msi /qn
 teshi --version
 ```
 
-The per-user `teshi-v*-x64-setup.exe` is the only installer that can self-update; use it when the user wants in-app updates and can run an installer interactively.
+On Windows two installers are published as well:
+
+- `teshi-v*-x64-setup.exe` — per-user install and the only channel that self-updates in place. Use it when the user wants `teshi update` and can run an installer interactively.
+- `teshi-v*-x64.msi` — machine-wide install for IT. Run `msiexec /i teshi-v*-x64.msi /qn` from an elevated shell. Check-only; no in-app updates.
 
 If no archive is reachable, build from source:
 
