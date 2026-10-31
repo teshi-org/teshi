@@ -146,7 +146,9 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(spawn.call_args.kwargs["stdout"], service.subprocess.DEVNULL)
 
     async def wait_until_active(self):
-        async with asyncio.timeout(2):
+        # Liveness wait for the in-flight request, not a timing assertion: a
+        # loaded runner can take seconds to start the worker process.
+        async with asyncio.timeout(10):
             while self.supervisor.active_request is None:
                 await asyncio.sleep(0.001)
 

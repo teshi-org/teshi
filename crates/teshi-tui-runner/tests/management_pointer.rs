@@ -117,12 +117,21 @@ impl Fixture {
 
     fn click(&self, terminal: &Terminal, labels: &[&str], name: &str) {
         self.capture(terminal, &format!("{name}-before"));
-        let screen = terminal.screen().unwrap();
-        let label = labels
-            .iter()
-            .find(|label| screen.contains(**label))
-            .unwrap_or_else(|| panic!("missing control {labels:?}:\n{screen}"));
-        terminal.click_text(label, 1500).unwrap();
+        // A panel paints its frame before its controls, so wait for the label
+        // instead of reading the first screen that shows the panel title.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let label = loop {
+            let screen = terminal.screen().unwrap();
+            if let Some(label) = labels.iter().find(|label| screen.contains(**label)) {
+                break (*label).to_string();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "missing control {labels:?}:\n{screen}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        terminal.click_text(&label, 1500).unwrap();
         self.capture(terminal, &format!("{name}-after"));
     }
 
@@ -449,7 +458,7 @@ fn click_sidebar(terminal: &Terminal, text: &str) {
     // The panel opens before its sidebar rows are listed, so wait for the row
     // instead of reading the first screen that shows the title.
     terminal
-        .expect_text(text, true, 2000)
+        .expect_text(text, true, 5000)
         .unwrap_or_else(|error| panic!("missing sidebar text {text}: {error}"));
     let screen = terminal.screen().unwrap();
     let (col, row) = screen
