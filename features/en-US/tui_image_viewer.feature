@@ -55,3 +55,12 @@ Feature: Responsive screenshot inspection
     Given Teshi is running with image graphics disabled
     When I open the screenshot viewer
     Then the unavailable graphics reason and external-viewer action are visible
+
+  Scenario: Inspect a recorded step from the Explore steps pane
+    Given Teshi is running with image graphics enabled
+    When I open the Explore steps pane
+    Then the Explore panes mark captured scenarios and steps
+    When I open the screenshot viewer from the Explore steps
+    Then the screenshot viewer shows the capture of the selected step
+    When I close the screenshot viewer from Explore
+    Then Explore is interactive within 1000 milliseconds
