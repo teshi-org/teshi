@@ -12,6 +12,8 @@ from websockets.sync.server import serve
 
 REPO = Path(__file__).resolve().parents[2]
 CLI = Path(os.environ.get("TESHI_TEST_CLI", REPO / "target/debug" / ("teshi.exe" if os.name == "nt" else "teshi")))
+# A real 2x3 PNG: replay acceptance validates every capture it records.
+SCREENSHOT = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAAA2iEnWAAAAFElEQVR4nGMUkdNgYGBgYgADKAUABu4AYPJwfb0AAAAASUVORK5CYII="
 
 
 @unittest.skipUnless(CLI.is_file(), "build teshi-cli or set TESHI_TEST_CLI for CLI contracts")
@@ -50,7 +52,7 @@ class VisualCliTests(unittest.TestCase):
             elif command["cmd"] == "screenshot":
                 self.capture_count += 1
                 response = ({"ok": False, "error": "injected capture failure"} if self.capture_failure or self.capture_count == self.fail_capture_number
-                            else {"ok": True, "screenshot": "AA=="})
+                            else {"ok": True, "screenshot": SCREENSHOT})
             elif (command.get("action") == "pointer_click" or command["cmd"] == "shell_tray_click") and not (
                 command.get("mode") == "foreground" and command.get("allow_interactive_input") is True
             ):
@@ -288,18 +290,20 @@ class VisualCliTests(unittest.TestCase):
         identities = [e["step_id"] for e in run["events"] if e["type"] == "step_result"]
         self.assertEqual(len(set(identities)), 4)
 
-    def test_all_captures_fail_but_terminal_is_passed_and_unique(self):
+    def test_all_captures_fail_keeps_passed_terminal_and_rejects_acceptance(self):
         self.fixture("Feature: Coverage\n  Scenario: Result\n    Given ready\n", [3])
         self.capture_failure = True
         ids = set()
         for _ in range(2):
             result = self.replay_fixture()
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotEqual(result.returncode, 0)
             self.assertIn('"event": "replay_complete"', result.stdout)
+            self.assertIn("replay acceptance incomplete", result.stderr)
             run, index = self.latest_run()
             ids.add(run["id"])
-            self.assertEqual(run["status"], "passed")
-            self.assertEqual(index["status"], "passed")
+            self.assertEqual(run["test_status"], "passed")
+            self.assertEqual(run["status"], "incomplete")
+            self.assertEqual(index["status"], "incomplete")
             self.assertEqual(run["events"][-1]["capture_failures"], 1)
             kinds = [event["type"] for event in run["events"]]
             self.assertLess(kinds.index("step_result"), kinds.index("step_screenshot"))
@@ -324,9 +328,11 @@ class VisualCliTests(unittest.TestCase):
         self.fixture("Feature: Coverage\n  Scenario: Result\n    Given ready\n\n    Then visible\n", [3, 5])
         self.fail_capture_number = 2
         result = self.replay_fixture()
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("replay acceptance incomplete", result.stderr)
         run, index = self.latest_run()
-        self.assertEqual(run["status"], "passed")
+        self.assertEqual(run["test_status"], "passed")
+        self.assertEqual(run["status"], "incomplete")
         self.assertEqual(len(index["steps"]), 1)
         self.assertEqual(run["events"][-1]["capture_failures"], 1)
 

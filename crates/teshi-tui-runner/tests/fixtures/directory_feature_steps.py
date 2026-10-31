@@ -87,6 +87,18 @@ class World:
         self.expect("Explore")
         self.expect("Project: xxx")
 
+    def capture(self, run_directory, case, step, attempt, timing="after_step"):
+        event = dict(case_id=case["id"], step_id=f"{case['id']}:L{step['line']}",
+                     attempt=attempt, feature=case["feature_path"], step_line=step["line"],
+                     step_text=step["text"], source="pty", capture_timing=timing)
+        try:
+            stem = re.sub(r"[^A-Za-z0-9-]", "-", f"directory-{case['id']}-L{step['line']}-{attempt}")
+            event.update(self.op("capture", directory=str(run_directory), stem=stem),
+                         capture_status="available")
+        except Exception as error:
+            event.update(capture_status="failed", message=str(error))
+        return event
+
     def exact(self, expected):
         expected = set(expected)
         candidates = set(self.files.values())
@@ -141,6 +153,9 @@ class World:
         quoted = re.findall("“([^”]+)”", text)
         if text == "已准备隔离的启动目录和项目 xxx":
             assert self.project.is_dir() and self.root != self.project
+            # Establish the tested product's viewport during fixture setup so
+            # every source step has fresh evidence, including Background.
+            self.launch(self.project, "teshi")
         elif text == "隔离项目不使用真实用户的配置和会话数据":
             assert self.project.is_relative_to(Path(tempfile.gettempdir()))
         elif text == "项目 xxx 的 features 中有“登录.feature”和“auth/退出.feature”":
@@ -277,6 +292,7 @@ def main():
     artifact_root = Path(os.environ.get("TESHI_FEATURE_ARTIFACTS", request["meta"].get("artifacts_dir", ".teshi/tui-results/directory")))
     artifact_root.mkdir(parents=True, exist_ok=True)
     EVENT_LOG = artifact_root / "binding-events.ndjson"
+    captures = Path(request["meta"].get("evidence_run_directory", str(artifact_root / "captures")))
     (artifact_root / "request.json").write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
     emit("start_run", total=len(request["cases"]))
     failed = examples_failed = examples_passed = 0
@@ -285,25 +301,30 @@ def main():
         variants = [dict(zip(table["headers"], row)) for table in case["examples"] for row in table["rows"]] or [{}]
         errors = []
         for index, variant in enumerate(variants):
+            # Every Examples row is its own business execution.
+            attempt = index + 1
             evidence = Path(os.environ.get("TESHI_FEATURE_ARTIFACTS", request["meta"].get("artifacts_dir", ".teshi/tui-results/directory"))) / re.sub(r"[^A-Za-z0-9_-]", "_", str(case["id"])) / str(index)
             evidence.mkdir(parents=True, exist_ok=True)
             world = World(request, evidence)
             events = []
             text = "setup"
+            step = dict(line=0, text=text)
             try:
                 for step in case["steps"]:
                     text = step["text"]
                     for key, value in variant.items():
                         text = text.replace("<" + key + ">", value)
                     event = dict(line=step["line"], text=text, example=variant)
-                    emit("start_step", case_id=case["id"], step_id=str(step["line"]), text=text, example=variant)
+                    emit("start_step", case_id=case["id"], step_id=str(step["line"]), attempt=attempt, text=text, example=variant)
                     world.step(text)
                     events.append(dict(event, status="passed"))
-                    emit("end_step", case_id=case["id"], step_id=str(step["line"]), status="passed", example=variant)
+                    emit("end_step", case_id=case["id"], step_id=str(step["line"]), attempt=attempt, status="passed", example=variant)
+                    emit("step_screenshot", **world.capture(captures, case, step, attempt), status="passed")
             except Exception as error:
                 errors.append(f"{text}: {error}")
                 events.append(dict(text=text, example=variant, status="failed", message=str(error)))
-                emit("end_step", case_id=case["id"], step_id=str(step["line"]), status="failed", message=str(error))
+                emit("end_step", case_id=case["id"], step_id=str(step["line"]), attempt=attempt, status="failed", message=str(error))
+                emit("step_screenshot", **world.capture(captures, case, step, attempt), status="failed")
             finally:
                 try:
                     world.close()

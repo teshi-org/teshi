@@ -6,6 +6,14 @@ use std::process::{Command, Stdio};
 use teshi_core::gherkin::parse_feature;
 use teshi_tui_runner::{Launch, Terminal};
 
+fn capture(session: &Terminal, request: &Value) -> Result<Value> {
+    let directory =
+        std::path::Path::new(request["directory"].as_str().context("missing directory")?);
+    let stem = request["stem"].as_str().context("missing capture stem")?;
+    let frame = session.capture_frame(directory, stem)?;
+    Ok(json!({"screenshot_file":frame.png,"svg_file":frame.svg,"text_file":frame.text}))
+}
+
 fn terminal_host() -> Result<()> {
     let mut terminal: Option<Terminal> = None;
     for line in std::io::stdin().lock().lines() {
@@ -33,6 +41,7 @@ fn terminal_host() -> Result<()> {
                     session.expect_text(text, request["visible"].as_bool().unwrap_or(true), 8000)?
                 }
                 "screenshot" => session.screenshot(std::path::Path::new(text))?,
+                "capture" => return capture(session, &request),
                 "exit" => session.expect_exit(0, 10000)?,
                 _ => bail!("unknown terminal operation"),
             }
