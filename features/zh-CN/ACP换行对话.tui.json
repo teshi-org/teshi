@@ -352,7 +352,7 @@
       "actions": [
         {
           "action": "key",
-          "key": "q"
+          "key": "ctrl+q"
         }
       ]
     },

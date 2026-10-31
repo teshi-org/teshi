@@ -341,7 +341,7 @@ def scenario_actions(canonical_name: str, scenario_index: int, root: Path, teshi
                 [write(f"This is live conversation turn {turn}. Reply only with the concatenation of LIVE_REPLY_ and {turn:02}. Do not use tools or add explanation."), key("Enter")],
                 [expect(f"LIVE_REPLY_{turn:02}", timeout_ms=120000), idle(timeout_ms=120000)],
             ])
-        return actions + [[key("Escape")], [key("q")], [exit_expect()]]
+        return actions + [[key("Escape")], [key("ctrl+q")], [exit_expect()]]
     if canonical_name == "tui_editor.feature":
         if scenario_index == 0:
             return [
@@ -350,7 +350,7 @@ def scenario_actions(canonical_name: str, scenario_index: int, root: Path, teshi
                 [expect("Welcome to AI Chat!")],
                 [key("1")],
                 [expect("Sample scenario")],
-                [key("q")],
+                [key("ctrl+q")],
                 [exit_expect()],
             ]
         return [
@@ -362,7 +362,7 @@ def scenario_actions(canonical_name: str, scenario_index: int, root: Path, teshi
             [expect("a sample step updated")],
             [key("s")],
             [expect("a sample step updated")],
-            [key("q")],
+            [key("ctrl+q")],
             [exit_expect()],
         ]
 
@@ -375,7 +375,7 @@ def scenario_actions(canonical_name: str, scenario_index: int, root: Path, teshi
                     [expect(f"WRAPPED_REPLY_{turn:02d}"), idle()],
                 ]
             )
-        actions.extend([[key("Escape")], [key("q")], [exit_expect()]])
+        actions.extend([[key("Escape")], [key("ctrl+q")], [exit_expect()]])
         return actions
 
     if canonical_name == "tui_acp_long_conversation.feature":
@@ -395,7 +395,7 @@ def scenario_actions(canonical_name: str, scenario_index: int, root: Path, teshi
                     ]
                 )
             actions.extend([[*batch], [expect(f"WRAPPED_REPLY_{last:02d}")]])
-        actions.extend([[key("Escape")], [key("q")], [exit_expect()]])
+        actions.extend([[key("Escape")], [key("ctrl+q")], [exit_expect()]])
         return actions
 
     if canonical_name in {
@@ -415,7 +415,7 @@ def scenario_actions(canonical_name: str, scenario_index: int, root: Path, teshi
                     [expect("PERMISSION_AFTER_allow_always")],
                     [expect("PERMISSION_BEFORE")],
                     [key("Escape")],
-                    [key("q")],
+                    [key("ctrl+q")],
                     [exit_expect()],
                 ]
             )
@@ -428,7 +428,7 @@ def scenario_actions(canonical_name: str, scenario_index: int, root: Path, teshi
                      action("expect_text", text="Allow once", visible=False, timeout_ms=5000)],
                     [action("expect_text", text="PERMISSION_AFTER", visible=False, timeout_ms=5000)],
                     [key("Escape")],
-                    [key("q")],
+                    [key("ctrl+q")],
                     [exit_expect()],
                 ]
             )
@@ -457,7 +457,7 @@ def scenario_actions(canonical_name: str, scenario_index: int, root: Path, teshi
             ],
             [write("/settings"), key("Enter"), expect("Fast: On"), key("Escape")],
             [key("Escape")],
-            [key("q")],
+            [key("ctrl+q")],
             [exit_expect()],
         ]
 
@@ -465,7 +465,7 @@ def scenario_actions(canonical_name: str, scenario_index: int, root: Path, teshi
         if scenario_index == 0:
             return [
                 [expect("Explore")],
-                [key("q")],
+                [key("ctrl+q")],
                 [exit_expect(1000)],
                 [exit_expect(1000)],
             ]
@@ -473,7 +473,7 @@ def scenario_actions(canonical_name: str, scenario_index: int, root: Path, teshi
             return [
                 [expect("Explore")],
                 [expect("Explore")],
-                [key("q")],
+                [key("ctrl+q")],
                 [exit_expect(3000)],
                 [exit_expect(1000)],
                 [exit_expect(1000)],
@@ -481,7 +481,7 @@ def scenario_actions(canonical_name: str, scenario_index: int, root: Path, teshi
         if scenario_index == 2:
             return [
                 [expect("Explore")],
-                [key("q")],
+                [key("ctrl+q")],
                 [exit_expect(5000)],
                 [exit_expect(1000)],
                 [exit_expect(1000)],
@@ -490,14 +490,14 @@ def scenario_actions(canonical_name: str, scenario_index: int, root: Path, teshi
             return [
                 [expect("Explore")],
                 [expect("Explore")],
-                [key("q")],
+                [key("ctrl+q")],
                 [exit_expect(1000)],
                 [exit_expect(1000)],
             ]
         return [
             [key("3"), expect("Welcome to AI Chat!"), key("Enter")],
             [write("Inspect the project"), key("Enter"), expect("Inspection finished"), expect("│ ○ ")],
-            [key("Escape"), key("q")],
+            [key("Escape"), key("ctrl+q")],
             [exit_expect(1000)],
             [launch(root, teshi, mode="exit", cols=100, rows=30), expect("Explore")],
             [key("3"), key("Enter"), write("/resume"), key("Enter")],

@@ -1967,7 +1967,7 @@
         },
         {
           "action": "key",
-          "key": "q"
+          "key": "ctrl+q"
         },
         {
           "action": "expect_exit",
@@ -2222,7 +2222,7 @@
         },
         {
           "action": "key",
-          "key": "q"
+          "key": "ctrl+q"
         },
         {
           "action": "expect_exit",

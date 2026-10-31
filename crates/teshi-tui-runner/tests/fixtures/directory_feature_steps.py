@@ -266,7 +266,7 @@ class World:
                 self.op("screenshot", str(self.evidence / "screen.svg"))
                 self.op("key", "Escape")
                 self.op("click", "Explore [1]")
-                self.op("key", "q")
+                self.op("key", "ctrl+q")
                 self.op("exit")
             (self.evidence / "launch.json").write_text(json.dumps(self.command, ensure_ascii=False, indent=2), encoding="utf-8")
         finally:
