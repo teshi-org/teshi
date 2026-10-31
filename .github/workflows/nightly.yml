@@ -142,7 +142,6 @@ jobs:
       source_ref: ${{ needs.prepare.outputs.source_ref }}
       release_body: ${{ needs.prepare.outputs.release_body }}
       prerelease: true
-      skip_winget: true
       run_scope: windows-installer
       invoked_via_call: true
     secrets: inherit
