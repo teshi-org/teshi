@@ -4,7 +4,7 @@ pub mod scenario;
 
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tui_test::{
     KeyAction, MouseAction, MouseButton, MouseOptions, OpenOptions, Operation, OperationResult,
@@ -42,6 +42,17 @@ pub struct Launch {
 pub struct Terminal {
     session: Session,
     process_id: Option<u32>,
+}
+
+/// Artifact filenames written for one captured terminal viewport.
+#[derive(Debug, Clone)]
+pub struct Frame {
+    /// SVG viewport written by the terminal backend.
+    pub svg: String,
+    /// PNG preview rendered from the SVG.
+    pub png: String,
+    /// Plain-text viewport.
+    pub text: String,
 }
 
 impl Terminal {
@@ -154,6 +165,57 @@ impl Terminal {
             background: None,
         })?;
         Ok(())
+    }
+
+    /// Writes `<stem>.svg`, a `<stem>.png` preview, and `<stem>.txt` into `directory`.
+    ///
+    /// The text viewport proves what the step displayed even when a terminal
+    /// client cannot render graphics, so every capture carries all three.
+    ///
+    /// # Errors
+    /// Returns errors for an invalid stem, terminal observation failures, an
+    /// oversized viewport, or unreadable SVG output.
+    pub fn capture_frame(&self, directory: &std::path::Path, stem: &str) -> Result<Frame> {
+        anyhow::ensure!(
+            !stem.is_empty() && stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "invalid capture stem"
+        );
+        std::fs::create_dir_all(directory)?;
+        let frame = Frame {
+            svg: format!("{stem}.svg"),
+            png: format!("{stem}.png"),
+            text: format!("{stem}.txt"),
+        };
+        std::fs::write(directory.join(&frame.text), self.screen()?)?;
+        self.screenshot(&directory.join(&frame.svg))?;
+        let mut options = resvg::usvg::Options::default();
+        static FONTS: std::sync::OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> =
+            std::sync::OnceLock::new();
+        options.fontdb = FONTS
+            .get_or_init(|| {
+                let mut database = resvg::usvg::fontdb::Database::new();
+                database.load_system_fonts();
+                std::sync::Arc::new(database)
+            })
+            .clone();
+        let tree =
+            resvg::usvg::Tree::from_data(&std::fs::read(directory.join(&frame.svg))?, &options)?;
+        let size = tree.size().to_int_size();
+        anyhow::ensure!(
+            size.width() <= 16384
+                && size.height() <= 16384
+                && u64::from(size.width()) * u64::from(size.height()) <= 32 * 1024 * 1024,
+            "terminal preview exceeds the pixel budget"
+        );
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height())
+            .context("cannot allocate terminal preview")?;
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::default(),
+            &mut pixmap.as_mut(),
+        );
+        pixmap.save_png(directory.join(&frame.png))?;
+        Ok(frame)
     }
 
     /// Waits for text to become visible or absent in the current viewport.

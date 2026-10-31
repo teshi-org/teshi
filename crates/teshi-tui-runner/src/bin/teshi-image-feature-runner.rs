@@ -10,41 +10,8 @@ fn capture(session: &Terminal, request: &Value) -> Result<Value> {
     let directory =
         std::path::Path::new(request["directory"].as_str().context("missing directory")?);
     let stem = request["stem"].as_str().context("missing capture stem")?;
-    anyhow::ensure!(
-        !stem.is_empty() && stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
-        "invalid capture stem"
-    );
-    std::fs::create_dir_all(directory)?;
-    let svg = format!("{stem}.svg");
-    let png = format!("{stem}.png");
-    let text = format!("{stem}.txt");
-    std::fs::write(directory.join(&text), session.screen()?)?;
-    session.screenshot(&directory.join(&svg))?;
-    let mut options = resvg::usvg::Options::default();
-    static FONTS: std::sync::OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> =
-        std::sync::OnceLock::new();
-    options.fontdb = FONTS
-        .get_or_init(|| {
-            let mut fonts = resvg::usvg::fontdb::Database::new();
-            fonts.load_system_fonts();
-            std::sync::Arc::new(fonts)
-        })
-        .clone();
-    let tree = resvg::usvg::Tree::from_data(&std::fs::read(directory.join(&svg))?, &options)?;
-    let size = tree.size().to_int_size();
-    anyhow::ensure!(
-        u64::from(size.width()) * u64::from(size.height()) <= 32 * 1024 * 1024,
-        "terminal preview exceeds the pixel budget"
-    );
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height())
-        .context("cannot allocate terminal preview")?;
-    resvg::render(
-        &tree,
-        resvg::tiny_skia::Transform::default(),
-        &mut pixmap.as_mut(),
-    );
-    pixmap.save_png(directory.join(&png))?;
-    Ok(json!({"screenshot_file":png,"svg_file":svg,"text_file":text}))
+    let frame = session.capture_frame(directory, stem)?;
+    Ok(json!({"screenshot_file":frame.png,"svg_file":frame.svg,"text_file":frame.text}))
 }
 
 fn terminal_host() -> Result<()> {
