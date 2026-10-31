@@ -532,6 +532,9 @@ pub fn run() -> Result<()> {
     // a frozen full-screen UI.
     drop(terminal);
     drop(_guard);
+    // Only the Windows reader thread outlives the loop; elsewhere there is
+    // nothing to release and `drop` would just trip clippy::drop_non_drop.
+    #[cfg(windows)]
     drop(event_source);
 
     let saved = app.save_sessions(true);
