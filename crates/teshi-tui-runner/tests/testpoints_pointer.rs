@@ -603,14 +603,18 @@ fn testpoint_narrow_review_controls_resize_and_modal_input_own_the_pointer() {
         fixture.point(0)["review_state"] == "approved"
     });
     click_footer(&terminal, "Filter");
-    std::thread::sleep(Duration::from_millis(100));
+    terminal
+        .expect_text("Test points (proposed)", true, 3000)
+        .unwrap();
     click_footer(&terminal, "Reject");
     fixture.wait(&terminal, "narrow-filter-reject", || {
         fixture.point(1)["review_state"] == "rejected"
     });
-    for _ in 0..4 {
+    for label in ["approved", "rejected", "needs review", "all"] {
         click_footer(&terminal, "Filter");
-        std::thread::sleep(Duration::from_millis(100));
+        terminal
+            .expect_text(&format!("Test points ({label})"), true, 3000)
+            .unwrap();
     }
     click_footer(&terminal, "Batch");
     fixture.wait(&terminal, "narrow-batch", || {
@@ -622,7 +626,7 @@ fn testpoint_narrow_review_controls_resize_and_modal_input_own_the_pointer() {
     assert_eq!(fixture.records(), batch);
     // Below 70 columns only the focused pane is drawn; focus the review pane.
     terminal.key("Tab").unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    terminal.expect_text("Objective:", true, 3000).unwrap();
     terminal.click_text("Objective:", 1000).unwrap();
     terminal.key("i").unwrap();
     terminal.key("End").unwrap();

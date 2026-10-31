@@ -74,6 +74,7 @@ impl Fixture {
                 "XDG_CONFIG_HOME",
                 "XDG_DATA_HOME",
                 "TESHI_APP_DATA_DIR",
+                "TESHI_ACP_STORE_DIR",
                 "TESHI_SESSION_DIR",
             ]
             .into_iter()
@@ -247,7 +248,6 @@ fn five_tabs_render_at_normal_and_narrow_sizes_and_modal_owns_pointer() {
     terminal.resize(150, 30).unwrap();
     terminal.key("1").unwrap();
     terminal.expect_text("Scenarios (30)", true, 10000).unwrap();
-    std::thread::sleep(Duration::from_millis(100));
     terminal.click_text("Project: project", 10000).unwrap();
     terminal.expect_text("Open path", true, 10000).unwrap();
     terminal.click_text("Requirements [4]", 10000).unwrap();

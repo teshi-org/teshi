@@ -39,6 +39,14 @@ fn explicit_acp_selection_survives_new_and_restart() {
             cwd: Some(root.path().to_string_lossy().into_owned()),
             env: vec![
                 (
+                    "TESHI_APP_DATA_DIR".into(),
+                    root.path().join("app-data").to_string_lossy().into_owned(),
+                ),
+                (
+                    "TESHI_SESSION_DIR".into(),
+                    root.path().join("sessions").to_string_lossy().into_owned(),
+                ),
+                (
                     "TESHI_ACP_STORE_DIR".into(),
                     store.to_string_lossy().into_owned(),
                 ),

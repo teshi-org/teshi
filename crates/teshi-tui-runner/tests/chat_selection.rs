@@ -79,6 +79,14 @@ fn acp_chat_copy_command_and_selection_round_trip() {
         cwd: Some(root.path().to_string_lossy().into_owned()),
         env: vec![
             (
+                "TESHI_SESSION_DIR".into(),
+                root.path().join("sessions").to_string_lossy().into_owned(),
+            ),
+            (
+                "TESHI_ACP_STORE_DIR".into(),
+                root.path().join("acp").to_string_lossy().into_owned(),
+            ),
+            (
                 "APPDATA".into(),
                 root.path().join("appdata").to_string_lossy().into_owned(),
             ),
@@ -216,6 +224,14 @@ fn native_chat_copy_command_reads_completed_responses() {
         ],
         cwd: Some(root.path().to_string_lossy().into_owned()),
         env: vec![
+            (
+                "TESHI_SESSION_DIR".into(),
+                root.path().join("sessions").to_string_lossy().into_owned(),
+            ),
+            (
+                "TESHI_ACP_STORE_DIR".into(),
+                root.path().join("acp").to_string_lossy().into_owned(),
+            ),
             (
                 "APPDATA".into(),
                 root.path().join("appdata").to_string_lossy().into_owned(),

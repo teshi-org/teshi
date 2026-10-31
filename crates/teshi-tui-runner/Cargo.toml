@@ -4,6 +4,42 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+# Real terminal acceptance repeatedly paints and encodes large evidence frames.
+# Optimize only this isolated runner's image dependencies; keep its test code
+# debuggable and leave the product workspace's development profile unchanged.
+[profile.dev.package.resvg]
+opt-level = 2
+
+[profile.dev.package.usvg]
+opt-level = 2
+
+[profile.dev.package.tiny-skia]
+opt-level = 2
+
+[profile.dev.package.tiny-skia-path]
+opt-level = 2
+
+[profile.dev.package.png]
+opt-level = 2
+
+[profile.dev.package.flate2]
+opt-level = 2
+
+[profile.dev.package.fdeflate]
+opt-level = 2
+
+[profile.dev.package.miniz_oxide]
+opt-level = 2
+
+[profile.dev.package.rustybuzz]
+opt-level = 2
+
+[profile.dev.package.ttf-parser]
+opt-level = 2
+
+[profile.dev.package.fontdb]
+opt-level = 2
+
 [workspace]
 
 [dependencies]

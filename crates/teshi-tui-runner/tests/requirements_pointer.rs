@@ -106,6 +106,7 @@ impl Fixture {
                         "XDG_CONFIG_HOME",
                         "XDG_DATA_HOME",
                         "TESHI_APP_DATA_DIR",
+                        "TESHI_ACP_STORE_DIR",
                         "TESHI_SESSION_DIR",
                     ]
                     .into_iter()

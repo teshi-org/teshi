@@ -43,6 +43,8 @@ fn requirement_title_tracks_keyboard_save_and_survives_restart() {
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
             "TESHI_APP_DATA_DIR",
+            "TESHI_SESSION_DIR",
+            "TESHI_ACP_STORE_DIR",
         ]
         .into_iter()
         .map(|name| {

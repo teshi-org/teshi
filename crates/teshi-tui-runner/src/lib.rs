@@ -1,10 +1,11 @@
 //! Real terminal automation for Teshi scenario runners.
 
+pub mod preview;
 pub mod scenario;
 
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use tui_test::{
     KeyAction, MouseAction, MouseButton, MouseOptions, OpenOptions, Operation, OperationResult,
@@ -42,6 +43,7 @@ pub struct Launch {
 pub struct Terminal {
     session: Session,
     process_id: Option<u32>,
+    frame_receipt: Option<std::path::PathBuf>,
 }
 
 /// Artifact filenames written for one captured terminal viewport.
@@ -65,9 +67,38 @@ impl Terminal {
         if config.program.trim().is_empty() {
             bail!("TUI executable must not be empty");
         }
+        if std::env::var("TESHI_ENFORCE_TEST_ISOLATION").as_deref() == Ok("1")
+            && std::env::var_os("TESHI_SELF_TEST_BIN").is_some_and(|binary| {
+                dunce::canonicalize(binary).ok() == dunce::canonicalize(&config.program).ok()
+            })
+        {
+            let environment: std::collections::BTreeMap<_, _> = config
+                .env
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect();
+            for key in [
+                "TESHI_APP_DATA_DIR",
+                "TESHI_SESSION_DIR",
+                "TESHI_ACP_STORE_DIR",
+            ] {
+                anyhow::ensure!(
+                    environment
+                        .get(key)
+                        .is_some_and(|value| !value.trim().is_empty()),
+                    "self-test launch must explicitly isolate {key}"
+                );
+            }
+        }
         let mut terminal = Self {
             session: Session::new("teshi-tui"),
             process_id: None,
+            frame_receipt: config
+                .env
+                .iter()
+                .rev()
+                .find(|(key, _)| key == "TESHI_TEST_FRAME_PATH")
+                .map(|(_, value)| std::path::PathBuf::from(value)),
         };
         let defaults = OpenOptions::default();
         let opened = terminal.session.run(RunOptions {
@@ -188,33 +219,7 @@ impl Terminal {
         };
         std::fs::write(directory.join(&frame.text), self.screen()?)?;
         self.screenshot(&directory.join(&frame.svg))?;
-        let mut options = resvg::usvg::Options::default();
-        static FONTS: std::sync::OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> =
-            std::sync::OnceLock::new();
-        options.fontdb = FONTS
-            .get_or_init(|| {
-                let mut database = resvg::usvg::fontdb::Database::new();
-                database.load_system_fonts();
-                std::sync::Arc::new(database)
-            })
-            .clone();
-        let tree =
-            resvg::usvg::Tree::from_data(&std::fs::read(directory.join(&frame.svg))?, &options)?;
-        let size = tree.size().to_int_size();
-        anyhow::ensure!(
-            size.width() <= 16384
-                && size.height() <= 16384
-                && u64::from(size.width()) * u64::from(size.height()) <= 32 * 1024 * 1024,
-            "terminal preview exceeds the pixel budget"
-        );
-        let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height())
-            .context("cannot allocate terminal preview")?;
-        resvg::render(
-            &tree,
-            resvg::tiny_skia::Transform::default(),
-            &mut pixmap.as_mut(),
-        );
-        pixmap.save_png(directory.join(&frame.png))?;
+        preview::render_svg(&directory.join(&frame.svg), &directory.join(&frame.png))?;
         Ok(frame)
     }
 
@@ -238,6 +243,35 @@ impl Terminal {
                     "timed out after {timeout_ms}ms waiting for {text:?} visible={visible}\n{screen}"
                 );
             }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Waits for an explicit business condition over the current rendered viewport.
+    ///
+    /// Callers supply the actual result (focused field, selected row, closed
+    /// modal), rather than treating an idle interval as application completion.
+    /// Returns the matching viewport for assertions and diagnostic capture.
+    ///
+    /// # Errors
+    /// Returns invalid timeout, observation or deadline errors with the last screen.
+    pub fn expect_screen(
+        &self,
+        description: &str,
+        timeout_ms: u64,
+        mut condition: impl FnMut(&str) -> bool,
+    ) -> Result<String> {
+        validate_timeout(timeout_ms)?;
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            let screen = self.screen()?;
+            if condition(&screen) {
+                return Ok(screen);
+            }
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "timed out after {timeout_ms}ms waiting for {description}\n{screen}"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -293,7 +327,7 @@ impl Terminal {
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         loop {
             let screen = self.screen()?;
-            if let Some((row, col)) = locate(&screen, text) {
+            if let Some((row, col)) = self.completed_click_location(&screen, text)? {
                 // SGR 1006 encodes 1-based row/column. Crossterm's mouse
                 // parser needs a press and release pair for one click.
                 self.write(&format!("\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m"))?;
@@ -304,6 +338,54 @@ impl Terminal {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn completed_click_location(&self, screen: &str, text: &str) -> Result<Option<(usize, usize)>> {
+        let observed = locate(screen, text);
+        let Some(path) = &self.frame_receipt else {
+            return Ok(observed);
+        };
+        let Ok(bytes) = std::fs::read(path) else {
+            return Ok(None);
+        };
+        #[derive(Deserialize)]
+        struct Receipt {
+            pid: u32,
+            cols: u16,
+            rows: u16,
+            cells: Vec<Vec<String>>,
+        }
+        let Ok(receipt) = serde_json::from_slice::<Receipt>(&bytes) else {
+            return Ok(None);
+        };
+        if self.process_id.is_some_and(|pid| pid != receipt.pid) {
+            return Ok(None);
+        }
+        if let OperationResult::State(state) = self.session.execute(Operation::State)?
+            && (state.cols, state.rows) != (receipt.cols, receipt.rows)
+        {
+            return Ok(None);
+        }
+        let completed = receipt
+            .cells
+            .iter()
+            .map(|row| {
+                let mut text = String::new();
+                let mut skip = 0;
+                for cell in row {
+                    if skip > 0 {
+                        skip -= 1;
+                        continue;
+                    }
+                    text.push_str(cell);
+                    skip = unicode_width::UnicodeWidthStr::width(cell.as_str()).saturating_sub(1);
+                }
+                text
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let target = locate(&completed, text);
+        Ok(target.filter(|position| Some(*position) == observed))
     }
 
     /// Drags the left mouse button over the first viewport occurrence of `text`.

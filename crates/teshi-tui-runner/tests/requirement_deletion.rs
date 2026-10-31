@@ -40,6 +40,8 @@ fn launch_config(binary: &Path, project: &Path, store: &Path, root: &Path) -> La
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
             "TESHI_APP_DATA_DIR",
+            "TESHI_SESSION_DIR",
+            "TESHI_ACP_STORE_DIR",
         ]
         .into_iter()
         .map(|name| (name.into(), root.join(name).to_string_lossy().into_owned()))
