@@ -227,7 +227,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventK
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Clear, Paragraph},
 };
@@ -677,7 +677,7 @@ pub(crate) fn render_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             if rect.contains((x, y).into()) {
                 frame
                     .buffer_mut()
-                    .set_style(*rect, Style::default().add_modifier(Modifier::UNDERLINED));
+                    .set_style(*rect, Style::default().bg(theme::HOVER_BG));
                 break;
             }
         }

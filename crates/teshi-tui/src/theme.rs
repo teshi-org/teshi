@@ -69,6 +69,8 @@ pub(crate) const TAB_ACTIVE_BG: Color = Color::Rgb(0x41, 0x37, 0x55);
 pub(crate) const TAB_INACTIVE: Color = Color::Rgb(0xB2, 0xB2, 0xB2);
 /// Selection retained outside the focused widget.
 pub(crate) const SELECTION_INACTIVE_BG: Color = Color::Rgb(0x44, 0x44, 0x44);
+/// Surface tinted under the pointer for clickable regions.
+pub(crate) const HOVER_BG: Color = Color::Rgb(0x3A, 0x3A, 0x3A);
 /// Selected editor text.
 pub(crate) const EDITOR_SELECTION_BG: Color = Color::Rgb(0x5F, 0x5F, 0x87);
 /// Current preview line surface.

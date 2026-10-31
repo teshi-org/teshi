@@ -8,7 +8,7 @@ is the source of truth. GPUI desktop and web shells are outside this guide.
 1. Quiet chrome, prominent content: BORDER for unfocused panels, PRIMARY for focus.
 2. Use semantic roles through theme helpers rather than constructing page colors.
 3. Rounded borders and `▌` group rails; keep header/status/footer rows one line high.
-4. Fill full selected rows with CURSOR_BG/CURSOR_FG when focused and SELECTION_INACTIVE_BG/FG otherwise. Hover reverses video.
+4. Fill full selected rows with CURSOR_BG/CURSOR_FG when focused and SELECTION_INACTIVE_BG/FG otherwise. Hover tints the target with HOVER_BG; never add underline for hover.
 5. Modes, states, and tags use solid chips with CHIP_FG text.
 6. Footer keys use PRIMARY bold and descriptions FOOTER_DESC on a full-width FOOTER_BG strip.
 7. Inactive tabs use TAB_INACTIVE. Active tabs use TAB_ACTIVE_BG and bold text, with a PRIMARY underline derived from the registered click region.
