@@ -53,6 +53,15 @@ impl AcpBackendConfig {
     }
 }
 
+/// How long the worker keeps retrying ACP process-container shutdown.
+///
+/// An unresponsive agent must not keep the frontend's worker join alive
+/// forever: that join is the last blocking step of an exit, and retrying
+/// without a bound is what makes quitting look like a hang. Dropping the
+/// client after the deadline still closes the job object, and
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` reaps the container.
+const SHUTDOWN_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
 enum WorkerCommand {
     Prompt(String),
     Configure {
@@ -1002,8 +1011,15 @@ async fn run_worker(
     }
     // Keep the worker owned until the process container has actually stopped.
     // The frontend's bounded switch wait can time out without losing this handle.
+    let deadline = tokio::time::Instant::now() + SHUTDOWN_RETRY_BUDGET;
     while let Err(error) = client.shutdown().await {
         tracing::error!(error = %error, "ACP shutdown has not completed");
+        if tokio::time::Instant::now() >= deadline {
+            tracing::error!(
+                "Abandoning the ACP process container after repeated shutdown failures"
+            );
+            break;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }

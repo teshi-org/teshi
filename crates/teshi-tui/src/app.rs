@@ -3530,6 +3530,32 @@ impl App {
         Ok(())
     }
 
+    /// Asks every agent backend to release its owned processes and transports.
+    ///
+    /// Callers must poll [`Self::poll_agent_shutdown`] afterwards. Dropping the
+    /// app joins live workers, so an exit path requests first and waits with a
+    /// bound instead of starting the join from a cold drop.
+    pub fn request_agent_shutdown(&mut self) {
+        for agent in &mut self.agents {
+            agent.backend.request_shutdown();
+            for backend in &mut agent.retiring_backends {
+                backend.request_shutdown();
+            }
+        }
+    }
+
+    /// Whether any agent backend still owns resources after a shutdown request.
+    pub fn agent_shutdown_pending(&self) -> bool {
+        self.agents.iter().any(AgentThread::shutdown_pending)
+    }
+
+    /// Reaps agent resources that already exited; never blocks on live work.
+    pub fn poll_agent_shutdown(&mut self) {
+        for agent in &mut self.agents {
+            agent.poll_shutdown();
+        }
+    }
+
     fn poll_acp_host_tools(&mut self, agent_idx: usize) {
         while let Some(request) = self.agents[agent_idx].backend.host_tool_request() {
             if !request.is_pending() {
