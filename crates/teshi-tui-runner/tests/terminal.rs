@@ -123,6 +123,28 @@ fn real_pty_input_repaint_resize_and_exit() {
 }
 
 #[test]
+fn business_condition_waits_for_the_new_viewport_and_reports_timeout_context() {
+    let terminal = Terminal::launch(fixture()).unwrap();
+    terminal.expect_text("fixture-ready", true, 5000).unwrap();
+    terminal.write("replace").unwrap();
+    terminal.key("Enter").unwrap();
+    let screen = terminal
+        .expect_screen("replacement after input", 5000, |screen| {
+            screen.contains("replacement-screen") && !screen.contains("fixture-ready")
+        })
+        .unwrap();
+    assert!(screen.contains("replacement-screen"));
+    let error = terminal
+        .expect_screen("missing business result", 20, |_| false)
+        .unwrap_err();
+    assert!(error.to_string().contains("missing business result"));
+    assert!(error.to_string().contains("replacement-screen"));
+    terminal.write("quit").unwrap();
+    terminal.key("Enter").unwrap();
+    terminal.expect_exit(0, 5000).unwrap();
+}
+
+#[test]
 fn timeout_contains_current_screen_and_drop_closes_session() {
     let terminal = Terminal::launch(fixture()).unwrap();
     terminal.expect_text("fixture-ready", true, 5000).unwrap();

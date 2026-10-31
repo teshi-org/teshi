@@ -68,6 +68,12 @@ PAIRS = [
     ("the first capture exceeds the decoded-image limit", "第一张截图超过已解码图片的限制", "oversize"),
     ("the image limit error and external-viewer action are visible", "图片限制错误和外部查看入口可见", "limit_error"),
     ("the unavailable graphics reason and external-viewer action are visible", "图片不可用的原因和外部查看入口可见", "unavailable"),
+    ("I open the Explore steps pane", "我打开探索页的步骤面板", "explore_pane"),
+    ("the Explore panes mark captured scenarios and steps", "探索页标出已有截图的场景和步骤", "explore_markers"),
+    ("I open the screenshot viewer from the Explore steps", "我从探索页的步骤打开截图查看器", "open_explore"),
+    ("the screenshot viewer shows the capture of the selected step", "截图查看器显示所选步骤的截图", "explore_capture_ready"),
+    ("I close the screenshot viewer from Explore", "我从探索页关闭截图查看器", "close_explore"),
+    ("Explore is interactive within 1000 milliseconds", "探索页在 1000 毫秒内可交互", "explore_interactive"),
 ]
 BINDINGS = {text: action for en, zh, action in PAIRS for text in (en, zh)}
 
@@ -243,6 +249,31 @@ class World:
         elif action == "unavailable":
             self.wait(lambda screen: "no image protocol" in screen
                       and "TESHI_IMAGE_PROTOCOL=none" in screen and "Press o" in screen)
+        elif action == "explore_pane":
+            self.key("1")
+            self.wait(lambda screen: "Steps" in screen and "Features" in screen)
+            # Features -> Scenarios -> Steps owns the `i` entry point.
+            self.key("l")
+            self.key("l")
+            self.wait(lambda screen: "a saved screenshot" in screen)
+        elif action == "explore_markers":
+            self.wait(lambda screen: "Detail ●2" in screen
+                      and "a saved screenshot ●2" in screen)
+        elif action == "open_explore":
+            self.view_started = time.perf_counter()
+            self.key("i")
+            self.wait(lambda screen: "Screenshot " in self.header(screen))
+        elif action == "explore_capture_ready":
+            screen = self.ready("1/2", "a saved screenshot")
+            # Explore keeps its Features column outside the viewer.
+            assert "Features" in screen, screen
+        elif action == "close_explore":
+            self.key("Escape")
+            self.wait(lambda screen: "Screenshot " not in screen and "Steps" in screen,
+                      timeout=1)
+        elif action == "explore_interactive":
+            self.wait(lambda screen: "Screenshot " not in screen
+                      and "Steps" in screen, timeout=1)
 
     def capture(self, case, step, directory, timing):
         event = dict(case_id=case["id"], step_id=f"{case['id']}:L{step['line']}",

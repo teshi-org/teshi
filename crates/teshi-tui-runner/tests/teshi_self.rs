@@ -58,10 +58,11 @@ fn thirty_turn_wrapped_acp_conversation_keeps_each_reply_visible() {
 #[test]
 #[ignore = "requires authenticated CodeBuddy and TESHI_CODEBUDDY_LIVE=1"]
 fn live_codebuddy_completes_ten_visible_turns() {
-    if std::env::var("TESHI_CODEBUDDY_LIVE").as_deref() != Ok("1") {
-        eprintln!("skipped: set TESHI_CODEBUDDY_LIVE=1 to run the live provider test");
-        return;
-    }
+    assert_eq!(
+        std::env::var("TESHI_CODEBUDDY_LIVE").as_deref(),
+        Ok("1"),
+        "manual acceptance requires authenticated CodeBuddy and explicit TESHI_CODEBUDDY_LIVE=1; absence is not a test pass"
+    );
     verify_live_codebuddy(include_str!(
         "../../../features/en-US/tui_codebuddy_live_conversation.feature"
     ));
@@ -118,6 +119,9 @@ fn verify_live_codebuddy(source: &str) {
         "env":[
             ["APPDATA",root.path().join("appdata")],
             ["LOCALAPPDATA",root.path().join("localappdata")],
+            ["TESHI_APP_DATA_DIR",root.path().join("teshi-app-data")],
+            ["TESHI_SESSION_DIR",root.path().join("teshi-sessions")],
+            ["TESHI_ACP_STORE_DIR",root.path().join("teshi-acp")],
             ["XDG_CONFIG_HOME",root.path().join("config")],
             ["XDG_DATA_HOME",root.path().join("data")],
             ["TESHI_AGENT_BACKEND","acp"],
@@ -224,6 +228,9 @@ fn verify_wrapped_chat(source: &str, batches: &[(usize, usize)]) {
         "env":[
             ["APPDATA",root.path().join("appdata")],
             ["LOCALAPPDATA",root.path().join("localappdata")],
+            ["TESHI_APP_DATA_DIR",root.path().join("teshi-app-data")],
+            ["TESHI_SESSION_DIR",root.path().join("teshi-sessions")],
+            ["TESHI_ACP_STORE_DIR",root.path().join("teshi-acp")],
             ["XDG_CONFIG_HOME",root.path().join("config")],
             ["XDG_DATA_HOME",root.path().join("data")],
             ["TESHI_AGENT_BACKEND","acp"],
@@ -357,6 +364,9 @@ fn verify_permission_prompt(source: &str, allow: bool) {
         "env":[
             ["APPDATA",root.path().join("appdata")],
             ["LOCALAPPDATA",root.path().join("localappdata")],
+            ["TESHI_APP_DATA_DIR",root.path().join("teshi-app-data")],
+            ["TESHI_SESSION_DIR",root.path().join("teshi-sessions")],
+            ["TESHI_ACP_STORE_DIR",root.path().join("teshi-acp")],
             ["XDG_CONFIG_HOME",root.path().join("config")],
             ["XDG_DATA_HOME",root.path().join("data")],
             ["TESHI_AGENT_BACKEND","acp"],
@@ -479,6 +489,9 @@ fn acp_settings_switch_model_by_mouse_and_keyboard() {
                 "env":[
                     ["APPDATA",root.path().join("appdata")],
                     ["LOCALAPPDATA",root.path().join("localappdata")],
+            ["TESHI_APP_DATA_DIR",root.path().join("teshi-app-data")],
+            ["TESHI_SESSION_DIR",root.path().join("teshi-sessions")],
+            ["TESHI_ACP_STORE_DIR",root.path().join("teshi-acp")],
                     ["XDG_CONFIG_HOME",root.path().join("config")],
                     ["XDG_DATA_HOME",root.path().join("data")],
                     ["TESHI_AGENT_BACKEND","acp"],
@@ -593,7 +606,10 @@ fn verify(source: &str, command: &str) {
     let launch_actions = vec![
         json!({"action":"launch","config":{
             "program":binary,"args":[project,"--recursive","--requirements-root",root.path().join("requirements")],"cwd":root.path(),
-            "env":[["APPDATA",root.path().join("appdata")],["LOCALAPPDATA",root.path().join("localappdata")],["XDG_CONFIG_HOME",root.path().join("config")],["XDG_DATA_HOME",root.path().join("data")]],
+            "env":[["APPDATA",root.path().join("appdata")],["LOCALAPPDATA",root.path().join("localappdata")],
+            ["TESHI_APP_DATA_DIR",root.path().join("teshi-app-data")],
+            ["TESHI_SESSION_DIR",root.path().join("teshi-sessions")],
+            ["TESHI_ACP_STORE_DIR",root.path().join("teshi-acp")],["XDG_CONFIG_HOME",root.path().join("config")],["XDG_DATA_HOME",root.path().join("data")]],
             "cols":140,"rows":40
         }}),
         text("Sample scenario"),

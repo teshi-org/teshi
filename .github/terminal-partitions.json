@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "baseline": {
+    "source_sha": "5e62a50cac82d6909051ef8e86517030bf98dcd2",
+    "run_url": "https://github.com/teshi-org/teshi/actions/runs/41166978257",
+    "platform": "windows-latest"
+  },
+  "manual_tests": {
+    "test:teshi_self::live_codebuddy_completes_ten_visible_turns": "Requires authenticated CodeBuddy and explicit TESHI_CODEBUDDY_LIVE=1; external-service acceptance is not executed by hosted CI."
+  },
+  "shards": {
+    "terminal-a": {
+      "teshi_self": 104.69,
+      "interaction_acceptance": 24.53,
+      "testpoints_pointer": 20.48,
+      "cli": 11.79,
+      "requirements_vim": 6.24,
+      "requirement_creation": 5.36,
+      "chat_runtime": 3.94,
+      "project_switch": 2.62,
+      "chat_focus": 2.1,
+      "chat_profile_title": 1.39,
+      "requirement_projects": 0.75,
+      "outline": 0,
+      "terminal": 0
+    },
+    "terminal-b": {
+      "ai_controls_pointer": 41.43,
+      "requirements_pointer": 38.45,
+      "management_pointer": 31.79,
+      "overlay_pointer": 22.57,
+      "chat_selection": 14.69,
+      "navigation_pointer": 13.51,
+      "acp_activity": 5.37,
+      "explore_pointer": 4.6,
+      "acp_discovery": 4.49,
+      "requirement_deletion": 3.91,
+      "agent_selection": 1.55,
+      "requirement_title": 1.34,
+      "windows_vt_input": 0.61
+    }
+  }
+}

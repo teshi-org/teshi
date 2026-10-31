@@ -1,5 +1,5 @@
 //! Real PTY coverage of built-in and project-owned chat profile titles.
-use std::{fs, path::Path, time::Duration};
+use std::{fs, path::Path};
 use teshi_tui_runner::{Launch, Terminal};
 
 fn launch(project: &Path, root: &Path) -> Terminal {
@@ -128,7 +128,13 @@ fn changing_custom_profile_updates_title() {
     terminal
         .expect_text("Agent Configuration", false, 10000)
         .unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    terminal
+        .expect_screen("active Agent title", 5000, |screen| {
+            screen
+                .lines()
+                .any(|line| line.contains(&format!("Agent: {target}")))
+        })
+        .unwrap();
     assert!(
         title(&terminal).contains(&format!("Agent: {target}")),
         "{}",

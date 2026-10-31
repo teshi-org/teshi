@@ -977,6 +977,16 @@ fn explore_select_style(focused: bool) -> Style {
     theme::selected_row(focused)
 }
 
+/// Capture marker for the Explore panes; the MindMap tree uses the same shape.
+fn capture_badge(count: usize) -> Span<'static> {
+    Span::styled(
+        format!(" ●{count}"),
+        Style::default()
+            .fg(theme::SUCCESS)
+            .add_modifier(Modifier::DIM),
+    )
+}
+
 fn explore_block(title: &str, focused: bool) -> Block<'_> {
     theme::panel_block(title, focused)
 }
@@ -1413,7 +1423,12 @@ fn render_explore_scenarios(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 git_diff_status_style(git_status),
             );
             let name = Span::styled(format!(" {}{}", scenario.name, tp_badge), normal);
-            let mut line = Line::from(vec![git_marker, status_dot, name]);
+            let mut spans = vec![git_marker, status_dot, name];
+            let captures = app.explore_scenario_captures(i);
+            if captures > 0 {
+                spans.push(capture_badge(captures));
+            }
+            let mut line = Line::from(spans);
             if i == app.explore_selected_scenario {
                 line = apply_line_background(line, explore_select_style(focused));
             }
@@ -2119,7 +2134,12 @@ fn render_explore_steps(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             } else {
                 Span::raw(format!(" {}", step.text))
             };
-            let mut line = Line::from(vec![kw_span, body_span]);
+            let captures = app.explore_step_captures(&step.text);
+            let mut spans = vec![kw_span, body_span];
+            if captures > 0 {
+                spans.push(capture_badge(captures));
+            }
+            let mut line = Line::from(spans);
             let trail = if i == app.explore_selected_step {
                 highlight_style
             } else {
@@ -2243,8 +2263,25 @@ fn render_failure_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
         return;
     }
 
+    // The hint is an addition; a popup too short for both must keep every
+    // detail line, and the run's message is the last thing to lose.
     let out_lines = truncate_lines(build_case_detail_lines(&scenario.name, detail), inner.width);
-    frame.render_widget(Paragraph::new(Text::from(out_lines)), inner);
+    let hint_fits = out_lines.len() < inner.height as usize;
+    let body = if hint_fits {
+        let [body, footer] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                " i failed step screenshot · Enter/Esc close",
+                Style::default().fg(theme::MUTED),
+            )),
+            footer,
+        );
+        body
+    } else {
+        inner
+    };
+    frame.render_widget(Paragraph::new(Text::from(out_lines)), body);
 }
 
 fn render_external_change_prompt(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -2574,6 +2611,17 @@ fn render_screenshot_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if !app.screenshot.visible || area.width < 20 || area.height < 6 {
         return;
     }
+    // Explore keeps its Features column as context for the captures; a narrow
+    // terminal falls back to covering the whole tab.
+    let area = match app.screenshot.origin {
+        crate::image_view::ScreenshotOrigin::Explore => {
+            let right =
+                Layout::horizontal([Constraint::Percentage(28), Constraint::Percentage(72)])
+                    .split(area)[1];
+            if right.width >= 60 { right } else { area }
+        }
+        crate::image_view::ScreenshotOrigin::MindMap => area,
+    };
     let popup = Rect::new(
         area.x + area.width / 20,
         area.y + area.height / 20,

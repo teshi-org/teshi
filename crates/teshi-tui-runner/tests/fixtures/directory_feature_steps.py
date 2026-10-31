@@ -1,17 +1,49 @@
 """Executable bindings for project-directory loading; every variant owns a real PTY."""
 import hashlib
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import re
 import shlex
-import subprocess
+import shutil
 import sys
 import tempfile
 import time
+import xml.etree.ElementTree as ET
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "scripts"))
+from ci_process import HostClient
 
 
 EVENT_LOG = None
+_BINARY_IDENTITIES = {}
+
+
+def binary_identity(path):
+    path = Path(path).resolve()
+    before = path.stat()
+    signature = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+    cached = _BINARY_IDENTITIES.get(path)
+    if cached and cached[0] == signature:
+        return cached[1]
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    after = path.stat()
+    if signature != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+        raise RuntimeError("test executable changed while computing its identity")
+    _BINARY_IDENTITIES.clear()
+    _BINARY_IDENTITIES[path] = (signature, digest.hexdigest())
+    return digest.hexdigest()
+
+
+def budget(name, default):
+    value = float(os.environ.get(name, default))
+    if not 0 < value < float("inf"):
+        raise ValueError(f"{name} must be a finite positive number")
+    return value
 
 
 def emit(kind, **values):
@@ -24,6 +56,9 @@ def emit(kind, **values):
 
 class World:
     def __init__(self, request, evidence):
+        self.request_timeout = budget("TESHI_DIRECTORY_REQUEST_TIMEOUT_SECONDS", 30)
+        self.step_timeout = budget("TESHI_DIRECTORY_STEP_TIMEOUT_SECONDS", 60)
+        case_timeout = budget("TESHI_DIRECTORY_CASE_TIMEOUT_SECONDS", 180)
         self.temp = tempfile.TemporaryDirectory(prefix="teshi-directory-")
         self.root = Path(self.temp.name)
         self.project = self.root / "xxx"
@@ -32,34 +67,57 @@ class World:
         self.evidence = evidence
         self.locale = None
         self.files = {}
-        self.host = subprocess.Popen([request["host"], "--terminal-host"], stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, text=True, encoding="utf-8",
-            env={key: value for key, value in os.environ.items() if key not in
-                ("TESHI_RUNNER_CMD", "TESHI_RUNNER_ARGS", "TESHI_RUNNER_CWD")})
+        try:
+            self.client = HostClient([request["host"], "--terminal-host"], evidence,
+                env={key: value for key, value in os.environ.items() if key not in
+                    ("TESHI_RUNNER_CMD", "TESHI_RUNNER_ARGS", "TESHI_RUNNER_CWD")})
+        except BaseException:
+            self.temp.cleanup()
+            raise
+        self.case_deadline = time.monotonic() + case_timeout
+        self.deadline = self.case_deadline
+        self.context = None
+        self.timings = dict(execution=0, wait=0, capture=0, cleanup=0)
+        self.spans = []
         self.running = False
         self.command = None
         self.session_seed = None
 
+    @contextmanager
+    def measure(self, category):
+        span = [time.monotonic(), 0.0, category]
+        self.spans.append(span)
+        try:
+            yield
+        finally:
+            elapsed = time.monotonic() - span[0]
+            self.spans.pop()
+            self.timings[category] += elapsed - span[1]
+            if self.spans:
+                self.spans[-1][1] += elapsed
+
     def op(self, op, text="", **values):
-        self.host.stdin.write(json.dumps(dict(op=op, text=text, **values)) + "\n")
-        self.host.stdin.flush()
-        reply = json.loads(self.host.stdout.readline())
-        if not reply["ok"]:
-            raise AssertionError(reply["error"])
-        return reply.get("value")
+        context = dict(self.context or {}, phase=self.spans[-1][2] if self.spans else "setup")
+        return self.client.request(dict(op=op, text=text, **values),
+            min(self.deadline, time.monotonic() + self.request_timeout), context)
 
     def screen(self):
         return self.op("screen")
 
     def wait(self, predicate, timeout=15):
-        deadline = time.monotonic() + timeout
-        screen = ""
-        while time.monotonic() < deadline:
-            screen = self.screen()
-            if predicate(screen):
-                return screen
-            time.sleep(.05)
-        raise AssertionError("Viewport condition timed out\n" + screen)
+        previous = self.deadline
+        self.deadline = min(previous, time.monotonic() + timeout)
+        try:
+            with self.measure("wait"):
+                screen = ""
+                while time.monotonic() < self.deadline:
+                    screen = self.screen()
+                    if predicate(screen):
+                        return screen
+                    time.sleep(min(.05, max(0, self.deadline - time.monotonic())))
+                raise TimeoutError("Viewport condition timed out\n" + screen)
+        finally:
+            self.deadline = previous
 
     def expect(self, text):
         return self.wait(lambda screen: text in screen)
@@ -83,20 +141,28 @@ class World:
         self.op("launch", config=dict(program=binary, args=args, cwd=str(cwd), env=env, cols=170, rows=44))
         self.running = True
         self.command = dict(program=binary, args=args, cwd=str(cwd), locale_override=self.locale,
-            binary_sha256=hashlib.sha256(Path(binary).read_bytes()).hexdigest())
+            binary_sha256=binary_identity(binary))
         self.expect("Explore")
         self.expect("Project: xxx")
 
-    def capture(self, run_directory, case, step, attempt, timing="after_step"):
+    def capture(self, run_directory, case, step, attempt, timing="after_step", archive=None):
         event = dict(case_id=case["id"], step_id=f"{case['id']}:L{step['line']}",
                      attempt=attempt, feature=case["feature_path"], step_line=step["line"],
                      step_text=step["text"], source="pty", capture_timing=timing)
-        try:
-            stem = re.sub(r"[^A-Za-z0-9-]", "-", f"directory-{case['id']}-L{step['line']}-{attempt}")
-            event.update(self.op("capture", directory=str(run_directory), stem=stem),
-                         capture_status="available")
-        except Exception as error:
-            event.update(capture_status="failed", message=str(error))
+        with self.measure("capture"):
+            try:
+                stem = re.sub(r"[^A-Za-z0-9-]", "-", f"directory-{case['id']}-L{step['line']}-{attempt}")
+                event.update(self.op("capture", directory=str(run_directory), stem=stem),
+                             capture_status="available")
+                if archive:
+                    archive.mkdir(parents=True, exist_ok=True)
+                    for key in ("screenshot_file", "svg_file", "text_file"):
+                        filename = event[key]
+                        if Path(filename).name != filename:
+                            raise ValueError("capture filename escapes its directory")
+                        shutil.copyfile(run_directory / filename, archive / filename)
+            except Exception as error:
+                event.update(capture_status="failed", message=str(error))
         return event
 
     def exact(self, expected):
@@ -107,12 +173,13 @@ class World:
         self.search_paths()
         self.wait(lambda screen: all(name in screen for name in expected))
         # Hold the negative assertion across multiple external refresh opportunities.
-        deadline = time.monotonic() + 3.2
-        while time.monotonic() < deadline:
-            screen = self.screen()
-            actual = {name for name in candidates if name in screen}
-            assert actual == expected, (expected, actual, screen)
-            time.sleep(.08)
+        with self.measure("wait"):
+            deadline = time.monotonic() + 3.2
+            while time.monotonic() < deadline:
+                screen = self.screen()
+                actual = {name for name in candidates if name in screen}
+                assert actual == expected, (expected, actual, screen)
+                time.sleep(.08)
 
     def search_paths(self):
         self.op("key", "Escape")
@@ -227,11 +294,12 @@ class World:
             self.search_paths()
             self.expect(quoted[0])
         elif text.startswith("Feature 列表不包含"):
-            deadline = time.monotonic() + 3.2
-            while time.monotonic() < deadline:
-                screen = self.screen()
-                assert all(name not in screen for name in quoted), screen
-                time.sleep(.08)
+            with self.measure("wait"):
+                deadline = time.monotonic() + 3.2
+                while time.monotonic() < deadline:
+                    screen = self.screen()
+                    assert all(name not in screen for name in quoted), screen
+                    time.sleep(.08)
         elif text == "项目 xxx 的配置指定隔离的测试运行工作目录":
             (self.project / "work").mkdir()
             script = str(Path(__file__).resolve())
@@ -260,20 +328,21 @@ class World:
             raise AssertionError("Unbound step: " + text)
 
     def close(self):
+        self.deadline = time.monotonic() + 10
         try:
-            if self.running:
+            (self.evidence / "launch.json").write_text(json.dumps(self.command, ensure_ascii=False, indent=2), encoding="utf-8")
+            if self.running and not self.client.poisoned:
                 (self.evidence / "screen.txt").write_text(self.screen(), encoding="utf-8")
                 self.op("screenshot", str(self.evidence / "screen.svg"))
                 self.op("key", "Escape")
                 self.op("click", "Explore [1]")
                 self.op("key", "ctrl+q")
                 self.op("exit")
-            (self.evidence / "launch.json").write_text(json.dumps(self.command, ensure_ascii=False, indent=2), encoding="utf-8")
         finally:
-            self.op("close")
-            self.host.stdin.close()
-            self.host.wait(timeout=15)
-            self.temp.cleanup()
+            try:
+                self.client.close()
+            finally:
+                self.temp.cleanup()
 
 
 def probe_runner(path):
@@ -296,6 +365,9 @@ def main():
     (artifact_root / "request.json").write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
     emit("start_run", total=len(request["cases"]))
     failed = examples_failed = examples_passed = 0
+    measurements = []
+    slow_steps = []
+    junit = ET.Element("testsuite", name="project-directory-replay")
     for case in request["cases"]:
         emit("start_case", case_id=case["id"], name=case["scenario"])
         variants = [dict(zip(table["headers"], row)) for table in case["examples"] for row in table["rows"]] or [{}]
@@ -305,29 +377,49 @@ def main():
             attempt = index + 1
             evidence = Path(os.environ.get("TESHI_FEATURE_ARTIFACTS", request["meta"].get("artifacts_dir", ".teshi/tui-results/directory"))) / re.sub(r"[^A-Za-z0-9_-]", "_", str(case["id"])) / str(index)
             evidence.mkdir(parents=True, exist_ok=True)
-            world = World(request, evidence)
+            world = None
+            started = time.monotonic()
+            step_started = started
             events = []
             text = "setup"
             step = dict(line=0, text=text)
             try:
+                world = World(request, evidence)
+                setup_seconds = time.monotonic() - started
                 for step in case["steps"]:
                     text = step["text"]
                     for key, value in variant.items():
                         text = text.replace("<" + key + ">", value)
                     event = dict(line=step["line"], text=text, example=variant)
+                    world.context = dict(case_id=case["id"], step_line=step["line"],
+                                         step_text=text, example=variant, attempt=attempt)
+                    world.deadline = min(world.case_deadline, time.monotonic() + world.step_timeout)
                     emit("start_step", case_id=case["id"], step_id=str(step["line"]), attempt=attempt, text=text, example=variant)
-                    world.step(text)
-                    events.append(dict(event, status="passed"))
-                    emit("end_step", case_id=case["id"], step_id=str(step["line"]), attempt=attempt, status="passed", example=variant)
-                    emit("step_screenshot", **world.capture(captures, case, step, attempt), status="passed")
+                    step_started = time.monotonic()
+                    with world.measure("execution"):
+                        world.step(text)
+                    elapsed = time.monotonic() - step_started
+                    events.append(dict(event, status="passed", elapsed_seconds=elapsed))
+                    emit("end_step", case_id=case["id"], step_id=str(step["line"]), attempt=attempt, status="passed", example=variant, elapsed_seconds=elapsed)
+                    capture = world.capture(captures, case, step, attempt, archive=artifact_root / "captures")
+                    emit("step_screenshot", **capture, status="passed")
+                    if capture["capture_status"] != "available":
+                        errors.append("Step evidence: " + capture.get("message", "capture unavailable"))
+                        events.append(dict(event, status="failed", message=errors[-1]))
+                        break
             except Exception as error:
+                elapsed = time.monotonic() - step_started
                 errors.append(f"{text}: {error}")
-                events.append(dict(text=text, example=variant, status="failed", message=str(error)))
-                emit("end_step", case_id=case["id"], step_id=str(step["line"]), attempt=attempt, status="failed", message=str(error))
-                emit("step_screenshot", **world.capture(captures, case, step, attempt), status="failed")
+                events.append(dict(line=step["line"], text=text, example=variant, status="failed", message=str(error), elapsed_seconds=elapsed))
+                emit("end_step", case_id=case["id"], step_id=str(step["line"]), attempt=attempt, status="failed", message=str(error), elapsed_seconds=elapsed)
+                if world:
+                    world.client.diagnose(error)
+                    emit("step_screenshot", **world.capture(captures, case, step, attempt, archive=artifact_root / "captures"), status="failed")
             finally:
                 try:
-                    world.close()
+                    if world:
+                        with world.measure("cleanup"):
+                            world.close()
                 except Exception as error:
                     errors.append("Terminal cleanup: " + str(error))
                     events.append(dict(status="failed", message=str(error)))
@@ -335,6 +427,30 @@ def main():
                 ok = all(event["status"] == "passed" for event in events)
                 examples_passed += int(ok)
                 examples_failed += int(not ok)
+                measurement = dict(case_id=case["id"], scenario=case["scenario"], attempt=attempt,
+                    example=variant, status="passed" if ok else "failed",
+                    elapsed_seconds=time.monotonic() - started, evidence=str(evidence),
+                    setup_seconds=setup_seconds if world else time.monotonic() - started,
+                    phases=world.timings if world else {},
+                    temp_root=str(world.root) if world else None)
+                measurements.append(measurement)
+                slow_steps.extend(dict(event, case_id=case["id"], attempt=attempt)
+                                  for event in events if "elapsed_seconds" in event)
+                (evidence / "timings.json").write_text(json.dumps(measurement, ensure_ascii=False, indent=2), encoding="utf-8")
+                test = ET.SubElement(junit, "testcase", classname=case["feature_path"],
+                    name=f"{case['scenario']} [example {attempt}]", time=f"{measurement['elapsed_seconds']:.6f}")
+                if not ok:
+                    ET.SubElement(test, "failure").text = json.dumps(events, ensure_ascii=False)
+                # Checkpoint after every Examples row so an interrupted run retains evidence.
+                junit.set("tests", str(examples_passed + examples_failed))
+                junit.set("failures", str(examples_failed))
+                ET.ElementTree(junit).write(artifact_root / "junit.xml", encoding="utf-8", xml_declaration=True)
+                (artifact_root / "timing-summary.json").write_text(
+                    json.dumps(sorted(measurements, key=lambda item: item["elapsed_seconds"], reverse=True),
+                               ensure_ascii=False, indent=2), encoding="utf-8")
+                (artifact_root / "slow-steps.json").write_text(
+                    json.dumps(sorted(slow_steps, key=lambda item: item["elapsed_seconds"], reverse=True)[:20],
+                               ensure_ascii=False, indent=2), encoding="utf-8")
         if errors:
             failed += 1
             emit("case_failed", case_id=case["id"], error=dict(message="; ".join(errors)))

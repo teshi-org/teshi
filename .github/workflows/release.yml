@@ -662,7 +662,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.resolve.outputs.tag }}
-          name: ${{ inputs.invoked_via_call && needs.resolve.outputs.prerelease == 'true' && format('{0} · Nightly #{1}', needs.resolve.outputs.tag, github.run_number) || needs.resolve.outputs.tag }}
+          # Quoted so YAML does not treat the `#` in the release name as a comment.
+          name: "${{ inputs.invoked_via_call && needs.resolve.outputs.prerelease == 'true' && format('{0} · Nightly #{1}', needs.resolve.outputs.tag, github.run_number) || needs.resolve.outputs.tag }}"
           target_commitish: ${{ needs.resolve.outputs.source_ref }}
           prerelease: ${{ needs.resolve.outputs.prerelease == 'true' }}
           draft: true
