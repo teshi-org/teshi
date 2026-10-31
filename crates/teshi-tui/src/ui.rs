@@ -356,6 +356,26 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         Paragraph::new("").style(Style::default().bg(theme::FOOTER_BG).fg(theme::FOOTER_DESC)),
         chunks[3],
     );
+    // Quit stays pinned to the bottom-right of every tab so it is always
+    // discoverable and clickable. Exiting is a deliberate chord now, and the
+    // label is the only place it is advertised. Tab footers render into the
+    // remaining width and cannot cover the control.
+    const EXIT_LABEL: &str = " ^q 退出";
+    let full_footer = chunks[3];
+    // Very narrow terminals keep their tab footer intact: those rows already
+    // shed their key hints, and the chord remains the affordance there.
+    let exit_width = if full_footer.width >= 60 {
+        (EXIT_LABEL.width() as u16).min(full_footer.width)
+    } else {
+        0
+    };
+    let footer = Rect {
+        width: full_footer.width.saturating_sub(exit_width),
+        ..full_footer
+    };
+    // Shadow the layout so every tab footer below renders into the narrowed
+    // row and leaves the right edge to the exit control.
+    let chunks = [chunks[0], chunks[1], chunks[2], footer];
     render_main_panel(frame, app, chunks[2]);
     render_tree_pointer_feedback(frame, app);
 
@@ -387,7 +407,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                 frame,
                 app,
                 chunks[3],
-                "",
+                mode,
                 &[
                     (" Save", Action::Save),
                     (" New", Action::ReqNewDocument),
@@ -520,11 +540,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             app,
             Rect::new(chunks[3].x, chunks[3].y, controls_width, chunks[3].height),
             "",
-            &[
-                (" Save", Action::Save),
-                (" Model", Action::ModelPanelOpen),
-                (" Quit", Action::Quit),
-            ],
+            &[(" Save", Action::Save), (" Model", Action::ModelPanelOpen)],
             false,
         );
         if chunks[3].width > controls_width {
@@ -538,6 +554,32 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                 ),
             );
         }
+    }
+
+    if exit_width > 0 {
+        let exit_area = Rect::new(
+            full_footer.right().saturating_sub(exit_width),
+            full_footer.y,
+            exit_width,
+            1,
+        );
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect: exit_area,
+            action: Action::Quit,
+            modal: false,
+        });
+        frame.render_widget(
+            Paragraph::new(theme::footer_line([
+                Span::styled(
+                    " ^q ",
+                    Style::default()
+                        .fg(theme::PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("退出", Style::default().fg(theme::FOOTER_DESC)),
+            ])),
+            exit_area,
+        );
     }
 
     if app.auth_panel_active
@@ -3563,8 +3605,6 @@ fn footer_hints(app: &App) -> Line<'static> {
                 footer_pill(" Scroll [hjkl/Arrows] "),
                 Span::raw(" "),
                 footer_pill(" Return Tree [Esc] "),
-                Span::raw(" "),
-                footer_pill(" Quit [q] "),
             ])
         }
         (MainTab::MindMap, _) => {
@@ -3587,8 +3627,6 @@ fn footer_hints(app: &App) -> Line<'static> {
                 hints.push(Span::raw(" "));
                 hints.push(footer_pill(" Show Panel [p] "));
             }
-            hints.push(Span::raw(" "));
-            hints.push(footer_pill(" Quit [q] "));
             Line::from(hints)
         }
         (MainTab::Explore, _) => Line::from(vec![
@@ -3603,15 +3641,13 @@ fn footer_hints(app: &App) -> Line<'static> {
             footer_pill(" Run [r] "),
             Span::raw(" "),
             footer_pill(" AI [a] "),
-            Span::raw(" "),
-            footer_pill(" Quit [q] "),
         ]),
         (MainTab::Ai, _) if app.ai_input_focused => {
             Line::raw("[INPUT] Enter send · Shift+Enter newline · Esc normal · Ctrl+v paste")
         }
-        (MainTab::Ai, _) => Line::raw(
-            "[NORMAL] i/Enter input · hjkl/Arrows scroll · [/] agent · a new · x close · q quit",
-        ),
+        (MainTab::Ai, _) => {
+            Line::raw("[NORMAL] i/Enter input · hjkl/Arrows scroll · [/] agent · a new · x close")
+        }
         (MainTab::Requirements, _) => crate::authoring_tab::requirements_footer_line(
             &app.requirements_root,
             &app.authoring_ui.iteration_filter,
@@ -6074,6 +6110,7 @@ mod truncate_tests {
         Line, Span, build_case_detail_lines, explore_scenarios_title, render, truncate_line_to_cols,
     };
     use crate::app::{App, CaseDetail, ClickableRegion, RunStatus};
+    use crate::keymap::Action;
     use ratatui::{Terminal, backend::TestBackend};
     use teshi_core::gherkin;
 
@@ -6134,7 +6171,23 @@ mod truncate_tests {
             let text = (0..160)
                 .map(|x| buffer[(x, 23)].symbol())
                 .collect::<String>();
-            assert_eq!(text.trim_end(), expected);
+            // The tab's own action bar keeps every label; the pinned exit
+            // control owns the right edge of the same row.
+            assert!(text.starts_with(expected), "{text}");
+            let exit = app
+                .clickable_regions
+                .iter()
+                .find_map(|region| match region {
+                    ClickableRegion::ActionButton {
+                        rect,
+                        action: Action::Quit,
+                        ..
+                    } => Some(*rect),
+                    _ => None,
+                })
+                .expect("bottom-right exit control");
+            assert_eq!(exit.y, 23);
+            assert_eq!(exit.right(), 160);
             let offset = text.find(first_key).unwrap() as u16;
             for x in offset..offset + first_key.len() as u16 {
                 assert_eq!(buffer[(x, 23)].fg, crate::theme::PRIMARY);
@@ -6145,6 +6198,61 @@ mod truncate_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn exit_control_is_pinned_to_the_bottom_right_in_every_tab() {
+        use crate::app::MainTab;
+        for (index, tab) in [
+            MainTab::Explore,
+            MainTab::MindMap,
+            MainTab::Ai,
+            MainTab::Requirements,
+            MainTab::TestPoints,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut app = App::from_args().expect("app init");
+            app.active_tab = tab;
+            app.status_message = None;
+            let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let exit = app
+                .clickable_regions
+                .iter()
+                .find_map(|region| match region {
+                    ClickableRegion::ActionButton {
+                        rect,
+                        action: Action::Quit,
+                        ..
+                    } => Some(*rect),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("tab {index} has no clickable exit control"));
+            assert_eq!(exit.y, 23, "tab {index}");
+            assert_eq!(exit.right(), 100, "tab {index}");
+            let label = (exit.x..exit.right())
+                .map(|x| terminal.backend().buffer()[(x, 23)].symbol())
+                .collect::<String>();
+            assert!(label.contains("^q"), "tab {index}: {label}");
+            assert!(label.contains('退'), "tab {index}: {label}");
+        }
+    }
+
+    #[test]
+    fn narrow_footer_keeps_tab_actions_without_the_exit_control() {
+        let mut app = App::from_args().expect("app init");
+        app.status_message = None;
+        let mut terminal = Terminal::new(TestBackend::new(50, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        assert!(!app.clickable_regions.iter().any(|region| matches!(
+            region,
+            ClickableRegion::ActionButton {
+                action: Action::Quit,
+                ..
+            }
+        )));
     }
 
     #[test]

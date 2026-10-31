@@ -194,7 +194,35 @@ fn vim_boundaries_pages_and_arrow_pane_chords_work_across_tabs() {
     terminal.expect_text("[NORMAL]", true, 10000).unwrap();
     capture(&terminal, "vim-ai-modes");
     fixture.unchanged();
+    terminal.key("ctrl+q").unwrap();
+    terminal.expect_exit(0, 10000).unwrap();
+}
+
+#[test]
+#[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
+fn bare_q_and_ctrl_c_stay_in_the_app_while_ctrl_q_exits() {
+    let fixture = Fixture::new();
+    let terminal = fixture.launch();
     terminal.key("q").unwrap();
+    terminal.expect_text("Explore", true, 2000).unwrap();
+    terminal.key("ctrl+c").unwrap();
+    terminal.expect_text("Explore", true, 2000).unwrap();
+    terminal.key("ctrl+q").unwrap();
+    terminal.expect_exit(0, 10000).unwrap();
+}
+
+#[test]
+#[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
+fn bottom_right_exit_control_quits_on_click() {
+    let fixture = Fixture::new();
+    let terminal = fixture.launch();
+    terminal.expect_text("^q", true, 10000).unwrap();
+    // Address the bottom-right cell directly: text lookup counts characters,
+    // and the footer's wide glyphs shift that count away from the real column.
+    let (col, row) = (148_u16, 30_u16);
+    terminal
+        .write(&format!("\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m"))
+        .unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -258,7 +286,7 @@ fn five_tabs_render_at_normal_and_narrow_sizes_and_modal_owns_pointer() {
     terminal.expect_text("Open path", false, 10000).unwrap();
     terminal.expect_text("Scenario", true, 1000).unwrap();
     fixture.unchanged();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -273,7 +301,7 @@ fn project_header_pointer_opens_picker_on_explore() {
     terminal.key("Escape").unwrap();
     terminal.expect_text("Open path", false, 3000).unwrap();
     fixture.unchanged();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -288,7 +316,7 @@ fn pane_prefix_cancel_keeps_mindmap_preview_visible() {
     capture(&terminal, "mindmap-prefix-cancel");
     terminal.expect_text("Preview", true, 1000).unwrap();
     fixture.unchanged();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -372,7 +400,7 @@ fn requirements_pointer_wheel_scrollbar_and_resize_keep_independent_panes() {
     terminal.key("Escape").unwrap();
     capture(&terminal, "requirements-narrow-pointer-editor");
     fixture.unchanged();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -419,7 +447,7 @@ fn explore_pointer_selection_and_scenario_wheel_leave_feature_and_step_independe
     capture(&terminal, "explore-scenario-horizontal-wheel");
     terminal.expect_text("Given step 30", true, 1000).unwrap();
     fixture.unchanged();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -450,7 +478,7 @@ fn external_feature_additions_are_discovered_in_recursive_project() {
     terminal.expect_text("added_nested", true, 10000).unwrap();
     capture(&terminal, "external-additions");
     fixture.unchanged();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -499,7 +527,7 @@ fn external_clean_changes_and_deletion_refresh_without_reopening() {
             .unwrap()
             .contains("updated externally")
     );
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -549,7 +577,7 @@ fn external_unreadable_feature_reports_error_and_preserves_project() {
     terminal.expect_text("sample", true, 10000).unwrap();
     capture(&terminal, "external-scan-failure");
     fs::remove_file(invalid).unwrap();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -626,7 +654,7 @@ fn external_changes_wait_until_real_feature_run_finishes() {
         )
         .unwrap();
     }
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -673,7 +701,7 @@ fn pointer_hover_changes_visible_action_style_and_clears_on_exit() {
         "hover style did not clear"
     );
     fixture.unchanged();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -756,7 +784,7 @@ fn explore_long_step_horizontal_scroll_and_resize_stays_bounded() {
         "widened scrollbar is not clamped: {widened}"
     );
     assert_eq!(fs::read_to_string(&fixture.source).unwrap(), body);
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 
@@ -811,7 +839,7 @@ fn normal_tabs_place_navigation_left_and_details_vertically_right() {
         capture(&terminal, &format!("layout-normal-tab-{tab}"));
     }
     fixture.unchanged();
-    terminal.key("q").unwrap();
+    terminal.key("ctrl+q").unwrap();
     terminal.expect_exit(0, 10000).unwrap();
 }
 

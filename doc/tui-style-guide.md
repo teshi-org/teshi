@@ -150,7 +150,7 @@ AI [3]
 ╭ Agents ─────────╮╭ AI Chat · Default ───────────────── Manual ─╮
 │○ Agent 1        ││ Welcome to AI Chat!                        │
 ╰─────────────────╯╰───────────────────────────────────────────╯
- Focus [Enter]   Clear [Esc]   Model [m]   Quit [q]
+ Focus [Enter]   Clear [Esc]   Model [m]   Quit [Ctrl+Q]
 ```
 
 ```text

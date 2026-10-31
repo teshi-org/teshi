@@ -29,7 +29,7 @@ pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             Action::AiFocusInput,
         )
     };
-    let mut controls = vec![
+    let controls = vec![
         first,
         (
             if compact { " Blur" } else { " Blur [Esc]" },
@@ -44,9 +44,6 @@ pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             Action::ModelPanelOpen,
         ),
     ];
-    if !app.ai_input_focused {
-        controls.push((if compact { " Quit" } else { " Quit [q]" }, Action::Quit));
-    }
     let mode = if app.ai_input_focused {
         "[INPUT] "
     } else {
