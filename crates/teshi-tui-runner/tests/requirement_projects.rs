@@ -108,6 +108,8 @@ fn project_views_link_existing_sources_and_create_project_owned_documents() {
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
             "TESHI_APP_DATA_DIR",
+            "TESHI_SESSION_DIR",
+            "TESHI_ACP_STORE_DIR",
         ]
         .into_iter()
         .map(|name| (name.into(), root.join(name).to_string_lossy().into_owned()))

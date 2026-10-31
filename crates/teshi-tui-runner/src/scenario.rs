@@ -532,32 +532,7 @@ fn capture_terminal(
         let text = format!("{stem}.txt");
         std::fs::write(artifacts.join(&text), session.screen()?)?;
         session.screenshot(&artifacts.join(&svg))?;
-        let mut options = resvg::usvg::Options::default();
-        static FONTS: std::sync::OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> =
-            std::sync::OnceLock::new();
-        options.fontdb = FONTS
-            .get_or_init(|| {
-                let mut database = resvg::usvg::fontdb::Database::new();
-                database.load_system_fonts();
-                std::sync::Arc::new(database)
-            })
-            .clone();
-        let tree = resvg::usvg::Tree::from_data(&std::fs::read(artifacts.join(&svg))?, &options)?;
-        let size = tree.size().to_int_size();
-        anyhow::ensure!(
-            size.width() <= 16384
-                && size.height() <= 16384
-                && u64::from(size.width()) * u64::from(size.height()) <= 32 * 1024 * 1024,
-            "terminal preview is too large"
-        );
-        let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height())
-            .context("cannot allocate terminal preview")?;
-        resvg::render(
-            &tree,
-            resvg::tiny_skia::Transform::default(),
-            &mut pixmap.as_mut(),
-        );
-        pixmap.save_png(artifacts.join(&png))?;
+        crate::preview::render_svg(&artifacts.join(&svg), &artifacts.join(&png))?;
         Ok((svg, png, text))
     })();
     match result {

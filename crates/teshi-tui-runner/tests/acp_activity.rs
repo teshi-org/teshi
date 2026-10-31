@@ -30,6 +30,10 @@ fn acp_reply_color_and_event_order_in_real_terminal() {
         ],
         cwd: Some(root.path().to_string_lossy().into_owned()),
         env: vec![
+            (
+                "TESHI_APP_DATA_DIR".into(),
+                root.path().join("app-data").to_string_lossy().into_owned(),
+            ),
             // The host agent shell disables color; this regression measures it.
             ("NO_COLOR".into(), String::new()),
             ("TERM".into(), "xterm-256color".into()),
@@ -243,6 +247,10 @@ fn fake_acp_activity_compact_expanded_and_narrow() {
         cwd: Some(root.path().to_string_lossy().into_owned()),
         env: vec![
             (
+                "TESHI_APP_DATA_DIR".into(),
+                root.path().join("app-data").to_string_lossy().into_owned(),
+            ),
+            (
                 "APPDATA".into(),
                 root.path().join("appdata").to_string_lossy().into_owned(),
             ),
@@ -262,6 +270,14 @@ fn fake_acp_activity_compact_expanded_and_narrow() {
                 root.path().join("data").to_string_lossy().into_owned(),
             ),
             ("TESHI_AGENT_BACKEND".into(), "acp".into()),
+            (
+                "TESHI_SESSION_DIR".into(),
+                root.path().join("sessions").to_string_lossy().into_owned(),
+            ),
+            (
+                "TESHI_ACP_STORE_DIR".into(),
+                root.path().join("acp").to_string_lossy().into_owned(),
+            ),
             ("TESHI_ACP_PROGRAM".into(), "python".into()),
             (
                 "TESHI_ACP_ARGS_JSON".into(),
@@ -336,6 +352,10 @@ fn interrupted_acp_task_can_continue_in_real_terminal() {
             ],
             cwd: Some(root.path().to_string_lossy().into_owned()),
             env: vec![
+                (
+                    "TESHI_APP_DATA_DIR".into(),
+                    root.path().join("app-data").to_string_lossy().into_owned(),
+                ),
                 // The host agent shell disables color; this regression measures it.
                 ("NO_COLOR".into(), String::new()),
                 ("TERM".into(), "xterm-256color".into()),

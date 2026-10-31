@@ -449,6 +449,9 @@ fn run_child(
     );
     evidence.record(serde_json::json!({"type":"runner_command","command":config.cmd,"args":config.args,"cwd":config.cwd}))?;
     let mut nonvisual = std::collections::HashSet::new();
+    // The published plan owns step identity for adapters that report a source
+    // line instead, so one execution is never counted as a planned gap twice.
+    let mut planned: HashMap<String, std::collections::BTreeSet<u64>> = HashMap::new();
     for case in &request.cases {
         let path = if Path::new(&case.feature_path).is_absolute() {
             PathBuf::from(&case.feature_path)
@@ -483,6 +486,10 @@ fn run_child(
                     .is_file()
                 {
                     for step in teshi_core::scenario_steps(&feature, scenario) {
+                        planned
+                            .entry(case.id.clone())
+                            .or_default()
+                            .insert(step.line_number as u64);
                         evidence.record(serde_json::json!({"type":"planned_step","case_id":case.id,"step_id":format!("{}:L{}",case.id,step.line_number),
                             "step_line":step.line_number,"feature":case.feature_path,"screenshot_required":!nonvisual_case}))?;
                     }
@@ -570,11 +577,8 @@ fn run_child(
                     .unwrap_or_else(|_| serde_json::json!({"type":"stdout","message":line}));
                 if let Ok(mut run) = evidence.lock() {
                     let mut value = value;
-                    if value["step_id"].is_null()
-                        && let Some(line) = value["step_line"].as_u64()
-                        && let Some(case) = value["case_id"].as_str()
-                    {
-                        value["step_id"] = serde_json::json!(format!("{case}:L{line}"));
+                    if let Some(step_id) = planned_step_id(&value, &planned) {
+                        value["step_id"] = serde_json::json!(step_id);
                     }
                     if value["case_id"]
                         .as_str()
@@ -647,6 +651,8 @@ fn run_child(
     if run.snapshot().test_status == "running" {
         run.record(serde_json::json!({"type":"end_run","status":"interrupted","reason":"runner_exited_without_completion"}))?;
     }
+    // Missing evidence only taints a passing run. A run that failed or never
+    // completed is unsuccessful on its own status.
     let accepted = run.snapshot().acceptance_status == "passed";
     if status.success() && !accepted {
         let _ = tx.send(RunEvent::RunnerError {
@@ -663,6 +669,24 @@ fn run_child(
     let success = status.success() && accepted;
     let _ = tx.send(RunEvent::RunnerExit { code, success });
     Ok(())
+}
+
+/// Map an adapter's step identity onto the plan published for its case.
+///
+/// Adapters may report the source step line as `step_line` or reuse it as
+/// `step_id`. The plan is authoritative, so a planned step and its execution
+/// share one identity instead of counting as a planned gap plus a missing
+/// capture. Canonical identities and cases without a plan are left untouched.
+fn planned_step_id(
+    value: &serde_json::Value,
+    planned: &HashMap<String, std::collections::BTreeSet<u64>>,
+) -> Option<String> {
+    let case = value["case_id"].as_str()?;
+    let lines = planned.get(case)?;
+    let line = value["step_line"]
+        .as_u64()
+        .or_else(|| value["step_id"].as_str().and_then(|id| id.parse().ok()))?;
+    lines.contains(&line).then(|| format!("{case}:L{line}"))
 }
 
 fn stop_runner_tree(child: &mut std::process::Child) -> Result<()> {

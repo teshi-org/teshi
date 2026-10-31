@@ -345,9 +345,7 @@ where
         return Err(error);
     }
     result?;
-    if run.snapshot().test_status == "passed" {
-        run.ensure_accepted()?;
-    }
+    run.ensure_accepted()?;
     Ok(())
 }
 

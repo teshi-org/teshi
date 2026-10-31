@@ -26,6 +26,7 @@ mod profiles;
 mod project_context;
 mod runner;
 mod session;
+mod test_frame;
 mod test_points_tab;
 mod theme;
 mod ui;
@@ -316,6 +317,7 @@ pub fn run() -> Result<()> {
     app.set_image_support(image_detection);
     app.version = version_display().to_string();
     let mut event_source = input::EventSource::new()?;
+    let test_frame_path = std::env::var_os("TESHI_TEST_FRAME_PATH").map(std::path::PathBuf::from);
 
     while !app.should_quit {
         app.poll_runner_events();
@@ -331,7 +333,12 @@ pub fn run() -> Result<()> {
         app.poll_status_message_expiry();
         app.screenshot.poll();
         app.screenshot.prepare_frame(&mut terminal)?;
-        terminal.draw(|frame| ui::render(frame, &mut app))?;
+        let completed = terminal.draw(|frame| ui::render(frame, &mut app))?;
+        if let Some(path) = &test_frame_path {
+            // A text fragment can precede the final layout in a PTY reader.
+            // Publish only after draw/flush completed and hit regions exist.
+            test_frame::publish(path, &completed)?;
+        }
         app.screenshot.finish_frame(&mut terminal)?;
 
         // Drain bounded input bursts before redrawing the complete chat. A

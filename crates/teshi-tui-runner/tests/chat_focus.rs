@@ -108,7 +108,7 @@ fn repeated_focus_keeps_input_title_and_context_statistics() {
     capture(&terminal, "blurred");
     for _ in 0..2 {
         terminal.key("Enter").unwrap();
-        std::thread::sleep(Duration::from_millis(100));
+        terminal.expect_text("Send [Enter]", true, 5000).unwrap();
         assert_eq!(input_title(&terminal), before);
         let focused_svg = root.path().join("focused.svg");
         terminal.screenshot(&focused_svg).unwrap();
@@ -119,7 +119,7 @@ fn repeated_focus_keeps_input_title_and_context_statistics() {
         );
         capture(&terminal, "focused");
         terminal.key("Escape").unwrap();
-        std::thread::sleep(Duration::from_millis(100));
+        terminal.expect_text("Focus [i/Enter]", true, 5000).unwrap();
         assert_eq!(input_title(&terminal), before);
     }
 }

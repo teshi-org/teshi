@@ -24,6 +24,7 @@ for line in sys.stdin:
   print(p["raw"],flush=True)
   continue
  if p.get("cmd")=="bad_response":
+  time.sleep(0.2)
   print("123",flush=True)
   continue
  print(json.dumps({"ok":True,"echo":p.get("cmd"),"_target_identity":p.get("identity")}),flush=True)
@@ -145,9 +146,14 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(session._handle_exec("launch", "fixture.exe")["ok"])
             self.assertEqual(spawn.call_args.kwargs["stdout"], service.subprocess.DEVNULL)
 
-    async def wait_until_active(self):
-        async with asyncio.timeout(2):
+    async def wait_until_active(self, request=None):
+        # Liveness wait for the in-flight request, not a timing assertion: a
+        # loaded runner can take seconds to start the worker process. A request
+        # that already finished can never become active again, so stop there.
+        async with asyncio.timeout(10):
             while self.supervisor.active_request is None:
+                if request is not None and request.done():
+                    return
                 await asyncio.sleep(0.001)
 
     async def test_malformed_response_matrix_and_followup_alignment(self):
@@ -202,7 +208,7 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         for command in ({"cmd": "hang", "timeout_ms": 100}, {"cmd": "bad_response"}):
             with self.subTest(command=command):
                 preview = asyncio.create_task(self.supervisor.execute(command, background=True))
-                await self.wait_until_active()
+                await self.wait_until_active(preview)
                 business = asyncio.create_task(self.supervisor.execute({"cmd": "next"}))
                 self.assertFalse((await preview)["ok"])
                 self.assertEqual((await business)["echo"], "next")

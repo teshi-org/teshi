@@ -1,10 +1,65 @@
 //! Source-bound project discovery acceptance using an owned real PTY.
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::process::{Command, Stdio};
 use teshi_core::gherkin::parse_feature;
 use teshi_tui_runner::{Launch, Terminal};
+
+fn inventory(path: &std::path::Path) -> Result<Value> {
+    let feature = parse_feature(&std::fs::read_to_string(path)?, path.to_owned());
+    let mut cases = Vec::new();
+    for scenario in feature.all_scenarios() {
+        let mut examples = Vec::new();
+        for table in &scenario.examples {
+            for row in &table.rows {
+                anyhow::ensure!(row.len() == table.headers.len(), "invalid Examples row");
+                examples.push(
+                    table
+                        .headers
+                        .iter()
+                        .cloned()
+                        .zip(row.iter().cloned())
+                        .collect::<BTreeMap<_, _>>(),
+                );
+            }
+        }
+        if examples.is_empty() {
+            examples.push(BTreeMap::new());
+        }
+        let variants: Vec<_> = examples
+            .iter()
+            .enumerate()
+            .map(|(index, example)| {
+                let steps: Vec<_> = feature
+                    .background
+                    .iter()
+                    .flat_map(|background| &background.steps)
+                    .chain(&scenario.steps)
+                    .map(|step| {
+                        let mut text = step.text.clone();
+                        for (key, value) in example {
+                            text = text.replace(&format!("<{key}>"), value);
+                        }
+                        json!({"line":step.line_number,"text":text})
+                    })
+                    .collect();
+                json!({"attempt":index+1,"example":example,"steps":steps})
+            })
+            .collect();
+        cases.push(json!({"scenario":scenario.name,"line_number":scenario.line_number,"variants":variants}));
+    }
+    Ok(json!(cases))
+}
+
+fn capture(session: &Terminal, request: &Value) -> Result<Value> {
+    let directory =
+        std::path::Path::new(request["directory"].as_str().context("missing directory")?);
+    let stem = request["stem"].as_str().context("missing capture stem")?;
+    let frame = session.capture_frame(directory, stem)?;
+    Ok(json!({"screenshot_file":frame.png,"svg_file":frame.svg,"text_file":frame.text}))
+}
 
 fn terminal_host() -> Result<()> {
     let mut terminal: Option<Terminal> = None;
@@ -33,6 +88,7 @@ fn terminal_host() -> Result<()> {
                     session.expect_text(text, request["visible"].as_bool().unwrap_or(true), 8000)?
                 }
                 "screenshot" => session.screenshot(std::path::Path::new(text))?,
+                "capture" => return capture(session, &request),
                 "exit" => session.expect_exit(0, 10000)?,
                 _ => bail!("unknown terminal operation"),
             }
@@ -49,6 +105,13 @@ fn terminal_host() -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--inventory") {
+        let path = std::env::args()
+            .nth(2)
+            .context("missing Feature inventory path")?;
+        println!("{}", inventory(std::path::Path::new(&path))?);
+        return Ok(());
+    }
     if std::env::args().nth(1).as_deref() == Some("--terminal-host") {
         return terminal_host();
     }

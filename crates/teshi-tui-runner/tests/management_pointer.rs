@@ -21,6 +21,13 @@ struct Fixture {
     artifacts: PathBuf,
 }
 
+#[derive(Clone, Copy)]
+enum PointerResult<'a> {
+    Visible(&'a str),
+    Hidden(&'a str),
+    Selected(&'a str),
+}
+
 impl Fixture {
     fn new(name: &str, narrow: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
@@ -59,6 +66,13 @@ impl Fixture {
             env: [
                 ("TERM".into(), "xterm-256color".into()),
                 ("TESHI_AGENT_BACKEND".into(), "native".into()),
+                (
+                    "TESHI_TEST_FRAME_PATH".into(),
+                    root.path()
+                        .join("completed-frame.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
             ]
             .into_iter()
             .chain(
@@ -104,7 +118,15 @@ impl Fixture {
     }
 
     fn capture(&self, terminal: &Terminal, name: &str) {
-        std::thread::sleep(Duration::from_millis(100));
+        // Business readiness belongs to the operation's explicit postcondition.
+        let receipt = self._root.path().join("completed-frame.json");
+        if let Ok(bytes) = fs::read(receipt) {
+            fs::write(
+                self.artifacts.join(format!("{name}-completed-frame.json")),
+                bytes,
+            )
+            .unwrap();
+        }
         fs::write(
             self.artifacts.join(format!("{name}.txt")),
             terminal.screen().unwrap(),
@@ -115,15 +137,32 @@ impl Fixture {
             .unwrap();
     }
 
-    fn click(&self, terminal: &Terminal, labels: &[&str], name: &str) {
+    fn click(&self, terminal: &Terminal, labels: &[&str], name: &str, result: PointerResult<'_>) {
         self.capture(terminal, &format!("{name}-before"));
-        let screen = terminal.screen().unwrap();
-        let label = labels
-            .iter()
-            .find(|label| screen.contains(**label))
-            .unwrap_or_else(|| panic!("missing control {labels:?}:\n{screen}"));
-        terminal.click_text(label, 1500).unwrap();
+        // A panel paints its frame before its controls, so wait for the label
+        // instead of reading the first screen that shows the panel title.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let label = loop {
+            let screen = terminal.screen().unwrap();
+            if let Some(label) = labels.iter().find(|label| screen.contains(**label)) {
+                break (*label).to_string();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "missing control {labels:?}:\n{screen}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        terminal.click_text(&label, 1500).unwrap();
+        let outcome = terminal.expect_screen(name, 20000, |screen| match result {
+            PointerResult::Visible(text) => screen.contains(text),
+            PointerResult::Hidden(text) => !screen.contains(text),
+            PointerResult::Selected(text) => screen
+                .lines()
+                .any(|line| line.contains(text) && line.contains('▶')),
+        });
         self.capture(terminal, &format!("{name}-after"));
+        outcome.unwrap();
     }
 
     fn finish(&self, terminal: Terminal) {
@@ -270,8 +309,13 @@ fn click_field(terminal: &Terminal, name: &str) {
     terminal
         .write(&format!("\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m"))
         .unwrap();
-    std::thread::sleep(Duration::from_millis(100));
-    let screen = terminal.screen().unwrap();
+    let screen = terminal
+        .expect_screen("clicked field is focused", 3000, |screen| {
+            screen
+                .lines()
+                .any(|line| line.contains(name) && line.contains('▸'))
+        })
+        .unwrap();
     assert!(
         screen
             .lines()
@@ -289,22 +333,42 @@ fn model_list_add_control(narrow: bool) {
     let terminal = fixture.launch();
     terminal.key("m").unwrap();
     terminal.expect_text("Model Profiles", true, 1500).unwrap();
-    fixture.click(&terminal, &["Add [a]", "Add[a]", "a add"], "add-pointer");
+    fixture.click(
+        &terminal,
+        &["Add [a]", "Add[a]", "a add"],
+        "add-pointer",
+        PointerResult::Visible("Add Model Profile"),
+    );
     terminal
         .expect_text("Add Model Profile", true, 1500)
         .unwrap();
-    fixture.click(&terminal, &["Cancel [Esc]"], "cancel-add");
+    fixture.click(
+        &terminal,
+        &["Cancel [Esc]"],
+        "cancel-add",
+        PointerResult::Hidden("Add Model Profile"),
+    );
     terminal
         .expect_text("Add Model Profile", false, 1500)
         .unwrap();
     assert_eq!(fixture.profile_count(), 2);
-    fixture.click(&terminal, &["Edit [e]", "Edit[e]"], "edit-alpha");
+    fixture.click(
+        &terminal,
+        &["Edit [e]", "Edit[e]"],
+        "edit-alpha",
+        PointerResult::Visible("Edit Model Profile"),
+    );
     terminal
         .expect_text("Edit Model Profile", true, 1500)
         .unwrap();
     click_field(&terminal, "Name");
     terminal.write(" edited").unwrap();
-    fixture.click(&terminal, &["Save [Enter]"], "save-edited-alpha");
+    fixture.click(
+        &terminal,
+        &["Save [Enter]"],
+        "save-edited-alpha",
+        PointerResult::Hidden("Edit Model Profile"),
+    );
     terminal
         .expect_text("Edit Model Profile", false, 1500)
         .unwrap();
@@ -316,6 +380,7 @@ fn model_list_add_control(narrow: bool) {
         &terminal,
         &["Use [Enter]", "Use[Enter]"],
         "use-edited-alpha",
+        PointerResult::Hidden("Model Profiles"),
     );
     terminal.expect_text("Model Profiles", false, 1500).unwrap();
     assert_eq!(
@@ -326,15 +391,35 @@ fn model_list_add_control(narrow: bool) {
     );
     terminal.key("m").unwrap();
     terminal.expect_text("Model Profiles", true, 1500).unwrap();
-    fixture.click(&terminal, &["Del [dd/Del]"], "delete-edited-alpha");
+    fixture.click(
+        &terminal,
+        &["Del [dd/Del]"],
+        "delete-edited-alpha",
+        PointerResult::Visible("Confirm deletion"),
+    );
     terminal
         .expect_text("Confirm deletion", true, 2000)
         .unwrap();
     assert!(fixture.profiles.join("Alpha.json").exists());
-    fixture.click(&terminal, &["Cancel [Esc/n]"], "cancel-delete-alpha");
+    fixture.click(
+        &terminal,
+        &["Cancel [Esc/n]"],
+        "cancel-delete-alpha",
+        PointerResult::Hidden("Confirm deletion"),
+    );
     assert!(fixture.profiles.join("Alpha.json").exists());
-    fixture.click(&terminal, &["Del [dd/Del]"], "request-delete-alpha-again");
-    fixture.click(&terminal, &["Delete [Enter/y]"], "confirm-delete-alpha");
+    fixture.click(
+        &terminal,
+        &["Del [dd/Del]"],
+        "request-delete-alpha-again",
+        PointerResult::Visible("Confirm deletion"),
+    );
+    fixture.click(
+        &terminal,
+        &["Delete [Enter/y]"],
+        "confirm-delete-alpha",
+        PointerResult::Hidden("Confirm deletion"),
+    );
     assert!(!fixture.profiles.join("Alpha.json").exists());
     assert!(fixture.profiles.join("Beta.json").is_file());
     assert_eq!(fixture.profile_count(), 1);
@@ -348,6 +433,7 @@ fn model_list_add_control(narrow: bool) {
         &terminal,
         &["Close [Esc]", "Close[Esc]"],
         "close-model-list",
+        PointerResult::Hidden("Model Profiles"),
     );
     terminal.expect_text("Model Profiles", false, 1500).unwrap();
     fixture.finish(terminal);
@@ -382,7 +468,12 @@ fn model_form_fields_save_cancel(narrow: bool) {
     }
     terminal.write("0.42").unwrap();
     fixture.capture(&terminal, "fields-focused");
-    fixture.click(&terminal, &["Save [Enter]"], "save-profile");
+    fixture.click(
+        &terminal,
+        &["Save [Enter]"],
+        "save-profile",
+        PointerResult::Hidden("Add Model Profile"),
+    );
     terminal
         .expect_text("Add Model Profile", false, 1500)
         .unwrap();
@@ -425,7 +516,12 @@ fn model_form_fields_save_cancel(narrow: bool) {
     terminal
         .expect_text("Add Model Profile", true, 1500)
         .unwrap();
-    fixture.click(&terminal, &["Cancel [Esc]"], "cancel-second-add");
+    fixture.click(
+        &terminal,
+        &["Cancel [Esc]"],
+        "cancel-second-add",
+        PointerResult::Hidden("Add Model Profile"),
+    );
     terminal
         .expect_text("Add Model Profile", false, 1500)
         .unwrap();
@@ -438,7 +534,12 @@ fn auth_overview_close(narrow: bool) {
     let terminal = fixture.launch();
     command(&terminal, "/auth");
     terminal.expect_text("Auth Management", true, 1500).unwrap();
-    fixture.click(&terminal, &["Close [Esc]", "Esc to close"], "close-auth");
+    fixture.click(
+        &terminal,
+        &["Close [Esc]", "Esc to close"],
+        "close-auth",
+        PointerResult::Hidden("Auth Management"),
+    );
     terminal
         .expect_text("Auth Management", false, 1500)
         .unwrap();
@@ -446,6 +547,11 @@ fn auth_overview_close(narrow: bool) {
 }
 
 fn click_sidebar(terminal: &Terminal, text: &str) {
+    // The panel opens before its sidebar rows are listed, so wait for the row
+    // instead of reading the first screen that shows the title.
+    terminal
+        .expect_text(text, true, 5000)
+        .unwrap_or_else(|error| panic!("missing sidebar text {text}: {error}"));
     let screen = terminal.screen().unwrap();
     let (col, row) = screen
         .lines()
@@ -486,6 +592,7 @@ fn agent_profile_sidebar_apply(narrow: bool) {
         &terminal,
         &["Apply [Enter]", "Enter apply"],
         "apply-beta-profile",
+        PointerResult::Hidden("Agent Configuration"),
     );
     terminal
         .expect_text("Agent Configuration", false, 1500)
@@ -516,9 +623,19 @@ fn backend_picker(narrow: bool) {
     terminal
         .expect_text("Select Agent for this session", true, 1500)
         .unwrap();
-    fixture.click(&terminal, &["ACP Beta"], "select-acp-beta");
+    fixture.click(
+        &terminal,
+        &["ACP Beta"],
+        "select-acp-beta",
+        PointerResult::Selected("ACP Beta"),
+    );
     assert!(picker_row_selected(&terminal, "ACP Beta"));
-    fixture.click(&terminal, &["Use [Enter]"], "use-acp-beta");
+    fixture.click(
+        &terminal,
+        &["Use [Enter]"],
+        "use-acp-beta",
+        PointerResult::Hidden("Select Agent for this session"),
+    );
     terminal
         .expect_text("Select Agent for this session", false, 1500)
         .unwrap();
@@ -534,9 +651,19 @@ fn backend_picker(narrow: bool) {
             .lines()
             .any(|line| line.contains("ACP Beta") && line.contains("[selected]"))
     );
-    fixture.click(&terminal, &["Teshi Native"], "select-native");
+    fixture.click(
+        &terminal,
+        &["Teshi Native"],
+        "select-native",
+        PointerResult::Selected("Teshi Native"),
+    );
     assert!(picker_row_selected(&terminal, "Teshi Native"));
-    fixture.click(&terminal, &["Use [Enter]"], "use-native");
+    fixture.click(
+        &terminal,
+        &["Use [Enter]"],
+        "use-native",
+        PointerResult::Hidden("Select Agent for this session"),
+    );
     terminal
         .expect_text("Select Agent for this session", false, 1500)
         .unwrap();
@@ -554,9 +681,19 @@ fn installed_picker(narrow: bool) {
     terminal
         .expect_text("Installed ACP Agents", true, 1500)
         .unwrap();
-    fixture.click(&terminal, &["ACP Beta"], "installed-select-beta");
+    fixture.click(
+        &terminal,
+        &["ACP Beta"],
+        "installed-select-beta",
+        PointerResult::Selected("ACP Beta"),
+    );
     assert!(picker_row_selected(&terminal, "ACP Beta"));
-    fixture.click(&terminal, &["Close [Esc]"], "installed-close");
+    fixture.click(
+        &terminal,
+        &["Close [Esc]"],
+        "installed-close",
+        PointerResult::Hidden("Installed ACP Agents"),
+    );
     terminal
         .expect_text("Installed ACP Agents", false, 1500)
         .unwrap();
@@ -582,12 +719,12 @@ fn registry_picker(narrow: bool) {
     terminal
         .expect_text("Installed ACP Agents", true, 1500)
         .unwrap();
-    fixture.click(&terminal, &["Registry [i]"], "open-registry");
-    // A click can land before the picker frame exists on a loaded runner; the
-    // retry only re-issues the same control and keeps the same assertions.
-    if terminal.expect_text("Registry Beta", true, 2000).is_err() {
-        fixture.click(&terminal, &["Registry [i]"], "open-registry-retry");
-    }
+    fixture.click(
+        &terminal,
+        &["Registry [i]"],
+        "open-registry",
+        PointerResult::Visible("Registry Beta"),
+    );
     // The picker waits on a real registry fetch; a loaded runner needs slack.
     let registry_visible = terminal.expect_text("Registry Beta", true, 20000);
     fs::write(
@@ -597,15 +734,26 @@ fn registry_picker(narrow: bool) {
     .unwrap();
     fixture.capture(&terminal, "registry-fetch-result");
     registry_visible.unwrap();
-    fixture.click(&terminal, &["Registry Beta"], "registry-select-beta");
+    fixture.click(
+        &terminal,
+        &["Registry Beta"],
+        "registry-select-beta",
+        PointerResult::Selected("Registry Beta"),
+    );
     assert!(picker_row_selected(&terminal, "Registry Beta"));
     fixture.click(
         &terminal,
         &["Registry beta description"],
         "registry-description-select",
+        PointerResult::Selected("Registry Beta"),
     );
     assert!(picker_row_selected(&terminal, "Registry Beta"));
-    fixture.click(&terminal, &["Close [Esc]"], "registry-close");
+    fixture.click(
+        &terminal,
+        &["Close [Esc]"],
+        "registry-close",
+        PointerResult::Hidden("Official ACP Registry"),
+    );
     terminal
         .expect_text("Official ACP Registry", false, 1500)
         .unwrap();

@@ -24,9 +24,15 @@ fn launch_config(binary: &Path, project: &Path, store: &Path, app_data: &Path) -
             ("XDG_CONFIG_HOME", app_data.join("config")),
             ("XDG_DATA_HOME", app_data.join("data")),
             ("TESHI_APP_DATA_DIR", app_data.to_path_buf()),
+            ("TESHI_SESSION_DIR", app_data.join("sessions")),
+            ("TESHI_ACP_STORE_DIR", app_data.join("acp")),
         ]
         .into_iter()
         .map(|(name, value)| (name.into(), value.to_string_lossy().into_owned()))
+        .chain(std::iter::once((
+            "TESHI_AGENT_BACKEND".into(),
+            "native".into(),
+        )))
         .collect(),
         cols: 120,
         rows: 35,

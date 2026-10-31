@@ -41,6 +41,16 @@ pub struct ReplayRunSnapshot {
     pub events: Vec<Value>,
 }
 
+impl ReplayRunSnapshot {
+    /// Whether a passing run must be rejected because required evidence is missing.
+    ///
+    /// Failed, blocked, partial, manual, unbound, and interrupted runs keep their
+    /// own outcome; only an otherwise successful run depends on evidence.
+    pub fn rejected(&self) -> bool {
+        self.test_status == "passed" && self.acceptance_status != "passed"
+    }
+}
+
 /// Single writer for one immutable run directory.
 pub struct ReplayEvidenceRun {
     directory: PathBuf,
@@ -288,10 +298,11 @@ impl ReplayEvidenceRun {
     /// Fail acceptance when assertions passed but required evidence is incomplete.
     ///
     /// # Errors
-    /// Returns an error for missing, failed, or unexecuted required captures.
+    /// Returns an error for missing, failed, or unexecuted required captures on a
+    /// run whose tests passed.
     pub fn ensure_accepted(&self) -> Result<()> {
         anyhow::ensure!(
-            self.snapshot.acceptance_status == "passed",
+            !self.snapshot.rejected(),
             "replay acceptance {} (tests: {}, evidence: {:?})",
             self.snapshot.acceptance_status,
             self.snapshot.test_status,

@@ -549,6 +549,19 @@ pub struct StepRunRecord {
     pub message: Option<String>,
 }
 
+/// First capture recorded for `step_text`, matched on the recorded text.
+fn index_of_step_capture(
+    refs: &[crate::image_view::ScreenshotRef],
+    step_text: &str,
+) -> Option<usize> {
+    let step_text = step_text.trim();
+    if step_text.is_empty() {
+        return None;
+    }
+    refs.iter()
+        .position(|shot| shot.step_text.trim() == step_text)
+}
+
 fn empty_running_detail(case_id: String) -> CaseDetail {
     CaseDetail {
         case_id,
@@ -875,6 +888,8 @@ pub struct App {
     /// Which scenarios have saved captures, for tree markers and the fallback
     /// list.
     pub capture_index: crate::image_view::CaptureIndex,
+    /// Newest capture of each parsed scenario, for Explore capture markers.
+    explore_captures: HashMap<(usize, usize), crate::image_view::CaptureEntry>,
     undo_stack: Vec<(EditorBuffer, usize, usize)>,
     redo_stack: Vec<(EditorBuffer, usize, usize)>,
     pub runner_config: Option<RunnerConfig>,
@@ -2111,6 +2126,7 @@ impl App {
             preview_panel_rect: None,
             screenshot: Default::default(),
             capture_index: Default::default(),
+            explore_captures: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             runner_config: runner::load_runner_config_for_project(&project_root, None).ok(),
@@ -2221,6 +2237,7 @@ impl App {
         app.sync_cursor_to_first_node();
         app.normalize_explore_selection();
         app.show_selection_warning();
+        app.refresh_capture_index();
         Ok(app)
     }
 
@@ -2316,6 +2333,7 @@ impl App {
             preview_panel_rect: None,
             screenshot: Default::default(),
             capture_index: Default::default(),
+            explore_captures: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             runner_config: runner::load_runner_config_for_project(&project_root, None).ok(),
@@ -2417,6 +2435,7 @@ impl App {
         app.normalize_explore_selection();
         app.mindmap_index.apply_highlight_categories("root");
         app.show_selection_warning();
+        app.refresh_capture_index();
         Ok(app)
     }
 
@@ -2502,6 +2521,7 @@ impl App {
             preview_panel_rect: None,
             screenshot: Default::default(),
             capture_index: Default::default(),
+            explore_captures: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             runner_config: runner::load_runner_config_for_project(&project_root, None).ok(),
@@ -4737,6 +4757,9 @@ impl App {
         self.bump_git_status_revision();
         self.rebuild_project_views(None);
         self.refresh_git_status();
+        // Captures belong to this Feature now; the Explore markers would
+        // otherwise wait for the next viewer open.
+        self.refresh_capture_index();
         self.status = "Feature loaded; AST and MindMap scope: current Feature".into();
     }
 
@@ -6102,6 +6125,9 @@ impl App {
                     skipped,
                 });
                 self.status = format!("Run complete: {passed} passed, {failed} failed");
+                // Captures of this run belong to the Explore markers as soon
+                // as it ends, without waiting for the viewer to open.
+                self.refresh_capture_index();
             }
             RunEvent::StartStep {
                 case_id,
@@ -6837,7 +6863,44 @@ impl App {
         self.screenshot.support_detail = detection.detail;
     }
 
-    /// Handles keys owned by the screenshot panel in the MindMap tab.
+    /// Opens the viewer for whatever the active tab has selected.
+    ///
+    /// Returns false when the tab has no capture entry point, so `i` keeps its
+    /// normal binding in that pane.
+    fn open_screenshot_for_current_tab(&mut self) -> bool {
+        match self.active_tab {
+            MainTab::MindMap => {
+                if self.mindmap_focus != MindMapFocus::Main || self.scenario_dropdown_open {
+                    return false;
+                }
+                self.refresh_capture_index();
+                self.open_screenshot_panel();
+                true
+            }
+            MainTab::Explore
+                if !self.explore_edit_mode
+                    && (self.explore_detail_open
+                        || (self.explore_focus == ColumnFocus::Step
+                            && self.catalog_selection_ready()
+                            && self.explore_selected_deleted_feature.is_none()
+                            && self.explore_changed_steps().is_empty())) =>
+            {
+                // Failure Details is the primary entry: it points at the step
+                // that actually broke, which is what a capture is for.
+                let step = if self.explore_detail_open {
+                    self.failed_step_text()
+                } else {
+                    self.explore_selected_step_text()
+                };
+                self.refresh_capture_index();
+                self.open_explore_screenshot(step.as_deref());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Handles keys owned by the screenshot panel.
     ///
     /// Returns true when the key was consumed and must not also run its normal
     /// binding.
@@ -6846,20 +6909,12 @@ impl App {
             return false;
         }
         if !self.screenshot.visible {
-            if self.active_tab != MainTab::MindMap {
-                return false;
-            }
-            let opens = key.code == KeyCode::Char('i')
+            return key.code == KeyCode::Char('i')
                 && key.modifiers == KeyModifiers::NONE
-                && self.mindmap_focus == MindMapFocus::Main
-                && !self.scenario_dropdown_open;
-            if opens {
-                self.open_screenshot_panel();
-            }
-            return opens;
+                && self.open_screenshot_for_current_tab();
         }
         match key.code {
-            KeyCode::Char('i') | KeyCode::Esc => self.screenshot.close(),
+            KeyCode::Char('i') | KeyCode::Esc => self.close_screenshot_panel(),
             KeyCode::Char('j') => self.step_screenshot(1),
             KeyCode::Char('k') => self.step_screenshot(-1),
             KeyCode::Char('+') | KeyCode::Char('=') => self
@@ -6901,15 +6956,20 @@ impl App {
     /// itself decides whether a rebuild is needed.
     fn refresh_capture_index(&mut self) {
         self.capture_index = crate::image_view::CaptureIndex::scan(&self.project);
-        let captured = self.captured_scenarios();
-        self.mindmap_index.set_captured_scenarios(captured);
+        self.explore_captures = self.captured_scenarios();
+        let counts = self
+            .explore_captures
+            .iter()
+            .map(|(key, entry)| (*key, entry.count))
+            .collect();
+        self.mindmap_index.set_captured_scenarios(counts);
     }
 
     /// Maps the newest captures onto `(feature index, scenario index)`.
     ///
     /// Entries whose scenario could not be resolved are left out; marking a
     /// whole Feature would point at nodes with no capture of their own.
-    fn captured_scenarios(&self) -> HashMap<(usize, usize), usize> {
+    fn captured_scenarios(&self) -> HashMap<(usize, usize), crate::image_view::CaptureEntry> {
         let mut captured = HashMap::new();
         for entry in &self.capture_index.entries {
             if entry.scenario.is_empty() {
@@ -6931,26 +6991,62 @@ impl App {
             else {
                 continue;
             };
+            // Entries arrive newest first, so the first one wins.
             captured
                 .entry((feature_idx, scenario_idx))
-                .and_modify(|count: &mut usize| *count = (*count).max(entry.count))
-                .or_insert(entry.count);
+                .or_insert_with(|| entry.clone());
         }
         captured
     }
 
     fn open_screenshot_panel(&mut self) {
-        self.refresh_capture_index();
+        let refs = self.collect_scenario_screenshots();
+        self.show_screenshot_panel(crate::image_view::ScreenshotOrigin::MindMap, refs, None);
+    }
+
+    /// Opens the viewer for the Explore selection, starting at `step_text`.
+    fn open_explore_screenshot(&mut self, step_text: Option<&str>) {
+        let refs = self.collect_explore_screenshots();
+        self.show_screenshot_panel(
+            crate::image_view::ScreenshotOrigin::Explore,
+            refs,
+            step_text,
+        );
+    }
+
+    fn show_screenshot_panel(
+        &mut self,
+        origin: crate::image_view::ScreenshotOrigin,
+        refs: Vec<crate::image_view::ScreenshotRef>,
+        step_text: Option<&str>,
+    ) {
+        let start = step_text.and_then(|step| index_of_step_capture(&refs, step));
         self.screenshot.close();
+        self.screenshot.origin = origin;
         self.screenshot.visible = true;
-        self.screenshot.index = 0;
         self.screenshot.cancel();
-        self.screenshot.refs = self.collect_scenario_screenshots();
+        self.screenshot.index = start.unwrap_or(0);
+        self.screenshot.refs = refs;
         if self.screenshot.refs.is_empty() {
             self.set_status_message("No captured screenshots for this scenario".to_string());
             return;
         }
+        if step_text.is_some() && start.is_none() {
+            self.set_status_message("No capture for this step; showing the first one".to_string());
+        }
         self.load_selected_screenshot();
+    }
+
+    /// Closes the viewer and keeps the Explore Steps selection on the last
+    /// capture that was shown.
+    fn close_screenshot_panel(&mut self) {
+        if self.screenshot.origin == crate::image_view::ScreenshotOrigin::Explore
+            && let Some(step) = self.explore_step_index_for_current_capture()
+        {
+            self.explore_selected_step = step;
+            self.persist_explore_memory();
+        }
+        self.screenshot.close();
     }
 
     fn step_screenshot(&mut self, delta: isize) {
@@ -7006,6 +7102,74 @@ impl App {
             &feature_rel,
             scenario.as_deref(),
         )
+    }
+
+    /// Captures recorded for the scenario selected in Explore, in step order.
+    fn collect_explore_screenshots(&mut self) -> Vec<crate::image_view::ScreenshotRef> {
+        let Some(feature) = self.project.features.get(self.explore_selected_feature) else {
+            return Vec::new();
+        };
+        let feature_rel =
+            crate::image_view::relative_feature_path(&self.project.root_dir, &feature.file_path);
+        let scenario = feature
+            .scenario_at(self.explore_selected_scenario)
+            .map(|item| item.name.clone());
+        crate::image_view::screenshots_for(
+            &self.project.root_dir,
+            &feature_rel,
+            scenario.as_deref(),
+        )
+    }
+
+    /// Captures recorded for the Explore scenario, `0` when it has none.
+    pub(crate) fn explore_scenario_captures(&self, scenario_idx: usize) -> usize {
+        self.explore_captures
+            .get(&(self.explore_selected_feature, scenario_idx))
+            .map_or(0, |entry| entry.count)
+    }
+
+    /// Captures recorded for one step of the Explore scenario.
+    pub(crate) fn explore_step_captures(&self, step_text: &str) -> usize {
+        self.explore_captures
+            .get(&(
+                self.explore_selected_feature,
+                self.explore_selected_scenario,
+            ))
+            .map_or(0, |entry| entry.step_captures(step_text.trim()))
+    }
+
+    /// Text of the step selected in the Explore Steps pane.
+    fn explore_selected_step_text(&self) -> Option<String> {
+        let feature = self.project.features.get(self.explore_selected_feature)?;
+        let step = feature
+            .scenario_at(self.explore_selected_scenario)?
+            .steps
+            .get(self.explore_selected_step)?;
+        Some(step.text.clone())
+    }
+
+    /// Text of the step that failed in the open Failure Details popup.
+    fn failed_step_text(&self) -> Option<String> {
+        let detail = self.explore_case_details.get(&self.explore_detail_case?)?;
+        detail
+            .steps
+            .iter()
+            .rev()
+            .find(|step| step.status.as_deref() == Some("failed"))
+            .or_else(|| detail.steps.last())
+            .map(|step| step.text.clone())
+    }
+
+    /// Step index in the selected scenario for the capture the viewer shows.
+    fn explore_step_index_for_current_capture(&self) -> Option<usize> {
+        let shot = self.screenshot.refs.get(self.screenshot.index)?;
+        let feature = self.project.features.get(self.explore_selected_feature)?;
+        let scenario = feature.scenario_at(self.explore_selected_scenario)?;
+        let step_text = shot.step_text.trim();
+        scenario.steps.iter().position(|step| {
+            (!step_text.is_empty() && step.text.trim() == step_text)
+                || shot.step_line == Some(step.line_number as u64)
+        })
     }
 
     /// Transition back one stage.
@@ -9556,6 +9720,11 @@ impl App {
         }
         if self.active_tab == MainTab::Ai {
             self.ai_input_focused = false;
+        }
+        if self.active_tab == MainTab::Explore {
+            // Captures may have been recorded by another process since the last
+            // look; the Steps and Scenarios markers refresh with the tab.
+            self.refresh_capture_index();
         }
         if self.active_tab == MainTab::TestPoints {
             let artifacts = self.authoring_ui.artifacts.as_ref();
@@ -12436,7 +12605,7 @@ mod tests {
     use super::{
         AgentPanelMode, AgentThread, AiChatMessage, AiRole, AiStatus, App, BddFocusSlot,
         ChatAnchor, ChatSelection, ClickableRegion, ColumnFocus, GitStatusRefreshResult, MainTab,
-        MindMapFocus, ModelPanelMode, ViewStage, completed_assistant_responses,
+        MindMapFocus, ModelPanelMode, RunStatus, ViewStage, completed_assistant_responses,
         current_step_keyword_index, replace_step_keyword_line,
     };
     use crate::bdd_nav::step_edit_start_col;
@@ -17444,6 +17613,7 @@ mod tests {
             preview_panel_rect: None,
             screenshot: Default::default(),
             capture_index: Default::default(),
+            explore_captures: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             runner_config: None,
@@ -17641,6 +17811,7 @@ Feature: B
             preview_panel_rect: None,
             screenshot: Default::default(),
             capture_index: Default::default(),
+            explore_captures: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             runner_config: None,
@@ -18202,6 +18373,151 @@ Feature: B
         assert!(!app.screenshot.loading);
     }
 
+    /// Writes one replay run whose captures cover the given steps in order.
+    fn write_capture_run(project: &Path, feature: &str, scenario: &str, steps: &[&str]) {
+        let run =
+            project.join(".teshi/logs/replay-screenshots/11111111-1111-4111-8111-111111111111");
+        fs::create_dir_all(&run).unwrap();
+        let events: Vec<serde_json::Value> = steps
+            .iter()
+            .enumerate()
+            .map(|(index, text)| {
+                serde_json::json!({
+                    "type": "step_screenshot",
+                    "capture_status": "available",
+                    "screenshot_file": format!("step-{index}.png"),
+                    "feature": feature,
+                    "scenario": scenario,
+                    "step_text": text,
+                    "step_line": index + 3,
+                    "status": "passed",
+                    "captured_at": "2026-10-31T00:00:00Z",
+                })
+            })
+            .collect();
+        fs::write(
+            run.join("run.json"),
+            serde_json::json!({
+                "started_at": "2026-10-31T00:00:00Z",
+                "events": events,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// App with one Feature whose two steps have captures.
+    fn explore_capture_test_app() -> (App, tempfile::TempDir, tempfile::TempDir) {
+        let project = tempdir().unwrap();
+        let store = tempdir().unwrap();
+        fs::write(
+            project.path().join("marked.feature"),
+            "Feature: Marked\n  Scenario: Detail\n    Given a visible step\n    Then broken step\n",
+        )
+        .unwrap();
+        write_capture_run(
+            project.path(),
+            "marked.feature",
+            "Detail",
+            &["a visible step", "broken step"],
+        );
+        let mut app = App::from_directory(
+            project.path(),
+            crate::config::load_config().unwrap(),
+            false,
+            store.path().to_path_buf(),
+        )
+        .unwrap();
+        app.active_tab = MainTab::Explore;
+        (app, project, store)
+    }
+
+    #[test]
+    fn explore_panes_mark_the_scenario_and_steps_that_have_captures() {
+        let (mut app, _project, _store) = explore_capture_test_app();
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..30)
+            .flat_map(|y| (0..120).map(move |x| (x, y)))
+            .map(|cell| buffer[cell].symbol())
+            .collect();
+        assert!(text.contains("Detail ●2"), "Explore was: {text}");
+        assert!(text.contains("a visible step ●1"), "Explore was: {text}");
+        assert!(text.contains("broken step ●1"), "Explore was: {text}");
+    }
+
+    #[test]
+    fn explore_steps_open_the_viewer_at_the_selected_step() {
+        let (mut app, _project, _store) = explore_capture_test_app();
+        app.explore_focus = ColumnFocus::Step;
+        app.explore_selected_step = 1;
+
+        assert!(app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+        assert!(app.screenshot.visible);
+        assert_eq!(
+            app.screenshot.origin,
+            crate::image_view::ScreenshotOrigin::Explore
+        );
+        assert_eq!(app.screenshot.refs.len(), 2);
+        assert_eq!(app.screenshot.index, 1);
+
+        // Closing hands the last viewed capture back to the Steps pane.
+        app.screenshot.index = 0;
+        assert!(app.handle_screenshot_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.screenshot.visible);
+        assert_eq!(app.explore_selected_step, 0);
+    }
+
+    #[test]
+    fn explore_i_stays_inert_off_the_steps_pane() {
+        let (mut app, _project, _store) = explore_capture_test_app();
+        app.explore_focus = ColumnFocus::Scenario;
+
+        assert!(!app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+        assert!(!app.screenshot.visible);
+
+        app.explore_edit_mode = true;
+        app.explore_focus = ColumnFocus::Step;
+        assert!(!app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+        assert!(!app.screenshot.visible);
+    }
+
+    #[test]
+    fn failure_details_open_the_capture_of_the_failed_step() {
+        let (mut app, _project, _store) = explore_capture_test_app();
+        let mut detail = super::empty_running_detail("case-1".to_string());
+        detail.status = RunStatus::Failed;
+        detail.steps = vec![
+            super::StepRunRecord {
+                step_id: "s1".into(),
+                text: "a visible step".into(),
+                status: Some("passed".into()),
+                message: None,
+            },
+            super::StepRunRecord {
+                step_id: "s2".into(),
+                text: "broken step".into(),
+                status: Some("failed".into()),
+                message: Some("boom".into()),
+            },
+        ];
+        app.explore_case_details.insert((0, 0), detail);
+        app.explore_detail_open = true;
+        app.explore_detail_case = Some((0, 0));
+        // The popup owns `i` from any Explore pane.
+        app.explore_focus = ColumnFocus::Scenario;
+
+        assert!(app.handle_screenshot_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+        assert!(app.screenshot.visible);
+        assert_eq!(app.screenshot.index, 1);
+        assert_eq!(app.screenshot.refs[1].step_text, "broken step");
+    }
+
     #[test]
     fn screenshot_overlay_lists_scenarios_that_have_captures() {
         let mut app = editor_test_app();
@@ -18213,6 +18529,7 @@ Feature: B
                 feature: "features/demo.feature".into(),
                 scenario: "First".into(),
                 count: 4,
+                step_counts: vec![("Given a".into(), 4)],
                 started_at: "2026-10-30T00:00:00Z".into(),
             }],
         };

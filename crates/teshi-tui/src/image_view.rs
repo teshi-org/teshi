@@ -306,6 +306,19 @@ impl Rendered {
     }
 }
 
+/// Tab the viewer was opened from.
+///
+/// The origin decides how much of the tab the overlay covers and whether
+/// closing hands the viewed capture back to the selected Explore step.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScreenshotOrigin {
+    /// Opened from a MindMap node; the viewer covers the active tab.
+    #[default]
+    MindMap,
+    /// Opened from the Explore Steps pane; the Features column stays visible.
+    Explore,
+}
+
 /// Screenshot panel state owned by the app.
 #[derive(Default)]
 pub struct ScreenshotPanel {
@@ -315,6 +328,8 @@ pub struct ScreenshotPanel {
     pub support: GraphicsSupport,
     /// Why images are off, or which override forced the protocol.
     pub support_detail: String,
+    /// Tab the viewer belongs to.
+    pub origin: ScreenshotOrigin,
     /// Whether the viewer overlay is open.
     pub visible: bool,
     /// Captures of the selected scenario, in step order.
@@ -523,8 +538,20 @@ pub struct CaptureEntry {
     pub scenario: String,
     /// Captures in that run.
     pub count: usize,
+    /// Captures per recorded step text, in step order.
+    pub step_counts: Vec<(String, usize)>,
     /// Start time of the run the captures came from.
     pub started_at: String,
+}
+
+impl CaptureEntry {
+    /// Captures recorded for one step, `0` when it has none.
+    pub fn step_captures(&self, step_text: &str) -> usize {
+        self.step_counts
+            .iter()
+            .find(|(text, _)| text == step_text)
+            .map_or(0, |(_, count)| *count)
+    }
 }
 
 /// Directory holding one project's replay history.
@@ -679,7 +706,7 @@ impl CaptureIndex {
             if entries.len() >= MAX_ENTRIES {
                 break;
             }
-            let mut per_scenario: HashMap<(String, String), usize> = HashMap::new();
+            let mut per_scenario: HashMap<(String, String), ScenarioCaptures> = HashMap::new();
             for event in &run.events {
                 if event["type"] != "step_screenshot" || event["capture_status"] != "available" {
                     continue;
@@ -693,14 +720,20 @@ impl CaptureIndex {
                     Some(name) => name.to_string(),
                     None => scenario_at_line(project, &feature, event["step_line"].as_u64()),
                 };
-                *per_scenario.entry((feature, scenario)).or_default() += 1;
+                let captures = per_scenario.entry((feature, scenario)).or_default();
+                captures.count += 1;
+                let step = event["step_text"].as_str().unwrap_or_default().trim();
+                if !step.is_empty() {
+                    captures.increment_step(step);
+                }
             }
-            for ((feature, scenario), count) in per_scenario {
+            for ((feature, scenario), captures) in per_scenario {
                 if seen.insert((feature.clone(), scenario.clone())) {
                     entries.push(CaptureEntry {
                         feature,
                         scenario,
-                        count,
+                        count: captures.count,
+                        step_counts: captures.steps,
                         started_at: run.started_at.clone(),
                     });
                 }
@@ -708,6 +741,22 @@ impl CaptureIndex {
         }
         entries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
         Self { entries }
+    }
+}
+
+/// Capture totals of one scenario while a run is being scanned.
+#[derive(Default)]
+struct ScenarioCaptures {
+    count: usize,
+    steps: Vec<(String, usize)>,
+}
+
+impl ScenarioCaptures {
+    fn increment_step(&mut self, step: &str) {
+        match self.steps.iter_mut().find(|(text, _)| text == step) {
+            Some((_, count)) => *count += 1,
+            None => self.steps.push((step.to_string(), 1)),
+        }
     }
 }
 
@@ -766,7 +815,8 @@ pub(crate) fn relative_feature_path(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
-#[cfg(test)]
+// Only the Windows probe's tests drive a real capture pipeline.
+#[cfg(all(test, windows))]
 fn load(picker: &Picker, project: &Path, shot: &ScreenshotRef, size: Size) -> Result<Rendered> {
     let request = Request {
         project: project.into(),
@@ -1200,6 +1250,13 @@ mod tests {
             relative_feature_path(root, Path::new("proj/features/demo.feature")),
             "features/demo.feature"
         );
+        assert_eq!(
+            relative_feature_path(root, Path::new("proj/features\\demo.feature")),
+            "features/demo.feature"
+        );
+        // A drive root is only a prefix once the platform treats `\` as a
+        // separator, so the recorded Windows path can only be stripped there.
+        #[cfg(windows)]
         assert_eq!(
             relative_feature_path(
                 Path::new("C:/proj"),
