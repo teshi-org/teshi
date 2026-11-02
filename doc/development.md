@@ -261,11 +261,9 @@ Run `python scripts/release.py` (dry-run) to verify version consistency across c
 
 Workflow: [`.github/workflows/release.yml`](../.github/workflows/release.yml)
 
-WinGet submission (CLI MSI only) runs automatically when `WINGET_TOKEN` is configured. Legacy standalone workflow: [`.github/workflows/winget.yml`](../.github/workflows/winget.yml).
-
 ### Nightly (pre-release) builds
 
-Nightly builds publish the Windows per-user **setup.exe** from the `dev` branch as GitHub **pre-releases** (no Linux/macOS archives, MSI, or WinGet submission). Stable releases still publish the full asset set.
+Nightly builds publish the Windows per-user **setup.exe** from the `dev` branch as GitHub **pre-releases** (no Linux/macOS archives or MSI). Stable releases still publish the full asset set.
 
 | Trigger | Workflow |
 |---------|----------|

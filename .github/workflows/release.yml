@@ -35,11 +35,6 @@ on:
         required: false
         type: boolean
         default: false
-      skip_winget:
-        description: "Skip WinGet manifest submission"
-        required: false
-        type: boolean
-        default: false
       run_scope:
         description: "Workflow scope: full release, windows-only retry, or windows installer"
         required: false
@@ -71,7 +66,6 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
       source_ref: ${{ steps.meta.outputs.source_ref }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
-      skip_winget: ${{ steps.meta.outputs.skip_winget }}
       run_scope: ${{ steps.meta.outputs.run_scope }}
       matrix: ${{ steps.meta.outputs.matrix }}
       release_body: ${{ steps.meta.outputs.release_body }}
@@ -83,7 +77,6 @@ jobs:
           INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
           INPUT_SOURCE_REF: ${{ inputs.source_ref }}
           INPUT_PRERELEASE: ${{ inputs.prerelease }}
-          INPUT_SKIP_WINGET: ${{ inputs.skip_winget }}
           INPUT_RUN_SCOPE: ${{ inputs.run_scope }}
           INPUT_INVOKED_VIA_CALL: ${{ inputs.invoked_via_call }}
           INPUT_RELEASE_BODY: ${{ inputs.release_body }}
@@ -107,7 +100,6 @@ jobs:
               source_ref="${tag}"
             fi
             prerelease="${INPUT_PRERELEASE}"
-            skip_winget="${INPUT_SKIP_WINGET}"
             run_scope="${INPUT_RUN_SCOPE:-full}"
             release_body="${INPUT_RELEASE_BODY}"
           elif [ "${event}" = "workflow_dispatch" ]; then
@@ -115,10 +107,8 @@ jobs:
             source_ref="${tag}"
             if echo "${tag}" | grep -q -- '-nightly'; then
               prerelease=true
-              skip_winget=true
             else
               prerelease=false
-              skip_winget=false
             fi
             run_scope="${{ github.event.inputs.run_scope }}"
           elif [ "${event}" = "push" ] && [[ "${GITHUB_REF}" == refs/tags/* ]]; then
@@ -128,10 +118,8 @@ jobs:
             source_ref="${GITHUB_SHA}"
             if echo "${tag}" | grep -q -- '-nightly'; then
               prerelease=true
-              skip_winget=true
             else
               prerelease=false
-              skip_winget=false
             fi
             run_scope=full
           else
@@ -164,7 +152,6 @@ jobs:
             echo "tag=${tag}"
             echo "source_ref=${source_ref}"
             echo "prerelease=${prerelease}"
-            echo "skip_winget=${skip_winget}"
             echo "run_scope=${run_scope}"
             echo "matrix=${matrix}"
             echo "build_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -683,75 +670,6 @@ jobs:
         shell: bash
         run: gh release edit "$RELEASE_TAG" --draft=false
 
-  submit_winget:
-    name: Submit WinGet manifest
-    runs-on: windows-latest
-    needs: [publish, resolve]
-    if: ${{ needs.resolve.outputs.run_scope == 'full' && needs.resolve.outputs.skip_winget != 'true' }}
-
-    steps:
-      - name: Install wingetcreate
-        shell: pwsh
-        run: winget install --id Microsoft.WingetCreate -e --source winget --accept-package-agreements --accept-source-agreements
-
-      - name: Submit MSI to winget-pkgs
-        shell: pwsh
-        env:
-          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINGET_TOKEN)) {
-            Write-Host "Skipping WinGet submission: WINGET_TOKEN not configured."
-            exit 0
-          }
-
-          $tag = $env:RELEASE_TAG
-          $version = $tag.TrimStart('v')
-          $msiUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/teshi-$tag-x64.msi"
-          $prTitle = "Add teshi $version"
-          $pkgId = "teshi-org.teshi"
-          $manifestDir = ".\winget-manifests\manifests\t\teshi-org\teshi\$version"
-
-          New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
-
-          $msiPath = Join-Path $manifestDir "teshi-$tag-x64.msi"
-          Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath
-          $sha256 = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash
-          Remove-Item -Path $msiPath -Force
-
-          @"
-          PackageIdentifier: $pkgId
-          PackageVersion: $version
-          DefaultLocale: en-US
-          ManifestType: version
-          ManifestVersion: 1.6.0
-          "@ | Set-Content -NoNewline (Join-Path $manifestDir "$pkgId.yaml")
-
-          @"
-          PackageIdentifier: $pkgId
-          PackageVersion: $version
-          Installers:
-            - Architecture: x64
-              InstallerType: wix
-              InstallerUrl: $msiUrl
-              InstallerSha256: $sha256
-          ManifestType: installer
-          ManifestVersion: 1.6.0
-          "@ | Set-Content -NoNewline (Join-Path $manifestDir "$pkgId.installer.yaml")
-
-          @"
-          PackageIdentifier: $pkgId
-          PackageVersion: $version
-          PackageLocale: en-US
-          Publisher: teshi-org
-          PackageName: teshi
-          License: MIT
-          ShortDescription: Terminal-first mindmap editor for structured notes and navigation.
-          ManifestType: defaultLocale
-          ManifestVersion: 1.6.0
-          "@ | Set-Content -NoNewline (Join-Path $manifestDir "$pkgId.locale.en-US.yaml")
-
-          wingetcreate submit --prtitle $prTitle --token $env:WINGET_TOKEN --no-open $manifestDir
-
   notify-telegram:
     name: Telegram notify
     if: always()
@@ -761,7 +679,6 @@ jobs:
       - resolve
       - build
       - publish
-      - submit_winget
     steps:
       - name: Send Telegram message
         env:
@@ -773,7 +690,6 @@ jobs:
           RESOLVE_RESULT: ${{ needs.resolve.result }}
           BUILD_RESULT: ${{ needs.build.result }}
           PUBLISH_RESULT: ${{ needs.publish.result }}
-          WINGET_RESULT: ${{ needs.submit_winget.result }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.resolve.outputs.tag }}
         run: |
@@ -805,7 +721,6 @@ jobs:
               "resolve: ${RESOLVE_RESULT}" \
               "build: ${BUILD_RESULT}" \
               "publish: ${PUBLISH_RESULT}" \
-              "winget: ${WINGET_RESULT}" \
               "构建: ${RUN_URL}")"
           fi
 
