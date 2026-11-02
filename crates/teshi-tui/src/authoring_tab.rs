@@ -1716,6 +1716,46 @@ impl AuthoringUiState {
         self.tree_state.scroll_selected_into_view();
     }
 
+    /// Collapses the selected row, then walks to its parent on repeat.
+    ///
+    /// Mirrors `h` in the MindMap tree: an open folder, query, or iteration row
+    /// closes; anything else selects the parent row, so repeated presses climb
+    /// back towards the root.
+    pub fn collapse_tree_selection(&mut self) {
+        let selected = self.tree_state.selected().to_vec();
+        if !selected.is_empty() && self.tree_state.close(&selected) {
+            return;
+        }
+        if selected.len() <= 1 {
+            return;
+        }
+        self.tree_state
+            .select(selected[..selected.len() - 1].to_vec());
+        self.tree_state.scroll_selected_into_view();
+    }
+
+    /// Expands the selected row, then steps into its first child on repeat.
+    ///
+    /// Mirrors `l` in the MindMap tree: a closed folder, query, or iteration row
+    /// opens; an open one selects its first child, so repeated presses descend
+    /// the tree.
+    pub fn expand_tree_selection(&mut self) {
+        let selected = self.tree_state.selected().to_vec();
+        if selected
+            .last()
+            .is_some_and(|node| node.starts_with(TREE_DOC_PREFIX))
+        {
+            return;
+        }
+        if !self.tree_state.opened().contains(&selected) {
+            self.tree_state.open(selected);
+            return;
+        }
+        if tree_children(&self.tree_items, &selected).is_some_and(|children| !children.is_empty()) {
+            self.move_tree_selection(1);
+        }
+    }
+
     pub fn insert_char(&mut self, ch: char) {
         if !self.insert_session_undo {
             self.push_edit_undo();
@@ -2087,6 +2127,20 @@ pub(crate) fn find_tree_path(
         }
     }
     None
+}
+
+/// Children of the node at `path`, or `None` when the path no longer exists.
+fn tree_children<'a>(
+    items: &'a [TreeItem<'static, String>],
+    path: &[String],
+) -> Option<&'a [TreeItem<'static, String>]> {
+    let (first, rest) = path.split_first()?;
+    let item = items.iter().find(|item| item.identifier() == first)?;
+    if rest.is_empty() {
+        Some(item.children())
+    } else {
+        tree_children(item.children(), rest)
+    }
 }
 
 fn collect_visible_requirement_rows(

@@ -34,8 +34,10 @@ and never changes stored state.
   folder when it is first saved.
 - **Delete folder…** also removes subfolders and reports how many requirements return
   to Inbox. A folder still used by a saved query cannot be deleted.
-- **Enter** or a mouse click expands or collapses a folder or query; Enter on a
-  requirement opens it in the editor.
+- **Enter**, `h`/`l` (or Left/Right), or a mouse click expands or collapses a folder,
+  query, or iteration row; Enter on a requirement opens it in the editor. Repeated
+  `l` steps into the first child and repeated `h` climbs to the parent, so the keys
+  walk the tree like the MindMap pane; panes change with Tab/BackTab or Ctrl+W.
 
 Text fields support Left/Right, Home/End, Backspace, and Delete. In the query form,
 Tab or Up/Down switches between Name and Condition, and the form shows how many visible

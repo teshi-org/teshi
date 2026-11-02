@@ -134,6 +134,10 @@ pub enum Action {
     ReqActionMenu,
     /// Toggle a folder or query row; open a document in the editor (Enter).
     ReqTreeActivate,
+    /// Collapse the selected folder, query, or iteration row (`h`).
+    ReqTreeCollapse,
+    /// Expand the selected folder, query, or iteration row (`l`).
+    ReqTreeExpand,
     /// Edit the selected document's iteration (`I` on the Requirements tree).
     ReqEditIteration,
     /// Edit the selected document's optional priority (`p` on the Requirements tree).
@@ -1164,8 +1168,12 @@ impl Action {
                 };
             }
             return match (event.code, event.modifiers) {
-                (KeyCode::Left, _) => Some(Self::FocusPrevColumn),
-                (KeyCode::Right, _) => Some(Self::FocusNextColumn),
+                (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                    Some(Self::ReqTreeCollapse)
+                }
+                (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                    Some(Self::ReqTreeExpand)
+                }
                 (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => Some(Self::MoveUp),
                 (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                     Some(Self::MoveDown)
@@ -2705,22 +2713,22 @@ mod tests {
                 KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
                 context
             ),
-            None
+            Some(Action::ReqTreeCollapse)
         );
         assert_eq!(
             Action::from_key_event(
                 KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
                 context
             ),
-            None
+            Some(Action::ReqTreeExpand)
         );
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), context),
-            Some(Action::FocusPrevColumn)
+            Some(Action::ReqTreeCollapse)
         );
         assert_eq!(
             Action::from_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), context),
-            Some(Action::FocusNextColumn)
+            Some(Action::ReqTreeExpand)
         );
         assert_eq!(
             Action::from_key_event(

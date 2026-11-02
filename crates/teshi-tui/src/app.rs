@@ -8929,6 +8929,20 @@ impl App {
                     }
                 }
             }
+            Action::ReqTreeCollapse => {
+                if self.active_tab == MainTab::Requirements
+                    && self.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Tree
+                {
+                    self.authoring_ui.collapse_tree_selection();
+                }
+            }
+            Action::ReqTreeExpand => {
+                if self.active_tab == MainTab::Requirements
+                    && self.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Tree
+                {
+                    self.authoring_ui.expand_tree_selection();
+                }
+            }
             Action::ReqEditIteration => {
                 if self.active_tab == MainTab::Requirements {
                     if self.authoring_ui.selected_document_id.is_some() {
@@ -16361,6 +16375,32 @@ mod tests {
         for ch in text.chars() {
             app.handle_action(Action::OverlayInsert(ch)).unwrap();
         }
+    }
+
+    #[test]
+    fn test_h_and_l_expand_collapse_and_walk_the_tree() {
+        let (mut app, _project, _store) = requirements_test_app();
+        select_requirement_row(&mut app, "req-dir:inbox");
+        let group = app.authoring_ui.tree_state.selected().to_vec();
+        app.handle_action(Action::ReqTreeCollapse).unwrap();
+        assert!(!app.authoring_ui.tree_state.opened().contains(&group));
+        assert_eq!(app.authoring_ui.tree_state.selected(), group.as_slice());
+
+        // `l` opens the row, then the next press steps into its first child.
+        app.handle_action(Action::ReqTreeExpand).unwrap();
+        assert!(app.authoring_ui.tree_state.opened().contains(&group));
+        assert_eq!(app.authoring_ui.tree_state.selected(), group.as_slice());
+        app.handle_action(Action::ReqTreeExpand).unwrap();
+        let child = app.authoring_ui.tree_state.selected().to_vec();
+        assert_eq!(child.len(), group.len() + 1);
+        assert!(child.last().unwrap().starts_with("req-doc:"));
+
+        // `h` climbs back to the folder row, then closes it on the next press.
+        app.handle_action(Action::ReqTreeCollapse).unwrap();
+        assert_eq!(app.authoring_ui.tree_state.selected(), group.as_slice());
+        app.handle_action(Action::ReqTreeCollapse).unwrap();
+        assert!(!app.authoring_ui.tree_state.opened().contains(&group));
+        assert_eq!(app.authoring_ui.tree_state.selected(), group.as_slice());
     }
 
     #[test]

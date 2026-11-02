@@ -201,8 +201,9 @@ valid selections; changed streamed text or a different session clears them.
 | Key | Action |
 |-----|--------|
 | `j/k`, Down/Up | Next/previous row, including folder and query rows |
-| Left/Right | Previous/next pane (compatibility) |
-| Ctrl+W then `h/l` or Left/Right | Previous/next pane |
+| `h`, Left | Collapse the selected row; press again to walk up to its parent |
+| `l`, Right | Expand the selected row; press again to step into its first child |
+| Tab/BackTab, or Ctrl+W then `h/l` or Left/Right | Previous/next pane |
 | Home/End | First/last item |
 | PageUp/PageDown, Ctrl+B/Ctrl+F | Page through items |
 | Enter | Expand/collapse a folder or query; open a requirement in the editor |
@@ -218,11 +219,14 @@ valid selections; changed streamed text or a different session clears them.
 | `p` | Edit optional priority (Unset, P0-P3) |
 | `s` / Ctrl+S | Save |
 
-Bare `h/l` do not change panes here. The tree reserves `g` for switching views, so
-use Home/End for its boundaries. Priority changes preserve document order, Markdown,
-and unsaved text; existing documents remain unset. The tree title lists scope, view,
-iteration, and (in Current project) the completed filter. See
-`doc/requirement-organization.md` for the action menu.
+`h`/`l` and Left/Right work like the MindMap tree: one press collapses or expands
+the selected row, and repeating the key climbs to the parent or steps into the first
+child, so they walk the whole hierarchy. Change panes with Tab/BackTab or Ctrl+W then
+`h/l`/Left/Right. The tree reserves `g` for switching views, so use Home/End for its
+boundaries. Priority changes preserve document order, Markdown, and unsaved text;
+existing documents remain unset. The tree title lists scope, view, iteration, and
+(in Current project) the completed filter. See `doc/requirement-organization.md` for
+the action menu.
 
 ### Markdown Browse
 
