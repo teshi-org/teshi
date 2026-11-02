@@ -295,6 +295,57 @@ fn run_store_command(
     let requirements_root =
         requirements_data_dir(cli_override).map_err(|err| (false, CliError::Io(err)))?;
     match action {
+        RequirementsCommand::Organize {
+            project,
+            file,
+            folder,
+            query,
+            condition,
+            assign,
+            to,
+        } => (|| -> anyhow::Result<String> {
+            let cwd = std::env::current_dir()?;
+            let root = project.as_deref().unwrap_or(&cwd);
+            let identity = teshi_engine::read_requirement_project(root)?.ok_or_else(|| {
+                anyhow::anyhow!("project has no identity; link requirements first")
+            })?;
+            if let Some(path) = file {
+                let value = serde_json::from_slice(&std::fs::read(path)?)?;
+                teshi_engine::organization::save_requirement_organization(
+                    &requirements_root,
+                    &identity.id,
+                    &value,
+                )?;
+            }
+            use teshi_engine::organization::*;
+            let mut value = load_requirement_organization(&requirements_root, &identity.id)?;
+            let expected = value.clone();
+            if let Some(path) = folder {
+                value.ensure_folder(path)?;
+            }
+            if let (Some(name), Some(rule)) = (query, condition) {
+                let predicate =
+                    value.condition_with_folder_ids(&parse_requirement_condition(rule)?);
+                let existing = value.root_query_id(name);
+                value.save_query(existing.as_deref(), name, predicate)?;
+            }
+            if let Some(path) = to {
+                let id = value
+                    .folder_id(path)
+                    .ok_or_else(|| anyhow::anyhow!("unknown folder: {path}"))?;
+                value.add_documents(&id, assign)?;
+            }
+            if folder.is_some() || query.is_some() || to.is_some() {
+                save_requirement_organization_checked(
+                    &requirements_root,
+                    &identity.id,
+                    &value,
+                    Some(&expected),
+                )?;
+            }
+            Ok(serde_json::to_string_pretty(&value)?)
+        })()
+        .map_err(|e| (true, CliError::Io(e))),
         RequirementsCommand::Create {
             title,
             file,

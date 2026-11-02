@@ -50,6 +50,9 @@ pub fn run_case(teshi: &Path, feature_path: &str, scenario_name: &str) -> Result
 }
 
 fn run_step(world: &mut World, kind: StepKeywordType, step: &BddStep) -> Result<()> {
+    if crate::organization::handle(world, &step.text)? {
+        return Ok(());
+    }
     match kind {
         StepKeywordType::Given => given(world, step),
         StepKeywordType::When => when(world, step),

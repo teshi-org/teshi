@@ -1,6 +1,9 @@
 //! Requirements tab state, tree construction, and editing helpers.
 
-use std::collections::HashMap;
+mod organize;
+pub use organize::{CursorMotion, LineInput, MenuCommand, OrganizationForm, TreeTarget};
+
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use crate::theme;
@@ -64,6 +67,37 @@ pub enum RequirementsPendingAction {
 /// Overlay used to pick a filter or edit a document iteration.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum RequirementsOverlay {
+    /// Space menu listing the operations valid for the tree row captured when it opened.
+    ActionMenu {
+        /// Row the chosen operation applies to.
+        target: TreeTarget,
+        /// Highlighted menu row.
+        selection: usize,
+    },
+    /// Folder or saved-query text form.
+    OrganizationForm(OrganizationForm),
+    /// Exact folder membership of one requirement; no checked folder means Inbox.
+    FolderPicker {
+        /// Stable target captured before any external reload can change selection.
+        document_id: String,
+        /// Every manual folder as `(id, path)`, sorted by path.
+        options: Vec<(String, String)>,
+        /// Folder IDs the requirement will belong to.
+        checked: BTreeSet<String>,
+        /// Highlighted option index.
+        selection: usize,
+    },
+    /// Confirm removal of a folder (with subfolders) or a saved query.
+    RemoveCollection {
+        /// Stable collection ID.
+        collection_id: String,
+        /// Display path of the collection.
+        name: String,
+        /// Whether the collection is a saved query.
+        query: bool,
+        /// Documents left without any folder after removal.
+        inbox_returns: usize,
+    },
     /// Resolve unsaved changes before navigation.
     Unsaved { pending: RequirementsPendingAction },
     /// No overlay.
@@ -113,6 +147,14 @@ pub struct AuthoringUiState {
     pub project_root: PathBuf,
     /// Identity error shown instead of silently treating a malformed project as empty.
     pub project_identity_error: Option<String>,
+    /// Include implemented and verified requirements in project views.
+    pub show_completed: bool,
+    /// Last loaded project organization; external edits are detected against it.
+    organization: Option<teshi_engine::organization::RequirementOrganization>,
+    /// Draft document and the folder it was created in, filed on its first save.
+    draft_folder: Option<(String, String)>,
+    /// Visible labels of tree nodes whose label is not derivable from the node ID.
+    pub tree_labels: HashMap<String, String>,
     pub tree_items: Vec<TreeItem<'static, String>>,
     pub tree_state: TreeState<String>,
     pub focus: RequirementsFocus,
@@ -544,6 +586,10 @@ impl AuthoringUiState {
             requirements_root: PathBuf::new(),
             project_root: PathBuf::new(),
             project_identity_error: None,
+            show_completed: false,
+            organization: None,
+            draft_folder: None,
+            tree_labels: HashMap::new(),
             tree_items: Vec::new(),
             tree_state: TreeState::default(),
             focus: RequirementsFocus::Tree,
@@ -683,8 +729,32 @@ impl AuthoringUiState {
 
     /// Rebuilds the requirement tree from the current index, filter, and group mode.
     pub fn rebuild_tree(&mut self) {
-        let index = self.project_filtered_index();
-        self.tree_items = build_requirement_tree(&index, &self.iteration_filter, self.group_mode);
+        let mut index = self.project_filtered_index();
+        if let teshi_core::authoring::RequirementProjectFilter::Project(project) =
+            &self.project_filter
+        {
+            let project = project.clone();
+            index.documents.retain(|d| {
+                self.show_completed
+                    || d.projects.get(&project)
+                        == Some(&teshi_core::authoring::RequirementProjectStatus::Planned)
+            });
+            // Path grouping in project scope is replaced by the project's own folders.
+            if self.group_mode == RequirementGroupMode::Path {
+                self.rebuild_folders_tree(&project);
+            } else {
+                self.tree_labels.clear();
+                self.tree_items = build_requirement_tree(
+                    &index,
+                    &self.iteration_filter,
+                    RequirementGroupMode::Iteration,
+                );
+            }
+        } else {
+            self.tree_labels.clear();
+            self.tree_items =
+                build_requirement_tree(&index, &self.iteration_filter, self.group_mode);
+        }
         let visible = visible_document_ids(&index, &self.iteration_filter);
         let target = self
             .selected_document_id
@@ -699,17 +769,28 @@ impl AuthoringUiState {
                 }
             });
 
+        // A folder or query row stays selected across rebuilds, e.g. after renaming it.
+        let keep_group_row = self
+            .tree_state
+            .selected()
+            .last()
+            .is_some_and(|node| !node.starts_with(TREE_DOC_PREFIX))
+            && self.selected_tree_path_exists();
         if let Some(id) = target {
             if self.selected_document_id.as_deref() != Some(id.as_str()) {
                 self.load_document_state(&id);
             }
-            self.sync_tree_selection();
+            if !keep_group_row {
+                self.sync_tree_selection();
+            }
         } else if !self.buffer_dirty {
             self.exit_insert_mode();
             self.selected_document_id = None;
             self.buffer = EditorBuffer::from_string(String::new());
             self.buffer_dirty = false;
-            self.tree_state.select(Vec::new());
+            if !keep_group_row {
+                self.tree_state.select(Vec::new());
+            }
         }
     }
 
@@ -918,7 +999,14 @@ impl AuthoringUiState {
     ///
     /// Returns an error when saving metadata fails or its expected value changed.
     pub fn confirm_overlay(&mut self) -> Result<(), String> {
+        if let Some(result) = self.confirm_organization_overlay() {
+            return result.map(drop);
+        }
         match self.overlay.clone() {
+            RequirementsOverlay::ActionMenu { .. }
+            | RequirementsOverlay::OrganizationForm(_)
+            | RequirementsOverlay::FolderPicker { .. }
+            | RequirementsOverlay::RemoveCollection { .. } => Ok(()),
             RequirementsOverlay::Unsaved { .. } => Ok(()),
             RequirementsOverlay::None => Ok(()),
             RequirementsOverlay::FilterPicker { selection } => {
@@ -944,42 +1032,69 @@ impl AuthoringUiState {
         self.overlay = RequirementsOverlay::None;
     }
 
-    /// Moves the filter-picker highlight.
+    /// Moves the highlight of a list overlay, or switches query form fields.
     pub fn overlay_move_selection(&mut self, delta: isize) {
-        let filter_len = self.filter_picker_options().len();
-        match &mut self.overlay {
-            RequirementsOverlay::FilterPicker { selection } => {
-                if filter_len > 0 {
-                    *selection =
-                        (*selection as isize + delta).rem_euclid(filter_len as isize) as usize;
-                }
-            }
-            RequirementsOverlay::PriorityEdit { selection, .. } => {
-                *selection = (*selection as isize + delta).rem_euclid(5) as usize;
-            }
-            _ => {}
+        if self.organization_form_switch_field() {
+            return;
         }
-    }
-
-    /// Inserts a character into the iteration editor buffer.
-    pub fn overlay_insert_char(&mut self, ch: char) {
-        if let RequirementsOverlay::IterationEdit { buffer } = &mut self.overlay
-            && !ch.is_control()
+        let len = match &self.overlay {
+            RequirementsOverlay::FilterPicker { .. } => self.filter_picker_options().len(),
+            RequirementsOverlay::PriorityEdit { .. } => 5,
+            _ => self.organization_list_len().unwrap_or(0),
+        };
+        if let RequirementsOverlay::FilterPicker { selection }
+        | RequirementsOverlay::PriorityEdit { selection, .. }
+        | RequirementsOverlay::ActionMenu { selection, .. }
+        | RequirementsOverlay::FolderPicker { selection, .. } = &mut self.overlay
+            && len > 0
         {
-            buffer.push(ch);
+            *selection = (*selection as isize + delta).rem_euclid(len as isize) as usize;
         }
     }
 
-    /// Deletes the last character from the iteration editor buffer.
+    /// Inserts a character into the focused overlay text field.
+    pub fn overlay_insert_char(&mut self, ch: char) {
+        if ch.is_control() {
+            return;
+        }
+        if let RequirementsOverlay::IterationEdit { buffer } = &mut self.overlay {
+            buffer.push(ch);
+        } else if let Some(input) = self.organization_form_input() {
+            input.insert(ch);
+        }
+    }
+
+    /// Deletes the character before the cursor in the focused overlay text field.
     pub fn overlay_backspace(&mut self) {
         if let RequirementsOverlay::IterationEdit { buffer } = &mut self.overlay {
             buffer.pop();
+        } else if let Some(input) = self.organization_form_input() {
+            input.backspace();
         }
     }
 
     /// Returns `true` when a Requirements overlay is capturing keys.
     pub fn overlay_active(&self) -> bool {
         !matches!(self.overlay, RequirementsOverlay::None)
+    }
+
+    /// Returns `true` when the open overlay edits text rather than choosing from a list.
+    pub fn overlay_accepts_text(&self) -> bool {
+        matches!(
+            self.overlay,
+            RequirementsOverlay::IterationEdit { .. } | RequirementsOverlay::OrganizationForm(_)
+        )
+    }
+
+    /// Returns `true` when the open overlay is a navigable choice list.
+    pub fn overlay_is_list(&self) -> bool {
+        matches!(
+            self.overlay,
+            RequirementsOverlay::FilterPicker { .. }
+                | RequirementsOverlay::PriorityEdit { .. }
+                | RequirementsOverlay::ActionMenu { .. }
+                | RequirementsOverlay::FolderPicker { .. }
+        )
     }
 
     /// Saves iteration metadata, prompting first if this would hide dirty Markdown.
@@ -1184,11 +1299,32 @@ impl AuthoringUiState {
         self.buffer_dirty = false;
     }
 
+    fn selected_tree_path_exists(&self) -> bool {
+        let path = self.tree_state.selected();
+        let mut items = self.tree_items.as_slice();
+        !path.is_empty()
+            && path.iter().all(|id| {
+                if let Some(item) = items.iter().find(|item| item.identifier() == id) {
+                    items = item.children();
+                    true
+                } else {
+                    false
+                }
+            })
+    }
+
     fn sync_tree_selection(&mut self) {
         let Some(id) = self.selected_document_id.as_ref() else {
             self.tree_state.select(Vec::new());
             return;
         };
+        let node = format!("{TREE_DOC_PREFIX}{id}");
+        // Documents can be listed under several folders and queries; keep the occurrence
+        // the user is on instead of jumping to the first one.
+        if self.tree_state.selected().last() == Some(&node) && self.selected_tree_path_exists() {
+            self.select_document_tree_path(self.tree_state.selected().to_vec());
+            return;
+        }
         if let Some(path) = find_tree_path(&self.tree_items, &format!("{TREE_DOC_PREFIX}{id}")) {
             self.select_document_tree_path(path);
         }
@@ -1393,6 +1529,7 @@ impl AuthoringUiState {
             });
             self.discovered = true;
         }
+        self.draft_folder = self.selected_folder().map(|folder| (id.clone(), folder));
         let artifacts = self.artifacts.as_mut().expect("artifacts initialized");
         let body = format!("# {}\n\n", title.trim());
         let revision = compute_document_revision(&body);
@@ -1499,12 +1636,13 @@ impl AuthoringUiState {
             &mut artifacts.test_points.test_points,
         );
         let test_points_result = save_test_points(project_root, &artifacts.test_points);
+        let filing_result = self.file_saved_draft(&doc_id);
         // The saved title must be visible even if linked test-point persistence fails.
         self.rebuild_tree();
         test_points_result?;
         self.buffer_dirty = false;
         self.draft_document_id = None;
-        Ok(())
+        filing_result
     }
 
     pub fn focus_next_column(&mut self) {
@@ -1547,28 +1685,35 @@ impl AuthoringUiState {
     }
 
     pub fn move_tree_selection(&mut self, delta: isize) {
-        let mut documents = Vec::new();
-        collect_tree_documents(&self.tree_items, &mut Vec::new(), &mut documents);
-        if documents.is_empty() {
+        let mut rows = Vec::new();
+        collect_visible_requirement_rows(
+            &self.tree_items,
+            &mut Vec::new(),
+            self.tree_state.opened(),
+            &mut rows,
+        );
+        if rows.is_empty() {
             return;
         }
-        let pos = self
-            .selected_document_id
-            .as_ref()
-            .and_then(|id| documents.iter().position(|(_, doc_id)| doc_id == id))
-            .unwrap_or(0);
-        let next = if delta < 0 {
-            pos.saturating_sub(delta.unsigned_abs())
-        } else {
-            pos.saturating_add(delta as usize)
-                .min(documents.len().saturating_sub(1))
+        let current = rows
+            .iter()
+            .position(|path| path == self.tree_state.selected());
+        let next = match current {
+            None => 0,
+            Some(pos) if delta < 0 => pos.saturating_sub(delta.unsigned_abs()),
+            Some(pos) => pos.saturating_add(delta as usize).min(rows.len() - 1),
         };
-        if let Some((path, doc_id)) = documents.get(next) {
-            self.select_document_by_id(doc_id);
-            if self.selected_document_id.as_deref() == Some(doc_id) {
-                self.select_document_tree_path(path.clone());
+        let path = rows[next].clone();
+        if let Some(node) = path.last() {
+            self.select_tree_node(node);
+            if let Some(id) = node.strip_prefix(TREE_DOC_PREFIX)
+                && self.selected_document_id.as_deref() != Some(id)
+            {
+                return;
             }
         }
+        self.tree_state.select(path);
+        self.tree_state.scroll_selected_into_view();
     }
 
     pub fn insert_char(&mut self, ch: char) {
@@ -1944,17 +2089,17 @@ pub(crate) fn find_tree_path(
     None
 }
 
-fn collect_tree_documents(
+fn collect_visible_requirement_rows(
     items: &[TreeItem<'static, String>],
     parent_path: &mut Vec<String>,
-    documents: &mut Vec<(Vec<String>, String)>,
+    opened: &std::collections::HashSet<Vec<String>>,
+    rows: &mut Vec<Vec<String>>,
 ) {
     for item in items {
         parent_path.push(item.identifier().clone());
-        if let Some(doc_id) = item.identifier().strip_prefix(TREE_DOC_PREFIX) {
-            documents.push((parent_path.clone(), doc_id.to_string()));
-        } else {
-            collect_tree_documents(item.children(), parent_path, documents);
+        rows.push(parent_path.clone());
+        if opened.contains(parent_path) {
+            collect_visible_requirement_rows(item.children(), parent_path, opened, rows);
         }
         parent_path.pop();
     }
@@ -2134,23 +2279,107 @@ pub fn requirements_footer_line(
     ])
 }
 
-/// Title shown on the Requirements tree pane.
-pub fn requirements_tree_title(filter: &RequirementIterationFilter) -> String {
-    match filter {
-        RequirementIterationFilter::All => "Requirements · All".into(),
-        RequirementIterationFilter::Unassigned => {
-            format!("Requirements · {UNASSIGNED_ITERATION_LABEL}")
-        }
-        RequirementIterationFilter::Named(name) => format!("Requirements · {name}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
     use teshi_core::authoring::{AuthoringArtifacts, RequirementDocumentIndex};
+
+    #[test]
+    fn external_organization_refresh_preserves_dirty_markdown_and_reports_invalid_json() {
+        use teshi_engine::organization::*;
+        let store = tempdir().unwrap();
+        let project = tempdir().unwrap();
+        initialize_requirement_store(store.path()).unwrap();
+        let identity = teshi_engine::ensure_requirement_project(project.path()).unwrap();
+        let mut state = AuthoringUiState::load_from_project(project.path(), store.path());
+        state.buffer = EditorBuffer::from_string("unsaved draft".into());
+        state.buffer_dirty = true;
+        let mut org = RequirementOrganization::default();
+        let folder = org.ensure_folder("External").unwrap();
+        save_requirement_organization(store.path(), &identity.id, &org).unwrap();
+        state.poll_organization_changes();
+        assert!(
+            find_tree_path(
+                &state.tree_items,
+                &format!("{TREE_DIR_PREFIX}collection:{folder}")
+            )
+            .is_some()
+        );
+        assert!(state.buffer_dirty);
+        assert_eq!(state.buffer.as_string(), "unsaved draft");
+        let path = store
+            .path()
+            .join("views")
+            .join(format!("{}.json", identity.id));
+        fs::write(&path, "invalid JSON").unwrap();
+        state.poll_organization_changes();
+        assert!(state.project_identity_error.is_some());
+        fs::write(&path, serde_json::to_vec(&org).unwrap()).unwrap();
+        state.poll_organization_changes();
+        assert!(state.project_identity_error.is_none());
+        assert_eq!(state.buffer.as_string(), "unsaved draft");
+    }
+
+    #[test]
+    fn organization_tree_keeps_inbox_and_multiple_references_without_parent_aggregation() {
+        use teshi_engine::organization::*;
+        let project = "project-a";
+        let mut one = RequirementDocumentMeta::new(
+            "one",
+            "one.md",
+            "One",
+            teshi_core::authoring::DocumentRevision::new("r1"),
+        );
+        one.projects.insert(
+            project.into(),
+            teshi_core::authoring::RequirementProjectStatus::Implemented,
+        );
+        let two = RequirementDocumentMeta::new(
+            "two",
+            "two.md",
+            "Two",
+            teshi_core::authoring::DocumentRevision::new("r2"),
+        );
+        let index = RequirementDocumentIndex {
+            documents: vec![one, two],
+            ..Default::default()
+        };
+        let mut org = RequirementOrganization::default();
+        org.ensure_folder("AI/Chat").unwrap();
+        org.collections[1].documents.insert("one".into());
+        org.collections.push(RequirementCollection {
+            id: "query".into(),
+            name: "Implemented".into(),
+            parent: None,
+            documents: Default::default(),
+            condition: Some(RequirementCondition::Status(
+                teshi_core::authoring::RequirementProjectStatus::Implemented,
+            )),
+        });
+        let (tree, labels) = organize::build_organization_tree(&index.documents, &org, project);
+        assert_eq!(tree.len(), 3, "Inbox, the AI folder, and Saved queries");
+        assert_eq!(tree[0].identifier(), organize::TREE_INBOX_NODE);
+        assert_eq!(tree[2].identifier(), organize::TREE_QUERIES_NODE);
+        assert_eq!(tree[0].children().len(), 1);
+        assert_eq!(tree[0].children()[0].identifier(), "req-doc:two");
+        assert_eq!(labels["req-dir:inbox"], "Inbox (1)");
+        assert_eq!(tree[1].children().len(), 1, "AI only lists its subfolder");
+        assert_eq!(
+            labels[tree[1].identifier()],
+            "AI (0)",
+            "parents do not aggregate"
+        );
+        assert_eq!(
+            tree[1].children()[0].children()[0].identifier(),
+            "req-doc:one"
+        );
+        let query = &tree[2].children()[0];
+        assert_eq!(labels[query.identifier()], "Implemented (1)");
+        assert_eq!(query.children()[0].identifier(), "req-doc:one");
+        assert_eq!(labels["req-doc:one"], "One · implemented");
+    }
 
     #[test]
     fn tree_builds_nested_paths() {
@@ -2278,7 +2507,11 @@ mod tests {
         assert_eq!(state.buffer.as_string(), "# Three\n\n");
         assert_eq!(
             state.tree_state.selected(),
-            [format!("{TREE_DOC_PREFIX}doc-3")].as_slice()
+            [
+                format!("{TREE_DIR_PREFIX}inbox"),
+                format!("{TREE_DOC_PREFIX}doc-3")
+            ]
+            .as_slice()
         );
         let test_point = &state.artifacts.as_ref().unwrap().test_points.test_points[0];
         assert_eq!(test_point.review_state, ReviewState::NeedsReview);
@@ -2710,12 +2943,23 @@ mod tests {
             assert_eq!(state.selected_document_id.as_deref(), Some("doc-sprint"));
 
             state.move_tree_selection(1);
+            assert!(
+                state
+                    .tree_state
+                    .selected()
+                    .last()
+                    .unwrap()
+                    .starts_with(TREE_ITER_PREFIX)
+            );
+            state.tree_state.toggle_selected();
+            state.move_tree_selection(1);
             assert_eq!(state.selected_document_id.as_deref(), Some("doc-open"));
             assert_eq!(
                 state.tree_state.selected().last().map(String::as_str),
                 Some("req-doc:doc-open")
             );
 
+            state.move_tree_selection(-1);
             state.move_tree_selection(-1);
             assert_eq!(state.selected_document_id.as_deref(), Some("doc-sprint"));
         });

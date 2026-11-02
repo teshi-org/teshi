@@ -427,15 +427,8 @@ pub fn run() -> Result<()> {
                             test_points_editing: app.test_points_ui.editing,
                             delete_confirmation_active: app.pending_delete.is_some(),
                             requirements_overlay_active: app.authoring_ui.overlay_active(),
-                            requirements_text_overlay: matches!(
-                                app.authoring_ui.overlay,
-                                authoring_tab::RequirementsOverlay::IterationEdit { .. }
-                            ),
-                            requirements_list_overlay: matches!(
-                                app.authoring_ui.overlay,
-                                authoring_tab::RequirementsOverlay::FilterPicker { .. }
-                                    | authoring_tab::RequirementsOverlay::PriorityEdit { .. }
-                            ),
+                            requirements_text_overlay: app.authoring_ui.overlay_accepts_text(),
+                            requirements_list_overlay: app.authoring_ui.overlay_is_list(),
                             generation_scope_prompt_active: app.generation_scope_prompt.is_some(),
                             quit_pending_confirm: app.quit_pending_confirm,
                             acp_permission_pending: app.has_acp_permission_prompt(),

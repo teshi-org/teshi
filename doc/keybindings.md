@@ -200,24 +200,29 @@ valid selections; changed streamed text or a different session clears them.
 
 | Key | Action |
 |-----|--------|
-| `j/k`, Down/Up | Next/previous item |
+| `j/k`, Down/Up | Next/previous row, including folder and query rows |
 | Left/Right | Previous/next pane (compatibility) |
 | Ctrl+W then `h/l` or Left/Right | Previous/next pane |
 | Home/End | First/last item |
 | PageUp/PageDown, Ctrl+B/Ctrl+F | Page through items |
-| Ctrl+N | New requirement Markdown document |
+| Enter | Expand/collapse a folder or query; open a requirement in the editor |
+| Space | Action menu for the selected row (folders, queries, membership, and the keys below) |
+| Ctrl+N | New requirement; with a folder selected, it is filed there on first save |
 | `d` / Delete | Open global-document deletion confirmation |
 | `i` | Iteration filter |
 | `o` | Cycle Current project / All projects / No project |
+| `g` | Switch view: Folders (Current project) or Path, and Iteration |
+| `H` | Show/hide implemented and verified requirements (Current project only) |
 | `b` | Link/unlink the saved document to/from the current project |
-| `g` | Toggle path vs iteration/path grouping |
 | `I` | Edit iteration |
 | `p` | Edit optional priority (Unset, P0-P3) |
 | `s` / Ctrl+S | Save |
 
-Bare `h/l` do not change panes here. The tree reserves `g` for grouping, so use
-Home/End for its boundaries. Priority changes preserve document order, Markdown,
-and unsaved text; existing documents remain unset.
+Bare `h/l` do not change panes here. The tree reserves `g` for switching views, so
+use Home/End for its boundaries. Priority changes preserve document order, Markdown,
+and unsaved text; existing documents remain unset. The tree title lists scope, view,
+iteration, and (in Current project) the completed filter. See
+`doc/requirement-organization.md` for the action menu.
 
 ### Markdown Browse
 

@@ -128,6 +128,12 @@ pub enum Action {
     ReqProjectLink,
     /// Toggle path vs iteration grouping (`g` on the Requirements tree).
     ReqGroupToggle,
+    /// Toggle implemented and verified requirement visibility (`H`, Current project only).
+    ReqCompletedToggle,
+    /// Open the action menu for the selected tree row (Space).
+    ReqActionMenu,
+    /// Toggle a folder or query row; open a document in the editor (Enter).
+    ReqTreeActivate,
     /// Edit the selected document's iteration (`I` on the Requirements tree).
     ReqEditIteration,
     /// Edit the selected document's optional priority (`p` on the Requirements tree).
@@ -165,6 +171,10 @@ pub enum Action {
     OverlayInsert(char),
     /// Backspace in the overlay text field.
     OverlayBackspace,
+    /// Delete the character under the overlay text cursor.
+    OverlayDelete,
+    /// Move the overlay text cursor.
+    OverlayCursor(crate::authoring_tab::CursorMotion),
     /// Confirm the pending generation source-scope overlay.
     GenerationScopeConfirm,
     /// Cancel the pending generation source-scope overlay.
@@ -800,19 +810,26 @@ impl Action {
 
         // Requirements overlay intercepts keys while open (including from generation scope).
         if context.requirements_overlay_active {
+            use crate::authoring_tab::CursorMotion;
+            let text = context.requirements_text_overlay;
             return match (event.code, event.modifiers) {
                 (KeyCode::Char(ch), modifiers)
-                    if context.requirements_text_overlay
-                        && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
+                    if text && (modifiers.is_empty() || modifiers == KeyModifiers::SHIFT) =>
                 {
                     Some(Self::OverlayInsert(ch))
                 }
                 (KeyCode::Esc, _) => Some(Self::OverlayCancel),
                 (KeyCode::Enter, _) => Some(Self::OverlayConfirm),
-                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                (KeyCode::Left, _) if text => Some(Self::OverlayCursor(CursorMotion::Left)),
+                (KeyCode::Right, _) if text => Some(Self::OverlayCursor(CursorMotion::Right)),
+                (KeyCode::Home, _) if text => Some(Self::OverlayCursor(CursorMotion::Home)),
+                (KeyCode::End, _) if text => Some(Self::OverlayCursor(CursorMotion::End)),
+                (KeyCode::Delete, _) if text => Some(Self::OverlayDelete),
+                // Tab and arrows move between query form fields or list rows.
+                (KeyCode::Up | KeyCode::BackTab, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
                     Some(Self::OverlayMoveUp)
                 }
-                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                (KeyCode::Down | KeyCode::Tab, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                     Some(Self::OverlayMoveDown)
                 }
                 (KeyCode::Backspace, _) => Some(Self::OverlayBackspace),
@@ -1158,9 +1175,14 @@ impl Action {
                     Some(Self::ReqDeleteDocument)
                 }
                 (KeyCode::Char('i'), KeyModifiers::NONE) => Some(Self::ReqFilterOverlay),
+                (KeyCode::Enter, KeyModifiers::NONE) => Some(Self::ReqTreeActivate),
                 (KeyCode::Char('o'), KeyModifiers::NONE) => Some(Self::ReqProjectScope),
                 (KeyCode::Char('b'), KeyModifiers::NONE) => Some(Self::ReqProjectLink),
                 (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Self::ReqGroupToggle),
+                (KeyCode::Char('H'), KeyModifiers::SHIFT | KeyModifiers::NONE) => {
+                    Some(Self::ReqCompletedToggle)
+                }
+                (KeyCode::Char(' '), KeyModifiers::NONE) => Some(Self::ReqActionMenu),
                 (KeyCode::Char('I'), KeyModifiers::SHIFT) => Some(Self::ReqEditIteration),
                 (KeyCode::Char('p'), KeyModifiers::NONE) => Some(Self::ReqEditPriority),
                 (KeyCode::Char('1'), KeyModifiers::NONE) => Some(Self::SelectTab(MainTab::Explore)),
@@ -2593,6 +2615,54 @@ mod tests {
             acp_permission_pending: false, // project context covered
             project_switch_active: false,
         }
+    }
+
+    #[test]
+    fn test_requirements_tree_space_opens_menu_and_text_forms_edit_at_cursor() {
+        let context = requirements_tree_context();
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        assert_eq!(
+            Action::from_key_event(key(KeyCode::Char(' '), KeyModifiers::NONE), context),
+            Some(Action::ReqActionMenu)
+        );
+        for removed in ['F', 'A', 'C'] {
+            assert_eq!(
+                Action::from_key_event(key(KeyCode::Char(removed), KeyModifiers::SHIFT), context),
+                None,
+                "{removed} moved into the Space menu"
+            );
+        }
+        let form = KeyContext {
+            requirements_overlay_active: true,
+            requirements_text_overlay: true,
+            ..context
+        };
+        use crate::authoring_tab::CursorMotion;
+        for (code, expected) in [
+            (KeyCode::Left, Action::OverlayCursor(CursorMotion::Left)),
+            (KeyCode::End, Action::OverlayCursor(CursorMotion::End)),
+            (KeyCode::Delete, Action::OverlayDelete),
+            (KeyCode::Tab, Action::OverlayMoveDown),
+            (KeyCode::Char('j'), Action::OverlayInsert('j')),
+        ] {
+            assert_eq!(
+                Action::from_key_event(key(code, KeyModifiers::NONE), form),
+                Some(expected)
+            );
+        }
+        let menu = KeyContext {
+            requirements_overlay_active: true,
+            requirements_list_overlay: true,
+            ..context
+        };
+        assert_eq!(
+            Action::from_key_event(key(KeyCode::Char('j'), KeyModifiers::NONE), menu),
+            Some(Action::OverlayMoveDown)
+        );
+        assert_eq!(
+            Action::from_key_event(key(KeyCode::Char(' '), KeyModifiers::NONE), menu),
+            Some(Action::OverlayInsert(' '))
+        );
     }
 
     #[test]

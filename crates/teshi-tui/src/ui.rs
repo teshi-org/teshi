@@ -402,67 +402,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             RequirementsEditorMode::VisualChar => "[VISUAL]",
             RequirementsEditorMode::VisualLine => "[V-LINE]",
         };
-        if chunks[3].width < 55 {
-            render_action_bar(
-                frame,
-                app,
-                chunks[3],
-                mode,
-                &[
-                    (" Save", Action::Save),
-                    (" New", Action::ReqNewDocument),
-                    (" Filter", Action::ReqFilterOverlay),
-                    (" Point", Action::ReqNewTestPoint),
-                ],
-                false,
-            );
-        } else {
-            let compact = chunks[3].width < 100;
-            let mut controls = vec![
-                (
-                    if compact { " New" } else { " New doc [Ctrl+n]" },
-                    Action::ReqNewDocument,
-                ),
-                (
-                    if compact {
-                        " Delete"
-                    } else {
-                        " Delete [d/Delete]"
-                    },
-                    Action::ReqDeleteDocument,
-                ),
-                (
-                    if compact { " Filter" } else { " Filter [i]" },
-                    Action::ReqFilterOverlay,
-                ),
-                (
-                    if compact { " Group" } else { " Group [g]" },
-                    Action::ReqGroupToggle,
-                ),
-                (
-                    if compact {
-                        " Iteration"
-                    } else {
-                        " Iteration [I]"
-                    },
-                    Action::ReqEditIteration,
-                ),
-                (
-                    if compact { " Save" } else { " Save [Ctrl+s]" },
-                    Action::Save,
-                ),
-                (
-                    if compact { " Point" } else { " Point [n]" },
-                    Action::ReqNewTestPoint,
-                ),
-            ];
-            if !compact {
-                controls.insert(0, (" Link [b]", Action::ReqProjectLink));
-                controls.insert(0, (" Scope [o]", Action::ReqProjectScope));
-                controls.push((" Priority [p]", Action::ReqEditPriority));
-            }
-            render_action_bar(frame, app, chunks[3], mode, &controls, false);
-        }
+        let controls = requirements_footer_controls(&app.authoring_ui, chunks[3].width);
+        render_action_bar(frame, app, chunks[3], mode, &controls, false);
     } else if app.active_tab == MainTab::TestPoints {
         let inserting = app.test_points_ui.editing;
         if inserting {
@@ -4775,6 +4716,61 @@ fn render_requirement_scrollbars(
 }
 
 /// Requirements tab: tree, Markdown editor, and linked test points.
+/// Footer controls for the focused Requirements pane.
+///
+/// The tree shows view settings plus the Space menu, which holds every row operation;
+/// the editor shows document commands. Labels shorten below 100 columns and only the
+/// essentials remain below 55.
+fn requirements_footer_controls(
+    ui: &crate::authoring_tab::AuthoringUiState,
+    width: u16,
+) -> Vec<(&'static str, Action)> {
+    let tree = ui.focus == crate::authoring_tab::RequirementsFocus::Tree;
+    let label = |full: &'static str, short: &'static str| if width < 100 { short } else { full };
+    if width < 55 {
+        return if tree {
+            vec![
+                (" Actions", Action::ReqActionMenu),
+                (" New", Action::ReqNewDocument),
+                (" Filter", Action::ReqFilterOverlay),
+            ]
+        } else {
+            vec![
+                (" Save", Action::Save),
+                (" New", Action::ReqNewDocument),
+                (" Point", Action::ReqNewTestPoint),
+            ]
+        };
+    }
+    if !tree {
+        return vec![
+            (label(" Save [Ctrl+s]", " Save"), Action::Save),
+            (label(" Point [n]", " Point"), Action::ReqNewTestPoint),
+            (
+                label(" Iteration [I]", " Iteration"),
+                Action::ReqEditIteration,
+            ),
+            (label(" New doc [Ctrl+n]", " New"), Action::ReqNewDocument),
+        ];
+    }
+    let mut controls = vec![
+        (label(" Scope [o]", " Scope"), Action::ReqProjectScope),
+        (label(" View [g]", " View"), Action::ReqGroupToggle),
+        (label(" Filter [i]", " Filter"), Action::ReqFilterOverlay),
+    ];
+    if ui.is_project_scope() {
+        controls.push((
+            label(" Completed [H]", " Completed"),
+            Action::ReqCompletedToggle,
+        ));
+    }
+    controls.extend([
+        (label(" Actions [Space]", " Actions"), Action::ReqActionMenu),
+        (label(" New doc [Ctrl+n]", " New"), Action::ReqNewDocument),
+    ]);
+    controls
+}
+
 fn render_requirements_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     app.authoring_ui.pane_areas = [Rect::default(); 3];
     app.authoring_ui.scroll_limits = [[0; 2]; 3];
@@ -4825,14 +4821,7 @@ fn render_requirements_tree(
     area: Rect,
     focused: bool,
 ) {
-    let block = theme::panel_block(
-        format!(
-            "{} · {}",
-            crate::authoring_tab::requirements_tree_title(&ui.iteration_filter),
-            ui.project_scope_label()
-        ),
-        focused,
-    );
+    let block = theme::panel_block(ui.tree_status_title(), focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -4870,27 +4859,28 @@ fn render_requirements_tree(
         .iter()
         .map(|node| {
             let id = node.item.identifier();
-            let label_width =
-                if let Some(doc_id) = id.strip_prefix(crate::authoring_tab::TREE_DOC_PREFIX) {
-                    ui.artifacts
-                        .as_ref()
-                        .and_then(|a| a.index.documents.iter().find(|d| d.id == doc_id))
-                        .map(|d| {
-                            UnicodeWidthStr::width(
-                                crate::authoring_tab::requirement_document_tree_label(d).as_str(),
-                            )
-                        })
-                        .unwrap_or(0)
-                } else if let Some(name) = id.strip_prefix(crate::authoring_tab::TREE_ITER_PREFIX) {
-                    UnicodeWidthStr::width(name)
-                } else {
-                    UnicodeWidthStr::width(
-                        id.rsplit('/')
-                            .next()
-                            .unwrap_or(id)
-                            .trim_start_matches(crate::authoring_tab::TREE_DIR_PREFIX),
-                    )
-                };
+            let label_width = if let Some(label) = ui.tree_labels.get(id) {
+                UnicodeWidthStr::width(label.as_str())
+            } else if let Some(doc_id) = id.strip_prefix(crate::authoring_tab::TREE_DOC_PREFIX) {
+                ui.artifacts
+                    .as_ref()
+                    .and_then(|a| a.index.documents.iter().find(|d| d.id == doc_id))
+                    .map(|d| {
+                        UnicodeWidthStr::width(
+                            crate::authoring_tab::requirement_document_tree_label(d).as_str(),
+                        )
+                    })
+                    .unwrap_or(0)
+            } else if let Some(name) = id.strip_prefix(crate::authoring_tab::TREE_ITER_PREFIX) {
+                UnicodeWidthStr::width(name)
+            } else {
+                UnicodeWidthStr::width(
+                    id.rsplit('/')
+                        .next()
+                        .unwrap_or(id)
+                        .trim_start_matches(crate::authoring_tab::TREE_DIR_PREFIX),
+                )
+            };
             node.depth() * 2 + 2 + label_width
         })
         .max()
@@ -5282,6 +5272,70 @@ fn render_requirements_linked(
     );
 }
 
+/// Centers a `width` x `height` popup in `area`, shrinking it to fit.
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+/// Draws clickable popup controls on the second-to-last row of `panel`.
+fn render_overlay_footer(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    panel: Rect,
+    controls: &[(&str, Action)],
+) {
+    render_action_bar(
+        frame,
+        app,
+        Rect::new(
+            panel.x + 1,
+            panel.bottom().saturating_sub(2),
+            panel.width.saturating_sub(2),
+            1,
+        ),
+        "",
+        controls,
+        true,
+    );
+}
+
+/// One labeled text field; the focused field shows a block cursor.
+fn form_input_line<'a>(
+    label: &'a str,
+    input: &'a crate::authoring_tab::LineInput,
+    focused: bool,
+) -> Line<'a> {
+    let label_style = if focused {
+        Style::default().fg(theme::PRIMARY)
+    } else {
+        theme::muted()
+    };
+    let mut spans = vec![Span::styled(format!("{label}: "), label_style)];
+    if !focused {
+        spans.push(Span::raw(input.text()));
+        return Line::from(spans);
+    }
+    let (before, after) = input.split_at_cursor();
+    let mut rest = after.chars();
+    let under = rest.next().map_or(" ".to_string(), String::from);
+    spans.extend([
+        Span::raw(before),
+        Span::styled(
+            under,
+            Style::default().fg(theme::CURSOR_FG).bg(theme::CURSOR_BG),
+        ),
+        Span::raw(rest.as_str()),
+    ]);
+    Line::from(spans)
+}
+
 fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     use crate::project_context::SwitchOverlay;
     if !matches!(app.project_switch.overlay, SwitchOverlay::None) {
@@ -5397,6 +5451,284 @@ fn render_requirements_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect)
                 "",
                 &[(" Cancel [Esc]", Action::OverlayCancel)],
                 true,
+            );
+        }
+        RequirementsOverlay::ActionMenu { target, selection } => {
+            let items = app.authoring_ui.menu_items(target);
+            let title = app.authoring_ui.menu_title(target);
+            let selection = *selection;
+            let label_width = items
+                .iter()
+                .map(|item| UnicodeWidthStr::width(item.label))
+                .max()
+                .unwrap_or(0);
+            let content_width = (label_width + 12).max(UnicodeWidthStr::width(title.as_str()) + 2);
+            let panel = centered_rect(
+                area,
+                (content_width as u16 + 2).clamp(32, 64),
+                items.len() as u16 + 4,
+            );
+            frame.render_widget(Clear, panel);
+            let lines = items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    app.clickable_regions
+                        .push(ClickableRegion::RequirementFilterOption {
+                            rect: Rect::new(
+                                panel.x + 1,
+                                panel.y + 1 + index as u16,
+                                panel.width.saturating_sub(2),
+                                1,
+                            ),
+                            index,
+                        });
+                    let style = if index == selection {
+                        theme::selected_row(true)
+                    } else {
+                        Style::default()
+                    };
+                    let pad = label_width - UnicodeWidthStr::width(item.label);
+                    Line::from(vec![
+                        Span::styled(format!("  {}{}  ", item.label, " ".repeat(pad)), style),
+                        Span::styled(item.hint, style.patch(theme::muted())),
+                    ])
+                })
+                .collect();
+            frame.render_widget(
+                Paragraph::new(theme::popup_rows(lines, panel.width.saturating_sub(2)))
+                    .block(theme::popup_block(title)),
+                panel,
+            );
+            render_overlay_footer(
+                frame,
+                app,
+                panel,
+                &[
+                    (" Select [Enter]", Action::OverlayConfirm),
+                    (" Close [Esc]", Action::OverlayCancel),
+                ],
+            );
+        }
+        RequirementsOverlay::FolderPicker {
+            document_id,
+            options,
+            checked,
+            selection,
+        } => {
+            let title = app
+                .authoring_ui
+                .artifacts
+                .as_ref()
+                .and_then(|a| a.index.documents.iter().find(|d| &d.id == document_id))
+                .map_or(document_id.clone(), |d| d.title.clone());
+            let rows = options.len().max(1) as u16;
+            let panel = centered_rect(area, 64, rows + 6);
+            frame.render_widget(Clear, panel);
+            let visible = (panel.height.saturating_sub(6) as usize).max(1);
+            let start = selection.saturating_sub(visible.saturating_sub(1));
+            let mut lines: Vec<Line> = if options.is_empty() {
+                vec![Line::styled(
+                    "  No folders yet. Close, select Inbox, and choose New folder….",
+                    theme::muted(),
+                )]
+            } else {
+                options
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .take(visible)
+                    .map(|(index, (id, path))| {
+                        app.clickable_regions
+                            .push(ClickableRegion::RequirementFilterOption {
+                                rect: Rect::new(
+                                    panel.x + 1,
+                                    panel.y + 1 + (index - start) as u16,
+                                    panel.width.saturating_sub(2),
+                                    1,
+                                ),
+                                index,
+                            });
+                        let style = if index == *selection {
+                            theme::selected_row(true)
+                        } else {
+                            Style::default()
+                        };
+                        let mark = if checked.contains(id) { "[x]" } else { "[ ]" };
+                        Line::styled(format!("  {mark} {path}"), style)
+                    })
+                    .collect()
+            };
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                if checked.is_empty() {
+                    "  No folder checked: the requirement is listed in Inbox."
+                } else {
+                    "  The requirement is listed in every checked folder."
+                },
+                theme::muted(),
+            ));
+            frame.render_widget(
+                Paragraph::new(theme::popup_rows(lines, panel.width.saturating_sub(2)))
+                    .block(theme::popup_block(format!(" Folders of {title} "))),
+                panel,
+            );
+            render_overlay_footer(
+                frame,
+                app,
+                panel,
+                &[
+                    (" Toggle [Space]", Action::OverlayInsert(' ')),
+                    (" Save [Enter]", Action::OverlayConfirm),
+                    (" Cancel [Esc]", Action::OverlayCancel),
+                ],
+            );
+        }
+        RequirementsOverlay::OrganizationForm(form) => {
+            use crate::authoring_tab::OrganizationForm;
+            let (title, mut lines, query) = match form {
+                OrganizationForm::NewFolder {
+                    parent_path, name, ..
+                } => (
+                    parent_path
+                        .as_ref()
+                        .map_or(" New folder ".to_string(), |parent| {
+                            format!(" New subfolder in {parent} ")
+                        }),
+                    vec![
+                        form_input_line("Name", name, true),
+                        Line::raw(""),
+                        Line::styled(
+                            "Use / to create nested folders, e.g. Chat/Archive.",
+                            theme::muted(),
+                        ),
+                    ],
+                    false,
+                ),
+                OrganizationForm::Rename { query, name, .. } => (
+                    if *query {
+                        " Rename saved query ".to_string()
+                    } else {
+                        " Rename folder ".to_string()
+                    },
+                    vec![
+                        form_input_line("Name", name, true),
+                        Line::raw(""),
+                        Line::styled(
+                            "Requirements and queries keep their references.",
+                            theme::muted(),
+                        ),
+                    ],
+                    false,
+                ),
+                OrganizationForm::Query {
+                    query_id,
+                    name,
+                    condition,
+                    condition_focused,
+                } => {
+                    let preview = match app.authoring_ui.query_form_preview() {
+                        Some(Ok(count)) => Line::styled(
+                            if count == 1 {
+                                "Matches 1 requirement".to_string()
+                            } else {
+                                format!("Matches {count} requirements")
+                            },
+                            Style::default().fg(theme::SUCCESS),
+                        ),
+                        Some(Err(error)) => {
+                            Line::styled(format!("! {error}"), Style::default().fg(theme::ERROR))
+                        }
+                        None => Line::raw(""),
+                    };
+                    (
+                        if query_id.is_some() {
+                            " Edit saved query ".to_string()
+                        } else {
+                            " New saved query ".to_string()
+                        },
+                        vec![
+                            form_input_line("Name     ", name, !condition_focused),
+                            form_input_line("Condition", condition, *condition_focused),
+                            preview,
+                            Line::raw(""),
+                            Line::styled(
+                                "Fields: status, priority, iteration, title, folder",
+                                theme::muted(),
+                            ),
+                            Line::styled(
+                                "& = and, | = or, ! = not; & binds tighter than |",
+                                theme::muted(),
+                            ),
+                            Line::styled(
+                                "Example: status=planned & priority=P1 | folder=AI/Chat",
+                                theme::muted(),
+                            ),
+                        ],
+                        true,
+                    )
+                }
+            };
+            lines.insert(0, Line::raw(""));
+            let panel = centered_rect(area, 72, lines.len() as u16 + 4);
+            frame.render_widget(Clear, panel);
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .block(theme::popup_block(title)),
+                panel,
+            );
+            let mut controls = vec![(" Save [Enter]", Action::OverlayConfirm)];
+            if query {
+                controls.push((" Next field [Tab]", Action::OverlayMoveDown));
+            }
+            controls.push((" Cancel [Esc]", Action::OverlayCancel));
+            render_overlay_footer(frame, app, panel, &controls);
+        }
+        RequirementsOverlay::RemoveCollection {
+            name,
+            query,
+            inbox_returns,
+            ..
+        } => {
+            let (title, lines) = if *query {
+                (
+                    " Delete saved query ",
+                    vec![
+                        Line::raw(format!("Delete saved query '{name}'?")),
+                        Line::raw("Requirements are not changed."),
+                    ],
+                )
+            } else {
+                (
+                    " Delete folder ",
+                    vec![
+                        Line::raw(format!("Delete folder '{name}' and its subfolders?")),
+                        Line::raw(match inbox_returns {
+                            0 => "No requirement returns to Inbox.".to_string(),
+                            1 => "1 requirement returns to Inbox.".to_string(),
+                            n => format!("{n} requirements return to Inbox."),
+                        }),
+                        Line::raw("Requirement documents are never deleted."),
+                    ],
+                )
+            };
+            let panel = centered_rect(area, 64, lines.len() as u16 + 4);
+            frame.render_widget(Clear, panel);
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .block(theme::popup_block(title)),
+                panel,
+            );
+            render_overlay_footer(
+                frame,
+                app,
+                panel,
+                &[
+                    (" Delete [Enter]", Action::OverlayConfirm),
+                    (" Cancel [Esc]", Action::OverlayCancel),
+                ],
             );
         }
         RequirementsOverlay::IterationEdit { buffer } => {
@@ -6193,22 +6525,30 @@ mod truncate_tests {
     #[test]
     fn requirements_mode_footer_keeps_text_and_emphasizes_plain_keys() {
         use crate::authoring_tab::{RequirementsEditorMode, RequirementsFocus};
-        for (mode, expected, first_key) in [
+        for (focus, mode, expected, first_key) in [
             (
+                RequirementsFocus::Editor,
                 RequirementsEditorMode::Browse,
-                "[BROWSE] Scope [o] Link [b] New doc [Ctrl+n] Delete [d/Delete] Filter [i] Group [g] Iteration [I] Save [Ctrl+s] Point [n] Priority [p]",
-                "[Ctrl+n]",
+                "[BROWSE] Save [Ctrl+s] Point [n] Iteration [I] New doc [Ctrl+n]",
+                "[Ctrl+s]",
             ),
             (
+                RequirementsFocus::Editor,
                 RequirementsEditorMode::Insert,
-                "[INSERT] Scope [o] Link [b] New doc [Ctrl+n] Delete [d/Delete] Filter [i] Group [g] Iteration [I] Save [Ctrl+s] Point [n] Priority [p]",
-                "[Ctrl+n]",
+                "[INSERT] Save [Ctrl+s] Point [n] Iteration [I] New doc [Ctrl+n]",
+                "[Ctrl+s]",
+            ),
+            (
+                RequirementsFocus::Tree,
+                RequirementsEditorMode::Browse,
+                "[BROWSE] Scope [o] View [g] Filter [i]",
+                "[Space]",
             ),
         ] {
             let mut app = App::from_args().expect("app init");
             app.active_tab = crate::app::MainTab::Requirements;
             app.status_message = None;
-            app.authoring_ui.focus = RequirementsFocus::Editor;
+            app.authoring_ui.focus = focus;
             app.authoring_ui.editor_mode = mode;
             let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
             terminal.draw(|frame| render(frame, &mut app)).unwrap();

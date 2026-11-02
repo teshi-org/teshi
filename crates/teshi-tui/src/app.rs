@@ -3829,7 +3829,45 @@ impl App {
             .context("persist generation session state")
     }
 
+    /// Runs a Space menu command after closing the menu.
+    ///
+    /// Document commands reuse the tree actions so guards such as unsaved-change
+    /// prompts behave exactly as when their shortcut is pressed.
+    fn run_requirements_menu(
+        &mut self,
+        target: crate::authoring_tab::TreeTarget,
+        command: crate::authoring_tab::MenuCommand,
+    ) -> Result<()> {
+        use crate::authoring_tab::MenuCommand;
+        self.authoring_ui.cancel_overlay();
+        let action = match command {
+            MenuCommand::OpenEditor => Action::ReqTreeActivate,
+            MenuCommand::ToggleLink => Action::ReqProjectLink,
+            MenuCommand::EditIteration => Action::ReqEditIteration,
+            MenuCommand::EditPriority => Action::ReqEditPriority,
+            MenuCommand::DeleteDocument => Action::ReqDeleteDocument,
+            MenuCommand::NewRequirement => Action::ReqNewDocument,
+            _ => {
+                if let Err(error) = self
+                    .authoring_ui
+                    .open_organization_command(command, &target)
+                {
+                    self.status = error;
+                }
+                return Ok(());
+            }
+        };
+        self.handle_action(action)
+    }
+
     fn confirm_requirements_overlay(&mut self) -> Result<()> {
+        if let Some((target, command)) = self.authoring_ui.menu_selection() {
+            return self.run_requirements_menu(target, command);
+        }
+        if let Some(result) = self.authoring_ui.confirm_organization_overlay() {
+            self.status = result.unwrap_or_else(|error| error);
+            return Ok(());
+        }
         if let crate::authoring_tab::RequirementsOverlay::DeleteConfirmation {
             document_id, ..
         } = self.authoring_ui.overlay.clone()
@@ -4809,6 +4847,7 @@ impl App {
             return;
         }
         self.last_external_check = Instant::now();
+        self.authoring_ui.poll_organization_changes();
 
         // Index-based runner events and pending agent edits must retain their targets.
         if self.runner_rx.is_some() || !self.pending_agent_changes.is_empty() {
@@ -7649,6 +7688,7 @@ impl App {
             return Ok(());
         }
         if self.authoring_ui.overlay_active() {
+            use crate::authoring_tab::RequirementsOverlay;
             return match action {
                 Action::OverlayConfirm => self.confirm_requirements_overlay(),
                 Action::OverlayCancel => {
@@ -7663,12 +7703,49 @@ impl App {
                     self.authoring_ui.overlay_move_selection(1);
                     Ok(())
                 }
+                // Space chooses the highlighted menu row, like Enter.
+                Action::OverlayInsert(' ')
+                    if matches!(
+                        self.authoring_ui.overlay,
+                        RequirementsOverlay::ActionMenu { .. }
+                    ) =>
+                {
+                    self.confirm_requirements_overlay()
+                }
+                Action::OverlayInsert(' ')
+                    if matches!(
+                        self.authoring_ui.overlay,
+                        RequirementsOverlay::FolderPicker { .. }
+                    ) =>
+                {
+                    self.authoring_ui.toggle_folder_choice();
+                    Ok(())
+                }
+                Action::OverlayInsert(ch)
+                    if matches!(
+                        self.authoring_ui.overlay,
+                        RequirementsOverlay::ActionMenu { .. }
+                    ) =>
+                {
+                    match self.authoring_ui.menu_shortcut(ch) {
+                        Some((target, command)) => self.run_requirements_menu(target, command),
+                        None => Ok(()),
+                    }
+                }
                 Action::OverlayInsert(ch) => {
                     self.authoring_ui.overlay_insert_char(ch);
                     Ok(())
                 }
                 Action::OverlayBackspace => {
                     self.authoring_ui.overlay_backspace();
+                    Ok(())
+                }
+                Action::OverlayDelete => {
+                    self.authoring_ui.overlay_delete();
+                    Ok(())
+                }
+                Action::OverlayCursor(motion) => {
+                    self.authoring_ui.overlay_move_cursor(motion);
                     Ok(())
                 }
                 _ => Ok(()),
@@ -8812,15 +8889,44 @@ impl App {
             Action::ReqGroupToggle => {
                 if self.active_tab == MainTab::Requirements {
                     self.authoring_ui.toggle_group_mode();
-                    self.status = match self.authoring_ui.group_mode {
-                        teshi_core::authoring::RequirementGroupMode::Path => {
-                            "Grouped by path".to_string()
-                        }
-                        teshi_core::authoring::RequirementGroupMode::Iteration => {
-                            "Grouped by iteration".to_string()
-                        }
-                    };
+                    self.status = format!("View: {}", self.authoring_ui.view_label());
                     self.quit_pending_confirm = false;
+                }
+            }
+            Action::ReqActionMenu => {
+                if self.active_tab == MainTab::Requirements
+                    && self.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Tree
+                    && let Err(error) = self.authoring_ui.open_action_menu()
+                {
+                    self.status = error;
+                }
+            }
+            Action::ReqCompletedToggle => {
+                if self.active_tab == MainTab::Requirements {
+                    self.status = match self.authoring_ui.toggle_completed() {
+                        Ok(true) => "Showing implemented and verified requirements".into(),
+                        Ok(false) => "Showing pending requirements only".into(),
+                        Err(_) => "Completed filter applies to Current project only".into(),
+                    };
+                }
+            }
+            Action::ReqTreeActivate => {
+                if self.active_tab == MainTab::Requirements
+                    && self.authoring_ui.focus == crate::authoring_tab::RequirementsFocus::Tree
+                    && let Some(id) = self.authoring_ui.tree_state.selected().last().cloned()
+                {
+                    if let Some(doc_id) = id.strip_prefix(crate::authoring_tab::TREE_DOC_PREFIX) {
+                        self.authoring_ui.select_tree_node(&id);
+                        // An unsaved-changes prompt may have kept the previous document.
+                        if self.authoring_ui.selected_document_id.as_deref() == Some(doc_id)
+                            && !self.authoring_ui.overlay_active()
+                        {
+                            self.authoring_ui.focus =
+                                crate::authoring_tab::RequirementsFocus::Editor;
+                        }
+                    } else {
+                        self.authoring_ui.tree_state.toggle_selected();
+                    }
                 }
             }
             Action::ReqEditIteration => {
@@ -8849,6 +8955,8 @@ impl App {
             | Action::OverlayMoveDown
             | Action::OverlayInsert(_)
             | Action::OverlayBackspace
+            | Action::OverlayDelete
+            | Action::OverlayCursor(_)
             | Action::GenerationScopeConfirm
             | Action::GenerationScopeCancel
             | Action::GenerationScopeChangeIteration => {}
@@ -9811,6 +9919,7 @@ impl App {
             return false;
         }
         let filter_count = self.authoring_ui.filter_picker_options().len();
+        let organization_count = self.authoring_ui.organization_list_len().unwrap_or(0);
         let keyword_count = self.buffer.language().all_step_keywords().len();
         let list = if let Some(prompt) = self.agent_mut().pending_acp_permission.as_mut() {
             Some((&mut prompt.selected, prompt.options.len()))
@@ -9829,6 +9938,12 @@ impl App {
         } = &mut self.authoring_ui.overlay
         {
             apply_list_navigation(selection, 5, action);
+        } else if let crate::authoring_tab::RequirementsOverlay::ActionMenu { selection, .. }
+        | crate::authoring_tab::RequirementsOverlay::FolderPicker {
+            selection, ..
+        } = &mut self.authoring_ui.overlay
+        {
+            apply_list_navigation(selection, organization_count, action);
         } else if self.agent_profile_panel_active {
             let count = match self.agent_panel_mode {
                 AgentPanelMode::List => self.agent_registry.len(),
@@ -10799,6 +10914,13 @@ impl App {
                             pos.y,
                         ));
                         if let Some(id) = ui.tree_state.selected().last().cloned() {
+                            // The widget only toggles an already selected row; folders must
+                            // toggle on the first click as well, without loading a document.
+                            if !id.starts_with(crate::authoring_tab::TREE_DOC_PREFIX)
+                                && previous != ui.tree_state.selected()
+                            {
+                                ui.tree_state.toggle_selected();
+                            }
                             ui.select_tree_node(&id);
                             if ui.overlay_active() {
                                 ui.tree_state.select(previous);
@@ -11279,10 +11401,17 @@ impl App {
                 self.handle_action(action.clone())?;
             }
             ClickableRegion::RequirementFilterOption { index, .. } => {
-                if let crate::authoring_tab::RequirementsOverlay::FilterPicker { selection }
-                | crate::authoring_tab::RequirementsOverlay::PriorityEdit {
-                    selection, ..
-                } = &mut self.authoring_ui.overlay
+                use crate::authoring_tab::RequirementsOverlay;
+                if let RequirementsOverlay::FolderPicker { selection, .. } =
+                    &mut self.authoring_ui.overlay
+                {
+                    // Clicking a folder toggles it; saving stays an explicit Enter.
+                    *selection = *index;
+                    self.authoring_ui.toggle_folder_choice();
+                } else if let RequirementsOverlay::FilterPicker { selection }
+                | RequirementsOverlay::PriorityEdit { selection, .. }
+                | RequirementsOverlay::ActionMenu { selection, .. } =
+                    &mut self.authoring_ui.overlay
                 {
                     *selection = *index;
                     self.handle_action(Action::OverlayConfirm)?;
@@ -16221,10 +16350,176 @@ mod tests {
         assert!(teshi_engine::read_requirement_document(store.path(), "doc-1").is_ok());
     }
 
+    fn select_requirement_row(app: &mut App, node: &str) {
+        let path = crate::authoring_tab::find_tree_path(&app.authoring_ui.tree_items, node)
+            .unwrap_or_else(|| panic!("tree row {node}"));
+        app.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Tree;
+        app.authoring_ui.tree_state.select(path);
+    }
+
+    fn type_into_overlay(app: &mut App, text: &str) {
+        for ch in text.chars() {
+            app.handle_action(Action::OverlayInsert(ch)).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_space_menu_creates_folder_and_edits_exact_membership() {
+        use crate::authoring_tab::RequirementsOverlay;
+        let (mut app, _project, store) = requirements_test_app();
+        let teshi_core::authoring::RequirementProjectFilter::Project(project_id) =
+            app.authoring_ui.project_filter.clone()
+        else {
+            panic!("new requirements switch to Current project scope");
+        };
+
+        select_requirement_row(&mut app, "req-dir:inbox");
+        app.handle_action(Action::ReqActionMenu).unwrap();
+        assert!(matches!(
+            app.authoring_ui.overlay,
+            RequirementsOverlay::ActionMenu { .. }
+        ));
+        app.handle_action(Action::OverlayConfirm).unwrap();
+        type_into_overlay(&mut app, "AI/Chat");
+        app.handle_action(Action::OverlayConfirm).unwrap();
+        assert_eq!(
+            app.authoring_ui.overlay,
+            RequirementsOverlay::None,
+            "{}",
+            app.status
+        );
+        assert!(
+            app.status.contains("Created folder AI/Chat"),
+            "{}",
+            app.status
+        );
+
+        select_requirement_row(&mut app, "req-doc:doc-1");
+        app.handle_action(Action::ReqActionMenu).unwrap();
+        app.handle_action(Action::OverlayMoveDown).unwrap();
+        app.handle_action(Action::OverlayConfirm).unwrap();
+        let RequirementsOverlay::FolderPicker { options, .. } = &app.authoring_ui.overlay else {
+            panic!("Folders… opens the picker: {:?}", app.authoring_ui.overlay);
+        };
+        let paths: Vec<_> = options.iter().map(|(_, path)| path.as_str()).collect();
+        assert_eq!(paths, ["AI", "AI/Chat"]);
+        app.handle_action(Action::OverlayMoveDown).unwrap();
+        app.handle_action(Action::OverlayInsert(' ')).unwrap();
+        app.handle_action(Action::OverlayConfirm).unwrap();
+        let org =
+            teshi_engine::organization::load_requirement_organization(store.path(), &project_id)
+                .unwrap();
+        let chat = org.folder_id("AI/Chat").unwrap();
+        assert_eq!(org.document_folders("doc-1"), [chat].into());
+        assert_eq!(app.authoring_ui.tree_labels["req-dir:inbox"], "Inbox (0)");
+
+        select_requirement_row(&mut app, "req-doc:doc-1");
+        app.handle_action(Action::ReqActionMenu).unwrap();
+        app.handle_action(Action::OverlayMoveDown).unwrap();
+        app.handle_action(Action::OverlayConfirm).unwrap();
+        app.handle_action(Action::OverlayMoveDown).unwrap();
+        app.handle_action(Action::OverlayInsert(' ')).unwrap();
+        app.handle_action(Action::OverlayConfirm).unwrap();
+        assert!(
+            app.status.contains("Moved doc-1 to Inbox"),
+            "{}",
+            app.status
+        );
+        assert_eq!(app.authoring_ui.tree_labels["req-dir:inbox"], "Inbox (1)");
+    }
+
+    #[test]
+    fn test_query_form_keeps_invalid_input_open_and_saves_valid_query() {
+        use crate::authoring_tab::RequirementsOverlay;
+        let (mut app, _project, _store) = requirements_test_app();
+        select_requirement_row(&mut app, "req-dir:queries");
+        app.handle_action(Action::ReqActionMenu).unwrap();
+        app.handle_action(Action::OverlayConfirm).unwrap();
+        type_into_overlay(&mut app, "Open");
+        app.handle_action(Action::OverlayMoveDown).unwrap();
+        type_into_overlay(&mut app, " & title=");
+        assert!(matches!(
+            app.authoring_ui.query_form_preview(),
+            Some(Err(_))
+        ));
+        app.handle_action(Action::OverlayConfirm).unwrap();
+        assert!(
+            matches!(
+                app.authoring_ui.overlay,
+                RequirementsOverlay::OrganizationForm(_)
+            ),
+            "invalid input stays editable"
+        );
+        assert!(app.status.contains("must not be empty"), "{}", app.status);
+
+        type_into_overlay(&mut app, "req");
+        assert_eq!(app.authoring_ui.query_form_preview(), Some(Ok(1)));
+        app.handle_action(Action::OverlayConfirm).unwrap();
+        assert_eq!(
+            app.authoring_ui.overlay,
+            RequirementsOverlay::None,
+            "{}",
+            app.status
+        );
+        assert!(
+            app.authoring_ui
+                .tree_labels
+                .values()
+                .any(|label| label == "Open (1)")
+        );
+    }
+
+    #[test]
+    fn test_enter_opens_document_and_completed_filter_requires_project_scope() {
+        let (mut app, _project, _store) = requirements_test_app();
+        select_requirement_row(&mut app, "req-doc:doc-1");
+        app.handle_action(Action::ReqTreeActivate).unwrap();
+        assert_eq!(
+            app.authoring_ui.focus,
+            crate::authoring_tab::RequirementsFocus::Editor
+        );
+
+        app.authoring_ui
+            .set_project_filter(teshi_core::authoring::RequirementProjectFilter::All);
+        assert!(
+            !app.authoring_ui
+                .tree_status_title()
+                .contains("Pending only")
+        );
+        app.handle_action(Action::ReqCompletedToggle).unwrap();
+        assert!(!app.authoring_ui.show_completed);
+        assert!(
+            app.status.contains("Current project only"),
+            "{}",
+            app.status
+        );
+
+        select_requirement_row(&mut app, "req-doc:doc-1");
+        let target = app.authoring_ui.tree_target().unwrap();
+        assert!(
+            app.authoring_ui
+                .menu_items(&target)
+                .iter()
+                .all(|item| item.command != crate::authoring_tab::MenuCommand::EditFolders),
+            "folders exist only in Current project scope"
+        );
+    }
+
     #[test]
     fn requirements_delete_confirmation_removes_document_and_click_control_is_registered() {
         let (mut app, project, store) = requirements_test_app();
         app.authoring_ui.focus = crate::authoring_tab::RequirementsFocus::Tree;
+        app.handle_action(Action::ReqActionMenu).unwrap();
+        let target = app
+            .authoring_ui
+            .tree_target()
+            .expect("selected document row");
+        let delete_index = app
+            .authoring_ui
+            .menu_items(&target)
+            .iter()
+            .position(|item| item.command == crate::authoring_tab::MenuCommand::DeleteDocument)
+            .expect("document menu offers deletion");
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         terminal
             .draw(|frame| crate::ui::render(frame, &mut app))
@@ -16233,14 +16528,14 @@ mod tests {
             .clickable_regions
             .iter()
             .find_map(|region| match region {
-                ClickableRegion::ActionButton {
-                    rect,
-                    action: Action::ReqDeleteDocument,
-                    ..
-                } => Some(*rect),
+                ClickableRegion::RequirementFilterOption { rect, index }
+                    if *index == delete_index =>
+                {
+                    Some(*rect)
+                }
                 _ => None,
             })
-            .expect("requirements delete control");
+            .expect("requirements delete menu row");
         app.handle_mouse_event(
             MouseEventKind::Down(MouseButton::Left),
             delete_rect.x,

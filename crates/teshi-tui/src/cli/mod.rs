@@ -316,6 +316,30 @@ pub enum ExportTargetArg {
 /// Subcommands for `teshi requirements`.
 #[derive(Debug, Subcommand)]
 pub enum RequirementsCommand {
+    /// Read or replace project folders and saved query collections
+    Organize {
+        /// Project directory (default: current directory)
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// JSON configuration; omit to read the current configuration
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Create a manual folder path, including missing ancestors
+        #[arg(long, conflicts_with_all = ["file", "query", "assign"])]
+        folder: Option<String>,
+        /// Create or update a root query collection by name
+        #[arg(long, requires = "condition", conflicts_with_all = ["file", "assign"])]
+        query: Option<String>,
+        /// Query expression: status=planned & priority=P1 (also supports |, !, and folder=AI/Chat)
+        #[arg(long, requires = "query")]
+        condition: Option<String>,
+        /// Link requirement IDs to the folder supplied with --to
+        #[arg(long, num_args = 1.., requires = "to", conflicts_with = "file")]
+        assign: Vec<String>,
+        /// Existing manual folder path for --assign
+        #[arg(long, requires = "assign")]
+        to: Option<String>,
+    },
     /// Create a timestamp-named requirement (no implicit project association)
     Create {
         /// Title; must match the first Markdown heading when a body is supplied

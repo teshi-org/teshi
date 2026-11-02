@@ -3,6 +3,7 @@
 mod api_dispatch;
 mod app_data;
 mod authoring;
+pub use authoring::organization;
 mod browser_agent;
 mod daemon;
 mod events;

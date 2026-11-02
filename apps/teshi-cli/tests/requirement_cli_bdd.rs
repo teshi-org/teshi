@@ -113,7 +113,7 @@ fn run_locale(locale: &str) {
         "{locale}: teshi run did not emit end_run.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        combined.contains("end_run passed=40 failed=0 skipped=0"),
+        combined.contains("end_run passed=44 failed=0 skipped=0"),
         "{locale}: requirement CLI E2E failed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
