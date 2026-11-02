@@ -2,6 +2,9 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(200);
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -11,6 +14,8 @@ use crate::app::{App, ColumnFocus, MainTab};
 pub(crate) struct FeatureBrowser {
     pub(crate) query: String,
     pub(crate) searching: bool,
+    applied_query: String,
+    pending_search: Option<Instant>,
     pub(crate) directory: Option<String>,
     expanded: BTreeSet<String>,
     rows: RefCell<Option<(u64, Rc<Vec<Row>>)>>,
@@ -23,13 +28,59 @@ pub(crate) enum Row {
 }
 
 impl App {
+    fn feature_browser_filter_query(&self) -> &str {
+        if self.feature_browser.pending_search.is_some() {
+            &self.feature_browser.applied_query
+        } else if self.feature_browser.query.trim().is_empty() {
+            ""
+        } else {
+            &self.feature_browser.query
+        }
+    }
+
+    fn commit_feature_browser_search(&mut self) {
+        self.feature_browser.pending_search = None;
+        self.feature_browser.applied_query = self.feature_browser.query.clone();
+        if self.explore_selected_feature_row().is_none() {
+            self.explore_set_feature_row(0);
+        }
+    }
+
+    fn schedule_feature_browser_search(&mut self) {
+        if self.feature_browser.query.trim().is_empty() {
+            self.commit_feature_browser_search();
+        } else {
+            self.feature_browser.pending_search = Some(Instant::now());
+        }
+    }
+
+    pub(crate) fn poll_feature_browser_search(&mut self) {
+        if self
+            .feature_browser
+            .pending_search
+            .is_some_and(|at| at.elapsed() >= SEARCH_DEBOUNCE)
+        {
+            self.commit_feature_browser_search();
+        }
+    }
+
+    pub(crate) fn paste_feature_browser_search(&mut self, text: &str) {
+        for ch in text.chars() {
+            if !self
+                .handle_feature_browser_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+            {
+                break;
+            }
+        }
+    }
+
     pub(crate) fn feature_browser_rows(&self) -> Rc<Vec<Row>> {
         // Hash only tree inputs: scenario edits and selection changes do not
         // require sorting and allocating the entire directory tree again.
         let mut key = std::collections::hash_map::DefaultHasher::new();
         self.project.root_dir.hash(&mut key);
         self.feature_discovery_root.hash(&mut key);
-        self.feature_browser.query.hash(&mut key);
+        self.feature_browser_filter_query().hash(&mut key);
         self.feature_browser.expanded.hash(&mut key);
         if let Some(catalog) = &self.lazy_features {
             catalog.revision.hash(&mut key);
@@ -60,7 +111,7 @@ impl App {
             .feature_discovery_root
             .as_deref()
             .unwrap_or(&self.project.root_dir);
-        let query = self.feature_browser.query.to_lowercase();
+        let query = self.feature_browser_filter_query().to_lowercase();
         if let Some(catalog) = &self.lazy_features {
             for (index, file_path) in catalog.paths.iter().enumerate() {
                 let path = file_path
@@ -141,7 +192,8 @@ impl App {
     }
 
     pub(crate) fn feature_directory_collapsed(&self, path: &str) -> bool {
-        self.feature_browser.query.is_empty() && !self.feature_browser.expanded.contains(path)
+        self.feature_browser_filter_query().is_empty()
+            && !self.feature_browser.expanded.contains(path)
     }
 
     pub(crate) fn handle_feature_browser_key(&mut self, event: KeyEvent) -> bool {
@@ -190,8 +242,10 @@ impl App {
                 KeyCode::Up | KeyCode::Down => return false,
                 _ => return true,
             }
-            if self.explore_selected_feature_row().is_none() {
-                self.explore_set_feature_row(0);
+            if matches!(event.code, KeyCode::Esc | KeyCode::Enter) {
+                self.commit_feature_browser_search();
+            } else {
+                self.schedule_feature_browser_search();
             }
             return true;
         }
@@ -202,6 +256,7 @@ impl App {
             }
             KeyCode::Esc if !self.feature_browser.query.is_empty() => {
                 self.feature_browser.query.clear();
+                self.commit_feature_browser_search();
                 true
             }
             KeyCode::Enter | KeyCode::Left | KeyCode::Right => {
@@ -231,6 +286,36 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_coalesces_input_and_commits_explicit_actions() {
+        let mut app = App::from_args().unwrap();
+        app.active_tab = MainTab::Explore;
+        app.explore_focus = ColumnFocus::Feature;
+        app.project.features = vec![
+            teshi_core::gherkin::parse_feature("Feature: Auth", "auth.feature".into()),
+            teshi_core::gherkin::parse_feature("Feature: Other", "other.feature".into()),
+        ];
+        app.git_status = Default::default();
+        let initial = app.feature_browser_rows();
+        app.feature_browser.searching = true;
+        app.paste_feature_browser_search("auth");
+        assert_eq!(app.feature_browser.query, "auth");
+        assert!(Rc::ptr_eq(&initial, &app.feature_browser_rows()));
+        app.poll_feature_browser_search();
+        assert!(Rc::ptr_eq(&initial, &app.feature_browser_rows()));
+        app.feature_browser.pending_search = Some(Instant::now() - SEARCH_DEBOUNCE);
+        app.poll_feature_browser_search();
+        assert_eq!(app.feature_browser_rows().len(), 1);
+        app.handle_feature_browser_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.feature_browser_rows().len(), 2);
+        app.feature_browser.searching = true;
+        app.paste_feature_browser_search("other");
+        app.handle_feature_browser_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.feature_browser_rows().len(), 1);
+        assert_eq!(app.feature_browser_filter_query(), "other");
+        assert!(app.feature_browser.pending_search.is_none());
+    }
 
     #[test]
     fn large_tree_reuses_rows_and_invalidates_changed_inputs() {
@@ -326,6 +411,8 @@ mod tests {
                 ))
             );
         }
+        app.feature_browser.pending_search = Some(Instant::now() - SEARCH_DEBOUNCE);
+        app.poll_feature_browser_search();
         let rows = app.feature_browser_rows();
         assert_eq!(rows.len(), 4);
         assert!(matches!(rows.last(), Some(Row::File(0, _, false))));

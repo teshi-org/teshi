@@ -329,6 +329,7 @@ pub fn run() -> Result<()> {
         }
         app.poll_lazy_features();
         app.poll_git_status();
+        app.poll_feature_browser_search();
         app.poll_external_feature_changes();
         app.poll_status_message_expiry();
         app.screenshot.poll();
@@ -454,6 +455,12 @@ pub fn run() -> Result<()> {
                         mouse_event.row,
                         mouse_event.modifiers,
                     )?;
+                }
+                Event::Paste(text)
+                    if app.active_tab == crate::app::MainTab::Explore
+                        && app.feature_browser.searching =>
+                {
+                    app.paste_feature_browser_search(&text);
                 }
                 Event::Paste(_)
                     if app.pending_delete.is_some()
