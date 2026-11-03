@@ -88,6 +88,31 @@ Reserve the packaged `setup.exe` flow below for work that targets the installer 
 update stream; that path cannot be exercised any other way, and it is what pays for the
 full release build.
 
+### Update failure and offline-retry acceptance (Windows)
+
+```powershell
+cargo build -p teshi-cli -p teshi-update-helper --locked
+$env:TESHI_UPDATE_CLI_TEST_BIN = (Resolve-Path target/debug/teshi.exe).Path
+$env:TESHI_UPDATE_HELPER_TEST_BIN = (Resolve-Path target/debug/teshi-update-helper.exe).Path
+cargo test -p teshi-update --locked manager::acceptance::interrupted_download_setup_failure_offline_retry_and_helper_rollback -- --ignored --exact --nocapture
+```
+
+This opt-in test requires Inno Setup 6. It isolates `LOCALAPPDATA` in a child process,
+uses a disposable marked installation, and transfers a real Inno package over a loopback
+HTTP fault server. It verifies Range after disconnection, setup failure diagnostics,
+offline retries through the actual CLI, helper mutual exclusion, smoke-check rollback,
+successful commit and preservation of user files. The Inno fixture omits registry,
+shortcut and uninstall registration; it does not replace release-installer packaging
+acceptance. Production GitHub proxy/TLS behavior is covered separately by
+`cargo test -p teshi-update --test proxy_transport --locked`.
+
+The same acceptance also launches disposable daemon and STDIO MCP processes. It verifies
+`daemon stop` while the helper gate is locked, update-driven graceful daemon shutdown,
+default refusal to kill an MCP blocker, explicit `--force-close`, and survival of a
+same-named MCP process from another directory. It never targets the developer's running
+Teshi sessions. Daemon server tests additionally keep a WebSocket open during shutdown
+and reject mismatched process-generation headers.
+
 ## Local source build identity
 
 `crates/teshi-core/build.rs` derives a complete `local` identity automatically

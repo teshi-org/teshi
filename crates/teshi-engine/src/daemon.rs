@@ -87,6 +87,34 @@ pub fn remove_daemon_manifest(project_root: &Path) {
     std::fs::remove_file(path.with_extension("lock")).ok();
 }
 
+/// Removes a stopped daemon's manifest only if no replacement has published one.
+/// Keeps the advisory lock file so concurrent writers retain one lock identity.
+///
+/// # Errors
+/// Returns lock, manifest-read or deletion errors.
+pub fn remove_daemon_manifest_if_matches(
+    project_root: &Path,
+    expected: &DaemonManifest,
+) -> Result<()> {
+    let path = DaemonManifest::manifest_path(project_root);
+    fs_util::with_exclusive_lock(&path, || {
+        let data = match std::fs::read(&path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let actual: DaemonManifest = serde_json::from_slice(&data)?;
+        if actual.pid == expected.pid
+            && actual.port == expected.port
+            && actual.started == expected.started
+            && actual.process_start == expected.process_start
+        {
+            std::fs::remove_file(&path)?;
+        }
+        Ok(())
+    })
+}
+
 /// Spawn the daemon as a detached background process using the current executable.
 ///
 /// On Windows this delegates to PowerShell `Start-Process` to avoid a self-spawn
@@ -158,4 +186,34 @@ pub fn spawn_daemon_background(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopped_daemon_cleanup_preserves_a_replacement_manifest_and_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let old = DaemonManifest {
+            pid: 100,
+            port: 200,
+            started: chrono::Utc::now(),
+            process_start: Some("old".into()),
+        };
+        old.save_manifest(root.path()).unwrap();
+        let replacement = DaemonManifest {
+            pid: 101,
+            process_start: Some("new".into()),
+            ..old.clone()
+        };
+        replacement.save_manifest(root.path()).unwrap();
+        remove_daemon_manifest_if_matches(root.path(), &old).unwrap();
+        assert_eq!(DaemonManifest::load_manifest(root.path()).unwrap().pid, 101);
+        remove_daemon_manifest_if_matches(root.path(), &replacement).unwrap();
+        assert!(!DaemonManifest::manifest_path(root.path()).exists());
+        assert!(DaemonManifest::manifest_path(root.path())
+            .with_extension("lock")
+            .exists());
+    }
 }

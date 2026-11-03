@@ -7389,6 +7389,7 @@ dependencies = [
  "serde_json",
  "teshi-core",
  "teshi-engine",
+ "teshi-update",
  "teshi-web-protocol",
  "tokio",
  "tokio-tungstenite 0.24.0",
@@ -7559,6 +7560,7 @@ dependencies = [
  "chrono",
  "flate2",
  "fs2",
+ "libc",
  "reqwest",
  "rustls",
  "rustls-native-certs",
@@ -7570,6 +7572,7 @@ dependencies = [
  "tempfile",
  "teshi-core",
  "thiserror 2.0.19",
+ "windows-sys 0.59.0",
  "winreg 0.55.0",
  "zip",
 ]

@@ -50,6 +50,8 @@ pub struct HttpResponse {
     pub etag: Option<String>,
     /// Retry delay in seconds, if throttled.
     pub retry_after: Option<u64>,
+    /// Byte interval returned for a partial payload response.
+    pub content_range: Option<String>,
     /// Response stream, bounded by the caller.
     pub body: Box<dyn Read + Send>,
 }
@@ -61,6 +63,16 @@ pub trait Http {
     /// # Errors
     /// Returns network or policy errors.
     fn get(&self, url: &str, etag: Option<&str>) -> Result<HttpResponse>;
+
+    /// Requests the remainder of a payload. Transports without Range support
+    /// may return a complete HTTP 200 response instead.
+    ///
+    /// # Errors
+    /// Returns network or policy errors.
+    fn get_range(&self, url: &str, start: u64) -> Result<HttpResponse> {
+        let _ = start;
+        self.get(url, None)
+    }
 }
 
 /// Production HTTPS transport; has no token or arbitrary repository configuration.
@@ -237,6 +249,16 @@ fn redact_proxy_secrets(message: &str) -> String {
 
 impl Http for GithubHttp {
     fn get(&self, url: &str, etag: Option<&str>) -> Result<HttpResponse> {
+        self.request(url, etag, None)
+    }
+
+    fn get_range(&self, url: &str, start: u64) -> Result<HttpResponse> {
+        self.request(url, None, Some(start))
+    }
+}
+
+impl GithubHttp {
+    fn request(&self, url: &str, etag: Option<&str>, start: Option<u64>) -> Result<HttpResponse> {
         let parsed = reqwest::Url::parse(url).map_err(|e| invalid(e.to_string()))?;
         if !allowed_url(&parsed) {
             return Err(invalid("Disallowed release URL"));
@@ -249,7 +271,17 @@ impl Http for GithubHttp {
         if let Some(etag) = etag {
             request = request.header("If-None-Match", etag);
         }
+        if let Some(start) = start {
+            request = request.header("Range", format!("bytes={start}-"));
+        }
+        // Range offsets and release checksums refer to the published bytes.
+        request = request.header("Accept-Encoding", "identity");
         let response = request.send().map_err(network)?;
+        let content_range = response
+            .headers()
+            .get("content-range")
+            .and_then(|h| h.to_str().ok())
+            .map(str::to_owned);
         let etag = response
             .headers()
             .get("etag")
@@ -272,6 +304,7 @@ impl Http for GithubHttp {
             status: response.status().as_u16(),
             etag,
             retry_after,
+            content_range,
             body: Box::new(response),
         })
     }

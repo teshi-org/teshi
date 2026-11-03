@@ -81,8 +81,8 @@ pub use browser_agent::{
     DEFAULT_BROWSER_LEASE_TTL_SECS,
 };
 pub use daemon::{
-    find_project_root, pick_free_port, remove_daemon_manifest, spawn_daemon_background,
-    DaemonManifest, DaemonManifestExt,
+    find_project_root, pick_free_port, remove_daemon_manifest, remove_daemon_manifest_if_matches,
+    spawn_daemon_background, DaemonManifest, DaemonManifestExt,
 };
 pub use events::{HostEventCallback, RuntimeEvent, RuntimeEvents};
 pub use fs_util::{read_locked, write_atomic};

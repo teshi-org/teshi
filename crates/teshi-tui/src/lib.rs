@@ -193,12 +193,22 @@ pub fn run() -> Result<()> {
     match cli_args.command {
         Some(cli::Command::Update {
             status,
+            retry_install,
+            force_close,
             check,
             channel,
             yes,
             json,
         }) => {
-            return cli::update::handle_update(status, check, channel.as_deref(), yes, json);
+            return cli::update::handle_update(
+                status,
+                check,
+                retry_install,
+                force_close,
+                channel.as_deref(),
+                yes,
+                json,
+            );
         }
         Some(cli::Command::Check(args)) => {
             return cli::check::handle_check_command(&args);

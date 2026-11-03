@@ -68,6 +68,7 @@ impl Http for FakeHttp {
             },
             etag: Some("test-etag".into()),
             retry_after: Some(60),
+            content_range: None,
             body: Box::new(Cursor::new(
                 self.pages
                     .get(url)
@@ -308,7 +309,7 @@ fn candidate(bytes: &[u8]) -> Candidate {
 }
 
 #[test]
-fn truncated_download_and_cancellation_remove_partial_files() {
+fn truncated_download_and_cancellation_retain_resumable_bytes() {
     let temp = tempfile::tempdir().unwrap();
     let mut http = FakeHttp::default();
     http.pages
@@ -324,9 +325,9 @@ fn truncated_download_and_cancellation_remove_partial_files() {
         )
         .unwrap_err()
         .code,
-        ErrorCode::Verification
+        ErrorCode::Network
     );
-    assert!(!destination.exists());
+    assert_eq!(std::fs::read(&destination).unwrap(), b"short");
     assert_eq!(
         download::download(
             &http,
@@ -339,7 +340,7 @@ fn truncated_download_and_cancellation_remove_partial_files() {
         .code,
         ErrorCode::Cancelled
     );
-    assert!(!destination.exists());
+    assert_eq!(std::fs::read(&destination).unwrap(), b"short");
 }
 
 #[test]

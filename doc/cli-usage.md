@@ -51,6 +51,9 @@ teshi update --check --json          # one JSON object; progress still goes to s
 teshi update --channel nightly       # explicit channel switch
 teshi update --yes                   # compatibility flag; automatic installation is already default
 teshi update --status                # last local helper result without contacting GitHub
+teshi update --retry-install         # retry the last cached installation offline
+teshi update --force-close           # close remaining processes from this installation after a graceful-exit timeout
+teshi update --retry-install --force-close
 ```
 
 `teshi update` starts installation automatically after it finds a verified candidate. `--yes` is retained for compatibility and does not bypass operating-system elevation, process coordination, or installation ownership checks. `--check` remains metadata-only and never downloads or installs a payload. `--json` prints one final object; progress still goes to stderr.
@@ -65,6 +68,53 @@ teshi update --status                # last local helper result without contacti
 Pending MUST NOT be printed as installed. Only the Windows per-user setup.exe install can replace files. Portable archives, MSI, source/Cargo builds, and explicitly externally managed installs can check for a release but cannot replace files. See [Installation](installation.md) for the install matrix, first-release bootstrap, checksum trust boundary, and proxy/TLS notes.
 
 GitHub metadata and payload downloads follow `HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` and the static Windows/macOS system proxy. PAC/WPAD is not supported. Windows update TLS skips online CRL lookups but still verifies certificates; it never uses `danger_accept_invalid_certs`.
+
+Interrupted payloads are retained and resumed with HTTP Range. A server returning a full
+response restarts that transfer; every completed payload is checked against its declared
+size and SHA256. Transfers have at most three attempts per invocation. Verified payloads
+survive setup, staging and helper failures, and regular `update` reuses them after checking
+release metadata and revalidating the cached bytes.
+
+`--retry-install` uses the last cached candidate for this installation without contacting
+GitHub or initializing a network client. It requires a complete verified payload and an
+unchanged installed build; missing, damaged or stale cache is refused with instructions
+to run regular `update`. It conflicts with `--check`, `--channel` and `--status`. Both paths
+retain the installation lock, helper transaction, inventory validation, smoke check and
+rollback. `--status` includes `last_failure` with its phase, error code, pinned payload
+identity and expected retry behavior, in addition to `previous_transaction`.
+
+During helper handoff, Teshi requests normal shutdown of registered daemons and desktop
+windows from the same installation. It waits for process exit before replacing files.
+TUI/MCP processes that remain open are reported by PID and executable path; the default
+operation fails safely after the exit deadline. `--force-close` explicitly permits the
+helper to terminate remaining processes from that installation after the deadline and
+can discard unsaved work. It never means “kill every teshi.exe”: executable paths must
+match the installed inventory, and OS creation identities are rechecked on process
+handles before termination. Other installation directories are excluded.
+
+The permission applies to one invocation and must be supplied again on an offline retry.
+`--yes` does not grant force-close permission. `--force-close` conflicts with `--check`
+and `--status`; `--status` itself is read-only and includes `running_processes`.
+Each transaction records process-close attempts in `processes.json`; failure diagnostics
+distinguish `process_exit` from file commit failures. Legacy processes without a verified
+shutdown endpoint may need to be closed manually or with explicit `--force-close`.
+
+### Stop the project daemon
+
+Run from the intended project directory:
+
+```powershell
+teshi daemon stop          # request graceful shutdown and confirm process exit
+teshi daemon stop --force  # force-close the verified daemon if graceful shutdown fails
+```
+
+Stop remains available while an updater holds the installation gate. The command bypasses
+HTTP proxies for loopback requests, checks HTTP status and daemon process/project identity,
+and only reports success after the captured process generation exits. Failed shutdowns
+retain the manifest; cleanup cannot remove a replacement daemon's manifest. Force close
+requires a matching process creation identity recorded by the daemon, and uses Windows
+process handles or Linux pidfds. Legacy manifests without that identity are refused for
+force close. Other Unix platforms support graceful shutdown but not force close.
 
 ### Requirement library (`teshi requirements`)
 

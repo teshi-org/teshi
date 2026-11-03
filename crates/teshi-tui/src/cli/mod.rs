@@ -83,9 +83,15 @@ pub enum Command {
     },
     /// Check for and install a verified Teshi release bundle
     Update {
-        /// Read the last local helper result without contacting GitHub
-        #[arg(long, conflicts_with_all = ["check", "channel", "yes"])]
+        /// Read local failures and the last helper result without contacting GitHub
+        #[arg(long, conflicts_with_all = ["check", "channel", "yes", "retry_install", "force_close"])]
         status: bool,
+        /// Retry the cached installation offline after revalidating its payload
+        #[arg(long, conflicts_with_all = ["check", "channel"])]
+        retry_install: bool,
+        /// Force-close remaining processes from this installation after graceful shutdown (unsaved work may be lost)
+        #[arg(long, conflicts_with = "check")]
+        force_close: bool,
         /// Only check metadata; do not download or install a bundle
         #[arg(long)]
         check: bool,
@@ -1961,7 +1967,11 @@ pub enum DaemonCommand {
     /// Start the project daemon if not already running
     Start,
     /// Stop the running project daemon
-    Stop,
+    Stop {
+        /// Force-close the verified daemon if graceful shutdown does not finish
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

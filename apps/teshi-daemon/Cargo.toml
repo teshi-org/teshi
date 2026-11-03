@@ -17,6 +17,7 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 teshi-core = { workspace = true }
+teshi-update = { workspace = true }
 teshi-engine = { workspace = true }
 teshi-web-protocol = { workspace = true }
 tokio = { workspace = true }

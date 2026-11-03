@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Extension, Path, Query, Request, State};
-use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -91,6 +91,7 @@ struct DaemonState {
     shutdown_token: CancellationToken,
     active_control_sessions: Arc<StdMutex<HashSet<String>>>,
     hosted_session_gate: Arc<tokio::sync::RwLock<()>>,
+    process_endpoint: Option<teshi_update::processes::DaemonEndpoint>,
 }
 
 impl DaemonState {
@@ -172,6 +173,16 @@ pub async fn run_server_with_listener(
     dist: PathBuf,
     project_root: Option<std::path::PathBuf>,
 ) -> Result<()> {
+    let shutdown_project = project_root.as_deref().map(fs::canonicalize).transpose()?;
+    let port = listener.local_addr()?.port();
+    let process_endpoint = teshi_update::processes::inspect(std::process::id())?.map(|process| {
+        teshi_update::processes::DaemonEndpoint {
+            process,
+            port,
+            project_root: shutdown_project.clone(),
+        }
+    });
+    let _update_registration = teshi_update::processes::register_daemon(port, shutdown_project)?;
     let shutdown_token = CancellationToken::new();
     let sessions = SessionStore::new();
     let state = DaemonState {
@@ -182,6 +193,7 @@ pub async fn run_server_with_listener(
         shutdown_token: shutdown_token.clone(),
         active_control_sessions: Arc::new(StdMutex::new(HashSet::new())),
         hosted_session_gate: Arc::new(tokio::sync::RwLock::new(())),
+        process_endpoint,
     };
 
     let cors = browser_cors_layer();
@@ -249,6 +261,7 @@ pub async fn run_server_with_listener(
         .route("/api/v1/fs/read", get(api_read_file))
         .route("/api/v1/daemon/run", post(api_run))
         .route("/api/v1/daemon/shutdown", post(api_daemon_shutdown))
+        .route("/api/v1/daemon/process", get(api_daemon_process))
         .route("/api/v1/steps/catalog", get(api_step_catalog))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -323,7 +336,13 @@ pub async fn run_server_with_listener(
 
     // Clean up on exit
     if let Some(root) = idle_project_root {
-        teshi_engine::remove_daemon_manifest(&root);
+        if let Some(manifest) =
+            <teshi_engine::DaemonManifest as teshi_engine::DaemonManifestExt>::load_manifest(&root)
+        {
+            if manifest.pid == std::process::id() && manifest.port == port {
+                teshi_engine::remove_daemon_manifest_if_matches(&root, &manifest)?;
+            }
+        }
     }
 
     serve_result.map_err(Into::into)
@@ -1354,7 +1373,7 @@ async fn dispatch_control_request(
             control_status(status)
         }
         "runtime.shutdown" => {
-            let status = api_daemon_shutdown(State(state.clone())).await;
+            let status = api_daemon_shutdown(State(state.clone()), HeaderMap::new()).await;
             control_status(status)
         }
         _ => {
@@ -1507,6 +1526,7 @@ async fn handle_control_socket(state: DaemonState, mut socket: WebSocket) {
     let mut session_watch = tokio::time::interval(std::time::Duration::from_millis(250));
     loop {
         tokio::select! {
+            _ = state.shutdown_token.cancelled() => break,
             _ = session_watch.tick() => {
                 if state.sessions.get_session(&active_token).is_none() {
                     break;
@@ -1654,6 +1674,9 @@ async fn handle_control_socket(state: DaemonState, mut socket: WebSocket) {
     while request_tasks.join_next().await.is_some() {}
     drop(response_tx);
     drop(event_tx);
+    if state.shutdown_token.is_cancelled() {
+        writer.abort();
+    }
     let _ = writer.await;
     release_control_session(&state.active_control_sessions, &active_token);
 }
@@ -1754,6 +1777,7 @@ async fn handle_preview_socket(state: DaemonState, mut socket: WebSocket) {
     let mut missing_since = None;
     loop {
         tokio::select! {
+            _ = state.shutdown_token.cancelled() => break,
             _ = &mut relay => {
                 break;
             }
@@ -1782,7 +1806,12 @@ async fn events_ws(
 ) -> Response {
     let rt = state.rt.clone();
     let active_ws = state.active_ws.clone();
-    ws.on_upgrade(move |socket| handle_events_socket(rt, active_ws, role, socket))
+    ws.on_upgrade(move |socket| async move {
+        tokio::select! {
+            _ = state.shutdown_token.cancelled() => {},
+            _ = handle_events_socket(rt, active_ws, role, socket) => {},
+        }
+    })
 }
 
 struct WsGuard(Arc<AtomicUsize>);
@@ -1923,8 +1952,11 @@ async fn browser_stream_ws(State(state): State<DaemonState>, ws: WebSocketUpgrad
             .unwrap_or_else(|| "TargetApp.exe".into())
     });
     let active_ws = state.active_ws.clone();
-    ws.on_upgrade(move |socket| {
-        handle_browser_stream_socket(ws_url, attach_process, active_ws, socket, false)
+    ws.on_upgrade(move |socket| async move {
+        tokio::select! {
+            _ = state.shutdown_token.cancelled() => {},
+            _ = handle_browser_stream_socket(ws_url, attach_process, active_ws, socket, false) => {},
+        }
     })
 }
 
@@ -3128,7 +3160,30 @@ async fn api_terminal_write(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn api_daemon_shutdown(State(state): State<DaemonState>) -> StatusCode {
+async fn api_daemon_process(State(state): State<DaemonState>) -> impl IntoResponse {
+    match state.process_endpoint {
+        Some(endpoint) => Json(endpoint).into_response(),
+        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+async fn api_daemon_shutdown(State(state): State<DaemonState>, headers: HeaderMap) -> StatusCode {
+    if headers.contains_key("x-teshi-process-pid") || headers.contains_key("x-teshi-process-start")
+    {
+        let Some(endpoint) = &state.process_endpoint else {
+            return StatusCode::CONFLICT;
+        };
+        let pid = headers
+            .get("x-teshi-process-pid")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u32>().ok());
+        let started = headers
+            .get("x-teshi-process-start")
+            .and_then(|value| value.to_str().ok());
+        if pid != Some(endpoint.process.pid) || started != Some(endpoint.process.started.as_str()) {
+            return StatusCode::CONFLICT;
+        }
+    }
     state.shutdown_token.cancel();
     StatusCode::OK
 }
@@ -3542,6 +3597,7 @@ mod integration {
             shutdown_token: CancellationToken::new(),
             active_control_sessions: Arc::new(StdMutex::new(HashSet::new())),
             hosted_session_gate: Arc::new(tokio::sync::RwLock::new(())),
+            process_endpoint: None,
         }
     }
 
@@ -3751,6 +3807,7 @@ mod integration {
             pid: std::process::id(),
             port: address.port(),
             started: chrono::Utc::now(),
+            process_start: None,
         }
         .save_manifest(&project_root)
         .unwrap();
@@ -3764,6 +3821,9 @@ mod integration {
         ));
         let client = reqwest::Client::new();
         let url = format!("http://{}/api/v1/daemon/shutdown", address);
+        let (events, _) = tokio_tungstenite::connect_async(format!("ws://{address}/api/v1/events"))
+            .await
+            .unwrap();
         let mut shutdown_accepted = false;
         for _ in 0..40 {
             if let Ok(response) = client.post(&url).send().await {
@@ -3780,6 +3840,7 @@ mod integration {
             .expect("daemon shutdown timed out")
             .expect("daemon task panicked")
             .expect("daemon server failed");
+        drop(events);
         assert!(!DaemonManifest::manifest_path(&project_root).exists());
         assert!(std::net::TcpStream::connect_timeout(
             &address,
@@ -3787,6 +3848,36 @@ mod integration {
         )
         .is_err());
         std::fs::remove_dir_all(project_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_a_different_process_generation() {
+        let mut state = test_state();
+        let process = teshi_update::processes::inspect(std::process::id())
+            .unwrap()
+            .unwrap();
+        state.process_endpoint = Some(teshi_update::processes::DaemonEndpoint {
+            process: process.clone(),
+            port: 1,
+            project_root: None,
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-teshi-process-pid",
+            process.pid.to_string().parse().unwrap(),
+        );
+        headers.insert("x-teshi-process-start", "wrong-generation".parse().unwrap());
+        assert_eq!(
+            api_daemon_shutdown(State(state.clone()), headers.clone()).await,
+            StatusCode::CONFLICT
+        );
+        assert!(!state.shutdown_token.is_cancelled());
+        headers.insert("x-teshi-process-start", process.started.parse().unwrap());
+        assert_eq!(
+            api_daemon_shutdown(State(state.clone()), headers).await,
+            StatusCode::OK
+        );
+        assert!(state.shutdown_token.is_cancelled());
     }
 
     #[test]

@@ -10,7 +10,15 @@ fn update_help_exposes_check_status_channel_and_json() {
         .unwrap();
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    for flag in ["--check", "--status", "--channel", "--yes", "--json"] {
+    for flag in [
+        "--check",
+        "--status",
+        "--channel",
+        "--yes",
+        "--json",
+        "--retry-install",
+        "--force-close",
+    ] {
         assert!(help.contains(flag), "{flag}");
     }
     assert!(help.contains("installation is automatic"));
@@ -38,9 +46,19 @@ fn local_status_and_identity_do_not_require_a_release_or_install_manifest() {
 
 #[test]
 fn status_rejects_install_flags() {
-    let output = Command::new(env!("CARGO_BIN_EXE_teshi"))
-        .args(["update", "--status", "--yes"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2));
+    for flags in [
+        ["--status", "--yes"],
+        ["--status", "--retry-install"],
+        ["--check", "--retry-install"],
+        ["--retry-install", "--channel=nightly"],
+        ["--status", "--force-close"],
+        ["--check", "--force-close"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_teshi"))
+            .arg("update")
+            .args(flags)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+    }
 }

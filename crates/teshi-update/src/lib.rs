@@ -1,5 +1,6 @@
 //! Native application updates, shared by CLI and desktop without UI dependencies.
 
+pub mod diagnostics;
 pub mod download;
 pub mod exe;
 pub mod github;
@@ -7,7 +8,9 @@ pub mod install;
 pub mod lifecycle;
 pub mod manager;
 pub mod manifest;
+pub mod payload;
 pub mod policy;
+pub mod processes;
 pub mod release;
 pub mod storage;
 pub mod transaction;

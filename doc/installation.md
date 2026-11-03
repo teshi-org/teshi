@@ -41,11 +41,41 @@ Shipped release binaries include `teshi update`. The first updater-enabled **set
 |--------------|----------------|
 | Windows setup.exe (`%LOCALAPPDATA%\Programs\teshi`, `kind: exe`) | Download the new setup.exe, silent `/update=true`, helper replaces managed files |
 | Portable ZIP/tar.gz with `teshi-bundle.json` | Check-only; do not self-update |
-| Registered Teshi MSI | Check-only; install setup.exe if you want in-app updates |
+| Registered Teshi MSI | Check-only; upgrade using a newer MSI or contact your administrator |
 | Explicit external package-manager marker | Prints the manager guidance; never overwrites files |
 | Source/Cargo/`cargo run` builds | Check-only with manual-install guidance |
 
 `teshi update --check` never downloads payloads. `teshi update` starts installation automatically after a verified candidate is found; `--yes` remains a compatibility flag and does not bypass operating-system or process-safety checks. Checksums in `SHA256SUMS` and `update-manifest.json` detect corrupt or mismatched GitHub assets; they are not an independent signature if GitHub itself is compromised.
+
+Downloads use a persistent per-user cache at `%LOCALAPPDATA%\teshi\updates\payloads`
+on Windows, keyed by release ID, asset ID and SHA256. Partial transfers resume on the next
+attempt, and completed payloads are revalidated before reuse. Installation failures do
+not delete verified downloads. `teshi update --retry-install` retries the cached candidate
+offline; `teshi update --status` explains the last failed phase and whether a cached
+payload was retained. Ordinary `update` can still contact GitHub for newer metadata.
+
+Payloads are retained until explicitly removed; there is no automatic eviction in this
+version. To reclaim disk space, remove obsolete entry directories under `payloads` only
+when no updater is running. Removing a cache entry requires downloading it again; do not
+remove installation `.teshi-update/pending.json` or transaction journals to clear cache.
+
+Closing the TUI or browser does not necessarily stop its background daemon or MCP server.
+The updater now requests graceful shutdown of registered daemons from the same install
+and reports remaining processes. Use `teshi daemon stop` from that daemon's project, or
+explicitly run `teshi update --force-close` / `teshi update --retry-install --force-close`
+to permit termination after the graceful-exit deadline. Force close can lose unsaved work;
+it targets verified process generations in that installation, not other Teshi copies.
+The setup.exe-only self-update eligibility rules above still apply.
+
+MSI installations skip the updater's installation-level process and daemon registration.
+Running `teshi web` and stopping its daemon do not require write access to the MSI
+installation directory. Project daemon manifests and logs remain in the project's
+`.teshi` directory (or the user-level daemon directory when no project is selected).
+
+In-app setup uses `/SUPPRESSMSGBOXES` and `/SP-` as well as `/VERYSILENT`, so
+ordinary installer failures return an error instead of waiting on a hidden dialog.
+Installer-driven application closing is disabled; the helper owns the verified,
+installation-scoped close policy described above.
 
 ### Proxies and TLS
 
