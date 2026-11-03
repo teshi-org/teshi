@@ -22,7 +22,17 @@ pub(super) fn inspect(pid: u32) -> Result<Option<ProcessIdentity>> {
         .nth(19)
         .ok_or_else(|| crate::invalid("Missing process creation time"))?
         .to_string();
-    let executable = fs::canonicalize(fs::read_link(root.join("exe"))?)?;
+    // The process can exit between the stat read and the link read. A vanished
+    // /proc/<pid>/exe means the identity is gone, which callers treat as "not
+    // running" rather than as an I/O failure of the shutdown path.
+    let executable = match fs::read_link(root.join("exe"))
+        .map_err(std::io::Error::from)
+        .and_then(fs::canonicalize)
+    {
+        Ok(executable) => executable,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
     Ok(Some(ProcessIdentity {
         pid,
         executable,
