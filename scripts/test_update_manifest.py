@@ -3,11 +3,20 @@
 import json
 from pathlib import Path
 import tempfile
+import tomllib
 import unittest
 import sys
 from unittest.mock import patch
 
 import update_manifest as manifest
+
+# Publication fixtures follow the workspace version so a version bump does not
+# leave the identity contract asserting against a stale tag.
+VERSION = tomllib.loads(
+    (Path(__file__).resolve().parents[1] / "Cargo.toml").read_text(encoding="utf-8")
+)["workspace"]["package"]["version"]
+STABLE_TAG = f"v{VERSION}"
+NIGHTLY_TAG = f"{STABLE_TAG}-nightly.20260908.aaaaaaa"
 
 
 class UpdateManifestTests(unittest.TestCase):
@@ -16,7 +25,7 @@ class UpdateManifestTests(unittest.TestCase):
             output = Path(directory) / "identity.json"
             github_env = Path(directory) / "github-env"
             with patch.dict("os.environ", {"TESHI_RELEASE_TIMESTAMP": "2026-09-08T01:02:03Z", "TESHI_NIGHTLY_RELEASE_NUMBER": "101", "GITHUB_ENV": str(github_env)}), \
-                 patch.object(sys, "argv", ["update_manifest.py", "identity", "--tag", "v0.7.10-nightly.20260908.aaaaaaa", "--sequence", "99", "--output", str(output)]), \
+                 patch.object(sys, "argv", ["update_manifest.py", "identity", "--tag", NIGHTLY_TAG, "--sequence", "99", "--output", str(output)]), \
                  patch.object(manifest.subprocess, "check_output", return_value="a" * 40):
                 manifest.main()
             exported = github_env.read_text(encoding="utf-8")
@@ -27,12 +36,12 @@ class UpdateManifestTests(unittest.TestCase):
     @patch.dict("os.environ", {"TESHI_RELEASE_TIMESTAMP": "2026-09-08T01:02:03Z"})
     def test_build_identity_and_nightly_tag(self):
         sha = "a" * 40
-        stable = manifest.identity("v0.7.10", sha, 10)
-        nightly = manifest.identity("v0.7.10-nightly.20260908.aaaaaaa", sha, 11)
+        stable = manifest.identity(STABLE_TAG, sha, 10)
+        nightly = manifest.identity(NIGHTLY_TAG, sha, 11)
         self.assertEqual(stable["channel"], "stable")
         self.assertEqual(nightly["build_sequence"], 11)
         self.assertEqual(stable["git_sha"], nightly["git_sha"])
-        for tag, commit, sequence in [("v0.7.10", "a" * 7, 1), ("v0.7.10", sha, 0), ("v0.7.10-nightly.20260908.bbbbbbb", sha, 1)]:
+        for tag, commit, sequence in [(STABLE_TAG, "a" * 7, 1), (STABLE_TAG, sha, 0), (f"{STABLE_TAG}-nightly.20260908.bbbbbbb", sha, 1)]:
             with self.assertRaises(ValueError):
                 manifest.identity(tag, commit, sequence)
 
@@ -65,33 +74,33 @@ class UpdateManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             with self.assertRaises(FileNotFoundError):
-                manifest.release(root, {}, "v0.7.10")
+                manifest.release(root, {}, STABLE_TAG)
             for target in manifest.TARGETS:
                 ext = "zip" if "windows" in target else "tar.gz"
-                (root / f"teshi-v0.7.10-{target}.{ext}").write_bytes(b"fixture")
-            (root / "teshi-v0.7.10-x64.msi").write_bytes(b"msi fixture")
-            (root / "teshi-v0.7.10-x64-setup.exe").write_bytes(b"setup fixture")
-            manifest.release(root, {}, "v0.7.10")
+                (root / f"teshi-{STABLE_TAG}-{target}.{ext}").write_bytes(b"fixture")
+            (root / f"teshi-{STABLE_TAG}-x64.msi").write_bytes(b"msi fixture")
+            (root / f"teshi-{STABLE_TAG}-x64-setup.exe").write_bytes(b"setup fixture")
+            manifest.release(root, {}, STABLE_TAG)
             self.assertIn("update-manifest.json", (root / "SHA256SUMS").read_text())
-            self.assertIn("teshi-v0.7.10-x64-setup.exe", (root / "SHA256SUMS").read_text())
+            self.assertIn(f"teshi-{STABLE_TAG}-x64-setup.exe", (root / "SHA256SUMS").read_text())
             self.assertEqual(len(json.loads((root / "update-manifest.json").read_text())["assets"]), 5)
             manifest.verify_release(root)
-            (root / "teshi-v0.7.10-x64.msi").write_bytes(b"tampered")
+            (root / f"teshi-{STABLE_TAG}-x64.msi").write_bytes(b"tampered")
             with self.assertRaises(ValueError):
                 manifest.verify_release(root)
 
     def test_publication_can_include_only_the_windows_setup_exe(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "teshi-v0.7.10-x64-setup.exe").write_bytes(b"setup fixture")
-            manifest.release(root, {}, "v0.7.10", include=("exe",))
+            (root / f"teshi-{STABLE_TAG}-x64-setup.exe").write_bytes(b"setup fixture")
+            manifest.release(root, {}, STABLE_TAG, include=("exe",))
             assets = json.loads((root / "update-manifest.json").read_text())["assets"]
             self.assertEqual([asset["kind"] for asset in assets], ["exe"])
             self.assertEqual(
                 [asset["name"] for asset in assets],
-                ["teshi-v0.7.10-x64-setup.exe"],
+                [f"teshi-{STABLE_TAG}-x64-setup.exe"],
             )
-            self.assertIn("teshi-v0.7.10-x64-setup.exe", (root / "SHA256SUMS").read_text())
+            self.assertIn(f"teshi-{STABLE_TAG}-x64-setup.exe", (root / "SHA256SUMS").read_text())
             self.assertNotIn(".msi", (root / "SHA256SUMS").read_text())
             manifest.verify_release(root)
 

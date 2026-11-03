@@ -88,6 +88,8 @@ impl Fixture {
         terminal
             .expect_text("# Vim acceptance", true, 10000)
             .unwrap();
+        // The tree owns the tab on open; Ctrl+w Right hands the keys to the editor.
+        terminal.key("Ctrl+w").unwrap();
         terminal.key("Right").unwrap();
         terminal
     }
