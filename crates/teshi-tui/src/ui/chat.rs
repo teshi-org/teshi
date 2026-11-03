@@ -485,7 +485,9 @@ pub(super) fn render_chat_panel(
         " AI Chat ",
         fg(theme::PRIMARY).add_modifier(Modifier::BOLD),
     ));
-    if !app.agent_registry.uses_builtin_fallback() {
+    if !app.agent_registry.uses_builtin_fallback()
+        && (app.agent().backend_selected || app.agent().backend.is_connected())
+    {
         title.push_span(Span::styled(
             format!("· Agent: {} ", app.active_agent_profile().name),
             muted(),
@@ -715,7 +717,21 @@ fn build_chat_projection(
             wrap_line_to_width(Line::styled(greeting, muted()), width),
         );
         append_blank(&mut out);
-        if !crate::llm::is_configured() {
+        if !agent.backend.is_connected() {
+            let hint = if agent.backend_selected {
+                "Agent preselected; not connected. Focus the input to start, or use /agent."
+            } else {
+                "No agent selected. Use /agent to choose, or focus the input to use Teshi Native."
+            };
+            append_unselectable(
+                &mut out,
+                wrap_line_to_width(Line::styled(hint, muted()), width),
+            );
+            append_blank(&mut out);
+        }
+        if agent.backend_kind() == teshi_agent::backend::AgentBackendKind::Native
+            && !crate::llm::is_configured()
+        {
             let note =
                 "Note: Run 'teshi auth login' or set TESHI_LLM_API_KEY to enable AI responses.";
             append_unselectable(
@@ -1330,12 +1346,17 @@ fn render_chat_status(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             }
         }
         AiStatus::Error => {
-            if app.status.starts_with("AI error:") {
+            if app.status.starts_with("AI error:")
+                || app.status.starts_with("AI backend unavailable:")
+            {
                 app.status.clone()
             } else {
                 "AI error — check TESHI_LLM_API_KEY and your network connection.".to_string()
             }
         }
+        AiStatus::Idle if agent.backend.is_connected() => "Ready".into(),
+        AiStatus::Idle if agent.backend_selected => "Not connected · /agent".into(),
+        AiStatus::Idle => "No agent selected · /agent".into(),
         _ => String::new(),
     };
 
@@ -1355,6 +1376,7 @@ fn render_chat_status(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             left.push(Span::styled(status_text, fg(theme::ERROR)));
             left.push(Span::styled("  Enter retry · Esc clear", muted()));
         }
+        AiStatus::Idle => left.push(Span::styled(status_text, muted())),
         _ => {}
     }
     // Pipeline stage is redundant while approval text already names it.

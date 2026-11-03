@@ -151,7 +151,7 @@ mod tests {
             .is_none()
         {
             assert!(Instant::now() < deadline);
-            app.discover_visible_acp_controls();
+            app.refresh_acp_controls();
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(
@@ -223,29 +223,121 @@ mod tests {
     }
 
     #[test]
-    fn entering_ai_discovers_settings_without_a_prompt_or_picker() {
+    fn browsing_chat_does_not_connect_until_settings_are_explicitly_opened() {
         let (mut app, _project, _store) = configured_app(false);
-        app.active_tab = crate::app::MainTab::Explore;
-        app.discover_visible_acp_controls();
-        assert!(!app.agent().acp_controls_ui.discovery_started);
-        app.active_tab = crate::app::MainTab::Ai;
-        app.discover_visible_acp_controls();
+        for tab in [
+            crate::app::MainTab::Explore,
+            crate::app::MainTab::Ai,
+            crate::app::MainTab::MindMap,
+            crate::app::MainTab::Ai,
+        ] {
+            app.active_tab = tab;
+            app.mindmap_ai_panel_visible = true;
+            app.poll_llm_events();
+            assert!(!app.agent().acp_controls_ui.discovery_started);
+            assert!(!app.agent().backend.is_connected());
+            assert!(!app.agent().backend.acp_controls().unwrap().ready);
+        }
+        app.open_acp_controls(None);
         assert!(app.agent().acp_controls_ui.discovery_started);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !app.agent().backend.acp_controls().unwrap().ready {
             assert!(Instant::now() < deadline);
-            app.discover_visible_acp_controls();
+            app.refresh_acp_controls();
             std::thread::sleep(Duration::from_millis(10));
         }
         let state = app.agent().backend.acp_controls().unwrap();
-        app.discover_visible_acp_controls();
+        app.refresh_acp_controls();
         assert_eq!(
             app.agent().backend.acp_controls().unwrap().revision,
             state.revision
         );
         assert!(!state.config.options.is_empty());
-        assert!(app.agent().acp_controls_ui.picker.is_none());
+        assert!(app.agent().acp_controls_ui.picker.is_some());
         assert!(app.agent().messages().is_empty());
+    }
+
+    #[test]
+    fn input_focus_connects_without_starting_a_turn_on_both_chat_surfaces() {
+        use crate::{
+            app::{AiStatus, ClickableRegion, MainTab, MindMapFocus},
+            keymap::Action,
+        };
+        for tab in [MainTab::Ai, MainTab::MindMap] {
+            for mouse in [false, true] {
+                let (mut app, _project, _store) = configured_app(false);
+                app.active_tab = tab;
+                app.mindmap_ai_panel_visible = true;
+                app.mindmap_focus = MindMapFocus::AiPanel;
+                app.ai_input_focused = false;
+                if mouse {
+                    let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+                    terminal
+                        .draw(|frame| crate::ui::render(frame, &mut app))
+                        .unwrap();
+                    let rect = app
+                        .clickable_regions
+                        .iter()
+                        .find_map(|region| match region {
+                            ClickableRegion::ChatInput { rect } => Some(*rect),
+                            _ => None,
+                        })
+                        .expect("visible chat input");
+                    app.handle_mouse_event(
+                        MouseEventKind::Down(MouseButton::Left),
+                        rect.x + 1,
+                        rect.y + 1,
+                        KeyModifiers::NONE,
+                    )
+                    .unwrap();
+                } else {
+                    app.handle_action(Action::AiFocusInput).unwrap();
+                }
+                assert!(app.ai_input_focused);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !app.agent().backend.acp_controls().unwrap().ready {
+                    assert!(Instant::now() < deadline);
+                    app.poll_llm_events();
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let connected = app.agent().backend.acp_controls().unwrap();
+                assert!(app.agent().messages().is_empty());
+                assert_eq!(app.agent().status, AiStatus::Idle);
+                assert_eq!(
+                    app.agent().backend.status(),
+                    teshi_agent::backend::AgentBackendStatus::Idle
+                );
+                app.handle_action(Action::AiBlurInput).unwrap();
+                app.handle_action(Action::AiFocusInput).unwrap();
+                assert_eq!(
+                    app.agent().backend.acp_controls().unwrap().session_id,
+                    connected.session_id
+                );
+                app.agent_mut().backend.start().unwrap();
+                app.agent_mut().status = AiStatus::Waiting;
+                app.agent_mut().partial_response_mut().push_str("streaming");
+                app.handle_action(Action::AiFocusInput).unwrap();
+                assert_eq!(app.agent().status, AiStatus::Waiting);
+                assert_eq!(app.agent().partial_response(), "streaming");
+            }
+        }
+    }
+
+    #[test]
+    fn switching_and_closing_conversations_preserves_focused_connection() {
+        use crate::keymap::Action;
+        let (mut app, _project, _store) = configured_app(false);
+        let (mut other, _other_project, _other_store) = configured_app(false);
+        app.agents.push(other.agents.remove(0));
+        app.ai_input_focused = true;
+        app.handle_action(Action::AgentSelect(1)).unwrap();
+        assert!(app.agent().backend.is_connected());
+        assert!(!app.agents[0].backend.is_connected());
+        app.handle_action(Action::AgentClose).unwrap();
+        assert!(app.ai_input_focused);
+        assert!(app.agent().backend.is_connected());
+        assert!(app.agent().messages().is_empty());
+        assert_eq!(app.agent().status, crate::app::AiStatus::Idle);
     }
 
     #[test]
@@ -447,6 +539,13 @@ pub(crate) struct ControlsUi {
 }
 
 impl ControlsUi {
+    /// Record a connection requested by a user action, never by panel visibility.
+    pub(crate) fn begin_connection(&mut self) {
+        self.discovery_started = true;
+        self.animation_started = Some(std::time::Instant::now());
+        self.discovery_error = None;
+    }
+
     /// Whether settings own text/paste input ahead of the underlying chat.
     pub(crate) fn picker_active(&self) -> bool {
         self.picker.is_some()
@@ -458,15 +557,16 @@ impl ControlsUi {
 }
 
 impl App {
-    pub(crate) fn discover_visible_acp_controls(&mut self) {
-        let visible = self.active_tab == crate::app::MainTab::Ai
-            || (self.active_tab == crate::app::MainTab::MindMap && self.mindmap_ai_panel_visible);
-        if visible
-            && self.agent().backend.kind() == teshi_agent::backend::AgentBackendKind::Acp
-            && !self.agent().acp_controls_ui.discovery_started
-        {
+    /// Prepare ACP once when the user enters the input, preserving startup errors.
+    pub(crate) fn connect_acp_on_input_focus(&mut self) {
+        // A failed attempt stays visible until the user explicitly reconnects.
+        if !self.agent().acp_controls_ui.discovery_started {
             self.connect_acp_controls();
         }
+    }
+
+    pub(crate) fn refresh_acp_controls(&mut self) {
+        // Polling updates an existing picker; displaying chat never connects it.
         self.refresh_acp_approval_picker();
     }
 
@@ -481,9 +581,8 @@ impl App {
     }
     pub(crate) fn connect_acp_controls(&mut self) {
         // A failed discovery stays inspectable instead of restarting every frame.
-        self.agent_mut().acp_controls_ui.discovery_started = true;
-        self.agent_mut().acp_controls_ui.animation_started = Some(std::time::Instant::now());
-        self.agent_mut().acp_controls_ui.discovery_error = None;
+        self.agent_mut().backend_selected = true;
+        self.agent_mut().acp_controls_ui.begin_connection();
         let index = self.selected_agent;
         if !self.ensure_agent_backend(index) {
             self.agent_mut().acp_controls_ui.discovery_error = Some(self.status.clone());
@@ -822,7 +921,7 @@ pub(crate) fn render_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else if state.ready {
         "Settings".into()
     } else {
-        "Connect".into()
+        "Not connected".into()
     };
     let more = if area.width < 32 && status == "Settings" {
         "⋯".into()

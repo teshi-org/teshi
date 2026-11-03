@@ -145,6 +145,8 @@ pub struct AgentThread {
     pub profile_id: Option<String>,
     /// Current conversation's ACP selection, also included in session snapshots.
     pub selected_acp_id: Option<String>,
+    /// A remembered choice is a preselection, not permission to connect on display.
+    pub(crate) backend_selected: bool,
     selection_root: Option<std::path::PathBuf>,
     selection_warning: Option<String>,
     /// Permission prompt from the external ACP agent, if one is pending.
@@ -230,31 +232,32 @@ impl AgentThread {
         let mut thread = Self::new_with_backend(id, title, kind);
         thread.selection_root = root;
         if std::env::var("TESHI_AGENT_BACKEND").is_ok() {
+            thread.backend_selected = true;
             return thread;
         }
         let Some(root) = thread.selection_root.as_ref() else {
             return thread;
         };
-        let choice = crate::agent_selection::load(root).and_then(|choice| match choice {
-            Some(crate::agent_selection::Selection::Acp { agent_id }) => {
-                if !crate::acp_agents::load(root)?
+        let choice = crate::agent_selection::load(root).and_then(|choice| {
+            if let Some(crate::agent_selection::Selection::Acp { agent_id }) = &choice
+                && !crate::acp_agents::load(root)?
                     .iter()
-                    .any(|agent| agent.id == agent_id)
-                {
-                    anyhow::bail!("ACP Agent {agent_id} is unavailable; using Teshi Native");
-                }
-                Ok(Some(agent_id))
+                    .any(|agent| &agent.id == agent_id)
+            {
+                anyhow::bail!("ACP Agent {agent_id} is unavailable; using Teshi Native");
             }
-            _ => Ok(None),
+            Ok(choice)
         });
         match choice {
-            Ok(Some(id)) => {
+            Ok(Some(crate::agent_selection::Selection::Acp { agent_id })) => {
                 thread.backend = teshi_agent_runtime::backend::AgentBackendRuntime::new(
                     teshi_agent::backend::AgentBackendKind::Acp,
                     teshi_agent_runtime::max_agent_iterations(),
                 );
-                thread.selected_acp_id = Some(id);
+                thread.selected_acp_id = Some(agent_id);
+                thread.backend_selected = true;
             }
+            Ok(Some(crate::agent_selection::Selection::Native)) => thread.backend_selected = true,
             Ok(None) => {}
             Err(error) => thread.selection_warning = Some(format!("Agent preference: {error}")),
         }
@@ -288,6 +291,7 @@ impl AgentThread {
             task_elapsed: Duration::ZERO,
             profile_id: None,
             selected_acp_id: None,
+            backend_selected: false,
             selection_root: None,
             selection_warning: None,
             acp_controls_ui: Default::default(),
@@ -1633,7 +1637,7 @@ impl App {
         }
         self.selected_agent = self.selected_agent.min(self.agents.len() - 1);
         self.active_model_label = None;
-        self.ai_input_focused = true;
+        self.ai_input_focused = false;
     }
 
     fn project_switch_action(&mut self, action: Action) -> Result<()> {
@@ -2232,8 +2236,6 @@ impl App {
         };
         app.refresh_git_status();
         app.restore_generation_session_from_disk();
-        app.spawn_llm_if_configured();
-        app.activate_active_profile();
         app.mindmap_index.apply_highlight_categories("root");
         let n = app.buffers.len();
         app.status = format!("Opened directory with {n} feature file(s)");
@@ -2432,8 +2434,6 @@ impl App {
         };
         app.refresh_git_status();
         app.restore_generation_session_from_disk();
-        app.spawn_llm_if_configured();
-        app.activate_active_profile();
         app.sync_cursor_to_first_node();
         app.normalize_explore_selection();
         app.mindmap_index.apply_highlight_categories("root");
@@ -2619,8 +2619,6 @@ impl App {
         };
         app.authoring_ui
             .set_project_filter(teshi_core::authoring::RequirementProjectFilter::All);
-        app.spawn_llm_if_configured();
-        app.activate_active_profile();
         app.sync_cursor_to_first_node();
         app.normalize_explore_selection();
         app.mindmap_index.apply_highlight_categories("root");
@@ -3007,10 +3005,14 @@ impl App {
 
     /// Spawn the LLM worker when the shared profile store or `TESHI_LLM_*` is usable.
     pub fn spawn_llm_if_configured(&mut self) {
-        if self.agent().backend.kind() == teshi_agent::backend::AgentBackendKind::Acp {
+        self.spawn_llm_for_agent_if_configured(self.selected_agent);
+    }
+
+    fn spawn_llm_for_agent_if_configured(&mut self, agent_idx: usize) {
+        if self.agents[agent_idx].backend.kind() == teshi_agent::backend::AgentBackendKind::Acp {
             return;
         }
-        if self.agent_mut().backend.is_connected() {
+        if self.agents[agent_idx].backend.is_connected() {
             return;
         }
         match crate::llm::effective_config() {
@@ -3025,7 +3027,7 @@ impl App {
                     "LLM configured: model={}, base_url={}, provider={}",
                     config.model, config.base_url, config.provider
                 );
-                if let Err(error) = self.agent_mut().backend.attach_native_model(config) {
+                if let Err(error) = self.agents[agent_idx].backend.attach_native_model(config) {
                     self.status = format!("AI backend unavailable: {error}");
                 }
             }
@@ -3193,9 +3195,35 @@ impl App {
         true
     }
 
+    fn focus_ai_input(&mut self) {
+        self.ai_input_focused = true;
+        self.agent_mut().backend_selected = true;
+        // Focusing prepares a connection, not a turn. It must never reset an
+        // active response or send an empty prompt, including on repeated clicks.
+        if self.agent().backend.is_connected() {
+            return;
+        }
+        match self.agent().backend.kind() {
+            teshi_agent::backend::AgentBackendKind::Native => self.spawn_llm_if_configured(),
+            teshi_agent::backend::AgentBackendKind::Acp => self.connect_acp_on_input_focus(),
+        }
+    }
+
     fn start_agent_backend(&mut self, agent_idx: usize) -> bool {
+        self.agents[agent_idx].backend_selected = true;
         if !self.ensure_agent_backend(agent_idx) {
             return false;
+        }
+        self.spawn_llm_for_agent_if_configured(agent_idx);
+        // Callers show configuration guidance for an unavailable native model.
+        // Do not mark a request as running when no worker can complete it.
+        if self.agents[agent_idx].backend.kind() == teshi_agent::backend::AgentBackendKind::Native
+            && !self.agents[agent_idx].backend.is_connected()
+        {
+            return true;
+        }
+        if self.agents[agent_idx].backend.kind() == teshi_agent::backend::AgentBackendKind::Acp {
+            self.agents[agent_idx].acp_controls_ui.begin_connection();
         }
         match self.agents[agent_idx].backend.start() {
             Ok(()) => true,
@@ -3206,22 +3234,6 @@ impl App {
                 false
             }
         }
-    }
-
-    /// Activate the saved active profile (if any) that has a matching file on disk.
-    pub fn activate_active_profile(&mut self) {
-        if self.agent().backend_kind() == teshi_agent::backend::AgentBackendKind::Acp {
-            return;
-        }
-        let active_id = match self.model_active_id.clone() {
-            Some(id) => id,
-            None => return,
-        };
-        let profile = match self.model_profiles.iter().find(|p| p.id == active_id) {
-            Some(p) => p.clone(),
-            None => return,
-        };
-        self.activate_model_profile(&profile);
     }
 
     /// Respawn the LLM worker thread using the given shared model profile.
@@ -3246,6 +3258,7 @@ impl App {
         }
         self.agent_mut().status = AiStatus::Idle;
         self.agent_mut().tool_status = None;
+        self.agent_mut().backend_selected = true;
         self.active_model_label = Some(format!("{} ({})", profile.name, profile.model_id));
         self.status = format!("Switched to model: {}", profile.name);
     }
@@ -3293,7 +3306,7 @@ impl App {
             }
         }
         use teshi_agent::backend::AgentBackendEvent;
-        self.discover_visible_acp_controls();
+        self.refresh_acp_controls();
         self.sync_acp_policy();
         for i in 0..self.agents.len() {
             self.poll_acp_host_tools(i);
@@ -4146,12 +4159,12 @@ impl App {
                     "Advanced to Scenario Planning with {} approved test point(s)",
                     approved.len()
                 );
-                // Resume the agent loop when an LLM handle is available.
+                // Continuing generation is an explicit request, including after history restore.
+                if !self.start_agent_backend(agent_idx) {
+                    return Ok(());
+                }
                 if self.agents[agent_idx].backend.is_connected() {
                     self.agents[agent_idx].status = AiStatus::Waiting;
-                    if !self.start_agent_backend(agent_idx) {
-                        return Ok(());
-                    }
                     self.compact_context_if_needed(agent_idx);
                     let messages = self.build_chat_messages_for_agent(agent_idx);
                     let profile = self.agent_profile(agent_idx);
@@ -4415,12 +4428,12 @@ impl App {
             source: None,
         });
 
-        // Start the LLM request (same pattern as user message submit)
-        if !self.agents[agent_idx].backend.is_connected() {
-            self.status = "AI not configured".to_string();
+        // An explicit exploration task may create the first backend connection.
+        if !self.start_agent_backend(agent_idx) {
             return;
         }
-        if !self.start_agent_backend(agent_idx) {
+        if !self.agents[agent_idx].backend.is_connected() {
+            self.status = "AI not configured".to_string();
             return;
         }
         self.compact_context_if_needed(agent_idx);
@@ -7802,6 +7815,7 @@ impl App {
                         }
                         let agent = self.agent_mut();
                         agent.profile_id = Some(profile.id.clone());
+                        agent.backend_selected = true;
                         let _ = agent;
                         if acp {
                             let tools = teshi_agent_runtime::tool_bridge::ToolBridgeConfig {
@@ -7967,7 +7981,9 @@ impl App {
                     }
                     self.status = "Sending MindMap context to AI...".to_string();
 
-                    if !crate::llm::is_configured() {
+                    if self.agent().backend_kind() == teshi_agent::backend::AgentBackendKind::Native
+                        && !self.agent().backend.is_connected()
+                    {
                         self.agent_mut().messages_mut().push(AiChatMessage {
                                 role: AiRole::Assistant,
                                 content: "AI is not configured. Run 'teshi auth login', open the model panel, or set TESHI_LLM_API_KEY in your environment.".to_string(),
@@ -9169,7 +9185,7 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::AiPaste(text) => {
-                self.ai_input_focused = true;
+                self.focus_ai_input();
                 // Normalize Windows line endings
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
                 let byte_idx = char_to_byte_idx(&self.agent().input, self.agent().input_cursor);
@@ -9178,14 +9194,14 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::AiNewline => {
-                self.ai_input_focused = true;
+                self.focus_ai_input();
                 let byte_idx = char_to_byte_idx(&self.agent().input, self.agent().input_cursor);
                 self.agent_mut().input.insert(byte_idx, '\n');
                 self.agent_mut().input_cursor += 1;
                 self.quit_pending_confirm = false;
             }
             Action::AiClipboardPaste => {
-                self.ai_input_focused = true;
+                self.focus_ai_input();
                 if let Ok(mut cb) = arboard::Clipboard::new()
                     && let Ok(text) = cb.get_text()
                 {
@@ -9197,7 +9213,7 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::AiSendChar(ch) => {
-                self.ai_input_focused = true;
+                self.focus_ai_input();
                 let byte_idx = char_to_byte_idx(&self.agent().input, self.agent().input_cursor);
                 self.agent_mut().input.insert(byte_idx, ch);
                 self.agent_mut().input_cursor += 1;
@@ -9481,7 +9497,7 @@ impl App {
                 self.quit_pending_confirm = false;
             }
             Action::AiFocusInput => {
-                self.ai_input_focused = true;
+                self.focus_ai_input();
             }
             Action::AgentNew => {
                 self.clear_chat_selection();
@@ -9494,9 +9510,8 @@ impl App {
                     root,
                 ));
                 self.selected_agent = self.agents.len() - 1;
-                self.ai_input_focused = true;
-                self.spawn_llm_if_configured();
                 self.status = format!("Created agent {id}");
+                self.focus_ai_input();
                 self.show_selection_warning();
                 self.quit_pending_confirm = false;
             }
@@ -9512,6 +9527,9 @@ impl App {
                         self.selected_agent = self.agents.len().saturating_sub(1);
                     }
                     self.status = format!("Closed {name}");
+                    if self.ai_input_focused {
+                        self.focus_ai_input();
+                    }
                 }
                 self.quit_pending_confirm = false;
             }
@@ -9520,6 +9538,9 @@ impl App {
                 if self.agents.len() > 1 {
                     self.selected_agent = (self.selected_agent + 1) % self.agents.len();
                     self.status = format!("Switched to {}", self.agent().title);
+                    if self.ai_input_focused {
+                        self.focus_ai_input();
+                    }
                 }
                 self.quit_pending_confirm = false;
             }
@@ -9528,6 +9549,9 @@ impl App {
                 if self.agents.len() > 1 {
                     self.selected_agent = self.selected_agent.saturating_sub(1);
                     self.status = format!("Switched to {}", self.agent().title);
+                    if self.ai_input_focused {
+                        self.focus_ai_input();
+                    }
                 }
                 self.quit_pending_confirm = false;
             }
@@ -9536,6 +9560,9 @@ impl App {
                     self.clear_chat_selection();
                     self.selected_agent = index;
                     self.status = format!("Switched to {}", self.agent().title);
+                    if self.ai_input_focused {
+                        self.focus_ai_input();
+                    }
                 }
                 self.quit_pending_confirm = false;
             }
@@ -11479,7 +11506,7 @@ impl App {
                 self.scenario_dropdown_selection = *index;
             }
             ClickableRegion::ChatInput { .. } => {
-                self.ai_input_focused = true;
+                self.focus_ai_input();
                 if self.active_tab == MainTab::MindMap {
                     self.mindmap_focus = MindMapFocus::AiPanel;
                 }
@@ -12260,6 +12287,7 @@ impl App {
         thread.replace_backend(kind);
         *thread.messages_mut() = messages;
         thread.selected_acp_id = selected_id;
+        thread.backend_selected = true;
         thread.selection_warning = None;
         thread.acp_controls_ui = Default::default();
         thread.status = AiStatus::Idle;
@@ -12283,6 +12311,8 @@ impl App {
         self.agent_profile_panel_active = false;
         if kind == teshi_agent::backend::AgentBackendKind::Acp {
             self.connect_acp_controls();
+        } else {
+            self.spawn_llm_if_configured();
         }
     }
 
@@ -12548,8 +12578,10 @@ impl App {
         let root = self.agent().selection_root.clone();
         *self.agent_mut() = AgentThread::new_with_selection(id, &title, root);
         self.agent_mut().profile_id = profile_id;
-        self.spawn_llm_if_configured();
         self.status = "New session started".to_string();
+        if self.ai_input_focused {
+            self.focus_ai_input();
+        }
         self.show_selection_warning();
         Ok(())
     }
@@ -12743,6 +12775,7 @@ impl App {
         );
         *agent.messages_mut() = session.messages.clone();
         agent.selected_acp_id = session.acp_agent_id.clone();
+        agent.backend_selected = session.backend_kind.is_some();
         agent.acp_controls_ui = Default::default();
         agent.saved_session = Some(session);
         agent.last_session_snapshot.clear();
@@ -12754,6 +12787,7 @@ impl App {
         agent.input_cursor = 0;
         agent.status = AiStatus::Idle;
         agent.scroll_offset = 0;
+        self.ai_input_focused = false;
         self.session_panel_active = false;
         self.status = if legacy {
             "Loaded legacy session; history remains unassigned".into()
@@ -13076,9 +13110,7 @@ mod tests {
     }
 
     fn stop_fixture_agents(app: &mut App) {
-        // Constructors may attach an idle model from inherited configuration.
-        // These state tests drive their own event loop; quiesce those owned
-        // workers so the tested precondition is a clean, idle project A.
+        // Quiesce workers explicitly started by a fixture before switching projects.
         for agent in &mut app.agents {
             agent.backend.request_shutdown();
         }
@@ -14047,6 +14079,34 @@ mod tests {
     }
 
     #[test]
+    fn browsing_native_chat_and_creating_sessions_do_not_attach_a_model() {
+        let (mut app, _project, _store) = slash_test_app();
+        assert!(!app.agent().backend.is_connected());
+        assert!(!app.agent().backend_selected);
+        for tab in [MainTab::Ai, MainTab::Explore, MainTab::Ai, MainTab::MindMap] {
+            app.active_tab = tab;
+            app.mindmap_ai_panel_visible = true;
+            app.poll_llm_events();
+            assert!(!app.agent().backend.is_connected());
+            assert!(app.agent().messages().is_empty());
+            assert_eq!(app.agent().total_input_tokens, 0);
+            assert_eq!(app.agent().status, AiStatus::Idle);
+        }
+        app.ai_input_focused = false;
+        app.execute_slash_command("new").unwrap();
+        app.poll_llm_events();
+        assert!(!app.agent().backend.is_connected());
+        let mut session = crate::session::Session::from_messages(Vec::new(), None);
+        session.backend_kind = Some(teshi_agent::backend::AgentBackendKind::Native);
+        session.project_root = Some(app.project.root_dir.clone());
+        assert!(app.restore_session(session, false));
+        app.active_tab = MainTab::Ai;
+        app.poll_llm_events();
+        assert!(app.agent().backend_selected);
+        assert!(!app.agent().backend.is_connected());
+    }
+
+    #[test]
     fn agent_selection_survives_new_agent_new_session_and_restart() {
         let (mut app, _project, _store) = slash_test_app();
         let preferences = tempdir().unwrap();
@@ -14086,6 +14146,8 @@ mod tests {
             AgentThread::new_with_selection(9, "Restarted", Some(preferences.path().into()));
         assert_eq!(restarted.selected_acp_id.as_deref(), Some("fixture"));
         assert!(restarted.messages().is_empty());
+        assert!(restarted.backend_selected);
+        assert!(!restarted.backend.is_connected());
         app.select_backend(None);
         let restarted =
             AgentThread::new_with_selection(10, "Native", Some(preferences.path().into()));
@@ -14094,6 +14156,8 @@ mod tests {
             teshi_agent::backend::AgentBackendKind::Native
         );
         assert_eq!(restarted.selected_acp_id, None);
+        assert!(restarted.backend_selected);
+        assert!(!restarted.backend.is_connected());
         crate::agent_selection::save(
             preferences.path(),
             &crate::agent_selection::Selection::Acp {
@@ -14135,6 +14199,10 @@ mod tests {
         stop_fixture_agents(&mut app);
         assert!(app.restore_session(session, false));
         assert_eq!(app.agent().selected_acp_id.as_deref(), Some("alpha"));
+        app.active_tab = MainTab::Ai;
+        app.poll_llm_events();
+        assert!(!app.agent().backend.is_connected());
+        assert!(app.agent().backend_selected);
         assert_eq!(
             crate::agent_selection::load(root.path()).unwrap(),
             Some(crate::agent_selection::Selection::Acp {

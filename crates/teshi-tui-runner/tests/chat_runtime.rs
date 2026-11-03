@@ -161,6 +161,10 @@ fn elapsed_time_advances_through_acp_tool_activity_and_remains_after_completion(
 #[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
 fn reported_context_usage_above_threshold_is_visible() {
     use std::io::{Read, Write};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
     fs::create_dir(&project).unwrap();
@@ -168,6 +172,8 @@ fn reported_context_usage_above_threshold_is_visible() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let server_requests = Arc::clone(&requests);
     let server = std::thread::spawn(move || {
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         let mut stream = loop {
@@ -213,6 +219,7 @@ fn reported_context_usage_above_threshold_is_visible() {
             assert!(count > 0);
             request.extend_from_slice(&chunk[..count]);
         }
+        server_requests.fetch_add(1, Ordering::SeqCst);
         let body = "data: {\"model\":\"fixture\",\"choices\":[{\"delta\":{\"content\":\"Usage fixture reply\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":701,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n";
         write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
     });
@@ -261,7 +268,33 @@ fn reported_context_usage_above_threshold_is_visible() {
     terminal.expect_text("sample", true, 10000).unwrap();
     terminal.key("3").unwrap();
     terminal.expect_text("AI Chat", true, 10000).unwrap();
+    terminal.expect_text("Not connected", true, 5000).unwrap();
+    for _ in 0..3 {
+        terminal.key("1").unwrap();
+        terminal.key("3").unwrap();
+        terminal.resize(64, 24).unwrap();
+        terminal.resize(150, 30).unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        0,
+        "browsing must not call the model"
+    );
+    capture(&terminal, "native-not-connected");
     terminal.key("Enter").unwrap();
+    terminal.expect_text("Ready", true, 5000).unwrap();
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        0,
+        "focus connects without a model request"
+    );
+    for _ in 0..2 {
+        terminal.key("Escape").unwrap();
+        terminal.key("Enter").unwrap();
+        terminal.expect_text("Ready", true, 5000).unwrap();
+    }
+    capture(&terminal, "native-connected-on-focus");
     terminal.write("Inspect usage").unwrap();
     terminal.key("Enter").unwrap();
     terminal
@@ -270,4 +303,78 @@ fn reported_context_usage_above_threshold_is_visible() {
     terminal.expect_text("ctx 701/1000 !", true, 15000).unwrap();
     capture(&terminal, "reported-context-warning");
     server.join().unwrap();
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+#[ignore = "requires a built Teshi CLI; set TESHI_SELF_TEST_BIN"]
+fn unavailable_native_model_does_not_leave_a_running_task() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("first");
+    let second = root.path().join("second");
+    for directory in [&project, &second] {
+        fs::create_dir_all(directory).unwrap();
+        fs::write(directory.join("sample.feature"), "Feature: Startup\n").unwrap();
+    }
+    let env = [
+        "APPDATA",
+        "LOCALAPPDATA",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "TESHI_APP_DATA_DIR",
+        "TESHI_SESSION_DIR",
+        "TESHI_ACP_STORE_DIR",
+    ]
+    .into_iter()
+    .map(|key| {
+        (
+            key.into(),
+            root.path().join(key).to_string_lossy().into_owned(),
+        )
+    })
+    .chain([
+        ("TESHI_AGENT_BACKEND".into(), "native".into()),
+        ("TESHI_LLM_API_KEY".into(), String::new()),
+        ("TESHI_LLM_BASE_URL".into(), "http://127.0.0.1:9/v1".into()),
+    ])
+    .collect();
+    let terminal = Terminal::launch(Launch {
+        program: fs::canonicalize(std::env::var("TESHI_SELF_TEST_BIN").unwrap())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+        args: vec![
+            "--recursive".into(),
+            project.to_string_lossy().into_owned(),
+            "--requirements-root".into(),
+            root.path()
+                .join("requirements")
+                .to_string_lossy()
+                .into_owned(),
+        ],
+        cwd: Some(root.path().to_string_lossy().into_owned()),
+        env,
+        cols: 100,
+        rows: 24,
+    })
+    .unwrap();
+    terminal.expect_text("sample", true, 10000).unwrap();
+    terminal.key("3").unwrap();
+    terminal.expect_text("Not connected", true, 5000).unwrap();
+    terminal.key("Enter").unwrap();
+    terminal.write("unconfigured native message").unwrap();
+    terminal.key("Enter").unwrap();
+    terminal
+        .expect_text("AI is not configured", true, 5000)
+        .unwrap();
+    capture(&terminal, "native-not-configured");
+    terminal
+        .write(&format!("/project {}", second.display()))
+        .unwrap();
+    terminal.key("Enter").unwrap();
+    terminal
+        .expect_text("Project: second", true, 10000)
+        .unwrap();
+    capture(&terminal, "native-failure-project-switch");
+    terminal.close().unwrap();
 }
