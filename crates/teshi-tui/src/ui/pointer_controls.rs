@@ -55,19 +55,9 @@ pub(super) fn render_ai_footer(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             .iter()
             .map(|(label, _)| label.width() as u16)
             .sum::<u16>();
-    if used + 2 < area.width
-        && let Some(status) = app.agent().tool_status.as_ref()
-    {
+    if !app.ai_input_focused && used + 2 < area.width {
         frame.render_widget(
-            Paragraph::new(Line::styled(
-                status.clone(),
-                Style::default().fg(theme::WARNING),
-            )),
-            Rect::new(area.x + used + 2, area.y, area.width - used - 2, 1),
-        );
-    } else if !app.ai_input_focused && used + 2 < area.width {
-        frame.render_widget(
-            Paragraph::new("hjkl/Arrows scroll · [/] agent"),
+            Paragraph::new("hjkl/Arrows scroll · [/] chat").style(theme::muted()),
             Rect::new(area.x + used + 2, area.y, area.width - used - 2, 1),
         );
     }
@@ -78,7 +68,7 @@ pub(super) fn render_agent_sidebar(frame: &mut Frame<'_>, app: &mut App, area: R
     if area.width < 5 || area.height < 3 {
         return;
     }
-    let block = theme::panel_block(" Agents ", false);
+    let block = theme::panel_block(" Chats ", false).title_style(theme::muted());
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -92,14 +82,14 @@ pub(super) fn render_agent_sidebar(frame: &mut Frame<'_>, app: &mut App, area: R
             AiStatus::Waiting => ("●", theme::WARNING),
             AiStatus::AwaitingApproval => ("◆", theme::PRIMARY),
             AiStatus::Error => ("●", theme::ERROR),
-            AiStatus::Idle => ("○", theme::SUCCESS),
+            AiStatus::Idle => ("○", theme::MUTED),
         };
         let line = Line::from(vec![
             Span::styled(format!(" {dot} "), Style::default().fg(color)),
             Span::raw(agent.title.clone()),
         ]);
         lines.push(if index == app.selected_agent {
-            line.style(theme::selected_row(true))
+            line.style(Style::default().bg(theme::CHAT_CHIP_BG).fg(theme::FG))
         } else {
             line
         });

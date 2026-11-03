@@ -817,13 +817,13 @@ fn render_ai_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     }
 
-    if area.width < 70 {
+    if area.width < 90 {
         chat::render_chat_panel(frame, app, area, true, chat::ChatPlacement::Tab);
         return;
     }
     // Layout: sidebar (left) + main panel (right)
     let [sidebar_area, main_area] =
-        Layout::horizontal([Constraint::Length(28), Constraint::Min(10)]).areas(area);
+        Layout::horizontal([Constraint::Length(22), Constraint::Min(10)]).areas(area);
 
     chat::render_agent_sidebar(frame, app, sidebar_area);
     chat::render_chat_panel(frame, app, main_area, true, chat::ChatPlacement::Tab);

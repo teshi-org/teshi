@@ -69,6 +69,8 @@ pub struct KeyContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum Action {
+    /// Open the session Agent selector from the chat configuration row.
+    AiOpenAgentSelector,
     /// Toggle the completed process of a user turn without moving input focus.
     AiToggleTurn(usize),
     /// Toggle one reasoning body; `usize::MAX` identifies live native reasoning.

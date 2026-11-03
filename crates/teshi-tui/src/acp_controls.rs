@@ -870,8 +870,14 @@ impl App {
 fn chip(frame: &mut Frame<'_>, area: Rect, label: String, target: Target, ui: &mut ControlsUi) {
     let content = if let Some((name, value)) = label.split_once(": ") {
         Line::from(vec![
-            Span::styled(format!(" {name} "), Style::default().fg(theme::MUTED)),
-            Span::styled(value.to_owned(), Style::default().fg(theme::FG)),
+            Span::styled(
+                format!(" {name} "),
+                Style::default().fg(theme::MUTED).bg(theme::BLOCK_BG),
+            ),
+            Span::styled(
+                value.to_owned(),
+                Style::default().fg(theme::PRIMARY).bg(theme::CHAT_CHIP_BG),
+            ),
             Span::raw(" "),
         ])
     } else {
@@ -884,7 +890,7 @@ fn chip(frame: &mut Frame<'_>, area: Rect, label: String, target: Target, ui: &m
         )
     };
     frame.render_widget(
-        Paragraph::new(content).style(Style::default().fg(theme::PRIMARY).bg(theme::BLOCK_BG)),
+        Paragraph::new(content).style(Style::default().fg(theme::PRIMARY).bg(theme::CHAT_CHIP_BG)),
         area,
     );
     ui.regions.push((area, target));

@@ -48,6 +48,10 @@ pub(crate) const MUTED: Color = Color::Rgb(0x94, 0x94, 0x94);
 pub(crate) const BORDER: Color = Color::Rgb(0x5F, 0x5F, 0x5F);
 /// Surface color for code fences and blockquotes.
 pub(crate) const BLOCK_BG: Color = Color::Rgb(0x30, 0x30, 0x30);
+/// Subtle user-message surface, restricted to the chat transcript.
+pub(crate) const CHAT_USER_BG: Color = Color::Rgb(0x2B, 0x24, 0x2E);
+/// Quiet purple surface for chat selectors and the selected conversation.
+pub(crate) const CHAT_CHIP_BG: Color = Color::Rgb(0x33, 0x2C, 0x41);
 /// Scrollbar thumb color.
 pub(crate) const SCROLL_THUMB: Color = Color::Rgb(0x58, 0x58, 0x58);
 /// Scrollbar track color.

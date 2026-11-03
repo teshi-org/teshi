@@ -9452,6 +9452,7 @@ impl App {
                         .count();
                 self.quit_pending_confirm = false;
             }
+            Action::AiOpenAgentSelector => self.execute_slash_command("agent")?,
             Action::AiToggleTurn(start) => {
                 self.agent_mut().chat.revision += 1;
                 let default = self.agent().activity_details_expanded;

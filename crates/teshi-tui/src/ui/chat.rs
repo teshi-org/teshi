@@ -23,6 +23,8 @@ use crate::theme;
 
 /// Left rail drawn on every row of a user or assistant message.
 const RAIL: &str = "▌ ";
+/// Low-emphasis guide for answers, thinking, and tool details; the same two-cell source offset.
+const QUIET_RAIL: &str = "│ ";
 /// Indent applied to tool-result bodies, which have no rail.
 const TOOL_RESULT_INDENT: &str = "    ";
 /// Fallback cursor glyph appended to a streaming response.
@@ -193,7 +195,10 @@ fn append_selectable_chunk(
     let mut source_cursor = 0;
     for line in lines {
         let full_text = line_text(&line);
-        let (display_start, selectable) = if let Some(body) = full_text.strip_prefix(RAIL) {
+        let (display_start, selectable) = if let Some(body) = full_text
+            .strip_prefix(RAIL)
+            .or_else(|| full_text.strip_prefix(QUIET_RAIL))
+        {
             (RAIL.chars().count(), body)
         } else {
             (0, full_text.as_str())
@@ -502,7 +507,7 @@ pub(super) fn render_chat_panel(
 
     let mut title = Line::from(Span::styled(
         " AI Chat ",
-        fg(theme::PRIMARY).add_modifier(Modifier::BOLD),
+        fg(theme::FG).add_modifier(Modifier::BOLD),
     ));
     if !app.agent_registry.uses_builtin_fallback()
         && (app.agent().backend_selected || app.agent().backend.is_connected())
@@ -512,45 +517,50 @@ pub(super) fn render_chat_panel(
             muted(),
         ));
     }
-    let block = theme::panel_block(title, focused);
+    // The composer owns the bright focus outline; the enclosing frame stays quiet.
+    let block = theme::panel_block(title, false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     render_approval_badge(frame, app, area);
-
     if inner.width == 0 || inner.height == 0 {
         return;
     }
 
     let input_active = focused && app.ai_input_focused;
-    let has_acp = app.agent().backend.acp_controls().is_some();
-    let queue_height = u16::from(!app.agent().chat.queue.is_empty() && inner.height >= 6);
-    let status_height: u16 = 1 + queue_height;
-
-    // The input grows with its wrapped content but never takes more than a
-    // third of the panel, so history always stays visible.
-    let input_text_width = inner.width.saturating_sub(2);
-    let input_text_rows = visual_line_count_for_width(&app.agent().input, input_text_width)
-        .min((inner.height / 3).max(3));
-    let input_height: u16 = (input_text_rows + 2).min(inner.height.saturating_sub(status_height));
-
+    let queue_height = u16::from(!app.agent().chat.queue.is_empty() && inner.height >= 7);
+    let alert_height = u16::from(needs_chat_status(app) && inner.height >= 6);
+    let dock_height = 1 + queue_height + alert_height;
+    let input_width = composer_text_width(inner.width);
+    let input_rows =
+        visual_line_count_for_width(&app.agent().input, input_width).min((inner.height / 3).max(3));
+    let input_height = (input_rows + 2).min(inner.height.saturating_sub(dock_height));
     let filter = slash_filter(app, placement);
-    let sugg_count = filter
+    let suggestion_count = filter
         .as_deref()
         .map_or(0, |f| filtered_slash_commands(f).len() as u16);
-    let sugg_height: u16 = if sugg_count > 0 {
-        let max_possible = inner
-            .height
-            .saturating_sub(status_height + input_height + 1);
-        (sugg_count + 1).min(max_possible) // +1 for the hint line
+    let suggestion_height = if suggestion_count > 0 {
+        (suggestion_count + 1).min(inner.height.saturating_sub(dock_height + input_height + 1))
     } else {
         0
     };
-
     let chat_height = inner
         .height
-        .saturating_sub(status_height + sugg_height + input_height);
-    let chat_area = shrink_left(Rect::new(inner.x, inner.y, inner.width, chat_height), 1);
-    let status_area = shrink_left(Rect::new(inner.x, inner.y + chat_height, inner.width, 1), 1);
+        .saturating_sub(dock_height + suggestion_height + input_height);
+    render_chat_history(
+        frame,
+        app,
+        shrink_left(Rect::new(inner.x, inner.y, inner.width, chat_height), 1),
+        placement,
+    );
+    let mut dock_y = inner.y + chat_height;
+    if alert_height > 0 {
+        render_chat_status(
+            frame,
+            app,
+            shrink_left(Rect::new(inner.x, dock_y, inner.width, 1), 1),
+        );
+        dock_y += 1;
+    }
     if queue_height > 0 {
         let count = app.agent().chat.queue.len();
         let state = if matches!(
@@ -572,72 +582,186 @@ pub(super) fn render_chat_panel(
             Paragraph::new(Line::styled(
                 activity_summary(
                     &format!("Queued {count}: {preview} · /unqueue to edit · {state}"),
-                    inner.width as usize,
+                    inner.width.saturating_sub(1) as usize,
                 ),
                 fg(theme::WARNING),
             )),
-            Rect::new(
-                inner.x + 1,
-                inner.y + chat_height + 1,
-                inner.width.saturating_sub(1),
-                1,
-            ),
+            Rect::new(inner.x + 1, dock_y, inner.width.saturating_sub(1), 1),
         );
+        dock_y += 1;
     }
-    let sugg_area = Rect::new(
-        inner.x,
-        inner.y + chat_height + status_height,
-        inner.width,
-        sugg_height,
+    render_chat_toolbar(
+        frame,
+        app,
+        shrink_left(Rect::new(inner.x, dock_y, inner.width, 1), 1),
     );
-    let input_area = Rect::new(
-        inner.x,
-        inner.y + chat_height + status_height + sugg_height,
-        inner.width,
-        input_height,
-    );
-
-    render_chat_history(frame, app, chat_area, placement);
-    if has_acp {
-        let has_status = app.agent().status != AiStatus::Idle
-            || app.agent().task_interrupted()
-            || !matches!(
-                app.generation_stage,
-                GenerationStage::Idle | GenerationStage::Complete
-            );
-        // Preserve the activity first, then the agent/settings controls. Detailed
-        // messages remain in the conversation and approval UI when this row clips.
-        let status_width = if has_status {
-            (status_area.width / 2).min(48)
-        } else {
-            0
-        };
-        if status_width > 0 {
-            render_chat_status(
-                frame,
-                app,
-                Rect::new(status_area.x, status_area.y, status_width, 1),
-            );
-        }
-        crate::acp_controls::render_bar(
+    dock_y += 1;
+    if let Some(filter) = filter.as_deref()
+        && suggestion_height > 0
+    {
+        render_slash_suggestions(
             frame,
             app,
-            Rect::new(
-                status_area.x + status_width,
-                status_area.y,
-                status_area.width - status_width,
-                1,
-            ),
+            Rect::new(inner.x, dock_y, inner.width, suggestion_height),
+            filter,
         );
+    }
+    render_chat_input(
+        frame,
+        app,
+        Rect::new(
+            inner.x,
+            dock_y + suggestion_height,
+            inner.width,
+            input_height,
+        ),
+        input_active,
+    );
+}
+
+/// Warnings and recovery remain visible; ordinary progress already lives in the transcript.
+fn needs_chat_status(app: &App) -> bool {
+    matches!(
+        app.agent().status,
+        AiStatus::AwaitingApproval | AiStatus::Error
+    ) || app.agent().task_interrupted()
+        || !app.agent().backend.is_connected()
+        || !matches!(
+            app.generation_stage,
+            GenerationStage::Idle | GenerationStage::Complete
+        )
+}
+
+/// Pick complete metric fields rather than clipping context counts or a warning marker.
+fn chat_metrics(app: &App, width: usize) -> String {
+    let agent = app.agent();
+    let seconds = agent
+        .task_started
+        .map_or(agent.task_elapsed, |start| start.elapsed())
+        .as_secs();
+    let runtime = format!("{}m{:02}s", seconds / 60, seconds % 60);
+    let limit = app.active_context_window();
+    let (context, compact) = match agent.last_input_tokens {
+        Some(tokens) => {
+            let warning = if u64::from(tokens) * 10 >= u64::from(limit) * 7 {
+                " !"
+            } else {
+                ""
+            };
+            (
+                format!("ctx {tokens}/{limit}{warning}"),
+                format!(
+                    "ctx {}%{warning}",
+                    u64::from(tokens) * 100 / u64::from(limit.max(1))
+                ),
+            )
+        }
+        None => ("ctx unknown".into(), "ctx ?".into()),
+    };
+    let speed = (agent.status == AiStatus::Waiting)
+        .then(|| agent.chat.rate.per_second(std::time::Instant::now()))
+        .flatten()
+        .map(|rate| format!("~{rate:.0} tok/s"));
+    let prefix = speed
+        .as_ref()
+        .map(|s| format!("{s} · "))
+        .unwrap_or_default();
+    let usage = token_usage_label(agent.total_input_tokens, agent.total_output_tokens);
+    let mut candidates = Vec::new();
+    if agent.total_input_tokens > 0 || agent.total_output_tokens > 0 {
+        candidates.push(format!("{prefix}{runtime} · {context} · {usage}"));
+    }
+    candidates.extend([
+        format!("{prefix}{runtime} · {context}"),
+        format!("{prefix}{runtime} · {compact}"),
+    ]);
+    if let Some(speed) = speed {
+        candidates.push(format!("{speed} · {compact}"));
+    }
+    candidates.extend([
+        format!("{runtime} · {context}"),
+        format!("{runtime} · {compact}"),
+        compact,
+        runtime,
+    ]);
+    candidates
+        .into_iter()
+        .find(|text| text.width() <= width)
+        .unwrap_or_default()
+}
+
+/// Place selectable configuration chips beside a separate right-aligned metrics area.
+fn render_chat_toolbar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+    let min_controls = if area.width >= 75 { 36 } else { 18 };
+    let metrics = chat_metrics(app, area.width.saturating_sub(min_controls + 1) as usize);
+    let metrics_width = metrics.width() as u16;
+    let controls_width = area
+        .width
+        .saturating_sub(metrics_width + u16::from(metrics_width > 0));
+    if app.agent().backend.acp_controls().is_some() {
+        crate::acp_controls::render_bar(frame, app, Rect::new(area.x, area.y, controls_width, 1));
     } else {
-        render_chat_status(frame, app, status_area);
+        render_native_controls(frame, app, Rect::new(area.x, area.y, controls_width, 1));
     }
-    if let Some(filter) = filter.as_deref()
-        && sugg_height > 0
+    frame.render_widget(
+        Paragraph::new(Line::styled(metrics, muted())).alignment(Alignment::Right),
+        Rect::new(
+            area.right().saturating_sub(metrics_width),
+            area.y,
+            metrics_width,
+            1,
+        ),
+    );
+}
+
+fn render_native_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let model = app.active_model_label.as_deref().unwrap_or("Select");
+    let model = activity_summary(model, area.width.saturating_sub(27) as usize);
+    let controls = [
+        (
+            if app.agent().backend_selected || app.agent().backend.is_connected() {
+                " Agent Native ▾ "
+            } else {
+                " Agent ▾ "
+            }
+            .to_string(),
+            crate::keymap::Action::AiOpenAgentSelector,
+        ),
+        (
+            format!(" Model {model} ▾ "),
+            crate::keymap::Action::ModelPanelOpen,
+        ),
+    ];
+    let mut x = area.x;
+    for (label, action) in controls {
+        let width = label.width() as u16;
+        if x.saturating_add(width) > area.right() {
+            continue;
+        }
+        let rect = Rect::new(x, area.y, width, 1);
+        frame.render_widget(
+            Paragraph::new(label).style(fg(theme::PRIMARY).bg(theme::CHAT_CHIP_BG)),
+            rect,
+        );
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect,
+            action,
+            modal: false,
+        });
+        x += width + 1;
+    }
+    if app.agent().backend.is_connected()
+        && app.agent().status == AiStatus::Idle
+        && x + 5 <= area.right()
     {
-        render_slash_suggestions(frame, app, sugg_area, filter);
+        frame.render_widget(
+            Paragraph::new("Ready").style(muted()),
+            Rect::new(x, area.y, 5, 1),
+        );
     }
-    render_chat_input(frame, app, input_area, input_active);
 }
 
 /// Draws the approval-mode chip on the panel's top border and registers it as
@@ -668,7 +792,11 @@ fn render_approval_badge(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         col_right,
     });
 
-    let mut style = theme::chip(label.as_str(), chip_bg).style;
+    let mut style = if mode.requires_manual_approval() {
+        muted().bg(theme::BLOCK_BG)
+    } else {
+        theme::chip(label.as_str(), chip_bg).style
+    };
     if app
         .mouse_position
         .is_some_and(|(mx, my)| my == area.y && mx >= badge_x && mx < col_right)
@@ -871,6 +999,7 @@ fn build_chat_projection(
                 source: None,
                 action: Some(crate::keymap::Action::AiToggleTurn(turn.start)),
             }));
+            append_blank(&mut out);
             if !expanded {
                 message_index = answer;
                 folded_answer = Some(answer);
@@ -1184,7 +1313,17 @@ fn push_railed(
     width: usize,
 ) {
     let body_width = rail_body_width(width) as usize;
-    let rail = Span::styled(RAIL, fg(color));
+    let prefix = if color == theme::ACCENT {
+        RAIL
+    } else {
+        QUIET_RAIL
+    };
+    let rail_color = if color == theme::SUCCESS || color == theme::MUTED {
+        theme::BORDER
+    } else {
+        color
+    };
+    let rail = Span::styled(prefix, fg(rail_color));
     for line in lines {
         for row in wrap_line_to_width(line, body_width) {
             let mut spans = Vec::with_capacity(row.spans.len() + 1);
@@ -1244,6 +1383,11 @@ fn push_message(
         _ if progress => theme::MUTED,
         _ => theme::SUCCESS,
     };
+    if msg.role == AiRole::User {
+        for line in &mut body {
+            line.style = line.style.bg(theme::CHAT_USER_BG);
+        }
+    }
     push_railed(out, body, color, width);
 }
 
@@ -1714,25 +1858,7 @@ fn render_chat_status(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ));
     }
 
-    let model_label = if app.agent().backend.acp_controls().is_some() {
-        ""
-    } else {
-        app.active_model_label.as_deref().unwrap_or("")
-    };
-    let model_tag = (!model_label.is_empty()).then(|| format!(" {model_label} "));
-    let tag_width = model_tag.as_deref().map_or(0, |t| t.width() as u16);
-    let [status_left, status_right] =
-        Layout::horizontal([Constraint::Min(1), Constraint::Length(tag_width)]).areas(area);
-    frame.render_widget(Paragraph::new(Line::from(left)), status_left);
-    if let Some(tag) = model_tag {
-        frame.render_widget(
-            Paragraph::new(Line::styled(
-                tag,
-                fg(theme::ACCENT).add_modifier(Modifier::BOLD),
-            )),
-            status_right,
-        );
-    }
+    frame.render_widget(Paragraph::new(Line::from(left)), area);
 }
 
 /// Returns the slash-command filter text when suggestions should be shown.
@@ -1758,72 +1884,65 @@ fn render_slash_suggestions(frame: &mut Frame<'_>, app: &mut App, area: Rect, fi
     super::pointer_controls::render_slash_suggestions(frame, app, area, &filtered);
 }
 
+/// Right-side controls disappear as a unit in very narrow composers.
+fn composer_button_width(inner_width: u16) -> u16 {
+    if inner_width >= 26 { 9 } else { 0 }
+}
+
+fn composer_text_width(outer_width: u16) -> u16 {
+    let inner = outer_width.saturating_sub(2);
+    inner
+        .saturating_sub(
+            2 + composer_button_width(inner) + u16::from(composer_button_width(inner) > 0),
+        )
+        .max(1)
+}
+
 fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: bool) {
-    app.clickable_regions
-        .push(crate::app::ClickableRegion::ChatInput { rect: area });
-    let border_color = if active { theme::ACCENT } else { theme::BORDER };
-    let agent = app.agent();
-    let usage = token_usage_label(agent.total_input_tokens, agent.total_output_tokens);
-    let context = match agent.last_input_tokens {
-        Some(tokens) => format!(
-            "ctx {tokens}/{}{}",
-            app.active_context_window(),
-            if u64::from(tokens) * 10 >= u64::from(app.active_context_window()) * 7 {
-                " !"
-            } else {
-                ""
-            }
-        ),
-        None => "ctx unknown".to_string(),
-    };
-    let seconds = agent
-        .task_started
-        .map_or(agent.task_elapsed, |start| start.elapsed())
-        .as_secs();
-    let runtime = format!("{}m{:02}s", seconds / 60, seconds % 60);
-    let speed = if agent.status == AiStatus::Waiting {
-        agent
-            .chat
-            .rate
-            .per_second(std::time::Instant::now())
-            .map(|rate| format!("~{rate:.0} tok/s · "))
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let label = if area.width >= 75 {
-        format!("{speed}{runtime} · {context} · {usage}")
-    } else {
-        format!("{speed}{runtime} · {context}")
-    };
-    let mut block = Block::default()
+    let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(fg(border_color));
-    if !label.is_empty() {
-        block = block
-            .title_top(Line::styled(format!(" {label} "), muted()).alignment(Alignment::Right));
-    }
+        .border_style(fg(if active {
+            theme::PRIMARY
+        } else {
+            theme::BORDER
+        }));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let (rows, cursor) = input_rows(&agent.input, agent.input_cursor, inner.width);
+    let button_width = composer_button_width(inner.width);
+    let text_width = composer_text_width(area.width).min(inner.width.saturating_sub(2));
+    let text_x = inner.x + 2.min(inner.width);
+    let text_area = Rect::new(text_x, inner.y, text_width, inner.height);
+    app.clickable_regions.push(ClickableRegion::ChatInput {
+        rect: Rect::new(
+            area.x,
+            area.y,
+            area.width
+                .saturating_sub(button_width + u16::from(button_width > 0)),
+            area.height,
+        ),
+    });
+    frame.render_widget(
+        Paragraph::new("›").style(fg(if active { theme::ACCENT } else { theme::MUTED })),
+        Rect::new(inner.x, inner.y, 1, 1),
+    );
+    let agent = app.agent();
+    let (rows, cursor) = input_rows(&agent.input, agent.input_cursor, text_width);
     let scroll = cursor.0.saturating_sub(inner.height - 1);
-
-    let display: Text<'static> = if agent.input.is_empty() {
-        if active {
-            let placeholder =
-                if matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval) {
-                    "Type a follow-up · Enter queues it"
-                } else {
-                    "Type your message..."
-                };
-            Text::from(Line::styled(placeholder, muted()))
+    let display = if agent.input.is_empty() {
+        let placeholder = if active {
+            if matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval) {
+                "Type a follow-up · Enter queues it"
+            } else {
+                "Type your message..."
+            }
         } else {
-            Text::default()
-        }
+            ""
+        };
+        Text::from(Line::styled(placeholder, muted()))
     } else {
         Text::from(
             rows.into_iter()
@@ -1831,12 +1950,33 @@ fn render_chat_input(frame: &mut Frame<'_>, app: &mut App, area: Rect, active: b
                 .collect::<Vec<_>>(),
         )
     };
-    let text_style = Style::default();
-    frame.render_widget(Paragraph::new(display).style(text_style), inner);
-
-    // Show a visible cursor at the insertion point, accounting for wrapping.
-    if active {
-        frame.set_cursor_position((inner.x + cursor.1, inner.y + cursor.0 - scroll));
+    frame.render_widget(Paragraph::new(display), text_area);
+    if active && text_width > 0 {
+        frame.set_cursor_position((text_x + cursor.1, inner.y + cursor.0 - scroll));
+    }
+    if button_width > 0 {
+        let busy = matches!(agent.status, AiStatus::Waiting | AiStatus::AwaitingApproval);
+        let label = if busy { " Queue ↵ " } else { " Send ↵  " };
+        let action = if agent.input.is_empty() {
+            crate::keymap::Action::AiFocusInput
+        } else {
+            crate::keymap::Action::AiSendMessage
+        };
+        let button = Rect::new(
+            inner.right() - button_width,
+            inner.bottom() - 1,
+            button_width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(label).style(fg(theme::PRIMARY).bg(theme::CHAT_CHIP_BG)),
+            button,
+        );
+        app.clickable_regions.push(ClickableRegion::ActionButton {
+            rect: button,
+            action,
+            modal: false,
+        });
     }
 }
 
@@ -2236,16 +2376,18 @@ mod tests {
     }
 
     #[test]
-    fn input_title_keeps_elapsed_time_and_unknown_usage_without_focus_hint() {
+    fn metrics_row_keeps_elapsed_and_context_outside_the_input_border() {
         use ratatui::{Terminal, backend::TestBackend};
         let (mut app, _project, _store) = activity_test_app();
         app.agents[0].task_elapsed = std::time::Duration::from_secs(125);
         app.agents[0].task_started = None;
         app.agents[0].last_input_tokens = None;
-        let mut terminal = Terminal::new(TestBackend::new(100, 6)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
         for focused in [true, false] {
             terminal
-                .draw(|frame| render_chat_input(frame, &mut app, frame.area(), focused))
+                .draw(|frame| {
+                    render_chat_panel(frame, &mut app, frame.area(), focused, ChatPlacement::Tab)
+                })
                 .unwrap();
             let screen: String = terminal
                 .backend()
@@ -2261,17 +2403,196 @@ mod tests {
     }
 
     #[test]
+    fn composer_buttons_queue_complete_unicode_drafts_without_covering_the_input() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+        use ratatui::{Terminal, backend::TestBackend};
+        for width in [20, 32, 48, 90, 120] {
+            let (mut app, _project, _store) = activity_test_app();
+            app.active_tab = crate::app::MainTab::Ai;
+            app.ai_input_focused = true;
+            app.agents[0].status = AiStatus::Waiting;
+            let draft = "中文导航 first line\nsecond line with a long wrapped follow-up";
+            app.agents[0].input = draft.into();
+            app.agents[0].input_cursor = draft.chars().count();
+            let mut terminal = Terminal::new(TestBackend::new(width, 22)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_chat_panel(frame, &mut app, frame.area(), true, ChatPlacement::Tab)
+                })
+                .unwrap();
+            let input = app
+                .clickable_regions
+                .iter()
+                .find_map(|region| match region {
+                    ClickableRegion::ChatInput { rect } => Some(*rect),
+                    _ => None,
+                })
+                .unwrap();
+            let button = app
+                .clickable_regions
+                .iter()
+                .find_map(|region| match region {
+                    ClickableRegion::ActionButton {
+                        rect,
+                        action: crate::keymap::Action::AiSendMessage,
+                        ..
+                    } => Some(*rect),
+                    _ => None,
+                });
+            let cursor = terminal.get_cursor_position().unwrap();
+            assert!(
+                cursor.x < width - 1 && cursor.y < input.bottom() - 1,
+                "cursor stays inside the composer after Unicode wrapping: {cursor:?}"
+            );
+            if let Some(button) = button {
+                assert!(
+                    cursor.x < button.x,
+                    "cursor must not land in the send control"
+                );
+                assert!(
+                    button.x >= input.right(),
+                    "button must not cover editable cells at width {width}"
+                );
+                assert!(button.right() < width && button.y < 22);
+                app.handle_mouse_event(
+                    MouseEventKind::Down(MouseButton::Left),
+                    button.x + 1,
+                    button.y,
+                    KeyModifiers::NONE,
+                )
+                .unwrap();
+            } else {
+                assert!(width < 30, "normal-width composers retain the send control");
+                app.handle_action(crate::keymap::Action::AiSendMessage)
+                    .unwrap();
+            }
+            assert_eq!(
+                app.agent().chat.queue.front().map(String::as_str),
+                Some(draft)
+            );
+            assert!(
+                app.agent().messages().is_empty(),
+                "queued text is not an already submitted turn"
+            );
+        }
+    }
+
+    #[test]
+    fn tinted_user_blocks_and_quiet_answer_rails_preserve_selection_across_wraps() {
+        let (mut app, _project, _store) = activity_test_app();
+        app.agents[0].messages_mut().extend([
+            message(
+                AiRole::User,
+                "中文导航 first **bold** line\nsecond line",
+                None,
+            ),
+            message(AiRole::Assistant, "ANSWER_BODY", None),
+        ]);
+        for width in [24, 48, 80] {
+            let projection = build_chat_projection(&app, width, 40, ChatPlacement::Tab);
+            let rows: Vec<_> = projection
+                .lines
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.source.as_ref().is_some_and(|source| source.block == 0))
+                .collect();
+            assert!(!rows.is_empty());
+            for (_, row) in &rows {
+                assert_eq!(row.line.spans[0].content, RAIL);
+                assert!(
+                    row.line
+                        .spans
+                        .iter()
+                        .skip(1)
+                        .all(|span| span.style.bg == Some(theme::CHAT_USER_BG))
+                );
+            }
+            let (first, row) = rows.first().unwrap();
+            let start = projection
+                .anchor_at(*first, row.source.as_ref().unwrap().display_start)
+                .unwrap();
+            let (last, row) = rows.last().unwrap();
+            let end = projection
+                .anchor_at(*last, row.source.as_ref().unwrap().display_end)
+                .unwrap();
+            let selection = ChatSelection {
+                agent_id: 0,
+                anchor: start,
+                focus: end,
+            };
+            assert_eq!(
+                projection.selected_text(selection).as_deref(),
+                Some("中文导航 first bold line\nsecond line")
+            );
+            let answer = projection
+                .lines
+                .iter()
+                .find(|row| line_text(&row.line).contains("ANSWER_BODY"))
+                .unwrap();
+            assert_eq!(answer.line.spans[0].content, QUIET_RAIL);
+            assert_eq!(answer.line.spans[0].style.fg, Some(theme::BORDER));
+        }
+    }
+
+    #[test]
+    fn metrics_keep_warning_fields_whole_and_remain_above_the_composer() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let (mut app, _project, _store) = activity_test_app();
+        app.agents[0].last_input_tokens = Some(app.active_context_window());
+        app.agents[0].status = AiStatus::Waiting;
+        app.agents[0]
+            .chat
+            .rate
+            .record("live output", std::time::Instant::now());
+        for width in [12, 18, 24, 40, 80] {
+            let label = chat_metrics(&app, width);
+            assert!(label.width() <= width);
+            assert!(
+                label.ends_with('!'),
+                "context warning survives compact layouts: {label}"
+            );
+            assert!(
+                !label.contains('…'),
+                "metric fields never get clipped mid-number"
+            );
+        }
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_chat_panel(frame, &mut app, frame.area(), true, ChatPlacement::Tab)
+            })
+            .unwrap();
+        let input = app
+            .clickable_regions
+            .iter()
+            .find_map(|region| match region {
+                ClickableRegion::ChatInput { rect } => Some(*rect),
+                _ => None,
+            })
+            .unwrap();
+        let line = |y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        };
+        assert!(line(input.y - 1).contains("ctx"));
+        assert!(!line(input.y).contains("ctx"));
+    }
+
+    #[test]
     fn context_warning_uses_last_input_and_seventy_percent_boundary() {
         use ratatui::{Terminal, backend::TestBackend};
         let (mut app, _project, _store) = activity_test_app();
         let limit = app.active_context_window();
         let threshold = (u64::from(limit) * 7).div_ceil(10) as u32;
-        let mut terminal = Terminal::new(TestBackend::new(100, 6)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
         for (tokens, warning) in [(threshold - 1, false), (threshold, true)] {
             app.agents[0].last_input_tokens = Some(tokens);
             app.agents[0].total_input_tokens = 0;
             terminal
-                .draw(|frame| render_chat_input(frame, &mut app, frame.area(), true))
+                .draw(|frame| {
+                    render_chat_panel(frame, &mut app, frame.area(), true, ChatPlacement::Tab)
+                })
                 .unwrap();
             let screen: String = terminal
                 .backend()
@@ -2489,15 +2810,19 @@ mod tests {
             .collect();
         assert_eq!(indices.len(), 1, "reply must occur once: {texts:?}");
         let index = indices[0];
-        assert_eq!(rows[index].spans[0].style.fg, Some(expected), "reply rail");
+        assert_eq!(
+            rows[index].spans[0].style.fg,
+            Some(theme::BORDER),
+            "quiet reply rail"
+        );
         let header = (0..index)
             .rev()
             .find(|i| texts[*i].contains("Teshi"))
             .unwrap();
         assert_eq!(
             rows[header].spans[0].style.fg,
-            Some(expected),
-            "header rail"
+            Some(theme::BORDER),
+            "quiet header rail"
         );
         assert_eq!(
             rows[header].spans.last().unwrap().style.fg,
@@ -2512,13 +2837,13 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(
             buffer[(0, index as u16)].fg,
-            expected,
-            "rendered reply rail"
+            theme::BORDER,
+            "rendered quiet reply rail"
         );
         assert_eq!(
             buffer[(0, header as u16)].fg,
-            expected,
-            "rendered header rail"
+            theme::BORDER,
+            "rendered quiet header rail"
         );
     }
 
@@ -2890,9 +3215,10 @@ mod tests {
         assert!(
             thoughts
                 .iter()
-                .flat_map(|line| &line.spans)
+                .flat_map(|line| line.spans.iter().skip(1))
                 .all(|span| span.style.fg == Some(theme::MUTED))
         );
+        assert_eq!(thoughts[0].spans[0].style.fg, Some(theme::BORDER));
         thoughts.clear();
         push_thinking(&mut thoughts, "First line\nSecond line", 72, true);
         assert_eq!(thoughts.len(), 3);

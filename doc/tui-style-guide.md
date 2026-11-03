@@ -7,8 +7,8 @@ is the source of truth. GPUI desktop and web shells are outside this guide.
 
 1. Quiet chrome, prominent content: BORDER for unfocused panels, PRIMARY for focus.
 2. Use semantic roles through theme helpers rather than constructing page colors.
-3. Rounded borders and `▌` group rails; keep header/status/footer rows one line high.
-4. Fill full selected rows with CURSOR_BG/CURSOR_FG when focused and SELECTION_INACTIVE_BG/FG otherwise. Hover tints the target with HOVER_BG; never add underline for hover.
+3. Rounded borders; `▌` for user messages and quiet `│` guides for chat activity and answers. Keep header/status/footer rows one line high.
+4. Fill full selected rows with CURSOR_BG/CURSOR_FG when focused and SELECTION_INACTIVE_BG/FG otherwise. Chat conversation rows use the quieter CHAT_CHIP_BG/FG fill. Hover tints the target with HOVER_BG; never add underline for hover.
 5. Modes, states, and tags use solid chips with CHIP_FG text.
 6. Footer keys use PRIMARY bold and descriptions FOOTER_DESC on a full-width FOOTER_BG strip.
 7. Inactive tabs use TAB_INACTIVE. Active tabs use TAB_ACTIVE_BG and bold text, with a PRIMARY underline derived from the registered click region.
@@ -17,7 +17,7 @@ is the source of truth. GPUI desktop and web shells are outside this guide.
 10. Clear popups first, then draw rounded PRIMARY borders, PRIMARY bold titles, and action chips.
 
 Never paint the terminal background globally. Fill only selections, chips, active
-tabs, footers, code/quote blocks, current lines, and overlays.
+tabs, footers, code/quote blocks, user chat messages, current lines, and overlays.
 Preserve visible text, key bindings, tab padding, dividers, and click regions.
 
 ## Token table
@@ -35,6 +35,8 @@ Preserve visible text, key bindings, tab padding, dividers, and click regions.
 | MUTED | #949494 | Hints, metadata, pending |
 | BORDER | #5F5F5F | Unfocused borders, skipped |
 | BLOCK_BG | #303030 | Code and quote surfaces |
+| CHAT_USER_BG | #2B242E | User chat message surface |
+| CHAT_CHIP_BG | #332C41 | Chat controls and selected conversation |
 | SCROLL_THUMB | #585858 | Scrollbar thumb |
 | SCROLL_TRACK | #3A3A3A | Scrollbar track |
 | CURSOR_BG | #8787D7 | Focused row fill |
@@ -84,7 +86,8 @@ Keep existing node text, shape, IDs, navigation, and grouping unchanged.
 |---|---|
 | Status | `● ○ ◆ ✓ ✗` |
 | Spinner | `◐◓◑◒` |
-| Rail | `▌` |
+| Rail | User `▌`, quiet answer/activity `│` |
+| Composer | Prompt `›`, submit `↵` |
 | Scrollbar | Track `│`, thumb `┃` |
 | Bullets | `• ▪ ‣ ⭑ ◦` |
 | Current menu item | `◦` |
@@ -139,7 +142,7 @@ MindMap [2]
 ╭MindMap────────────────────╮╭Scenario: Show the shared palette╮
 │▼ project                  ││Given a feature is selected      │
 │  ▸ a feature is selected   │╰─────────────────────────────────╯
-│                           │╭ AI Chat · Default ──────────────╮
+│                           │╭ AI Chat ──────────────╮
 ╰───────────────────────────╯╰─────────────────────────────────╯
  Navigate [↑↓]   Toggle [Space]   Expand [→]   Collapse [←]
 ```
@@ -147,9 +150,18 @@ MindMap [2]
 ```text
 AI [3]
 ━━━━━━━━
-╭ Agents ─────────╮╭ AI Chat · Default ───────────────── Manual ─╮
-│○ Agent 1        ││ Welcome to AI Chat!                        │
-╰─────────────────╯╰───────────────────────────────────────────╯
+╭ Chats ──────────╮╭ AI Chat ────────────────────────── Manual ─╮
+│○ Agent 1        ││ ▌ You                                     │
+│                 ││ ▌ Inspect requirement navigation           │
+│                 ││                                            │
+│                 ││ │ Teshi                                    │
+│                 ││ │ The navigation checks are complete.      │
+│                 ││                                            │
+│                 ││ Agent Native ▾  Model ▾  0m18s · ctx 12%   │
+│                 ││╭──────────────────────────────────────────╮│
+│ New [a] Close[x]│││› Continue the review…              Send ↵ ││
+│                 ││╰──────────────────────────────────────────╯│
+╰─────────────────╯╰────────────────────────────────────────────╯
  Focus [Enter]   Clear [Esc]   Model [m]   Quit [Ctrl+Q]
 ```
 

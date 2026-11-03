@@ -380,8 +380,8 @@ button; continuing is explicit and does not bypass generation review.
   are read-only; ambiguous modified text is not used to guess an edit target.
 - Requirements, Testpoints and Explore use two columns with vertically combined
   details. Below 70 columns or 12 body rows only the focused pane is shown; normal
-  pane navigation still reaches every pane. Narrow AI retains agent switching
-  through **[ / ]** while hiding the sidebar.
+  pane navigation still reaches every pane. AI hides its chat sidebar below 90
+  columns; **[ / ]** still switches conversations at these widths.
 - The input focus border no longer adds a transient shortcut title. **Enter**
   sends; **Ctrl+J / Shift+Enter** inserts a newline, as before.
 
@@ -392,10 +392,11 @@ These changes have no PTY acceptance evidence yet.
 
 The built-in fallback no longer adds a `Default` suffix to AI Chat. Custom profiles,
 including a custom profile named Default, display `Agent: <name>`; `/agent-profile`
-still opens selection. ACP activity and controls now share one status row. On narrow
-screens, Agent names are clipped and option chips may be omitted; the settings chip
+still opens selection. Agent/model controls and live metrics share a dedicated row
+above the input box. Progress stays in the transcript; approval, errors and task
+recovery have their own alert row. On narrow screens, Agent names are clipped and option chips may be omitted; the settings chip
 (`⋯` when compact) or **Ctrl+,** opens the full settings picker. Errors, approval and
-interrupted-task recovery retain priority. These changes have not been runtime-tested.
+interrupted-task recovery retain priority.
 
 ## Chat activity and follow-up messages
 
@@ -417,8 +418,26 @@ cancelled turns pause the queue; `/sendqueued` resumes it, and `/unqueue` return
 latest queued message to the input for editing. Unsent messages survive session
 checkpoints and are paused on restore. Queuing never approves tools or test points.
 
-The input border shows an approximate live output rate, such as `~42 tok/s`, while
+The configuration row shows an approximate live output rate, such as `~42 tok/s`, while
 text or readable reasoning arrives. The estimate uses recent text, disappears during
 tool execution or after a streaming pause, and remains separate from provider-reported
 token usage and billing. Agents that omit tool details retain their original title;
 Teshi does not infer tool categories from free-form titles.
+
+## AI chat presentation
+
+The chat frame stays neutral while the focused input uses the purple outline.
+User messages have a subtle pink surface; answers retain a green role label with
+a quiet thin guide. Thinking, tools and secondary metadata remain muted. Code-block
+and text-selection colors retain their own meaning within a user message.
+
+The chat sidebar uses 22 columns and a subdued selected-row fill. It disappears
+below 90 columns so the conversation keeps its reading width. Agent selection,
+model selection and overflow settings remain available above the composer. The
+time, context and optional token totals use complete fields rather than clipped
+numbers. A compact context percentage preserves the warning in narrow layouts.
+
+The input border contains no statistics. The visible `Send` or `Queue` button uses
+the same action as Enter; very narrow inputs retain keyboard submission. Clicking
+an empty button focuses the input without sending an empty message. Footer
+shortcuts retain their existing actions without repeating tool progress.

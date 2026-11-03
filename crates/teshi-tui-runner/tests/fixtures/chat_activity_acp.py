@@ -12,6 +12,13 @@ trace = os.environ.get("TESHI_CHAT_ACTIVITY_TRACE")
 lock = threading.Lock()
 cancelled = threading.Event()
 count = len(Path(trace).read_text(encoding="utf-8").splitlines()) if trace and Path(trace).exists() else 0
+model = "quality"
+
+
+def config_options():
+    return [{"id": "model", "name": "Model", "category": "model", "type": "select",
+             "currentValue": model, "options": [{"value": "quality", "name": "Quality"},
+                                                  {"value": "fast", "name": "Fast"}]}]
 
 
 def send(value):
@@ -79,7 +86,13 @@ for line in sys.stdin:
         send({"jsonrpc": "2.0", "id": request["id"], "result": {
             "protocolVersion": 1, "agentInfo": {"name": "chat-activity-fixture"}}})
     elif method == "session/new":
-        send({"jsonrpc": "2.0", "id": request["id"], "result": {"sessionId": "activity"}})
+        send({"jsonrpc": "2.0", "id": request["id"], "result": {
+            "sessionId": "activity", "configOptions": config_options()}})
+    elif method == "session/set_config_option":
+        assert request["params"]["configId"] == "model"
+        model = request["params"]["value"]
+        assert model in {"quality", "fast"}
+        send({"jsonrpc": "2.0", "id": request["id"], "result": {"configOptions": config_options()}})
     elif method == "session/prompt":
         count += 1
         cancelled = threading.Event()

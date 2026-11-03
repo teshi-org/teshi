@@ -104,13 +104,15 @@ fn elapsed_time_advances_through_acp_tool_activity_and_remains_after_completion(
         .expect_text("I will inspect the project", true, 15000)
         .unwrap();
     let screen = terminal.screen().unwrap();
-    let status = screen
+    let controls = screen
         .lines()
-        .find(|line| line.contains("thinking") && line.contains("ACP") && line.contains("Settings"))
-        .unwrap_or_else(|| panic!("activity and controls not on one row: {screen}"));
+        .find(|line| {
+            line.contains("ACP") && line.contains("Settings") && line.contains("ctx unknown")
+        })
+        .unwrap_or_else(|| panic!("configuration and metrics must share the dock row: {screen}"));
     assert!(
-        status.contains('●'),
-        "waiting animation not visible: {status}"
+        !controls.contains("thinking"),
+        "progress already has its transcript row: {controls}"
     );
     let initial = timer_line(&terminal);
     capture(&terminal, "elapsed-initial");

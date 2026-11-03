@@ -110,7 +110,7 @@ fn live_thinking_speed_inline_wait_and_independent_process_folding() {
     let root = tempfile::tempdir().unwrap();
     let terminal = launch(root.path());
     terminal.write("Inspect this fixture").unwrap();
-    terminal.key("Enter").unwrap();
+    terminal.click_text("Send ↵", 10000).unwrap();
     terminal
         .expect_text("Waiting for agent", true, 10000)
         .unwrap();
@@ -151,7 +151,10 @@ fn live_thinking_speed_inline_wait_and_independent_process_folding() {
     terminal.expect_text("FOCUS_SURVIVED", true, 10000).unwrap();
     capture(&terminal, "folded");
     terminal.click_text("2 tool calls:", 10000).unwrap();
-    terminal.click_text("▌ ▸ 2 tool calls:", 10000).unwrap();
+    terminal
+        .expect_text("▾ 2 tool calls:", true, 10000)
+        .unwrap();
+    terminal.click_text("▸ 2 tool calls:", 10000).unwrap();
     terminal
         .expect_text("Read src/chat_fixture.rs", true, 10000)
         .unwrap();
@@ -288,6 +291,47 @@ fn cancelling_a_turn_keeps_its_followup_available_for_editing() {
 
 #[test]
 #[ignore = "requires a built Teshi CLI and Python; set TESHI_SELF_TEST_BIN"]
+fn refined_dock_keeps_model_controls_metrics_and_narrow_composers_accessible() {
+    let root = tempfile::tempdir().unwrap();
+    let terminal = launch(root.path());
+    terminal.expect_text("Model Quality", true, 10000).unwrap();
+    terminal.click_text("Model Quality", 10000).unwrap();
+    terminal.expect_text("Fast", true, 10000).unwrap();
+    terminal.click_text("Fast", 10000).unwrap();
+    terminal.expect_text("Model Fast", true, 10000).unwrap();
+    let screen = terminal.screen().unwrap();
+    let lines: Vec<_> = screen.lines().collect();
+    let metadata = lines
+        .iter()
+        .position(|line| line.contains("Model Fast") && line.contains("ctx unknown"))
+        .unwrap();
+    let send = lines
+        .iter()
+        .position(|line| line.contains("Send ↵"))
+        .unwrap();
+    assert_eq!(
+        metadata + 2,
+        send,
+        "metrics sit above the border, not on it: {screen}"
+    );
+    assert!(!lines[send - 1].contains("ctx"), "{screen}");
+    capture(&terminal, "refined-config-and-input");
+    for width in [150, 88, 48, 32, 110] {
+        terminal.resize(width, 32).unwrap();
+        terminal.expect_text("Chats", width >= 90, 10000).unwrap();
+        terminal.expect_text("ctx", true, 10000).unwrap();
+        terminal.expect_text("Send ↵", true, 10000).unwrap();
+        capture(&terminal, &format!("refined-width-{width}"));
+    }
+    terminal.expect_text("Model Fast", true, 10000).unwrap();
+    assert!(
+        !root.path().join("trace.jsonl").exists(),
+        "presentation and model selection must not submit a prompt"
+    );
+}
+
+#[test]
+#[ignore = "requires a built Teshi CLI and Python; set TESHI_SELF_TEST_BIN"]
 fn native_streaming_keeps_the_composer_active_and_sends_the_next_turn_once() {
     struct Provider(std::process::Child);
     impl Drop for Provider {
@@ -329,7 +373,7 @@ fn native_streaming_keeps_the_composer_active_and_sends_the_next_turn_once() {
         .unwrap();
     terminal.expect_text("tok/s", true, 10000).unwrap();
     terminal.write("NATIVE_QUEUED_PROMPT").unwrap();
-    terminal.key("Enter").unwrap();
+    terminal.click_text("Queue ↵", 10000).unwrap();
     terminal.expect_text("Queued 1:", true, 10000).unwrap();
     terminal.expect_text("NATIVE_DONE_2", false, 1000).unwrap();
     capture(&terminal, "native-queued");
